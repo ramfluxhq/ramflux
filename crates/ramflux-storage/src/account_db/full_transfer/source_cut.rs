@@ -2,13 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Independent immutable snapshot keys stay solely in encrypted device-local metadata.
+use super::source_owner::SourceContext;
 use super::stage::{FullTransferStage, context, open_regular, raw32};
 use crate::{AccountDbKey, EncryptionMode, StorageError, database::Connection};
-use ramflux_crypto::custody::pairing::PairingRole;
 use std::path::Path;
 use zeroize::Zeroizing;
 
-impl FullTransferStage<'_> {
+pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS source_cut(cut INTEGER PRIMARY KEY CHECK(cut BETWEEN 0 AND 9),snapshot_id TEXT NOT NULL UNIQUE,filename TEXT NOT NULL UNIQUE,snapshot_key BLOB NOT NULL CHECK(length(snapshot_key)=32),schema_generation INTEGER NOT NULL,erasure_generation INTEGER NOT NULL);";
+
+impl SourceContext<'_> {
     /// Adopt an already pinned/copied A-private cut without recutting it after SAS. The
     /// local path is supplied by the trusted snapshot owner, never by a packet or manifest.
     /// Its independently generated encryption key is committed only inside encrypted stage
@@ -22,10 +24,9 @@ impl FullTransferStage<'_> {
         private_path: &Path,
         snapshot: super::super::backup::AccountBackupSnapshot,
     ) -> Result<(), StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         raw32(snapshot_id)?;
-        let record = self.resume_record()?;
-        if record.role != PairingRole::Initiator || cut > 9 || !private_path.is_absolute() {
+        if cut > 9 || !private_path.is_absolute() {
             return Err(context());
         }
         let reused: bool = self.connection.query_row(
@@ -57,11 +58,11 @@ impl FullTransferStage<'_> {
         open_regular_linked(&destination)?.sync_all()?;
         std::fs::remove_file(private_path)?;
         drop(open_regular(&destination, false)?);
-        std::fs::File::open(&self.directory)?.sync_all()?;
+        std::fs::File::open(self.directory)?.sync_all()?;
         if let Some(parent) = private_path.parent() {
             std::fs::File::open(parent)?.sync_all()?;
         }
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         let snapshot_id = snapshot_id.to_owned();
         let key = Zeroizing::new(*snapshot.key.bytes());
         drop(snapshot); // Consume the job-owned independent key before leaving this local I/O scope.
@@ -107,9 +108,9 @@ impl FullTransferStage<'_> {
         snapshot_id: &str,
         read: impl FnOnce(&Connection) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         raw32(snapshot_id)?;
-        if cut > 9 || self.resume_record()?.role != PairingRole::Initiator {
+        if cut > 9 {
             return Err(context());
         }
         let snapshot_id = snapshot_id.to_owned();
@@ -121,6 +122,14 @@ impl FullTransferStage<'_> {
         ))?;
         if filename != expected {
             return Err(context());
+        }
+        let live_schema: u64 = self.db.connection.query_row(
+            "SELECT max(schema_version) FROM schema_migration",
+            [],
+            |row| row.get(0),
+        )?;
+        if live_schema != schema {
+            return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
         let raw = Zeroizing::new(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| context())?);
         let key = AccountDbKey::from_bytes(*raw);
@@ -143,7 +152,15 @@ impl FullTransferStage<'_> {
         let output = read(&input)?;
         drop(input);
         drop(key);
-        self.db.require_full_stage_unlock()?;
+        let live_schema: u64 = self.db.connection.query_row(
+            "SELECT max(schema_version) FROM schema_migration",
+            [],
+            |row| row.get(0),
+        )?;
+        if live_schema != schema {
+            return Err(StorageError::PairingField("SnapshotInvalidated"));
+        }
+        self.require_source_live()?;
         Ok(output)
     }
 }
@@ -179,4 +196,48 @@ fn open_regular_linked(path: &Path) -> Result<std::fs::File, StorageError> {
         return Err(context());
     }
     Ok(std::fs::File::open(path)?)
+}
+
+impl FullTransferStage<'_> {
+    /// Adopt the exact private immutable cut under this stage's authenticated source role.
+    /// # Errors
+    /// Refuses wrong role/scope, changed paths/keys/generations or unavailable unlock.
+    pub fn adopt_source_cut(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+        private_path: &Path,
+        snapshot: super::super::backup::AccountBackupSnapshot,
+    ) -> Result<(), StorageError> {
+        self.source_context()?.adopt_source_cut(cut, snapshot_id, private_path, snapshot)
+    }
+    /// Measure the actual saved immutable source view without exposing its key.
+    /// # Errors
+    /// Refuses wrong role, missing/stale cuts, key corruption or unavailable unlock.
+    pub fn source_cut_estimated_bytes(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+    ) -> Result<u64, StorageError> {
+        self.source_context()?.source_cut_estimated_bytes(cut, snapshot_id)
+    }
+    /// Inspect the exact saved source schema/counts against compiled declarations.
+    /// # Errors
+    /// Refuses wrong role, missing/stale cuts, unsupported schema or unavailable unlock.
+    pub fn source_cut_schema(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+        rules: &'static [super::catalog::FamilyRule],
+    ) -> Result<super::inventory::FullTransferSchema, StorageError> {
+        self.source_context()?.source_cut_schema(cut, snapshot_id, rules)
+    }
+    pub(super) fn with_source_cut<T>(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+        read: impl FnOnce(&Connection) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        self.source_context()?.with_source_cut(cut, snapshot_id, read)
+    }
 }

@@ -195,6 +195,9 @@ impl EncryptedStageChunk {
     }
 }
 impl FullStageKey<'_> {
+    pub(super) fn require_live(&self) -> Result<(), StorageError> {
+        self.db.require_full_stage_unlock()
+    }
     pub(super) fn open_metadata(
         &self,
         path: &std::path::Path,

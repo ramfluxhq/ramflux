@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 /// Counts and schema commitment, before portable rows/bytes/root have been encoded.
 /// Never use this object as `DataVerified` or a complete source-manifest permission.
+#[derive(Clone)]
 pub struct FullTransferSchema {
     pub census_hash: [u8; 32],
     pub families: Vec<Family>,

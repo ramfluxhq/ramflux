@@ -20,7 +20,6 @@ use zeroize::Zeroizing;
 
 const SCHEMA: &str = "
 CREATE TABLE stage(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL CHECK(schema_version=1),local_account_id TEXT NOT NULL,role INTEGER NOT NULL CHECK(role IN(0,1)),lease_expires_at INTEGER NOT NULL,record_digest BLOB NOT NULL CHECK(length(record_digest)=32));
-CREATE TABLE source_cut(cut INTEGER PRIMARY KEY CHECK(cut BETWEEN 0 AND 9),snapshot_id TEXT NOT NULL UNIQUE,filename TEXT NOT NULL UNIQUE,snapshot_key BLOB NOT NULL CHECK(length(snapshot_key)=32),schema_generation INTEGER NOT NULL,erasure_generation INTEGER NOT NULL);
 CREATE TABLE resume(singleton INTEGER PRIMARY KEY CHECK(singleton=1),role INTEGER NOT NULL,transcript BLOB NOT NULL,th BLOB NOT NULL CHECK(length(th)=32),grant_bytes BLOB NOT NULL,lease BLOB NOT NULL,transfer_id TEXT NOT NULL,base_manifest_hash TEXT NOT NULL,base_record_hash TEXT NOT NULL);
 CREATE TABLE manifest(direction INTEGER NOT NULL CHECK(direction IN(0,1)),cut INTEGER NOT NULL,manifest_hash TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('base','delta','tail')),bytes BLOB NOT NULL,chunks_root TEXT NOT NULL,root_verified INTEGER NOT NULL DEFAULT 0 CHECK(root_verified IN(0,1)),verified INTEGER NOT NULL CHECK(verified IN(0,1)),PRIMARY KEY(direction,cut),UNIQUE(direction,manifest_hash));
 CREATE TABLE chunk(direction INTEGER NOT NULL,manifest_hash TEXT NOT NULL,idx INTEGER NOT NULL,length INTEGER NOT NULL CHECK(length BETWEEN 1 AND 262144),digest BLOB NOT NULL CHECK(length(digest)=32),file_durable INTEGER NOT NULL CHECK(file_durable=1),PRIMARY KEY(direction,manifest_hash,idx),FOREIGN KEY(direction,manifest_hash) REFERENCES manifest(direction,manifest_hash));";
@@ -91,6 +90,7 @@ impl AccountDb {
         connection.call(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(super::source_cut::SCHEMA)?;
             tx.execute_batch(super::source_receipt::SCHEMA)?;
             tx.execute_batch(super::source_scalar::SCHEMA)?;
             tx.execute_batch(super::native_floor::SCHEMA)?;
@@ -238,7 +238,11 @@ const fn role_number(role: PairingRole) -> u8 {
         PairingRole::Responder => 1,
     }
 }
-fn stage_directory(db: &AccountDb, transfer: &str, create: bool) -> Result<PathBuf, StorageError> {
+pub(super) fn stage_directory(
+    db: &AccountDb,
+    transfer: &str,
+    create: bool,
+) -> Result<PathBuf, StorageError> {
     raw32(transfer)?;
     if db.local_account_id.is_empty()
         || !db.local_account_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
@@ -307,7 +311,7 @@ pub(super) fn open_regular(path: &Path, write: bool) -> Result<fs::File, Storage
     }
     Ok(file)
 }
-fn read_bounded(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>, StorageError> {
     use std::io::Read as _;
     let file = open_regular(path, false)?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(limit + 1));
@@ -317,7 +321,11 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>, Storage
     }
     Ok(bytes)
 }
-fn write_new_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), StorageError> {
+pub(super) fn write_new_atomic(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), StorageError> {
     let temporary = directory.join(format!("{name}.tmp"));
     let mut file = create_file(&temporary)?;
     file.write_all(bytes)?;
@@ -326,7 +334,7 @@ fn write_new_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), St
     fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
-fn sync_stage(directory: &Path) -> Result<(), StorageError> {
+pub(super) fn sync_stage(directory: &Path) -> Result<(), StorageError> {
     open_regular(&directory.join("stage.db"), false)?.sync_all()?;
     fs::File::open(directory)?.sync_all()?;
     Ok(())

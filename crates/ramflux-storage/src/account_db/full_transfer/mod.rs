@@ -10,6 +10,8 @@ mod scalar;
 mod scalar_sql;
 mod source_base;
 mod source_cut;
+mod source_owner;
+mod source_preparation;
 mod source_receipt;
 mod source_scalar;
 mod stage;
@@ -18,6 +20,9 @@ mod stage_reader;
 mod stage_validation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
 pub use source_base::FullBaseSourceEncoding;
+pub use source_preparation::{
+    FullSourcePreparation, FullSourcePreparationCancel, PreparedFullSource,
+};
 pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;
 pub use stage_reader::FullForwardReader;
@@ -46,3 +51,6 @@ mod source_scalar_tests;
 
 #[cfg(test)]
 mod source_base_tests;
+
+#[cfg(test)]
+mod source_preparation_tests;

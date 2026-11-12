@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Encrypted, fixed-owner base-row spool. SQLite key order is the protocol's encoded order.
+use super::source_owner::SourceContext;
 use super::{
     CodecRule, FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog,
     write_full_scalar_sql_row,
@@ -51,18 +52,30 @@ struct SourceGuard {
     local: String,
     path: std::path::PathBuf,
     principal: String,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl SourceGuard {
-    fn new(db: &crate::AccountDb) -> Self {
+    fn new(
+        db: &crate::AccountDb,
+        cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
         Self {
             unlocked: db.connection.downgrade(),
             index: db.account_index.clone(),
             local: db.local_account_id.clone(),
             path: db.path.clone(),
             principal: db.principal_commitment.clone(),
+            cancelled,
         }
     }
     fn require(&self) -> Result<(), StorageError> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(StorageError::PairingField("Cancelled"));
+        }
         if self.unlocked.upgrade_account_writer().is_none() {
             return Err(StorageError::AuthorizationRejected);
         }
@@ -82,7 +95,7 @@ pub struct FullScalarSourceCounts {
     pub records: u64,
     pub encoded_bytes: u64,
 }
-impl FullTransferStage<'_> {
+impl SourceContext<'_> {
     /// Encode one fixed-width family from the OWN immutable base cut into encrypted SQL.
     /// Each bounded row is validated before insertion. A transaction publishes all rows and
     /// counts together; failed/repeated encodes cannot expose a partial family. No plaintext
@@ -100,7 +113,7 @@ impl FullTransferStage<'_> {
             return Err(invalid());
         };
         let spool = self.connection.clone();
-        let guard = SourceGuard::new(self.db);
+        let guard = SourceGuard::new(self.db, self.cancelled.clone());
         let snapshot = snapshot_id.to_owned();
         self.with_source_cut(0, snapshot_id, |input| {
             super::inventory::validate_columns(input, table, rule)?;
@@ -118,16 +131,16 @@ impl FullTransferStage<'_> {
         family: &str,
         writer: W,
     ) -> Result<(W, FullScalarSourceCounts), StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         // Recheck the exact saved source view, including its private key/generations.
         self.with_source_cut(0, snapshot_id, |_| Ok(()))?;
         let rule = compiled(family)?;
         let snapshot = snapshot_id.to_owned();
-        let guard = SourceGuard::new(self.db);
+        let guard = SourceGuard::new(self.db, self.cancelled.clone());
         let result = self
             .connection
             .call(move |db| Ok(write_sorted(db, &snapshot, rule, writer, &guard)))??;
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         Ok(result)
     }
 }
@@ -253,4 +266,28 @@ fn write_sorted<W: Write>(
     }
     source_guard.require()?;
     Ok((writer, total))
+}
+
+impl FullTransferStage<'_> {
+    /// Encode one actual immutable base family through its compiled fixed-width owner.
+    /// # Errors
+    /// Refuses wrong role, unsupported codecs, stale cut/generation, duplicates or I/O failure.
+    pub fn stage_source_fixed_base_family(
+        &mut self,
+        snapshot_id: &str,
+        family: &str,
+    ) -> Result<FullScalarSourceCounts, StorageError> {
+        self.source_context()?.stage_source_fixed_base_family(snapshot_id, family)
+    }
+    /// Write the exact committed family, in encoded-key order, to a private encrypted sink.
+    /// # Errors
+    /// Refuses wrong role, missing/stale cuts/spools, malformed rows or output failures.
+    pub fn write_source_fixed_base_family<W: Write + Send + 'static>(
+        &self,
+        snapshot_id: &str,
+        family: &str,
+        writer: W,
+    ) -> Result<(W, FullScalarSourceCounts), StorageError> {
+        self.source_context()?.write_source_fixed_base_family(snapshot_id, family, writer)
+    }
 }
