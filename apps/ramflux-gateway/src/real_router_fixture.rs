@@ -49,12 +49,21 @@ pub(crate) async fn real_router_with_custody(
     ramflux_node_core::load_config(&config, "ramflux-router")?;
     drop(udp);
     let mut command = std::process::Command::new(binary);
+    command.env_remove("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING");
     if let Some(node) = node {
         let path = root.join("custody-node.json");
         std::fs::write(&path, serde_json::to_vec(node.envelope())?)?;
         command.env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &path);
         command
             .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &node.envelope().body.node_signing_public_key);
+        if node
+            .envelope()
+            .body
+            .channel_binding_modes
+            .contains(&ramflux_protocol::custody::BindingMode::NoChannelBinding)
+        {
+            command.env("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING", "1");
+        }
     }
     let process = command
         .arg("--config")
