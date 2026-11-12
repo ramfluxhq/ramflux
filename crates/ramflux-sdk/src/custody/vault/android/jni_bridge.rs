@@ -149,7 +149,11 @@ impl KeystoreBridge for JniKeystore {
                 jni_sig!("(I[B[B)[B"),
                 &[JValue::Int(i32::from(kind.code())), JValue::from(&aad), JValue::from(&secret)],
             );
-            clear_java_array(env, &secret, plaintext.len());
+            // With a Java exception pending no further JNI call is allowed; the helper has
+            // already cleared its argument in that case.
+            if result.is_ok() {
+                clear_java_array(env, &secret, plaintext.len());
+            }
             let reply = JByteArray::cast_local(env, result?.l()?)?;
             env.convert_byte_array(&reply)
         })?;

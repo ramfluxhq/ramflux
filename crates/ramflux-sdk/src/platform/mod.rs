@@ -22,6 +22,6 @@ pub(crate) mod apple_container;
 /// Destination-family bind, staggered connect and the QUIC/TCP race (design 4.2, 4.3).
 pub mod connect_policy;
 /// Android host seams: private storage, backup rules, lifecycle, network and push policy.
-/// Also built for host tests; nothing here is reachable on another platform.
-#[cfg(any(target_os = "android", test))]
+/// Also built for Unix host tests; nothing here is reachable on another platform.
+#[cfg(any(target_os = "android", all(test, unix)))]
 pub mod android;

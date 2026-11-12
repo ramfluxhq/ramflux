@@ -146,8 +146,8 @@ pub fn set_keychain_access_group(group: &str) -> Result<(), SdkError> {
 mod presence;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android", test))]
 mod primary_items;
-/// Android Keystore provider; also built for host tests with a fake Keystore.
-#[cfg(any(target_os = "android", test))]
+/// Android Keystore provider; also built for Unix host tests with a fake Keystore.
+#[cfg(any(target_os = "android", all(test, unix)))]
 pub(crate) mod android;
 impl PrimaryVault for NativePrimaryVault {
     fn vault_class(&self) -> &'static str {
