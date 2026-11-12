@@ -443,9 +443,10 @@ async fn gateway_transport_auth_does_not_snapshot_state() -> anyhow::Result<()> 
             !crate::gateway_state(&fixture.context.state)?
                 .observe_admission_checkpoint_health(now + 32)
         );
+        let recovered_source = crate::pre_auth::source_key("192.0.2.90".parse()?);
         assert!(
             crate::pre_auth::admit_with_clock(
-                "recovered-source",
+                &recovered_source,
                 None,
                 &fixture.context.state,
                 || UNIX_EPOCH + Duration::from_secs(now + 32)
