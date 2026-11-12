@@ -154,18 +154,25 @@ cursor must lie inside the retained journal.
 
 ## Events
 
-A client subscribes with `bus.subscribe`. Three frames matter here:
+A client subscribes with `bus.subscribe`
+(`{"topics": [...], "since_seq": <cursor>}`); see `docs/event_stream.md`. The
+journal sequence of that stream and `journal_sequence` of this contract are the
+same number space, so the read-model cursor is also the subscription cursor.
 
 | Frame | Meaning | Client action |
 |---|---|---|
-| `state.changed` (durable) | A row of the account changed. | Read changes from the applied cursor. |
+| `message.schema.updated` (durable, `seq` = journal sequence) | Body `{"update": MessageUpdate}`: one row changed. `update.journal_sequence` equals `seq`. | Read changes after the applied cursor, or apply the update and keep `seq` as the cursor. |
+| `state.changed` (durable account notice) | Some account state was committed. | Read changes after the applied cursor. |
 | `message.transient` (`seq` = 0) | Live indicator such as typing. Never stored, never replayed, may be dropped under load. | Update the indicator; let it expire. |
-| `stream.lagged` | The subscriber's queue overflowed. This is the final frame of the subscription. | Read changes from the applied cursor, then subscribe again. |
+| `stream.lagged` | The subscriber's queue overflowed. This is the final frame of the subscription. | Read changes after the applied cursor, then subscribe again from it. |
+| error `resync_required` on subscribe | The cursor is pruned or ahead of the journal. | Drop the cache, read a page, subscribe from its `snapshot_sequence`. |
 
 `stream.lagged` has the body
 `{"last_delivered_seq": <number or null>, "dropped_frame_id"?, "dropped_topic"?}`.
-A null `last_delivered_seq` means the bus did not track the position; the
-client's own applied cursor is authoritative in every case.
+The journal tail reports the last delivered sequence. The account notice path
+does not track a position and reports null with the identifier and topic of
+the frame it could not queue. In both cases the client's own applied cursor is
+authoritative, and no committed message is lost: it stays in the durable store.
 
 ## Errors
 
