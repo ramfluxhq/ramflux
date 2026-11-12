@@ -67,6 +67,7 @@ impl AccountView {
             "device_id":account.gateway_config.device_id,
             "target_delivery_id":account.target_delivery_id,
             "node_id":client.account_db()?.load_actor_state::<String>("account/node-id")?,
+            "session_delivery_mode":account.session_delivery_mode(),
             "session_id":account.engine.as_ref().map(|engine|engine.session().session_id.clone()),
             "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
             "pending_deliveries":account.pending_deliveries.len(),
@@ -232,6 +233,8 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         if view.native.is_none() {
             status["networking"] = json!(snapshot.state);
         }
+        status["session_delivery_mode"] =
+            json!(if connection.session_mode().is_push() { "push" } else { "compat" });
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);
