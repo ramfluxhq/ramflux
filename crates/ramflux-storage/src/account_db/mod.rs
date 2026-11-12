@@ -20,7 +20,7 @@ pub mod backup;
 mod backup_consent_merge;
 mod backup_contact_merge;
 pub(crate) mod backup_database;
-mod backup_edit_register;
+pub(crate) mod backup_edit_register;
 mod backup_generated_identity;
 pub(crate) mod backup_merge;
 mod backup_message_footprint;
