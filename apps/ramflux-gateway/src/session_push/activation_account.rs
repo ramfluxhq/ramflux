@@ -124,7 +124,7 @@ impl Account {
         };
         let host = crate::ephemeral::tests::guard_10s(
             "SDK account writer and resident host ready",
-            AccountSessionHarness::attach(AccountSessionFixture {
+            Box::pin(AccountSessionHarness::attach(AccountSessionFixture {
                 index,
                 db,
                 identity,
@@ -136,7 +136,7 @@ impl Account {
                 }),
                 incarnation: Some(incarnation.to_owned()),
                 ephemeral: runtime.ephemeral,
-            }),
+            })),
         )
         .await
         .map_err(|error| anyhow::anyhow!("attached account startup: {error:?}"))?;

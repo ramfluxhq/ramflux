@@ -3,7 +3,10 @@
 
 //! Explicit fixture API: real account writer and resident host, with only transport injected.
 
-use super::*;
+use super::{
+    AccountIndex, AccountRuntime, Arc, BTreeMap, BTreeSet, Duration, LocalBusConfig,
+    LocalBusDaemonState, RoutingMutex, SdkError, mpsc, uploads, watch,
+};
 use crate::bus::connection_manager::{ConnectionHandle, SessionClient};
 use crate::{
     EphemeralConsumer, EphemeralSendOutcome, GatewaySessionAccess, GatewaySessionConfig,
@@ -30,22 +33,13 @@ pub struct AccountSessionFixture {
 }
 
 impl AccountSessionHarness {
-    /// Attach an authenticated session transport to the account's actual writer and host.
-    /// # Errors
-    /// Returns account, configuration, or connection startup errors.
-    pub async fn attach(fixture: AccountSessionFixture) -> Result<Self, SdkError> {
-        let AccountSessionFixture {
-            index,
-            mut db,
-            identity,
-            config,
-            session,
-            stream,
-            incarnation,
-            ephemeral,
-        } = fixture;
-        let id = db.local_account_id.clone();
-        let root = index.root().to_path_buf();
+    fn fixture_client(
+        index: &AccountIndex,
+        mut db: ramflux_storage::AccountDb,
+        identity: ramflux_crypto::IdentityRoot,
+        config: &GatewaySessionConfig,
+        incarnation: Option<&str>,
+    ) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
         client.identity_root = Some(identity);
         client.device_branch = config.device_branch.as_ref().map(|branch| (**branch).clone());
@@ -69,7 +63,27 @@ impl AccountSessionHarness {
         client.persist_identity_directory(&manifest)?;
         // The transport begins after authentication; initialize the account-side receive
         // epoch with the same operation used by production install_connection.
-        client.first_activate_receive_ledger(&config.target_delivery_id, incarnation.as_deref())?;
+        client.first_activate_receive_ledger(&config.target_delivery_id, incarnation)?;
+        Ok(client)
+    }
+
+    /// Attach an authenticated session transport to the account's actual writer and host.
+    /// # Errors
+    /// Returns account, configuration, or connection startup errors.
+    pub async fn attach(fixture: AccountSessionFixture) -> Result<Self, SdkError> {
+        let AccountSessionFixture {
+            index,
+            db,
+            identity,
+            config,
+            session,
+            stream,
+            incarnation,
+            ephemeral,
+        } = fixture;
+        let id = db.local_account_id.clone();
+        let root = index.root().to_path_buf();
+        let client = Self::fixture_client(&index, db, identity, &config, incarnation.as_deref())?;
         let principal = client.surface_local_root_commitment()?;
         let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), stream);
         engine.session = session;
@@ -167,7 +181,7 @@ impl AccountSessionHarness {
         loop {
             tokio::select! {
                 result = &mut future => return result.map_err(|error| SdkError::GatewaySessionRejected(format!("account fixture exchange: {error:?}"))),
-                Some(work) = self.runtime.connection_work.recv() => self.runtime.apply_connection_work(work).await?,
+                Some(work) = self.runtime.connection_work.recv() => Box::pin(self.runtime.apply_connection_work(work)).await?,
             }
         }
     }
@@ -277,14 +291,12 @@ impl AccountSessionHarness {
             created_at: crate::prelude::now_unix_timestamp(),
             ttl: 300,
         };
-        account
-            .client
-            .send_plaintext_direct_message_via_gateway(
-                &mut session,
-                message,
-                b"durable control before transient baseline",
-            )
-            .await
+        Box::pin(account.client.send_plaintext_direct_message_via_gateway(
+            &mut session,
+            message,
+            b"durable control before transient baseline",
+        ))
+        .await
     }
 
     /// Service the real account writer while a test awaits an external semantic barrier.
@@ -370,7 +382,7 @@ impl AccountSessionHarness {
                 .recv()
                 .await
                 .ok_or(SdkError::GatewaySessionNotEstablished)?;
-            self.runtime.apply_connection_work(work).await?;
+            Box::pin(self.runtime.apply_connection_work(work)).await?;
         }
     }
 

@@ -370,19 +370,18 @@ impl EphemeralRoute for MeshRoute<'_> {
         .await
         {
             Ok(value) => {
-                if value.get("outcome").and_then(serde_json::Value::as_str) == Some("online") {
-                    if let Some(gateway) =
+                if value.get("outcome").and_then(serde_json::Value::as_str) == Some("online")
+                    && let Some(gateway) =
                         value.get("gateway_id").and_then(serde_json::Value::as_str)
-                        && gateway != self.context.gateway_id
-                    {
-                        return crate::ephemeral_forward::originate(
-                            self.context,
-                            gateway,
-                            envelope,
-                            expires_at_ms,
-                        )
-                        .await;
-                    }
+                    && gateway != self.context.gateway_id
+                {
+                    return crate::ephemeral_forward::originate(
+                        self.context,
+                        gateway,
+                        envelope,
+                        expires_at_ms,
+                    )
+                    .await;
                 }
                 parse_route_reply(&value, &self.context.gateway_id)
             }

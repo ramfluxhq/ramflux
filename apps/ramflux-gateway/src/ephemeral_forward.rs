@@ -67,9 +67,8 @@ pub(crate) async fn originate(
         envelope: envelope.clone(),
         expires_at_ms,
     };
-    let response = match context.peers.post_ephemeral(gateway_id, request).await {
-        Ok(response) => response,
-        Err(_) => return RouteDecision::Dropped(EphemeralDropReason::Offline),
+    let Ok(response) = context.peers.post_ephemeral(gateway_id, request).await else {
+        return RouteDecision::Dropped(EphemeralDropReason::Offline);
     };
     match (response.delivered, response.outcome) {
         (true, Some(SessionPushForwardOutcome::Queued)) => RouteDecision::Forwarded,
