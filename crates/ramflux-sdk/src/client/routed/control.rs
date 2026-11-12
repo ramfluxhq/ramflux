@@ -307,11 +307,43 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    pub(crate) fn refresh_generated_control_cache(
+        &mut self,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
+        if crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body).is_ok()
+        {
+            if let Ok((_, content)) = Self::decode_generated_inner(body) {
+                use ramflux_protocol::message::{content, control};
+                match content.value {
+                    Some(content::Value::Call(call)) => {
+                        let native = crate::client::generated_call::native::to_native(call)?;
+                        self.refresh_native_call_control(&native, body)?;
+                    }
+                    Some(content::Value::Control(control)) => {
+                        if let Some(control::Payload::ObjectRevoke(revoke)) = control.payload
+                            && self.object_store.cached_object(&revoke.object_id).is_some()
+                        {
+                            self.object_store.tombstone(&revoke.object_id)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(super) fn refresh_routed_control_cache(
         &mut self,
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
+        if self.refresh_generated_control_cache(body)? {
+            return Ok(());
+        }
         if self.refresh_call_control(body)? {
             return Ok(());
         }

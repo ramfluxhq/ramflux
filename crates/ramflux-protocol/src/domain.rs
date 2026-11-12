@@ -71,6 +71,7 @@ pub const MESSAGE_DELETE_TOMBSTONE: &str = "ramflux.message.delete.tombstone.v1"
 pub const MESSAGE_HISTORY_PAGE: &str = "ramflux.message.history_page.v1";
 /// Body-free original Message header commitment.
 pub const MESSAGE_ORIGINAL_HEADER: &str = "ramflux.message.original_header.v1";
+pub const MESSAGE_FRIEND_APPLIED: &str = "ramflux.message.friend.applied.v1";
 pub const MESSAGE_ID: &str = "ramflux.message.id.v1";
 pub const EDIT_PREVIOUS_CONTENT: &str = "ramflux.message.edit.previous_content.v1";
 pub const REPORT_OPENING: &str = "ramflux.message.report_opening.v1";
@@ -191,7 +192,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 163] = [
+pub const ALL: [&str; 164] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -353,6 +354,7 @@ pub const ALL: [&str; 163] = [
     EDIT_PREVIOUS_CONTENT,
     MESSAGE_ID,
     MESSAGE_ORIGINAL_HEADER,
+    MESSAGE_FRIEND_APPLIED,
     MESSAGE_HISTORY_PAGE,
     MESSAGE_DELETE_TOMBSTONE,
 ];
@@ -412,9 +414,10 @@ mod tests {
         for label in &super::ALL[140..155] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[155..].len(), 8);
+        assert_eq!(super::ALL[155..].len(), 9);
         for label in [
             super::MESSAGE_ID,
+            super::MESSAGE_FRIEND_APPLIED,
             super::MESSAGE_DELETE_TOMBSTONE,
             super::MESSAGE_HISTORY_PAGE,
             super::MESSAGE_ORIGINAL_HEADER,

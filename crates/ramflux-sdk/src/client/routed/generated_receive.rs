@@ -411,6 +411,13 @@ impl RamfluxClient {
                 crate::client::generated_control::validate_control_native(&control)?;
                 if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
                     self.receive_generated_own_message_copy(opened, entry, copy)?;
+                } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
+                    self.apply_generated_friend_control(
+                        entry,
+                        identity.as_ref().ok_or_else(|| invalid("Friend identity missing"))?,
+                        friend,
+                        bytes,
+                    )?;
                 } else {
                     return Err(SdkError::InboundPending(
                         "generated native control executor is not yet activated".into(),
@@ -580,6 +587,9 @@ impl RamfluxClient {
         if scanned.kind == 8 {
             let control = g::Control::decode(scanned.body)
                 .map_err(|_| invalid("control authority fields missing"))?;
+            if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
+                self.authorize_generated_friend_control(&source, friend)?;
+            }
             if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
                 if source.root_commitment() != self.own_account_anchor()? {
                     return Err(SdkError::InboundRejected("own control requires same root".into()));

@@ -929,15 +929,15 @@ impl DmSession {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DmHeader {
-    ratchet_session_id: String,
-    sender_device_id_hash: [u8; 32],
-    recipient_device_id_hash: [u8; 32],
-    dh_ratchet_public: [u8; 32],
-    pn: u64,
-    n: u64,
-    device_epoch: u64,
-    message_event_id: String,
+pub(crate) struct DmHeader {
+    pub(crate) ratchet_session_id: String,
+    pub(crate) sender_device_id_hash: [u8; 32],
+    pub(crate) recipient_device_id_hash: [u8; 32],
+    pub(crate) dh_ratchet_public: [u8; 32],
+    pub(crate) pn: u64,
+    pub(crate) n: u64,
+    pub(crate) device_epoch: u64,
+    pub(crate) message_event_id: String,
 }
 
 impl DmHeader {
@@ -954,7 +954,7 @@ impl DmHeader {
         ]
     }
 
-    fn canonical_header_bytes(&self) -> Result<Vec<u8>, CryptoError> {
+    pub(crate) fn canonical_header_bytes(&self) -> Result<Vec<u8>, CryptoError> {
         Ok(canonical_header_bytes(HeaderKind::DmMessage, &self.fields())?)
     }
 }
