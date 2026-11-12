@@ -23,6 +23,8 @@ pub(crate) mod surface;
 pub(crate) mod reset;
 pub(crate) mod self_sync;
 
+pub(crate) mod history;
+
 #[cfg(test)]
 mod tests;
 

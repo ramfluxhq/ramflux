@@ -7,10 +7,14 @@ use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
 mod bootstrap;
+pub(crate) mod delivery;
 mod import;
 mod ordinary;
 mod page;
 mod pending;
+pub(crate) mod producer;
+#[cfg(test)]
+mod producer_tests;
 
 pub(crate) struct Author {
     pub(crate) root: String,
