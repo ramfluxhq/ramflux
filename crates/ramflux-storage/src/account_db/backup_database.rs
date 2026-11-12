@@ -51,6 +51,39 @@ pub struct BackupDatabase {
     original_input: BackupInputObservation,
 }
 impl BackupDatabase {
+    /// Open only the receiver owner's freshly copied CURRENT-schema B database.
+    /// This preserves B-local rows and MAC authority exactly: archive normalization
+    /// belongs to imported archives and must not run on this own-device copy.
+    pub(in crate::account_db) fn open_full_receiver_copy(
+        path: &Path,
+        key: &AccountDbKey,
+    ) -> Result<Self, StorageError> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let db = rusqlite::Connection::open(path)?;
+        let hex = zeroize::Zeroizing::new(key.sqlcipher_hex());
+        let pragma = zeroize::Zeroizing::new(format!(
+            "PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+            hex.as_str()
+        ));
+        db.execute_batch(&pragma)?;
+        crate::schema_generation::validate(&db)?;
+        crate::schema_object_erasure::validate(&db)?;
+        let fingerprint: String = db.query_row(
+            "SELECT key_fingerprint FROM account_key_check WHERE singleton_id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if fingerprint != key.fingerprint() {
+            return Err(StorageError::AccountKeyMismatch);
+        }
+        super::backup_native::full_transfer_snapshot_preflight(&db)?;
+        let original_input = observation::capture(&db, false)?;
+        Ok(Self { db, original_input })
+    }
+
     /// Opens a private snapshot or an owner-guarded generation for restore checks.
     /// Never use this worker handle as an active live account writer.
     /// # Errors

@@ -6,6 +6,12 @@ does not establish their readiness or enable pairing for ordinary clients.
 The node release gate also suppresses discovery advertisement while the feature
 is dormant. Setting an environment opt-in does not override that release gate.
 
+The product follows a phone-first account model: the phone is the primary device,
+desktop clients mainly host agents, and the web client is a linked secondary.
+Primary authority follows the verified native device role and keys; a desktop
+session is not a prerequisite for pairing. The SDK and reference CLI exercise
+this shared flow while the phone companion remains outside this preview.
+
 Pairing enrolls a separately generated device branch. Each device keeps its own
 signing and agreement keys, local encrypted store and data passphrase. Pairing
 never copies an existing device's ratchet state or account authority seeds.

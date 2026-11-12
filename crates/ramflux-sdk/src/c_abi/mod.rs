@@ -48,6 +48,8 @@ pub enum RamfluxErrorCode {
     ObjectOwnershipUnverified = 21,
     CustodyForkFenced = 22,
     SchemaResetRequired = 23,
+    PairingRefused = 24,
+    PairingStale = 25,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -56,6 +58,11 @@ pub const RAMFLUX_ERR_ACCOUNT_BUSY: i32 = 18;
 
 /// Local attachment erasure; this outcome does not terminate the client or daemon.
 pub const RAMFLUX_ERR_OBJECT_ERASED: i32 = 19;
+
+/// Pairing wrote a closed local refusal result to the caller's output buffer.
+pub const RAMFLUX_ERR_PAIRING_REFUSED: i32 = 24;
+/// Pairing rejected a stale operation generation without applying its request.
+pub const RAMFLUX_ERR_PAIRING_STALE: i32 = 25;
 
 impl RamfluxErrorCode {
     const fn name(self) -> &'static str {
@@ -80,6 +87,8 @@ impl RamfluxErrorCode {
             Self::ObjectOwnershipUnverified => "ObjectOwnershipUnverified",
             Self::CustodyForkFenced => "CustodyForkFenced",
             Self::SchemaResetRequired => "SchemaResetRequired",
+            Self::PairingRefused => "PairingRefused",
+            Self::PairingStale => "PairingStale",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -1167,3 +1176,6 @@ fn receive_reconcile_keeps_existing_abi_classes() {
         assert_eq!(sdk_error_code(&SdkError::ReceiveEpochReconcile(reason)), sdk_error_code(&old));
     }
 }
+
+#[cfg(test)]
+mod pairing_error_tests;

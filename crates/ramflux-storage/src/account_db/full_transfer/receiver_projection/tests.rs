@@ -14,13 +14,18 @@ type ResultOf<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn h(n: u8) -> String {
     encode_base64url([n; 32])
 }
-fn db(label: &str, anchor: &str) -> ResultOf<(PathBuf, AccountDb)> {
+pub(in crate::account_db::full_transfer) fn db(
+    label: &str,
+    anchor: &str,
+) -> ResultOf<(PathBuf, AccountDb)> {
     let root = crate::tests::temp_root(label);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", anchor)?;
     Ok((root, AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", label.as_bytes()))?))
 }
-fn input(source: &AccountDb) -> ResultOf<(FullResumeRecord, SourceManifest, Zeroizing<Vec<u8>>)> {
+pub(in crate::account_db::full_transfer) fn input(
+    source: &AccountDb,
+) -> ResultOf<(FullResumeRecord, SourceManifest, Zeroizing<Vec<u8>>)> {
     let (mut record, mut manifest, _) = super::super::stage_tests::fixture()?;
     let mut prep = source.prepare_full_transfer_source()?;
     prep.capture_base_cut(&manifest.manifest.snapshot_id)?;
@@ -40,7 +45,11 @@ fn input(source: &AccountDb) -> ResultOf<(FullResumeRecord, SourceManifest, Zero
     record.base_manifest_hash = encode_base64url(manifest_hash(&manifest)?);
     Ok((record, manifest, Zeroizing::new(bytes)))
 }
-fn seed(db: &AccountDb, n: u8, generation: u64) -> ResultOf {
+pub(in crate::account_db::full_transfer) fn seed(
+    db: &AccountDb,
+    n: u8,
+    generation: u64,
+) -> ResultOf {
     db.connection
         .execute("INSERT INTO object_erasure_fence VALUES(?1)", rusqlite::params![h(n)])?;
     db.connection.execute(

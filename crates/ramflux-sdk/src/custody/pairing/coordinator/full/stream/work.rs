@@ -137,7 +137,7 @@ impl FullStreamWork {
         self.runtime.require_live()?;
         // Receipt frees no immutable cut and authorizes no candidate. Keep the exact
         // cipher for the future semantic/DV workflow; never synthesize a peer DV here.
-        Ok(FullStreamFinished { packet: self.packet, manifest })
+        Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
     pub(super) async fn destination(mut self) -> Result<FullStreamFinished, SdkError> {
         let manifest = self.receive_manifest().await?;
@@ -192,8 +192,13 @@ impl FullStreamWork {
             next += 1;
         }
         self.runtime.require_live()?;
-        // All durable disk bytes/root were checked. No input has been semantically
-        // applied and neither this task nor its caller may label this DataVerified.
-        Ok(FullStreamFinished { packet: self.packet, manifest })
+        self.fresh().await?;
+        let pinned = self.io.pin_receiver_base(&hash).await?;
+        let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
+        let receiver = self.io.project_receiver_base(copy).await?;
+        self.runtime.require_live()?;
+        // Typed projection into B's own private copy is complete. Contribution/root and
+        // semantic/DV validation still precede any receipt, publication or selection.
+        Ok(FullStreamFinished { packet: self.packet, manifest, receiver: Some(receiver) })
     }
 }

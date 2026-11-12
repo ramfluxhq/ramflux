@@ -1218,6 +1218,44 @@ async fn pairing_full_private_io_port_uses_short_original_writer_loans() -> Test
     Ok(())
 }
 
+fn receiver_scratch_count(path: &std::path::Path) -> Result<usize, std::io::Error> {
+    std::fs::read_dir(path)?.try_fold(0, |count, entry| {
+        Ok(count + usize::from(entry?.file_name().to_string_lossy().starts_with("receiver-")))
+    })
+}
+
+async fn assert_disk_status_totals(
+    rig: &mut Rig,
+    operation: &str,
+    manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+) -> TestResult {
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation.into(),
+        generation: 1,
+    };
+    for actor in [&mut rig.primary, &mut rig.secondary] {
+        let status = actor.transfer_status(&request).await?;
+        let Outcome::FullStatus { value } = status.outcome else {
+            return Err("disk status".into());
+        };
+        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
+        assert_eq!(value.bytes_durable, value.bytes_total);
+        assert_eq!(value.cut, manifest.manifest.snapshot_cut);
+        assert_eq!(
+            value.stage,
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+        );
+        assert_eq!(
+            value.tail_status,
+            ramflux_protocol::custody::pairing::local_dto::FullTailStatus::None
+        );
+        assert!(value.result.is_none());
+    }
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services() -> TestResult {
     let hold = ClockHold::new();
@@ -1258,6 +1296,11 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
         tokio::time::advance(std::time::Duration::from_millis(500)).await;
     }
     assert!(complete, "owned stream did not finish its actual disk-only phase");
+    assert!(
+        rig.secondary.full_receiver_base_projected_for_test(),
+        "receiver skipped its own private base projection"
+    );
+    assert!(!rig.primary.full_receiver_base_projected_for_test(), "source acquired a target copy");
     {
         let stage = rig.source.client.account_db()?.open_full_transfer_stage(
             &operation,
@@ -1270,30 +1313,7 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
         );
     }
     let manifest = rig.primary.full_source_manifest_for_test()?;
-    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
-        schema: "ramflux.pairing.StatusRequest.v2".into(),
-        version: 2,
-        operation_id: operation.clone(),
-        generation: 1,
-    };
-    for actor in [&mut rig.primary, &mut rig.secondary] {
-        let status = actor.transfer_status(&request).await?;
-        let Outcome::FullStatus { value } = status.outcome else {
-            return Err("disk status".into());
-        };
-        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
-        assert_eq!(value.bytes_durable, value.bytes_total);
-        assert_eq!(value.cut, manifest.manifest.snapshot_cut);
-        assert_eq!(
-            value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
-        );
-        assert_eq!(
-            value.tail_status,
-            ramflux_protocol::custody::pairing::local_dto::FullTailStatus::None
-        );
-        assert!(value.result.is_none());
-    }
+    assert_disk_status_totals(&mut rig, &operation, &manifest).await?;
     let hash = ramflux_protocol::encode_base64url(
         ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
     );
@@ -1315,8 +1335,22 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
         assert_eq!(row.phase, "mutually_confirmed", "disk receipts granted authority");
     }
     assert!(rig.participant_a.db.lock().map_err(|_| "source handback")?.is_none());
+    let target_stage = rig
+        .participant_b
+        .root
+        .join("custody_accounts")
+        .join(&rig.participant_b.account_id)
+        .join("full-transfer")
+        .join(&manifest.manifest.transfer_id);
+    assert_eq!(receiver_scratch_count(&target_stage)?, 1);
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
+    assert!(!rig.secondary.full_receiver_base_projected_for_test());
+    assert_eq!(
+        receiver_scratch_count(&target_stage)?,
+        0,
+        "account lock retained private receiver data"
+    );
     hold.finish().await?;
     Ok(())
 }

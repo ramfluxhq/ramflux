@@ -501,6 +501,7 @@ impl PairingActor {
     /// # Errors
     /// Generation mismatch.
     pub async fn status(&mut self, request: &StatusRequest) -> Result<LocalResult, SdkError> {
+        self.require_open()?;
         request.validate().map_err(|e| wire(&e))?;
         self.expire_live().await;
         self.with_ceremony(|c| check_generation(c, &request.operation_id, request.generation))?;
@@ -511,6 +512,7 @@ impl PairingActor {
     /// # Errors
     /// Transport, `Busy`, or protocol failure.
     pub async fn sync_relay(&mut self) -> Result<LocalResult, SdkError> {
+        self.require_open()?;
         self.expire_live().await;
         if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
             self.flush_send().await?;
@@ -979,6 +981,11 @@ impl PairingActor {
                 })
                 .await?,
         ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_enabled_for_test(&mut self, enabled: bool) {
+        self.config.enabled = enabled;
     }
 
     #[cfg(test)]
