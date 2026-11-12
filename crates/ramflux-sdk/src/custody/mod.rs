@@ -17,8 +17,9 @@ pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
 pub(crate) use store::pairing::{
-    matches_install, verify_local as verify_pairing_local,
-    write_authority as write_pairing_authority,
+    matches_generation_install, matches_install, verify_generation_keys,
+    verify_local as verify_pairing_local, write_authority as write_pairing_authority,
+    write_generation_authority,
 };
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{

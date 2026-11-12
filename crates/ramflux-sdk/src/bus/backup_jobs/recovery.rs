@@ -133,7 +133,7 @@ pub(super) fn recover_generations(
             if selected.as_deref().and_then(Path::parent) == Some(path.as_path()) {
                 std::fs::remove_file(marker)?;
                 std::fs::File::open(&path)?.sync_all()?;
-            } else {
+            } else if !super::full_generation::protect_pending_full(data_root, id, &path)? {
                 std::fs::remove_dir_all(path)?;
             }
         }

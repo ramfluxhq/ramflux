@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::Zeroizing;
 
+pub mod owner;
 const LIMIT: usize = 4096;
 fn pending() -> SdkError {
     SdkError::PairingCode("PublicationPending")
@@ -98,6 +99,34 @@ pub(crate) fn require_selected_full_generation(
 ) -> Result<(), SdkError> {
     let selected = AccountIndex::open(root)?.account_generation_selection(&install.account_id)?;
     compare_selected_full_generation(install, adoption, selected)
+}
+
+/// Native-file load checks local G3 metadata; the network owner must additionally
+/// supply the adoption row read from its actual opened database.
+pub(crate) fn require_installed_native_generation(
+    root: &Path,
+    account: &crate::custody::BornAccount,
+    install: &Install,
+) -> Result<(), SdkError> {
+    require_completed_full_generation(root, account, install, &super::activate::adoption(install)?)
+}
+
+/// Completed G3 admission requires every durable local owner to agree. A decoded
+/// marker alone never supplies the caller's actual selected-database adoption row.
+pub(crate) fn require_completed_full_generation(
+    root: &Path,
+    account: &crate::custody::BornAccount,
+    install: &Install,
+    adoption: &AdoptionRow,
+) -> Result<(), SdkError> {
+    if install.state != "installed"
+        || !super::install_store::list_pending(root, &install.account_id)?.is_empty()
+        || super::activate::adoption(install)? != *adoption
+        || !crate::custody::matches_generation_install(account, install)?
+    {
+        return Err(pending());
+    }
+    require_selected_full_generation(root, install, adoption)
 }
 
 fn compare_selected_full_generation(

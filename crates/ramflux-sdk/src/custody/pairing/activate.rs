@@ -194,20 +194,10 @@ pub fn refresh_authority(
 pub(crate) fn authority_lock(root: &Path, id: &str) -> Result<fs::File, SdkError> {
     super::super::valid_id(id)?;
     let path = root.join("custody_accounts").join(id).join(".authority.lock");
-    let file = fs::File::from(
-        rustix::fs::open(
-            path,
-            rustix::fs::OFlags::RDWR
-                | rustix::fs::OFlags::CREATE
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .map_err(std::io::Error::from)?,
-    );
+    let file = crate::platform::fs::open_owner_only_no_follow(&path)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match crate::platform::fs::try_lock_exclusive(&file) {
             Ok(()) => return Ok(file),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {

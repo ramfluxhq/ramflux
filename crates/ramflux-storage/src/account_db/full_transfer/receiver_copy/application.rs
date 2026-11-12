@@ -78,9 +78,9 @@ impl FullReceiverBaseCopy {
     /// approval after lock/restart and selects neither paths nor native authority.
     /// # Errors
     /// Refuses changed B/scope/bytes, unsupported successor input, expiry or durability errors.
-    pub fn commit_application(
-        &mut self,
-        stage: &mut FullTransferStage<'_>,
+    fn application_proof(
+        &self,
+        stage: &FullTransferStage<'_>,
         now: u64,
     ) -> Result<FullAppliedDataReceipt, StorageError> {
         self.verify_materialization(stage)?;
@@ -120,28 +120,6 @@ impl FullReceiverBaseCopy {
                 )
                 .map_err(|_| wrong())?;
         }
-        for name in ["private.db", "contributions.db"] {
-            super::super::stage::open_regular(&self.scratch.path.join(name), false)?.sync_all()?;
-        }
-        std::fs::File::open(&self.scratch.path)?.sync_all()?;
-        let workspace =
-            self.scratch.path.file_name().and_then(|n| n.to_str()).ok_or_else(wrong)?.to_owned();
-        let key = Zeroizing::new(*self.key.bytes());
-        let nonce = union.generation_nonce;
-        let digest = self.stage_digest;
-        let root = union.chunks_root;
-        let records = union.records;
-        let bytes = union.total_bytes;
-        let hash = self.hash.clone();
-        stage.connection.call(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            tx.execute("INSERT INTO receiver_generation VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(singleton) DO UPDATE SET generation_nonce=excluded.generation_nonce,stage_digest=excluded.stage_digest,manifest_hash=excluded.manifest_hash,workspace=excluded.workspace,private_key=excluded.private_key,union_root=excluded.union_root,records=excluded.records,encoded_bytes=excluded.encoded_bytes",params![nonce.as_slice(),digest.as_slice(),hash,workspace,key.as_slice(),root.as_slice(),records,bytes])?;
-            tx.commit()
-        })?;
-        // A possible metadata commit must never leave its durable key pointing at deleted files.
-        self.scratch.retain();
-        super::super::stage::sync_stage(&stage.directory)?;
-        self.observation.require_current(stage.db)?;
         Ok(FullAppliedDataReceipt {
             role: ramflux_crypto::custody::pairing::PairingRole::Responder,
             packet: DataPacket::DataVerified {
@@ -153,12 +131,81 @@ impl FullReceiverBaseCopy {
                 manifest_chain_hash: encode_base64url(chain.finish().map_err(|_| wrong())?),
                 signature: encode_base64url([0; 64]),
             },
-            nonce,
-            applied_root: root,
-            digest,
+            nonce: union.generation_nonce,
+            applied_root: union.chunks_root,
+            digest: self.stage_digest,
             branch_key: record.grant.branch_keys.destination,
             expires_at: record.grant.expires_at.min(stage.reference().lease_expires_at.0),
         })
+    }
+    /// Durably retain a validated private generation before requesting its original DV.
+    /// # Errors
+    /// Refuses changed input, expiry, lost B ownership or encrypted stage I/O failure.
+    pub fn commit_application(
+        &mut self,
+        stage: &mut FullTransferStage<'_>,
+        now: u64,
+    ) -> Result<FullAppliedDataReceipt, StorageError> {
+        let proof = self.application_proof(stage, now)?;
+        self.persist_application(stage, None)?;
+        Ok(proof)
+    }
+    fn persist_application(
+        &mut self,
+        stage: &FullTransferStage<'_>,
+        receipt: Option<Zeroizing<Vec<u8>>>,
+    ) -> Result<(), StorageError> {
+        for name in ["private.db", "contributions.db"] {
+            super::super::stage::open_regular(&self.scratch.path.join(name), false)?.sync_all()?;
+        }
+        std::fs::File::open(&self.scratch.path)?.sync_all()?;
+        let workspace =
+            self.scratch.path.file_name().and_then(|n| n.to_str()).ok_or_else(wrong)?.to_owned();
+        let key = Zeroizing::new(*self.key.bytes());
+        let union = self.union.as_ref().ok_or_else(wrong)?;
+        let nonce = union.generation_nonce;
+        let digest = self.stage_digest;
+        let root = union.chunks_root;
+        let records = union.records;
+        let bytes = union.total_bytes;
+        let hash = self.hash.clone();
+        stage.connection.call(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("INSERT INTO receiver_generation VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(singleton) DO UPDATE SET generation_nonce=excluded.generation_nonce,stage_digest=excluded.stage_digest,manifest_hash=excluded.manifest_hash,workspace=excluded.workspace,private_key=excluded.private_key,union_root=excluded.union_root,records=excluded.records,encoded_bytes=excluded.encoded_bytes",params![nonce.as_slice(),digest.as_slice(),hash,workspace,key.as_slice(),root.as_slice(),records,bytes])?;
+            if let Some(receipt) = receipt
+                && tx.execute("UPDATE receiver_receipt SET generation_nonce=?1 WHERE manifest_hash=?2 AND bytes=?3", params![nonce.as_slice(),hash,receipt.as_slice()])? != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.commit()
+        })?;
+        // A possible metadata commit must never leave its durable key pointing at deleted files.
+        self.scratch.retain();
+        super::super::stage::sync_stage(&stage.directory)?;
+        self.observation.require_current(stage.db)
+    }
+    pub(super) fn retain_for_installation(
+        &mut self,
+        stage: &FullTransferStage<'_>,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        stage.verified_duplex(now)?;
+        let proof = self.application_proof(stage, now)?;
+        let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(stage.connection.query_row(
+            "SELECT bytes FROM receiver_receipt WHERE manifest_hash=?1",
+            params![self.hash],
+            |row| row.get(0),
+        )?);
+        let packet = DataPacket::from_wire_bytes(bytes.as_slice()).map_err(|_| wrong())?;
+        let DataPacket::DataVerified { signature, .. } = packet else {
+            return Err(wrong());
+        };
+        let expected = proof.signed_packet(signature)?.encode_secret().map_err(|_| wrong())?;
+        if expected.as_slice() != bytes.as_slice() {
+            return Err(wrong());
+        }
+        // The source input/signature is unchanged; only the locally rebased B generation
+        // and its qualified contribution ledger move together in this transaction.
+        self.persist_application(stage, Some(bytes))
     }
     /// Persist exact signed DV and its input-verified flag in one stage transaction after
     /// rechecking this same B writer and actual generation. Only its returned bytes may send.
@@ -238,6 +285,8 @@ impl FullTransferStage<'_> {
         Ok(name)
     }
 }
+
+mod recovery;
 
 #[cfg(test)]
 mod tests;

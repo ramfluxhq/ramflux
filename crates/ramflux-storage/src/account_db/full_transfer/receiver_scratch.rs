@@ -25,6 +25,24 @@ impl Scratch {
     pub(super) fn retain(&mut self) {
         self.retained = true;
     }
+    pub(super) fn reopen_retained(stage: &Path, name: &str) -> Result<Self, StorageError> {
+        super::stage::raw32(name.strip_prefix("receiver-").ok_or_else(super::stage::context)?)?;
+        let path = stage.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(super::stage::context());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(super::stage::context());
+            }
+        }
+        let lock = super::stage::open_regular(&path.join("owner.lock"), true)?;
+        fs2::FileExt::try_lock_exclusive(&lock)?;
+        Ok(Self { path, lock: Some(lock), retained: true })
+    }
     pub(super) fn create(stage: &Path, retained: Option<&str>) -> Result<Self, StorageError> {
         reclaim(stage, retained)?;
         let path = stage.join(format!(
