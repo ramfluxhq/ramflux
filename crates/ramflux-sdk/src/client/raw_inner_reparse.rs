@@ -22,10 +22,14 @@ struct Prepared {
     content: g::Content,
     provenance: Provenance,
     source: ramflux_crypto::RootQualifiedDeviceRef,
+    origin: Option<(ramflux_storage::RawInnerCopy, super::raw_inner_origin::RetainedOrigin)>,
 }
+// Bump when executable reparse policy changes without a descriptor change.
+const REPARSE_POLICY: &str = "native-origin-1";
 fn decoder_marker() -> String {
     format!(
-        "{}/{}",
+        "{}/{}/{}",
+        REPARSE_POLICY,
         g::registry::COMPILED_LAYER,
         ramflux_protocol::encode_base64url(blake3::hash(g::FILE_DESCRIPTOR_SET).as_bytes())
     )
@@ -47,11 +51,39 @@ impl RamfluxClient {
                 if !db.mark_raw_inner_reparse_attempted(&snapshot, &decoder)? {
                     return Ok(false);
                 }
+                if matches!(
+                    snapshot.copy.kind,
+                    ramflux_storage::RawInnerCopyKind::OuterInner
+                        | ramflux_storage::RawInnerCopyKind::SourceEvidence
+                ) && !db
+                    .actor_state_exists(&format!("routed/unsupported/{}", snapshot.copy.owner_id))?
+                    && db.message_content(&snapshot.copy.owner_id)?.is_some()
+                {
+                    // A later copy cannot replace known content or an Edit. Retire redundant
+                    // raw/opening copies without a second schema event; body-free headers stay.
+                    db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
+                    return Ok(false);
+                }
                 let Some(prepared) = prepared else {
                     return Ok(false);
                 };
-                self.require_cached_root_authority(HeadUse::HistoricalRead, &prepared.source)?;
-                let Prepared { identity, content, provenance, .. } = prepared;
+                if let Some((copy, origin)) = prepared.origin.as_ref() {
+                    if db.raw_inner_copy(&copy.copy_id)?.as_ref() != Some(copy) {
+                        return Ok(false);
+                    }
+                    if origin.verify(&prepared.identity, &snapshot.copy.bytes).is_err() {
+                        return Ok(false);
+                    }
+                } else {
+                    self.require_cached_root_authority(HeadUse::HistoricalRead, &prepared.source)?;
+                }
+                if !self.raw_reparse_scope_allowed(
+                    &prepared.source,
+                    &prepared.provenance.conversation,
+                )? {
+                    return Ok(false);
+                }
+                let Prepared { identity, content, provenance, origin, .. } = prepared;
                 let metadata =
                     db.message_metadata(&provenance.conversation, &provenance.message)?;
                 db.bind_raw_inner_copy(&snapshot.copy.copy_id, &provenance.message)?;
@@ -73,6 +105,14 @@ impl RamfluxClient {
                     &format!("routed/generated-identity/{}", provenance.message),
                     &identity,
                 )?;
+                if let Some((copy, origin)) = origin.as_ref() {
+                    db.persist_message_actor_state(
+                        &provenance.message,
+                        &format!("routed/origin-evidence/{}", provenance.message),
+                        origin,
+                    )?;
+                    db.finish_raw_inner_reparse(&copy.copy_id)?;
+                }
                 db.remove_actor_state(&format!("routed/unsupported/{}", provenance.message))?;
                 let update = g::MessageUpdate {
                     account_id: db.local_account_id.clone(),
@@ -135,6 +175,68 @@ impl RamfluxClient {
         {
             return Ok(None);
         }
+        let (source, origin) = if let Some(copy_id) = provenance.source_evidence_copy.as_ref() {
+            let Some(copy) = self.account_db()?.raw_inner_copy(copy_id)? else {
+                return Ok(None);
+            };
+            if copy.owner_id != snapshot.copy.owner_id
+                || copy.kind != ramflux_storage::RawInnerCopyKind::SourceEvidence
+            {
+                return Ok(None);
+            }
+            let Ok(origin) =
+                serde_json::from_slice::<super::raw_inner_origin::RetainedOrigin>(&copy.bytes)
+            else {
+                return Ok(None);
+            };
+            let Ok(verified) = origin.verify(&identity, &snapshot.copy.bytes) else {
+                return Ok(None);
+            };
+            let Ok(route) = serde_json::from_str::<Routing>(&provenance.original_route) else {
+                return Ok(None);
+            };
+            let envelope = &verified.outer;
+            if route.kind != Kind::Direct
+                || envelope.delivery_class != ramflux_protocol::DeliveryClass::Message
+                || origin.routing != route
+                || route.message_id != provenance.message
+                || envelope.envelope_id != provenance.envelope_id
+                || envelope.payload_hash != provenance.payload_hash
+                || envelope.delivery_mode.as_deref().unwrap_or("durable")
+                    != provenance.original_mode
+                || envelope.created_at.checked_add(i64::from(envelope.ttl))
+                    != Some(provenance.expires_at)
+                || verified.author.root != snapshot.source_anchor
+                || verified.author.device.storage_key() != provenance.source
+                || identity
+                    .author
+                    .as_ref()
+                    .is_none_or(|author| author.device_epoch != provenance.source_epoch)
+            {
+                return Ok(None);
+            }
+            (verified.author.device, Some((copy, origin)))
+        } else {
+            if ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION >= 1 {
+                return Ok(None);
+            }
+            let Some(source) = self.legacy_raw_reparse_source(snapshot, &identity, &provenance)?
+            else {
+                return Ok(None);
+            };
+            (source, None)
+        };
+        if !self.raw_reparse_scope_allowed(&source, &provenance.conversation)? {
+            return Ok(None);
+        }
+        Ok(Some(Prepared { identity, content, provenance, source, origin }))
+    }
+    fn legacy_raw_reparse_source(
+        &self,
+        snapshot: &RawInnerReparseRow,
+        identity: &g::EventIdentity,
+        provenance: &Provenance,
+    ) -> Result<Option<ramflux_crypto::RootQualifiedDeviceRef>, SdkError> {
         let receipt =
             match self.account_db()?.load_actor_state::<Committed>(&provenance.outer_receipt_key) {
                 Ok(Some(receipt)) => receipt,
@@ -179,13 +281,10 @@ impl RamfluxClient {
         {
             return Ok(None);
         }
-        if !self.raw_reparse_scope_allowed(&source, &provenance.conversation)? {
-            return Ok(None);
-        }
         if Self::verify_generated_message_header(&receipt.entry, &snapshot.copy.bytes).is_err() {
             return Ok(None);
         }
-        Ok(Some(Prepared { identity, content, provenance, source }))
+        Ok(Some(source))
     }
     fn raw_reparse_scope_allowed(
         &self,

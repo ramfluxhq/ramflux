@@ -15,7 +15,7 @@ CREATE INDEX IF NOT EXISTS raw_inner_owner_source ON raw_inner_owner(source_anch
 CREATE TABLE IF NOT EXISTS raw_inner_copy(
     copy_id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL,
-    copy_kind TEXT NOT NULL CHECK(copy_kind IN ('outer_inner','nested_group','history_container')),
+    copy_kind TEXT NOT NULL CHECK(copy_kind IN ('outer_inner','nested_group','history_container','source_evidence')),
     raw_digest BLOB NOT NULL CHECK(length(raw_digest)=32),
     raw_bytes BLOB NOT NULL,
     attempted_decoder TEXT NOT NULL DEFAULT '',

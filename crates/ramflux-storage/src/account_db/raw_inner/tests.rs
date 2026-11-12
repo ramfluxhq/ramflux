@@ -898,3 +898,42 @@ fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> Tes
     );
     Ok(())
 }
+
+#[test]
+fn source_evidence_copy_is_charged_bound_and_erased_with_target() -> TestResult {
+    let (_root, db) = test_db("source-evidence-copy")?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "event",
+            verified_source_anchor: "root",
+            copy_id: "evidence",
+            kind: RawInnerCopyKind::SourceEvidence,
+            bytes: b"private opening and native evidence",
+            bounded_metadata: b"metadata",
+        })?;
+        db.bind_raw_inner_copy("evidence", "target")
+    })?;
+    assert_eq!(
+        db.raw_inner_copy("evidence")?.ok_or("copy")?.kind,
+        RawInnerCopyKind::SourceEvidence
+    );
+    assert_eq!(
+        db.unsupported_raw_quota(None)?.raw_bytes,
+        u64::try_from(b"private opening and native evidence".len() + b"metadata".len())?
+    );
+    db.import_deleted_message_projection("c", "target", false, 1)?;
+    assert!(db.raw_inner_copy("evidence")?.is_none());
+    assert_eq!(db.unsupported_raw_quota(None)?.raw_bytes, 0);
+    assert!(
+        db.write_transaction(|| db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "event",
+            verified_source_anchor: "root",
+            copy_id: "evidence",
+            kind: RawInnerCopyKind::SourceEvidence,
+            bytes: b"late",
+            bounded_metadata: b"metadata",
+        }))
+        .is_err()
+    );
+    Ok(())
+}

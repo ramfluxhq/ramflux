@@ -8,12 +8,12 @@ use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
 mod pending;
 
-struct Author {
-    root: String,
-    device: ramflux_crypto::RootQualifiedDeviceRef,
+pub(crate) struct Author {
+    pub(crate) root: String,
+    pub(crate) device: ramflux_crypto::RootQualifiedDeviceRef,
 }
 
-fn authority(
+pub(crate) fn authority(
     outer: &Value,
     manifest: &g::NativeCustodyManifest,
     identity: &g::EventIdentity,
