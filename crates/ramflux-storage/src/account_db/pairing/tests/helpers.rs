@@ -163,6 +163,8 @@ pub(super) fn adoption(role: &str, primary: Option<&str>) -> TestResult<Adoption
         branch_vault_ref: "vault-branch".into(),
         data_vault_ref: "vault-data".into(),
         primary_vault_ref: primary.map(str::to_owned),
+        full_generation_nonce: None,
+        full_initial_union_root: None,
     })
 }
 

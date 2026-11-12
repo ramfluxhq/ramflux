@@ -207,6 +207,8 @@ pub struct AdoptionRow {
     pub branch_vault_ref: String,
     pub data_vault_ref: String,
     pub primary_vault_ref: Option<String>,
+    pub full_generation_nonce: Option<String>,
+    pub full_initial_union_root: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,11 +493,19 @@ impl AdoptionRow {
             + self.local_role.len()
             + self.branch_vault_ref.len()
             + self.data_vault_ref.len()
-            + self.primary_vault_ref.as_ref().map_or(0, String::len);
+            + self.primary_vault_ref.as_ref().map_or(0, String::len)
+            + self.full_generation_nonce.as_ref().map_or(0, String::len)
+            + self.full_initial_union_root.as_ref().map_or(0, String::len);
         require(n <= ADOPTION_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.operation_id, "operation_id")?;
         b32(&self.record_hash, "record_hash")?;
+        optional_b32(self.full_generation_nonce.as_deref(), "full_generation_nonce")?;
+        optional_b32(self.full_initial_union_root.as_deref(), "full_initial_union_root")?;
+        require(
+            self.full_generation_nonce.is_some() == self.full_initial_union_root.is_some(),
+            "full_generation",
+        )?;
         decode_ref(&self.local_ref, "local_ref")?;
         require(matches!(self.local_role.as_str(), "primary" | "secondary"), "local_role")?;
         ident(&self.branch_vault_ref, "branch_vault_ref")?;
@@ -871,16 +881,22 @@ impl AccountDb {
     pub fn put_pairing_adoption(&self, row: &AdoptionRow) -> Result<(), StorageError> {
         decode_adoption(row)?;
         self.require_account(&row.account_id)?;
-        self.connection.execute(
+        let changed = self.connection.execute(
             "INSERT INTO pairing_adoption(
               account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,
-              data_vault_ref,primary_vault_ref)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+              data_vault_ref,primary_vault_ref,full_generation_nonce,full_initial_union_root)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(account_id) DO UPDATE SET
               operation_id=excluded.operation_id,record_hash=excluded.record_hash,
               local_ref=excluded.local_ref,local_role=excluded.local_role,
               branch_vault_ref=excluded.branch_vault_ref,data_vault_ref=excluded.data_vault_ref,
-              primary_vault_ref=excluded.primary_vault_ref",
+              primary_vault_ref=excluded.primary_vault_ref,
+              full_generation_nonce=COALESCE(excluded.full_generation_nonce,pairing_adoption.full_generation_nonce),
+              full_initial_union_root=COALESCE(excluded.full_initial_union_root,pairing_adoption.full_initial_union_root)
+             WHERE pairing_adoption.full_generation_nonce IS NULL
+                OR excluded.full_generation_nonce IS NULL
+                OR (pairing_adoption.full_generation_nonce=excluded.full_generation_nonce
+                    AND pairing_adoption.full_initial_union_root=excluded.full_initial_union_root)",
             params![
                 row.account_id,
                 row.operation_id,
@@ -890,8 +906,11 @@ impl AccountDb {
                 row.branch_vault_ref,
                 row.data_vault_ref,
                 row.primary_vault_ref,
+                row.full_generation_nonce,
+                row.full_initial_union_root,
             ],
         )?;
+        require(changed == 1, "full_generation")?;
         Ok(())
     }
 
@@ -999,7 +1018,7 @@ pub(super) fn read_adoption(
 ) -> Result<Option<AdoptionRow>, StorageError> {
     let row = connection
             .query_row(
-                "SELECT account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref
+                "SELECT account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref,full_generation_nonce,full_initial_union_root
                  FROM pairing_adoption WHERE account_id=?1",
                 params![account_id],
                 |r| {
@@ -1012,6 +1031,8 @@ pub(super) fn read_adoption(
                         branch_vault_ref: r.get(5)?,
                         data_vault_ref: r.get(6)?,
                         primary_vault_ref: r.get(7)?,
+                        full_generation_nonce: r.get(8)?,
+                        full_initial_union_root: r.get(9)?,
                     })
                 },
             )

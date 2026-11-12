@@ -537,6 +537,7 @@ macro_rules! table_rule {
     (@version "object_segment_reference_veto",$mode:ident) => { U64(2) };
     (@version "account_mac_bundle",Transfer) => { U64(2) };
     (@version "runtime_inbox_recovery",$mode:ident) => { U64(2) };
+    (@version "pairing_adoption",$mode:ident) => { U64(2) };
     (@version $other:literal,$mode:ident) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {
