@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod backup;
-pub use backup::BackupIndexInstall;
+pub use backup::{AccountGenerationSelection, BackupIndexInstall};
 mod operations;
 
 #[derive(Clone)]

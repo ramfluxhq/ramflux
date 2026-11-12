@@ -4,7 +4,7 @@
 //! One durable commit selects an entire verified account generation and its recovery material.
 
 use super::AccountIndex;
-use crate::{StorageError, WrappedAccountDbKey};
+use crate::{LocalAccountRecord, StorageError, WrappedAccountDbKey};
 use rusqlite::{OptionalExtension, params};
 
 pub struct BackupIndexInstall<'a> {
@@ -16,7 +16,33 @@ pub struct BackupIndexInstall<'a> {
     pub wrapped_key: &'a WrappedAccountDbKey,
 }
 
+/// One SQLite read snapshot of the selected paths and their G2 recovery manifest.
+/// The manifest can contain private legacy recovery metadata; never log this value.
+pub struct AccountGenerationSelection {
+    pub account: LocalAccountRecord,
+    pub manifest_json: Option<Vec<u8>>,
+}
+
 impl AccountIndex {
+    /// Read the generation pointer and its recovery material in one SQL statement.
+    /// Separate `account`/manifest reads could otherwise straddle a concurrent selection.
+    /// This observation grants no generation lease or permission to select/install data.
+    /// # Errors
+    /// Returns missing-account or index read errors.
+    pub fn account_generation_selection(
+        &self,
+        id: &str,
+    ) -> Result<AccountGenerationSelection, StorageError> {
+        self.connection.query_row(
+            "SELECT a.local_account_id,a.principal_commitment,a.db_relative_path,a.object_dir_relative_path,a.account_state,g.manifest_json FROM local_account a LEFT JOIN account_backup_generation g ON g.local_account_id=a.local_account_id WHERE a.local_account_id=?1",
+            params![id], |row| Ok(AccountGenerationSelection {
+                account: LocalAccountRecord {
+                    local_account_id:row.get(0)?, principal_commitment:row.get(1)?,
+                    db_relative_path:row.get(2)?,object_dir_relative_path:row.get(3)?,account_state:row.get(4)?,
+                }, manifest_json:row.get(5)?,
+            }),
+        ).optional()?.ok_or_else(||StorageError::AccountNotFound(id.into()))
+    }
     pub(super) fn install_backup_schema(&self) -> Result<(), StorageError> {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS account_backup_generation(local_account_id TEXT PRIMARY KEY,manifest_json BLOB NOT NULL);")?;
         #[cfg(unix)]
@@ -198,6 +224,9 @@ mod tests {
         assert!(index.install_backup_generation(&install).is_err());
         assert_eq!(index.account("account")?.db_relative_path, before.db_relative_path);
         assert!(index.backup_generation_manifest("account")?.is_none());
+        let unchanged = index.account_generation_selection("account")?;
+        assert_eq!(unchanged.account, before);
+        assert!(unchanged.manifest_json.is_none(), "failed commit exposed a new recovery marker");
         index.connection.execute_batch("DROP TRIGGER reject_test_manifest")?;
         index.install_backup_generation(&install)?;
         assert_eq!(index.account("account")?.db_relative_path, install.db_relative_path);
@@ -205,6 +234,10 @@ mod tests {
         drop(index);
         let reopened = AccountIndex::open(&root)?;
         assert_eq!(reopened.account("account")?.db_relative_path, install.db_relative_path);
+        let selected = reopened.account_generation_selection("account")?;
+        assert_eq!(selected.account.db_relative_path, install.db_relative_path);
+        assert_eq!(selected.account.object_dir_relative_path, install.object_relative_path);
+        assert_eq!(selected.manifest_json, Some(b"new manifest".to_vec()));
         drop(reopened);
         std::fs::remove_dir_all(root)?;
         Ok(())

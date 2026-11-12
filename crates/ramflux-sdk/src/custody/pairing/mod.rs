@@ -6,6 +6,7 @@ mod activate;
 pub(crate) mod admission;
 mod coordinator;
 mod full_bootstrap;
+pub mod full_generation;
 pub use full_bootstrap::{
     FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest, FullSourceManifestSigningRequest,
 };

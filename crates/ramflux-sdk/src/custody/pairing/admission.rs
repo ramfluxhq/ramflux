@@ -24,6 +24,13 @@ pub(crate) fn require_network_admission(
     let adoption = reader
         .read_for(&config.account_root, &config.account_id)?
         .ok_or(SdkError::PairingCode("PublicationPending"))?;
+    if installed.full_transfer.is_some() {
+        super::full_generation::require_selected_full_generation(
+            &config.account_root,
+            &installed,
+            &adoption,
+        )?;
+    }
     if super::activate::adoption(&installed)? != adoption
         || !crate::custody::matches_install(account, &installed)?
     {
