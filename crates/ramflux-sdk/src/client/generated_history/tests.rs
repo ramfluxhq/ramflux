@@ -597,3 +597,153 @@ fn retained_origin_uses_first_hand_native_proof_and_rejects_body_identity_and_ro
     assert!(changed.verify(id, &raw).is_err());
     Ok(())
 }
+
+fn retain_upgrade_candidate(
+    client: &RamfluxClient,
+    sender: &Sender,
+    candidate: &g::Inner,
+    mode: &str,
+    now: u64,
+) -> TestResult<String> {
+    use crate::client::{
+        raw_inner_origin::RetainedOrigin,
+        routed::{Kind, Routing},
+    };
+    let identity = candidate.identity.as_ref().ok_or("candidate identity")?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let route = Routing {
+        kind: Kind::Direct,
+        conversation_id: identity.conversation_id.clone(),
+        message_id: id.clone(),
+        group_id: None,
+        group_message_id: None,
+        attachments: false,
+    };
+    let origin = RetainedOrigin {
+        evidence: evidence_with_policy(sender, candidate, now, mode, "message")?,
+        reported_inner: Vec::new(),
+        routing: route.clone(),
+    };
+    let proof_id = origin.copy_id()?;
+    let envelope = origin.verify(identity, &candidate.encode_to_vec())?.outer;
+    let copy_id = format!("upgrade/{id}/{mode}");
+    let provenance = crate::client::routed::generated_receive::Provenance {
+        source: ramflux_protocol::qualified_device_id(
+            &sender.author.account_anchor,
+            &sender.author.device_id,
+        )?,
+        conversation: identity.conversation_id.clone(),
+        message: id.clone(),
+        envelope_id: envelope.envelope_id,
+        payload_hash: envelope.payload_hash,
+        expires_at: envelope.created_at + i64::from(envelope.ttl),
+        original_mode: mode.into(),
+        source_epoch: sender.author.device_epoch,
+        original_route: serde_json::to_string(&route)?,
+        outer_receipt_key: copy_id.clone(),
+        source_evidence_copy: Some(proof_id.clone()),
+        received_erasure_generation: client.account_db()?.privacy_erasure_generation()?,
+    };
+    let db = client.account_db()?;
+    db.write_transaction(|| -> TestResult {
+        client.retain_raw_origin_copy(
+            &id,
+            &sender.author.account_anchor,
+            &proof_id,
+            &origin,
+            None,
+        )?;
+        db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
+            owner_id: &id,
+            verified_source_anchor: &sender.author.account_anchor,
+            copy_id: &copy_id,
+            kind: ramflux_storage::RawInnerCopyKind::OuterInner,
+            bytes: &candidate.encode_to_vec(),
+            bounded_metadata: &serde_json::to_vec(&provenance)?,
+        })?;
+        db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
+            conversation_id: &identity.conversation_id,
+            message_id: &id,
+            sender_id: "original",
+            encrypted_body: &[],
+            metadata: &ramflux_storage::MessageMetadata::default(),
+            created_at: 1,
+        })?;
+        db.persist_message_actor_state(
+            &id,
+            &format!("routed/unsupported/{id}"),
+            &g::UnsupportedView::default(),
+        )?;
+        Ok(())
+    })?;
+    Ok(id)
+}
+
+#[test]
+fn reparse_preserves_original_channel_and_authority() -> TestResult {
+    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    for mode in ["ephemeral", "durable"] {
+        let root = Root::new()?;
+        let now = crate::custody::network_now()?;
+        let author = sender(&root, "upgrade-author", now)?;
+        let original = identity(&author, 1)?;
+        let mut client = import_receiver(&root, &original)?;
+        let db = client.account_db()?;
+        db.persist_client_record(
+            "conversation",
+            "conversation",
+            &json!({
+                "kind":"direct", "group_id":null,
+                "participant_roots":[client.own_account_anchor()?,author.author.account_anchor],
+            }),
+        )?;
+        let target = g::MessageRef {
+            id: original.id.clone(),
+            conversation_id: original.conversation_id.clone(),
+            author_anchor: author.author.account_anchor.clone(),
+        };
+        let delete_identity = identity(&author, 2)?;
+        let deletion = inner(
+            &author,
+            2,
+            g::content::Value::Delete(g::Delete {
+                targets: vec![target.clone()],
+                scope: g::DeleteScope::Everyone as i32,
+                tombstone_id: g::identity::delete_tombstone(&delete_identity.id)?.to_vec(),
+                ..Default::default()
+            }),
+        )?;
+        let delete_id = retain_upgrade_candidate(&client, &author, &deletion, mode, now)?;
+        let pin = inner(
+            &author,
+            3,
+            g::content::Value::Service(g::Service {
+                action: g::ServiceAction::ServicePinAdded as i32,
+                target: Some(target),
+                ..Default::default()
+            }),
+        )?;
+        let pin_id = retain_upgrade_candidate(&client, &author, &pin, "durable", now)?;
+        let before = db.journal_bounds()?.head_seq;
+        client.active_account_db = None;
+        client.unlock_account("receiver", b"history-import-test")?;
+        let progress = client.reparse_raw_inner_page()?;
+        let db = client.account_db()?;
+        assert_eq!(progress.projected, usize::from(mode == "durable"));
+        assert_eq!(
+            db.message_is_deleted(&ramflux_protocol::encode_base64url(&original.id))?,
+            mode == "durable",
+            "original channel must gate Delete effects"
+        );
+        assert!(!db.actor_state_exists(&format!("routed/generated-identity/{pin_id}"))?);
+        assert_eq!(db.actor_state_keys("self-sync/pin/")?, Vec::<String>::new());
+        assert!(!db.actor_state_exists(&format!("routed/origin-evidence/{pin_id}"))?);
+        if mode == "ephemeral" {
+            assert_eq!(db.journal_bounds()?.head_seq, before);
+            assert!(!db.actor_state_exists(&format!("routed/generated-identity/{delete_id}"))?);
+        }
+        assert_eq!(db.unsupported_raw_quota(None)?.owners, 0);
+        assert_eq!(client.reparse_raw_inner_page()?.projected, 0);
+    }
+    Ok(())
+}

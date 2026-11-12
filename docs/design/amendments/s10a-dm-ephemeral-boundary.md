@@ -44,3 +44,15 @@ time; restore must not combine an older allowance with a newer ratchet.
 D ends delivery/display; it does not promise cryptographic erasure. Skipped
 keys, backups and retained unknown plaintext can outlive D. Signed outer
 identities, timestamps, mode, TTL and collapse correlation remain visible.
+
+Reparse reapplies the authenticated original channel policy inside the installing
+writer transaction. Recognizing a retained ephemeral kind cannot authorize a
+Delete, Edit, Reaction, Receipt, SelfSync or native operation. Recognized Typing
+is discarded without reconstructing durable content. Durable author Deletes
+use verified original source evidence; LOCAL and moderator effects additionally
+require current Sync or group permission. Both owner fences, provenance and the
+erasure generation are checked before installation. Historical Message/Service
+projection is cosmetic; Control/Call/Task/Surface never execute retroactively.
+A Service does not execute a pin action. The v1 native pin action is unavailable
+until a separate native authority and state contract exists; same-root SelfSync
+pins remain separate. This policy follows sweep-2 audit H2/M7.
