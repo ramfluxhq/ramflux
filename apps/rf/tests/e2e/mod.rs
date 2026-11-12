@@ -448,7 +448,7 @@ pub fn spawn_daemon_with_env(
         .arg("--itest-memory-vault")
         .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
         .envs(env.iter().copied())
-        .env("RUST_LOG", "info");
+        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug");
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
     let deadline = Instant::now() + SOCKET_TIMEOUT;
@@ -1073,6 +1073,22 @@ pub fn group_send(
             body,
         ],
     )
+}
+
+/// Exact wire IDs submitted to the selected member, independent of read-side views.
+pub fn group_envelope_ids(sent: &Value, recipient: &Account) -> Result<Vec<String>> {
+    let rows = sent["submitted"].as_array().ok_or("group send submitted entries missing")?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let envelope = &row["envelope"];
+        if envelope["target_delivery_id"].as_str() == Some(&recipient.target_delivery_id) {
+            ids.push(required_str(envelope, "envelope_id")?);
+        }
+    }
+    if ids.is_empty() {
+        return Err("group send had no wire entry for recipient".into());
+    }
+    Ok(ids)
 }
 
 pub fn wait_group_texts(
