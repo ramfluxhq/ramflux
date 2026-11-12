@@ -79,7 +79,9 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
                     if entry.require_live().is_err() {
                         break;
                     }
-                    if let Err(error) = actor.sync_relay().await {
+                    let progress =
+                        actor.sync_relay().await.and_then(|_| actor.service_staged_full_target());
+                    if let Err(error) = progress {
                         actor.note_background_error(&error);
                     }
                 }

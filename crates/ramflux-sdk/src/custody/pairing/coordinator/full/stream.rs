@@ -88,6 +88,24 @@ struct FullStreamWork {
     new_target: Option<(String, ramflux_protocol::custody::DeviceRef)>,
 }
 impl PairingActor {
+    /// New B has no ordinary account session yet. Its coordinator owns the actual
+    /// staged writer and services one short local request between relay polls.
+    pub(in crate::custody::pairing::coordinator) fn service_staged_full_target(
+        &mut self,
+    ) -> Result<(), SdkError> {
+        if !self.ceremony.as_ref().is_some_and(|c| {
+            c.role == PairingRole::Responder
+                && c.full.as_ref().is_some_and(|full| full.common.recipient_mode == "new")
+        }) {
+            return Ok(());
+        }
+        let participant = self.participant.clone().ok_or_else(wrong)?;
+        let slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        if let Some(db) = slot.as_ref() {
+            self.service_full_transfer(db)?;
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn full_base_stream_started_for_test(&self) -> bool {
         self.ceremony
