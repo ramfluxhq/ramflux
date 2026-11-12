@@ -49,7 +49,9 @@ impl RamfluxClient {
                 Some(_) => return Err(invalid("own account device root mismatch")),
                 None => selector.to_owned(),
             };
-            return self.own_custody_device(&device)?.ok_or(SdkError::IdentityRootMissing);
+            // Siblings are named from the current verified roster, never from the
+            // roster loaded at unlock (see `device_identity_for_root`).
+            return self.device_identity_for_root(&account.record().body.account_anchor, &device);
         }
         if let Some(reader) = &self.reader_device_identity {
             let device = match ramflux_protocol::parse_qualified_device_id(selector)? {
