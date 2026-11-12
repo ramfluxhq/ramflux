@@ -261,7 +261,7 @@ impl BackupDatabase {
         super::receive::ledger_backup::sanitize_backup(&target)?;
         super::pairing::sanitize_backup(&target)?;
         drop(target);
-        std::fs::File::open(path)?.sync_all()?;
+        crate::sync_path::sync_path(path)?;
         Ok(())
     }
     /// Enqueues ordinary read-model invalidations and a final restore event in commit order.

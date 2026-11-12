@@ -101,7 +101,7 @@ mod recovery_tests;
 #[cfg(test)]
 mod account_error_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod custody_daemon_tests;
 
 #[cfg(test)]

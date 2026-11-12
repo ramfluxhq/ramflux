@@ -134,6 +134,6 @@ fn remove_root_payload(dir: &Path) -> Result<(), StorageError> {
     for name in root_trees() {
         ignore_not_found(std::fs::remove_dir_all(dir.join(name)))?;
     }
-    std::fs::File::open(dir)?.sync_all()?;
+    crate::sync_path::sync_path(dir)?;
     Ok(())
 }

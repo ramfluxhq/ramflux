@@ -3,6 +3,7 @@
 
 //! Ordinary account actor lifecycle without access to the primary credential provider.
 use crate::custody::tests::{Root, TestVault, input, words};
+#[cfg(unix)]
 use crate::platform::listener::BusListener;
 use crate::{LocalBusClient, LocalBusConfig, LocalBusFrame, custody::CreationCeremony};
 use ramflux_protocol::custody::CustodyRefusal;
@@ -284,6 +285,7 @@ async fn connect_custody(path: &std::path::Path) -> Result<crate::custody::Custo
     .await??)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
     let root = Root::new()?;

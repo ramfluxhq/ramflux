@@ -3,7 +3,7 @@
 
 //! Exclusive archive publication, including bounded copy for NFS/FUSE without rename flags.
 use super::io::PartialFile;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "publication_crash_tests.rs"]
 mod crash_tests;
 use std::{

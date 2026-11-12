@@ -234,4 +234,4 @@ pub(crate) fn ensure_data_root(root: &Path) -> Result<(), SdkError> {
 
 #[cfg(test)]
 #[path = "fs_windows/tests.rs"]
-mod tests;
+pub(crate) mod tests;
