@@ -8,7 +8,7 @@
 
 pub(crate) mod listener;
 mod name;
-mod win32;
+pub(crate) mod win32;
 
 #[cfg(test)]
 mod tests;

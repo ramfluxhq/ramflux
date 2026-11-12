@@ -14,11 +14,11 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
     let parent = root.join("custody_accounts");
     if !parent.try_exists()? {
         private_directory(&parent)?;
-        fs::File::open(root)?.sync_all()?;
+        crate::platform::fs::sync_path(root)?;
     }
     let dir = directory(root, id)?;
     private_directory(&dir)?; // Exclusive reservation is itself a fail-closed mode latch.
-    fs::File::open(&parent)?.sync_all()?;
+    crate::platform::fs::sync_path(&parent)?;
     // Create the crash marker before the insert-only index reservation. Startup can remove
     // a marker with neither an index row nor authority without retiring the account id.
     #[cfg(test)]
@@ -26,7 +26,7 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
     let index = ramflux_storage::AccountIndex::open(root)?;
     if let Err(error) = index.reserve_account(id, anchor) {
         fs::remove_dir(&dir)?;
-        fs::File::open(&parent)?.sync_all()?;
+        crate::platform::fs::sync_path(&parent)?;
         return match error {
             ramflux_storage::StorageError::AccountAlreadyExists(_) => {
                 Err(SdkError::CustodyAccountConflict)

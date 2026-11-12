@@ -19,11 +19,11 @@ pub(super) fn remember(stage: &Path, path: &Path, file: &std::fs::File) -> io::R
     let mut marker = crate::platform::fs::create_new_owner_only_io(&stage.join(MARKER))?;
     marker.write_all(&serde_json::to_vec(&owner)?)?;
     marker.sync_all()?;
-    std::fs::File::open(stage)?.sync_all()
+    crate::platform::fs::sync_path(stage)
 }
 pub(super) fn forget(stage: &Path) -> io::Result<()> {
     std::fs::remove_file(stage.join(MARKER))?;
-    std::fs::File::open(stage)?.sync_all()
+    crate::platform::fs::sync_path(stage)
 }
 pub(super) fn recover(stage: &Path) -> io::Result<()> {
     let path = stage.join(MARKER);
@@ -41,12 +41,17 @@ pub(super) fn recover(stage: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(&owner.path) {
         Ok(m)
             if m.is_file()
-                && crate::platform::fs::same_metadata_identity(&m, owner.device, owner.inode) =>
+                && crate::platform::fs::same_metadata_identity(
+                    &m,
+                    &owner.path,
+                    owner.device,
+                    owner.inode,
+                ) =>
         {
             std::fs::remove_file(&owner.path)?;
             let parent =
                 owner.path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            std::fs::File::open(parent)?.sync_all()?;
+            crate::platform::fs::sync_path(parent)?;
         }
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}

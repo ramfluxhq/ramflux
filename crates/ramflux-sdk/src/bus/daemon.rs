@@ -132,8 +132,8 @@ pub(crate) fn write_local_bus_account_manifest(
     set_owner_only_file_permissions(&tmp_path)?;
     std::fs::rename(tmp_path, &path)?;
     set_owner_only_file_permissions(&path)?;
-    std::fs::File::open(&accounts_dir)?.sync_all()?;
-    std::fs::File::open(data_root)?.sync_all()?;
+    crate::platform::fs::sync_path(&accounts_dir)?;
+    crate::platform::fs::sync_path(data_root)?;
     Ok(())
 }
 

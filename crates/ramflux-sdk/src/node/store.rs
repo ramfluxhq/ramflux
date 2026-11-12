@@ -68,7 +68,7 @@ impl NodeStore {
         file.write_all(&serde_json::to_vec_pretty(self)?)?;
         file.sync_all()?;
         std::fs::rename(temporary, path)?;
-        std::fs::File::open(root)?.sync_all()?;
+        crate::platform::fs::sync_path(root)?;
         Ok(())
     }
 

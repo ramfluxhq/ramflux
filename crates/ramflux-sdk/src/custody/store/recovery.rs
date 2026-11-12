@@ -88,7 +88,7 @@ fn replace_public(path: &Path, value: &impl Serialize) -> Result<(), SdkError> {
     }
     create_private_temp(&temporary, &bytes)?;
     fs::rename(&temporary, path)?;
-    fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
+    crate::platform::fs::sync_path(path.parent().ok_or_else(invalid)?)?;
     Ok(())
 }
 fn lock(root: &Path, id: &str) -> Result<fs::File, SdkError> {
@@ -415,7 +415,7 @@ pub(crate) fn finish_recovery(
         vault.delete(&intent.previous_branch_ref)?;
     }
     fs::remove_file(directory(root, id)?.join("recovery.json"))?;
-    fs::File::open(directory(root, id)?)?.sync_all()?;
+    crate::platform::fs::sync_path(directory(root, id)?)?;
     Ok(())
 }
 

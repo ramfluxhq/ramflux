@@ -101,7 +101,7 @@ impl Sid {
     ///
     /// # Errors
     /// Returns the OS error when the SID cannot be converted.
-    pub(super) fn to_sddl_string(&self) -> io::Result<String> {
+    pub(crate) fn to_sddl_string(&self) -> io::Result<String> {
         let mut text: *mut u16 = std::ptr::null_mut();
         // SAFETY: `self` holds a SID validated by `copy_from`; on success `text` is a
         // NUL-terminated buffer the system allocated, released below with `LocalFree`.
@@ -123,7 +123,7 @@ impl Sid {
 /// What the carrier needs to know about a token.
 #[derive(Clone, Copy)]
 pub(crate) struct TokenFacts {
-    pub(super) user: Sid,
+    pub(crate) user: Sid,
     pub(super) integrity_rid: u32,
     pub(super) app_container: bool,
 }
@@ -183,7 +183,7 @@ fn token_facts(token: &OwnedHandle) -> io::Result<TokenFacts> {
 ///
 /// # Errors
 /// Returns the OS error when the process token cannot be opened or queried.
-pub(super) fn process_facts() -> io::Result<TokenFacts> {
+pub(crate) fn process_facts() -> io::Result<TokenFacts> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: the pseudo-handle of the current process is always valid; `token` receives an
     // owned handle on success.
@@ -249,7 +249,7 @@ impl Drop for SecurityDescriptor {
 impl SecurityDescriptor {
     /// # Errors
     /// Returns the OS error when the SDDL string is rejected.
-    pub(super) fn from_sddl(sddl: &str) -> io::Result<Self> {
+    pub(crate) fn from_sddl(sddl: &str) -> io::Result<Self> {
         let wide = wide(OsStr::new(sddl));
         let mut raw: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `wide` is NUL-terminated and outlives the call; `raw` receives an allocation
@@ -410,5 +410,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
     }
 }
 
+pub(crate) mod files;
+
 #[cfg(test)]
-pub(super) mod test_tokens;
+pub(crate) mod test_tokens;
