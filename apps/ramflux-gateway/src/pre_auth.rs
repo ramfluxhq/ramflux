@@ -24,6 +24,18 @@ pub(crate) fn source_key(peer: IpAddr) -> String {
 #[path = "pre_auth_tests.rs"]
 pub(crate) mod tests;
 
+/// An explicit runtime policy overrides storage; absence preserves valid persisted policy.
+pub(crate) fn restore(
+    store: &ramflux_node_core::GatewayRedbStore,
+    config: Option<&ramflux_node_core::GatewayConfig>,
+) -> anyhow::Result<ramflux_node_core::GatewayState> {
+    let restored = match config.and_then(|config| config.pre_auth.as_ref()) {
+        Some(policy) => store.load_state_with_pre_auth_config(policy)?,
+        None => store.load_state()?,
+    };
+    Ok(restored.unwrap_or_default())
+}
+
 /// Configure before pruning, persistence, or opening a public listener.
 pub(crate) fn configure(
     state: &mut ramflux_node_core::GatewayState,

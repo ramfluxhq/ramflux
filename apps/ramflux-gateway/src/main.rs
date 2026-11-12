@@ -82,16 +82,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
-        let runtime_policy = config
-            .gateway
-            .as_ref()
-            .and_then(|gateway| gateway.pre_auth.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        let mut state = match store.load_state_with_pre_auth_config(&runtime_policy)? {
-            Some(state) => state,
-            None => ramflux_node_core::GatewayState::new(),
-        };
+        let mut state = pre_auth::restore(&store, config.gateway.as_ref())?;
         pre_auth::configure(&mut state, config.gateway.as_ref())?;
         let now = state.observe_pre_auth_time(std::time::SystemTime::now())?;
         state.prune_retained_sessions(

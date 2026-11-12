@@ -15,6 +15,30 @@ fn context() -> anyhow::Result<GatewayQuicContext> {
     Ok(context)
 }
 
+#[test]
+fn preauth_optional_runtime_policy_preserves_or_overrides_storage() -> anyhow::Result<()> {
+    let context = context()?;
+    context.store.save_state(&*gateway_state(&context.state)?)?;
+    for config in [
+        None,
+        Some(ramflux_node_core::GatewayConfig {
+            pre_auth: None,
+            public_listen_addr: "127.0.0.1:0".into(),
+        }),
+    ] {
+        let restored = super::restore(&context.store, config.as_ref())?;
+        assert!(restored.pre_auth_policy().enabled);
+        assert_eq!(restored.pre_auth_policy().per_source_ip_handshake_rate, 1);
+    }
+    let config = ramflux_node_core::GatewayConfig {
+        pre_auth: Some(ramflux_node_core::GatewayPreAuthConfig::default()),
+        public_listen_addr: "127.0.0.1:0".into(),
+    };
+    let restored = super::restore(&context.store, Some(&config))?;
+    assert!(!restored.pre_auth_policy().enabled);
+    Ok(())
+}
+
 // Exercise the same strict frame decoder used by Quinn, TCP+TLS and compio.
 fn open(source: &str, now: u64) -> anyhow::Result<GatewayOpenFrame> {
     let frame = GatewayClientFrame::Open {

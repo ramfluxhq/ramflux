@@ -23,6 +23,8 @@ it invalidates admission cookies while preserving existing resume tokens. The
 persisted legacy `cookie_secret` is used only for resume tokens in service builds.
 
 Validated runtime configuration is applied before persisted admission validation.
+An absent admission section preserves a valid stored policy; a fresh store stays
+disabled. An explicit section, including `enabled = false`, overrides storage.
 An out-of-bounds stored policy does not block startup. Restored debt is trimmed
 to the new rate; policy, debt, counters and floor are then committed in one redb
 transaction. HTTP policy updates use that same atomic transaction and retain the
