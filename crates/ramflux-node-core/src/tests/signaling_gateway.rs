@@ -705,7 +705,7 @@ fn gateway_preauth_cookie_rate_limit_and_metrics() -> Result<(), Box<dyn std::er
         cookie_ttl_seconds: 10,
         auth_deadline_ms: 1_000,
         cookie_secret: DEFAULT_PRE_AUTH_COOKIE_SECRET.to_owned(),
-    });
+    })?;
     let source = source_ip_hash("127.0.0.1");
     assert_eq!(
         state.check_pre_auth(&source, None, 1_760_000_000)?,

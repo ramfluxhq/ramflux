@@ -146,6 +146,7 @@ pub(crate) fn save_snapshot_batch(
     db: &redb::Database,
     table: TableDefinition<&str, &[u8]>,
     entries: &[(&str, Vec<u8>)],
+    before_commit: impl FnOnce() -> Result<(), NodeCoreError>,
 ) -> Result<(), NodeCoreError> {
     let write_txn = db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     {
@@ -158,6 +159,7 @@ pub(crate) fn save_snapshot_batch(
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
     }
+    before_commit()?;
     write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     Ok(())
 }

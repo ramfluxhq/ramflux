@@ -172,27 +172,7 @@ pub(crate) fn pre_auth_gate(
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    let source_ip_hash = crate::pre_auth::source_key(peer);
-    let now = ramflux_node_core::now_unix_seconds();
-    let mut gateway = gateway_state(state)?;
-    let decision =
-        match gateway.check_pre_auth(&source_ip_hash, request.pre_auth_cookie.as_deref(), now) {
-            Ok(decision) => decision,
-            Err(error) => {
-                store.save_pre_auth_hot(&gateway)?;
-                return Err(error.into());
-            }
-        };
-    Ok(match decision {
-        ramflux_node_core::GatewayPreAuthDecision::Accepted => {
-            store.save_pre_auth_hot(&gateway)?;
-            None
-        }
-        ramflux_node_core::GatewayPreAuthDecision::Challenge(challenge) => {
-            store.save_pre_auth_with_challenges(&gateway)?;
-            Some(challenge)
-        }
-    })
+    crate::pre_auth::admit(peer, request.pre_auth_cookie.as_deref(), state, store)
 }
 
 pub(crate) fn gateway_state(

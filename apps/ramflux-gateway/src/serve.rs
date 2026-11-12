@@ -231,7 +231,7 @@ async fn run_gateway_quic(
     serve_gateway_quic_endpoint(endpoint, context).await
 }
 
-async fn serve_gateway_quic_endpoint(
+pub(crate) async fn serve_gateway_quic_endpoint(
     endpoint: quinn::Endpoint,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
@@ -342,11 +342,11 @@ pub(crate) async fn serve_gateway_tcp_listener(
             {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    tracing::debug!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
+                    tracing::debug!(%error, "gateway TCP-TLS handshake rejected");
                     return;
                 }
                 Err(error) => {
-                    tracing::debug!(%error, %remote_addr, "gateway TCP-TLS handshake rejected");
+                    tracing::debug!(%error, "gateway TCP-TLS handshake rejected");
                     return;
                 }
             };
@@ -365,11 +365,11 @@ pub(crate) async fn serve_gateway_tcp_listener(
                 remote_addr,
             };
             let stream = ramflux_transport::GatewayTcpTlsStream::Server(tls_stream);
-            if let Err(error) =
+            if let Err(_error) =
                 Box::pin(crate::session::handle_gateway_tcp_tls_stream(stream, context, started))
                     .await
             {
-                tracing::warn!(%error, %remote_addr, "gateway TCP-TLS stream failed");
+                crate::pre_auth::record_ingress_failure("tcp_tls");
             }
         });
     }

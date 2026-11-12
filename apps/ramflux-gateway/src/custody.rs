@@ -534,4 +534,4 @@ pub(crate) async fn quic(
 
 #[cfg(test)]
 #[path = "custody_tests.rs"]
-mod tests;
+pub(crate) mod tests;

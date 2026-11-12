@@ -187,6 +187,7 @@ mod tests {
     fn unresolved_security_paths_and_unknown_settings_are_rejected_without_the_value() {
         for key in [
             "RAMFLUX_NODE_PRIVACY_KEY_FILE",
+            "RAMFLUX_GATEWAY_PRE_AUTH_COOKIE_KEY_FILE",
             "RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE",
             "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE",
             "RAMFLUX_FEDERATION_TRUST_SNAPSHOT_FILE",

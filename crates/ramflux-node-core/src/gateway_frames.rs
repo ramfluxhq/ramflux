@@ -53,6 +53,34 @@ impl Default for GatewayPreAuthPolicy {
     }
 }
 
+/// Nonsecret gateway admission configuration. Admission remains disabled by default.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatewayPreAuthConfig {
+    pub enabled: bool,
+    pub per_source_ip_handshake_rate: u32,
+    pub window_seconds: u64,
+    pub cookie_ttl_seconds: u64,
+    pub auth_deadline_ms: u64,
+}
+impl Default for GatewayPreAuthConfig {
+    fn default() -> Self {
+        let policy = GatewayPreAuthPolicy::default();
+        Self::from(&policy)
+    }
+}
+impl From<&GatewayPreAuthPolicy> for GatewayPreAuthConfig {
+    fn from(policy: &GatewayPreAuthPolicy) -> Self {
+        Self {
+            enabled: policy.enabled,
+            per_source_ip_handshake_rate: policy.per_source_ip_handshake_rate,
+            window_seconds: policy.window_seconds,
+            cookie_ttl_seconds: policy.cookie_ttl_seconds,
+            auth_deadline_ms: policy.auth_deadline_ms,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GatewayPreAuthMetrics {
     pub pre_auth_cookie_required: u64,

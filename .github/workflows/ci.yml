@@ -894,6 +894,11 @@ jobs:
           RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
         run: |
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal0 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(ephemeral_persistence_absence)'
+      - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix)'
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'

@@ -11,7 +11,7 @@ fn context() -> anyhow::Result<GatewayQuicContext> {
         per_source_ip_handshake_rate: 1,
         window_seconds: 3_600,
         ..GatewayPreAuthPolicy::default()
-    });
+    })?;
     Ok(context)
 }
 
@@ -152,5 +152,112 @@ fn http_headers_cannot_rotate_source_or_advance_server_clock() -> anyhow::Result
         crate::pre_auth_gate(&request, "192.0.2.2".parse()?, &context.state, &context.store)?
             .is_none()
     );
+    Ok(())
+}
+
+pub(crate) fn mount_key(
+    state: &mut ramflux_node_core::GatewayState,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?).as_bytes())?;
+    state.configure_pre_auth_cookie_key(path)?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn preauth_wire_and_peer_boundary_matrix() -> anyhow::Result<()> {
+    let frame = GatewayClientFrame::Open { open: open("wire-sentinel", 1)? };
+    let mut value = serde_json::to_value(&frame)?;
+    for field in ["source_ip_hash", "pre_auth_now"] {
+        let object = value
+            .get_mut("open")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("Open object"))?;
+        let old = object.remove(field).ok_or_else(|| anyhow::anyhow!("legacy field missing"))?;
+        assert!(crate::ingress::parse(&serde_json::to_vec(&value)?, "192.0.2.1".parse()?).is_ok());
+        value["open"][field] = serde_json::Value::Null;
+        assert!(crate::ingress::parse(&serde_json::to_vec(&value)?, "192.0.2.1".parse()?).is_ok());
+        value["open"][field] = serde_json::json!({"wrong":"type"});
+        assert!(crate::ingress::parse(&serde_json::to_vec(&value)?, "192.0.2.1".parse()?).is_err());
+        value["open"][field] = old;
+    }
+    let mut context = context()?;
+    context.remote_addr = "192.0.2.1:1000".parse()?;
+    assert!(pre_auth_gate_for_gateway_open(&open("port-first", 1)?, &context)?.is_none());
+    let cookie = pre_auth_gate_for_gateway_open(&open("cookie", 1)?, &context)?
+        .ok_or_else(|| anyhow::anyhow!("challenge"))?
+        .pre_auth_cookie;
+    context.remote_addr = "192.0.2.1:2000".parse()?;
+    let mut retry = open("port-rebound", 1)?;
+    retry.pre_auth_cookie = Some(cookie);
+    assert!(pre_auth_gate_for_gateway_open(&retry, &context)?.is_none());
+    context.remote_addr = "192.0.2.2:2000".parse()?;
+    assert!(pre_auth_gate_for_gateway_open(&open("fresh-peer", 1)?, &context)?.is_none());
+    assert!(pre_auth_gate_for_gateway_open(&retry, &context).is_err());
+    Ok(())
+}
+
+#[test]
+fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyhow::Result<()> {
+    use std::time::{Duration, UNIX_EPOCH};
+    let context = context()?;
+    let source = crate::pre_auth::source_key(context.remote_addr.ip());
+    let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
+    assert!(
+        super::admit_with_clock(&source, None, &context.state, &context.store, || at(100))?
+            .is_none()
+    );
+    let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
+    assert_eq!(serde_json::to_value(&saved)?["pre_auth_time_floor"], 100);
+    let invalid = super::admit_with_clock(&source, None, &context.state, &context.store, || {
+        UNIX_EPOCH - Duration::from_secs(1)
+    })
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("pre-epoch accepted"))?;
+    assert_eq!(invalid.to_string(), "clock_invalid");
+    let rollback =
+        super::admit_with_clock(&source, None, &context.state, &context.store, || at(99))
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("rollback accepted"))?;
+    assert_eq!(rollback.to_string(), "clock_rollback");
+    context.store.fail_next_pre_auth_commit();
+    assert!(
+        super::admit_with_clock(&source, None, &context.state, &context.store, || at(101)).is_err()
+    );
+    let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
+    assert_eq!(serde_json::to_value(saved)?["pre_auth_time_floor"], 100);
+    assert!(
+        super::admit_with_clock(&source, None, &context.state, &context.store, || at(101))?
+            .is_some()
+    );
+    let held = crate::gateway_state(&context.state)?;
+    let (began, waiting) = std::sync::mpsc::channel();
+    let shared = context.clone();
+    let peer = source.clone();
+    let (sampled, observed) = std::sync::mpsc::channel();
+    let caller = std::thread::spawn(move || -> Result<(), String> {
+        began.send(()).map_err(|e| e.to_string())?;
+        super::admit_with_clock(&peer, None, &shared.state, &shared.store, || {
+            let _ = sampled.send(());
+            at(102)
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    waiting.recv()?;
+    assert!(observed.try_recv().is_err(), "production gate sampled before acquiring state lock");
+    drop(held);
+    caller.join().map_err(|_| anyhow::anyhow!("gate thread panic"))?.map_err(anyhow::Error::msg)?;
+    observed.recv()?;
     Ok(())
 }

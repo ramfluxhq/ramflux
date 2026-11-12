@@ -526,3 +526,6 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
     assert!(proxy.handoff(&session.session_id).is_err());
     Ok(())
 }
+
+#[path = "pre_auth_custody_tests.rs"]
+pub(crate) mod pre_auth_matrix;

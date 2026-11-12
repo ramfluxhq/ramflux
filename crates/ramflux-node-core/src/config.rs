@@ -42,6 +42,8 @@ pub struct MeshConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct GatewayConfig {
     pub public_listen_addr: String,
+    #[serde(default)]
+    pub pre_auth: Option<crate::gateway_frames::GatewayPreAuthConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -155,6 +157,9 @@ pub(crate) fn validate_config(
     config: &NodeServiceConfig,
     expected_service_id: &str,
 ) -> Result<(), NodeCoreError> {
+    if let Some(pre_auth) = config.gateway.as_ref().and_then(|gateway| gateway.pre_auth.as_ref()) {
+        crate::GatewayState::new().configure_pre_auth_policy(pre_auth)?;
+    }
     if config.service_id != expected_service_id {
         return Err(NodeCoreError::ServiceIdMismatch {
             expected: expected_service_id.to_owned(),

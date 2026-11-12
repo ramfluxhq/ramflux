@@ -21,10 +21,14 @@ mod itest_http;
 mod mesh_delivery;
 mod object_issue;
 mod pre_auth;
+#[cfg(test)]
+mod pre_auth_transport_tests;
 mod principal_directory;
 mod push_queue;
 mod push_registration;
 mod quic_dispatch;
+#[cfg(test)]
+mod real_router_fixture;
 mod registration;
 #[cfg(test)]
 mod registration_forward_tests;
@@ -81,8 +85,10 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             Some(state) => state,
             None => ramflux_node_core::GatewayState::new(),
         };
+        pre_auth::configure(&mut state, config.gateway.as_ref())?;
+        let now = state.observe_pre_auth_time(std::time::SystemTime::now())?;
         state.prune_retained_sessions(
-            ramflux_node_core::now_unix_seconds(),
+            now,
             session::gateway_resume_window_seconds(),
             &std::collections::BTreeSet::new(),
         );

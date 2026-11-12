@@ -3,6 +3,9 @@
 
 #![allow(unused_imports)]
 
+#[path = "gateway_pre_auth.rs"]
+mod pre_auth_state;
+
 use crate::{
     GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_DELIVERY_FRAME_QUEUE_KEY, GATEWAY_PRE_AUTH_METRICS_KEY,
     GATEWAY_PRE_AUTH_POLICY_KEY, GATEWAY_PRE_AUTH_RATE_STATE_KEY, GATEWAY_REPLAY_GUARD_STATE_KEY,
@@ -97,6 +100,12 @@ pub struct GatewayState {
     pre_auth_metrics: GatewayPreAuthMetrics,
     #[serde(default)]
     pre_auth_handshakes_by_source_ip: BTreeMap<String, Vec<u64>>,
+    #[serde(skip)]
+    pre_auth_legacy: bool,
+    #[serde(default)]
+    pre_auth_time_floor: u64,
+    #[serde(skip)]
+    pre_auth_cookie_key: Option<crate::RedactedString>,
     #[serde(default)]
     replay_guard_state: NodeReplayGuardState,
     #[serde(default)]
@@ -113,10 +122,21 @@ impl GatewayState {
         self.challenges_by_id.insert(challenge.challenge_id.clone(), challenge);
     }
 
-    pub fn set_pre_auth_policy(&mut self, policy: GatewayPreAuthPolicy) {
+    /// # Errors
+    /// Rejects invalid policy bounds without changing live debt or resume secrets.
+    pub fn set_pre_auth_policy(
+        &mut self,
+        policy: GatewayPreAuthPolicy,
+    ) -> Result<(), NodeCoreError> {
+        pre_auth_state::validate_policy(&policy)?;
         self.pre_auth_policy = policy;
-        self.pre_auth_handshakes_by_source_ip.clear();
-        self.pre_auth_metrics = GatewayPreAuthMetrics::default();
+        let rate = self.pre_auth_policy.per_source_ip_handshake_rate.min(60) as usize;
+        for events in self.pre_auth_handshakes_by_source_ip.values_mut() {
+            if events.len() > rate {
+                events.drain(..events.len() - rate);
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -154,7 +174,26 @@ impl GatewayState {
         if !self.pre_auth_policy.enabled {
             return Ok(GatewayPreAuthDecision::Accepted);
         }
+        self.validate_pre_auth_configuration()?;
+        if now < self.pre_auth_time_floor {
+            return Err(NodeCoreError::PreAuthClockRollback);
+        }
+        self.pre_auth_time_floor = now;
         let window_start = now.saturating_sub(self.pre_auth_policy.window_seconds);
+        // Reclaim only expired debt. Live sources never lose their rate history.
+        self.pre_auth_handshakes_by_source_ip.retain(|_, events| {
+            events.retain(|at| *at >= window_start);
+            !events.is_empty()
+        });
+        if !self.pre_auth_handshakes_by_source_ip.contains_key(source_ip_hash)
+            && self.pre_auth_handshakes_by_source_ip.len() >= 4096
+        {
+            return Err(NodeCoreError::PreAuthCapacity);
+        }
+        let cookie_secret = self
+            .pre_auth_cookie_key
+            .as_ref()
+            .map_or(self.pre_auth_policy.cookie_secret.as_str(), |key| key.as_str());
         let entries =
             self.pre_auth_handshakes_by_source_ip.entry(source_ip_hash.to_owned()).or_default();
         entries.retain(|timestamp| *timestamp >= window_start);
@@ -177,7 +216,7 @@ impl GatewayState {
                     cookie,
                     now,
                     self.pre_auth_policy.cookie_ttl_seconds,
-                    &self.pre_auth_policy.cookie_secret,
+                    cookie_secret,
                 ) =>
             {
                 // A valid cookie permits admission, not unbounded history growth.
@@ -202,7 +241,7 @@ impl GatewayState {
                     source_ip_hash,
                     PRE_AUTH_PROTOCOL_VERSION,
                     now,
-                    &self.pre_auth_policy.cookie_secret,
+                    cookie_secret,
                 );
                 Ok(GatewayPreAuthDecision::Challenge(GatewayPreAuthChallengeResponse {
                     challenge: "pre_auth_cookie_required".to_owned(),
@@ -498,6 +537,8 @@ fn write_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
 
 pub struct GatewayRedbStore {
     db: redb::Database,
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    fail_pre_auth_commit: std::sync::atomic::AtomicBool,
 }
 
 impl GatewayRedbStore {
@@ -505,7 +546,11 @@ impl GatewayRedbStore {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         let db = open_redb_with_table(path, GATEWAY_STATE_TABLE)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            fail_pre_auth_commit: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     /// # Errors
@@ -535,18 +580,7 @@ impl GatewayRedbStore {
             GATEWAY_PRE_AUTH_POLICY_KEY,
             &state.pre_auth_policy,
         )?;
-        save_snapshot(
-            &self.db,
-            GATEWAY_STATE_TABLE,
-            GATEWAY_PRE_AUTH_METRICS_KEY,
-            &state.pre_auth_metrics,
-        )?;
-        save_snapshot(
-            &self.db,
-            GATEWAY_STATE_TABLE,
-            GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-            &state.pre_auth_handshakes_by_source_ip,
-        )?;
+        self.save_pre_auth_hot(state)?;
         save_snapshot(
             &self.db,
             GATEWAY_STATE_TABLE,
@@ -564,39 +598,44 @@ impl GatewayRedbStore {
     /// # Errors
     /// Returns an error when the pre-auth hot state cannot be serialized or persisted.
     pub fn save_pre_auth_hot(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
-        self.save_gateway_entries(&[
-            (GATEWAY_PRE_AUTH_METRICS_KEY, serialize_snapshot_value(&state.pre_auth_metrics)?),
-            (
-                GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-                serialize_snapshot_value(&state.pre_auth_handshakes_by_source_ip)?,
-            ),
-        ])
+        if state.pre_auth_legacy {
+            return Ok(());
+        }
+        self.save_gateway_entries(&[(pre_auth_state::KEY, state.admission_bytes()?)])
     }
 
     /// # Errors
-    /// Returns an error when the pre-auth challenge state cannot be serialized or persisted.
+    /// Returns an error when admission or challenges cannot be persisted atomically.
     pub fn save_pre_auth_with_challenges(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
+        if state.pre_auth_legacy {
+            return Err(NodeCoreError::PreAuthMigrationRequired);
+        }
         self.save_gateway_entries(&[
-            (GATEWAY_PRE_AUTH_METRICS_KEY, serialize_snapshot_value(&state.pre_auth_metrics)?),
-            (
-                GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-                serialize_snapshot_value(&state.pre_auth_handshakes_by_source_ip)?,
-            ),
+            (pre_auth_state::KEY, state.admission_bytes()?),
             (GATEWAY_CHALLENGE_STATE_KEY, serialize_snapshot_value(&state.challenges_by_id)?),
         ])
     }
 
     /// # Errors
-    /// Returns an error when the pre-auth metrics state cannot be serialized or persisted.
+    /// Returns an error when admission counters cannot be persisted atomically with debt.
     pub fn save_pre_auth_metrics_only(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
-        self.save_gateway_entries(&[(
-            GATEWAY_PRE_AUTH_METRICS_KEY,
-            serialize_snapshot_value(&state.pre_auth_metrics)?,
-        )])
+        self.save_pre_auth_hot(state)
     }
 
     fn save_gateway_entries(&self, entries: &[(&str, Vec<u8>)]) -> Result<(), NodeCoreError> {
-        save_snapshot_batch(&self.db, GATEWAY_STATE_TABLE, entries)
+        save_snapshot_batch(&self.db, GATEWAY_STATE_TABLE, entries, || {
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            if self.fail_pre_auth_commit.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
+            }
+            Ok(())
+        })
+    }
+
+    /// Abort the next real admission transaction after its writes, before commit.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn fail_next_pre_auth_commit(&self) {
+        self.fail_pre_auth_commit.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// # Errors
@@ -605,9 +644,17 @@ impl GatewayRedbStore {
         let Some(sessions_by_id) =
             load_snapshot(&self.db, GATEWAY_STATE_TABLE, GATEWAY_SESSION_CHECKPOINT_KEY)?
         else {
+            let mut state = GatewayState::new();
+            self.load_pre_auth_admission(&mut state)?;
+            if state.pre_auth_time_floor != 0
+                || state.pre_auth_legacy
+                || !state.pre_auth_handshakes_by_source_ip.is_empty()
+            {
+                return Ok(Some(state));
+            }
             return Ok(None);
         };
-        Ok(Some(GatewayState {
+        let mut state = GatewayState {
             challenges_by_id: load_snapshot(
                 &self.db,
                 GATEWAY_STATE_TABLE,
@@ -627,18 +674,11 @@ impl GatewayRedbStore {
                 GATEWAY_PRE_AUTH_POLICY_KEY,
             )?
             .unwrap_or_default(),
-            pre_auth_metrics: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_PRE_AUTH_METRICS_KEY,
-            )?
-            .unwrap_or_default(),
-            pre_auth_handshakes_by_source_ip: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-            )?
-            .unwrap_or_default(),
+            pre_auth_metrics: GatewayPreAuthMetrics::default(),
+            pre_auth_handshakes_by_source_ip: BTreeMap::new(),
+            pre_auth_time_floor: 0,
+            pre_auth_cookie_key: None,
+            pre_auth_legacy: false,
             replay_guard_state: load_snapshot(
                 &self.db,
                 GATEWAY_STATE_TABLE,
@@ -651,7 +691,10 @@ impl GatewayRedbStore {
                 GATEWAY_RESUME_TOKEN_INDEX_KEY,
             )?
             .unwrap_or_default(),
-        }))
+        };
+        self.load_pre_auth_admission(&mut state)?;
+        pre_auth_state::validate_policy(&state.pre_auth_policy)?;
+        Ok(Some(state))
     }
 }
 
@@ -669,7 +712,7 @@ mod tests {
             window_seconds: 60,
             cookie_ttl_seconds: 60,
             ..GatewayPreAuthPolicy::default()
-        });
+        })?;
         for _ in 0..3 {
             assert_eq!(state.check_pre_auth("peer", None, 100)?, GatewayPreAuthDecision::Accepted);
         }
@@ -705,7 +748,7 @@ mod tests {
                 enabled: true,
                 per_source_ip_handshake_rate: rate,
                 ..GatewayPreAuthPolicy::default()
-            });
+            })?;
             state.pre_auth_handshakes_by_source_ip.insert("peer".into(), vec![100; 12]);
             let cookie = sign_pre_auth_cookie(
                 "peer",

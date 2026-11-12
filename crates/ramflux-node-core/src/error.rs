@@ -3,6 +3,18 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("clock_invalid")]
+    PreAuthClockInvalid,
+    #[error("clock_rollback")]
+    PreAuthClockRollback,
+    #[error("pre-auth source capacity reached")]
+    PreAuthCapacity,
+    #[error("invalid pre-auth configuration")]
+    PreAuthConfigInvalid,
+    #[error("invalid pre-auth admission snapshot")]
+    PreAuthSnapshotInvalid,
+    #[error("pre-auth legacy admission state requires migration")]
+    PreAuthMigrationRequired,
     #[error("attachment authority history is full")]
     AttachmentAuthorityHistoryCapacity,
     #[error("payload_too_large")]

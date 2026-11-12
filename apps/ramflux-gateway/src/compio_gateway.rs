@@ -5,6 +5,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::thread;
+use std::time::Duration;
 
 use crate::serve::GatewayListenerContext;
 use crate::session::handle_gateway_session_transport;
@@ -87,47 +88,53 @@ fn run_gateway_compio_quic(
     runtime.block_on(async move {
         let server =
             ramflux_transport::CompioGatewayQuicServer::bind(&addr.to_string(), &tls).await?;
-        let local_addr = server.local_addr()?;
-        tracing::info!(addr = %local_addr, "gateway compio QUIC session surface listening");
-        loop {
-            let connection = match server.accept_connection().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::debug!(%error, "gateway compio QUIC handshake ended");
-                    continue;
-                }
-            };
-            let context = context.clone();
-            compio::runtime::spawn(async move {
-                if let Err(error) = handle_gateway_compio_quic_connection(connection, context).await
-                {
-                    tracing::warn!(%error, "gateway compio QUIC connection failed");
-                }
-            })
-            .detach();
-        }
+        serve_gateway_compio_endpoint(server, context).await
     })
+}
+
+pub(crate) async fn serve_gateway_compio_endpoint(
+    server: ramflux_transport::CompioGatewayQuicServer,
+    context: GatewayListenerContext,
+) -> anyhow::Result<()> {
+    let local_addr = server.local_addr()?;
+    tracing::info!(addr = %local_addr, "gateway compio QUIC session surface listening");
+    loop {
+        let connection = match server.accept_connection().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::debug!(%error, "gateway compio QUIC handshake ended");
+                continue;
+            }
+        };
+        let context = context.clone();
+        compio::runtime::spawn(async move {
+            if let Err(error) = handle_gateway_compio_quic_connection(connection, context).await {
+                tracing::warn!(%error, "gateway compio QUIC connection failed");
+            }
+        })
+        .detach();
+    }
 }
 
 async fn handle_gateway_compio_quic_connection(
     connection: ramflux_transport::CompioGatewayQuicConnection,
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
-    let remote_addr = connection.remote_address();
     loop {
         let stream = match connection.accept_bidi().await {
             Ok(stream) => stream,
             Err(error) => {
-                tracing::debug!(%error, %remote_addr, "gateway compio QUIC connection stream loop ended");
+                tracing::debug!(%error, "gateway compio QUIC connection stream loop ended");
                 return Ok(());
             }
         };
+        let remote_addr = connection.remote_address();
         let context = context.clone();
         compio::runtime::spawn(async move {
-            if let Err(error) =
+            if let Err(_error) =
                 handle_gateway_compio_quic_stream(stream, context, remote_addr).await
             {
-                tracing::warn!(%error, %remote_addr, "gateway compio QUIC stream failed");
+                crate::pre_auth::record_ingress_failure("compio");
             }
         })
         .detach();
@@ -140,7 +147,7 @@ async fn handle_gateway_compio_quic_stream(
     remote_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let (mut send, mut recv) = stream.split();
-    let first_raw = recv.read_frame().await?;
+    let first_raw = compio::time::timeout(Duration::from_secs(10), recv.read_frame()).await??;
     let first = crate::ingress::parse(&first_raw, remote_addr.ip())?;
     if let crate::ingress::Ingress::Rejected(response) = first {
         send.write_json_message(&response).await?;
@@ -234,13 +241,13 @@ fn spawn_gateway_session_worker(
         };
         let sink = CompioGatewayChannelSink { sender: write_sender };
         let source = CompioGatewayChannelSource { receiver: read_receiver };
-        if let Err(error) = runtime.block_on(handle_gateway_session_transport(
+        if let Err(_error) = runtime.block_on(handle_gateway_session_transport(
             Box::new(sink),
             Box::new(source),
             context,
             first_frame,
         )) {
-            tracing::warn!(%error, "gateway compio session worker failed");
+            crate::pre_auth::record_ingress_failure("compio_worker");
         }
     })?;
     Ok(())

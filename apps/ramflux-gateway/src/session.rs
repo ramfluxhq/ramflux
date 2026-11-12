@@ -70,7 +70,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                 let custody_connection = connection.clone();
 
                 tokio::spawn(async move {
-                    if let Err(error) = handle_gateway_quic_stream_with_connection(
+                    if let Err(_error) = handle_gateway_quic_stream_with_connection(
                         send,
                         recv,
                         context,
@@ -79,7 +79,7 @@ pub(crate) async fn handle_gateway_quic_connection(
                     )
                     .await
                     {
-                        tracing::warn!(%error, "gateway QUIC stream failed");
+                        crate::pre_auth::record_ingress_failure("quinn");
                     }
                 });
             }
@@ -2049,24 +2049,14 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
     open: &ramflux_node_core::GatewayOpenFrame,
     context: &GatewayQuicContext,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    // Legacy wire hints remain accepted, but only the transport and server clock
-    // can identify a pre-authentication source and its admission window.
-    let source_ip_hash = crate::pre_auth::source_key(context.remote_addr.ip());
-    let now = ramflux_node_core::now_unix_seconds();
-    let mut gateway = gateway_state(&context.state)?;
-    let decision =
-        match gateway.check_pre_auth(&source_ip_hash, open.pre_auth_cookie.as_deref(), now) {
-            Ok(decision) => decision,
-            Err(error) => {
-                context.store.save_state(&gateway)?;
-                return Err(error.into());
-            }
-        };
-    context.store.save_state(&gateway)?;
-    Ok(match decision {
-        ramflux_node_core::GatewayPreAuthDecision::Accepted => None,
-        ramflux_node_core::GatewayPreAuthDecision::Challenge(challenge) => Some(challenge),
-    })
+    let source = crate::pre_auth::source_key(context.remote_addr.ip());
+    crate::pre_auth::admit_with_clock(
+        &source,
+        open.pre_auth_cookie.as_deref(),
+        &context.state,
+        &context.store,
+        std::time::SystemTime::now,
+    )
 }
 
 #[cfg(test)]
@@ -2575,8 +2565,9 @@ pub(crate) mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
             NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
-        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(store_path)?);
-        let state = ramflux_node_core::GatewayState::new();
+        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(&store_path)?);
+        let mut state = ramflux_node_core::GatewayState::new();
+        crate::pre_auth::tests::mount_key(&mut state, &store_path.with_extension("cookie"))?;
         store.save_state(&state)?;
         let config = ramflux_node_core::NodeServiceConfig {
             node_id: "node-gateway-test".to_owned(),
@@ -2594,6 +2585,7 @@ pub(crate) mod tests {
                     .collect(),
             },
             gateway: Some(ramflux_node_core::GatewayConfig {
+                pre_auth: None,
                 public_listen_addr: "127.0.0.1:0".to_owned(),
             }),
             signaling: None,

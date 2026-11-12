@@ -8,8 +8,9 @@ pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Re
             let active = context.hub.active_session_ids();
             let result = (|| -> anyhow::Result<()> {
                 let mut state = crate::gateway_state(&context.state)?;
+                let now = state.observe_pre_auth_time(std::time::SystemTime::now())?;
                 state.prune_retained_sessions(
-                    ramflux_node_core::now_unix_seconds(),
+                    now,
                     crate::session::gateway_resume_window_seconds(),
                     &active,
                 );

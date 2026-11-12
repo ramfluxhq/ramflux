@@ -114,11 +114,12 @@ pub(crate) fn handle_preauth_control_request(
     store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<bool> {
     if request.method == "POST" && request.path == "/mvp6/preauth/policy" {
-        let policy: ramflux_node_core::GatewayPreAuthPolicy =
+        let policy: ramflux_node_core::GatewayPreAuthConfig =
             serde_json::from_slice(&request.body)?;
         let mut gateway = gateway_state(state)?;
-        gateway.set_pre_auth_policy(policy);
-        let response = gateway.pre_auth_policy().clone();
+        gateway.configure_pre_auth_policy(&policy)?;
+        gateway.validate_pre_auth_configuration()?;
+        let response = ramflux_node_core::GatewayPreAuthConfig::from(gateway.pre_auth_policy());
         store.save_state(&gateway)?;
         ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         return Ok(true);
