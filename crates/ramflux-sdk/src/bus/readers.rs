@@ -315,6 +315,15 @@ struct GeneratedPageRequest {
     before_order_key: Option<ramflux_protocol::message::EventIdentity>,
     #[serde(default = "default_generated_page_limit")]
     limit: u32,
+    /// Durable change cursor. Present selects the change batch of the read model.
+    #[serde(default)]
+    after_sequence: Option<u64>,
+    /// Base64url message identifier. Present selects the single-message read model.
+    #[serde(default)]
+    message_id: Option<String>,
+    /// True selects the rendered read-model page instead of bare generated updates.
+    #[serde(default)]
+    read_model: bool,
 }
 pub(super) fn generated_page(
     client: &RamfluxClient,
@@ -322,6 +331,40 @@ pub(super) fn generated_page(
 ) -> Result<serde_json::Value, SdkError> {
     let result = (|| {
         let body: GeneratedPageRequest = serde_json::from_value(body.clone())?;
+        // Read-model selectors are exclusive; every one of them reads the durable store only.
+        if let Some(message_id) = body.message_id.as_deref() {
+            if body.after_sequence.is_some() || body.before_order_key.is_some() {
+                return Err(crate::bindings::AdapterError::new(
+                    crate::bindings::GeneratedErrorCode::InvalidArgument,
+                    "message_id excludes page and change cursors",
+                )
+                .into());
+            }
+            return Ok(serde_json::to_value(
+                client.generated_message_detail(&body.conversation_id, message_id)?,
+            )?);
+        }
+        if let Some(after_sequence) = body.after_sequence {
+            if body.before_order_key.is_some() {
+                return Err(crate::bindings::AdapterError::new(
+                    crate::bindings::GeneratedErrorCode::InvalidArgument,
+                    "after_sequence excludes before_order_key",
+                )
+                .into());
+            }
+            return Ok(serde_json::to_value(client.generated_message_changes(
+                &body.conversation_id,
+                after_sequence,
+                body.limit,
+            )?)?);
+        }
+        if body.read_model {
+            return Ok(serde_json::to_value(client.generated_message_view_page(
+                &body.conversation_id,
+                body.before_order_key.as_ref(),
+                body.limit,
+            )?)?);
+        }
         Ok(serde_json::to_value(client.generated_message_page(
             &body.conversation_id,
             body.before_order_key.as_ref(),

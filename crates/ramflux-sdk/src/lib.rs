@@ -139,7 +139,7 @@ pub use client::recovery::{
     SdkRecoveryInitiateRequest, SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember,
     recovery_member_public_key_base64url, verify_guardian_accept,
 };
-pub use client::{ReparseProgress, self_sync, typed_messages, typing};
+pub use client::{ReparseProgress, self_sync, typed_messages, typed_read_model, typing};
 pub use constants::*;
 pub use dm::{
     SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,

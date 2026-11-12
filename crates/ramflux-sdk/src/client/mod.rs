@@ -82,6 +82,7 @@ pub(crate) mod surface;
 pub(crate) mod target_selection;
 pub(crate) mod task;
 pub mod typed_messages;
+pub mod typed_read_model;
 pub mod typing;
 mod unsupported_view;
 
