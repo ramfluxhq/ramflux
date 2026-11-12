@@ -14,7 +14,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::GatewaySessionTransportKind;
+use crate::platform::network::{NetworkChangeKind, NetworkKey, NetworkMonitor};
+use crate::{ConnectionRace, GatewaySessionConfig, GatewaySessionTransportKind};
 
 /// `NetworkCapabilities.TRANSPORT_*` values the host passes as a bit set (`1 << value`).
 pub mod transport {
@@ -72,10 +73,26 @@ impl NetworkLabel {
     }
 }
 
-/// Receives the reduced events. The platform-neutral network monitor implements this by
-/// forwarding to its `on_network_changed`; the call must not block.
+/// Receives the reduced events. The call must not block.
 pub trait AndroidNetworkSink: Send + Sync {
     fn on_network_event(&self, event: AndroidNetworkEvent);
+}
+
+/// The platform-neutral monitor is the production sink: every Android event becomes one
+/// `on_network_changed` report, and the label only ever leaves this module as a hash.
+impl AndroidNetworkSink for NetworkMonitor {
+    fn on_network_event(&self, event: AndroidNetworkEvent) {
+        let kind = match event {
+            AndroidNetworkEvent::Available(label) => {
+                NetworkChangeKind::Available(NetworkKey::from_host_label(label.as_bytes()))
+            }
+            AndroidNetworkEvent::Changed(label) => {
+                NetworkChangeKind::Changed(NetworkKey::from_host_label(label.as_bytes()))
+            }
+            AndroidNetworkEvent::Lost => NetworkChangeKind::Lost,
+        };
+        self.on_network_changed(kind);
+    }
 }
 
 /// How a session should connect on the current network.
@@ -84,6 +101,8 @@ pub struct AndroidConnectionPolicy {
     /// Always `Auto`: QUIC raced against TCP+TLS on 443, so a network that drops UDP still
     /// connects.
     pub transport: GatewaySessionTransportKind,
+    /// Always `Raced`: TCP+TLS starts 300 ms after QUIC and the first handshake wins.
+    pub race: ConnectionRace,
     /// Always false: the process stays on the default network, including under a VPN.
     pub bind_to_network: bool,
     /// The network is metered: defer bulk transfers the user did not ask for.
@@ -94,6 +113,18 @@ pub struct AndroidConnectionPolicy {
     /// session still tries; a failure is reported as "network blocked", never as a prompt to
     /// trust a certificate.
     pub unvalidated: bool,
+}
+
+/// Give a gateway session configuration the phone connection policy: the raced `Auto`
+/// order and the host's shared network monitor, so the remembered transport follows the
+/// network Android reports. The configuration must have been built with the `Auto`
+/// transport kind; an explicit QUIC or TCP configuration ignores the race.
+#[must_use]
+pub fn mobile_session_config(
+    config: GatewaySessionConfig,
+    monitor: &NetworkMonitor,
+) -> GatewaySessionConfig {
+    config.with_connection_race(ConnectionRace::Raced).with_network_monitor(monitor.clone())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +280,7 @@ impl AndroidNetworkTracker {
         let capabilities = state.current.as_ref()?.capabilities?;
         Some(AndroidConnectionPolicy {
             transport: GatewaySessionTransportKind::Auto,
+            race: ConnectionRace::Raced,
             bind_to_network: false,
             metered: !capabilities.not_metered,
             vpn: capabilities.vpn || capabilities.transports & transport::VPN != 0,
@@ -402,12 +434,40 @@ mod tests {
             policy,
             Some(AndroidConnectionPolicy {
                 transport: GatewaySessionTransportKind::Auto,
+                race: ConnectionRace::Raced,
                 bind_to_network: false,
                 metered: false,
                 vpn: true,
                 unvalidated: true,
             })
         );
+    }
+
+    #[test]
+    fn android_callbacks_drive_the_neutral_network_monitor() {
+        let monitor = NetworkMonitor::new();
+        let sink: Arc<dyn AndroidNetworkSink> = Arc::new(monitor.clone());
+        let tracker = AndroidNetworkTracker::new(sink);
+        let start = monitor.snapshot().generation;
+
+        tracker.on_available(100);
+        tracker.on_capabilities_changed(100, wifi());
+        let wifi_key =
+            NetworkKey::from_host_label(NetworkLabel::new(100, transport::WIFI).as_bytes());
+        assert_eq!(monitor.snapshot().kind, NetworkChangeKind::Available(wifi_key));
+        assert_eq!(monitor.snapshot().generation, start + 1);
+
+        tracker.on_available(200);
+        tracker.on_capabilities_changed(200, cellular());
+        let cell_key =
+            NetworkKey::from_host_label(NetworkLabel::new(200, transport::CELLULAR).as_bytes());
+        assert_ne!(wifi_key, cell_key);
+        assert_eq!(monitor.snapshot().kind, NetworkChangeKind::Changed(cell_key));
+        assert_eq!(monitor.current_network(), cell_key);
+
+        tracker.on_lost(200);
+        assert_eq!(monitor.snapshot().kind, NetworkChangeKind::Lost);
+        assert_eq!(monitor.snapshot().generation, start + 3);
     }
 
     #[test]

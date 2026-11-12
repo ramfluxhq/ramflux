@@ -25,3 +25,5 @@ pub mod connect_policy;
 /// Also built for Unix host tests; nothing here is reachable on another platform.
 #[cfg(any(target_os = "android", all(test, unix)))]
 pub mod android;
+/// Host network-change reports and per-network path memory; neutral on every target.
+pub(crate) mod network;

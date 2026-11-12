@@ -12,10 +12,11 @@
 use std::sync::Arc;
 
 use super::lifecycle::{AndroidLifecycle, LifecycleOutcome};
-use super::network::{AndroidNetworkSink, AndroidNetworkTracker};
+use super::network::AndroidNetworkTracker;
 use super::storage::{AndroidStorage, InstallState};
 use crate::platform::embedded::{EmbeddedConfig, EmbeddedSupervisor};
 use crate::platform::lifecycle::LifecycleState;
+use crate::platform::network::NetworkMonitor;
 use crate::{LocalBusClient, NodeProfile, SdkError};
 
 /// The Android host of the in-process supervisor.
@@ -24,6 +25,7 @@ pub struct AndroidHost {
     supervisor: Arc<EmbeddedSupervisor>,
     lifecycle: AndroidLifecycle<EmbeddedSupervisor>,
     network: AndroidNetworkTracker,
+    monitor: NetworkMonitor,
 }
 
 impl AndroidHost {
@@ -34,7 +36,7 @@ impl AndroidHost {
     pub fn new(
         storage: AndroidStorage,
         builtin_nodes: Vec<NodeProfile>,
-        network_sink: Arc<dyn AndroidNetworkSink>,
+        monitor: NetworkMonitor,
     ) -> Result<Self, SdkError> {
         storage.prepare()?;
         let mut config = EmbeddedConfig::new(storage.host_paths());
@@ -44,7 +46,8 @@ impl AndroidHost {
             storage,
             lifecycle: AndroidLifecycle::new(Arc::clone(&supervisor)),
             supervisor,
-            network: AndroidNetworkTracker::new(network_sink),
+            network: AndroidNetworkTracker::new(Arc::new(monitor.clone())),
+            monitor,
         })
     }
 
@@ -94,6 +97,13 @@ impl AndroidHost {
         &self.network
     }
 
+    /// The platform-neutral network monitor the tracker reports to. Gateway session
+    /// configurations share it through `android::network::mobile_session_config`.
+    #[must_use]
+    pub const fn network_monitor(&self) -> &NetworkMonitor {
+        &self.monitor
+    }
+
     /// The validated storage layout, for the vault installation.
     #[must_use]
     pub const fn storage(&self) -> &AndroidStorage {
@@ -110,19 +120,12 @@ impl AndroidHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::android::network::AndroidNetworkEvent;
     use crate::platform::android::storage::data_root_lock_is_released;
-
-    struct Discard;
-
-    impl AndroidNetworkSink for Discard {
-        fn on_network_event(&self, _event: AndroidNetworkEvent) {}
-    }
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn host(dir: &std::path::Path) -> Result<AndroidHost, SdkError> {
-        AndroidHost::new(AndroidStorage::for_tests(dir), Vec::new(), Arc::new(Discard))
+        AndroidHost::new(AndroidStorage::for_tests(dir), Vec::new(), NetworkMonitor::new())
     }
 
     /// The real supervisor over the Android storage layout: the data-root lock is held only
@@ -179,6 +182,29 @@ mod tests {
         assert_eq!(host.state(), LifecycleState::Stopped);
         let data_root = host.storage().host_paths().data_root;
         assert!(data_root_lock_is_released(&data_root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn host_tracker_reports_to_the_shared_network_monitor() -> TestResult {
+        use crate::platform::android::network::{AndroidNetworkCapabilities, transport};
+        use crate::platform::network::NetworkChangeKind;
+        let dir = tempfile::tempdir()?;
+        let host = host(dir.path())?;
+        host.network().on_available(7);
+        host.network().on_capabilities_changed(
+            7,
+            AndroidNetworkCapabilities {
+                transports: transport::WIFI,
+                internet: true,
+                validated: true,
+                not_metered: true,
+                vpn: false,
+            },
+        );
+        assert!(matches!(host.network_monitor().snapshot().kind, NetworkChangeKind::Available(_)));
+        host.network().on_lost(7);
+        assert_eq!(host.network_monitor().snapshot().kind, NetworkChangeKind::Lost);
         Ok(())
     }
 

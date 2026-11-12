@@ -508,6 +508,20 @@ pub async fn relay_client_quic_health(
         .await
 }
 
+/// Open the TCP connection every stream carrier starts from.
+pub(crate) async fn connect_gateway_tcp(
+    bind_addr: SocketAddr,
+    peer_addr: SocketAddr,
+    timeout: Duration,
+) -> Result<TcpStream, TransportError> {
+    let socket = if peer_addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    socket.bind(bind_addr)?;
+    let tcp = tokio::time::timeout(timeout, socket.connect(peer_addr))
+        .await
+        .map_err(|error| TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error)))??;
+    Ok(tcp)
+}
+
 impl TcpTlsGatewayClient {
     /// # Errors
     /// Returns an error when the TCP socket, TLS config, or TLS handshake fails.
@@ -518,12 +532,21 @@ impl TcpTlsGatewayClient {
         ca_cert: &Path,
         timeout: Duration,
     ) -> Result<(Self, TcpTlsGatewayBidiStream), TransportError> {
-        let socket = if peer_addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
-        socket.bind(bind_addr)?;
-        let tcp =
-            tokio::time::timeout(timeout, socket.connect(peer_addr)).await.map_err(|error| {
-                TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, error))
-            })??;
+        let tcp = connect_gateway_tcp(bind_addr, peer_addr, timeout).await?;
+        Self::connect_over(tcp, server_name, ca_cert, timeout).await
+    }
+
+    /// Run the gateway TLS handshake over an established byte stream to the gateway (a direct
+    /// TCP connection, or a tunnel that ends at the gateway). TLS stays end to end.
+    ///
+    /// # Errors
+    /// Returns an error when the TLS config or TLS handshake fails.
+    pub async fn connect_over(
+        tcp: TcpStream,
+        server_name: &str,
+        ca_cert: &Path,
+        timeout: Duration,
+    ) -> Result<(Self, TcpTlsGatewayBidiStream), TransportError> {
         let server_name = ServerName::try_from(server_name.to_owned())
             .map_err(|error| TransportError::Tls(error.to_string()))?;
         let connector = TlsConnector::from(std::sync::Arc::new(

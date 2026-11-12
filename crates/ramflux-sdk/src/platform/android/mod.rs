@@ -13,5 +13,6 @@ pub mod backup;
 pub mod host;
 pub mod lifecycle;
 pub mod network;
+pub mod network_security;
 pub mod push;
 pub mod storage;
