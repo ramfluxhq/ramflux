@@ -1121,6 +1121,7 @@ async fn gap_timer_case() -> Case {
         .cloned()
         .ok_or("seq2")?;
     let connected = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    let receive_baseline = handle.test_receive_trace().iter().filter(|entry| entry.1).count();
     tokio::time::pause();
     publish_deliver(&handle, seq2);
     pump_anchored(&mut runtime, &handle).await?;
@@ -1144,7 +1145,18 @@ async fn gap_timer_case() -> Case {
         handle.test_receive_last_error(),
         handle.test_receive_trace()
     );
-    pump_anchored(&mut runtime, &handle).await?;
+    // A recorded Resume request precedes response intake and actor ApplyPage work.
+    // Wait for the completed receive pass, rather than a fixed number of idle yields.
+    let completion = handle.clone();
+    pump_until(&mut runtime, Duration::from_secs(2), || {
+        completion.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline
+    })
+    .await?;
+    assert!(
+        handle.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline,
+        "gap receive pass must finish before the cursor oracle: {:?}",
+        handle.test_receive_trace()
+    );
     assert_eq!(snap(&runtime)?.cursor, 2, "gap catch-up covers the hole");
     runtime.stop_connection().await;
     drop(runtime);
