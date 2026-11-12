@@ -26,6 +26,7 @@ mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 pub(crate) mod group_directory;
 mod legacy;
+mod native_control;
 pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
 mod refused_pair;
