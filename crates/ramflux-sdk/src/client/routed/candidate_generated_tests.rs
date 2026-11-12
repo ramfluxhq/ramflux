@@ -269,10 +269,33 @@ async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError>
             .any(|frame| frame["frame_type"] == "ack")
     );
     let page = b.client.generated_message_page("c", None, 100)?.messages;
-    assert!(matches!(
-        page.first().and_then(|update| update.state.as_ref()),
-        Some(g::message_update::State::Unsupported(_))
-    ));
+    let Some(g::message_update::State::Unsupported(view)) =
+        page.first().and_then(|update| update.state.as_ref())
+    else {
+        return Err(invalid("Unsupported view missing"));
+    };
+    assert_eq!(view.reason, "unknown_kind");
+    assert_eq!(view.raw_handle.len(), 16, "Unsupported view leaked private raw locator");
+    assert_eq!(usize::try_from(view.raw_length).map_err(|_| invalid("raw length"))?, raw.len());
+    let handle_key =
+        format!("routed/raw-handle/{}", ramflux_protocol::encode_base64url(&view.raw_handle));
+    assert_eq!(
+        b.client.account_db()?.load_actor_state::<String>(&handle_key)?,
+        Some(copy_id.clone())
+    );
+    apply(&mut b, &entry).await?;
+    let duplicate = b.client.generated_message_page("c", None, 100)?.messages;
+    assert_eq!(
+        duplicate.first().and_then(|update| update.state.as_ref()),
+        page.first().and_then(|update| update.state.as_ref())
+    );
+    let owner = ramflux_protocol::encode_base64url(generated_identity(&a, "unknown-wire")?.id);
+    b.client.delete_direct_message("c", &owner, "local", "erase-unsupported-handle")?;
+    assert!(
+        !b.client.account_db()?.actor_state_exists(&handle_key)?,
+        "erasure retained private handle mapping"
+    );
+    assert!(b.client.account_db()?.raw_inner_copy(&copy_id)?.is_none());
     Ok(())
 }
 
@@ -458,6 +481,11 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
             bytes: &raw,
             bounded_metadata: &metadata,
         })?;
+        b.client.persist_generated_unsupported_view(
+            &id,
+            &copy_id,
+            &g::validation::scan_inner(&raw).map_err(|_| invalid("fixture scan"))?,
+        )?;
         db.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "c",
             message_id: &id,
@@ -469,17 +497,7 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         Ok(())
     })?;
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 1);
-    assert_eq!(b.client.account_db()?.message_content(&id)?.as_deref(), Some(raw.as_slice()));
-    assert_eq!(
-        b.client.direct_message_by_id(&id)?.ok_or_else(|| invalid("projection"))?.encrypted_body,
-        raw
-    );
-    let page = b.client.generated_message_page("c", None, 10)?;
-    assert!(page.messages.first().is_some_and(|row| matches!(
-        row.state.as_ref(),
-        Some(g::message_update::State::Content(_))
-    )));
-    assert_schema_update_cursor(&b.client, &id)?;
+    assert_reparsed_content_and_handle_retirement(&b.client, &id, &raw)?;
     let head = b.client.account_db()?.journal_bounds()?.head_seq;
     retain_redundant_reparse_copy(&b.client, &id, source.root_commitment(), &raw, &metadata)?;
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
@@ -499,6 +517,30 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         .is_err()
     );
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
+    Ok(())
+}
+
+fn assert_reparsed_content_and_handle_retirement(
+    client: &RamfluxClient,
+    id: &str,
+    raw: &[u8],
+) -> Result<(), SdkError> {
+    assert_eq!(client.account_db()?.message_content(id)?.as_deref(), Some(raw));
+    assert_eq!(
+        client.direct_message_by_id(id)?.ok_or_else(|| invalid("projection"))?.encrypted_body,
+        raw
+    );
+    let page = client.generated_message_page("c", None, 10)?;
+    assert!(page.messages.first().is_some_and(|row| matches!(
+        row.state.as_ref(),
+        Some(g::message_update::State::Content(_))
+    )));
+    assert_schema_update_cursor(client, id)?;
+    assert_eq!(
+        client.account_db()?.actor_state_keys("routed/raw-handle/")?,
+        Vec::<String>::new(),
+        "reparse retained a stale raw handle"
+    );
     Ok(())
 }
 

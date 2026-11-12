@@ -187,7 +187,7 @@ impl RamfluxClient {
             )?;
             db.finish_raw_inner_reparse(&copy.copy_id)?;
         }
-        db.remove_actor_state(&format!("routed/unsupported/{}", provenance.message))?;
+        self.remove_generated_unsupported_view(&provenance.message)?;
         let update = g::MessageUpdate {
             account_id: db.local_account_id.clone(),
             identity: Some(identity),
@@ -220,6 +220,7 @@ impl RamfluxClient {
             db.finish_raw_inner_reparse(&copy.copy_id)?;
         }
         db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
+        self.disarm_generated_unsupported_view(&snapshot.copy.owner_id, &snapshot.copy.copy_id)?;
         Ok(())
     }
 
