@@ -852,6 +852,34 @@ fn history_import_rejects_bundle_when_event_actor_differs_from_source_device()
 }
 
 #[test]
+#[cfg(feature = "sqlcipher")]
+fn sqlcipher_patched_runtime_reopens_keyed_account() -> Result<(), StorageError> {
+    let (root, db) = test_db("sqlcipher-patched-runtime")?;
+    let cipher: String = db.connection.query_row("PRAGMA cipher_version", [], |row| row.get(0))?;
+    let sqlite: String =
+        db.connection.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+    assert!(cipher.starts_with("4.20.0"), "unexpected SQLCipher version: {cipher}");
+    assert_eq!(sqlite, "3.54.1");
+    println!("SQLCipher {cipher}; SQLite {sqlite}");
+    db.append_event("cipher-upgrade", "test.sqlcipher", b"persisted")?;
+    drop(db);
+
+    let index = AccountIndex::open(&root)?;
+    let key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let reopened = AccountDb::open(&index, "acct", &key)?;
+    assert_eq!(reopened.encryption_mode(), EncryptionMode::SqlCipher);
+    let payload: Vec<u8> = reopened.connection.query_row(
+        "SELECT event_body FROM local_event_log WHERE event_id = ?1",
+        ["cipher-upgrade"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(payload, b"persisted");
+    drop(reopened);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn wrong_account_db_key_is_rejected() -> Result<(), StorageError> {
     let root = temp_root("wrong-key");
     let index = AccountIndex::open(&root)?;
