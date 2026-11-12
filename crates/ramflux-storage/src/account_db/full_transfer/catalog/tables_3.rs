@@ -1781,3 +1781,23 @@ pub(super) const RULE_158: FamilyRule = table_rule!(
         ),
     ]
 );
+pub(super) const RULE_159: FamilyRule = table_rule!(
+    "sql/full_imported_mac_bundle",
+    "full_imported_mac_bundle",
+    Transfer,
+    ImportedBundle,
+    true,
+    ["source_ref", "bundle_id"],
+    [
+        ("source_ref", Utf8, false, Transfer, Immutable, CodecRule::SqlDeviceRef),
+        (
+            "bundle_id",
+            Utf8,
+            false,
+            Transfer,
+            Immutable,
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
+        ),
+        ("subkeys", Bytes, false, Transfer, ImportedBundle, CodecRule::SqlMacSubkeys),
+    ]
+);

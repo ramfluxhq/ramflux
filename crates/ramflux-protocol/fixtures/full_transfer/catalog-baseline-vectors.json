@@ -1,5 +1,5 @@
 {
-  "census_hash": "C-eGjT_0Pbpbip3_Xa0qXMe4SqHHgyGSATLZwxR-Z-Q",
+  "census_hash": "ts8q8yCXGHqbxUOwW5yFrXC7wk6HUTZqkB0QcIIF3ss",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -165,6 +165,10 @@
     {
       "hash": "h3utYsd5NXs-hrjPNbWx4zsRZdv-aHqM6-Avm3ab7CA",
       "id": "sql/friend_projection"
+    },
+    {
+      "hash": "ezixSXeCB9XhUBgWY7vGHpldkVvA5dEja6VRY0o90TY",
+      "id": "sql/full_imported_mac_bundle"
     },
     {
       "hash": "FicoBUdSzUTlTiYzIbVrGQJd2SDpkDe5ZlkKRm4xybM",

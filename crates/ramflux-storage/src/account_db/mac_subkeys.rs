@@ -144,6 +144,7 @@ pub(super) fn input_macs(
     merge::load_set(db, schema)?.iter().map(|b| b.mac(label, value)).collect()
 }
 
+pub(crate) mod full;
 pub(super) mod merge;
 
 pub(super) fn initialize(
@@ -211,6 +212,7 @@ fn initialize_inner(
     fresh: bool,
     interrupt: bool,
 ) -> Result<(), StorageError> {
+    db.execute_batch(full::SCHEMA)?;
     let version: Option<String> = db
         .query_row("SELECT checksum FROM schema_migration WHERE schema_version=14", [], |r| {
             r.get(0)
@@ -276,3 +278,6 @@ pub(super) mod tests;
 
 #[cfg(test)]
 mod restore_tests;
+
+#[cfg(test)]
+mod full_tests;

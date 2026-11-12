@@ -213,7 +213,7 @@ fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_
         rusqlite::params!["full-transfer-unimplemented-owner", "{}"],
     )?;
     let rules = full_transfer_catalog();
-    assert_eq!(rules.len(), 161);
+    assert_eq!(rules.len(), 162);
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
         Err(error) => {
@@ -233,7 +233,7 @@ fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_
             FamilySelector::ActorPrefix(_) => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(tables.len(), 155);
+    assert_eq!(tables.len(), 156);
     assert!(
         matches!(
             census.require_typed_owners(rules),

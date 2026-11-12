@@ -53,6 +53,7 @@ pub fn write_full_scalar_sql_row(
             &rule.codec.iter().find(|field| field.name == cell.name).ok_or_else(unsupported)?.codec;
         let width = match codec {
             CodecRule::SqlMacSubkeys => 192,
+            CodecRule::SqlDeviceRef => 512,
             CodecRule::SqlI64 { .. } => 8,
             CodecRule::SqlBase64 { decoded_bytes: U64(32), .. } => 43,
             CodecRule::SqlBytes { length, .. } => {
@@ -67,9 +68,13 @@ pub fn write_full_scalar_sql_row(
                 target.copy_from_slice(&value.to_be_bytes());
                 (CellType::I64, width)
             }
-            ValueRef::Text(bytes) if cell.cell_type == CellType::Utf8 && bytes.len() == width => {
-                target.copy_from_slice(bytes);
-                (CellType::Utf8, width)
+            ValueRef::Text(bytes)
+                if cell.cell_type == CellType::Utf8
+                    && (bytes.len() == width
+                        || (matches!(codec, CodecRule::SqlDeviceRef) && bytes.len() <= width)) =>
+            {
+                target[..bytes.len()].copy_from_slice(bytes);
+                (CellType::Utf8, bytes.len())
             }
             ValueRef::Blob(bytes) if cell.cell_type == CellType::Bytes && bytes.len() == width => {
                 target.copy_from_slice(bytes);
