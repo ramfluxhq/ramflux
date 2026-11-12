@@ -1583,3 +1583,76 @@ async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Res
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn early_edit_register_is_qualified_by_original_author_root() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(173, 175)?;
+    let c = Fixture::new("carol", 177)?;
+    b.client.establish_friend_link(
+        "carol-link",
+        &c.client.own_account_anchor()?,
+        &b.client.own_account_anchor()?,
+    )?;
+    let target = g::MessageRef {
+        id: generated_identity(&a, "qualified-target")?.id,
+        conversation_id: "c".into(),
+        author_anchor: a.client.own_account_anchor()?,
+    };
+    commit_content(&a, &mut b, "qualified-edit", edit(&target, 1, [0; 32], "rightful edit"))
+        .await?;
+    // A different direct conversation lets an accepted foreign peer name the same
+    // opaque target id without claiming membership in Alice's direct conversation.
+    let mut identity = generated_identity(&c, "foreign-edit")?;
+    identity.conversation_id = "foreign".into();
+    identity.id = g::identity::derive(
+        identity.author.as_ref().ok_or_else(|| invalid("author"))?,
+        "foreign",
+        identity.device_sequence,
+    )
+    .map_err(|_| invalid("foreign identity"))?
+    .to_vec();
+    let claimed = g::MessageRef {
+        id: target.id.clone(),
+        conversation_id: "foreign".into(),
+        author_anchor: c.client.own_account_anchor()?,
+    };
+    let raw = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content { value: Some(edit(&claimed, 1_000_000, [0; 32], "foreign poisoning")) },
+    )?;
+    let mut draft = message("foreign-edit", "foreign");
+    draft.source_principal_id = "carol".into();
+    draft.sender_id = "carol".into();
+    b.client.account_db()?.persist_client_record(
+        "conversation",
+        "foreign",
+        &serde_json::json!({
+            "kind":"direct", "group_id":null, "participants":["bob","carol"],
+            "participant_roots":[b.client.own_account_anchor()?,c.client.own_account_anchor()?],
+        }),
+    )?;
+    let incoming = seal(&c, &b, draft, &raw)?;
+    apply(&mut b, &incoming).await?;
+    assert_eq!(
+        b.client.account_db()?.unsupported_raw_quota(None)?.owners,
+        2,
+        "foreign root replaced the legitimate pending Edit"
+    );
+    commit_content(
+        &a,
+        &mut b,
+        "qualified-target",
+        g::content::Value::Message(g::Message { text: "original".into(), ..Default::default() }),
+    )
+    .await?;
+    let page = b.client.generated_message_page("c", None, 100)?.messages;
+    assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content {
+        value:Some(g::content::Value::Message(message))
+    })) if message.text=="rightful edit")), "foreign root replaced the legitimate pending Edit");
+    assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
+    Ok(())
+}
+
+#[path = "candidate_reparse_edit_tests.rs"]
+mod reparse_edit;
