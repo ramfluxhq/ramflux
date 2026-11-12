@@ -16,6 +16,7 @@ use e2e::{
 #[ignore = "real-process CLI e2e: run explicitly on QA and in the CLI e2e CI job"]
 #[test]
 fn e2e_push_restart() -> e2e::Result<()> {
+    eprintln!("push/restart: boot stack");
     let stack = boot_stack()?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -23,6 +24,7 @@ fn e2e_push_restart() -> e2e::Result<()> {
     configure_node(&bob_d, &stack.discovery_url)?;
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
+    eprintln!("push/restart: exchange contacts");
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
     let conversation = unique("push-restart");
     let bodies = ["push-one", "push-two", "push-three", "resume-one", "resume-two", "resume-three"];
@@ -33,6 +35,7 @@ fn e2e_push_restart() -> e2e::Result<()> {
         dm_send(&alice_d, &alice, &bob, &conversation, id, body)?;
     }
     // Node ACKs precede any read request, so read-triggered catch-up cannot mask missing push.
+    eprintln!("push/restart: await live node ACKs");
     for id in ids.iter().take(3) {
         wait_node_observed_ack(&stack, &bob, id)?;
     }
@@ -43,11 +46,14 @@ fn e2e_push_restart() -> e2e::Result<()> {
     );
     let live = wait_dm_texts(&bob_d, &bob, &conversation, &bodies[..3])?;
     assert_eq!(message_texts(&live), bodies[..3], "live push must contain exactly the sent set");
+    eprintln!("push/restart: live push verified; crash recipient");
     let (socket, root) = crash_daemon(bob_d)?;
     for (id, body) in ids.iter().zip(&bodies).skip(3) {
         dm_send(&alice_d, &alice, &bob, &conversation, id, body)?;
     }
+    eprintln!("push/restart: await offline node pending");
     wait_node_pending(&stack, &bob, &ids[3..])?;
+    eprintln!("push/restart: restart and unlock recipient");
     let bob_d = start_daemon_at(socket, root)?;
     unlock_account(&bob_d, &bob)?;
     let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies).map_err(|error| {
@@ -59,6 +65,7 @@ fn e2e_push_restart() -> e2e::Result<()> {
         )
     })?;
     assert_eq!(message_texts(&received), bodies, "restart must contain exactly the full sent set");
+    eprintln!("push/restart: full received set verified; await all ACKs");
     for id in &ids {
         wait_node_observed_ack(&stack, &bob, id).map_err(|error| {
             format!(
