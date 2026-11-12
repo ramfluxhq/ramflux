@@ -7,3 +7,5 @@
 pub(crate) mod fs;
 #[cfg(unix)]
 pub(crate) mod listener;
+/// Platform-neutral in-process host lifecycle (phones). Shared by the iOS and Android cores.
+pub mod lifecycle;

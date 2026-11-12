@@ -32,6 +32,9 @@ mod bus;
 pub mod c_abi;
 mod client;
 mod platform;
+pub use platform::lifecycle::{
+    HostLifecycle, HostPaths, LifecycleState, LifecycleTransition, SuspendReport,
+};
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,
