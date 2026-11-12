@@ -16,9 +16,7 @@ use super::listener::{
     BusListener, BusStream, PeerCred, PipeBusListener, authorize, bind, connect, connect_named,
 };
 use super::name;
-use super::win32::test_tokens::{
-    impersonate_low_integrity, impersonate_user, sid_from_string,
-};
+use super::win32::test_tokens::{impersonate_low_integrity, impersonate_user, sid_from_string};
 use super::win32::{self, MEDIUM_INTEGRITY_RID, TokenFacts};
 use crate::SdkError;
 
@@ -51,8 +49,7 @@ fn open_while_impersonating<G: Send + 'static>(
 ) -> Result<std::io::Result<()>, String> {
     std::thread::spawn(move || {
         let guard = token().map_err(text)?;
-        let opened =
-            std::fs::OpenOptions::new().read(true).write(true).open(&name).map(|_pipe| ());
+        let opened = std::fs::OpenOptions::new().read(true).write(true).open(&name).map(|_pipe| ());
         drop(guard);
         Ok(opened)
     })
@@ -101,7 +98,8 @@ async fn a_second_client_is_served_while_the_first_stays_connected() -> Result<(
 fn server_rule_refuses_other_user_low_integrity_and_app_container() -> Result<(), String> {
     let me = win32::process_facts().map_err(text)?.user;
     let other = sid_from_string(LOCAL_SYSTEM_SID).map_err(text)?;
-    let facts = |user, integrity_rid, app_container| TokenFacts { user, integrity_rid, app_container };
+    let facts =
+        |user, integrity_rid, app_container| TokenFacts { user, integrity_rid, app_container };
     authorize(&facts(me, MEDIUM_INTEGRITY_RID, false), &me).map_err(text)?;
     authorize(&facts(me, HIGH_INTEGRITY_RID, false), &me).map_err(text)?;
     for refused in [
