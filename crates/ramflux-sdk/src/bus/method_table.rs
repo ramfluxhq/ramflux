@@ -51,7 +51,7 @@ methods! {
     LocalRead(Always) => Actor: ["account.config.get"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
-    LocalRead(Always) => Actor: ["a2i.list_pending"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",
@@ -130,7 +130,6 @@ methods! {
         "conversation.directory",
         "conversation.list",
         "device.list",
-        "device.pair.status",
         "grant.list",
         "grant.list_standing_approvals",
         "group.invitations.list",
@@ -292,4 +291,19 @@ pub(super) fn require_local_first_relay(
         return Err(connection.pending());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+    #[test]
+    fn pairing_status_uses_coordinator_without_ordinary_network() -> Result<(), &'static str> {
+        for name in ["device.pair.status", "device.transfer.status"] {
+            let method = classify(name).ok_or("missing pairing status route")?;
+            assert_eq!(method.route, MethodRoute::Actor);
+            assert_eq!(method.class, MethodClass::LocalRead);
+            assert!(!requires_network(name, &serde_json::json!({}), true, None));
+        }
+        Ok(())
+    }
 }

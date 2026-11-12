@@ -1253,6 +1253,30 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
         );
     }
     let manifest = rig.primary.full_source_manifest_for_test()?;
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation.clone(),
+        generation: 1,
+    };
+    for actor in [&mut rig.primary, &mut rig.secondary] {
+        let status = actor.transfer_status(&request).await?;
+        let Outcome::FullStatus { value } = status.outcome else {
+            return Err("disk status".into());
+        };
+        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
+        assert_eq!(value.bytes_durable, value.bytes_total);
+        assert_eq!(value.cut, manifest.manifest.snapshot_cut);
+        assert_eq!(
+            value.stage,
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+        );
+        assert_eq!(
+            value.tail_status,
+            ramflux_protocol::custody::pairing::local_dto::FullTailStatus::None
+        );
+        assert!(value.result.is_none());
+    }
     let hash = ramflux_protocol::encode_base64url(
         ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
     );
@@ -1342,6 +1366,27 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         }
     }
     assert!(complete, "installed relay pumps did not complete the actual disk phase: {last}");
+    for participant in [&participant_a, &participant_b] {
+        let status = super::coordinator::handle_bus(
+            &participant.root,
+            &participant.account_id,
+            "device.transfer.status",
+            serde_json::json!({
+                "schema":"ramflux.pairing.StatusRequest.v2", "version":2,
+                "operation_id":operation, "generation":1,
+            }),
+        )
+        .await?;
+        let Outcome::FullStatus { value } = status.outcome else {
+            return Err("bus full status".into());
+        };
+        assert_eq!(value.bytes_durable, manifest.manifest.total_bytes);
+        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
+        assert_eq!(
+            value.stage,
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+        );
+    }
     assert!(!ordinary_session_admitted_for_participant(&participant_b)?);
     assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
     {
@@ -1428,6 +1473,16 @@ async fn pairing_full_background_refusal_keeps_exact_code_and_valid_legacy_statu
         let Outcome::Update { value } = status.outcome else { return Err("legacy status".into()) };
         assert_eq!(value.phase, "mutually_confirmed");
         assert!(value.result.is_none(), "full refusal invalidated a legacy active-phase update");
+        let full = rig.primary.transfer_status(&request).await?;
+        full.validate_method("transfer.status")?;
+        full.to_wire_bytes()?;
+        let Outcome::FullStatus { value } = full.outcome else { return Err("full status".into()) };
+        assert_eq!(value.result, Some(exact));
+        assert_eq!(value.bytes_durable.0, 0);
+        assert_eq!(
+            value.stage,
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Snapshot
+        );
     }
     Ok(())
 }

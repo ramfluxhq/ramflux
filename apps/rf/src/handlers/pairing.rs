@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 
 pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
+    let full_status = matches!(&command.action, PairingAction::TransferStatus(_));
     match command.action {
         PairingAction::Begin {
             display_name,
@@ -82,11 +83,11 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
             )
             .await?,
         ),
-        PairingAction::Status(operation) => show(
+        PairingAction::Status(operation) | PairingAction::TransferStatus(operation) => show(
             invoke(
                 &mut bus,
                 &command.account,
-                "status",
+                if full_status { "transfer.status" } else { "status" },
                 &StatusRequest {
                     schema: "ramflux.pairing.StatusRequest.v2".into(),
                     version: 2,
@@ -204,16 +205,18 @@ async fn invoke<T: PairingWire + serde::Serialize>(
     request: &T,
 ) -> Result<LocalResult, RfError> {
     request.validate().map_err(|_| invalid())?;
+    let method = if action == "transfer.status" {
+        "device.transfer.status".into()
+    } else {
+        format!("device.pair.{action}")
+    };
     let value = bus
-        .request(
-            Some(account.into()),
-            "device",
-            &format!("device.pair.{action}"),
-            serde_json::to_value(request)?,
-        )
+        .request(Some(account.into()), "device", &method, serde_json::to_value(request)?)
         .await?;
     let result: LocalResult = serde_json::from_value(value).map_err(|_| invalid())?;
-    result.validate().map_err(|_| invalid())?;
+    result
+        .validate_method(method.strip_prefix("device.").ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
     Ok(result)
 }
 fn show(result: LocalResult) -> Result<(), RfError> {

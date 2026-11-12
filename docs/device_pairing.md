@@ -54,3 +54,11 @@ of the merged data, the exact native publication and local installation. After
 a successful primary change, a final catch-up tail remains pending until the
 receiver merges it or the user explicitly abandons it; lease expiry or another
 primary change does not silently mark the tail complete.
+
+For an existing full-transfer stage, `rf pairing --account <id> transfer-status
+--operation-id <id> --generation <n>` reads `device.transfer.status` through the
+same SDK coordinator. The response contains only the role, stage, cut, lease,
+byte totals, missing-attachment count, tail status and an exact typed error. Its
+64-bit counters use decimal JSON strings. During the current disk-only phase,
+completed byte totals still show `streaming`; they do not claim semantic
+verification or installation. `pairing status` keeps the legacy ceremony view.

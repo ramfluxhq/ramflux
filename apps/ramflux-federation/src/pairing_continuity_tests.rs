@@ -683,6 +683,7 @@ fn begin_result(result: LocalResult) -> TestResult<BeginResult> {
         Outcome::Begin { value } => Ok(*value),
         Outcome::Update { value } => Err(format!("begin {}", value.phase).into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
@@ -691,6 +692,7 @@ fn update(result: LocalResult) -> TestResult<Update> {
         Outcome::Update { value } => Ok(*value),
         Outcome::Begin { .. } => Err("update was begin".into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
