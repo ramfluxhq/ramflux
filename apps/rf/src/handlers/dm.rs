@@ -8,7 +8,7 @@ use super::*;
 #[path = "dm/wait.rs"]
 mod wait;
 #[path = "dm/unified.rs"]
-mod unified;
+pub(crate) mod unified;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
