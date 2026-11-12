@@ -91,7 +91,7 @@ impl RamfluxClient {
         value: &g::SelfSync,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<(), SdkError> {
-        let references = self.self_sync_references(conversation, value)?;
+        let references = self.self_sync_references(conversation, value, true)?;
         self.persist_self_sync_owned_state(
             &format!("self-sync/pending/{}", envelope.envelope_id),
             &serde_json::json!({
@@ -202,7 +202,7 @@ impl RamfluxClient {
         if old.is_none() {
             self.require_self_sync_conversation_capacity(conversation)?;
         }
-        let references = self.self_sync_references(conversation, value)?;
+        let references = self.self_sync_references(conversation, value, true)?;
         let tie_break = body_hash(exact_body)?;
         let wins = old.as_ref().is_none_or(|state| {
             (value.revision, tie_break) > (state.value.revision, state.tie_break)
@@ -501,7 +501,7 @@ impl RamfluxClient {
         marker: Option<&g::MessageRef>,
         pending: Option<&PendingRead>,
     ) -> Result<Vec<Reference>, SdkError> {
-        let mut references = self.self_sync_references(conversation, value)?;
+        let mut references = self.self_sync_references(conversation, value, false)?;
         for reference in marker.into_iter().chain(pending.map(|pending| &pending.reference)) {
             let message_id = ramflux_protocol::encode_base64url(&reference.id);
             if !references.iter().any(|reference| reference.message_id == message_id) {
@@ -516,6 +516,7 @@ impl RamfluxClient {
         &self,
         conversation: &str,
         value: &g::SelfSync,
+        validate_known: bool,
     ) -> Result<Vec<Reference>, SdkError> {
         let mut references = Vec::new();
         let draft_refs = value
@@ -537,7 +538,10 @@ impl RamfluxClient {
                 return Err(refused("reference belongs to another conversation"));
             }
             let id = ramflux_protocol::encode_base64url(&reference.id);
-            if !self.account_db()?.message_is_deleted(&id)?
+            if validate_known && self.self_sync_reference_matches(reference)? == Some(false) {
+                return Err(refused("reference does not match authenticated target"));
+            }
+            if validate_known && !self.account_db()?.message_is_deleted(&id)?
                 && let Some(target) = self.direct_message_by_id(&id)?
                 && target.conversation_id != conversation
             {
@@ -558,7 +562,10 @@ impl RamfluxClient {
             return Ok(());
         };
         let id = ramflux_protocol::encode_base64url(&reference.id);
-        if self.account_db()?.message_is_deleted(&id)? {
+        if reference.conversation_id != conversation
+            || self.self_sync_reference_matches(reference)? != Some(true)
+            || self.account_db()?.message_is_deleted(&id)?
+        {
             return Ok(());
         }
         let Some(order) = self.self_sync_read_order(&id)? else {
@@ -573,6 +580,26 @@ impl RamfluxClient {
         self.account_db()?.mark_read(conversation, &self.owned_device_identity()?, &id)?;
         *marker = Some(reference.clone());
         Ok(())
+    }
+
+    // A matching application id alone cannot authorize a reference to another root
+    // or conversation. Unknown identities remain parked until authenticated receipt.
+    fn self_sync_reference_matches(
+        &self,
+        reference: &g::MessageRef,
+    ) -> Result<Option<bool>, SdkError> {
+        let id = ramflux_protocol::encode_base64url(&reference.id);
+        let identity = self
+            .account_db()?
+            .load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{id}"))?;
+        Ok(identity.map(|identity| {
+            identity.id == reference.id
+                && identity.conversation_id == reference.conversation_id
+                && identity
+                    .author
+                    .as_ref()
+                    .is_some_and(|author| author.account_anchor == reference.author_anchor)
+        }))
     }
 
     fn self_sync_read_order(&self, id: &str) -> Result<Option<DisplayOrder>, SdkError> {

@@ -493,3 +493,32 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> TestResult {
+    let (client, root) =
+        client_with_account("self-sync-read-reference", "principal_sync", "local")?;
+    let mut wrong_author = read("m2", 1);
+    wrong_author.read_through.as_mut().ok_or("reference")?.author_anchor = "another-root".into();
+    // Receipt before the target is a parked register, never an active read marker.
+    assert!(apply(&client, &wrong_author)?);
+    assert!(client.self_sync_state("c", &wrong_author)?.ok_or("state")?.read_marker.is_none());
+    install_read_messages(&client)?;
+    client.account_db()?.write_transaction(|| client.resolve_self_sync_read_references("c"))?;
+    let resolved = client.self_sync_state("c", &wrong_author)?.ok_or("resolved")?;
+    assert!(resolved.read_marker.is_none(), "wrong root must not activate when the target arrives");
+    assert!(resolved.pending_read.is_none(), "known-invalid reference is settled");
+    wrong_author.revision = 2;
+    assert!(apply(&client, &wrong_author).is_err());
+    let mut wrong_conversation = read("m1", 2);
+    wrong_conversation.read_through.as_mut().ok_or("reference")?.conversation_id = "other".into();
+    assert!(apply(&client, &wrong_conversation).is_err());
+    assert!(apply(&client, &read("m2", 3))?);
+    assert_eq!(
+        client.self_sync_state("c", &read("m2", 3))?.ok_or("valid")?.read_marker,
+        Some(reference("m2"))
+    );
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
