@@ -1324,14 +1324,6 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
             &participant_a.account_id,
             source.client.account_db()?,
         )?;
-        {
-            let slot = participant_b.db.lock().map_err(|_| "target writer")?;
-            service_full_transfer(
-                &participant_b.root,
-                &participant_b.account_id,
-                slot.as_ref().ok_or("target DB")?,
-            )?;
-        }
         let (source_done, source_state) = super::coordinator::settle_actor_data_for_test(
             &participant_a.root,
             &participant_a.account_id,
@@ -1350,6 +1342,7 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         }
     }
     assert!(complete, "installed relay pumps did not complete the actual disk phase: {last}");
+    assert!(!ordinary_session_admitted_for_participant(&participant_b)?);
     assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
     {
         let slot = participant_b.db.lock().map_err(|_| "target writer")?;
