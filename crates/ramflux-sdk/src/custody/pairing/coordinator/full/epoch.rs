@@ -229,6 +229,7 @@ impl crate::custody::pairing::PairingActor {
             state.keys = Some(finished.keys);
             state.epoch_ready = Some(finished.packet?);
             c.result = None;
+            c.full_error = None;
             self.full_runtime.require_live()?;
             return Ok(true);
         }
