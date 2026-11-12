@@ -16,8 +16,7 @@ async fn history_chain_restart_keeps_item_cursor_and_starts_at_page_zero() -> Te
     row.next_page = 3;
     row.last_digest = vec![9; 32];
     row.last_submit_at = 100;
-    row.cursor =
-        Some(Cursor { conversation: "c".into(), created_at: 7, message: "m".into() });
+    row.cursor = Some(Cursor { conversation: "c".into(), created_at: 7, message: "m".into() });
     assert!(!row.chain_expired(100 + RESTART_AFTER_IDLE_SECS - 1));
     assert!(row.chain_expired(100 + RESTART_AFTER_IDLE_SECS));
     row.restart_chain()?;
