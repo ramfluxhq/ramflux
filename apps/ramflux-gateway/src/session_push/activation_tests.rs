@@ -370,15 +370,17 @@ async fn calibrate_account_transport(
             tokio::task::yield_now().await;
         }
     };
-    let controlled = tokio::time::timeout(
-        Duration::from_secs(10),
+    let controlled = crate::ephemeral::tests::guard_10s(
+        "real durable receive and ACK completion",
         sender.host.service_while(receiver.host.service_while(settled)),
     )
     .await;
-    match controlled {
-        Ok(result) => result?,
-        Err(_) => anyhow::bail!("durable receive/ACK watchdog: {}", receiver.host.diagnostics()?),
-    }
+    controlled.map_err(|error| {
+        anyhow::anyhow!(
+            "durable receive/ACK failure: {error:?}; diagnostics={:?}",
+            receiver.host.diagnostics()
+        )
+    })?;
     crate::ephemeral::tests::guard_10s(
         "client durable ACK result applied",
         receiver.host.settled(TARGET, 1),
