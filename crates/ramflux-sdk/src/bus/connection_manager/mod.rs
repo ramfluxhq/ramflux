@@ -850,10 +850,13 @@ impl ConnectionHandle {
     pub(crate) async fn stop(&self) {
         self.stop_with_reason(DisconnectReason::Stop).await;
     }
+    pub(crate) fn signal_stop(&self) {
+        self.stop.send_replace(true);
+    }
     pub(crate) async fn stop_with_reason(&self, reason: DisconnectReason) {
         *self.shared.stop_reason.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(reason);
-        self.stop.send_replace(true);
+        self.signal_stop();
         let mut finished = self.finished.clone();
         while !*finished.borrow_and_update() {
             if finished.changed().await.is_err() {

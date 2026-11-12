@@ -767,7 +767,7 @@ mod tests {
 
 #[cfg(test)]
 #[path = "forward_identity_tests.rs"]
-mod forward_identity_tests;
+pub(crate) mod forward_identity_tests;
 #[cfg(test)]
 #[path = "ordinary_ingress_tests.rs"]
 mod ordinary_ingress_tests;

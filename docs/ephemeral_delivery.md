@@ -72,14 +72,14 @@ Ephemeral routing has read-only access to source authority and live routing.
 It does not append inbox content, allocate an inbox sequence, persist replay
 markers, create retries, write client history or journal entries, or notify an
 offline recipient. The ordinary durable route rejects marked envelopes before
-persistent effects. The S6c persistence
+persistent effects. The transport persistence
 guarantee covers transport through authenticated ciphertext handoff to the SDK
 consumer. Its persistence test uses presealed known ciphertext and checks client
 tables, database files and journal together with node artifacts across live,
 offline, full, expired and refused outcomes, including reopen.
 
 Pair decryption is stateful. Typing ratchet/allowance state and Unsupported
-unknown-content retention are S10a endpoint exceptions, verified in the message
+unknown-content retention are Message/typing endpoint exceptions, verified in the message
 module; they are outside this transport-only unchanged-database guarantee.
 Neither exception permits an ephemeral ACK, ledger entry or durable delivery
 fallback. Nodes observe mode, TTL, outer identities, timing and pair-session tag
@@ -100,12 +100,18 @@ until they retire; restart or reconnect renegotiates against the dormant router.
 ## Verification
 
 `ephemeral_activation_end_to_end` and `ephemeral_persistence_absence` use a
-same-tree router process, the production gateway ingress/writer, separate stores,
-and the SDK codec/receiver. They cover live delivery, legacy recipient refusal,
-offline drop, client database/WAL and journal stability, and empty Resume with
-unchanged issued after router restart. The dormant-parent row runs with
+same-tree router process, production gateway session loops, and SDK account writers
+and resident session hosts with separate stores. Receive crosses the generation-owned
+transient consumer through authenticated ciphertext handoff. A real durable receive
+and node ACK calibrates the measured account before the transport-only baseline.
+The end-to-end row checks outcomes and surviving-consumer dedup; the absence row
+checks the owned client databases/WAL, journal and all durable artifacts across
+live/offline/full/expired/refused cases and ordinary reopen. Resume remains empty
+and issued unchanged after router restart. The dormant-parent row runs with
 `RAMFLUX_EXPECT_EPHEMERAL_DORMANT=1`; normal activation rows require the listing.
 `e2e_push_restart` separately runs real node and `rf` processes, observes live DM
-ACKs before reads, kills the recipient process, sends three offline DMs and checks
+ACKs before reads, asserts negotiated push mode, kills the recipient process, sends three offline DMs and checks
 exact resumed content and node ACKs for every message. The CLI currently has no
 ephemeral or typing command.
+
+The real-router activation rows use a single mesh connection per gateway pool so that restart recovery finishes before the signed transient deadline. The end-to-end row checks delivery and typed refusal outcomes; the persistence row additionally compares both attached account stores, journals and ordinary reopen results.

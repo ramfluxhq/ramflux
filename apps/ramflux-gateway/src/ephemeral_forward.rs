@@ -50,6 +50,45 @@ pub(crate) struct GatewayForwardEphemeralRequest {
     pub(crate) expires_at_ms: u64,
 }
 
+/// Originate on the C1-selected same-node gateway, preserving typed refusal outcomes.
+/// Authentication binds both gateway instances through the existing mesh peer directory.
+pub(crate) async fn originate(
+    context: &crate::GatewayQuicContext,
+    gateway_id: &str,
+    envelope: &Envelope,
+    expires_at_ms: u64,
+) -> crate::ephemeral::RouteDecision {
+    use crate::ephemeral::RouteDecision;
+    use ramflux_protocol::ephemeral::EphemeralDropReason;
+    let request = GatewayForwardEphemeralRequest {
+        source_gateway_id: context.gateway_id.clone(),
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        forwarded: true,
+        envelope: envelope.clone(),
+        expires_at_ms,
+    };
+    let response = match context.peers.post_ephemeral(gateway_id, request).await {
+        Ok(response) => response,
+        Err(_) => return RouteDecision::Dropped(EphemeralDropReason::Offline),
+    };
+    match (response.delivered, response.outcome) {
+        (true, Some(SessionPushForwardOutcome::Queued)) => RouteDecision::Forwarded,
+        (false, Some(SessionPushForwardOutcome::Full)) => {
+            RouteDecision::Dropped(EphemeralDropReason::QueueFull)
+        }
+        (false, Some(SessionPushForwardOutcome::Unsupported)) => {
+            RouteDecision::Dropped(EphemeralDropReason::RecipientUnsupported)
+        }
+        (false, Some(SessionPushForwardOutcome::Expired)) => {
+            RouteDecision::Dropped(EphemeralDropReason::Expired)
+        }
+        (false, Some(SessionPushForwardOutcome::NoSession)) => {
+            RouteDecision::Dropped(EphemeralDropReason::Offline)
+        }
+        _ => RouteDecision::Dropped(EphemeralDropReason::Invalid),
+    }
+}
+
 /// Map a C4 result to the mesh reply. Ephemeral `full` / `unsupported` /
 /// `expired` / `no_session` / `invalid` are `delivered=false` and never originate a wake.
 #[must_use]

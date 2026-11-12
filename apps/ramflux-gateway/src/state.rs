@@ -151,6 +151,23 @@ impl GatewayPeerDirectory {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_peer(
+        tls: ramflux_transport::MeshTlsConfig,
+        ca: String,
+        gateway: &str,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            tls,
+            peer_ca_pems: vec![ca],
+            peers: Arc::new(BTreeMap::from([(
+                gateway.to_owned(),
+                GatewayPeer { endpoint, server_name: "ramflux-gateway".into() },
+            )])),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.peers.is_empty()
     }
@@ -165,6 +182,33 @@ impl GatewayPeerDirectory {
 
     pub(crate) fn peer_ca_pems(&self) -> &[String] {
         &self.peer_ca_pems
+    }
+
+    /// Authenticated, instance-bound same-node transient forwarding; never retries durably.
+    pub(crate) async fn post_ephemeral(
+        &self,
+        gateway_id: &str,
+        request: crate::ephemeral_forward::GatewayForwardEphemeralRequest,
+    ) -> anyhow::Result<ramflux_node_core::SessionPushForwardResponse> {
+        let peer = self
+            .peer(gateway_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown target gateway"))?;
+        let tls = self.tls.clone();
+        let peer_ca_pems = self.peer_ca_pems.clone();
+        let instance = gateway_id.to_owned();
+        Ok(tokio::task::spawn_blocking(move || {
+            ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_and_instance(
+                &peer.endpoint,
+                crate::ephemeral_forward::PATH,
+                &tls,
+                &peer.server_name,
+                &peer_ca_pems,
+                &instance,
+                &request,
+            )
+        })
+        .await??)
     }
 
     pub(crate) fn forward_path() -> &'static str {

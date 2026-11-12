@@ -17,7 +17,7 @@ def check(metadata):
     if not nodes:
         raise ValueError("production graph has no resolved SDK node")
     for node in nodes:
-        for feature in ("itest-memory-vault", "itest-legacy-accounts"):
+        for feature in ("itest-memory-vault", "itest-legacy-accounts", "test-support"):
             if feature in node["features"]:
                 raise ValueError(f"production graph enables forbidden SDK {feature}")
 
@@ -31,7 +31,7 @@ def check_tree(graph):
         # cargo tree puts optional source paths before the feature list.
         features = set(fields[-1].split(","))
         forbidden = {
-            "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts"),
+            "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts", "test-support"),
             "ramflux-node-core": ("durability-test-hooks",),
             "ramflux-storage": ("durability-test-hooks",),
         }.get(name, ())

@@ -397,6 +397,10 @@ impl LocalBusAccountState {
 
     /// Live session mode. `start_connection` moves the engine onto the worker, so the
     /// connection handle is the production source; a test carrier on `engine` still wins.
+    pub(crate) fn session_delivery_mode(&self) -> Option<&'static str> {
+        self.bound_session_mode().map(|mode| if mode.is_push() { "push" } else { "compat" })
+    }
+
     pub(crate) fn bound_session_mode(&self) -> Option<crate::gateway::session_push::SessionMode> {
         if let Some(engine) = self.engine.as_ref() {
             return Some(engine.mode.clone());

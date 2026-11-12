@@ -46,7 +46,7 @@ workspace = true
 ramflux-storage = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "test-support"] }
-ramflux-sdk = { workspace = true }
+ramflux-sdk = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
 redb = { workspace = true }
 ramflux-transport = { workspace = true, features = ["test-support"] }

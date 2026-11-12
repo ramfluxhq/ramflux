@@ -15,6 +15,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 mod attempt;
+mod ephemeral_host;
 mod events;
 mod host;
 mod lifecycle;

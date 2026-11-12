@@ -190,3 +190,9 @@ mod storage_failure_fixture;
 
 pub use object::{SdkObjectRelayCapability, SdkRelayToken};
 pub use prekey::SdkDeviceManifestResponse;
+
+#[cfg(feature = "test-support")]
+pub use bus::account_runtime::testing::{AccountSessionFixture, AccountSessionHarness};
+
+#[cfg(all(feature = "test-support", any(ramflux_production, ramflux_release_profile)))]
+compile_error!("test-support is excluded from production and release builds");

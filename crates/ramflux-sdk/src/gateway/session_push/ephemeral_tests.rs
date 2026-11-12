@@ -17,7 +17,7 @@ use tokio::time::{Duration, timeout};
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-fn source() -> Result<EphemeralSource, ramflux_crypto::CryptoError> {
+pub(crate) fn source() -> Result<EphemeralSource, ramflux_crypto::CryptoError> {
     let root = ramflux_crypto::create_identity_root("session-source", [11; 32]);
     let branch = ramflux_crypto::create_device_branch("session-source", "device", 1, [12; 32]);
     Ok(EphemeralSource {
@@ -29,7 +29,7 @@ fn source() -> Result<EphemeralSource, ramflux_crypto::CryptoError> {
     })
 }
 
-fn envelope(
+pub(crate) fn envelope(
     created_at: i64,
     id: &str,
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error + Send + Sync>> {
@@ -51,7 +51,7 @@ fn envelope(
     Ok(envelope)
 }
 
-fn frame(envelope: ramflux_protocol::Envelope) -> Result<Vec<u8>, serde_json::Error> {
+pub(crate) fn frame(envelope: ramflux_protocol::Envelope) -> Result<Vec<u8>, serde_json::Error> {
     let expires_at_ms =
         u64::try_from(envelope.created_at).unwrap_or(0).saturating_add(5).saturating_mul(1_000);
     // Preserve whitespace: transport occupancy and handoff must use original bytes.
@@ -91,7 +91,7 @@ async fn ephemeral_session_host_carries_raw_events_during_correlated_reply() -> 
     );
     let authority = source()?;
     let mut authority = Some(authority);
-    let received = timeout(Duration::from_secs(1), consumer.next(|_| authority.take())).await?;
+    let received = consumer.next(|_| authority.take()).await;
     let (bytes, _) = received.ok_or("consumer closed")?;
     assert_eq!(bytes, incoming);
     assert_eq!(engine.ephemeral_inbox.observation().0, 1, "in-flight counts once");
@@ -145,7 +145,10 @@ async fn ephemeral_session_consumer_promotes_idle_hold_and_preserves_generation_
     assert_eq!(inbox.observation(), (1, raw.len(), 1, 0));
     inbox.set_clock(ReceiverClock { local_now_ms: 1_001_000, monotonic_ms: 1_000 });
     tokio::time::advance(Duration::from_millis(10)).await;
-    let received = waiting.await.ok_or("held consumer closed")?;
+    let received = timeout(Duration::from_millis(20), waiting)
+        .await
+        .map_err(|_| "idle Hold timer did not promote ciphertext")?
+        .ok_or("held consumer closed")?;
     assert_eq!(received.0, raw, "idle timer must promote the original ciphertext");
     consumer.complete();
     drop(consumer);
@@ -180,20 +183,31 @@ async fn ephemeral_session_consumer_shares_one_budget_and_binds_root_device() ->
     drop(waiting);
     inbox.disconnect(false);
     inbox.reconnect();
-    let mut bad = envelope(1_000, "wrong-root")?;
-    bad.ext.ext.insert("source_root_commitment".into(), serde_json::json!("foreign"));
-    let branch = ramflux_crypto::create_device_branch("session-source", "device", 1, [12; 32]);
-    bad.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-        &ramflux_protocol::envelope_sender_signed_bytes(&bad)?,
-        &branch,
-    );
-    let raw = frame(bad)?;
-    inbox.push(&raw, 1_005_000);
-    let mut waiting = Box::pin(consumer.next(|_| source().ok()));
-    poll_pending(waiting.as_mut()).await;
-    assert_eq!(inbox.observation(), (0, 0, 0, 0), "foreign root cannot enter the receiver");
+    for wrong_root in [true, false] {
+        let mut bad = envelope(1_000, if wrong_root { "wrong-root" } else { "wrong-device" })?;
+        if wrong_root {
+            bad.ext.ext.insert("source_root_commitment".into(), serde_json::json!("foreign"));
+        } else {
+            bad.source_device_id = "foreign-device".into();
+        }
+        let branch = ramflux_crypto::create_device_branch("session-source", "device", 1, [12; 32]);
+        bad.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &ramflux_protocol::envelope_sender_signed_bytes(&bad)?,
+            &branch,
+        );
+        let raw = frame(bad)?;
+        inbox.push(&raw, 1_005_000);
+        let mut waiting = Box::pin(consumer.next(|_| source().ok()));
+        poll_pending(waiting.as_mut()).await;
+        assert_eq!(
+            inbox.observation(),
+            (0, 0, 0, 0),
+            "foreign root or literal device must not enter the receiver"
+        );
+        drop(waiting);
+    }
     inbox.disconnect(true);
-    assert!(waiting.await.is_none());
+    assert!(consumer.next(|_| source().ok()).await.is_none());
     let budget = SessionInbox::new();
     budget.set_clock(ReceiverClock { local_now_ms: 1_000_000, monotonic_ms: 0 });
     let mut large = frame(envelope(1_001, "byte-cap")?)?;
@@ -206,5 +220,29 @@ async fn ephemeral_session_consumer_shares_one_budget_and_binds_root_device() ->
         (8, crate::RECEIVER_CHANNEL_BYTES, 0, 0),
         "original raw bytes share the same 256 KiB budget"
     );
+    Ok(())
+}
+
+#[test]
+fn ephemeral_negotiation_refuses_nonadvertised_echo_subset() -> TestResult {
+    use super::{EstablishmentEcho, negotiate};
+    let push = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned();
+    let ephemeral = ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned();
+    for (advertised, capabilities) in [
+        (true, vec![push.clone(), "gateway.unadvertised.v1".into()]),
+        (true, vec![ephemeral]),
+        (false, vec![push]),
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "session": {"capabilities":capabilities, "inbox_incarnation_id":"0123456789abcdef0123456789abcdef"}
+        }))?;
+        let echo = EstablishmentEcho::from_bytes(&bytes)?;
+        let result = negotiate(advertised, &echo);
+        assert!(
+            matches!(result, Err(crate::SdkError::GatewaySessionRejected(ref reason))
+            if reason == "session push negotiation refused: echo names a capability that was not advertised"),
+            "echo must be a signed advertised subset with push present: {result:?}"
+        );
+    }
     Ok(())
 }

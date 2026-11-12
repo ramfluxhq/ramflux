@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 /// `allow_list_excludes_persistence_prefixes` test enforces it.
 const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::ephemeral::capability", "this module family's capability state (same crate)"),
+    ("crate::ephemeral::RouteDecision", "transient gateway route outcome"),
+    ("crate::ephemeral_forward", "transient gateway admission and forward codec"),
     ("crate::ephemeral::route", "this module family's route gate and responses (same crate)"),
     ("crate::EphemeralRouteGate", "route gate enum, crate root re-export (no I/O)"),
     ("crate::Envelope", "protocol wire envelope, crate root re-export (no I/O)"),
@@ -133,10 +135,6 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::ephemeral::send", "same-crate submit codec and D5 local unsupported (no I/O)"),
     ("crate::ephemeral::session", "bounded volatile SDK consumer and clock; no storage"),
     ("crate::ephemeral::decode_ephemeral_result", "in-memory correlated result decoder"),
-    (
-        "crate::GatewaySessionEngine",
-        "SDK stream owner type; durable submit remains a forbidden symbol",
-    ),
     ("crate::EphemeralConsumer", "volatile consumer capability type"),
     ("crate::EphemeralSendOutcome", "ephemeral result enum"),
     ("crate::SdkError", "SDK error enum; no storage operation"),
@@ -1214,6 +1212,23 @@ fn c1_view_real_source_refuses_store_and_publication_imports() -> TestResult {
         let outcome = scan_c1_view(&candidate, &modules);
         assert_eq!(outcome, Err(format!("import {path} not on the ephemeral allow-list in {rel}")));
     }
+    Ok(())
+}
+
+#[test]
+fn sdk_ephemeral_refuses_durable_engine_traversal() -> TestResult {
+    let root = workspace_root()?;
+    let rel = "crates/ramflux-sdk/src/gateway/ephemeral.rs";
+    let source = std::fs::read_to_string(root.join(rel))?;
+    let candidate = format!(
+        "{source}\nasync fn leak(engine: &mut crate::GatewaySessionEngine, envelope: ramflux_protocol::Envelope) {{ let _ = engine.submit_envelope_classified(envelope).await; }}\n"
+    );
+    let modules = load_crate_modules(&root.join("crates/ramflux-sdk/src"))?;
+    assert_eq!(
+        scan_file(&candidate, rel, "crate::gateway::ephemeral", &modules),
+        Err(format!("import crate::GatewaySessionEngine not on the ephemeral allow-list in {rel}"))
+    );
+
     Ok(())
 }
 

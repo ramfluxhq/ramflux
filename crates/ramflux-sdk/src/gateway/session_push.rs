@@ -18,7 +18,7 @@ mod carrier_tests;
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]
-mod ephemeral_tests;
+pub(crate) mod ephemeral_tests;
 #[cfg(test)]
 mod negotiation_tests;
 #[cfg(test)]

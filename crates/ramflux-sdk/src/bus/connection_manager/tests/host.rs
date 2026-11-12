@@ -348,7 +348,7 @@ async fn ephemeral_session_client_generation_owns_exchange_and_consumer() -> Cas
         })?;
         assert_eq!(call.await??, crate::EphemeralSendOutcome::Delivered);
         handle.stop().await;
-        assert!(stale.take_ephemeral_consumer().await.is_err(), "retired generation cannot obtain an adapter");
+        assert!(matches!(stale.take_ephemeral_consumer().await, Err(crate::SdkError::NetworkingPendingContext { .. })), "retired generation cannot obtain an adapter");
         assert!(consumer.next(|_| None).await.is_none(), "account stop closes the transient consumer");
         Ok(())
     }).await

@@ -36,6 +36,11 @@ fn e2e_push_restart() -> e2e::Result<()> {
     for id in ids.iter().take(3) {
         wait_node_observed_ack(&stack, &bob, id)?;
     }
+    let status = rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id])?;
+    assert_eq!(
+        status["session_delivery_mode"], "push",
+        "recipient must negotiate push before process death: {status}"
+    );
     let live = wait_dm_texts(&bob_d, &bob, &conversation, &bodies[..3])?;
     assert_eq!(message_texts(&live), bodies[..3], "live push must contain exactly the sent set");
     let (socket, root) = crash_daemon(bob_d)?;

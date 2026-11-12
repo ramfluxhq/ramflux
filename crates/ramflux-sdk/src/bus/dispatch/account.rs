@@ -142,6 +142,7 @@ fn account_status(
         "principal_commitment":account.principal_commitment,
         "device_id": account.gateway_config.device_id,
         "target_delivery_id": account.target_delivery_id,
+        "session_delivery_mode":account.session_delivery_mode(),
         "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
         "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
         "pending_deliveries": account.pending_deliveries.len(),

@@ -6,73 +6,76 @@ use super::*;
 use crate::session_push::tests::support::sink;
 use ramflux_node_core::{RouterCore, RouterRedbStore, SessionDescriptor, SessionLifecycle};
 use ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
-use ramflux_sdk::{
-    EphemeralReceiver, EphemeralSendError, EphemeralSendOutcome, EphemeralWire, ReceiverAdmit,
-    ReceiverClock, ReceiverDequeue, send_ephemeral,
-};
+use ramflux_sdk::{EphemeralSendError, EphemeralSendOutcome, EphemeralWire, send_ephemeral};
 use ramflux_storage::{AccountDb, AccountDbKey, AccountIndex};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const TARGET: &str = "alice-target";
-type TestResult = anyhow::Result<()>;
+pub(super) const TARGET: &str = "alice-target";
+pub(super) type TestResult = anyhow::Result<()>;
 
 fn register_source(router: &RouterCore) -> TestResult {
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let root = ramflux_crypto::create_identity_root("agent", [3; 32]);
-    let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
-    let agreement = ramflux_crypto::X25519KeyPair::from_seed([5; 32]);
-    let proof = ramflux_crypto::authorize_device_branch_v2(
-        &root,
-        &branch,
-        ramflux_crypto::BranchAuthorization {
-            audience: ramflux_node_core::IDENTITY_BIND_AUDIENCE,
-            capability_scope: vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.into()],
-            issued_at: now - 10,
-            expires_at: now + 3600,
-            principal_kind: ramflux_protocol::PrincipalKind::Human,
-            agreement_identity_public_key: agreement.public,
-        },
-    )?;
-    let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let branch_public =
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-    let (signing_key_commitment, agreement_key_commitment) =
-        ramflux_crypto::device_key_commitments(
-            &branch_public,
-            &ramflux_protocol::encode_base64url(agreement.public),
+    for (principal, device, root_seed, branch_seed, agreement_seed, target, session) in [
+        ("agent", "agent-device", 3, 4, 5, "agent-target", "agent-session"),
+        ("alice", "alice-device", 6, 7, 8, TARGET, "alice-session"),
+    ] {
+        let root = ramflux_crypto::create_identity_root(principal, [root_seed; 32]);
+        let branch = ramflux_crypto::create_device_branch(principal, device, 1, [branch_seed; 32]);
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed([agreement_seed; 32]);
+        let proof = ramflux_crypto::authorize_device_branch_v2(
+            &root,
+            &branch,
+            ramflux_crypto::BranchAuthorization {
+                audience: ramflux_node_core::IDENTITY_BIND_AUDIENCE,
+                capability_scope: vec![ramflux_node_core::IDENTITY_BIND_CAPABILITY.into()],
+                issued_at: now - 10,
+                expires_at: now + 3600,
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                agreement_identity_public_key: agreement.public,
+            },
         )?;
-    let device_set = ramflux_crypto::sign_device_set(
-        &root,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: ramflux_protocol::PrincipalKind::Human,
-            device_set_epoch: 1,
-            devices: vec![ramflux_protocol::SignedDeviceSetEntry {
-                device_id: "agent-device".into(),
-                device_epoch: 1,
-                signing_key_commitment,
-                agreement_key_commitment,
-                status: ramflux_protocol::DeviceSetStatus::Active,
-                revoked_at: None,
-            }],
-        },
-    )?;
-    router.mvp1_register_identity(&ramflux_node_core::IdentityRegisterRequest {
-        device_set: Some(device_set),
-        principal_commitment: ramflux_crypto::identity_root_commitment(
-            &root.signing_key.verifying_key(),
-        ),
-        root_public_key: public,
-        branch_public_key: branch_public,
-        proof,
-        target_delivery_id: "agent-target".into(),
-        gateway_id: "ramflux-gateway".into(),
-        session_id: "agent-session".into(),
-        push_alias_hash: None,
-        now,
-        registration_pow: None,
-        source_ip_hash: Some("activation-fixture".into()),
-    })?;
+        let public =
+            ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+        let branch_public =
+            ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
+        let (signing_key_commitment, agreement_key_commitment) =
+            ramflux_crypto::device_key_commitments(
+                &branch_public,
+                &ramflux_protocol::encode_base64url(agreement.public),
+            )?;
+        let device_set = ramflux_crypto::sign_device_set(
+            &root,
+            ramflux_crypto::DeviceSetSigningInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                device_set_epoch: 1,
+                devices: vec![ramflux_protocol::SignedDeviceSetEntry {
+                    device_id: device.into(),
+                    device_epoch: 1,
+                    signing_key_commitment,
+                    agreement_key_commitment,
+                    status: ramflux_protocol::DeviceSetStatus::Active,
+                    revoked_at: None,
+                }],
+            },
+        )?;
+        router.mvp1_register_identity(&ramflux_node_core::IdentityRegisterRequest {
+            device_set: Some(device_set),
+            principal_commitment: ramflux_crypto::identity_root_commitment(
+                &root.signing_key.verifying_key(),
+            ),
+            root_public_key: public,
+            branch_public_key: branch_public,
+            proof,
+            target_delivery_id: target.into(),
+            gateway_id: "ramflux-gateway".into(),
+            session_id: session.into(),
+            push_alias_hash: None,
+            now,
+            registration_pow: None,
+            source_ip_hash: Some("activation-fixture".into()),
+        })?;
+    }
     Ok(())
 }
 
@@ -90,15 +93,32 @@ fn recipient(context: &GatewayQuicContext) -> SessionDescriptor {
     }
 }
 
+async fn bind_source(context: &GatewayQuicContext) -> anyhow::Result<String> {
+    let descriptor = SessionDescriptor {
+        target_delivery_id: "agent-target".into(),
+        device_id: "agent-device".into(),
+        gateway_id: context.gateway_id.clone(),
+        session_id: "agent-session".into(),
+        device_epoch: 1,
+        session_seq: ramflux_node_core::now_unix_seconds(),
+        last_cursor: None,
+        push_alias_hash: None,
+        lifecycle: SessionLifecycle::Live,
+    };
+    negotiate(context, &auth_claiming_ephemeral(true)?, &descriptor)
+        .await?
+        .incarnation_id
+        .ok_or_else(|| anyhow::anyhow!("source push binding missing"))
+}
+
 async fn ready(context: &GatewayQuicContext) -> TestResult {
     context.hub.readiness.start_with_hub(&context.router, &context.hub, &context.gateway_id);
-    let waited = tokio::time::timeout(Duration::from_secs(15), async {
+    crate::ephemeral::tests::guard_10s("router capability discovery", async {
         while !context.hub.readiness.supports() {
             tokio::task::yield_now().await;
         }
     })
     .await;
-    assert!(waited.is_ok(), "router capabilities discovery did not finish within 15s");
     Ok(())
 }
 
@@ -180,15 +200,6 @@ fn files(root: &Path) -> anyhow::Result<BTreeMap<std::path::PathBuf, [u8; 32]>> 
     Ok(result)
 }
 
-fn account(root: &Path) -> anyhow::Result<AccountDb> {
-    let index = AccountIndex::open(root)?;
-    let identity = ramflux_crypto::create_identity_root("client", [11; 32]);
-    index.create_account(
-        "client",
-        &ramflux_crypto::identity_root_commitment(&identity.signing_key.verifying_key()),
-    )?;
-    Ok(AccountDb::open(&index, "client", &AccountDbKey::from_bytes([12; 32]))?)
-}
 fn journal(db: &AccountDb) -> anyhow::Result<String> {
     Ok(format!(
         "{:?}|{:?}|{:?}|{:?}",
@@ -197,6 +208,17 @@ fn journal(db: &AccountDb) -> anyhow::Result<String> {
         db.pending_outbox(256)?,
         db.list_actor_states::<Value>("")?
     ))
+}
+
+fn assert_client_reopen(root: &Path, baseline: &str) -> TestResult {
+    let index = AccountIndex::open(root)?;
+    let reopened = AccountDb::open(&index, "client", &AccountDbKey::from_bytes([12; 32]))?;
+    assert_eq!(
+        journal(&reopened)?,
+        baseline,
+        "ordinary client reopen retained ephemeral journal/outbox/actor state"
+    );
+    Ok(())
 }
 
 async fn issued(context: &GatewayQuicContext) -> anyhow::Result<Value> {
@@ -216,6 +238,14 @@ async fn empty_resume(context: &GatewayQuicContext, incarnation: &str) -> TestRe
     )
     .await?;
     assert_eq!(page["entries"], json!([]), "ephemeral appeared in Resume: {page}");
+    Ok(())
+}
+
+fn stop_router_gracefully(child: &mut Child) -> TestResult {
+    let status =
+        std::process::Command::new("kill").arg("-TERM").arg(child.0.id().to_string()).status()?;
+    anyhow::ensure!(status.success(), "router graceful stop signal failed");
+    child.0.wait()?;
     Ok(())
 }
 
@@ -252,191 +282,7 @@ async fn restart(child: &mut Child, context: &GatewayQuicContext) -> TestResult 
             }
         }
     });
-    let waited = tokio::time::timeout(Duration::from_secs(15), received).await;
-    assert!(waited.is_ok(), "restarted router did not bind within 15s");
-    waited??;
-    Ok(())
-}
-
-async fn exercise_live(
-    context: &GatewayQuicContext,
-    runtime: &crate::GatewaySessionRuntime,
-    caps: &[String],
-    incarnation: &str,
-    dormant: bool,
-) -> TestResult {
-    let (target_send, frames) = sink();
-    let registration = if runtime.ephemeral {
-        context
-            .hub
-            .register_ephemeral(
-                TARGET.into(),
-                "alice-session".into(),
-                target_send,
-                Some(incarnation.to_owned()),
-                64,
-            )
-            .await?
-    } else {
-        context.hub.register(TARGET.into(), "alice-session".into(), target_send).await?
-    };
-    let (outcome, writes, _) = send(context, runtime, "activation-live", caps)?;
-    if dormant {
-        assert_eq!(outcome, EphemeralSendOutcome::Unsupported);
-        assert_eq!(writes, 0);
-    } else {
-        assert_eq!(outcome, EphemeralSendOutcome::Delivered);
-        assert_eq!(writes, 1);
-        context.hub.flushed(TARGET).await?;
-        let observed_frames =
-            frames.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.clone();
-        assert_eq!(observed_frames.len(), 1, "one actual transient delivery");
-        let bytes = serde_json::to_vec(&observed_frames[0])?;
-        let mut receiver = EphemeralReceiver::new();
-        let now = crate::ephemeral::now_ms();
-        assert!(matches!(
-            receiver.admit(
-                &bytes,
-                ReceiverClock { local_now_ms: now, monotonic_ms: 1 },
-                "agent",
-                &runtime.branch_public_key
-            ),
-            ReceiverAdmit::Displayed { .. }
-        ));
-        assert!(matches!(receiver.pop(now, 1), ReceiverDequeue::Delivered { .. }));
-        receiver.complete();
-        assert_eq!(receiver.ledger_probe(), ramflux_sdk::LedgerProbe::default());
-    }
-    context.hub.unregister(TARGET, registration.token).await;
-    Ok(())
-}
-
-async fn exercise_full_and_expired(
-    context: &GatewayQuicContext,
-    runtime: &crate::GatewaySessionRuntime,
-    caps: &[String],
-    incarnation: &str,
-) -> TestResult {
-    let (target_send, _) = sink();
-    let registration = context
-        .hub
-        .register_ephemeral(
-            TARGET.into(),
-            "alice-session".into(),
-            target_send,
-            Some(incarnation.to_owned()),
-            64,
-        )
-        .await?;
-    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    let snapshot = context.hub.snapshot().await;
-    snapshot
-        .get(TARGET)
-        .ok_or_else(|| anyhow::anyhow!("full-row registration"))?
-        .queue
-        .park_next_write(entered.clone(), release.clone());
-    for n in 0..9 {
-        let submit = crate::ephemeral::handler_tests::submit(
-            runtime,
-            &format!("full-{n}"),
-            5,
-            |envelope| envelope.encrypted_payload = "x".repeat(30_000),
-        )?;
-        let mut wire = GatewayWire { context, runtime, reply: None, result: None, writes: 0 };
-        let outcome = send_ephemeral(
-            &submit.signed_request,
-            &submit.envelope,
-            caps,
-            crate::ephemeral::now_ms(),
-            &mut wire,
-        )?;
-        assert_eq!(
-            outcome,
-            if n < 8 {
-                EphemeralSendOutcome::Delivered
-            } else {
-                EphemeralSendOutcome::Dropped(
-                    ramflux_protocol::ephemeral::EphemeralDropReason::QueueFull,
-                )
-            }
-        );
-        if n == 0 {
-            let waiting = tokio::time::timeout(Duration::from_secs(10), entered.notified()).await;
-            assert!(waiting.is_ok(), "full-row writer did not enter held sink");
-        }
-    }
-    release.add_permits(1);
-    context.hub.flushed(TARGET).await?;
-    context.hub.unregister(TARGET, registration.token).await;
-    let expired = crate::ephemeral::handler_tests::submit(runtime, "expired", 5, |envelope| {
-        envelope.created_at -= 10;
-    })?;
-    let expires_at_ms = u64::try_from(expired.envelope.created_at + 5)? * 1000;
-    let result: Value = crate::router_post_json_async(
-        &context.router,
-        "/mvp0/envelope-ephemeral",
-        &json!({"envelope":expired.envelope,"expires_at_ms":expires_at_ms}),
-    )
-    .await?;
-    assert_eq!(result, json!({"outcome":"dropped","reason":"expired"}));
-    let mut invalid = crate::ephemeral::handler_tests::submit(runtime, "invalid", 5, |_| {})?;
-    invalid.envelope.signed.signature.clear();
-    let expires_at_ms = u64::try_from(invalid.envelope.created_at + 5)? * 1000;
-    let result: Value = crate::router_post_json_async(
-        &context.router,
-        "/mvp0/envelope-ephemeral",
-        &json!({"envelope":invalid.envelope,"expires_at_ms":expires_at_ms}),
-    )
-    .await?;
-    assert_eq!(result, json!({"outcome":"dropped","reason":"invalid"}));
-    Ok(())
-}
-
-async fn exercise_legacy_recipient(
-    context: &GatewayQuicContext,
-    runtime: &crate::GatewaySessionRuntime,
-    caps: &[String],
-    dormant: bool,
-    root: &Path,
-) -> TestResult {
-    // A legacy gateway registration against the new router is refused before any fallback.
-    let old = negotiate(context, &auth(true)?, &recipient(context)).await?;
-    assert!(
-        old.incarnation_id.is_some(),
-        "old gateway retains session push without an ephemeral echo"
-    );
-    assert!(!old.ephemeral);
-    let baseline_artifacts = files(root)?;
-    let baseline_issued = issued(context).await?;
-    let (local, writes, _) = send(
-        context,
-        runtime,
-        "old-gateway-no-echo",
-        &[ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()],
-    )?;
-    assert_eq!(local, EphemeralSendOutcome::Unsupported);
-    assert_eq!(writes, 0, "old gateway without an echo must not write a frame");
-    let (legacy_outcome, _, legacy_result) =
-        send(context, runtime, "activation-old-gateway", caps)?;
-    assert_eq!(
-        legacy_outcome,
-        EphemeralSendOutcome::Unsupported,
-        "legacy recipient capability must be refused before forwarding"
-    );
-    if !dormant {
-        assert_eq!(
-            legacy_result,
-            Some(json!({"frame_type":"ephemeral_result",
-            "envelope_id":"activation-old-gateway","outcome":"dropped","reason":"recipient_unsupported"}))
-        );
-    }
-    assert_eq!(
-        files(root)?,
-        baseline_artifacts,
-        "legacy recipient refusal changed durable artifacts"
-    );
-    assert_eq!(issued(context).await?, baseline_issued, "legacy refusal allocated a sequence");
+    crate::ephemeral::tests::guard_10s("restarted router bound", received).await?;
     Ok(())
 }
 
@@ -485,7 +331,7 @@ async fn settle_control(
     Ok(baseline_replay)
 }
 
-async fn run_activation() -> TestResult {
+async fn run_activation(measure_persistence: bool) -> TestResult {
     let seed = RouterCore::new();
     register_source(&seed)?;
     let (mut child, context) = real_router_with_state(Some(&seed)).await?;
@@ -497,7 +343,8 @@ async fn run_activation() -> TestResult {
     let dormant = std::env::var_os("RAMFLUX_EXPECT_EPHEMERAL_DORMANT").is_some();
     assert_eq!(binding.ephemeral, !dormant, "production router listing controls activation");
     let mut runtime = crate::session::submit_fixtures::test_runtime()?;
-    runtime.session_push = Some(incarnation.clone());
+    let source_incarnation = bind_source(&context).await?;
+    runtime.session_push = Some(source_incarnation.clone());
     runtime.ephemeral = binding.ephemeral;
     assert_eq!(runtime.ephemeral_negotiated(), !dormant);
     let caps = if binding.ephemeral {
@@ -508,12 +355,132 @@ async fn run_activation() -> TestResult {
     } else {
         vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()]
     };
-    let baseline_replay =
-        settle_control(&mut child, &context, &runtime, &incarnation, dormant).await?;
+    if dormant {
+        settle_control(&mut child, &context, &runtime, &incarnation, true).await?;
+        let (outcome, writes, _) = send(&context, &runtime, "dormant", &caps)?;
+        assert_eq!(outcome, EphemeralSendOutcome::Unsupported);
+        assert_eq!(writes, 0);
+        return Ok(());
+    }
     let client_root = child.1.join("client");
-    let db = account(&client_root)?;
+    let sender_root = client_root.join("sender");
+    let receiver_root = client_root.join("receiver");
+    let mut sender = super::activation_account::Account::attach(
+        &sender_root,
+        &context,
+        &runtime,
+        &source_incarnation,
+    )
+    .await?;
+    let recipient_runtime = super::activation_account::recipient_runtime(&runtime, &incarnation)?;
+    let mut receiver = super::activation_account::Account::attach(
+        &receiver_root,
+        &context,
+        &recipient_runtime,
+        &incarnation,
+    )
+    .await?;
+    let registration = context
+        .hub
+        .register_ephemeral(
+            TARGET.into(),
+            "alice-session".into(),
+            receiver.push_sink(),
+            Some(incarnation.clone()),
+            64,
+        )
+        .await?;
+    let sender_manifest = sender.host.public_manifest()?;
+    let receiver_manifest = receiver.host.public_manifest()?;
+    sender
+        .host
+        .trust_peer(receiver_manifest, recipient_runtime.source_identity.root_commitment())?;
+    receiver.host.trust_peer(sender_manifest, runtime.source_identity.root_commitment())?;
+    let source_registration = context.hub.register_runtime(&runtime, sender.push_sink()).await?;
+    let receiver_control_before = receiver.host.snapshot()?;
+    let committed = crate::ephemeral::tests::guard_10s(
+        "supported durable control submit",
+        receiver.host.service_while(sender.host.durable_message(
+            recipient_runtime.source_identity.root_commitment(),
+            &recipient_runtime.device_id,
+            TARGET,
+        )),
+    )
+    .await?;
+    assert_eq!(committed.inbox_seq, 1, "real transport durable control must issue sequence 1");
+    let settled = async {
+        loop {
+            let mut complete = true;
+            for target in [TARGET, runtime.target_delivery_id.as_str()] {
+                let value: Value = crate::router_get_json_async(
+                    &context.router,
+                    &format!("/mvp0/cursor/{target}"),
+                )
+                .await
+                .map_err(|error| {
+                    ramflux_sdk::SdkError::GatewaySessionRejected(error.to_string())
+                })?;
+                complete &= value["inbox_seq"] == 1 || value["cursor"]["inbox_seq"] == 1;
+            }
+            if complete {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    let controlled = tokio::time::timeout(
+        Duration::from_secs(10),
+        sender.host.service_while(receiver.host.service_while(settled)),
+    )
+    .await;
+    match controlled {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("durable receive/ACK watchdog: {}", receiver.host.diagnostics()?),
+    }
+    crate::ephemeral::tests::guard_10s(
+        "client durable ACK result applied",
+        receiver.host.settled(TARGET, 1),
+    )
+    .await?;
+    crate::ephemeral::tests::guard_10s(
+        "sender durable receipt ACK result applied",
+        sender.host.settled(&runtime.target_delivery_id, 1),
+    )
+    .await?;
+    assert_ne!(
+        receiver.host.snapshot()?,
+        receiver_control_before,
+        "durable receive on the measured SDK path must move the account observer"
+    );
+    empty_resume(&context, &incarnation).await?;
+    // Reopen the real router after the calibrated durable control, keeping both SDK hosts alive.
+    stop_router_gracefully(&mut child)?;
+    let baseline_replay = {
+        let store = RouterRedbStore::open(child.1.join("router.redb"))?;
+        store
+            .load_router()?
+            .ok_or_else(|| anyhow::anyhow!("baseline router missing"))?
+            .ephemeral_durable_snapshot()?
+            .replay
+    };
+    restart(&mut child, &context).await?;
+    assert_eq!(bind_source(&context).await?, source_incarnation);
+    let rebound =
+        negotiate(&context, &auth_claiming_ephemeral(true)?, &recipient(&context)).await?;
+    assert_eq!(rebound.incarnation_id.as_deref(), Some(incarnation.as_str()));
+    sender.host.warm_transport().await?;
+    receiver.host.warm_transport().await?;
+    let before_journal = (sender.host.snapshot()?, receiver.host.snapshot()?);
     let before_client = files(&client_root)?;
-    let before_journal = journal(&db)?;
+    let before_writes = (
+        sender.writes.lock().map_err(|_| anyhow::anyhow!("sender writes"))?.len(),
+        receiver.writes.lock().map_err(|_| anyhow::anyhow!("receiver writes"))?.len(),
+    );
+    let mut consumer = receiver
+        .host
+        .consumer()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("real account consumer missing"))?;
     let before_gateway = serde_json::to_vec(&context.store.load_state()?)?;
     let before_issued = issued(&context).await?;
     let before_artifacts = files(&child.1)?;
@@ -529,34 +496,177 @@ async fn run_activation() -> TestResult {
     assert_eq!(
         context.notify.wake_count(),
         before_control + 1,
-        "wake observer must see the production spawn_blocking call"
+        "wake observer must see production spawn_blocking"
     );
     let wakes = context.notify.wake_count();
-    exercise_live(&context, &runtime, &caps, &incarnation, dormant).await?;
-    if !dormant {
+
+    assert_eq!(
+        sender.submit(&runtime, "account-live", |_| {}).await?,
+        EphemeralSendOutcome::Delivered
+    );
+    let handed_off = crate::ephemeral::tests::guard_10s(
+        "live SDK authenticated handoff",
+        receiver.host.next(&mut consumer, |_| Some(super::activation_account::source(&runtime))),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("authenticated live handoff missing"))?;
+    let live: Value = serde_json::from_slice(&handed_off.0)?;
+    assert_eq!(
+        live["envelope"]["envelope_id"], "account-live",
+        "end-to-end handoff must use the real host and consumer"
+    );
+    assert_eq!(
+        live["envelope"]["encrypted_payload"],
+        super::activation_account::presealed_ciphertext()?,
+        "known presealed ciphertext must survive handoff unchanged"
+    );
+    consumer.complete();
+    context.hub.unregister(TARGET, registration.token).await;
+    assert_eq!(
+        sender.submit(&runtime, "account-offline", |_| {}).await?,
+        EphemeralSendOutcome::Dropped(ramflux_protocol::ephemeral::EphemeralDropReason::Offline)
+    );
+    let registration = context
+        .hub
+        .register_ephemeral(
+            TARGET.into(),
+            "alice-session".into(),
+            receiver.push_sink(),
+            Some(incarnation.clone()),
+            64,
+        )
+        .await?;
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    context
+        .hub
+        .snapshot()
+        .await
+        .get(TARGET)
+        .ok_or_else(|| anyhow::anyhow!("full-row registration"))?
+        .queue
+        .park_next_write(entered.clone(), release.clone());
+    for n in 0..9 {
+        let outcome = sender.submit_padded(&runtime, &format!("account-full-{n}")).await?;
         assert_eq!(
-            send(&context, &runtime, "activation-offline", &caps)?.0,
-            EphemeralSendOutcome::Dropped(
-                ramflux_protocol::ephemeral::EphemeralDropReason::Offline
+            outcome,
+            if n < 8 {
+                EphemeralSendOutcome::Delivered
+            } else {
+                EphemeralSendOutcome::Dropped(
+                    ramflux_protocol::ephemeral::EphemeralDropReason::QueueFull,
+                )
+            }
+        );
+        if n == 0 {
+            crate::ephemeral::tests::guard_10s(
+                "actual SDK full-row gateway writer",
+                entered.notified(),
             )
+            .await;
+        }
+    }
+    release.add_permits(1);
+    context.hub.flushed(TARGET).await?;
+    for n in 0..8 {
+        let received = crate::ephemeral::tests::guard_10s(
+            &format!("full-row SDK authenticated handoff {n}"),
+            receiver
+                .host
+                .next(&mut consumer, |_| Some(super::activation_account::source(&runtime))),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("full-row handoff missing"))?;
+        let frame: Value = serde_json::from_slice(&received.0)?;
+        assert_eq!(frame["envelope"]["envelope_id"], format!("account-full-{n}"));
+        consumer.complete();
+    }
+    assert_eq!(
+        sender.submit(&runtime, "account-expired", |envelope| envelope.created_at -= 10).await?,
+        EphemeralSendOutcome::Invalid(ramflux_protocol::ephemeral::EphemeralModeError::Expired)
+    );
+    if measure_persistence {
+        assert_eq!(
+            (sender.host.snapshot()?, receiver.host.snapshot()?),
+            before_journal,
+            "attached SDK account journal changed for ephemeral transport"
+        );
+        assert_eq!(
+            files(&client_root)?,
+            before_client,
+            "attached SDK account DB/WAL bytes changed"
         );
     }
-    if !dormant {
-        exercise_full_and_expired(&context, &runtime, &caps, &incarnation).await?;
-    }
+    assert_eq!(
+        files(&child.1)?,
+        before_artifacts,
+        "actual live/offline/full/expired transport changed durable artifacts"
+    );
+    let old = negotiate(&context, &auth(true)?, &recipient(&context)).await?;
+    assert!(!old.ephemeral);
+    let before_refused_artifacts = files(&child.1)?;
+    assert_eq!(
+        sender.submit(&runtime, "account-refused", |_| {}).await?,
+        EphemeralSendOutcome::Unsupported
+    );
+    assert_eq!(
+        files(&child.1)?,
+        before_refused_artifacts,
+        "refused transport changed durable artifacts"
+    );
+    // Registration metadata is control-plane state, outside the transport send-effect interval.
+    let rebound =
+        negotiate(&context, &auth_claiming_ephemeral(true)?, &recipient(&context)).await?;
+    assert_eq!(rebound.incarnation_id.as_deref(), Some(incarnation.as_str()));
+    context.hub.unregister(TARGET, registration.token).await;
     assert_eq!(issued(&context).await?, before_issued, "issued advanced for ephemeral");
     empty_resume(&context, &incarnation).await?;
     assert_eq!(
         context.notify.wake_count(),
         wakes,
-        "real admission/forward path woke offline delivery"
+        "actual submit path must never wake for ephemeral"
     );
     assert_eq!(serde_json::to_vec(&context.store.load_state()?)?, before_gateway);
-    assert_eq!(journal(&db)?, before_journal, "ephemeral mutated journal or durable SDK state");
-    assert_eq!(files(&client_root)?, before_client, "client DB/WAL bytes changed");
+    if measure_persistence {
+        assert_eq!(
+            (sender.host.snapshot()?, receiver.host.snapshot()?),
+            before_journal,
+            "attached SDK account journal changed for ephemeral transport"
+        );
+        assert_eq!(
+            files(&client_root)?,
+            before_client,
+            "attached SDK account DB/WAL bytes changed"
+        );
+    }
+    for (account, before) in [(&sender, before_writes.0), (&receiver, before_writes.1)] {
+        let writes = account.writes.lock().map_err(|_| anyhow::anyhow!("SDK writes"))?;
+        assert!(
+            writes
+                .iter()
+                .skip(before)
+                .all(|frame| frame["frame_type"] != "ack" && frame["frame_type"] != "ack_batch"),
+            "ephemeral handoff must emit no ACK or ledger work"
+        );
+        assert!(
+            writes
+                .iter()
+                .skip(before)
+                .filter(|frame| frame["frame_type"] == "submit")
+                .all(|frame| frame["submit"]["envelope"]["ext"]["delivery_mode"] == "ephemeral"
+                    || frame["envelope"]["ext"]["delivery_mode"] == "ephemeral"),
+            "no durable fallback submit"
+        );
+    }
     let after_artifacts = files(&child.1)?;
-    exercise_legacy_recipient(&context, &runtime, &caps, dormant, &child.1).await?;
-    assert_eq!(issued(&context).await?, before_issued, "legacy recipient caused durable fallback");
+    // Both ordinary-live and legacy-refusal intervals are observed; control-plane reassertion
+    // may legitimately refresh router metadata between them.
+    context.hub.unregister(&runtime.target_delivery_id, source_registration.token).await;
+    sender.stop().await;
+    receiver.stop().await;
+    drop(consumer);
+    drop(sender);
+    drop(receiver);
     // Ordinary reopen of the actual router store after process death: no replay tuple/content.
     child.0.kill()?;
     child.0.wait()?;
@@ -570,44 +680,29 @@ async fn run_activation() -> TestResult {
         baseline_replay,
         "router reopen retained an ephemeral replay tuple"
     );
-    assert_eq!(
-        after_artifacts, before_artifacts,
-        "ephemeral live/offline/full/expired/refused changed durable file artifacts"
-    );
+    assert!(!after_artifacts.is_empty(), "durable artifact inventory must be nonempty");
     drop(reopened);
     drop(store);
     restart(&mut child, &context).await?;
     assert_eq!(issued(&context).await?, before_issued, "router restart changed issued");
     empty_resume(&context, &incarnation).await?;
-    // A new receiver has no queued ciphertext or ACK work after restart.
-    assert_eq!(EphemeralReceiver::new().pop(crate::ephemeral::now_ms(), 1), ReceiverDequeue::Empty);
+    if measure_persistence {
+        assert_client_reopen(&sender_root, &before_journal.0)?;
+        assert_client_reopen(&receiver_root, &before_journal.1)?;
+    }
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a separately built same-tree router binary on QA"]
 async fn ephemeral_activation_end_to_end() -> TestResult {
-    run_activation().await
+    run_activation(false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a separately built same-tree router binary on QA"]
 async fn ephemeral_persistence_absence() -> TestResult {
-    run_activation().await
-}
-
-fn receiver_admit(
-    receiver: &mut EphemeralReceiver,
-    frame: &Value,
-    runtime: &crate::GatewaySessionRuntime,
-    monotonic_ms: u64,
-) -> anyhow::Result<ReceiverAdmit> {
-    Ok(receiver.admit(
-        &serde_json::to_vec(frame)?,
-        ReceiverClock { local_now_ms: crate::ephemeral::now_ms(), monotonic_ms },
-        "agent",
-        &runtime.branch_public_key,
-    ))
+    run_activation(true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -626,79 +721,361 @@ async fn ephemeral_router_restart_preserves_live_receiver_dedup() -> TestResult 
     }
     let incarnation = binding.incarnation_id.ok_or_else(|| anyhow::anyhow!("push missing"))?;
     let mut runtime = crate::session::submit_fixtures::test_runtime()?;
-    runtime.session_push = Some(incarnation.clone());
+    let source_incarnation = bind_source(&context).await?;
+    runtime.session_push = Some(source_incarnation.clone());
     runtime.ephemeral = true;
-    let caps = vec![
-        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
-        GATEWAY_EPHEMERAL_CAPABILITY.into(),
-    ];
-    let (target_send, frames) = sink();
+    let mut sender = super::activation_account::Account::attach(
+        &child.1.join("sender"),
+        &context,
+        &runtime,
+        &source_incarnation,
+    )
+    .await?;
+    let recipient_runtime = super::activation_account::recipient_runtime(&runtime, &incarnation)?;
+    let mut receiver = super::activation_account::Account::attach(
+        &child.1.join("receiver"),
+        &context,
+        &recipient_runtime,
+        &incarnation,
+    )
+    .await?;
+    let mut consumer =
+        receiver.host.consumer().await?.ok_or_else(|| anyhow::anyhow!("consumer missing"))?;
     let registration = context
         .hub
         .register_ephemeral(
             TARGET.into(),
             "alice-session".into(),
-            target_send,
+            receiver.push_sink(),
             Some(incarnation),
             64,
         )
         .await?;
     assert_eq!(
-        send(&context, &runtime, "surviving-receiver", &caps)?.0,
+        sender.submit(&runtime, "surviving-receiver", |_| {}).await?,
         EphemeralSendOutcome::Delivered
     );
-    context.hub.flushed(TARGET).await?;
-    let first = frames
-        .lock()
-        .map_err(|_| anyhow::anyhow!("frames"))?
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("first transient missing"))?;
-    let envelope: ramflux_protocol::Envelope = serde_json::from_value(first["envelope"].clone())?;
-    let expires_at_ms =
-        first["expires_at_ms"].as_u64().ok_or_else(|| anyhow::anyhow!("deadline"))?;
-    let mut receiver = EphemeralReceiver::new();
-    let admitted = receiver_admit(&mut receiver, &first, &runtime, 1)?;
-    assert!(matches!(admitted, ReceiverAdmit::Displayed { .. }));
-    assert!(matches!(
-        receiver.pop(crate::ephemeral::now_ms(), 1),
-        ReceiverDequeue::Delivered { .. }
-    ));
-    receiver.complete();
+    let first = crate::ephemeral::tests::guard_10s(
+        "initial live dedup handoff",
+        receiver.host.next(&mut consumer, |_| Some(super::activation_account::source(&runtime))),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("first handoff missing"))?;
+    let frame: Value = serde_json::from_slice(&first.0)?;
+    let envelope: ramflux_protocol::Envelope = serde_json::from_value(frame["envelope"].clone())?;
+    consumer.complete();
+    stop_router_gracefully(&mut child)?;
+    restart(&mut child, &context).await?;
+    negotiate(&context, &auth_claiming_ephemeral(true)?, &recipient(&context)).await?;
+    assert_eq!(bind_source(&context).await?, source_incarnation);
+    sender.host.warm_transport().await?;
+    receiver.host.warm_transport().await?;
+    assert!(crate::ephemeral::now_ms() < first.1, "router restart fixture must finish before D");
+    assert_eq!(
+        sender.host.submit(envelope).await?,
+        EphemeralSendOutcome::Delivered,
+        "only the router's volatile replay marker is lost"
+    );
+    assert_eq!(
+        sender.submit(&runtime, "fresh-after-router-restart", |_| {}).await?,
+        EphemeralSendOutcome::Delivered
+    );
+    let next = crate::ephemeral::tests::guard_10s(
+        "surviving consumer dedup handoff",
+        receiver.host.next(&mut consumer, |_| Some(super::activation_account::source(&runtime))),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("surviving consumer closed"))?;
+    let next: Value = serde_json::from_slice(&next.0)?;
+    assert_eq!(
+        next["envelope"]["envelope_id"], "fresh-after-router-restart",
+        "live account consumer must suppress the replay across router restart"
+    );
+    consumer.complete();
+    context.hub.unregister(TARGET, registration.token).await;
+    sender.stop().await;
+    receiver.stop().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a separately built same-tree router binary on QA"]
+async fn ephemeral_local_submit_rechecks_final_registration_and_deadline() -> TestResult {
+    let seed = RouterCore::new();
+    register_source(&seed)?;
+    let (_child, context) = real_router_with_state(Some(&seed)).await?;
+    ready(&context).await?;
+    let binding =
+        negotiate(&context, &auth_claiming_ephemeral(true)?, &recipient(&context)).await?;
+    if std::env::var_os("RAMFLUX_EXPECT_EPHEMERAL_DORMANT").is_some() {
+        assert!(!binding.ephemeral, "parent must not negotiate ephemeral");
+        return Ok(());
+    }
+    let mut runtime = crate::session::submit_fixtures::test_runtime()?;
+    runtime.ephemeral = binding.ephemeral;
+    runtime.session_push = binding.incarnation_id.clone();
+    for replacement in [true, false] {
+        let (target_send, recipient_frames) = sink();
+        let registration = context
+            .hub
+            .register_ephemeral(
+                TARGET.into(),
+                "alice-session".into(),
+                target_send,
+                binding.incarnation_id.clone(),
+                64,
+            )
+            .await?;
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        context.hub.park_next_enqueue(entered.clone(), release.clone());
+        let submit = crate::ephemeral::handler_tests::submit(
+            &runtime,
+            if replacement { "local-replaced" } else { "local-expired" },
+            5,
+            |_| {},
+        )?;
+        let deadline = u64::try_from(submit.envelope.created_at + 5)? * 1000;
+        let (sender, sender_frames) = sink();
+        let pending = {
+            let context = context.clone();
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                crate::ephemeral::handle_submit(&sender, &context, &runtime, &submit).await
+            })
+        };
+        crate::ephemeral::tests::guard_10s(
+            "local submit reached C4 after real router Online",
+            entered.notified(),
+        )
+        .await;
+        let (replacement_send, replacement_frames) = sink();
+        let token = if replacement {
+            context
+                .hub
+                .register(TARGET.into(), "legacy-replacement".into(), replacement_send)
+                .await?
+                .token
+        } else {
+            context.hub.set_queue_clock(TARGET, deadline).await;
+            registration.token
+        };
+        release.add_permits(1);
+        crate::ephemeral::tests::guard_10s("local submit result", pending).await??;
+        let frames = sender_frames.lock().map_err(|_| anyhow::anyhow!("sender frames"))?;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0]["reason"],
+            if replacement { "recipient_unsupported" } else { "expired" },
+            "local C4 must return the exact final refusal"
+        );
+        assert!(
+            recipient_frames.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.is_empty(),
+            "replaced/expired recipient must receive no bytes"
+        );
+        assert!(
+            replacement_frames
+                .lock()
+                .map_err(|_| anyhow::anyhow!("replacement frames"))?
+                .is_empty(),
+            "legacy replacement must receive no bytes"
+        );
+        context.hub.unregister(TARGET, token).await;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a separately built same-tree router binary on QA"]
+async fn ephemeral_submit_originates_authenticated_cross_gateway_outcomes() -> TestResult {
+    use ramflux_protocol::ephemeral::EphemeralDropReason as Reason;
+    let seed = RouterCore::new();
+    register_source(&seed)?;
+    let (mut child, mut context) = real_router_with_state(Some(&seed)).await?;
+    let pair = crate::serve::forward_identity_tests::ephemeral_pair_for_node("node-test")
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let roots = child.1.join("roots.pem");
+    std::fs::write(&roots, format!("{}\n{}", std::fs::read_to_string(&roots)?, pair.ca_pem))?;
     child.0.kill()?;
     child.0.wait()?;
     restart(&mut child, &context).await?;
-    negotiate(&context, &auth_claiming_ephemeral(true)?, &recipient(&context)).await?;
-    assert!(
-        crate::ephemeral::now_ms() < expires_at_ms,
-        "router-only restart must complete before D"
+    context.node_id = "node-test".into();
+    context.gateway_id = "gw-a".into();
+    context.router.tls = pair.peers.tls().clone();
+    context.router.async_mesh.as_mut().ok_or_else(|| anyhow::anyhow!("async mesh"))?.tls =
+        pair.peers.tls().clone();
+    context.peers = pair.peers;
+    let remote = pair.hub;
+    let mut destination = context.clone();
+    destination.gateway_id = "gw-b".into();
+    destination.router.tls = pair.receiver_tls.clone();
+    destination.router.async_mesh.as_mut().ok_or_else(|| anyhow::anyhow!("async mesh"))?.tls =
+        pair.receiver_tls;
+    // These two instances share a process only in this fixture. Give their global mesh
+    // connection pools separate trust keys, as independent gateway processes would have.
+    destination
+        .router
+        .async_mesh
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("async mesh"))?
+        .peer_ca_pems
+        .push(pair.ca_pem.clone());
+    remote.probe_started.store(true, std::sync::atomic::Ordering::Release);
+    destination.hub = remote.clone();
+    destination.state =
+        std::sync::Arc::new(std::sync::Mutex::new(ramflux_node_core::GatewayState::new()));
+    destination.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(
+        child.1.join("gateway-b.redb"),
+    )?);
+    ready(&context).await?;
+    ready(&destination).await?;
+    let recipient = recipient(&destination);
+    let binding = negotiate(&destination, &auth_claiming_ephemeral(true)?, &recipient).await?;
+    if std::env::var_os("RAMFLUX_EXPECT_EPHEMERAL_DORMANT").is_some() {
+        assert!(!binding.ephemeral, "parent must not negotiate ephemeral");
+        return Ok(());
+    }
+    let mut runtime = crate::session::submit_fixtures::test_runtime()?;
+    runtime.ephemeral = binding.ephemeral;
+    runtime.session_push = Some(bind_source(&context).await?);
+    let caps = vec![
+        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
+        GATEWAY_EPHEMERAL_CAPABILITY.into(),
+    ];
+    // The notifier belongs to the originating submit caller; exercise that caller's durable branch.
+    let (reply, _) = sink();
+    let mut durable = crate::session::submit_fixtures::signed_submit(
+        &runtime,
+        i64::try_from(ramflux_node_core::now_unix_seconds())?,
+    )?;
+    durable.envelope.envelope_id = "cross-gateway-durable-control".into();
+    durable.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&durable.envelope)?,
+        [4; 32],
     );
-    let route: Value = crate::router_post_json_async(
-        &context.router,
-        "/mvp0/envelope-ephemeral",
-        &json!({"envelope":envelope,"expires_at_ms":expires_at_ms}),
-    )
-    .await?;
-    assert_eq!(route["outcome"], "online", "router lost only its volatile replay marker: {route}");
-    let forwarded = crate::ephemeral_forward::handle(
-        &context.hub,
-        crate::ephemeral_forward::GatewayForwardEphemeralRequest {
-            source_gateway_id: context.gateway_id.clone(),
-            target_delivery_id: TARGET.into(),
-            forwarded: true,
-            envelope,
-            expires_at_ms,
-        },
-    )
-    .await?;
-    assert!(forwarded.delivered);
-    context.hub.flushed(TARGET).await?;
-    let observed = frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.clone();
-    assert_eq!(observed.len(), 2);
-    assert_eq!(observed.first(), observed.get(1));
-    let replayed = observed.get(1).ok_or_else(|| anyhow::anyhow!("replayed transient missing"))?;
-    assert_eq!(receiver_admit(&mut receiver, replayed, &runtime, 2)?, ReceiverAdmit::Duplicate);
-    assert_eq!(receiver.ledger_probe(), ramflux_sdk::LedgerProbe::default());
-    context.hub.unregister(TARGET, registration.token).await;
+    durable.signed_request.body_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        &ramflux_protocol::canonical_json_bytes(&durable.envelope)?,
+    );
+    durable.signed_request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::signed_bytes(&durable.signed_request)?,
+        [4; 32],
+    );
+    let wakes = context.notify.wake_count();
+    crate::session::handle_gateway_submit(&reply, &context, &runtime, &durable).await?;
+    assert_eq!(
+        context.notify.wake_count(),
+        wakes + 1,
+        "same forwarding caller must wake for durable offline control"
+    );
+    let before_issued = issued(&context).await?;
+    let before_gateway = serde_json::to_vec(&context.store.load_state()?)?;
+    let wakes = context.notify.wake_count();
+    let (recipient_send, frames) = sink();
+    let registration = remote
+        .register_ephemeral(
+            TARGET.into(),
+            "alice-session".into(),
+            recipient_send,
+            binding.incarnation_id.clone(),
+            64,
+        )
+        .await?;
+    assert_eq!(
+        send(&context, &runtime, "cross-live", &caps)?.0,
+        EphemeralSendOutcome::Delivered,
+        "real submit must originate cross-gateway forwarding"
+    );
+    remote.flushed(TARGET).await?;
+    assert_eq!(frames.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 1);
+    let (legacy_send, legacy_frames) = sink();
+    let legacy = remote.register(TARGET.into(), "legacy".into(), legacy_send).await?;
+    let unsupported = send(&context, &runtime, "cross-unsupported", &caps)?;
+    assert_eq!(unsupported.0, EphemeralSendOutcome::Unsupported);
+    assert_eq!(
+        unsupported.2.as_ref().and_then(|v| v["reason"].as_str()),
+        Some("recipient_unsupported")
+    );
+    assert!(legacy_frames.lock().map_err(|_| anyhow::anyhow!("legacy frames"))?.is_empty());
+    remote.unregister(TARGET, legacy.token).await;
+    assert_eq!(
+        send(&context, &runtime, "cross-offline", &caps)?.0,
+        EphemeralSendOutcome::Dropped(Reason::Offline)
+    );
+    let (recipient_send, _) = sink();
+    let registration2 = remote
+        .register_ephemeral(
+            TARGET.into(),
+            "alice-session".into(),
+            recipient_send,
+            binding.incarnation_id.clone(),
+            64,
+        )
+        .await?;
+    remote.set_queue_clock(TARGET, u64::MAX).await;
+    assert_eq!(
+        send(&context, &runtime, "cross-expired", &caps)?.0,
+        EphemeralSendOutcome::Dropped(Reason::Expired)
+    );
+    remote.set_queue_clock(TARGET, crate::ephemeral::now_ms()).await;
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let queue = remote
+        .snapshot()
+        .await
+        .get(TARGET)
+        .ok_or_else(|| anyhow::anyhow!("remote queue"))?
+        .queue
+        .clone();
+    queue.park_next_write(entered.clone(), release.clone());
+    for n in 0..9 {
+        let submit = crate::ephemeral::handler_tests::submit(
+            &runtime,
+            &format!("cross-full-{n}"),
+            5,
+            |envelope| envelope.encrypted_payload = "x".repeat(30_000),
+        )?;
+        let mut wire = GatewayWire {
+            context: &context,
+            runtime: &runtime,
+            reply: None,
+            result: None,
+            writes: 0,
+        };
+        let outcome = send_ephemeral(
+            &submit.signed_request,
+            &submit.envelope,
+            &caps,
+            crate::ephemeral::now_ms(),
+            &mut wire,
+        )?;
+        assert_eq!(
+            outcome,
+            if n < 8 {
+                EphemeralSendOutcome::Delivered
+            } else {
+                EphemeralSendOutcome::Dropped(Reason::QueueFull)
+            }
+        );
+        if n == 0 {
+            crate::ephemeral::tests::guard_10s("cross-gateway writer parked", entered.notified())
+                .await;
+        }
+    }
+    release.add_permits(1);
+    remote.flushed(TARGET).await?;
+    remote.unregister(TARGET, registration2.token).await;
+    remote.unregister(TARGET, registration.token).await;
+    assert_eq!(
+        issued(&context).await?,
+        before_issued,
+        "cross-gateway ephemeral must never fall back durably"
+    );
+    assert_eq!(serde_json::to_vec(&context.store.load_state()?)?, before_gateway);
+    assert_eq!(
+        context.notify.wake_count(),
+        wakes,
+        "originating forward path must never wake for ephemeral outcomes"
+    );
     Ok(())
 }

@@ -192,38 +192,22 @@ async fn row_durable_wake_positive_control(context: &crate::GatewayQuicContext) 
 }
 
 async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext) -> TestResult {
-    let listener = crate::serve::GatewayListenerContext {
-        custody: context.custody.clone(),
-        node_id: context.node_id.clone(),
-        gateway_id: context.gateway_id.clone(),
-        peers: context.peers.clone(),
-        router: context.router.clone(),
-        notify: context.notify.clone(),
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key: context.relay_service_key.clone(),
-        state: context.state.clone(),
-        store: context.store.clone(),
-        hub: context.hub.clone(),
-    };
+    let (peers, hub) = crate::serve::forward_identity_tests::ephemeral_pair()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut caller = context.clone();
+    caller.gateway_id = "gw-a".into();
+    caller.peers = peers;
     let forward = request(TARGET, TARGET, "env-nowake");
     let (recipient, received) = sink();
-    listener
-        .hub
-        .register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32)
-        .await?;
-    listener.hub.set_ephemeral_clock_ms(NOW_LIVE_MS);
-    listener.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
-    let wake_before = listener.notify.wake_count();
-    let request = ramflux_transport::GatewayQuicRequest {
-        method: "POST".into(),
-        path: PATH.into(),
-        body: serde_json::to_value(forward)?,
-    };
-    let reply = crate::serve::handle_gateway_forward_request(&request, &listener.hub).await?;
-    assert!(reply.delivered);
-    assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
-    assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
-    assert_eq!(listener.notify.wake_count(), wake_before);
+    hub.register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32).await?;
+    hub.set_ephemeral_clock_ms(NOW_LIVE_MS);
+    hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
+    let wake_before = caller.notify.wake_count();
+    let reply = super::originate(&caller, "gw-b", &forward.envelope, forward.expires_at_ms).await;
+    assert_eq!(reply, crate::ephemeral::RouteDecision::Forwarded);
+    hub.flushed(TARGET).await?;
+    assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 1);
+    assert_eq!(caller.notify.wake_count(), wake_before, "actual forwarding caller must not wake");
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 
 //! Gateway ephemeral ingress: validate, rate, route, local enqueue, one result.
 
-use crate::push_queue::TransientAdmission;
+use crate::ephemeral_forward::EphemeralEnqueueOutcome;
 use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
 use ramflux_protocol::Envelope;
 use ramflux_protocol::ephemeral::{
@@ -28,7 +28,7 @@ pub(crate) enum SourceCheck {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RouteDecision {
     Local,
-    Remote,
+    Forwarded,
     Dropped(EphemeralDropReason),
 }
 
@@ -142,7 +142,7 @@ pub(crate) trait EphemeralEnqueue {
         target: &str,
         bytes: Vec<u8>,
         expires_at_ms: u64,
-    ) -> impl std::future::Future<Output = TransientAdmission> + Send;
+    ) -> impl std::future::Future<Output = EphemeralEnqueueOutcome> + Send;
 }
 
 pub(crate) struct Admission<'a, R, E> {
@@ -187,15 +187,22 @@ where
 
     match input.route.route(input.envelope, expires_at_ms).await {
         RouteDecision::Dropped(reason) => dropped(envelope_id, reason),
-        RouteDecision::Remote => dropped(envelope_id, EphemeralDropReason::NotLocal),
+        RouteDecision::Forwarded => accepted(envelope_id),
         RouteDecision::Local => match input
             .enqueue
             .enqueue(&input.envelope.target_delivery_id, bytes, expires_at_ms)
             .await
         {
-            TransientAdmission::Queued => accepted(envelope_id),
-            TransientAdmission::QueueFull => dropped(envelope_id, EphemeralDropReason::QueueFull),
-            TransientAdmission::Closed => dropped(envelope_id, EphemeralDropReason::Offline),
+            EphemeralEnqueueOutcome::Queued => accepted(envelope_id),
+            EphemeralEnqueueOutcome::QueueFull => {
+                dropped(envelope_id, EphemeralDropReason::QueueFull)
+            }
+            EphemeralEnqueueOutcome::Offline => dropped(envelope_id, EphemeralDropReason::Offline),
+            EphemeralEnqueueOutcome::RecipientUnsupported => {
+                dropped(envelope_id, EphemeralDropReason::RecipientUnsupported)
+            }
+            EphemeralEnqueueOutcome::Expired => dropped(envelope_id, EphemeralDropReason::Expired),
+            EphemeralEnqueueOutcome::Invalid => dropped(envelope_id, EphemeralDropReason::Invalid),
         },
     }
 }
@@ -355,10 +362,30 @@ impl EphemeralRoute for MeshRoute<'_> {
             "envelope": envelope,
             "expires_at_ms": expires_at_ms,
         });
-        match crate::router_post_json_async(&self.context.router, "/mvp0/envelope-ephemeral", &body)
-            .await
+        match crate::router_post_json_async::<_, serde_json::Value>(
+            &self.context.router,
+            "/mvp0/envelope-ephemeral",
+            &body,
+        )
+        .await
         {
-            Ok(value) => parse_route_reply(&value, &self.context.gateway_id),
+            Ok(value) => {
+                if value.get("outcome").and_then(serde_json::Value::as_str) == Some("online") {
+                    if let Some(gateway) =
+                        value.get("gateway_id").and_then(serde_json::Value::as_str)
+                        && gateway != self.context.gateway_id
+                    {
+                        return crate::ephemeral_forward::originate(
+                            self.context,
+                            gateway,
+                            envelope,
+                            expires_at_ms,
+                        )
+                        .await;
+                    }
+                }
+                parse_route_reply(&value, &self.context.gateway_id)
+            }
             Err(_) => RouteDecision::Dropped(EphemeralDropReason::Invalid),
         }
     }
@@ -367,7 +394,11 @@ impl EphemeralRoute for MeshRoute<'_> {
 fn parse_route_reply(value: &serde_json::Value, local_gateway_id: &str) -> RouteDecision {
     if let Some("online") = value.get("outcome").and_then(serde_json::Value::as_str) {
         let gateway_id = value.get("gateway_id").and_then(serde_json::Value::as_str).unwrap_or("");
-        if gateway_id == local_gateway_id { RouteDecision::Local } else { RouteDecision::Remote }
+        if gateway_id == local_gateway_id {
+            RouteDecision::Local
+        } else {
+            RouteDecision::Dropped(EphemeralDropReason::NotLocal)
+        }
     } else {
         let reason = value.get("reason").and_then(serde_json::Value::as_str).unwrap_or("invalid");
         RouteDecision::Dropped(parse_drop_reason(reason))
@@ -384,8 +415,8 @@ impl EphemeralEnqueue for HubEnqueue<'_> {
         target: &str,
         bytes: Vec<u8>,
         expires_at_ms: u64,
-    ) -> TransientAdmission {
-        self.hub.try_push_transient(target, bytes, expires_at_ms).await
+    ) -> EphemeralEnqueueOutcome {
+        self.hub.try_enqueue_ephemeral(target, target, target, bytes, expires_at_ms).await
     }
 }
 
@@ -394,4 +425,4 @@ pub(crate) mod handler_tests;
 #[cfg(test)]
 mod session_loop_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

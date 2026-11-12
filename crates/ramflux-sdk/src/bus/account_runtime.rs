@@ -447,3 +447,9 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/networking_expiry.rs"]
 mod expiry_tests;
+
+#[cfg(feature = "test-support")]
+pub mod testing;
+
+#[cfg(feature = "test-support")]
+mod testing_authority;

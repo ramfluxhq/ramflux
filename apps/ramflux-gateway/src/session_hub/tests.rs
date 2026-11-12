@@ -117,13 +117,20 @@ async fn transient_entry_point_follows_live_registration() -> anyhow::Result<()>
     let hub = Arc::new(GatewaySessionHub::default());
     let (send, _) = sink();
     assert_eq!(
-        hub.try_push_transient("target", vec![1], u64::MAX).await,
-        crate::push_queue::TransientAdmission::Closed
+        hub.try_enqueue_ephemeral("target", "target", "target", vec![1], u64::MAX).await,
+        crate::ephemeral_forward::EphemeralEnqueueOutcome::Offline
     );
-    hub.register_session("target".into(), "session".into(), send, Some(ID.into())).await?;
+    hub.register_ephemeral("target".into(), "session".into(), send, Some(ID.into()), 64).await?;
     assert_eq!(
-        hub.try_push_transient("target", br#"{"frame_type":"ephemeral"}"#.to_vec(), u64::MAX).await,
-        crate::push_queue::TransientAdmission::Queued
+        hub.try_enqueue_ephemeral(
+            "target",
+            "target",
+            "target",
+            br#"{"frame_type":"ephemeral"}"#.to_vec(),
+            u64::MAX
+        )
+        .await,
+        crate::ephemeral_forward::EphemeralEnqueueOutcome::Queued
     );
     Ok(())
 }
@@ -132,7 +139,7 @@ async fn transient_entry_point_follows_live_registration() -> anyhow::Result<()>
 async fn lookup_releases_hub_before_final_admission() -> anyhow::Result<()> {
     let hub = Arc::new(GatewaySessionHub::default());
     let (send, _) = sink();
-    hub.register_session("target".into(), "session".into(), send, Some(ID.into())).await?;
+    hub.register_ephemeral("target".into(), "session".into(), send, Some(ID.into()), 64).await?;
     let queue = hub
         .snapshot()
         .await

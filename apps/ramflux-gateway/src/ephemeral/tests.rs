@@ -7,7 +7,8 @@ use super::{
     Admission, EPHEMERAL_FRAME_CAP, EPHEMERAL_RATE_BURST, EphemeralEnqueue, EphemeralRate,
     EphemeralRoute, RouteDecision, SourceCheck, admit, frame_bytes,
 };
-use crate::push_queue::{TRANSIENT_BYTE_CAP, TransientAdmission};
+use crate::ephemeral_forward::EphemeralEnqueueOutcome as TransientAdmission;
+use crate::push_queue::TRANSIENT_BYTE_CAP;
 use ramflux_protocol::ephemeral::{
     DELIVERY_MODE_EXTENSION, EphemeralDropReason, EphemeralSubmitOutcome, EphemeralSubmitResult,
     MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS,
@@ -178,7 +179,7 @@ fn pad_to_frame_size(target: usize) -> TestResult<Envelope> {
     Ok(envelope)
 }
 
-pub(super) async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
+pub(crate) async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
     let finished = tokio::time::timeout(Duration::from_secs(10), future).await;
     assert!(finished.is_ok(), "{what} did not finish within 10s");
     match finished {
@@ -341,7 +342,11 @@ impl EphemeralEnqueue for QueueEnqueue {
         bytes: Vec<u8>,
         expires_at_ms: u64,
     ) -> impl std::future::Future<Output = TransientAdmission> + Send {
-        std::future::ready(self.queue.try_push_transient(bytes, expires_at_ms))
+        std::future::ready(match self.queue.try_push_transient(bytes, expires_at_ms) {
+            crate::push_queue::TransientAdmission::Queued => TransientAdmission::Queued,
+            crate::push_queue::TransientAdmission::QueueFull => TransientAdmission::QueueFull,
+            crate::push_queue::TransientAdmission::Closed => TransientAdmission::Offline,
+        })
     }
 }
 

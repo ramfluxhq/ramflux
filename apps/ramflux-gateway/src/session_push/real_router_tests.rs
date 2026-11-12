@@ -76,6 +76,12 @@ async fn real_router_with_state(
     });
     tokio::time::timeout(Duration::from_secs(15), ready).await??;
     let mut context = crate::session::tests::test_gateway_context()?;
+    context.store =
+        Arc::new(ramflux_node_core::GatewayRedbStore::open(child.1.join("gateway.redb"))?);
+    {
+        let state = crate::gateway_state(&context.state)?;
+        context.store.save_state(&state)?;
+    }
     context.hub.probe_started.store(true, Ordering::Release);
     context.router = crate::RouterMeshClient {
         endpoint: endpoint.clone(),
@@ -128,3 +134,6 @@ async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()>
 
 #[path = "activation_tests.rs"]
 mod activation;
+
+#[path = "activation_account.rs"]
+mod activation_account;

@@ -43,7 +43,7 @@ pub(crate) struct PendingDelivery {
 }
 
 pub(crate) enum GatewaySessionClientTransport {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Injected,
     Quic {
         _client: ramflux_transport::QuicGatewayClient,
@@ -311,7 +311,7 @@ impl GatewaySessionEngine {
         Ok(engine)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_test_transport(
         config: GatewaySessionConfig,
         stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
@@ -852,6 +852,59 @@ impl GatewaySessionEngine {
         self.write_frame(&GatewayClientFrame::Close { reason: reason.to_owned() }).await?;
         self.stream.finish()?;
         Ok(())
+    }
+
+    /// Validate and submit once through a narrow transient capability, without retry or ACK.
+    ///
+    /// # Errors
+    /// Returns an error on transport loss, timeout, refusal, or a foreign result ID.
+    pub async fn submit_ephemeral(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> Result<crate::EphemeralSendOutcome, SdkError> {
+        super::ephemeral::TransientExchange::new(self.ephemeral_negotiated, |envelope| {
+            self.exchange_ephemeral(envelope)
+        })
+        .submit(envelope)
+        .await
+    }
+
+    // Transport-only glue: the guarded codec owns mode/deadline/negotiation admission.
+    async fn exchange_ephemeral(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> Result<crate::EphemeralSendOutcome, SdkError> {
+        use super::frame_dispatch::ExpectedReply;
+        let envelope_id = envelope.envelope_id.clone();
+        let signed_request =
+            self.signed_request("POST", "/gateway/session/submit", "already_authed", &envelope)?;
+        self.write_frame(&GatewayClientFrame::Submit {
+            submit: GatewaySubmitFrame { signed_request, envelope },
+        })
+        .await?;
+        loop {
+            let reply = self.read_raw_gateway_frame("ephemeral submit response").await?;
+            if !self.dispatch_frame_for_request(
+                &reply,
+                Some(ExpectedReply::EphemeralSubmit),
+                Some(&envelope_id),
+            )? {
+                continue;
+            }
+            if let GatewayServerFrame::Nack { reason } = reply {
+                return Err(SdkError::GatewaySessionRejected(reason));
+            }
+            let bytes = serde_json::to_vec(&reply)
+                .map_err(|error| SdkError::GatewaySessionRejected(error.to_string()))?;
+            return crate::ephemeral::decode_ephemeral_result(&bytes, &envelope_id)
+                .map_err(|error| SdkError::GatewaySessionRejected(error.to_string()));
+        }
+    }
+
+    /// Take the account generation's single bounded transient ciphertext consumer.
+    #[must_use]
+    pub fn take_ephemeral_consumer(&mut self) -> Option<crate::EphemeralConsumer> {
+        self.ephemeral_inbox.consumer()
     }
 
     pub(crate) fn signed_request<T>(

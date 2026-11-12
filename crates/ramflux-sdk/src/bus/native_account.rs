@@ -184,6 +184,7 @@ pub(super) fn status_at(
         "principal_commitment":native.record().body.account_anchor,"device_id":account.gateway_config.device_id,
         "target_delivery_id":account.target_delivery_id,
         "node_id":account.client.account_db()?.load_actor_state::<String>("account/node-id")?,
+        "session_delivery_mode":account.session_delivery_mode(),
         "session_id":account.engine.as_ref().map(|engine|engine.session().session_id.clone()),
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),

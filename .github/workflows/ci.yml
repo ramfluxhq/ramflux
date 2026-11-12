@@ -879,6 +879,22 @@ jobs:
         run: |
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label local-mint-gate -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
 
+      - name: Ephemeral activation and persistence (real router, WAL on)
+        if: ${{ !cancelled() }}
+        env:
+          RAMFLUX_ROUTER_WAL: "1"
+          RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
+        run: |
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal1 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(activation::)'
+
+      - name: Ephemeral persistence (real router, WAL off)
+        if: ${{ !cancelled() }}
+        env:
+          RAMFLUX_ROUTER_WAL: "0"
+          RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
+        run: |
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal0 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(ephemeral_persistence_absence)'
+
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
