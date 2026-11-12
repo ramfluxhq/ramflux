@@ -193,17 +193,6 @@ impl AccountSessionHarness {
         self.drive(client.submit_ephemeral(envelope)).await
     }
 
-    /// Submit a durable control through the same resident session host.
-    /// # Errors
-    /// Returns the actual classified session failure.
-    pub async fn durable_submit(
-        &mut self,
-        envelope: ramflux_protocol::Envelope,
-    ) -> Result<crate::GatewayInboxEntry, SdkError> {
-        let mut client = self.session()?;
-        self.drive(client.submit_envelope(envelope)).await
-    }
-
     /// Export the authenticated fixture account's public directory.
     /// # Errors
     /// Returns directory construction or serialization errors.
