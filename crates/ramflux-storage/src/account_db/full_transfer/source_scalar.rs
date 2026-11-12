@@ -46,7 +46,8 @@ pub(super) fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError
 }
 // A copy of the existing selected-generation operands, with only a weak unlock owner.
 // Worker callbacks recheck these per row without retaining the authoritative writer.
-struct SourceGuard {
+#[derive(Clone)]
+pub(super) struct SourceGuard {
     unlocked: crate::database::WeakConnection,
     index: std::sync::Arc<crate::AccountIndex>,
     local: String,
@@ -55,7 +56,7 @@ struct SourceGuard {
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl SourceGuard {
-    fn new(
+    pub(super) fn new(
         db: &crate::AccountDb,
         cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Self {
@@ -68,7 +69,7 @@ impl SourceGuard {
             cancelled,
         }
     }
-    fn require(&self) -> Result<(), StorageError> {
+    pub(super) fn require(&self) -> Result<(), StorageError> {
         if self
             .cancelled
             .as_ref()
@@ -107,6 +108,14 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         family: &str,
     ) -> Result<FullScalarSourceCounts, StorageError> {
+        self.stage_source_fixed_family(0, snapshot_id, family)
+    }
+    pub(super) fn stage_source_fixed_family(
+        &mut self,
+        cut: u64,
+        snapshot_id: &str,
+        family: &str,
+    ) -> Result<FullScalarSourceCounts, StorageError> {
         let rule = compiled(family)?;
         rule.require_typed_codec()?;
         let FamilySelector::Table(table) = rule.selector else {
@@ -115,7 +124,7 @@ impl SourceContext<'_> {
         let spool = self.connection.clone();
         let guard = SourceGuard::new(self.db, self.cancelled.clone());
         let snapshot = snapshot_id.to_owned();
-        self.with_source_cut(0, snapshot_id, |input| {
+        self.with_source_cut(cut, snapshot_id, |input| {
             super::inventory::validate_columns(input, table, rule)?;
             input.call(move |source| Ok(build(source, &spool, &snapshot, table, rule, &guard)))?
         })
@@ -131,9 +140,18 @@ impl SourceContext<'_> {
         family: &str,
         writer: W,
     ) -> Result<(W, FullScalarSourceCounts), StorageError> {
+        self.write_source_fixed_family(0, snapshot_id, family, writer)
+    }
+    pub(super) fn write_source_fixed_family<W: Write + Send + 'static>(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+        family: &str,
+        writer: W,
+    ) -> Result<(W, FullScalarSourceCounts), StorageError> {
         self.require_source_live()?;
         // Recheck the exact saved source view, including its private key/generations.
-        self.with_source_cut(0, snapshot_id, |_| Ok(()))?;
+        self.with_source_cut(cut, snapshot_id, |_| Ok(()))?;
         let rule = compiled(family)?;
         let snapshot = snapshot_id.to_owned();
         let guard = SourceGuard::new(self.db, self.cancelled.clone());
