@@ -17,6 +17,13 @@ async fn prepared_pair() -> Result<(Fixture, Fixture), SdkError> {
     reply_message.target_delivery_id = a.id.clone();
     let reply = seal(&b, &a, reply_message, b"reply")?;
     apply(&mut a, &reply).await?;
+    for receiver in [&a, &b] {
+        let db = receiver.client.account_db()?;
+        let mut thread = db.client_record("conversation", "c")?.ok_or_else(|| invalid("scope"))?;
+        thread["participant_roots"] =
+            serde_json::json!([a.client.own_account_anchor()?, b.client.own_account_anchor()?]);
+        db.persist_client_record("conversation", "c", &thread)?;
+    }
     Ok((a, b))
 }
 

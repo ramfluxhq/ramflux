@@ -1041,3 +1041,6 @@ mod revocation_receive_tests;
 mod effect_marker_tests;
 #[path = "legacy_effect_marker_tests.rs"]
 mod legacy_effect_marker;
+
+#[path = "candidate_ephemeral_tests.rs"]
+mod candidate_ephemeral;
