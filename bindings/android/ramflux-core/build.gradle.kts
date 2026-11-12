@@ -96,6 +96,11 @@ abstract class GenerateUniffiBindings @Inject constructor(
 }
 
 val workspaceRoot = rootDir.resolve("../..")
+
+// The Android Keystore helper (`org.ramflux.sdk.vault.KeystoreBridge`) is owned by the Rust
+// vault it serves and lives next to it. It is compiled into this library from there, by
+// reference; there is no second copy in this project.
+val keystoreHelperSources = workspaceRoot.resolve("crates/ramflux-sdk/android/src/main/kotlin")
 val scriptsDir = rootDir.resolve("scripts")
 val abiList = providers.gradleProperty("ramflux.abis").orElse("arm64-v8a,x86_64")
 val cargoProfileName = providers.gradleProperty("ramflux.cargoProfile").orElse("release")
@@ -190,6 +195,8 @@ androidComponents {
                 nativeLibraries.set(buildNative.flatMap { it.outputDir })
                 metadataAbi.set(abiList.map { it.substringBefore(',') })
             }
+        // Fails the build when the helper is missing: without it the vault cannot work.
+        variant.sources.kotlin?.addStaticSourceDirectory(keystoreHelperSources.path)
         // AGP assigns each task's output directory and wires it into the variant.
         variant.sources.jniLibs?.addGeneratedSourceDirectory(
             buildNative,

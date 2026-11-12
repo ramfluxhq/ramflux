@@ -23,7 +23,7 @@
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/ramflux_data_extraction_rules"
-        android:fullBackupContent="@xml/ramflux_backup_rules"
+        android:fullBackupContent="@xml/ramflux_full_backup_content"
         android:networkSecurityConfig="@xml/ramflux_network_security_config"
         tools:targetApi="31" />
 </manifest>

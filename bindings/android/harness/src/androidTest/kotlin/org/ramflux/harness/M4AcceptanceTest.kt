@@ -14,7 +14,6 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.ramflux.sdk.RamfluxAndroid
-import org.ramflux.sdk.RamfluxClient
 
 /**
  * The Android core acceptance, driven by `scripts/run-m4-harness.sh`:
@@ -42,7 +41,7 @@ class M4AcceptanceTest {
     @Test
     fun first_run_creates_an_account_sends_a_dm_and_is_killed() {
         assumeTrue(args.phase == "first" && !args.expectVaultRefusal)
-        val client = RamfluxClient.open(RamfluxAndroid.config(context))
+        val client = RamfluxAndroid.open(context)
         runBlocking { M4Script(client, args, journal).firstRun() }
         // No suspend, no close: the process dies with the stores open and the lock held,
         // which is what a real kill looks like. The driver expects this instrumentation
@@ -53,7 +52,7 @@ class M4AcceptanceTest {
     @Test
     fun resumed_run_finds_the_account_and_the_message_and_sends_again() {
         assumeTrue(args.phase == "resume")
-        val client = RamfluxClient.open(RamfluxAndroid.config(context))
+        val client = RamfluxAndroid.open(context)
         try {
             runBlocking {
                 val script = M4Script(client, args, journal)
@@ -68,7 +67,7 @@ class M4AcceptanceTest {
     @Test
     fun production_build_refuses_account_creation_without_a_hardware_backed_key() {
         assumeTrue(args.phase == "vault" && args.expectVaultRefusal)
-        val client = RamfluxClient.open(RamfluxAndroid.config(context))
+        val client = RamfluxAndroid.open(context)
         try {
             runBlocking { M4Script(client, args, journal).expectVaultRefusal() }
             assertTrue(journal["vault_refusal"] != null)

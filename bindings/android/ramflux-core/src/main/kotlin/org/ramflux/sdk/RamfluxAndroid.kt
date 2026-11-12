@@ -56,6 +56,23 @@ object RamfluxAndroid {
     )
 
     /**
+     * Load the native library and create the client for this application.
+     *
+     * The order matters. `System.loadLibrary` makes the JNI entry points of the library
+     * resolvable; initializing `KeystoreBridge` then registers the Keystore helper with the
+     * Rust vault. Until that has happened every vault call is refused, and there is no
+     * software fallback behind it.
+     */
+    fun open(context: Context): RamfluxClient {
+        System.loadLibrary(NATIVE_LIBRARY)
+        Class.forName(KEYSTORE_BRIDGE, true, RamfluxAndroid::class.java.classLoader)
+        return RamfluxClient.open(config(context))
+    }
+
+    private const val NATIVE_LIBRARY = "ramflux_ffi"
+    private const val KEYSTORE_BRIDGE = "org.ramflux.sdk.vault.KeystoreBridge"
+
+    /**
      * Tie the core to the application's foreground state and default network.
      *
      * When the last activity stops, the core is suspended: streams end, every store is
