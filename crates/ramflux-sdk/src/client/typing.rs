@@ -33,6 +33,7 @@ pub enum TypingOutcome {
     Held,
     Visible,
     Duplicate,
+    RetainedUnsupported,
     Dropped(EphemeralDropReason),
 }
 
@@ -131,8 +132,27 @@ impl TypingReceiver {
         if !self.rates.admit(root, &conversation, monotonic) {
             return Ok(TypingOutcome::Dropped(EphemeralDropReason::RateLimited));
         }
-        let opened = client.open_typing_delivery(envelope, local_device)?;
-        self.install(envelope, opened, Admission { deadline, wire_bytes, now_ms, monotonic })
+        match client.open_ephemeral_delivery(envelope, local_device)? {
+            crate::client::routed::EphemeralContent::Typing(identity, typing) => self.install(
+                envelope,
+                (identity, typing),
+                Admission { deadline, wire_bytes, now_ms, monotonic },
+            ),
+            other => {
+                let until = monotonic
+                    .checked_add(Duration::from_millis(deadline.saturating_sub(now_ms)))
+                    .ok_or_else(|| {
+                        SdkError::InboundRejected("ephemeral dedupe deadline overflow".into())
+                    })?;
+                self.seen.insert(source_key, (deadline, until, envelope.payload_hash.clone()));
+                Ok(match other {
+                    crate::client::routed::EphemeralContent::Unsupported => {
+                        TypingOutcome::RetainedUnsupported
+                    }
+                    _ => TypingOutcome::Dropped(EphemeralDropReason::Invalid),
+                })
+            }
+        }
     }
 
     fn install(

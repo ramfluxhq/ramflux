@@ -42,9 +42,11 @@ mod reset_work;
 #[cfg(test)]
 pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
+mod ephemeral_content;
 mod send_candidate;
 mod session;
 mod typing;
+pub(crate) use ephemeral_content::EphemeralContent;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

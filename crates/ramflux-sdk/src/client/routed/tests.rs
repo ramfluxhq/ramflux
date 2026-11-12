@@ -1064,3 +1064,5 @@ fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError>
     assert!(alice.client.v2_blocks_legacy(&bob.reference()?)?);
     Ok(())
 }
+#[path = "candidate_ephemeral_tests.rs"]
+mod candidate_ephemeral;

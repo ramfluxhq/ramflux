@@ -56,3 +56,13 @@ projection is cosmetic; Control/Call/Task/Surface never execute retroactively.
 A Service does not execute a pin action. The v1 native pin action is unavailable
 until a separate native authority and state contract exists; same-root SelfSync
 pins remain separate. This policy follows sweep-2 audit H2/M7.
+
+The ratchet/allowance exception does not permit generic change-outbox rows.
+Endpoint ephemeral admission commits crypto state and any bounded raw/provenance
+retention together before returning a result. A quota or commit failure retains
+neither partial raw evidence nor an advanced ratchet. Recognized non-Typing
+input advances only the authenticated receive ratchet and creates no projection,
+receipt, ACK or retry state. Retained future Edit/Reaction raw copies and native
+opening evidence share the referenced target's erase fence. Endpoint origin
+retention uses the shared strict v2 signature/evidence transcript; a legacy
+ciphertext-bearing signature is never reinterpreted as body-free origin proof.

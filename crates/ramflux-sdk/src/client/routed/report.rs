@@ -204,9 +204,9 @@ fn report_a0_envelope(
         .as_ref()
         .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
     let mut envelope = ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        schema: crate::dm::candidate_outer_profile(policy.mode).0.to_owned(),
+        version: crate::dm::candidate_outer_profile(policy.mode).1,
+        domain: crate::dm::candidate_outer_profile(policy.mode).0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: sdk_device_signed_fields(local_device_id, ""),
         envelope_id: message.envelope_id.clone(),

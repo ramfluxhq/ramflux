@@ -561,6 +561,16 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
     )
 }
 
+/// One profile choice for the candidate producer and its exact C/A0 construction.
+/// Ordinary legacy carriers remain dormant until the final activation change.
+pub(crate) fn candidate_outer_profile(mode: &str) -> (&'static str, u32) {
+    if mode == "ephemeral" && crate::client::target_selection::schema_v1_selected() {
+        (ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)
+    } else {
+        (ramflux_protocol::domain::ENVELOPE, 1)
+    }
+}
+
 fn gateway_envelope_with_policy(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
@@ -575,9 +585,9 @@ fn gateway_envelope_with_policy(
         encrypted_payload.as_bytes(),
     );
     let mut envelope = ramflux_protocol::Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.envelope.v1".to_owned(),
+        schema: candidate_outer_profile(mode).0.to_owned(),
+        version: candidate_outer_profile(mode).1,
+        domain: candidate_outer_profile(mode).0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: if ramflux_protocol::schema_profile::schema_v1_live() {
             crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "")
