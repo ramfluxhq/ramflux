@@ -17,6 +17,13 @@ pub(crate) struct PeerCred {
     unix_uid: u32,
 }
 
+impl PeerCred {
+    /// Credential of this process, for a carrier that never leaves it.
+    pub(crate) fn current_process() -> Self {
+        Self { unix_uid: rustix::process::getuid().as_raw() }
+    }
+}
+
 /// Opaque bound-socket identity. The Unix implementation stores pathname, device, and inode.
 pub(crate) struct EndpointId {
     path: PathBuf,
@@ -89,6 +96,13 @@ pub(crate) trait BusListener: Sized {
 /// # Errors
 /// Returns an error when the socket cannot be bound or the mode cannot be set.
 pub(crate) fn bind(path: &Path) -> Result<UnixBusListener, SdkError> {
+    // Phones are `unix`, but an app must not expose a socket: they embed the supervisor on
+    // the in-process carrier. The socket daemon refuses to start there.
+    if cfg!(any(target_os = "ios", target_os = "android")) {
+        return Err(SdkError::LocalBus(
+            "the socket carrier is not available on this platform".to_owned(),
+        ));
+    }
     <UnixBusListener as BusListener>::bind(path)
 }
 

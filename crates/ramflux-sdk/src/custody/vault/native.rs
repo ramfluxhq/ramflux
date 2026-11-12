@@ -7,6 +7,12 @@
 //! (`errSecMissingEntitlement`, typical of ad hoc signed builds) stores the same
 //! non-synchronizing items in the login keychain instead; see
 //! `docs/macos_keychain_authorization.md`.
+//!
+//! iOS has one keychain, which always behaves as the data-protection keychain. There the
+//! ordinary items are `AfterFirstUnlockThisDeviceOnly` so a background wake can read them
+//! after the first unlock since boot; they never synchronize and never migrate to another
+//! device. There is no login-keychain fallback: a missing entitlement fails closed. The
+//! host may pin one keychain access group; without it Security uses the app's first group.
 // Only this private FFI boundary permits unsafe. The safe password setter updates duplicate
 // items, so it cannot implement our insert-only primary replacement protocol.
 #![allow(unsafe_code)]
@@ -32,6 +38,8 @@ use security_framework_sys::{
     },
     keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate},
 };
+#[cfg(target_os = "ios")]
+use security_framework_sys::item::kSecAttrAccessGroup;
 
 const SERVICE: &str = "org.ramflux.identity.primary.v1";
 /// Distinct service so login-keychain items can never be mistaken for protected ones.
@@ -54,6 +62,8 @@ pub(super) enum Backend {
     /// Data-protection keychain with `SecAccessControl`; requires a provisioned entitlement.
     DataProtection,
     /// File-based login keychain, when-unlocked-this-device-only; no user-presence items.
+    /// macOS only: iOS never selects it.
+    #[cfg_attr(target_os = "ios", allow(dead_code, reason = "iOS has no login keychain"))]
     LoginKeychain,
 }
 #[derive(Clone, Copy)]
@@ -63,7 +73,46 @@ pub(super) struct KeychainItems {
 impl KeychainItems {
     /// Only the data-protection keychain can hold the migration user-presence item.
     pub(super) const PROTECTED: Self = Self { backend: Backend::DataProtection };
+    #[cfg(target_os = "macos")]
     const LOGIN: Self = Self { backend: Backend::LoginKeychain };
+}
+/// Keychain access group pinned by the host application, set at most once per process.
+#[cfg(target_os = "ios")]
+static ACCESS_GROUP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Pin every vault item to one keychain access group, for example `<TeamID>.<bundle id>`.
+/// An app whose first `keychain-access-groups` entry is shared with an extension must pin
+/// its private group, because v1 shares no vault item with an extension.
+///
+/// # Errors
+/// Refuses an empty or malformed group, and a second call with a different group.
+#[cfg(target_os = "ios")]
+pub(super) fn set_access_group(group: &str) -> Result<(), SdkError> {
+    let well_formed = !group.is_empty()
+        && group.len() <= 255
+        && group.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-_".contains(&byte));
+    if !well_formed {
+        return Err(unavailable());
+    }
+    if ACCESS_GROUP.get_or_init(|| group.to_owned()) == group {
+        Ok(())
+    } else {
+        Err(unavailable())
+    }
+}
+/// Protection class of a new item.
+#[cfg(target_os = "macos")]
+fn protection_mode(_presence: bool) -> ProtectionMode {
+    ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly
+}
+/// Protection class of a new item. Ordinary items must be readable in the background after
+/// the first unlock; the user-presence item is only ever read with the device unlocked.
+#[cfg(target_os = "ios")]
+fn protection_mode(presence: bool) -> ProtectionMode {
+    if presence {
+        ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly
+    } else {
+        ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly
+    }
 }
 type Pairs = Vec<(CFString, CFType)>;
 fn unavailable() -> SdkError {
@@ -82,7 +131,12 @@ pub(super) fn backend() -> Result<Backend, SdkError> {
     if let Some(selected) = tests::BACKEND.get() {
         return Ok(selected);
     }
-    let selected = select(probe(Backend::DataProtection), || probe(Backend::LoginKeychain))?;
+    #[cfg(target_os = "macos")]
+    let login = || probe(Backend::LoginKeychain);
+    // iOS has one keychain. A missing entitlement is a provisioning fault: fail closed.
+    #[cfg(target_os = "ios")]
+    let login = || MISSING_ENTITLEMENT;
+    let selected = select(probe(Backend::DataProtection), login)?;
     #[cfg(not(test))]
     let selected = *SELECTED.get_or_init(|| selected);
     Ok(selected)
@@ -106,11 +160,20 @@ fn probe(backend: Backend) -> i32 {
 }
 /// Stores used by reads and deletes: protected items first, then login-keychain items, so
 /// accounts created by an unentitled build stay readable after an entitled upgrade.
+#[cfg(target_os = "macos")]
 fn readable() -> Result<&'static [KeychainItems], SdkError> {
     Ok(match backend()? {
         Backend::DataProtection => &[KeychainItems::PROTECTED, KeychainItems::LOGIN],
         Backend::LoginKeychain => &[KeychainItems::LOGIN],
     })
+}
+/// iOS reads and deletes in its one keychain only.
+#[cfg(target_os = "ios")]
+fn readable() -> Result<&'static [KeychainItems], SdkError> {
+    match backend()? {
+        Backend::DataProtection => Ok(&[KeychainItems::PROTECTED]),
+        Backend::LoginKeychain => Err(unavailable()),
+    }
 }
 fn read_any(reference: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SdkError> {
     for items in readable()? {
@@ -152,6 +215,15 @@ fn pairs(items: KeychainItems, reference: &str, interactive: bool) -> Pairs {
                 CFBoolean::from(protected).into_CFType(),
             ),
         ];
+        // SAFETY (same block): the access-group key is a process-lifetime Security constant
+        // and the group string is copied into an owned CFString.
+        #[cfg(target_os = "ios")]
+        if let Some(group) = ACCESS_GROUP.get() {
+            fields.push((
+                CFString::wrap_under_get_rule(kSecAttrAccessGroup),
+                CFString::new(group).into_CFType(),
+            ));
+        }
         // Login-keychain reads may show the per-application ACL confirmation after an ad hoc
         // rebuild changes the code signature; that is not a user-presence grant.
         if !interactive && protected {
@@ -205,10 +277,9 @@ fn add_status(items: KeychainItems, reference: &str, bytes: &[u8], presence: boo
     let mut fields = pairs(items, reference, true);
     if items.backend == Backend::DataProtection {
         let flags = if presence { AccessControlOptions::USER_PRESENCE.bits() } else { 0 };
-        let Ok(access) = SecAccessControl::create_with_protection(
-            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-            flags,
-        ) else {
+        let Ok(access) =
+            SecAccessControl::create_with_protection(Some(protection_mode(presence)), flags)
+        else {
             return security_framework_sys::base::errSecParam;
         };
         // SAFETY: the key is static and the retained object lives through SecItemAdd.

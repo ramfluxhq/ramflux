@@ -33,6 +33,8 @@ pub use vault::{
     BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
+#[cfg(target_os = "ios")]
+pub use vault::set_keychain_access_group;
 
 #[cfg(any(target_os = "linux", test))]
 pub use vault::linux::{

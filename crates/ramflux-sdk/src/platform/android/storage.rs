@@ -246,6 +246,29 @@ impl AndroidStorage {
     }
 }
 
+/// Refuse a data root that is not the SDK's directory inside the no-backup directory.
+///
+/// The embedded supervisor calls this before it opens anything, so a host that skipped
+/// [`AndroidStorage`] still cannot place the database on shared storage or in a directory
+/// that Auto Backup copies.
+///
+/// # Errors
+/// A [`StorageRefusal`] as an `SdkError`.
+pub fn require_private_data_root(data_root: &Path) -> Result<(), SdkError> {
+    if data_root.file_name().is_none_or(|name| name != DATA_ROOT_DIR) {
+        return Err(StorageRefusal::NotNoBackupDir.into());
+    }
+    let parent = data_root.parent().ok_or(StorageRefusal::NotNormalized)?;
+    classify_no_backup_dir(parent)?;
+    let resolved = std::fs::canonicalize(data_root)?;
+    let resolved_parent = resolved.parent().ok_or(StorageRefusal::Redirected)?;
+    classify_no_backup_dir(resolved_parent).map_err(|_| StorageRefusal::Redirected)?;
+    if resolved.file_name().is_none_or(|name| name != DATA_ROOT_DIR) {
+        return Err(StorageRefusal::Redirected.into());
+    }
+    Ok(())
+}
+
 /// Take an exclusive lock through one descriptor and observe a second descriptor being
 /// refused. Some emulated filesystems accept the call and enforce nothing.
 fn locks_are_effective(dir: &Path) -> Result<bool, SdkError> {
@@ -330,6 +353,18 @@ mod tests {
         for (path, refusal) in cases {
             assert_eq!(classify_no_backup_dir(Path::new(path)), Err(refusal), "{path}");
         }
+    }
+
+    #[test]
+    fn data_root_outside_the_no_backup_directory_is_refused() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("ramflux");
+        std::fs::create_dir(&root)?;
+        assert!(require_private_data_root(&root).is_err());
+        assert!(require_private_data_root(Path::new("/data/user/0/org.ramflux.app/files/ramflux")).is_err());
+        assert!(require_private_data_root(Path::new("/storage/emulated/0/ramflux")).is_err());
+        assert!(require_private_data_root(Path::new("/data/user/0/org.ramflux.app/no_backup/other")).is_err());
+        Ok(())
     }
 
     #[test]

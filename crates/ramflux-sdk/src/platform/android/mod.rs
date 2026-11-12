@@ -10,6 +10,7 @@
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
 pub mod backup;
+pub mod host;
 pub mod lifecycle;
 pub mod network;
 pub mod push;

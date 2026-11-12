@@ -130,7 +130,7 @@ panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 core-foundation = "=0.10.1"
 security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
 security-framework-sys = { version = "=2.17.0", features = ["OSX_10_15"] }

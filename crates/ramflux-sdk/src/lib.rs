@@ -35,6 +35,9 @@ mod platform;
 pub use platform::lifecycle::{
     HostLifecycle, HostPaths, LifecycleState, LifecycleTransition, SuspendReport,
 };
+#[cfg(unix)]
+pub use platform::embedded::{DEFAULT_SUSPEND_DEADLINE, EmbeddedConfig, EmbeddedSupervisor};
+pub use platform::connect_policy;
 #[cfg(target_os = "android")]
 pub use platform::android;
 pub use client::home_migration::{

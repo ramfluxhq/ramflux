@@ -42,7 +42,17 @@ impl LocalBusClient {
     /// Returns an error when the Unix socket cannot be opened.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, SdkError> {
         let stream = crate::platform::listener::connect(socket_path).await?;
-        let (mut reader, mut writer) = stream.into_split();
+        let (reader, writer) = stream.into_split();
+        Ok(Self::from_io(reader, writer))
+    }
+
+    /// Build a client over an already connected byte stream. The Unix socket and the
+    /// in-process carrier share every line below. Must be called inside a Tokio runtime.
+    pub(crate) fn from_io<R, W>(mut reader: R, mut writer: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (outbound, mut outbound_rx) = mpsc::channel::<OutboundFrame>(64);
         let (events, event_rx) = mpsc::channel(64);
         let pending: Pending = Arc::new(PendingMutex::new(BTreeMap::new()));
@@ -112,7 +122,7 @@ impl LocalBusClient {
             writer_connected.store(false, Ordering::Release);
             fail_pending(&writer_pending, "local bus writer stopped");
         });
-        Ok(Self {
+        Self {
             inner: Arc::new(ClientConnection {
                 outbound,
                 pending,
@@ -122,7 +132,7 @@ impl LocalBusClient {
                 reader: reader_task,
                 writer: writer_task,
             }),
-        })
+        }
     }
 
     /// # Errors
