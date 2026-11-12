@@ -49,6 +49,8 @@ fn b7_offline_twenty_dms_three_group_messages_redb_only() -> e2e::Result<()> {
     offline_demo_b(false, None, false)
 }
 
+// Controller ruling: deterministic post-commit SIGABRT, not an in-transaction
+// crash. The existing push/restart test separately exercises external SIGKILL.
 #[ignore = "real-process Demo B B7 crash at commit 7 and beyond-batch control; CLI e2e CI job"]
 #[test]
 fn b7_mid_batch_crash_wal() -> e2e::Result<()> {
@@ -130,6 +132,13 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
             <= e2e::receive_counter(&receive, "committed_cursor")?,
         "{receive}"
     );
+    if crash_after == Some(1000) {
+        let log = std::fs::read_to_string(bob_d.data_root.join("daemon.log"))?;
+        assert!(
+            !log.contains("RECEIVE_CRASH"),
+            "beyond-batch control must not emit a crash witness: {log}"
+        );
+    }
     let status = e2e::rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id])?;
     assert_eq!(status["session_delivery_mode"], "push", "{status}");
     assert_eq!(status["networking_snapshot"]["receive"]["catch_ups_total"], 1, "{status}");

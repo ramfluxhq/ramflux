@@ -230,6 +230,9 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
     }
     if let Some(connection) = &view.connection {
         let mut snapshot = connection.snapshot();
+        // The actor refreshes its cached receive status on networking observations.
+        // W1 commits and ACK drains can advance the ledger between those observations,
+        // so status reads need current DB watermarks even when the session stays Live.
         if let Some(receive) = &mut snapshot.receive
             && let Some(target) = status["target_delivery_id"].as_str()
         {

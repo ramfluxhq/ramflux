@@ -800,6 +800,13 @@ jobs:
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
           RAMFLUX_PRODUCTION_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label production-absence -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
+      # Keep the Demo B test-only crash seam out of default shipped artifacts.
+      - name: Guard default receive crash seam absence
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -B scripts/ci/check-receive-crash-absence.py --self-test
+          python3 -B scripts/ci/check-receive-crash-absence.py
+
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
