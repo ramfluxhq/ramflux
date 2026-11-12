@@ -32,6 +32,18 @@ pub(crate) struct ConversationSelector {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
+    /// Unified read model (message schema v1 only): page size, 1..=100.
+    #[arg(long, hide = true)]
+    pub(crate) limit: Option<u32>,
+    /// Unified read model: `next_before` cursor JSON of the previous page.
+    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "JSON")]
+    pub(crate) before: Option<String>,
+    /// Unified read model: durable change cursor (`next_after` of the previous batch).
+    #[arg(long, hide = true, value_name = "SEQ")]
+    pub(crate) after_seq: Option<u64>,
+    /// Unified read model: one message with revision, reactions, receipts and erasure state.
+    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "ID")]
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Args)]
@@ -45,6 +57,18 @@ pub(crate) struct DmRead {
     /// Wait for deferred attachment fetches for at most this many seconds.
     #[arg(long, value_name = "SECS", default_value_t = 0)]
     pub(crate) wait: u64,
+    /// Unified read model (message schema v1 only): page size, 1..=100.
+    #[arg(long, hide = true)]
+    pub(crate) limit: Option<u32>,
+    /// Unified read model: `next_before` cursor JSON of the previous page.
+    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "JSON")]
+    pub(crate) before: Option<String>,
+    /// Unified read model: durable change cursor (`next_after` of the previous batch).
+    #[arg(long, hide = true, value_name = "SEQ")]
+    pub(crate) after_seq: Option<u64>,
+    /// Unified read model: one message with revision, reactions, receipts and erasure state.
+    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "ID")]
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Args)]
