@@ -70,7 +70,7 @@ impl RamfluxClient {
             }
             let page = page_key(&row.target);
             let cached = db.load_actor_state::<Cached>(&page)?;
-            let envelope = match (row.in_flight.as_ref(), cached) {
+            let envelope = match (row.in_flight.clone(), cached) {
                 (Some(flight), Some(cached))
                     if cached.transfer_id == row.transfer_id
                         && cached.page == flight.page
