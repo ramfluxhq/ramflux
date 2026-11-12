@@ -68,7 +68,7 @@ fn resign(request: &mut SignedRequest) -> TestResult {
 }
 
 /// Session metadata, memory state and committed-write counters. Replay evidence stays on disk
-/// rather than being materialized by load_state; the durable control below calibrates detection.
+/// rather than being materialized by `load_state`; the durable control below calibrates detection.
 pub(super) fn snapshot(context: &crate::GatewayQuicContext) -> TestResult<Vec<u8>> {
     let disk = context.store.load_state()?;
     let memory =
