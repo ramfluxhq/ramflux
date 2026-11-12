@@ -245,7 +245,8 @@ class RamfluxClientTest {
             client.execute(send())
             fail("expected the core's typed error")
         } catch (error: CoreException.AccountBusy) {
-            assertSame(busy, error)
+            // Compared by value: coroutine stack-trace recovery may rethrow a copy.
+            assertEquals(busy.detail, error.detail)
             assertEquals(18, error.detail.code)
         }
     }

@@ -47,10 +47,10 @@ class M4Script(
         check(client.state == CoreState.RUNNING) { "core did not reach RUNNING" }
         journal.put("started", "true")
 
-        val node = call("node.add", null, JSONObject().put("url", args.nodeUrl).put("refresh", false))
-        journal.put("node", node.toString())
+        val nodeId = addNode()
+        journal.put("node", nodeId ?: "")
 
-        val account = createAccount(node.optString("node_id").ifEmpty { null })
+        val account = createAccount(nodeId)
         journal.put("account", account)
         val status = call("account.status", account, JSONObject())
         journal.put("principal", status.getString("principal_id"))
@@ -115,7 +115,7 @@ class M4Script(
      */
     suspend fun expectVaultRefusal() {
         client.start()
-        call("node.add", null, JSONObject().put("url", args.nodeUrl).put("refresh", false))
+        addNode()
         val refused = try {
             createAccount(null)
             null
@@ -126,6 +126,26 @@ class M4Script(
         val accounts = call("account.list", null, JSONObject()).getJSONArray("accounts")
         check(accounts.length() == 0) { "a refused creation left an account behind: $accounts" }
         journal.put("vault_refusal", refused.toString())
+    }
+
+    /**
+     * Add the local node and confirm its key. With `nodePublicKey` the key is pinned to
+     * the value the driver read from the node; without it the first key seen is trusted,
+     * which is what the command-line client does for a node the user just named.
+     */
+    private suspend fun addNode(): String? {
+        val added = call("node.add", null, JSONObject().put("url", args.nodeUrl).put("refresh", false))
+        val nodeId = sequenceOf(added.optJSONObject("node"), added.optJSONObject("pending"), added)
+            .firstNotNullOfOrNull { it?.optString("node_id")?.ifEmpty { null } }
+            ?: return null
+        val known = call("node.list", null, JSONObject()).optJSONArray("nodes") ?: JSONArray()
+        val confirmed = (0 until known.length()).any { known.getJSONObject(it).optString("node_id") == nodeId }
+        if (!confirmed) {
+            val confirm = JSONObject().put("node_id", nodeId)
+            args.nodePublicKey?.let { confirm.put("expected_public_key", it) }
+            call("node.confirm", null, confirm)
+        }
+        return nodeId
     }
 
     /**

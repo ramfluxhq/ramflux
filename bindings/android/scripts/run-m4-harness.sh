@@ -18,6 +18,7 @@
 # pass what the device needs:
 #
 #   RAMFLUX_NODE_URL                 node URL as the device sees it (emulator: host alias)
+#   RAMFLUX_NODE_PUBLIC_KEY          node public key to pin (optional; otherwise first use)
 #   RAMFLUX_PASSPHRASE               fixture passphrase for the creation ceremony
 #   RAMFLUX_DISPLAY_NAME             account display name (optional)
 #   RAMFLUX_ACCOUNT_UNLOCK_BODY      JSON body of account.unlock for the second run (optional)
@@ -44,6 +45,7 @@ fail() { echo "m4-harness: FAIL: $*" >&2; exit 1; }
 # %q quoting keeps a JSON value one argument through `adb shell`.
 arg() { [ -n "${2:-}" ] && printf ' -e %s %q' "$1" "$2" || true; }
 instrument_args="$(arg nodeUrl "$RAMFLUX_NODE_URL")\
+$(arg nodePublicKey "${RAMFLUX_NODE_PUBLIC_KEY:-}")\
 $(arg passphrase "${RAMFLUX_PASSPHRASE:?set RAMFLUX_PASSPHRASE to the fixture passphrase}")\
 $(arg displayName "${RAMFLUX_DISPLAY_NAME:-}")\
 $(arg accountUnlockBody "${RAMFLUX_ACCOUNT_UNLOCK_BODY:-}")\

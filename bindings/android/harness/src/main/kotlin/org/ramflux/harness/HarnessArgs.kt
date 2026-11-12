@@ -13,6 +13,8 @@ data class HarnessArgs(
     val phase: String,
     /** Node URL of the local gateway as the emulator sees it, e.g. the host loopback alias. */
     val nodeUrl: String,
+    /** Public key of that node, read by the driver, to pin instead of trusting first use. */
+    val nodePublicKey: String?,
     /** Display name of the account the ceremony creates. */
     val displayName: String,
     /** Passphrase given to the creation ceremony. A fixture value, never a user's. */
@@ -39,6 +41,7 @@ data class HarnessArgs(
             return HarnessArgs(
                 phase = required("phase"),
                 nodeUrl = required("nodeUrl"),
+                nodePublicKey = arguments("nodePublicKey"),
                 displayName = arguments("displayName") ?: "m4-harness",
                 passphrase = required("passphrase"),
                 accountUnlockBody = arguments("accountUnlockBody"),
