@@ -20,6 +20,9 @@ itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = []
+# C ABI major 2: a synchronous facade over the in-process supervisor. Additive and default-off;
+# the major-1 symbols and their backend are unchanged.
+c-abi-v2 = ["c-abi"]
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]

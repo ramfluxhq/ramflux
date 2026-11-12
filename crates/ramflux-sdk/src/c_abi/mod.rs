@@ -16,6 +16,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// C ABI major 2 (supervisor-backed). Additive: nothing in this file changes behaviour.
+#[cfg(feature = "c-abi-v2")]
+pub mod v2;
+
 const ABI_VERSION_MAJOR: u32 = 1;
 const ABI_VERSION_MINOR: u32 = 0;
 const PROTOCOL_VERSION: u32 = 1;
