@@ -76,6 +76,8 @@ pub enum CodecRule {
     },
     /// Exactly 192 account MAC subkey bytes, SHA256-bound to the `bundle_id` key.
     SqlMacSubkeys,
+    /// Closed canonical public `DeviceRef` JSON text (at most 512 bytes), not opaque JSON.
+    SqlDeviceRef,
     /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
     SqlBytes {
         length: U64,
@@ -177,15 +179,26 @@ impl FamilyRule {
                 }
             }
         }
+        let current_mac = matches!(self.selector, FamilySelector::Table("account_mac_bundle"))
+            && self.id == "sql/account_mac_bundle/portable"
+            && self.key == ["bundle_id"];
+        let imported_mac =
+            matches!(self.selector, FamilySelector::Table("full_imported_mac_bundle"))
+                && self.id == "sql/full_imported_mac_bundle"
+                && self.key == ["source_ref", "bundle_id"];
         if self.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlMacSubkeys))
-            && (!matches!(self.selector, FamilySelector::Table("account_mac_bundle"))
-                || self.id != "sql/account_mac_bundle/portable"
-                || self.key != ["bundle_id"]
+            && (!(current_mac || imported_mac)
                 || self.merge != MergeRule::ImportedBundle
                 || self.codec.iter().any(|field| {
                     matches!(field.codec, CodecRule::SqlMacSubkeys) && field.name != "subkeys"
                 }))
         {
+            return Err(unsupported());
+        }
+        if self.codec.iter().any(|field| {
+            matches!(field.codec, CodecRule::SqlDeviceRef)
+                && (!imported_mac || field.name != "source_ref")
+        }) {
             return Err(unsupported());
         }
         let mut remaining = 4096;
@@ -250,6 +263,7 @@ impl FamilyRule {
                 matches!(
                     field.codec,
                     CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlDeviceRef
                         | CodecRule::SqlBytes { .. }
                         | CodecRule::SqlBase64 { .. }
                         | CodecRule::SqlI64 { .. }
@@ -275,7 +289,7 @@ impl FamilyRule {
                     Some(cell_type)
                 }
                 CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
-                CodecRule::SqlBase64 { .. } => Some(CellType::Utf8),
+                CodecRule::SqlBase64 { .. } | CodecRule::SqlDeviceRef => Some(CellType::Utf8),
                 CodecRule::SqlI64 { .. } => Some(CellType::I64),
                 _ => None,
             };
@@ -389,7 +403,7 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
-        CodecRule::SqlMacSubkeys => {
+        CodecRule::SqlMacSubkeys | CodecRule::SqlDeviceRef => {
             if depth != 1 {
                 return Err(unsupported());
             }
@@ -536,6 +550,7 @@ macro_rules! table_rule {
     (@version "object_identity_replacement",$mode:ident) => { U64(2) };
     (@version "object_segment_reference_veto",$mode:ident) => { U64(2) };
     (@version "account_mac_bundle",Transfer) => { U64(2) };
+    (@version "full_imported_mac_bundle",Transfer) => { U64(2) };
     (@version "runtime_inbox_recovery",$mode:ident) => { U64(2) };
     (@version "pairing_adoption",$mode:ident) => { U64(2) };
     (@version $other:literal,$mode:ident) => { U64(1) };
@@ -607,6 +622,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     tables_0::RULE_36,  // sql/event_tombstone
     tables_0::RULE_37,  // sql/friend_link_projection
     tables_0::RULE_38,  // sql/friend_projection
+    tables_3::RULE_159, // sql/full_imported_mac_bundle
     tables_0::RULE_39,  // sql/group_ban_projection
     tables_1::RULE_40,  // sql/group_control_event_seen
     tables_1::RULE_41,  // sql/group_invite_projection

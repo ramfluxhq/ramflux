@@ -34,6 +34,7 @@ pub(super) fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError
                 && !matches!(
                     field.codec,
                     CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlDeviceRef
                         | CodecRule::SqlBytes { .. }
                         | CodecRule::SqlBase64 { .. }
                         | CodecRule::SqlI64 { .. }
@@ -216,6 +217,14 @@ fn build(
     let mut total = FullScalarSourceCounts { records: 0, encoded_bytes: 0 };
     while let Some(row) = rows.next()? {
         source_guard.require()?;
+        if rule.id == "sql/full_imported_mac_bundle" {
+            let source = super::super::mac_subkeys::full::decode_source_ref(
+                row.get_ref(0)?.as_str().map_err(|_| invalid())?.as_bytes(),
+            )?;
+            if source.account_anchor != source_guard.principal {
+                return Err(invalid());
+            }
+        }
         let mut record = Zeroizing::new(Vec::new());
         let bytes = write_full_scalar_sql_row(rule, row, &mut *record)?;
         if record.len() > 16384 {

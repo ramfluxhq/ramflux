@@ -52,6 +52,7 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
             | "object_segment_resource"
             | "object_segment_floor"
             | "account_mac_bundle"
+            | "full_imported_mac_bundle"
             // Tombstones are unioned by their own helper (P03a-3d1), never row-merged.
             | "receive_erased_input"
             // Receive ledger never crosses a backup; P03b strips it and skips the row merge.
@@ -312,7 +313,7 @@ impl BackupDatabase {
         let result = (|| {
             super::restore_floor::refuse_schema_downgrade(&self.db)?;
             let tables = self.begin_merge_inputs(candidate, after_capture)?;
-            let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
+            let marker_ids = self.prepare_mac_verifiers(progress)?;
             super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
             let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
@@ -439,6 +440,13 @@ impl BackupDatabase {
         self.merge_edit_registers()?;
         self.merge_reaction_registers()?;
         Ok(floors)
+    }
+    fn prepare_mac_verifiers(
+        &self,
+        progress: &mut impl FnMut() -> Result<(), StorageError>,
+    ) -> Result<std::collections::BTreeMap<String, String>, StorageError> {
+        self.merge_full_imported_mac_verifiers(progress)?;
+        super::mac_subkeys::merge::prepare(&self.db)
     }
 
     fn begin_merge_inputs(

@@ -101,6 +101,7 @@ pub use account_db::large_segments::{
     SegmentCleanupPage, SegmentDirection, SegmentOrphanSweep, SegmentPageEntry, SegmentReference,
     SegmentStore,
 };
+pub use account_db::mac_subkeys::full::FullImportedMacDomain;
 pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
