@@ -29,6 +29,12 @@ pub(super) fn own_sent_erasure_owners(
     Ok(ids.into_iter().map(ramflux_protocol::encode_base64url).collect())
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum MessageProjection {
+    Live(i64),
+    Reparse(i64),
+}
+
 impl RamfluxClient {
     pub(crate) fn authorize_generated_own_sent(
         &self,
@@ -144,6 +150,9 @@ impl RamfluxClient {
             return Ok(true);
         }
         if scanned.outcome != g::validation::ScanOutcome::Supported {
+            if scanned.kind == 1 {
+                return self.commit_unsupported_own_message(&packet, &identity, sent);
+            }
             return Err(SdkError::InboundPending(
                 "own sent unsupported attestation retention pending".into(),
             ));
@@ -168,7 +177,7 @@ impl RamfluxClient {
                         &identity,
                         sent,
                         &packet,
-                        copy_created_at,
+                        MessageProjection::Live(copy_created_at),
                     )?;
                 }
                 Some(g::content::Value::Edit(_)) => {
@@ -207,7 +216,7 @@ impl RamfluxClient {
         })
     }
 
-    fn bind_generated_own_sent_context(
+    pub(super) fn bind_generated_own_sent_context(
         &self,
         packet: &SentMessage,
         identity: &g::EventIdentity,
@@ -253,14 +262,18 @@ impl RamfluxClient {
         Ok(())
     }
 
-    fn project_generated_own_sent_message(
+    pub(super) fn project_generated_own_sent_message(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         identity: &g::EventIdentity,
         sent: &g::OwnSentMessage,
         packet: &SentMessage,
-        copy_created_at: i64,
+        projection: MessageProjection,
     ) -> Result<(), SdkError> {
+        let (copy_created_at, topic) = match projection {
+            MessageProjection::Live(at) => (at, "message.received"),
+            MessageProjection::Reparse(at) => (at, "message.schema.updated"),
+        };
         let db = self.account_db()?;
         let id = ramflux_protocol::encode_base64url(&identity.id);
         if db.message_is_deleted(&id)? || self.apply_generated_delete_fence(identity)? {
@@ -277,13 +290,6 @@ impl RamfluxClient {
                 return Err(SdkError::ReplayMismatch);
             }
             return Ok(());
-        }
-        // Suppression is safe only once the identical original effect is durably present.
-        if packet
-            .original_recipients
-            .contains(&self.owned_device_identity()?.device_id().to_owned())
-        {
-            return Err(SdkError::InboundPending(format!("message_target:{id}")));
         }
         db.import_direct_message_projection(DirectMessageWrite {
             conversation_id: &identity.conversation_id,
@@ -335,12 +341,7 @@ impl RamfluxClient {
             .direct_message_by_id(&id)?
             .ok_or_else(|| invalid("own sent projection missing"))?;
         let update = self.generated_message_update(&row, &identity.conversation_id, 0)?;
-        db.append_message_update(
-            &format!("own-sent/{id}"),
-            "message.received",
-            &update,
-            now_unix_timestamp(),
-        )?;
+        db.append_message_update(&format!("own-sent/{id}"), topic, &update, now_unix_timestamp())?;
         Ok(())
     }
 }
@@ -467,11 +468,14 @@ mod tests {
         assert!(own.client.authorize_generated_own_sent(&source, conversation, &invalid).is_err());
         let mut suppressed = sent.clone();
         suppressed.original_recipients.push(source.device_id().into());
-        assert!(matches!(
-            own.client.receive_generated_own_sent(&entry()?, &source, 42, &suppressed),
-            Err(SdkError::InboundPending(_))
-        ));
-        assert!(own.client.account_db()?.message_content(&sent.message_id)?.is_none());
+        assert!(
+            own.client.receive_generated_own_sent(&entry()?, &source, 42, &suppressed)?,
+            "a copied Message repairs a missed original-recipient delivery"
+        );
+        assert_eq!(
+            own.client.account_db()?.message_content(&sent.message_id)?,
+            Some(sent.exact_inner.clone())
+        );
         assert!(own.client.receive_generated_own_sent(&entry()?, &source, 42, &sent)?);
         assert!(own.client.receive_generated_own_sent(&entry()?, &source, 42, &suppressed)?);
         Ok(())

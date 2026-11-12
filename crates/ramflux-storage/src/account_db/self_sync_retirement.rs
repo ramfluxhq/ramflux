@@ -11,7 +11,14 @@ impl AccountDb {
     /// # Errors
     /// Requires the caller's writer transaction; rejects other namespaces and SQL failures.
     pub fn retire_self_sync_actor(&self, key: &str) -> Result<(), StorageError> {
-        if ![
+        let key = key.to_owned();
+        self.connection.call(move |db| Ok(retire_actor(db, &key))).map_err(StorageError::from)?
+    }
+}
+
+pub(super) fn retire_actor(db: &rusqlite::Connection, key: &str) -> Result<(), StorageError> {
+    if db.is_autocommit()
+        || ![
             "self-sync/state/",
             "self-sync/pending/",
             "self-sync/repair/",
@@ -19,25 +26,23 @@ impl AccountDb {
         ]
         .iter()
         .any(|prefix| key.starts_with(prefix))
-        {
-            return Err(StorageError::AuthorizationRejected);
-        }
-        let key = key.to_owned();
-        self.connection.call(move |db| {
-            let retire = || -> Result<(), StorageError> {
-                if db.is_autocommit() { return Err(StorageError::AuthorizationRejected); }
-                db.execute("DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND actor_state_kind=?1", [&key])?;
-                db.execute("DELETE FROM runtime_actor_state WHERE state_kind=?1", [&key])?;
-                // A delete trigger can enqueue the old fingerprint-bearing state_kind.
-                db.execute("DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND actor_state_kind=?1", [&key])?;
-                db.execute("DELETE FROM message_footprint WHERE locator=?1", [&key])?;
-                db.execute("DELETE FROM message_copy_binding WHERE copy_id=?1", [&key])?;
-                db.execute("INSERT INTO runtime_privacy_maintenance VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1", [])?;
-                Ok(())
-            };
-            Ok(retire())
-        }).map_err(StorageError::from)?
+    {
+        return Err(StorageError::AuthorizationRejected);
     }
+    db.execute(
+        "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND actor_state_kind=?1",
+        [key],
+    )?;
+    db.execute("DELETE FROM runtime_actor_state WHERE state_kind=?1", [key])?;
+    // The delete trigger may enqueue the fingerprint-bearing actor key again.
+    db.execute(
+        "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND actor_state_kind=?1",
+        [key],
+    )?;
+    db.execute("DELETE FROM message_footprint WHERE locator=?1", [key])?;
+    db.execute("DELETE FROM message_copy_binding WHERE copy_id IN (?1,'actor:'||?1)", [key])?;
+    db.execute("INSERT INTO runtime_privacy_maintenance VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1", [])?;
+    Ok(())
 }
 
 #[cfg(test)]

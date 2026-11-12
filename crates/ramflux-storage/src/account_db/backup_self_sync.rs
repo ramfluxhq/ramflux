@@ -167,7 +167,7 @@ impl BackupDatabase {
 
     fn erase_self_sync_restored_values(&self) -> Result<(), StorageError> {
         let erased = erase_set(&self.db)?;
-        for prefix in [STATE, "self-sync/pending/", "self-sync/repair/"] {
+        for prefix in [STATE, "self-sync/pending/", "self-sync/repair/", "self-sync/repair-sent/"] {
             for (key, value) in rows(&self.db, "main", prefix)? {
                 let mut forbidden = erased.contains(conversation(&value)?);
                 if prefix == STATE
@@ -177,8 +177,7 @@ impl BackupDatabase {
                         && state_pair(&value)?.0 <= revision(&floor["revision"])?;
                 }
                 if forbidden {
-                    self.db
-                        .execute("DELETE FROM runtime_actor_state WHERE state_kind=?1", [key])?;
+                    super::self_sync_retirement::retire_actor(&self.db, &key)?;
                 }
             }
         }

@@ -1770,7 +1770,7 @@ fn cleared_self_sync_register_discards_a_prepared_courier_plan_before_ratchet_wo
     assert_eq!(
         a.client.account_db()?.test_table_fingerprints(&[])?,
         before,
-        "obsolete plan cannot allocate an identity, acquire a prekey or advance the ratchet"
+        "obsolete plan cannot allocate an identity or advance the ratchet"
     );
     assert!(
         a.client
