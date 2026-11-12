@@ -380,6 +380,53 @@ async fn generated_group_key_off_its_group_route_is_refused_without_retention()
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn peer_control_author_must_be_the_authenticated_pair_peer() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(249, 251)?;
+    b.client.account_db()?.persist_client_record(
+        "object",
+        "obj-1",
+        &serde_json::json!({"owner": a.client.own_account_anchor()?}),
+    )?;
+    let control = g::Control {
+        operation: 12,
+        payload: Some(g::control::Payload::ObjectRevoke(g::ObjectRevokeAccess {
+            object_id: "obj-1".into(),
+            recipient_principal_id: b.client.own_account_anchor()?,
+            link_id: "link".into(),
+            reason: "removed".into(),
+            effective_at: 9,
+        })),
+    };
+    // A well-formed identity whose author is another device of the same root: the transport
+    // peer is the object owner, the stated author is not the transport peer.
+    let conversation = scope(&a, &b)?;
+    let mut identity = generated_identity(&a, "revoke-other-author")?;
+    identity.conversation_id = conversation.clone();
+    if let Some(author) = identity.author.as_mut() {
+        author.device_id = "another-device".into();
+    }
+    identity.id = g::identity::derive(
+        identity.author.as_ref().ok_or_else(|| invalid("author"))?,
+        &conversation,
+        identity.device_sequence,
+    )
+    .map_err(|_| invalid("control identity"))?
+    .to_vec();
+    let raw = g::Inner {
+        layer: g::registry::COMPILED_LAYER,
+        kind: 8,
+        identity: Some(identity),
+        body: control.encode_to_vec(),
+    }
+    .encode_to_vec();
+    let entry = seal_control(&a, &b, "revoke-other-author", &raw)?;
+    assert!(run(&mut b, &entry).await.is_err(), "control with a foreign author executed");
+    assert!(b.client.account_db()?.actor_state_keys(APPLIED)?.is_empty());
+    Ok(())
+}
+
 #[test]
 fn no_known_control_operation_reaches_inbound_pending() {
     let source = include_str!("generated_receive.rs");
