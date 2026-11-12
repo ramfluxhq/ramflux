@@ -96,9 +96,10 @@ certificate and must not install an additional root.
 - An HTTP proxy is used only when the host configures one explicitly
   (`GatewaySessionConfig::with_http_proxy`). There is no environment or system
   lookup.
-- With a proxy configured, QUIC is never dialed. TCP + TLS runs inside an HTTP
-  `CONNECT` tunnel; TLS to the gateway stays end to end, so the proxy sees the
-  gateway host name and ciphertext only.
+- With a proxy configured, QUIC is never dialed and the proxy is never
+  bypassed: `Auto` and `TcpTls` run TCP + TLS inside an HTTP `CONNECT` tunnel,
+  and an explicit `Quic` kind is refused. TLS to the gateway stays end to end,
+  so the proxy sees the gateway address and ciphertext only.
 - The code is behind the default-off `http-connect-proxy` feature and is not
   compiled for Windows targets.
 - Proxy credentials (`Basic`) are redacted from `Debug` output and never

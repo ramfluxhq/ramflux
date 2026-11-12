@@ -57,6 +57,23 @@ pub(crate) async fn open_auto_raced(
     }
 }
 
+/// Connect with an HTTP proxy configured. QUIC cannot use the proxy, so an explicit `Quic`
+/// kind is refused and every other kind uses TCP + TLS inside the tunnel.
+pub(crate) async fn open_through_http_proxy(
+    config: &GatewaySessionConfig,
+) -> Result<OpenedTransport, SdkError> {
+    if config.transport_kind == GatewaySessionTransportKind::Quic {
+        return Err(SdkError::Transport(ramflux_transport::TransportError::UnsupportedOperation {
+            operation: "QUIC through an HTTP proxy",
+        }));
+    }
+    let plan = ramflux_transport::DialPlan::single(CarrierKind::TcpTls);
+    match dial_gateway(dial_target(config), &plan).await {
+        Ok(dialed) => opened_transport(dialed, CarrierKind::TcpTls),
+        Err(error) => Err(SdkError::from(error.into_transport_error())),
+    }
+}
+
 fn opened_transport(
     dialed: DialedGateway,
     carrier: CarrierKind,

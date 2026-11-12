@@ -170,9 +170,7 @@ async fn open_stream_path(
 ) -> Result<tokio::net::TcpStream, TransportError> {
     #[cfg(all(feature = "http-connect-proxy", not(windows)))]
     if let Some(proxy) = &target.http_proxy {
-        return proxy
-            .open_tunnel(&target.server_name, peer.port(), target.handshake_timeout)
-            .await;
+        return proxy.open_tunnel(peer, target.handshake_timeout).await;
     }
     crate::quic_gateway::connect_gateway_tcp(
         bind_addr_for_peer(target.bind_addr, peer),

@@ -4,7 +4,7 @@
 //! HTTP CONNECT tunnel (RFC 9110 section 9.3.6) for the stream carriers.
 //!
 //! The tunnel only moves bytes. TLS 1.3 to the gateway, the pinned CA and the custody exporter
-//! all run end to end inside it, so the proxy sees ciphertext and the gateway host name it was
+//! all run end to end inside it, so the proxy sees ciphertext and the gateway address it was
 //! asked to reach, nothing else. QUIC is never sent through an HTTP proxy.
 //!
 //! Compiled only with the default-off `http-connect-proxy` feature, and never on Windows.
@@ -63,15 +63,10 @@ pub struct HttpConnectProxy {
     pub credentials: Option<ProxyCredentials>,
 }
 
-fn valid_target_host(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 253
-        && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-}
-
-/// The CONNECT request for `host:port`. The request target is the authority form.
-fn connect_request(host: &str, port: u16, credentials: Option<&ProxyCredentials>) -> String {
-    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+/// The CONNECT request for `target`. The request target is the authority form, written from
+/// the configured gateway address, so the proxy performs no name resolution for the client.
+fn connect_request(target: SocketAddr, credentials: Option<&ProxyCredentials>) -> String {
+    let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if let Some(credentials) = credentials {
         request.push_str("Proxy-Authorization: ");
         request.push_str(&credentials.basic_header_value());
@@ -100,31 +95,23 @@ fn parse_connect_status(head: &[u8]) -> Result<u16, TransportError> {
 }
 
 impl HttpConnectProxy {
-    /// Open a tunnel to `target_host:target_port` and return the raw byte stream.
-    ///
-    /// `target_host` is the gateway host name the node profile carries; the proxy resolves it.
+    /// Open a tunnel to the gateway address `target` and return the raw byte stream.
     ///
     /// # Errors
     /// Returns an error when the proxy is unreachable, answers anything other than a 2xx
     /// status, or does not answer within `timeout`.
     pub async fn open_tunnel(
         &self,
-        target_host: &str,
-        target_port: u16,
+        target: SocketAddr,
         timeout: Duration,
     ) -> Result<TcpStream, TransportError> {
-        if !valid_target_host(target_host) {
-            return Err(TransportError::InvalidDnsName(
-                "proxy tunnel target is not a host name".to_owned(),
-            ));
-        }
         let elapsed = |_elapsed| {
             TransportError::Io(io::Error::new(io::ErrorKind::TimedOut, "proxy CONNECT timed out"))
         };
         let mut stream = tokio::time::timeout(timeout, TcpStream::connect(self.proxy_addr))
             .await
             .map_err(elapsed)??;
-        let request = connect_request(target_host, target_port, self.credentials.as_ref());
+        let request = connect_request(target, self.credentials.as_ref());
         tokio::time::timeout(timeout, async {
             stream.write_all(request.as_bytes()).await?;
             stream.flush().await?;
@@ -164,11 +151,19 @@ mod tests {
 
     #[test]
     fn connect_request_uses_the_authority_form_and_a_host_header() {
-        let request = connect_request("gw.example.org", 443, None);
-        assert_eq!(
-            request,
-            "CONNECT gw.example.org:443 HTTP/1.1\r\nHost: gw.example.org:443\r\n\r\n"
-        );
+        let v4 = connect_request(SocketAddr::from(([192, 0, 2, 1], 443)), None);
+        assert_eq!(v4, "CONNECT 192.0.2.1:443 HTTP/1.1\r\nHost: 192.0.2.1:443\r\n\r\n");
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap_or_else(|_| unreachable!());
+        assert!(connect_request(v6, None).starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn credentials_are_sent_only_in_the_proxy_authorization_header() {
+        let request = connect_request(SocketAddr::from(([192, 0, 2, 1], 443)), Some(&credentials()));
+        // base64("alice:s3cret-value")
+        assert!(request.contains("Proxy-Authorization: Basic YWxpY2U6czNjcmV0LXZhbHVl\r\n"));
+        assert!(!request.contains("s3cret-value"));
+        assert!(!request.to_ascii_lowercase().contains("\r\nauthorization:"));
     }
 
     #[test]
@@ -193,12 +188,9 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unencodable_credentials_and_non_host_targets() {
+    fn refuses_unencodable_credentials() {
         assert!(ProxyCredentials::new("a:b".to_owned(), "x".to_owned()).is_err());
         assert!(ProxyCredentials::new("a".to_owned(), "x\r\ny".to_owned()).is_err());
-        assert!(!valid_target_host("gw.example.org\r\nX-Injected: 1"));
-        assert!(!valid_target_host("gw.example.org:443"));
-        assert!(valid_target_host("gw.example.org"));
     }
 
     #[test]

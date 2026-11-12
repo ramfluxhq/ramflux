@@ -1010,9 +1010,13 @@ pub(crate) async fn open_gateway_session_transport(
     ),
     SdkError,
 > {
+    if config.has_http_proxy() {
+        // A configured proxy applies to every transport kind; it is never bypassed.
+        return super::auto_dial::open_through_http_proxy(config).await;
+    }
     match config.transport_kind {
         GatewaySessionTransportKind::Auto
-            if config.connection_race == super::ConnectionRace::Raced || config.has_http_proxy() =>
+            if config.connection_race == super::ConnectionRace::Raced =>
         {
             super::auto_dial::open_auto_raced(config).await
         }
