@@ -19,6 +19,7 @@ struct Repair {
     scope: String,
     target: String,
     target_epoch: u64,
+    target_certificate: Option<String>,
     exact_body: Zeroizing<Vec<u8>>,
     read_marker_body: Option<Zeroizing<Vec<u8>>>,
     references: Vec<Reference>,
@@ -39,6 +40,7 @@ pub(crate) struct Plan {
     pending: String,
     target: RootQualifiedDeviceRef,
     target_epoch: u64,
+    target_certificate: Option<String>,
     value: Zeroizing<Vec<u8>>,
     pub(crate) message: GatewayDirectMessage,
     pub(crate) request: SendMaterialRequest,
@@ -61,6 +63,12 @@ impl RamfluxClient {
                 .ok_or_else(|| refused("repair disappeared"))?;
             let repair: Repair = serde_json::from_value(encoded.clone())?;
             let target = self.device_identity(&repair.target)?;
+            if !self.self_sync_target_admitted(&target, repair.target_epoch)?
+                || self.self_sync_target_certificate(&target)? != repair.target_certificate
+            {
+                self.retire_self_sync_repair(&key)?;
+                continue;
+            }
             self.authorize_self_sync(&target, &repair.conversation_id)?;
             if self.self_sync_target_epoch(&target)? != repair.target_epoch {
                 self.retire_self_sync_repair(&key)?;
@@ -106,6 +114,7 @@ impl RamfluxClient {
                     pending,
                     target,
                     target_epoch: repair.target_epoch,
+                    target_certificate: repair.target_certificate.clone(),
                     value: body.clone(),
                     message,
                     request,
@@ -158,12 +167,60 @@ impl RamfluxClient {
             .ok_or_else(|| refused("repair target epoch missing"))
     }
 
+    pub(super) fn self_sync_target_certificate(
+        &self,
+        target: &RootQualifiedDeviceRef,
+    ) -> Result<Option<String>, SdkError> {
+        let Some(authority) = self
+            .current_custody_authority(target.root_commitment(), crate::custody::network_now()?)?
+        else {
+            return Ok(None);
+        };
+        authority
+            .envelope()
+            .body
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == target.device_id())
+            .and_then(|entry| entry.branch_certificate.as_ref())
+            .map(ramflux_protocol::custody::object_hash)
+            .transpose()
+            .map_err(SdkError::from)
+    }
+
+    fn self_sync_target_admitted(
+        &self,
+        target: &RootQualifiedDeviceRef,
+        epoch: u64,
+    ) -> Result<bool, SdkError> {
+        let now = crate::custody::network_now()?;
+        let Some(authority) = self.current_custody_authority(target.root_commitment(), now)? else {
+            return Ok(true);
+        };
+        Ok(authority
+            .authorize(
+                &ramflux_protocol::custody::DeviceRef {
+                    account_anchor: target.root_commitment().into(),
+                    device_id: target.device_id().into(),
+                    device_epoch: epoch,
+                },
+                "sync",
+                now,
+            )
+            .is_ok())
+    }
+
     fn self_sync_repair_current(&self, plan: &Plan) -> Result<bool, SdkError> {
         let Some(row) = self.account_db()?.load_actor_state::<serde_json::Value>(&plan.key)? else {
             return Ok(false);
         };
         if *blake3::hash(&ramflux_protocol::canonical_json_bytes(&row)?).as_bytes()
             != plan.fingerprint
+        {
+            return Ok(false);
+        }
+        if !self.self_sync_target_admitted(&plan.target, plan.target_epoch)?
+            || self.self_sync_target_certificate(&plan.target)? != plan.target_certificate
         {
             return Ok(false);
         }

@@ -26,6 +26,17 @@ impl Drop for OwnSentAttestation {
 }
 
 impl OwnSentAttestation {
+    pub(super) fn enclosing_copy(&self) -> Result<g::OwnMessageCopy, SdkError> {
+        let inner = g::Inner::decode(self.exact_outer_inner.as_slice())
+            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
+        let control = g::Control::decode(inner.body.as_slice())
+            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
+        match control.payload {
+            Some(g::control::Payload::OwnMessageCopy(copy)) => Ok(copy),
+            _ => Err(EvidenceError::OriginCommitmentMismatch.into()),
+        }
+    }
+
     pub(crate) fn verify(
         &self,
         exact_nested: &[u8],
@@ -95,16 +106,26 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let scanned = g::validation::scan_inner(&sent.exact_inner)
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        if scanned.outcome != g::validation::ScanOutcome::Supported
-            || !matches!(scanned.kind, 1 | 3)
-        {
+        if !matches!(scanned.kind, 1 | 3) {
             return Ok(());
         }
-        let (identity, content) = Self::decode_generated_inner(&sent.exact_inner)?;
-        let owners = super::generated::own_sent_erasure_owners(&identity, &content)?;
+        let (identity, owners) = if scanned.kind == 1 {
+            let inner = g::Inner::decode(sent.exact_inner.as_slice())
+                .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
+            let identity = inner.identity.ok_or(EvidenceError::OriginCommitmentMismatch)?;
+            let owners = vec![ramflux_protocol::encode_base64url(&identity.id)];
+            (identity, owners)
+        } else {
+            let (identity, content) = Self::decode_generated_inner(&sent.exact_inner)?;
+            let owners = super::generated::own_sent_erasure_owners(&identity, &content)?;
+            (identity, owners)
+        };
         let proof = self.capture_own_sent_attestation(opened, entry, sent)?;
         for owner in owners {
             self.persist_own_sent_attestation(&owner, &proof)?;
+            if scanned.outcome != g::validation::ScanOutcome::Supported && scanned.kind == 1 {
+                self.retain_unsupported_own_sent_view(&owner, &identity, sent, &proof)?;
+            }
         }
         Ok(())
     }
@@ -162,13 +183,17 @@ impl RamfluxClient {
         {
             return Ok(());
         }
-        let content = g::registry::decode_body(inner.kind, &inner.body, inner.layer)
-            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
         let identity = inner.identity.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
-        if !super::generated::own_sent_erasure_owners(identity, &content)?
-            .iter()
-            .any(|id| id == owner)
-        {
+        let owns = if inner.kind == 1 {
+            ramflux_protocol::encode_base64url(&identity.id) == owner
+        } else {
+            let content = g::registry::decode_body(inner.kind, &inner.body, inner.layer)
+                .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
+            super::generated::own_sent_erasure_owners(identity, &content)?
+                .iter()
+                .any(|id| id == owner)
+        };
+        if !owns {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
         let encoded = zeroize::Zeroizing::new(serde_json::to_vec(proof)?);
@@ -364,6 +389,102 @@ mod tests {
         assert!(
             db.raw_inner_copy(&keys[0])?.is_none(),
             "late original cannot resurrect its private proof"
+        );
+        Ok(())
+    }
+    fn bind_private_thread(own: &Fixture, sent: &g::OwnSentMessage) -> TestResult {
+        let context = sent.context.as_ref().ok_or("context")?;
+        own.client.account_db()?.persist_client_record(
+            "conversation",
+            &context.conversation_id,
+            &json!({"kind":"direct", "group_id":null, "participants":context.participants}),
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn own_sent_unsupported_message_keeps_exact_private_evidence_and_settles() -> TestResult {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (mut own, proof, mut sent) = fixture().await?;
+        bind_private_thread(&own, &sent)?;
+        let mut nested = g::Inner::decode(sent.exact_inner.as_slice())?;
+        nested.body.extend_from_slice(&[0xf8, 0x07, 1]);
+        sent.exact_inner = nested.encode_to_vec();
+        let identity = nested.identity.as_ref().ok_or("identity")?;
+        let mut outer = g::Inner::decode(proof.exact_outer_inner.as_slice())?;
+        let mut control = g::Control::decode(outer.body.as_slice())?;
+        let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_mut() else {
+            return Err("copy".into());
+        };
+        copy.payload = Some(g::own_message_copy::Payload::Sent(sent.clone()));
+        outer.body = control.encode_to_vec();
+        let proof = signed_proof(
+            &own,
+            outer.identity.as_ref().ok_or("outer identity")?,
+            outer.encode_to_vec(),
+            crate::custody::network_now()?,
+        )?;
+        proof.verify(&sent.exact_inner, &own.client.own_account_anchor()?)?;
+        own.client.authorize_generated_own_sent(
+            &own.client.owned_device_identity()?,
+            &identity.conversation_id,
+            &sent,
+        )?;
+        let packet = super::super::SentMessage::from_generated(&sent)?;
+        let owner = sent.message_id.clone();
+        own.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            assert!(own.client.commit_unsupported_own_message(&packet, identity, &sent)?);
+            own.client.persist_own_sent_attestation(&owner, &proof)?;
+            own.client.retain_unsupported_own_sent_view(&owner, identity, &sent, &proof)?;
+            Ok(())
+        })?;
+        let key = format!("routed/own-sent-attestation/{owner}/{owner}/inner");
+        assert_eq!(
+            own.client.account_db()?.raw_inner_copy(&key)?.ok_or("raw")?.bytes,
+            sent.exact_inner
+        );
+        assert!(own.client.account_db()?.message_content(&owner)?.is_none());
+        assert_eq!(own.client.reparse_raw_inner_page()?.projected, 0);
+        assert!(own.client.account_db()?.raw_inner_copy(&key)?.is_some());
+        own.client.account_db()?.write_transaction(|| {
+            own.client.retire_generated_edit_payloads(&identity.conversation_id, &owner)
+        })?;
+        assert!(own.client.account_db()?.raw_inner_copy(&key)?.is_none());
+        own.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            own.client.persist_own_sent_attestation(&owner, &proof)?;
+            own.client.retain_unsupported_own_sent_view(&owner, identity, &sent, &proof)
+        })?;
+        assert!(
+            own.client.account_db()?.raw_inner_copy(&key)?.is_none(),
+            "late opaque original cannot restore erased body or nonce"
+        );
+        assert!(own.client.account_db()?.raw_inner_copy(key.trim_end_matches("/inner"))?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn private_own_message_reparse_uses_own_attestation_and_keeps_peer_origin_separate()
+    -> TestResult {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (mut own, proof, sent) = fixture().await?;
+        bind_private_thread(&own, &sent)?;
+        let identity = g::Inner::decode(sent.exact_inner.as_slice())?.identity.ok_or("identity")?;
+        let owner = sent.message_id.clone();
+        // Stage a previous decoder's Unsupported view around genuinely signed native evidence.
+        own.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
+            own.client.persist_own_sent_attestation(&owner, &proof)?;
+            own.client.retain_unsupported_own_sent_view(&owner, &identity, &sent, &proof)
+        })?;
+        assert!(own.client.account_db()?.message_content(&owner)?.is_none());
+        assert_eq!(own.client.reparse_raw_inner_page()?.projected, 1);
+        assert_eq!(
+            own.client.account_db()?.message_content(&owner)?,
+            Some(sent.exact_inner.clone())
+        );
+        assert_eq!(own.client.reparse_raw_inner_page()?.projected, 0);
+        assert!(
+            own.client.export_generated_history_item(&identity.id).is_err(),
+            "sibling attestation cannot become peer origin"
         );
         Ok(())
     }

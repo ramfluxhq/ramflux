@@ -136,3 +136,58 @@ fn read(merged: &BackupDatabase, key: &str) -> Result<Option<Value>, Box<dyn std
         .optional()?;
     bytes.map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into)).transpose()
 }
+
+#[test]
+fn self_sync_restore_erases_local_repair_fingerprints_and_outbox_copies() -> TestResult {
+    let (source_root, source) = crate::tests::test_db("sync-restore-retire-source")?;
+    let (target_root, target) = crate::tests::test_db("sync-restore-retire-target")?;
+    source.persist_actor_state(
+        "self-sync/erase/restored-fence",
+        &json!({"conversation_id":"erased","erased":true}),
+    )?;
+    target.persist_actor_state("self-sync/state/stale-draft", &state("erased", 9, "old draft")?)?;
+    let marker = "self-sync/repair-sent/restore-old-draft-fingerprint-canary";
+    target.persist_actor_state(
+        marker,
+        &json!({"conversation_id":"erased","scope":"self-sync/state/stale-draft"}),
+    )?;
+    let incoming = source_root.join("incoming.db");
+    let source_snapshot = source.write_backup_snapshot(&incoming)?;
+    let destination = target_root.join("merged.db");
+    let target_snapshot = target.write_backup_snapshot(&destination)?;
+    let mut merged = BackupDatabase::open(&destination, &target_snapshot.key)?;
+    // Install one genuine pending outbox locator even if backup opening prunes prior outboxes.
+    merged.db.execute("INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) VALUES('runtime_actor_state','insert',0,?1)",
+        [serde_json::to_string(&json!({"state_kind":marker}))?])?;
+    merged.db.execute(
+        "INSERT OR IGNORE INTO message_footprint VALUES('old-owner','actor',?1)",
+        [marker],
+    )?;
+    merged.db.execute(
+        "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,'old-owner')",
+        [format!("actor:{marker}")],
+    )?;
+    merged.merge_backup(&incoming, &source_snapshot.key, || Ok(()))?;
+    assert!(read(&merged, marker)?.is_none(), "restore erase fence retires repair-sent keys");
+    let outbox: u64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_outbox WHERE actor_state_kind=?1",
+        [marker],
+        |row| row.get(0),
+    )?;
+    assert_eq!(outbox, 0, "old draft fingerprint must leave outbox locators too");
+    let bindings: u64 = merged.db.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE copy_id=?1",
+        [format!("actor:{marker}")],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bindings, 0);
+    assert!(read(&merged, "self-sync/state/stale-draft")?.is_none());
+    assert_eq!(
+        read(&merged, "self-sync/revision/stale-draft")?.ok_or("floor")?["revision"],
+        "00000000000000000009"
+    );
+    drop((merged, source, target));
+    std::fs::remove_dir_all(source_root)?;
+    std::fs::remove_dir_all(target_root)?;
+    Ok(())
+}

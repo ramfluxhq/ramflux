@@ -466,12 +466,14 @@ impl RamfluxClient {
         };
         let local = self.owned_device_identity()?;
         let local_epoch = self.self_sync_target_epoch(&local)?;
+        let target_certificate = self.self_sync_target_certificate(source)?;
         let id = ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&(
             scope,
             local.storage_key(),
             local_epoch,
             source.storage_key(),
             epoch,
+            &target_certificate,
             state.value.revision,
             state.tie_break,
             state.read_marker_body.as_ref().map(|body| (body.revision, body.tie_break)),
@@ -484,7 +486,7 @@ impl RamfluxClient {
             "conversation_id": state.conversation_id, "scope":scope, "references":state.references,
         });
         self.persist_self_sync_owned_state(&format!("self-sync/repair/{id}"), &serde_json::json!({
-            "conversation_id": state.conversation_id, "scope":scope, "target": source.storage_key(), "target_epoch": epoch,
+            "conversation_id": state.conversation_id, "scope":scope, "target": source.storage_key(), "target_epoch": epoch, "target_certificate": target_certificate,
             "exact_body": state.exact_body, "references": state.references,
             "read_marker_body": state.read_marker_body.as_ref().map(|body| &body.exact_body),
         }), &state.references)?;
