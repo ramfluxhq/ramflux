@@ -505,3 +505,4 @@ impl LocalPairingParticipant {
 }
 
 mod full;
+pub(crate) use full::FullProofSigner;

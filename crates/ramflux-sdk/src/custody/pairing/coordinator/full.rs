@@ -19,6 +19,7 @@ use ramflux_protocol::custody::pairing::{
 use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod bootstrap;
 pub(super) mod cancel;
+mod epoch;
 
 pub(super) struct FullCeremony {
     pub(super) common: CommonV3,

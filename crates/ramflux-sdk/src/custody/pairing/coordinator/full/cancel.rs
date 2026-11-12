@@ -13,6 +13,7 @@ use std::sync::{
 pub(crate) struct FullRuntimeCancel {
     stopped: AtomicBool,
     stage: Mutex<Option<FullStageIoCancel>>,
+    job: Mutex<Option<tokio::task::AbortHandle>>,
 }
 impl FullRuntimeCancel {
     pub(crate) fn require_live(&self) -> Result<(), SdkError> {
@@ -33,8 +34,23 @@ impl FullRuntimeCancel {
         }
         Ok(())
     }
+    pub(crate) fn register_job(&self, job: tokio::task::AbortHandle) -> Result<(), SdkError> {
+        let mut slot = self.job.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = self.require_live() {
+            job.abort();
+            return Err(error);
+        }
+        if let Some(old) = slot.replace(job) {
+            old.abort();
+        }
+        Ok(())
+    }
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
+        if let Some(job) = self.job.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        {
+            job.abort();
+        }
         if let Some(stage) =
             self.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {

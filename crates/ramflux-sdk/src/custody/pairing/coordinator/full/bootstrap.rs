@@ -20,13 +20,16 @@ pub(super) struct BootstrapState {
     pub(super) source_manifest: Option<SourceManifest>,
     pub(super) trust: Option<FullResumeTrust>,
     pub(super) keys: Option<FullResumeKeyOwner>,
-    cancel: Option<FullStageIoCancel>,
+    pub(super) cancel: Option<FullStageIoCancel>,
+    pub(super) epoch_job: Option<super::epoch::FullEpochJob>,
+    pub(super) epoch_ready: Option<crate::custody::pairing::FullPacketEpoch>,
 }
 impl Drop for BootstrapState {
     fn drop(&mut self) {
         if let Some(cancel) = &self.cancel {
             cancel.cancel();
         }
+        self.epoch_job.take();
     }
 }
 fn wrong() -> SdkError {
@@ -103,6 +106,8 @@ impl PairingActor {
                     trust: None,
                     keys: None,
                     cancel: None,
+                    epoch_job: None,
+                    epoch_ready: None,
                 },
                 prepared,
                 frames,
