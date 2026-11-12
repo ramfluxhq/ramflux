@@ -215,7 +215,8 @@ impl RamfluxClient {
             if entry.device_id == local.device_id() {
                 continue;
             }
-            let target = self.device_identity_for_root(local.root_commitment(), &entry.device_id)?;
+            let target =
+                self.device_identity_for_root(local.root_commitment(), &entry.device_id)?;
             if self.history_target_epoch(&target)?.is_some()
                 && self.stage_generated_history_transfer(&target)?
             {

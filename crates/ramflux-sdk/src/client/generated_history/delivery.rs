@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 /// Minimum spacing between accepted pages to one target; far inside the receiver window.
 const PAGE_INTERVAL_SECS: i64 = 1;
+/// Resends of one sealed page before its chain is restarted from the durable item cursor.
+const MAX_PAGE_ATTEMPTS: u32 = 10;
 
 /// The sealed in-flight page. Bound to every carried owner as a history container, so an
 /// Edit or Delete of any owner removes the whole cached page in the same transaction.
@@ -56,7 +58,11 @@ impl RamfluxClient {
             if row.done || row.next_at > now {
                 continue;
             }
-            let target = self.device_identity(&row.target)?;
+            let Ok(target) = self.device_identity(&row.target) else {
+                // An unknown target can never be admitted again under this row.
+                self.retire_generated_history_transfer(&key, &row.target)?;
+                continue;
+            };
             match self.history_target_epoch(&target) {
                 Ok(Some(epoch)) if epoch == row.target_epoch => (),
                 Ok(_) => {
@@ -72,7 +78,8 @@ impl RamfluxClient {
             let cached = db.load_actor_state::<Cached>(&page)?;
             let envelope = match (row.in_flight.clone(), cached) {
                 (Some(flight), Some(cached))
-                    if cached.transfer_id == row.transfer_id
+                    if row.attempts < MAX_PAGE_ATTEMPTS
+                        && cached.transfer_id == row.transfer_id
                         && cached.page == flight.page
                         && cached.envelope.envelope_id == flight.envelope_id
                         && cached.envelope.payload_hash == flight.payload_hash
@@ -90,6 +97,7 @@ impl RamfluxClient {
                     db.write_transaction(|| {
                         db.remove_actor_state(&page)?;
                         row.restart_chain()?;
+                        row.attempts = 0;
                         row.next_at = now.saturating_add(super::producer::RESTART_AFTER_IDLE_SECS);
                         db.persist_actor_state(&key, &row)?;
                         Ok::<_, SdkError>(())
