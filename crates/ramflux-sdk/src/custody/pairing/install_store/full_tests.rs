@@ -11,7 +11,7 @@ fn h(value: u8) -> String {
     encode_base64url([value; 32])
 }
 
-pub(super) fn fixture() -> Install {
+pub(crate) fn fixture() -> Install {
     Install {
         schema: "ramflux.pairing.Install.v3".into(),
         version: 3,

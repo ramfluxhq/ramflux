@@ -52,7 +52,7 @@ fn require(ok: bool, name: &'static str) -> Result<(), SdkError> {
     if ok { Ok(()) } else { Err(field(name)) }
 }
 
-fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
+pub(super) fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
     require(
         value.len() == 43
             && decode_base64url(value)
@@ -61,7 +61,7 @@ fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
     )
 }
 
-fn ident(value: &str, name: &'static str) -> Result<(), SdkError> {
+pub(super) fn ident(value: &str, name: &'static str) -> Result<(), SdkError> {
     require(
         !value.is_empty()
             && value.len() <= ID_MAX
@@ -425,4 +425,4 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 mod tests;
 
 #[cfg(test)]
-mod full_tests;
+pub(crate) mod full_tests;

@@ -15,7 +15,7 @@ mod account_writer;
 pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
-pub use account_index::BackupIndexInstall;
+pub use account_index::{AccountGenerationSelection, BackupIndexInstall};
 mod clock;
 mod constants;
 mod conversation_helpers;
