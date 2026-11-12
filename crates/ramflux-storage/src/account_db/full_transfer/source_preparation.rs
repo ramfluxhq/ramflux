@@ -94,6 +94,7 @@ impl FullSourcePreparation<'_> {
         }
         self.key.require_live()?;
         Ok(SourceContext {
+            key: &self.key,
             connection: &self.connection,
             db: self.db,
             directory: &self.directory,

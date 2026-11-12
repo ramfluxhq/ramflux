@@ -72,6 +72,7 @@ fn pairing_full_fixed_delta_uses_saved_cuts_and_emits_exact_put_absent_and_empty
         root_hash.push(index as u64, bytes)?;
     }
     assert_eq!(metadata.chunks_root, root_hash.finish()?);
+    let first_wire = (metadata.chunks_root, encoded.0.clone());
     let mut input = encoded.0.as_slice();
     let mut operations = Vec::new();
     while let Some(header) = read_record_header(&mut input)? {
@@ -103,6 +104,7 @@ fn pairing_full_fixed_delta_uses_saved_cuts_and_emits_exact_put_absent_and_empty
     );
     let (empty, metadata) =
         stage.encode_fixed_delta_source(2, &next, &unchanged, Sink::default())?;
+    assert_preserved_wire(&stage, 1, &first_wire.1, first_wire.0)?;
     assert!(empty.0.is_empty());
     assert_eq!(metadata.total_bytes, 0);
     assert_eq!(metadata.chunk_count, 0);
@@ -145,5 +147,28 @@ fn pairing_full_fixed_delta_refuses_decreased_erasure_generation_before_output()
         stage.encode_fixed_delta_source(1, &next, &base, Sink::default()).is_err(),
         "wrong cut identity"
     );
+    Ok(())
+}
+
+fn assert_preserved_wire(
+    stage: &FullTransferStage<'_>,
+    cut: u64,
+    expected: &[u8],
+    expected_root: [u8; 32],
+) -> ResultOf {
+    let connection = stage.key.open_metadata(&stage.directory.join("source-wire.db"))?;
+    let (total, root): (u64, Vec<u8>) = connection.query_row(
+        "SELECT total_bytes,root FROM wire_complete WHERE cut=?1",
+        rusqlite::params![i64::try_from(cut)?],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(root, expected_root, "successor preflight replaced the signed delta root");
+    assert_eq!(total, u64::try_from(expected.len())?);
+    let actual: Vec<u8> = connection.query_row(
+        "SELECT bytes FROM wire_chunk WHERE cut=?1 AND idx=0",
+        rusqlite::params![i64::try_from(cut)?],
+        |row| row.get(0),
+    )?;
+    assert_eq!(actual, expected, "successor preflight replaced the prior delta bytes");
     Ok(())
 }

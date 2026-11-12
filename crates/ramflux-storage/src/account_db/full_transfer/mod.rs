@@ -22,6 +22,7 @@ mod source_owner;
 mod source_preparation;
 mod source_receipt;
 mod source_scalar;
+mod source_wire;
 mod stage;
 mod stage_chunks;
 mod stage_reader;

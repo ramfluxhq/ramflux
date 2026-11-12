@@ -77,7 +77,8 @@ impl FullTransferStage<'_> {
                 total = total.checked_add(counts.encoded_bytes).ok_or_else(invalid)?;
             }
         }
-        let mut output = Rooted::new(writer, total)?;
+        let mut output =
+            Rooted::new(writer, total)?.with_wire(source.wire_spool(cut, current_snapshot)?);
         for (family, rule) in current.schema.families.iter().zip(full_transfer_catalog()) {
             if family.portable_records.0 == 0 {
                 continue;

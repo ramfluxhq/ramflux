@@ -8,6 +8,7 @@ use ramflux_crypto::custody::pairing::PairingRole;
 use std::path::Path;
 
 pub(super) struct SourceContext<'a> {
+    pub(super) key: &'a super::FullStageKey<'a>,
     pub(super) connection: &'a Connection,
     pub(super) db: &'a AccountDb,
     pub(super) directory: &'a Path,
@@ -20,6 +21,7 @@ impl FullTransferStage<'_> {
             return Err(context());
         }
         Ok(SourceContext {
+            key: &self.key,
             connection: &self.connection,
             db: self.db,
             directory: &self.directory,

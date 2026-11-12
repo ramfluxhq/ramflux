@@ -83,6 +83,9 @@ impl SourceContext<'_> {
             }
         }
         let mut output = Rooted::new(writer, total)?;
+        if cut == 0 {
+            output = output.with_wire(self.wire_spool(cut, snapshot_id)?);
+        }
         for family in &schema.families {
             if family.portable_records.0 > 0 {
                 let (next, counts) =
@@ -116,6 +119,7 @@ pub(super) struct Rooted<W> {
     cache: Zeroizing<Vec<u8>>,
     index: u64,
     written: u64,
+    wire: Option<super::source_wire::SourceWireSpool>,
 }
 impl<W> Rooted<W> {
     pub(super) fn new(writer: W, total: u64) -> Result<Self, StorageError> {
@@ -125,7 +129,12 @@ impl<W> Rooted<W> {
             cache: Zeroizing::new(Vec::with_capacity(CHUNK_BYTES as usize)),
             index: 0,
             written: 0,
+            wire: None,
         })
+    }
+    pub(super) fn with_wire(mut self, wire: super::source_wire::SourceWireSpool) -> Self {
+        self.wire = Some(wire);
+        self
     }
     pub(super) fn finish(mut self, total: u64) -> Result<(W, [u8; 32]), StorageError> {
         if self.written != total {
@@ -133,9 +142,16 @@ impl<W> Rooted<W> {
         }
         if !self.cache.is_empty() {
             self.root.push(self.index, &self.cache).map_err(|_| invalid())?;
+            if let Some(wire) = &mut self.wire {
+                wire.push(self.index, &self.cache)?;
+            }
             self.cache.zeroize();
         }
-        Ok((self.writer, self.root.finish().map_err(|_| invalid())?))
+        let root = self.root.finish().map_err(|_| invalid())?;
+        if let Some(wire) = self.wire {
+            wire.finish(total, root)?;
+        }
+        Ok((self.writer, root))
     }
 }
 impl<W: Write> Write for Rooted<W> {
@@ -153,6 +169,10 @@ impl<W: Write> Write for Rooted<W> {
                 self.root
                     .push(self.index, &self.cache)
                     .map_err(|_| std::io::Error::other("full source root refused"))?;
+                if let Some(wire) = &mut self.wire {
+                    wire.push(self.index, &self.cache)
+                        .map_err(|_| std::io::Error::other("full source spool refused"))?;
+                }
                 self.cache.zeroize();
                 self.cache.clear();
                 self.index = self
