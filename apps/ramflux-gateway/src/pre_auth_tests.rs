@@ -232,7 +232,8 @@ fn preauth_wire_and_peer_boundary_matrix() -> anyhow::Result<()> {
 }
 
 #[test]
-fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyhow::Result<()> {
+fn production_gate_samples_clock_under_lock_and_checkpoint_refuses_failed_commit()
+-> anyhow::Result<()> {
     use std::time::{Duration, UNIX_EPOCH};
     let context = context()?;
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
@@ -241,6 +242,7 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
         super::admit_with_clock(&source, None, &context.state, &context.store, || at(100))?
             .is_none()
     );
+    context.store.save_pre_auth_hot(&gateway_state(&context.state)?.admission_checkpoint(100))?;
     let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
     assert_eq!(serde_json::to_value(&saved)?["pre_auth_time_floor"], 100);
     let invalid = super::admit_with_clock(&source, None, &context.state, &context.store, || {
@@ -256,7 +258,10 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
     assert_eq!(rollback.to_string(), "clock_rollback");
     context.store.fail_next_pre_auth_commit();
     assert!(
-        super::admit_with_clock(&source, None, &context.state, &context.store, || at(101)).is_err()
+        context
+            .store
+            .save_pre_auth_hot(&gateway_state(&context.state)?.admission_checkpoint(101))
+            .is_err()
     );
     let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
     assert_eq!(serde_json::to_value(saved)?["pre_auth_time_floor"], 100);
@@ -367,6 +372,89 @@ fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Resul
     assert_eq!(
         serde_json::to_value(saved)?["pre_auth_handshakes_by_source_ip"][&source],
         serde_json::json!([101])
+    );
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn unauthenticated_open_costs_no_durable_commit() -> anyhow::Result<()> {
+    let mut costs = Vec::new();
+    for enabled in [false, true] {
+        let context = context()?;
+        let mut policy = gateway_state(&context.state)?.pre_auth_policy().clone();
+        policy.enabled = enabled;
+        gateway_state(&context.state)?.set_pre_auth_policy(policy)?;
+        let before = context.store.durable_commit_count();
+        for index in 0..32 {
+            let _ =
+                pre_auth_gate_for_gateway_open(&open(&format!("claim-{index}"), index)?, &context)?;
+        }
+        costs.push((enabled, context.store.durable_commit_count() - before));
+    }
+    assert_eq!(costs, [(false, 0), (true, 0)]);
+    Ok(())
+}
+
+#[test]
+fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
+    use std::time::{Duration, UNIX_EPOCH};
+    let mut context = context()?;
+    let path = std::env::temp_dir().join(format!(
+        "preauth-checkpoint-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(&path)?);
+    let source = super::source_key(context.remote_addr.ip());
+    {
+        let checkpoint = gateway_state(&context.state)?.admission_checkpoint(100);
+        context.store.save_pre_auth_hot(&checkpoint)?;
+        gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
+    }
+    for index in 0..16 {
+        let frame = open(&format!("rotated-{index}"), 86_400)?;
+        let challenge = super::admit_with_clock(
+            &source,
+            frame.pre_auth_cookie.as_deref(),
+            &context.state,
+            &context.store,
+            || UNIX_EPOCH + Duration::from_secs(101),
+        )?;
+        assert_eq!(challenge.is_some(), index > 0);
+    }
+    // The committed clock floor survives even if every recent Open was lost.
+    // A stalled checkpoint worker fails closed after its reservation expires.
+    assert!(
+        super::admit_with_clock(&source, None, &context.state, &context.store, || UNIX_EPOCH
+            + Duration::from_secs(131))
+        .is_err()
+    );
+    drop(context);
+    let store = ramflux_node_core::GatewayRedbStore::open(&path)?;
+    let mut restored = store.load_state()?.ok_or_else(|| anyhow::anyhow!("checkpoint"))?;
+    mount_key(
+        &mut restored,
+        &std::env::temp_dir().join(format!(
+            "restart-key-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        )),
+    )?;
+    assert!(
+        restored
+            .check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(99))
+            .is_err()
+    );
+    // Missing in-memory source debt cannot buy a fresh allowance after a crash.
+    assert!(
+        restored
+            .check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(131))
+            .is_err()
+    );
+    assert!(
+        restored
+            .check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(3731))
+            .is_ok()
     );
     drop(store);
     std::fs::remove_file(path)?;

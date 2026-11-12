@@ -125,6 +125,10 @@ fn capacity_and_hot_debt() -> Result {
     assert_eq!(state.check_pre_auth(&source(0), Some(&cookie), 160)?, Decision::Accepted);
     assert_eq!(state.check_pre_auth(&source(4096), None, 161)?, Decision::Accepted);
     assert!(matches!(state.check_pre_auth(&source(0), None, 161)?, Decision::Challenge(_)));
+    assert_eq!(state.pre_auth_handshakes_by_source_ip.len(), 4096 - 2 * 16 + 1);
+    assert!(state.has_pre_auth_source(&source(0)));
+    // The timer may drain the backlog; Opens themselves reclaim at most 16.
+    state.prune_retained_sessions(161, 300, &std::collections::BTreeSet::new());
     assert_eq!(state.pre_auth_handshakes_by_source_ip.len(), 2);
     Ok(())
 }
@@ -497,5 +501,65 @@ fn preauth_legacy_disabled_clock_persists_without_promoting_debt() -> Result {
         assert_eq!(state.pre_auth_time_floor, 100);
     }
     std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
+    let path = std::env::temp_dir().join(format!(
+        "preauth-cooldown-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = GatewayState::new();
+        state.set_pre_auth_policy(GatewayPreAuthPolicy {
+            enabled: true,
+            per_source_ip_handshake_rate: 1,
+            window_seconds: 3600,
+            ..GatewayPreAuthPolicy::default()
+        })?;
+        store.save_pre_auth_hot(&state.admission_checkpoint(100))?;
+    }
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = store.load_state()?.ok_or("missing reservation")?;
+        let mut config = crate::GatewayPreAuthConfig::from(state.pre_auth_policy());
+        config.window_seconds = 1;
+        state.configure_pre_auth_policy(&config)?;
+        store.save_pre_auth_hot(&state.admission_checkpoint(131))?;
+    }
+    let store = GatewayRedbStore::open(&path)?;
+    let mut state = store.load_state()?.ok_or("missing second reservation")?;
+    state.set_fixture_pre_auth_cookie_key();
+    let source = crate::source_ip_hash("192.0.2.1");
+    assert!(matches!(
+        state.check_pre_auth(&source, None, 162),
+        Err(NodeCoreError::PreAuthCapacity)
+    ));
+    assert!(state.check_pre_auth(&source, None, 3731).is_ok());
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn disabled_admission_restarts_inside_the_checkpoint_reservation() -> Result {
+    let fixture = Store::new()?;
+    fixture.store.save_pre_auth_hot(&GatewayState::new().admission_checkpoint(100))?;
+    let mut restored = fixture.restored()?;
+    let source = source(1);
+    assert_eq!(
+        restored.check_pre_auth_system_time(
+            &source,
+            None,
+            UNIX_EPOCH + Duration::from_secs(101)
+        )?,
+        Decision::Accepted
+    );
+    assert!(matches!(
+        restored.check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(99)),
+        Err(NodeCoreError::PreAuthClockRollback)
+    ));
     Ok(())
 }

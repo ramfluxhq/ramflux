@@ -78,14 +78,12 @@ pub(crate) fn handle_itest_request(
             Ok(None) => {
                 let mut gateway = gateway_state(state)?;
                 gateway.record_slowloris_timeout();
-                store.save_pre_auth_hot(&gateway)?;
                 return Ok(());
             }
             Err(error) => {
                 if is_timeout_error(&error) {
                     let mut gateway = gateway_state(state)?;
                     gateway.record_slowloris_timeout();
-                    store.save_pre_auth_hot(&gateway)?;
                     return Ok(());
                 }
                 return Err(error.into());

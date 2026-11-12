@@ -71,12 +71,11 @@ pub(crate) fn admit_with_clock(
     source: &str,
     cookie: Option<&str>,
     state: &std::sync::Arc<std::sync::Mutex<ramflux_node_core::GatewayState>>,
-    store: &ramflux_node_core::GatewayRedbStore,
+    _store: &ramflux_node_core::GatewayRedbStore,
     clock: impl FnOnce() -> std::time::SystemTime,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
     let mut gateway = crate::gateway_state(state)?;
     let decision = gateway.check_pre_auth_system_time(source, cookie, clock());
-    store.save_pre_auth_hot(&gateway)?;
     Ok(match decision? {
         ramflux_node_core::GatewayPreAuthDecision::Accepted => None,
         ramflux_node_core::GatewayPreAuthDecision::Challenge(challenge) => Some(challenge),

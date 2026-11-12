@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const KEY: &str = "pre_auth_admission_v1";
 pub(super) const LEGACY_CLOCK_KEY: &str = "pre_auth_legacy_clock_v1";
+const RESERVATION_KEY: &str = "pre_auth_reservation_v1";
+pub const PRE_AUTH_CHECKPOINT_SECONDS: u64 = 30;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
@@ -122,13 +124,24 @@ impl GatewayState {
         } else {
             (KEY, self.admission_bytes()?)
         };
-        Ok(vec![
+        let mut entries = vec![
             (
                 crate::GATEWAY_PRE_AUTH_POLICY_KEY,
                 crate::serialize_snapshot_value(&self.pre_auth_policy)?,
             ),
             admission,
-        ])
+        ];
+        if let Some(deadline) = self.pre_auth_runtime_deadline {
+            entries.push((
+                RESERVATION_KEY,
+                crate::serialize_snapshot_value(&(
+                    deadline,
+                    self.pre_auth_policy.window_seconds,
+                    self.pre_auth_restart_until,
+                ))?,
+            ));
+        }
+        Ok(entries)
     }
 
     /// Sample under the caller's state lock, before pruning or admission.
@@ -155,7 +168,26 @@ impl GatewayState {
         time: SystemTime,
     ) -> Result<crate::GatewayPreAuthDecision, NodeCoreError> {
         let now = self.observe_pre_auth_time(time)?;
+        if self.pre_auth_runtime_deadline.is_some_and(|deadline| now > deadline) {
+            return Err(NodeCoreError::PreAuthClockRollback);
+        }
         self.check_pre_auth(source, cookie, now)
+    }
+
+    /// Reserve the next checkpoint interval before serving Opens. The caller must
+    /// publish this deadline only after committing the checkpoint.
+    #[must_use]
+    pub fn admission_checkpoint(&self, now: u64) -> Self {
+        let mut checkpoint = self.clone();
+        checkpoint.pre_auth_time_floor = checkpoint.pre_auth_time_floor.max(now);
+        checkpoint.pre_auth_runtime_deadline =
+            Some(now.saturating_add(PRE_AUTH_CHECKPOINT_SECONDS));
+        checkpoint
+    }
+
+    /// Publish the successfully committed deadline without losing concurrent debt.
+    pub fn install_admission_checkpoint(&mut self, checkpoint: &Self) {
+        self.pre_auth_runtime_deadline = checkpoint.pre_auth_runtime_deadline;
     }
 
     pub(super) fn admission_bytes(&self) -> Result<Vec<u8>, NodeCoreError> {
@@ -246,6 +278,25 @@ impl GatewayRedbStore {
             state.pre_auth_time_floor = clock.high_water_unix_seconds;
             state.pre_auth_metrics = clock.metrics;
         }
+        if let Some(raw) =
+            table.get(RESERVATION_KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))?
+        {
+            let (floor, window, prior_cooldown): (u64, u64, u64) =
+                serde_json::from_slice(raw.value())
+                    .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
+            if window > 3600 || prior_cooldown > floor.saturating_add(3600) {
+                return Err(NodeCoreError::PreAuthSnapshotInvalid);
+            }
+            state.pre_auth_restart_until = prior_cooldown
+                .max(floor.saturating_add(window.max(state.pre_auth_policy.window_seconds)));
+        }
+        state.pre_auth_expiry = state
+            .pre_auth_handshakes_by_source_ip
+            .iter()
+            .filter_map(|(source, events)| events.last().map(|at| (*at, source.clone())))
+            .collect();
+        state.pre_auth_expiry_by_source =
+            state.pre_auth_expiry.iter().map(|(at, source)| (source.clone(), *at)).collect();
         Ok(())
     }
 }

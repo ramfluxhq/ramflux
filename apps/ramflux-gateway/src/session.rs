@@ -312,17 +312,7 @@ async fn handle_gateway_session_transport_inner(
     let auth_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let auth_result = {
         let mut gateway = gateway_state(&context.state)?;
-        let result = ramflux_node_core::validate_gateway_auth_with_replay(
-            &open,
-            &auth_frame,
-            auth_now,
-            gateway.replay_guard_state_mut(),
-            &registered_auth_key,
-        );
-        if result.is_ok() {
-            context.store.save_state(&gateway)?;
-        }
-        result
+        context.store.authenticate(&mut gateway, &open, &auth_frame, auth_now, &registered_auth_key)
     };
     if let Err(ref error) = auth_result {
         write_gateway_frame(
@@ -549,7 +539,6 @@ pub(crate) async fn read_gateway_auth_frame(
         Err(_elapsed) => {
             let mut gateway = gateway_state(&context.state)?;
             gateway.record_slowloris_timeout();
-            context.store.save_state(&gateway)?;
             return Ok(None);
         }
     };
@@ -644,7 +633,11 @@ pub(crate) async fn establish_gateway_session(
             last_heartbeat_at: now,
             lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
         });
-        context.store.save_state(&gateway)?;
+        context.store.save_authenticated_session(
+            &gateway,
+            &session_id,
+            &resume.metadata.resume_token_hash,
+        )?;
         resume.token
     };
     let accepted_cursor = router_cursor_async(&context.router, &open.target_delivery_id).await?;
@@ -1260,7 +1253,7 @@ pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
             signed_request,
             now,
         )?;
-        context.store.save_state(&gateway)?;
+        context.store.save_auth_replay(&runtime.source_identity, signed_request, now)?;
     }
     Ok(())
 }
@@ -1549,9 +1542,14 @@ pub(crate) async fn handle_gateway_own_device_fanout(
             &fanout.signed_request,
             submit_now,
         );
-        let rejection = result.err().map(|error| format!("fanout replay rejected: {error}"));
-        context.store.save_state(&gateway)?;
-        rejection
+        if result.is_ok() {
+            context.store.save_auth_replay(
+                &runtime.source_identity,
+                &fanout.signed_request,
+                submit_now,
+            )?;
+        }
+        result.err().map(|error| format!("fanout replay rejected: {error}"))
     };
     if let Some(reason) = replay_rejection {
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;

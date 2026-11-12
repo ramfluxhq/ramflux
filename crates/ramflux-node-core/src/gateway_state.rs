@@ -3,6 +3,8 @@
 
 #![allow(unused_imports)]
 
+#[path = "gateway_admission_store.rs"]
+mod admission_store;
 #[path = "gateway_pre_auth.rs"]
 mod pre_auth_state;
 
@@ -102,6 +104,14 @@ pub struct GatewayState {
     pre_auth_handshakes_by_source_ip: BTreeMap<String, Vec<u64>>,
     #[serde(skip)]
     pre_auth_legacy: bool,
+    #[serde(skip)]
+    pre_auth_expiry: BTreeSet<(u64, String)>,
+    #[serde(skip)]
+    pre_auth_expiry_by_source: BTreeMap<String, u64>,
+    #[serde(skip)]
+    pre_auth_runtime_deadline: Option<u64>,
+    #[serde(skip)]
+    pre_auth_restart_until: u64,
     #[serde(default)]
     pre_auth_time_floor: u64,
     #[serde(skip)]
@@ -196,13 +206,24 @@ impl GatewayState {
         }
         self.pre_auth_time_floor = now;
         let window_start = now.saturating_sub(self.pre_auth_policy.window_seconds);
-        // Reclaim only expired debt. Live sources never lose their rate history.
-        self.pre_auth_handshakes_by_source_ip.retain(|_, events| {
-            events.retain(|at| *at >= window_start);
-            !events.is_empty()
-        });
-        if !self.pre_auth_handshakes_by_source_ip.contains_key(source_ip_hash)
-            && self.pre_auth_handshakes_by_source_ip.len() >= 4096
+        if now <= self.pre_auth_restart_until && self.pre_auth_restart_until != 0 {
+            return Err(NodeCoreError::PreAuthCapacity);
+        }
+        // Fixed work per Open, even when an entire source set expires at once.
+        for _ in 0..16 {
+            let Some((at, source)) = self.pre_auth_expiry.first() else { break };
+            if *at >= window_start {
+                break;
+            }
+            let source = source.clone();
+            self.pre_auth_expiry.pop_first();
+            self.pre_auth_handshakes_by_source_ip.remove(&source);
+            self.pre_auth_expiry_by_source.remove(&source);
+        }
+        if (!self.pre_auth_handshakes_by_source_ip.contains_key(source_ip_hash)
+            && self.pre_auth_handshakes_by_source_ip.len() >= 4096)
+            || (!self.pre_auth_expiry_by_source.contains_key(source_ip_hash)
+                && self.pre_auth_expiry_by_source.len() >= 4096)
         {
             return Err(NodeCoreError::PreAuthCapacity);
         }
@@ -210,7 +231,12 @@ impl GatewayState {
             self.pre_auth_cookie_key.as_ref().ok_or(NodeCoreError::PreAuthConfigInvalid)?.as_str();
         let entries =
             self.pre_auth_handshakes_by_source_ip.entry(source_ip_hash.to_owned()).or_default();
+        if let Some(at) = self.pre_auth_expiry_by_source.insert(source_ip_hash.to_owned(), now) {
+            self.pre_auth_expiry.remove(&(at, source_ip_hash.to_owned()));
+        }
         entries.retain(|timestamp| *timestamp >= window_start);
+        // Reserve the latest timestamp before any return path, including challenge/error.
+        self.pre_auth_expiry.insert((now, source_ip_hash.to_owned()));
         let rate = self.pre_auth_policy.per_source_ip_handshake_rate as usize;
         // Only the newest `rate` events affect the sliding-window threshold.
         // Also bound buckets restored from snapshots written before this cap.
@@ -553,6 +579,10 @@ pub struct GatewayRedbStore {
     db: redb::Database,
     #[cfg(any(test, feature = "durability-test-hooks"))]
     fail_pre_auth_commit: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    durable_commits: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    full_snapshot_commits: std::sync::atomic::AtomicUsize,
 }
 
 impl GatewayRedbStore {
@@ -564,24 +594,38 @@ impl GatewayRedbStore {
             db,
             #[cfg(any(test, feature = "durability-test-hooks"))]
             fail_pre_auth_commit: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            durable_commits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            full_snapshot_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
+    /// Once the replay journal is active, callers commit signed-request evidence
+    /// with `authenticate` or `save_auth_replay`; this checkpoints other state only.
     pub fn save_state(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
         let mut entries = vec![
             (GATEWAY_CHALLENGE_STATE_KEY, serialize_snapshot_value(&state.challenges_by_id)?),
             (GATEWAY_SESSION_CHECKPOINT_KEY, serialize_snapshot_value(&state.sessions_by_id)?),
             (GATEWAY_DELIVERY_FRAME_QUEUE_KEY, serialize_snapshot_value(&state.frames_by_session)?),
-            (GATEWAY_REPLAY_GUARD_STATE_KEY, serialize_snapshot_value(&state.replay_guard_state)?),
             (
                 GATEWAY_RESUME_TOKEN_INDEX_KEY,
                 serialize_snapshot_value(&state.resume_token_index_by_hash)?,
             ),
         ];
+        if !self.replay_journal_active()? {
+            entries.push((
+                GATEWAY_REPLAY_GUARD_STATE_KEY,
+                serialize_snapshot_value(&state.replay_guard_state)?,
+            ));
+        }
         entries.extend(state.pre_auth_entries()?);
-        self.save_gateway_entries(&entries)
+        self.save_full_gateway_entries(&entries)?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        self.full_snapshot_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// # Errors
@@ -597,7 +641,22 @@ impl GatewayRedbStore {
                 return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
             }
             Ok(())
-        })
+        })?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        self.durable_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Number of successful gateway snapshot commits for durability witnesses.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn durable_commit_count(&self) -> usize {
+        self.durable_commits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Number of successful full snapshots, to calibrate incremental auth tests.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn full_snapshot_commit_count(&self) -> usize {
+        self.full_snapshot_commits.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Abort the next real admission transaction after its writes, before commit.
@@ -655,6 +714,10 @@ impl GatewayRedbStore {
             pre_auth_time_floor: 0,
             pre_auth_cookie_key: None,
             pre_auth_legacy: false,
+            pre_auth_expiry: BTreeSet::new(),
+            pre_auth_expiry_by_source: BTreeMap::new(),
+            pre_auth_runtime_deadline: None,
+            pre_auth_restart_until: 0,
             replay_guard_state: load_snapshot(
                 &self.db,
                 GATEWAY_STATE_TABLE,
@@ -673,9 +736,13 @@ impl GatewayRedbStore {
         } else if pre_auth_state::validate_policy(&state.pre_auth_policy).is_err() {
             state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig::default())?;
         }
+        self.load_session_overlay(&mut state)?;
+        self.load_replay_journal(&mut state)?;
         self.load_pre_auth_admission(&mut state)?;
         state.trim_pre_auth_debt();
         if !initialized
+            && state.sessions_by_id.is_empty()
+            && state.replay_guard_state.is_empty()
             && state.pre_auth_time_floor == 0
             && !state.pre_auth_legacy
             && state.pre_auth_handshakes_by_source_ip.is_empty()

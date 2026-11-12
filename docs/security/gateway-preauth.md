@@ -45,9 +45,24 @@ Server time is sampled under the state lock before expiry. Pre-epoch clocks and
 rollback fail closed with `pre_auth_rejected:clock_invalid` or
 `pre_auth_rejected:clock_rollback`. The fence remains active while admission is
 disabled, including legacy stores. Startup and retention return `clock_invalid`
-or `clock_rollback` errors too. Equal seconds are accepted. Debt, counters and the time floor are committed in one
-redb transaction before an admission or cookie challenge is sent. Storage failure
-refuses the attempt and retains conservative in-memory debt.
+or `clock_rollback` errors too. Equal seconds are accepted. Opens update bounded in-memory debt and counters and
+perform no durable write, including when admission is disabled. Each Open reclaims
+at most 16 expired source buckets; a capacity refusal can therefore be conservative
+while a large expired backlog drains. Each source still retains at most 60 events.
+
+Before listening, then on the existing retention worker every 10 seconds, one
+transaction checkpoints policy, debt, counters and a 30-second clock reservation.
+Opens beyond the last committed reservation fail closed until a checkpoint succeeds.
+A restart preserves the last committed clock floor, including while disabled.
+At most 30 seconds of uncheckpointed clock progress may be lost; the durable floor
+never regresses. Disabled admission can restart immediately at a valid host time.
+When enabled, admission refuses Opens through the reservation plus the larger of
+the saved and configured rate windows, retaining any longer prior restart cooldown.
+This conservative cooldown covers every lost in-memory admission, including
+previously unknown sources, so restarting cannot reset rate debt. No per-packet disk operation is needed. Failed checkpoint
+writes leave the previous reservation in force. Cookies and source/time hint rules
+are unchanged. The reservation is stored as `[reserved_floor, window_seconds, prior_restart_cooldown]` in
+`pre_auth_reservation_v1`; an unknown or malformed reservation refuses startup.
 
 The `pre_auth_admission_v1` JSON envelope uses version 1 and source scheme
 `transport-peer-v2`. Restore bounds are 8 MiB, 4096 canonical 43-character source
@@ -79,6 +94,8 @@ If waiting is impossible, stop every gateway using this database and back up the
 redb file. With an offline redb maintenance tool using the same redb format,
 open the `gateway_state_v1` table and commit one write transaction:
 
+- Delete `pre_auth_reservation_v1` to explicitly discard the future clock reservation
+  and restart cooldown as part of this offline reset.
 - For a trusted store, delete `pre_auth_admission_v1`. This also clears admission
   debt and aggregate counters. Rotate the mounted admission cookie key before
   restarting to prevent old cookies becoming valid again after rollback.
@@ -115,3 +132,26 @@ do not import the untrusted legacy counters or debt. Keep the persisted policy
 buckets intentionally reset legacy debt; schedule migration as an operator
 security decision. Configure a separate mounted cookie key, restart with the
 validated runtime policy, and enable admission only after migration succeeds.
+
+## Authentication replay storage
+
+The signed-request validity maximum remains seven days (604800 seconds), including
+120 seconds of allowed future clock skew. A root-qualified device may retain at
+most 4096 accepted signed requests during that interval; the guard retains at most
+262144 replay identities globally, including envelopes. These are admission caps,
+not eviction targets: exhaustion rejects new work and never discards live replay
+evidence. These conservative capacity choices require operator sizing review.
+Persisted request hashes from older versions have no recoverable owner; they count
+against every device until they expire. Existing over-cap stores remain replay
+evidence and refuse additions until enough entries expire.
+
+An expiry-ordered index removes at most 64 expired identities per request (the
+inclusive expiry second remains protected). Authentication durably inserts one
+root-owned replay row and one expiry-index row in redb, before acknowledging it.
+The full signed validity is retained across restart. The previous replay snapshot
+is an immutable migration baseline once the journal is active; checkpointing never
+rewrites it. Session establishment writes only its own session and resume-token
+rows. Periodic full checkpoints fold those session overlays atomically into the
+session snapshot and remove the overlays, preventing pruned sessions reappearing.
+Downgrading to a binary without the replay journal is unsupported: it would ignore
+new replay evidence. Preserve the database and upgrade forward.

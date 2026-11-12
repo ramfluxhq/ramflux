@@ -90,7 +90,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             session::gateway_resume_window_seconds(),
             &std::collections::BTreeSet::new(),
         );
-        store.save_state(&state)?;
+        let checkpoint = state.admission_checkpoint(now);
+        store.save_state(&checkpoint)?;
+        state.install_admission_checkpoint(&checkpoint);
         tracing::info!(service, node_id = config.node_id, "gateway state initialized");
         let router = router_mesh_client(&config)?;
         let notify = notify_http_client(&config)?;

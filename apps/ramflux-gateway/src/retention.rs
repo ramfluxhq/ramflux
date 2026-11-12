@@ -4,7 +4,7 @@
 //! Keep live sinks while expiring disconnected session metadata and resume checkpoints.
 pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Result<()> {
     ramflux_node_core::spawn_service_worker("gateway-retention", move |_| {
-        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(30)) {
+        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(10)) {
             let active = context.hub.active_session_ids();
             let result = (|| -> anyhow::Result<()> {
                 let mut state = crate::gateway_state(&context.state)?;
@@ -14,7 +14,9 @@ pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Re
                     crate::session::gateway_resume_window_seconds(),
                     &active,
                 );
-                context.store.save_state(&state)?;
+                let checkpoint = state.admission_checkpoint(now);
+                context.store.save_state(&checkpoint)?;
+                state.install_admission_checkpoint(&checkpoint);
                 Ok(())
             })();
             if let Err(error) = result {
