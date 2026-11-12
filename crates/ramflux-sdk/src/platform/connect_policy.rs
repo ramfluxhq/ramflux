@@ -35,6 +35,20 @@ pub const fn bind_addr_for(remote: SocketAddr) -> SocketAddr {
     }
 }
 
+/// Bind address a session uses for `remote`. A configured wildcard of the other family
+/// (today's default is the IPv4 wildcard) can never reach `remote`, so it is replaced by
+/// the wildcard of the remote's family. Every other configured address is kept as it is,
+/// which leaves each connect that works today unchanged.
+#[must_use]
+pub fn effective_bind_addr(configured: SocketAddr, remote: SocketAddr) -> SocketAddr {
+    let wildcard = configured.ip().is_unspecified() && configured.port() == 0;
+    if wildcard && configured.is_ipv4() != remote.is_ipv4() {
+        bind_addr_for(remote)
+    } else {
+        configured
+    }
+}
+
 /// A gateway named by host and port, as a mobile node profile must carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayHost {

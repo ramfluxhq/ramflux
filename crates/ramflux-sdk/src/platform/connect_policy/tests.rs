@@ -31,6 +31,17 @@ fn bind_address_follows_the_destination_family() {
 }
 
 #[test]
+fn session_bind_changes_only_a_wildcard_of_the_wrong_family() {
+    let v4_wildcard = SocketAddr::from(([0, 0, 0, 0], 0));
+    let pinned = SocketAddr::from(([127, 0, 0, 1], 4000));
+    assert_eq!(effective_bind_addr(v4_wildcard, v4(1)), v4_wildcard);
+    assert_eq!(effective_bind_addr(v4_wildcard, v6(1)), bind_addr_for(v6(1)));
+    assert_eq!(effective_bind_addr(bind_addr_for(v6(1)), v4(1)), v4_wildcard);
+    assert_eq!(effective_bind_addr(pinned, v6(1)), pinned);
+    assert_eq!(effective_bind_addr(pinned, v4(1)), pinned);
+}
+
+#[test]
 fn mobile_profile_refuses_an_ipv4_literal_and_accepts_names_and_ipv6() -> TestResult {
     assert!(GatewayHost::for_mobile("192.0.2.7", 443).is_err());
     assert!(GatewayHost::for_mobile("", 443).is_err());
