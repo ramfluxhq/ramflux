@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod attestation;
+pub(crate) mod authored;
 mod generated;
 mod replay;
 mod unsupported;
@@ -150,6 +151,29 @@ impl RamfluxClient {
         {
             return Ok(());
         }
+        let packet = self.own_sent_packet(input)?;
+        let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
+        bytes.extend(serde_json::to_vec(&packet)?);
+        crate::bus::own_device_copy::stage_held(
+            self,
+            super::own_device_copy::OwnMessageInput {
+                id: input.envelope,
+                created_at: now_unix_timestamp(),
+                conversation: input.conversation,
+                group: input.group,
+                body: &bytes,
+            },
+            input.message,
+        )?;
+        self.record_own_sent_projection(
+            &self.owned_device_identity()?,
+            input,
+            input.message,
+            packet.ciphertext_hash.as_deref(),
+        )?;
+        Ok(())
+    }
+    fn own_sent_packet(&self, input: OwnSentInput<'_>) -> Result<SentMessage, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
         let group = input
@@ -183,14 +207,15 @@ impl RamfluxClient {
             })
             .transpose()?
             .flatten();
-        let ciphertext_hash = own_sent_ciphertext_hash(input.ciphertext);
+        let ciphertext_hash =
+            (!input.ciphertext.is_empty()).then(|| own_sent_ciphertext_hash(input.ciphertext));
         let packet = SentMessage {
             authored_at: Some(input.at),
             envelope_id: input.envelope.into(),
             message_id: input.message.into(),
             sender_id: input.sender.into(),
             original_recipients: input.original_recipients.to_vec(),
-            ciphertext_hash: Some(ciphertext_hash.clone()),
+            ciphertext_hash,
             context: OwnContext {
                 conversation_id: input.conversation.into(),
                 participants,
@@ -199,27 +224,9 @@ impl RamfluxClient {
             },
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(input.body)),
         };
-        let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
-        bytes.extend(serde_json::to_vec(&packet)?);
-        crate::bus::own_device_copy::stage_held(
-            self,
-            super::own_device_copy::OwnMessageInput {
-                id: input.envelope,
-                created_at: now_unix_timestamp(),
-                conversation: input.conversation,
-                group: input.group,
-                body: &bytes,
-            },
-            input.message,
-        )?;
-        self.record_own_sent_projection(
-            &self.owned_device_identity()?,
-            input,
-            input.message,
-            Some(&ciphertext_hash),
-        )?;
-        Ok(())
+        Ok(packet)
     }
+
     pub(crate) fn own_group_copy_envelope(
         &self,
         group: &str,

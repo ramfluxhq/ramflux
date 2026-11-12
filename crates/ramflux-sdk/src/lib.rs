@@ -134,10 +134,11 @@ pub use client::conversation::ConversationSummary;
 #[cfg(feature = "itest-fingerprint")]
 pub use client::dm_session::RecvCommitFingerprint;
 pub use client::recovery::{
-    SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteMessage,
-    SdkGuardianRecoveryShare, SdkPendingRecoveryState, SdkPendingRecoveryStatus,
-    SdkRecoveryInitiateRequest, SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember,
-    recovery_member_public_key_base64url, verify_guardian_accept,
+    SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteHandle,
+    SdkGuardianInviteMessage, SdkGuardianRecoveryShare, SdkPendingGuardianInvite,
+    SdkPendingRecoveryState, SdkPendingRecoveryStatus, SdkRecoveryInitiateRequest,
+    SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
+    verify_guardian_accept,
 };
 pub use client::{ReparseProgress, self_sync, typed_messages, typed_read_model, typing};
 pub use constants::*;

@@ -315,6 +315,7 @@ impl RamfluxClient {
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
+        Self::require_a2i_binding_authority()?;
         let db = self.account_db()?;
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
@@ -326,7 +327,7 @@ impl RamfluxClient {
         if self.load_legacy_a2i_receipt(entry)?.is_some() {
             return Ok(());
         }
-        let opened = self.decrypt_bound_legacy_a2i(local_device, entry)?;
+        let opened = Self::decrypt_bound_legacy_a2i(local_device, entry)?;
         gate.effect(db, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))
     }
 
@@ -342,6 +343,7 @@ impl RamfluxClient {
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<bool, SdkError> {
+        Self::require_a2i_binding_authority()?;
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
         if self.legacy_a2i_is_unbound(local_device, entry)? {
@@ -353,7 +355,7 @@ impl RamfluxClient {
         if self.load_legacy_a2i_receipt(entry)?.is_some() {
             return Ok(false);
         }
-        let opened = self.decrypt_bound_legacy_a2i(local_device, entry)?;
+        let opened = Self::decrypt_bound_legacy_a2i(local_device, entry)?;
         gate.effect_in(tx, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))?;
         Ok(false)
     }
@@ -385,7 +387,7 @@ impl RamfluxClient {
             a2i::reject_legacy_a2i_payload_reuse(&receipt, entry)?;
             return Ok(());
         }
-        self.persist_legacy_a2i_effect(entry, opened)
+        Self::persist_legacy_a2i_effect(entry, opened)
     }
 
     /// Wired by P20. Group local apply that cannot complete stays held; no terminal marker.

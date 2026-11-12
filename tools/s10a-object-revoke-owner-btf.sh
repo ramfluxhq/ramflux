@@ -16,7 +16,7 @@ import sys
 p = Path(sys.argv[1]); s = p.read_text()
 old = 'crate::client::generated_control::authorize_object_revoke(sender, owner, revoke)'
 assert s.count(old) == 1
-p.write_text(s.replace(old, 'crate::client::generated_control::authorize_object_revoke(owner, owner, revoke)'))
+p.write_text(s.replace(old, 'crate::client::generated_control::authorize_object_revoke({ let _ = sender; owner }, owner, revoke)'))
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"

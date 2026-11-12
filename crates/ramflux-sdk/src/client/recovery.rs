@@ -5,6 +5,21 @@
 
 use crate::prelude::*;
 
+/// Exact verified source and signed-document fingerprint selected by the user.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SdkGuardianInviteHandle {
+    pub source: String,
+    pub invite_id: String,
+    pub fingerprint: String,
+}
+
+/// A pending invitation together with its unambiguous decision handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdkPendingGuardianInvite {
+    pub handle: SdkGuardianInviteHandle,
+    pub invite: SdkGuardianInviteMessage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SdkRecoveryQuorumMember {
     pub member_kind: ramflux_protocol::RecoveryQuorumMemberKind,

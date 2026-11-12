@@ -724,10 +724,7 @@ impl RamfluxClient {
             }
         }
         if scanned.kind == 12 {
-            if source.root_commitment() != self.own_account_anchor()? {
-                return Err(SdkError::InboundRejected("self sync requires same root".into()));
-            }
-            self.require_native_operation(&source, NativeOperation::Sync)?;
+            self.authorize_self_sync(&source, &opened.routing.conversation_id)?;
         }
         if scanned.kind == 8 {
             self.authorize_generated_control_fields(opened, entry, scanned)?;
@@ -745,6 +742,9 @@ impl RamfluxClient {
 
         let control = g::Control::decode(scanned.body)
             .map_err(|_| invalid("control authority fields missing"))?;
+        if control.operation == 11 {
+            Self::require_a2i_binding_authority()?;
+        }
         if (1..=16).contains(&control.operation)
             && crate::client::generated_control::validate_control_operation(&control).is_err()
         {
@@ -827,6 +827,7 @@ impl RamfluxClient {
             self.resolve_generated_pending_history_edit(&opened.routing.message_id)?;
         }
         self.resolve_self_sync_read_references(&opened.routing.conversation_id)?;
+        self.journal_generated_receive_updates(&opened.body)?;
         self.clear_generated_capacity(entry)?;
         Ok(())
     }

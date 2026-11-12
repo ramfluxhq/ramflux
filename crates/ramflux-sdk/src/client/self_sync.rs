@@ -17,6 +17,7 @@ pub(crate) mod delivery;
 mod draft;
 mod fence;
 mod refresh;
+pub(crate) mod restore;
 mod retirement;
 
 pub const SELF_SYNC_MAX_PINS_PER_CONVERSATION: usize = 100;
@@ -115,6 +116,10 @@ impl RamfluxClient {
         }
         self.require_native_operation(&local, NativeOperation::Sync)?;
         self.require_native_operation(source, NativeOperation::Sync)?;
+        if source != &local {
+            self.note_self_sync_sibling_reachable(source)?;
+            Self::require_self_sync_floor_bootstrap()?;
+        }
         if conversation.is_empty() {
             return Err(refused("conversation is not authorized locally"));
         }
@@ -147,10 +152,12 @@ impl RamfluxClient {
     ) -> Result<g::SelfSync, SdkError> {
         let source = self.owned_device_identity()?;
         self.authorize_self_sync(&source, conversation)?;
+        self.require_backup_outbound_ready()?;
         value.revision = 1;
         let state_key = key(source.root_commitment(), conversation, &value)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
+            self.require_self_sync_restore_refresh(&state_key)?;
             let old = db.load_actor_state::<State>(&state_key)?;
             value.revision = old
                 .as_ref()
@@ -224,6 +231,7 @@ impl RamfluxClient {
                 return Ok(false);
             }
         }
+        self.note_self_sync_sibling_reachable(source)?;
         if !wins {
             if let Some(mut state) = old {
                 let changed = state.read_marker != marker
@@ -411,6 +419,7 @@ impl RamfluxClient {
         }
         self.require_native_operation(sibling, NativeOperation::Sync)?;
         self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        Self::require_self_sync_floor_bootstrap()?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             for scope in db.actor_state_keys("self-sync/state/")? {
@@ -627,3 +636,13 @@ mod refresh_tests;
 mod tests;
 
 mod publication;
+
+impl RamfluxClient {
+    /// CLOSED v0: the current profile has no authenticated floor/erase carrier.
+    /// A descriptor amendment and audited atomic bootstrap are required to open it.
+    pub(crate) fn require_self_sync_floor_bootstrap() -> Result<(), SdkError> {
+        Err(SdkError::InboundPending(
+            "self sync: authenticated floor/erase bootstrap is unavailable".into(),
+        ))
+    }
+}

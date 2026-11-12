@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Conditional private-register courier plans; the writer owns every ratchet/store change.
-use super::{RamfluxClient, Reference, SdkError, State, g, refused, refresh::Generation};
+use super::{RamfluxClient, Reference, SdkError, State, g, refresh::Generation, refused};
 use crate::client::{
     identity_authority::NativeOperation,
     routed::{Route, SendMaterial, SendMaterialRequest},
@@ -173,7 +173,8 @@ impl RamfluxClient {
     // The receiver verifies references again; the sender never forwards a register whose
     // reference is known locally to name another conversation, author root or identity.
     fn self_sync_repair_references_authentic(&self, repair: &Repair) -> Result<bool, SdkError> {
-        for body in [Some(&repair.exact_body), repair.read_marker_body.as_ref()].into_iter().flatten()
+        for body in
+            [Some(&repair.exact_body), repair.read_marker_body.as_ref()].into_iter().flatten()
         {
             let value = g::self_sync::decode_stored_body(body)
                 .map_err(|_| refused("repair value malformed"))?;
@@ -304,6 +305,7 @@ impl RamfluxClient {
         mut plan: Plan,
         material: SendMaterial,
     ) -> Result<Option<(Plan, ramflux_protocol::Envelope)>, SdkError> {
+        Self::require_self_sync_floor_bootstrap()?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             if !self.self_sync_repair_current(&plan)? {

@@ -55,6 +55,17 @@ impl RamfluxClient {
         now_ms: u64,
         own_only: bool,
     ) -> Result<g::EventIdentity, SdkError> {
+        self.account_db()?.write_transaction(|| {
+            self.allocate_generated_identity_in(conversation, now_ms, own_only)
+        })
+    }
+
+    fn allocate_generated_identity_in(
+        &self,
+        conversation: &str,
+        now_ms: u64,
+        own_only: bool,
+    ) -> Result<g::EventIdentity, SdkError> {
         self.require_backup_outbound_ready()?;
         let source = self.owned_device_identity()?;
         let author = g::QualifiedDevice {
@@ -95,7 +106,7 @@ impl RamfluxClient {
             &key,
             &Counter { conversation_id: conversation.into(), author: author.clone(), sequence },
         )?;
-        db.persist_actor_state(&clock_key, &hlc)?;
+        db.admit_actor_counter_floor(&clock_key, hlc, ramflux_storage::FloorPolicy::Refuse)?;
         Ok(g::EventIdentity {
             id: id.to_vec(),
             conversation_id: conversation.into(),
@@ -120,7 +131,11 @@ impl RamfluxClient {
             (false, true) => (remote & 0xffff) + 1,
             (false, false) => 0,
         };
-        db.persist_actor_state(&key, &tick(physical, logical)?)?;
+        db.admit_actor_counter_floor(
+            &key,
+            tick(physical, logical)?,
+            ramflux_storage::FloorPolicy::Refuse,
+        )?;
         Ok(())
     }
 }

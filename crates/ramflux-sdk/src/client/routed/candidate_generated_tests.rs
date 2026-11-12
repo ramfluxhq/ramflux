@@ -91,7 +91,10 @@ fn commit_content<'a>(
         }
         let raw =
             RamfluxClient::encode_generated_inner(identity, &g::Content { value: Some(value) })?;
-        let entry = seal(a, b, message(id, "c"), &raw)?;
+        let mut outbound = message(id, "c");
+        outbound.source_principal_id = a.config()?.principal_id;
+        outbound.sender_id = a.id.clone();
+        let entry = seal(a, b, outbound, &raw)?;
         apply(b, &entry).await?;
         Ok(entry)
     })
@@ -1698,91 +1701,45 @@ mod control_executor;
 mod native_control;
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_self_sync_draft_retains_only_content_free_delivery_receipt() -> Result<(), SdkError>
-{
+async fn floorless_self_sync_draft_refuses_before_delivery_retention() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::owned("alice", "sync-receipt-owner", 231, 232)?;
     let mut b = Fixture::owned("bob", "sync-receipt-owner", 231, 234)?;
-    let value = a.client.change_self_sync(
-        "c",
-        g::SelfSync {
-            operation: 2,
-            draft: Some(g::Message { text: "obsolete private draft".into(), ..Default::default() }),
-            ..Default::default()
-        },
-    )?;
-    let raw = a
-        .client
-        .account_db()?
-        .write_transaction(|| a.client.self_sync_publication_inner("c", &value))?;
-    for _ in 0..2 {
-        b.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?;
-    }
+    let value = a.client.change_self_sync("c", g::SelfSync {
+        operation: 2, draft: Some(g::Message { text: "obsolete private draft".into(), ..Default::default() }), ..Default::default()
+    })?;
+    let identity = a.client.allocate_generated_identity("c", crate::client::generated_identity::now_ms(), true)?;
+    let raw = RamfluxClient::encode_generated_inner(identity, &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) })?;
+    for _ in 0..2 { b.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?; }
     let mut draft = message("stale-sync-delivery", "c");
     draft.source_principal_id = a.config()?.principal_id;
     let entry = seal_as(&a, &b, draft, &raw, Route::control())?;
-    apply(&mut b, &entry).await?;
+    assert!(matches!(apply(&mut b, &entry).await, Err(SdkError::InboundPending(_))));
     let receipt = b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
-    let committed = b
-        .client
-        .account_db()?
-        .load_actor_state::<super::super::super::Committed>(&receipt)?
-        .ok_or_else(|| invalid("SelfSync receipt missing"))?;
-    assert!(
-        committed.entry.envelope.encrypted_payload.is_empty(),
-        "a cleared draft cannot survive as recoverable pair ciphertext"
-    );
+    assert!(!b.client.account_db()?.actor_state_exists(&receipt)?);
     assert!(b.client.event_body(&format!("gateway/delivery/v2/{receipt}"))?.is_none());
     let state = b.client.self_sync_state("c", &value)?.ok_or_else(|| invalid("SelfSync state"))?;
-    assert_eq!(state.value.operation, 3);
-    assert_eq!(state.value.revision, 2);
-    assert_eq!(b.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 1);
+    assert_eq!((state.value.operation, state.value.revision), (3, 2));
+    assert_eq!(b.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 0);
     Ok(())
 }
 
 #[test]
-fn cleared_self_sync_register_discards_a_prepared_courier_plan_before_ratchet_work()
--> Result<(), SdkError> {
+fn floorless_self_sync_never_prepares_courier_plan_or_ratchet() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::owned("alice", "sync-plan-owner", 221, 222)?;
     let b = Fixture::owned("bob", "sync-plan-owner", 221, 224)?;
     super::review::trust(&a, &b)?;
     let target = b.client.owned_device_identity()?;
-    let value = a.client.change_self_sync(
-        "c",
-        g::SelfSync {
-            operation: 2,
-            draft: Some(g::Message { text: "erase queued draft".into(), ..Default::default() }),
-            ..Default::default()
-        },
-    )?;
-    a.client.bootstrap_self_sync(&target)?;
-    let config = a.config()?;
-    let plan = a.client.prepare_self_sync_repair(&config)?.ok_or_else(|| invalid("repair plan"))?;
+    let value = a.client.change_self_sync("c", g::SelfSync {
+        operation: 2, draft: Some(g::Message { text: "erase queued draft".into(), ..Default::default() }), ..Default::default()
+    })?;
+    assert!(matches!(a.client.bootstrap_self_sync(&target), Err(SdkError::InboundPending(_))));
     a.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?;
     let before = a.client.account_db()?.test_table_fingerprints(&[])?;
-    assert!(
-        a.client
-            .seal_self_sync_repair(
-                &config,
-                plan,
-                super::super::super::SendMaterial { manifest: None, bundle: None }
-            )?
-            .is_none()
-    );
-    assert_eq!(
-        a.client.account_db()?.test_table_fingerprints(&[])?,
-        before,
-        "obsolete plan cannot allocate an identity or advance the ratchet"
-    );
-    assert!(
-        a.client
-            .self_sync_state("c", &value)?
-            .ok_or_else(|| invalid("clear"))?
-            .value
-            .draft
-            .is_none()
-    );
+    assert!(a.client.prepare_self_sync_repair(&a.config()?)?.is_none());
+    assert_eq!(a.client.account_db()?.test_table_fingerprints(&[])?, before);
+    assert!(a.client.self_sync_state("c", &value)?.ok_or_else(|| invalid("clear"))?.value.draft.is_none());
     Ok(())
 }
 

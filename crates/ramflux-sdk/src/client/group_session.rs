@@ -602,6 +602,16 @@ impl RamfluxClient {
         sender_id: &str,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.encrypt_group_message_in(group_id, sender_id, plaintext))
+    }
+
+    fn encrypt_group_message_in(
+        &self,
+        group_id: &str,
+        sender_id: &str,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SdkError> {
         self.require_backup_outbound_ready()?;
         self.assert_shared_group_send_capacity(group_id, sender_id)?;
         let logical_event_id =
@@ -628,6 +638,7 @@ impl RamfluxClient {
             state.group_state_hash.as_deref(),
         )?;
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
+        self.capture_own_authored_group(group_id, sender_id, plaintext)?;
         let ciphertext = session.encrypt(plaintext, &associated_data)?;
         state.session_snapshot = session.snapshot();
         self.persist_group_sender_key_state(

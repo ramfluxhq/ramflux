@@ -3,10 +3,9 @@
 
 //! `CONTROL_A2I` (operation 11): a signed agent-to-inbox control event.
 //! The typed event converts to the native signed document, its signature is checked against the
-//! pinned key of the authenticated sending device, and the native A2I inbox row is written.
+//! pinned key of the authenticated sending device. Execution is closed until native grants exist.
 use super::{authority, content, generated_signed, native_signed};
 use crate::client::identity_authority::HeadUse;
-use crate::client::routed::control::a2i_key;
 use crate::client::routed::{Kind, Opened};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
@@ -81,7 +80,9 @@ fn object_to_generated(object: &Map<String, Value>) -> g::JsonObject {
     }
 }
 
-fn domain_to_native(event: &g::A2iControlEvent) -> Result<ramflux_protocol::ControlDomain, SdkError> {
+fn domain_to_native(
+    event: &g::A2iControlEvent,
+) -> Result<ramflux_protocol::ControlDomain, SdkError> {
     use g::control_domain::Value as D;
     use ramflux_protocol::ControlDomain as N;
     Ok(match event.control_domain.as_ref().and_then(|domain| domain.value.as_ref()) {
@@ -145,7 +146,7 @@ fn to_native(event: &g::A2iControlEvent) -> Result<ramflux_protocol::A2iControlE
 }
 
 /// Native signed document to the typed event (producer side).
-pub(super) fn to_generated(
+pub(in crate::client::routed) fn to_generated(
     event: &ramflux_protocol::A2iControlEvent,
 ) -> Result<g::A2iControlEvent, SdkError> {
     use g::control_domain::Value as D;
@@ -193,8 +194,9 @@ pub(super) fn to_generated(
 
 /// OPEN-VALUE (A2I-INBOX-ROW): no document fixes how the signed document fills the native A2I
 /// inbox row. Recommended mapping, kept in this one function: `event_id` = `correlation_id`,
-/// `event_type` = "a2i.control", `control_domain` = native snake_case name, `subject_base64` =
+/// `event_type` = "a2i.control", `control_domain` = native `snake_case` name, `subject_base64` =
 /// base64url of the canonical JSON subject, `created_at` = local receive time (seconds).
+#[cfg(test)]
 fn inbox_row(
     native: &ramflux_protocol::A2iControlEvent,
     received_at: i64,
@@ -228,6 +230,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         event: &g::A2iControlEvent,
     ) -> Result<ramflux_protocol::A2iControlEvent, SdkError> {
+        Self::require_a2i_binding_authority()?;
         if opened.routing.kind != Kind::Control || opened.routing.group_id.is_some() {
             return Err(authority("a2i control requires a direct control route"));
         }
@@ -267,28 +270,9 @@ impl RamfluxClient {
         event: &g::A2iControlEvent,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        let native = self.authorize_generated_a2i(opened, entry, event)?;
-        let mut row = inbox_row(&native, crate::time::now_unix_timestamp())?;
-        let source = self.bind_received_a2i_event(&mut row, entry)?;
-        let scoped = a2i_key(&source, &row.event_id)?;
-        let committed = self
-            .authenticated_committed_key(HeadUse::NewAuthorization, entry)?
-            .replace("routed/committed/", "routed/control/");
-        let db = self.account_db()?;
-        self.apply_generated_peer_control_once(entry, identity, exact_inner, 11, |_| {
-            if let Some(old) = db.load_actor_state::<ramflux_sync::A2iControlEvent>(&scoped)? {
-                let mut same = row.clone();
-                same.acknowledged = old.acknowledged;
-                same.created_at = old.created_at;
-                if same != old {
-                    return Err(authority("a2i event id reused by another authenticated delivery"));
-                }
-                return Ok(());
-            }
-            db.persist_actor_state(&committed, &row)?;
-            db.persist_actor_state(&scoped, &row)?;
-            Ok(())
-        })
+        let _ = (identity, exact_inner);
+        self.authorize_generated_a2i(opened, entry, event)?;
+        Ok(false)
     }
 }
 
@@ -298,9 +282,8 @@ mod tests {
 
     #[test]
     fn a2i_json_numbers_and_duplicate_keys_are_refused() {
-        let number = |token: &str| g::JsonValue {
-            value: Some(g::json_value::Value::Number(token.into())),
-        };
+        let number =
+            |token: &str| g::JsonValue { value: Some(g::json_value::Value::Number(token.into())) };
         assert!(json_to_native(&number("1"), 1).is_ok());
         for token in ["01", "1.0e0", " 1", "NaN", "\"1\""] {
             assert!(json_to_native(&number(token), 1).is_err(), "number {token:?} admitted");
@@ -308,6 +291,27 @@ mod tests {
         let member = |key: &str| g::JsonMember { key: key.into(), value: Some(number("1")) };
         let duplicate = g::JsonObject { members: vec![member("a"), member("a")] };
         assert!(object_to_native(&duplicate, 1).is_err());
+    }
+
+    #[test]
+    fn inbox_mapping_is_not_an_authority_contract() -> Result<(), SdkError> {
+        let native = serde_json::from_value(serde_json::json!({
+            "schema": ramflux_protocol::domain::A2I_CONTROL, "version": 1,
+            "domain": ramflux_protocol::domain::A2I_CONTROL,
+            "signing_key_id": "source", "signature_alg": "ed25519", "signature": "sig",
+            "event_type": "a2i.control", "control_domain": "mcp_tool",
+            "action": "approve", "subject": {"tool":"search"},
+            "correlation_id": "event", "source_device_id": "source", "target_device_id": "target"
+        }))?;
+        let mapped = inbox_row(&native, 123)?;
+        assert_eq!(mapped.event_id, "event");
+        assert_eq!(mapped.created_at, 123);
+        assert_eq!(
+            mapped.subject_base64,
+            ramflux_protocol::encode_base64url(br#"{"tool":"search"}"#)
+        );
+        assert!(RamfluxClient::require_a2i_binding_authority().is_err());
+        Ok(())
     }
 
     #[test]

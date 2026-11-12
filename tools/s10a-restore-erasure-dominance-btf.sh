@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source_file=crates/ramflux-storage/src/account_db/backup_edit_register.rs
-named=restore_erasure_dominates_edit_in_both_directions
+named=edit_restore_erasure_dominates_every_revision_and_opening
 snapshot=$(mktemp)
 log_file=$(mktemp)
 cp "$source_file" "$snapshot"

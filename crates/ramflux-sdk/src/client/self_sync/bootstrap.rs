@@ -82,7 +82,11 @@ impl RamfluxClient {
                 if enrollment_only && db.load_actor_state::<bool>(&marker)?.unwrap_or(false) {
                     continue;
                 }
-                self.bootstrap_self_sync(&sibling)?;
+                match self.bootstrap_self_sync(&sibling) {
+                    Ok(()) => {}
+                    Err(SdkError::InboundPending(_)) => continue,
+                    Err(error) => return Err(error),
+                }
                 if enrollment_only {
                     db.persist_actor_state(&marker, &true)?;
                 }

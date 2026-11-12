@@ -16,6 +16,8 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
+#[cfg(test)]
+pub(crate) use store::sibling_fixture::{SiblingSetup, install_sibling_fixture};
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
     accept_publication, account_exists, custody_vault_reference, export_agent_credentials,

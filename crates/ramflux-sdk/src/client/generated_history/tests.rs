@@ -961,3 +961,6 @@ mod producer_rows {
         Ok(())
     }
 }
+
+#[path = "tests/restore_header.rs"]
+mod restore_header;

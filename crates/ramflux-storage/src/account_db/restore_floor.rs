@@ -58,7 +58,8 @@ impl AccountDb {
 /// An archive written by a newer schema of the same generation cannot merge into this binary:
 /// rows and floors this binary does not know would be dropped silently.
 pub(super) fn refuse_schema_downgrade(db: &rusqlite::Connection) -> Result<(), StorageError> {
-    let generation = db.query_row("PRAGMA incoming.user_version", [], |row| row.get::<_, i64>(0))?;
+    let generation =
+        db.query_row("PRAGMA incoming.user_version", [], |row| row.get::<_, i64>(0))?;
     crate::schema_generation::require(generation)?;
     let recorded: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='schema_migration')",
@@ -112,7 +113,11 @@ mod tests {
         );
         assert_eq!(db.load_actor_state::<u64>(key)?, Some(1 << 62));
         assert_eq!(
-            db.write_transaction(|| db.admit_actor_counter_floor(key, u64::MAX, FloorPolicy::Refuse))?,
+            db.write_transaction(|| db.admit_actor_counter_floor(
+                key,
+                u64::MAX,
+                FloorPolicy::Refuse
+            ))?,
             u64::MAX
         );
         assert_eq!(db.load_actor_state::<u64>(key)?, Some(u64::MAX));
@@ -137,15 +142,28 @@ mod tests {
         let path = target_root.join("merged.db");
         let second = target.write_backup_snapshot(&path)?;
         let mut merged = BackupDatabase::open(&path, &second.key)?;
+        merged.attach(&incoming, &first.key)?;
+        assert!(
+            matches!(
+                refuse_schema_downgrade(&merged.db),
+                Err(StorageError::AccountSchemaTooNew { .. })
+            ),
+            "the initial schema fence must refuse before merge preparation, independently of later object-schema guards"
+        );
+        merged.db.execute_batch("DETACH DATABASE incoming")?;
         let before: i64 =
-            merged.db.query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
+            merged
+                .db
+                .query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
         let refused = merged.merge_backup(&incoming, &first.key, || Ok(()));
         assert!(
             matches!(refused, Err(StorageError::AccountSchemaTooNew { .. })),
             "a newer same-generation archive must be refused before any merge effect"
         );
         let after: i64 =
-            merged.db.query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
+            merged
+                .db
+                .query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
         assert_eq!(before, after);
         drop((merged, source, target));
         std::fs::remove_dir_all(source_root)?;

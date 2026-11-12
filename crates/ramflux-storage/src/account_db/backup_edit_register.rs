@@ -19,8 +19,9 @@ pub const PARKED_EDIT_REVIEW: &str = "backup/parked-edit-review";
 const REGISTER: &str = "routed/edit-revision/";
 const PENDING: [&str; 2] = ["routed/pending-edit/", "routed/pending-history-edit/"];
 /// Content-free attribution and replay state that survives retirement of a losing revision.
-pub(super) const KEEP: [&str; 10] = [
+pub(super) const KEEP: [&str; 11] = [
     "routed/original-header/",
+    "routed/original-header-copy/",
     "routed/generated-identity/",
     "routed/generated-order/",
     "routed/generated-display-hlc/",
@@ -123,7 +124,11 @@ fn registers(
     rows.into_iter().map(|(target, bytes)| Ok((target, serde_json::from_slice(&bytes)?))).collect()
 }
 
-fn erased_on(db: &rusqlite::Connection, database: &str, target: &str) -> Result<bool, StorageError> {
+fn erased_on(
+    db: &rusqlite::Connection,
+    database: &str,
+    target: &str,
+) -> Result<bool, StorageError> {
     if database == "main" && super::deleted_messages::message_is_deleted_on(db, target)? {
         return Ok(true);
     }
@@ -146,7 +151,7 @@ fn erased_on(db: &rusqlite::Connection, database: &str, target: &str) -> Result<
 }
 
 /// Stable-named private copies owned by one revision of `target` in one database.
-fn revision_copies(
+pub(super) fn revision_copies(
     db: &rusqlite::Connection,
     database: &str,
     target: &str,
@@ -195,7 +200,12 @@ fn revision_copies(
     Ok(copies)
 }
 
-fn exclude(db: &rusqlite::Connection, table: &str, column: &str, value: &str) -> rusqlite::Result<()> {
+pub(super) fn exclude(
+    db: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> rusqlite::Result<()> {
     if incoming_table(db, table)? {
         db.execute(
             &format!(
@@ -216,7 +226,7 @@ fn exclude_copy(db: &rusqlite::Connection, copy: &RetainedCopy) -> rusqlite::Res
 }
 
 /// Fence every body-bearing incoming row of a losing or erased copy out of the row merge.
-fn exclude_incoming_content(
+pub(super) fn exclude_incoming_content(
     db: &rusqlite::Connection,
     target: &str,
     copies: &BTreeSet<RetainedCopy>,
@@ -266,10 +276,7 @@ fn install_incoming_winner(db: &rusqlite::Connection, target: &str) -> Result<()
     let keep = keep_keys(db, target)?;
     super::message_edit_retirement::retire_for_restore(db, target, &keep)?;
     for prefix in REVISION_ACTORS {
-        super::message_edit_retirement::retire_actor_for_restore(
-            db,
-            &format!("{prefix}{target}"),
-        )?;
+        super::message_edit_retirement::retire_actor_for_restore(db, &format!("{prefix}{target}"))?;
     }
     drop_local_raw(db, &format!("{REVISION_RAW}{target}"))?;
     db.execute("DELETE FROM main.runtime_message_content WHERE message_id=?1", [target])?;
@@ -309,17 +316,16 @@ impl BackupDatabase {
         let incoming = registers(db, "incoming")?;
         let targets = local.keys().chain(incoming.keys()).cloned().collect::<BTreeSet<_>>();
         for target in targets {
-            let side = |database: &str,
-                        edit: Option<&EditPair>|
-             -> Result<RestoreMessage, StorageError> {
-                if erased_on(db, database, &target)? {
-                    return Ok(RestoreMessage::Erased);
-                }
-                Ok(RestoreMessage::Live {
-                    edit: edit.cloned(),
-                    openings: revision_copies(db, database, &target)?,
-                })
-            };
+            let side =
+                |database: &str, edit: Option<&EditPair>| -> Result<RestoreMessage, StorageError> {
+                    if erased_on(db, database, &target)? {
+                        return Ok(RestoreMessage::Erased);
+                    }
+                    Ok(RestoreMessage::Live {
+                        edit: edit.cloned(),
+                        openings: revision_copies(db, database, &target)?,
+                    })
+                };
             let ours = side("main", local.get(&target))?;
             let theirs = side("incoming", incoming.get(&target))?;
             let incoming_copies = match &theirs {
@@ -346,7 +352,12 @@ impl BackupDatabase {
                         }
                     } else if edit.as_ref() != incoming.get(&target) {
                         exclude_incoming_content(db, &target, &lost)?;
-                        exclude(db, "runtime_actor_state", "state_kind", &format!("{REGISTER}{target}"))?;
+                        exclude(
+                            db,
+                            "runtime_actor_state",
+                            "state_kind",
+                            &format!("{REGISTER}{target}"),
+                        )?;
                         db.execute(
                             "INSERT OR IGNORE INTO backup_erased_copy SELECT 'incoming','direct_message_projection',r.rowid FROM incoming.direct_message_projection r JOIN main.direct_message_projection l ON l.message_id=r.message_id AND l.conversation_id=r.conversation_id WHERE r.message_id=?1 AND r.deleted=0",
                             [&target],

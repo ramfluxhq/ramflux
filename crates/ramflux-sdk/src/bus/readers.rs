@@ -647,7 +647,10 @@ mod read_model_selector_tests {
                 json!({"conversation_id":"c","message_id":"x","after_sequence":1}),
                 GeneratedErrorCode::InvalidArgument,
             ),
-            (json!({"conversation_id":"c","message_id":"short"}), GeneratedErrorCode::InvalidArgument),
+            (
+                json!({"conversation_id":"c","message_id":"short"}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
             (
                 json!({"conversation_id":"c","after_sequence":0,"limit":0}),
                 GeneratedErrorCode::InvalidArgument,
@@ -665,10 +668,7 @@ mod read_model_selector_tests {
         let error = generated_page(&client, &json!({"conversation_id":"c","message_id":missing}))
             .err()
             .ok_or("missing message served")?;
-        assert_eq!(
-            AdapterError::from_sdk(&error).code,
-            GeneratedErrorCode::TargetNotFound as i32
-        );
+        assert_eq!(AdapterError::from_sdk(&error).code, GeneratedErrorCode::TargetNotFound as i32);
 
         let changes = generated_page(&client, &json!({"conversation_id":"c","after_sequence":0}))?;
         assert_eq!(changes["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);

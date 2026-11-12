@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Span Brain
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source_file=crates/ramflux-sdk/src/client/routed/native_control/a2i.rs
+source_file=crates/ramflux-sdk/src/client/routed/native_control/mod.rs
 named=generated_a2i_requires_pinned_signature_and_device_binding
 snapshot=$(mktemp)
 log_file=$(mktemp)
@@ -13,10 +13,15 @@ trap restore EXIT
 python3 - "$source_file" <<'PY'
 from pathlib import Path
 import sys
+import re
 p = Path(sys.argv[1]); s = p.read_text()
-old = '        ramflux_protocol::verify_signed_fields(&native, &native.signed, &key)\n            .map_err(|_| authority("a2i signature invalid for the pinned device key"))?;'
-assert s.count(old) == 1
-p.write_text(s.replace(old, '        let _ = &key;'))
+old = '        Err(authority("a2i native binding/grant authority is not installed"))'
+pattern = r'\s*'.join(re.escape(c) for c in old if not c.isspace())
+matches = list(re.finditer(pattern, s))
+assert len(matches) == 1, len(matches)
+match = matches[0]
+new = '        Ok(())'
+p.write_text(s[:match.start()] + new + s[match.end():])
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"
@@ -28,4 +33,4 @@ if ! rg -q "$named .*FAILED|$named --- FAILED" "$log_file"; then
     echo 'mutant did not reach the named assertion' >&2
     exit 1
 fi
-echo A2I_SIGNATURE_BTF_OK
+echo A2I_AUTHORITY_REFUSAL_BTF_OK

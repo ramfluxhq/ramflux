@@ -73,6 +73,7 @@ mod raw_inner_reparse;
 mod receipt_bindings;
 pub mod recovery;
 pub use raw_inner_reparse::ReparseProgress;
+mod generated_updates;
 pub(crate) mod reply_outbox;
 pub(crate) mod routed;
 pub mod self_sync;
@@ -94,6 +95,8 @@ use crate::prelude::*;
 pub struct RamfluxClient {
     pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
     pub(crate) typing_sender: std::cell::RefCell<typing::sender::Sender>,
+    pub(crate) self_sync_restore_clock:
+        std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
@@ -122,6 +125,7 @@ impl Default for RamfluxClient {
         Self {
             typing_receiver: std::cell::RefCell::default(),
             typing_sender: std::cell::RefCell::default(),
+            self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,
             voice_calls: BTreeMap::new(),

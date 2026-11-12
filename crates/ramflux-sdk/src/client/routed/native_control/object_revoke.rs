@@ -32,7 +32,6 @@ impl RamfluxClient {
         if source != opened.remote_device {
             return Err(authority("object revoke sender is not the pair-session peer"));
         }
-        let (principal, _) = self.pinned_peer(&source)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let own = self.own_account_anchor()?;
         if revoke.recipient_principal_id != local.principal_id
@@ -41,18 +40,35 @@ impl RamfluxClient {
             return Err(authority("object revoke names another recipient"));
         }
         let record = self.account_db()?.client_record("object", &revoke.object_id)?;
-        let owner = record
+        let record = record
             .as_ref()
-            .and_then(|record| record.get("owner"))
+            .ok_or_else(|| authority("object revoke names no received reference"))?;
+        let message = record
+            .get("message_id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| authority("object revoke names no received reference"))?;
-        let sender = if owner == source.root_commitment() {
-            source.root_commitment()
-        } else {
-            principal.as_str()
-        };
-        crate::client::generated_control::authorize_object_revoke(sender, owner, revoke)
-            .map_err(|_| authority("object revocation sender does not own the received reference"))?;
+        // The directory's display owner is an alias, not root authority. Bind the
+        // selector to its admitted original Message and use that immutable author.
+        let original = self
+            .account_db()?
+            .load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{message}"))?
+            .ok_or_else(|| authority("object reference has no authenticated original identity"))?;
+        if g::identity::verify(&original).is_err()
+            || ramflux_protocol::encode_base64url(&original.id) != message
+            || record.get("conversation_id").and_then(serde_json::Value::as_str)
+                != Some(original.conversation_id.as_str())
+        {
+            return Err(authority("object reference differs from its admitted original"));
+        }
+        let author = original
+            .author
+            .as_ref()
+            .ok_or_else(|| authority("object reference original author missing"))?;
+        let sender = source.root_commitment();
+        let owner = author.account_anchor.as_str();
+        crate::client::generated_control::authorize_object_revoke(sender, owner, revoke).map_err(
+            |_| authority("object revocation sender does not own the received reference"),
+        )?;
         Ok(source)
     }
 

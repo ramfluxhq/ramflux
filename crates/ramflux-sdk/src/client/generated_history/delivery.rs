@@ -153,10 +153,28 @@ impl RamfluxClient {
         let Some(row) = db.load_actor_state::<Outgoing>(&plan.key)? else { return Ok(None) };
         if serde_json::to_value(&row)? != plan.fingerprint
             || self.history_target_epoch(&plan.target)? != Some(row.target_epoch)
+            || !self.history_cached_page_current(&row)?
         {
             return Ok(None);
         }
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        self.require_native_operation(&plan.target, NativeOperation::Sync)?;
         Ok(Some(row))
+    }
+
+    // A plan may outlive an Edit/Delete while the network material is fetched. The
+    // transfer row is content-free and survives that retirement; its fingerprint
+    // alone cannot authorize handing the plan's captured ciphertext to transport.
+    fn history_cached_page_current(&self, row: &Outgoing) -> Result<bool, SdkError> {
+        let Some(flight) = &row.in_flight else { return Ok(true) };
+        let Some(cached) = self.account_db()?.load_actor_state::<Cached>(&page_key(&row.target))?
+        else {
+            return Ok(false);
+        };
+        Ok(cached.transfer_id == row.transfer_id
+            && cached.page == flight.page
+            && cached.envelope.envelope_id == flight.envelope_id
+            && cached.envelope.payload_hash == flight.payload_hash)
     }
 
     /// Build, seal and durably retain the next page in one writer transaction.
@@ -267,5 +285,77 @@ impl RamfluxClient {
             db.persist_actor_state(&plan.key, &row)?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::producer::Cursor;
+    use super::*;
+    use crate::client::native_test_support::{Fixture, TestResult};
+
+    #[tokio::test]
+    async fn history_captured_page_is_rechecked_after_an_owner_is_erased() -> TestResult {
+        let own = Fixture::new("history-stale-plan-erasure").await?;
+        own.client.send_direct_message("c", "owner", "sender", b"body")?;
+        let mut row = Outgoing::new(&own.client.owned_device_identity()?, 1)?;
+        let envelope = Envelope {
+            schema: "test".into(),
+            version: 1,
+            domain: "test".into(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "key".into(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "signature".into(),
+            },
+            envelope_id: "captured-page".into(),
+            source_principal_id: "source".into(),
+            source_device_id: "source-device".into(),
+            target_delivery_id: row.target.clone(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 300,
+            created_at: crate::time::now_unix_timestamp(),
+            encrypted_payload: "ciphertext".into(),
+            payload_hash: "payload-hash".into(),
+            delivery_mode: None,
+            collapse_tag: None,
+            report_commitment: None,
+        };
+        row.in_flight = Some(InFlight {
+            page: 0,
+            previous: vec![0; 32],
+            digest: vec![1; 32],
+            after: Cursor { conversation: "c".into(), created_at: 1, message: "owner".into() },
+            owners: vec!["owner".into()],
+            skipped: 0,
+            envelope_id: envelope.envelope_id.clone(),
+            payload_hash: envelope.payload_hash.clone(),
+        });
+        let db = own.client.account_db()?;
+        let key = page_key(&row.target);
+        db.write_transaction(|| {
+            db.persist_actor_state(
+                &key,
+                &Cached {
+                    transfer_id: row.transfer_id.clone(),
+                    page: 0,
+                    envelope: envelope.clone(),
+                },
+            )?;
+            db.bind_message_container_reference("owner", &key)?;
+            Ok::<(), SdkError>(())
+        })?;
+        assert!(own.client.history_cached_page_current(&row)?);
+        let captured = envelope.clone();
+        db.delete_direct_message("c", "owner", "local", "erase-owner")?;
+        assert!(!captured.encrypted_payload.is_empty(), "the prepared plan still owns ciphertext");
+        assert!(
+            !own.client.history_cached_page_current(&row)?,
+            "retiring the stored page revokes a previously captured plan even when its transfer fingerprint survives"
+        );
+        Ok(())
     }
 }

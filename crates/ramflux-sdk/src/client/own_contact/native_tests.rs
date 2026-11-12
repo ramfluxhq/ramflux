@@ -79,25 +79,19 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native((*native).clone())?;
     own.client.persist_fetched_identity_directory(&fetched)?;
+    assert_history_bootstrap_once(&own.client)?;
     let before = crate::bus::own_device_copy::copy_id(&own.client, "public-id")?;
     own.client.device_branch = None;
     assert_eq!(crate::bus::own_device_copy::copy_id(&own.client, "public-id")?, before);
     assert_eq!(own.client.stage_contact_backfill_batch()?, 1);
     assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
-    assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 1);
-    assert_eq!(
-        own.client
-            .self_sync_state("native-bootstrap-thread", &value)?
-            .ok_or("state")?
-            .value
-            .revision,
-        1,
-        "bootstrap never increments the accepted revision"
-    );
+    assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 0);
+    assert_bootstrap_revision(&own.client, &value)?;
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    assert_restore_refresh_round(&own.client, &qualified)?;
     remove_sibling_sync(&own, &mut native, &primary)?;
     assert!(own.client.prepare_self_sync_repair(&own.config)?.is_none());
     assert_eq!(
@@ -126,5 +120,60 @@ fn remove_sibling_sync(
     native.publication.record = primary.sign_record(body)?;
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
     own.client.persist_fetched_identity_directory(&fetched)?;
+    Ok(())
+}
+
+fn assert_history_bootstrap_once(client: &crate::RamfluxClient) -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    client.stage_native_history_bootstrap()?;
+    let db = client.account_db()?;
+    let transfers = db.actor_state_keys("history-out/transfer/")?;
+    assert_eq!(transfers.len(), 1, "the newly certified sibling gets a history transfer");
+    let before = db.load_actor_state::<serde_json::Value>(&transfers[0])?;
+    client.stage_native_history_bootstrap()?;
+    assert_eq!(
+        db.load_actor_state::<serde_json::Value>(&transfers[0])?,
+        before,
+        "repeated backfill preserves the transfer identity and cursor"
+    );
+    assert_eq!(db.actor_state_keys("history-out/bootstrap/")?.len(), 1);
+    Ok(())
+}
+
+fn assert_restore_refresh_round(
+    client: &crate::RamfluxClient,
+    sibling: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> TestResult {
+    use ramflux_protocol::message::SelfSync;
+    let scope = "native-bootstrap-thread";
+    let mute = || SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };
+    let db = client.account_db()?;
+    db.write_transaction(|| client.mark_self_sync_restore_refresh())?;
+    assert!(matches!(
+        client.change_self_sync(scope, mute()),
+        Err(crate::SdkError::InboundPending(_))
+    ));
+    let current = SelfSync { operation: 7, revision: 9, ..Default::default() };
+    assert!(matches!(
+        db.write_transaction(|| client.apply_self_sync_in(sibling, scope, &current)),
+        Err(crate::SdkError::InboundPending(_))
+    ));
+    assert!(
+        matches!(client.change_self_sync(scope, mute()), Err(crate::SdkError::InboundPending(_))),
+        "a packet cannot complete a floor-bearing authenticated snapshot round"
+    );
+    Ok(())
+}
+
+fn assert_bootstrap_revision(
+    client: &crate::RamfluxClient,
+    value: &ramflux_protocol::message::SelfSync,
+) -> TestResult {
+    assert_eq!(
+        client.self_sync_state("native-bootstrap-thread", value)?.ok_or("state")?.value.revision,
+        1,
+        "bootstrap never increments the accepted revision"
+    );
+
     Ok(())
 }
