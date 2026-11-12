@@ -126,6 +126,7 @@ struct Ceremony {
     displayed_proposal: Option<String>,
     common: Option<Common>,
     full: Option<full::FullCeremony>,
+    full_error: Option<ramflux_protocol::custody::pairing::full_transfer::FullError>,
     peer_ref: Option<DeviceRef>,
     peer_name: Option<String>,
     result: Option<String>,
@@ -154,11 +155,33 @@ enum SasHold {
 }
 
 impl PairingActor {
-    fn note_background_error(&mut self, error: &SdkError) {
+    pub(super) fn note_background_error(&mut self, error: &SdkError) {
         let code = Self::background_error_code(error);
         if let Some(c) = &mut self.ceremony {
-            c.result = Some(code.into());
+            if c.full.is_some() {
+                c.full_error = Some(
+                    ramflux_protocol::custody::pairing::full_transfer::FullError::from_code(code)
+                        .unwrap_or(
+                        ramflux_protocol::custody::pairing::full_transfer::FullError::InvalidInput,
+                    ),
+                );
+            }
+            // Active v2 updates permit only PublicationPending. Keep full-profile
+            // refusals separately instead of emitting an invalid phase/result pair.
+            if code == "PublicationPending" {
+                c.result = Some(code.into());
+            } else if !terminal(&c.phase) {
+                c.result = None;
+            }
         }
+    }
+    /// Exact last full-profile background refusal, separate from legacy update fields.
+    /// This is local progress information and confers no verification or publication right.
+    #[must_use]
+    pub fn full_background_error(
+        &self,
+    ) -> Option<ramflux_protocol::custody::pairing::full_transfer::FullError> {
+        self.ceremony.as_ref().and_then(|c| c.full_error)
     }
     fn background_error_code(error: &SdkError) -> &'static str {
         match error {
@@ -631,6 +654,7 @@ impl PairingActor {
             displayed_proposal: None,
             common: open.common,
             full: None,
+            full_error: None,
             peer_ref: None,
             peer_name: None,
             result: None,

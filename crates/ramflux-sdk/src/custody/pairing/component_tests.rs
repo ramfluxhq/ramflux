@@ -1405,3 +1405,29 @@ async fn pairing_full_new_target_missing_authority_is_scoped_and_corrupt_authori
     assert!(missing.is_err(), "missing source authority was reinterpreted as new-target staging");
     Ok(())
 }
+
+#[tokio::test]
+async fn pairing_full_background_refusal_keeps_exact_code_and_valid_legacy_status() -> TestResult {
+    use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::FullError};
+    let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation,
+        generation: rig.primary.actor_generation(),
+    };
+    for (code, exact) in [
+        ("NoSpace", FullError::NoSpace),
+        ("SchemaMismatch", FullError::SchemaMismatch),
+        ("ResumeRequired", FullError::ResumeRequired),
+    ] {
+        rig.primary.note_background_error(&SdkError::PairingCode(code));
+        assert_eq!(rig.primary.full_background_error(), Some(exact));
+        let status = rig.primary.status(&request).await?;
+        status.to_wire_bytes()?;
+        let Outcome::Update { value } = status.outcome else { return Err("legacy status".into()) };
+        assert_eq!(value.phase, "mutually_confirmed");
+        assert!(value.result.is_none(), "full refusal invalidated a legacy active-phase update");
+    }
+    Ok(())
+}

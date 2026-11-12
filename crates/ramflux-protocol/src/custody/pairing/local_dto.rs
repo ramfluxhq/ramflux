@@ -15,6 +15,8 @@ fn local_base(id: &str, generation: u64) -> Result<()> {
 }
 mod full;
 pub use full::FullTransferBegin;
+mod full_status;
+pub use full_status::{FullStatus, FullStatusStage, FullTailStatus};
 
 fn name(v: &str) -> Result<()> {
     require(v.len() <= 128 && crate::text_safety::free_text_is_safe(v), "display_name")
