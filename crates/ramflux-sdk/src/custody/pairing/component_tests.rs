@@ -723,6 +723,23 @@ async fn assert_full_cancel_fences_stage(rig: &mut Rig, operation: &str) -> Test
             generation: rig.secondary.actor_generation(),
         })
         .await?;
+    let status = rig
+        .secondary
+        .transfer_status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: 1,
+        })
+        .await?;
+    let Outcome::FullStatus { value } = status.outcome else {
+        return Err("cancelled full status".into());
+    };
+    assert_eq!(
+        value.stage,
+        ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Cancelled
+    );
+    assert!(value.result.is_none());
     {
         let slot = rig.participant_b.db.lock().map_err(|_| "DB")?;
         let db = slot.as_ref().ok_or("DB")?;
@@ -1494,5 +1511,43 @@ async fn assert_full_bus_disk_status(
             ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_expiry_keeps_public_status_after_secret_owners_drop() -> TestResult {
+    use ramflux_protocol::custody::pairing::{
+        full_transfer::FullError,
+        local_dto::{FullStatusStage, StatusRequest},
+    };
+    let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+    let request = StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation,
+        generation: 1,
+    };
+    let Outcome::FullStatus { value: before } =
+        rig.primary.transfer_status(&request).await?.outcome
+    else {
+        return Err("live full status".into());
+    };
+    crate::time::FixedClock::advance_to(i64::try_from(before.lease_expires_at)?);
+    let Outcome::FullStatus { value: after } = rig.primary.transfer_status(&request).await?.outcome
+    else {
+        return Err("expired full status".into());
+    };
+    assert_eq!(after.stage, FullStatusStage::Expired);
+    assert_eq!(after.result, Some(FullError::LeaseExpired));
+    assert_eq!(after.bytes_durable, before.bytes_durable);
+    assert_eq!(after.bytes_total, before.bytes_total);
+    assert!(
+        rig.primary.full_source_manifest_for_test().is_err(),
+        "status retained a full private owner"
+    );
+    assert!(
+        rig.primary.displayed_transcript().is_err(),
+        "expired status retained SAS confirmation"
+    );
     Ok(())
 }

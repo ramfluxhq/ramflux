@@ -127,6 +127,7 @@ struct Ceremony {
     common: Option<Common>,
     full: Option<full::FullCeremony>,
     full_error: Option<ramflux_protocol::custody::pairing::full_transfer::FullError>,
+    full_terminal_status: Option<Box<ramflux_protocol::custody::pairing::local_dto::FullStatus>>,
     peer_ref: Option<DeviceRef>,
     peer_name: Option<String>,
     result: Option<String>,
@@ -655,6 +656,7 @@ impl PairingActor {
             common: open.common,
             full: None,
             full_error: None,
+            full_terminal_status: None,
             peer_ref: None,
             peer_name: None,
             result: None,
@@ -1193,6 +1195,7 @@ impl PairingActor {
     }
 
     async fn fail(&mut self, phase: &str, code: &'static str) -> Result<LocalResult, SdkError> {
+        self.capture_full_terminal_status(phase);
         let epoch = self
             .ceremony
             .as_mut()

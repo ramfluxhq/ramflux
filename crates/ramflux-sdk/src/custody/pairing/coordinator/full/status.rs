@@ -4,7 +4,7 @@
 //! Public totals only. A disk receipt never advances semantic or authority phases.
 use super::super::{PairingActor, PairingWire, SdkError, wire};
 use ramflux_protocol::custody::pairing::{
-    full_transfer::{CHUNK_BYTES, SourceManifest, U64},
+    full_transfer::{CHUNK_BYTES, FullError, SourceManifest, U64},
     local_dto::{FullStatus, FullStatusStage, FullTailStatus, LocalResult, Outcome, StatusRequest},
 };
 
@@ -38,11 +38,39 @@ impl PairingActor {
         request: &StatusRequest,
     ) -> Result<LocalResult, SdkError> {
         let legacy = self.status(request).await?;
-        let c = self.ceremony.as_ref().ok_or(SdkError::PairingCode("NotFound"))?;
-        let Some(state) = c.full.as_ref().and_then(|full| full.bootstrap.as_ref()) else {
-            return Ok(legacy);
+        let Some(value) = self.current_full_status()? else { return Ok(legacy) };
+        Ok(LocalResult {
+            schema: "ramflux.pairing.LocalResult.v2".into(),
+            version: 2,
+            outcome: Outcome::FullStatus { value: Box::new(value) },
+        })
+    }
+    pub(in crate::custody::pairing::coordinator) fn capture_full_terminal_status(
+        &mut self,
+        phase: &str,
+    ) {
+        let stage = match phase {
+            "cancelled" => FullStatusStage::Cancelled,
+            "expired" => FullStatusStage::Expired,
+            _ => return,
         };
-        let Some(trust) = &state.trust else { return Ok(legacy) };
+        // Public display data only; failed capture must never obstruct key erasure.
+        let Ok(Some(mut value)) = self.current_full_status() else { return };
+        value.stage = stage;
+        value.result = if phase == "expired" { Some(FullError::LeaseExpired) } else { None };
+        if let Some(c) = &mut self.ceremony {
+            c.full_terminal_status = Some(Box::new(value));
+        }
+    }
+    fn current_full_status(&self) -> Result<Option<FullStatus>, SdkError> {
+        let c = self.ceremony.as_ref().ok_or(SdkError::PairingCode("NotFound"))?;
+        if let Some(saved) = &c.full_terminal_status {
+            return Ok(Some((**saved).clone()));
+        }
+        let Some(state) = c.full.as_ref().and_then(|full| full.bootstrap.as_ref()) else {
+            return Ok(None);
+        };
+        let Some(trust) = &state.trust else { return Ok(None) };
         let progress = if let Some(stream) = &state.stream {
             *stream.progress.lock().map_err(|_| SdkError::PairingCode("Busy"))?
         } else {
@@ -70,10 +98,6 @@ impl PairingActor {
             tail_status: FullTailStatus::None,
         };
         value.validate().map_err(|error| wire(&error))?;
-        Ok(LocalResult {
-            schema: "ramflux.pairing.LocalResult.v2".into(),
-            version: 2,
-            outcome: Outcome::FullStatus { value: Box::new(value) },
-        })
+        Ok(Some(value))
     }
 }
