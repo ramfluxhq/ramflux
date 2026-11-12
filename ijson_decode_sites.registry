@@ -1016,3 +1016,4 @@ crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | prepare_call_peer 
 crates/ramflux-sdk/src/custody/pairing/full_generation.rs | decode | 1 | E | excluded=closed local generation recovery metadata is outside Envelope/Ack/Nack containment closure
 
 crates/ramflux-storage/src/account_db/mac_subkeys/full.rs | decode_source_ref | 1 | E | excluded=closed public DeviceRef metadata is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/custody/pairing/full_epoch.rs | new | 1 | A | strict=parse_i_json_secret; admission=exact locally retained encrypted-stage lease before A3 locally frozen discovery and original SAS peer-proof verification
