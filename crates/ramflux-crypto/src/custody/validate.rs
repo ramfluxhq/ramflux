@@ -134,16 +134,39 @@ pub(super) fn branch_body(body: &BranchCertificate) -> Result<(), CryptoError> {
         return Err(reject("branch lease exceeds 30 days"));
     }
     if body.capabilities.is_empty()
-        || body.capabilities.len() > 5
+        || body.capabilities.len() > 6
         || !body.capabilities.windows(2).all(|pair| pair[0] < pair[1])
-        || body
-            .capabilities
-            .iter()
-            .any(|cap| !["call", "group", "message", "register", "sync"].contains(&cap.as_str()))
     {
         return Err(reject("invalid custody branch capabilities"));
     }
-    Ok(())
+    web_capability_shape(&body.capabilities)
+}
+/// Native certificates keep the closed five-name set. A web certificate carries exactly
+/// one `web_origin.<base64url SHA-256>` marker together with `web_secondary` and
+/// `message`, may add `call`, `group` and `sync`, and never carries `register`.
+fn web_capability_shape(capabilities: &[String]) -> Result<(), CryptoError> {
+    use ramflux_protocol::custody::{CAPABILITY_WEB_ORIGIN_PREFIX, CAPABILITY_WEB_SECONDARY};
+    let mut origins = 0_usize;
+    let mut secondary = false;
+    let mut register = false;
+    let mut message = false;
+    for capability in capabilities {
+        if let Some(hash) = capability.strip_prefix(CAPABILITY_WEB_ORIGIN_PREFIX) {
+            bytes(hash, 32)?;
+            origins += 1;
+        } else if capability == CAPABILITY_WEB_SECONDARY {
+            secondary = true;
+        } else if ["call", "group", "message", "register", "sync"].contains(&capability.as_str())
+        {
+            register |= capability == "register";
+            message |= capability == "message";
+        } else {
+            return Err(reject("invalid custody branch capabilities"));
+        }
+    }
+    let native = origins == 0 && !secondary && capabilities.len() <= 5;
+    let web = origins == 1 && secondary && message && !register;
+    if native || web { Ok(()) } else { Err(reject("invalid custody branch capabilities")) }
 }
 pub(super) fn record_structure(body: &DeviceSet) -> Result<(), CryptoError> {
     if body.schema != domain::SIGNED_DEVICE_SET_V3

@@ -36,6 +36,66 @@ pub enum ProofChannel<'a> {
         operator_opt_in: bool,
         receiving_node: &'a VerifiedNodeRecord,
     },
+    /// Web listener. `observed_hash` is recomputed by the verifier from the context the
+    /// gateway authored for that connection; `listener_url` and `origin` are that
+    /// context's values and must be advertised by the receiving node.
+    WebOriginBound {
+        observed_hash: &'a str,
+        listener_url: &'a str,
+        origin: &'a str,
+        receiving_node: &'a VerifiedNodeRecord,
+    },
+}
+
+/// The `transport_binding` of a `web_origin_bound` proof:
+/// `SHA-256(schema || 0x00 || canonical_json(context))`, base64url without padding.
+/// # Errors
+/// Returns canonical serialization failures and rejects a malformed context.
+pub fn web_origin_binding_hash(
+    context: &ramflux_protocol::custody::WebOriginBindingV1,
+) -> Result<String, CryptoError> {
+    if !context.well_formed() {
+        return Err(reject("malformed web origin binding context"));
+    }
+    let mut hash = Sha256::new();
+    hash.update(ramflux_protocol::custody::WEB_ORIGIN_BINDING_SCHEMA.as_bytes());
+    hash.update([0_u8]);
+    hash.update(ramflux_protocol::canonical_json_bytes(context)?);
+    Ok(encode_base64url(hash.finalize()))
+}
+
+/// The branch-certificate capability that pins a web device to `origin`.
+#[must_use]
+pub fn web_origin_capability(origin: &str) -> String {
+    format!(
+        "{}{}",
+        ramflux_protocol::custody::CAPABILITY_WEB_ORIGIN_PREFIX,
+        encode_base64url(Sha256::digest(origin.as_bytes()))
+    )
+}
+
+/// Listener separation, enforced inside proof verification so no caller can skip it:
+/// a web device is usable only through `web_origin_bound` for its own origin, and a
+/// native device is never usable through `web_origin_bound`.
+fn carrier_class(capabilities: &[String], web_origin: Option<&str>) -> Result<(), CryptoError> {
+    use ramflux_protocol::custody::{CAPABILITY_WEB_ORIGIN_PREFIX, CAPABILITY_WEB_SECONDARY};
+    let secondary = capabilities.iter().any(|cap| cap == CAPABILITY_WEB_SECONDARY);
+    let pinned = capabilities.iter().any(|cap| cap.starts_with(CAPABILITY_WEB_ORIGIN_PREFIX));
+    match web_origin {
+        None if secondary || pinned => Err(reject("web device refused on a native listener")),
+        None => Ok(()),
+        Some(origin) => {
+            let expected = web_origin_capability(origin);
+            if secondary
+                && capabilities.iter().any(|cap| *cap == expected)
+                && !capabilities.iter().any(|cap| cap == "register")
+            {
+                Ok(())
+            } else {
+                Err(reject("device is not a web device linked to this origin"))
+            }
+        }
+    }
 }
 
 /// Hash exactly the 32 bytes returned by the client-facing TLS 1.3 exporter.
@@ -126,7 +186,8 @@ pub fn verify_branch_proof_v3(
     structure(body)?;
     let recipient = match channel {
         ProofChannel::DirectExporter { receiving_node, .. }
-        | ProofChannel::NoChannelBinding { receiving_node, .. } => receiving_node,
+        | ProofChannel::NoChannelBinding { receiving_node, .. }
+        | ProofChannel::WebOriginBound { receiving_node, .. } => receiving_node,
         ProofChannel::HomeRelayReceipt { current_node, .. } => current_node,
     };
     if body.audience != recipient.envelope().body.node_id {
@@ -159,6 +220,13 @@ pub fn verify_branch_proof_v3(
     if body.certificate_hash != object_hash(signed_certificate)? {
         return Err(reject("branch certificate hash mismatch"));
     }
+    carrier_class(
+        &certificate.capabilities,
+        match channel {
+            ProofChannel::WebOriginBound { origin, .. } => Some(origin),
+            _ => None,
+        },
+    )?;
     signature(
         &super::validate::key(&certificate.branch_signing_public_key)?,
         domain::BRANCH_PROOF_V3,
@@ -185,6 +253,20 @@ pub fn verify_branch_proof_v3(
             allows(receiving_node, BindingMode::NoChannelBinding)?;
             if !operator_opt_in || body.binding_mode != BindingMode::NoChannelBinding {
                 return Err(reject("explicit no-channel-binding opt-in required"));
+            }
+        }
+        ProofChannel::WebOriginBound { observed_hash, listener_url, origin, receiving_node } => {
+            allows(receiving_node, BindingMode::WebOriginBound)?;
+            bytes(observed_hash, 32)?;
+            let advertised = receiving_node.envelope().body.web_listeners.iter().any(|listener| {
+                listener.url == listener_url && listener.origins.iter().any(|o| o == origin)
+            });
+            if !advertised
+                || capability != "message"
+                || body.binding_mode != BindingMode::WebOriginBound
+                || body.transport_binding != observed_hash
+            {
+                return Err(reject("web origin binding mismatch"));
             }
         }
     }

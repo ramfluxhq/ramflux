@@ -382,8 +382,12 @@ impl CustodyService {
             }
             request @ CustodyMeshRequest::Challenge { .. } => self.challenge(scope, request),
             CustodyMeshRequest::Prove { action, proof, receipt, connection_id } => {
-                self.prove(scope, ProofAttempt { action, proof, receipt, connection_id })
+                self.prove(scope, ProofAttempt { action, proof, receipt, connection_id, web: None })
             }
+            CustodyMeshRequest::ProveWeb { action, proof, context, connection_id } => self.prove(
+                scope,
+                ProofAttempt { action, proof, receipt: None, connection_id, web: Some(context) },
+            ),
             CustodyMeshRequest::Request { session_id, request, action, connection_id } => self
                 .request(
                     scope,
@@ -452,7 +456,9 @@ impl CustodyService {
     ) -> CustodyServerFrame {
         let (now, permit) = grant;
         let result = (|| {
+            // The router's own TLS listener is a native listener: never the web mode.
             if context.mode == BindingMode::HomeRelayReceipt
+                || context.mode == BindingMode::WebOriginBound
                 || !self.node.envelope().body.channel_binding_modes.contains(&context.mode)
                 || (context.mode == BindingMode::NoChannelBinding && !self.allow_unbound)
             {

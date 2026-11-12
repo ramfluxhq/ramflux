@@ -44,6 +44,7 @@ fn node_body() -> NodeIdentityRecord {
         }],
         revoked_proxy_key_ids: vec![],
         channel_binding_modes: vec![BindingMode::DirectExporter, BindingMode::HomeRelayReceipt],
+        web_listeners: Vec::new(),
     }
 }
 fn node(body: NodeIdentityRecord) -> TestResult<VerifiedNodeRecord> {

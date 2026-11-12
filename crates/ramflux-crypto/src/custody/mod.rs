@@ -40,7 +40,8 @@ mod branch_proof;
 mod node_identity;
 pub use branch_proof::{
     MAX_BRANCH_PROOF_BYTES, ProofChannel, branch_exporter_hash, sign_branch_proof_v3,
-    sign_proxy_acceptance, verify_branch_proof_v3,
+    sign_proxy_acceptance, verify_branch_proof_v3, web_origin_binding_hash,
+    web_origin_capability,
 };
 pub use node_identity::{
     NodeKeyBinding, VerifiedNodeRecord, sign_node_identity_record, verify_node_identity_record,

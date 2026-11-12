@@ -128,6 +128,7 @@ fn node_record()
         }],
         revoked_proxy_key_ids: vec![],
         channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::HomeRelayReceipt],
+        web_listeners: Vec::new(),
     };
     let record = ramflux_crypto::custody::sign_node_identity_record(&key, body)?;
     Ok((

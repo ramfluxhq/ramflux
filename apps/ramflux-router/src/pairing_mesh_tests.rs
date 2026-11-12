@@ -151,6 +151,7 @@ fn write_node_record(path: &std::path::Path, node_id: &str, now: u64) -> anyhow:
         proxy_keys: vec![],
         revoked_proxy_key_ids: vec![],
         channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::DirectExporter],
+        web_listeners: Vec::new(),
     };
     let record = ramflux_crypto::custody::sign_node_identity_record(&key, body)?;
     std::fs::write(path, ramflux_protocol::canonical_json_bytes(&record)?)?;

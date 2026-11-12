@@ -55,6 +55,7 @@ impl Fixture {
                 proxy_keys: vec![],
                 revoked_proxy_key_ids: vec![],
                 channel_binding_modes: vec![BindingMode::DirectExporter],
+                web_listeners: Vec::new(),
             },
         )?;
         let genesis = crypto::sign_node(

@@ -78,6 +78,7 @@ pub(crate) fn node(
         proxy_keys: vec![],
         revoked_proxy_key_ids: vec![],
         channel_binding_modes: vec![BindingMode::DirectExporter],
+        web_listeners: Vec::new(),
     };
     let record = ramflux_crypto::custody::sign_node_identity_record(&key, body)?;
     Ok(ramflux_crypto::custody::verify_node_identity_record(

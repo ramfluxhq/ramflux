@@ -47,6 +47,7 @@ fn node() -> Result<(VerifiedNodeRecord, SigningKey)> {
             }],
             revoked_proxy_key_ids: vec![],
             channel_binding_modes: vec![BindingMode::HomeRelayReceipt],
+            web_listeners: Vec::new(),
         },
     )?;
     Ok((

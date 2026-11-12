@@ -320,6 +320,11 @@ pub enum CustodyServerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryHint>,
     },
+    /// Web listener only: the context the device must commit to in `transport_binding`.
+    /// Appended last to keep the existing variant order.
+    WebBinding {
+        context: super::WebOriginBindingV1,
+    },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
 /// absent: only the listener holding the actual TLS connection may supply it.
@@ -350,6 +355,14 @@ pub enum CustodyMeshRequest {
         session_id: String,
         request: Box<crate::SignedRequest>,
         action: CustodySessionAction,
+    },
+    /// A `web_origin_bound` proof together with the context the web listener itself
+    /// authored for that connection. Only the gateway's web listener may send this.
+    ProveWeb {
+        action: CustodyProofAction,
+        proof: Box<Envelope<BranchProofV3>>,
+        context: super::WebOriginBindingV1,
+        connection_id: String,
     },
 }
 

@@ -124,6 +124,7 @@ fn make_record(
             proxy_keys: vec![],
             revoked_proxy_key_ids: vec![],
             channel_binding_modes: vec![BindingMode::HomeRelayReceipt],
+            web_listeners: Vec::new(),
         },
         |previous| previous.envelope().body.clone(),
     );

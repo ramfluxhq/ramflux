@@ -17,6 +17,8 @@ pub(super) struct ProofAttempt {
     pub proof: Box<Envelope<BranchProofV3>>,
     pub receipt: Option<Box<Envelope<RelayAcceptance>>>,
     pub connection_id: String,
+    /// Present only for a proof relayed by the gateway's web listener.
+    pub web: Option<ramflux_protocol::custody::WebOriginBindingV1>,
 }
 pub(super) struct SessionRequest {
     pub session_id: String,
@@ -67,6 +69,13 @@ impl CustodyService {
         if binding_mode == BindingMode::DirectExporter && matches!(origin, Origin::Proxy) {
             return Err(CustodyRefusal::BindingRefused);
         } // Mesh is never the client-facing hop.
+        // A web device may only open a session, and only through the gateway's web listener.
+        if binding_mode == BindingMode::WebOriginBound
+            && !(matches!(origin, Origin::Proxy)
+                && matches!(action, CustodyProofAction::OpenSession))
+        {
+            return Err(CustodyRefusal::BindingRefused);
+        }
         let holder = holder(peer, &connection_id)?;
         let challenge = match self.leases().issue(
             crate::custody_sessions::ChallengeIntent {
@@ -90,8 +99,16 @@ impl CustodyService {
         scope: Scope<'_>,
         attempt: ProofAttempt,
     ) -> Result<CustodyServerFrame, CustodyRefusal> {
-        let ProofAttempt { ref proof, ref receipt, ref connection_id, .. } = attempt;
+        let ProofAttempt { ref proof, ref receipt, ref connection_id, ref web, .. } = attempt;
+        // The web context and the web mode travel together or not at all.
+        if web.is_some() != (proof.body.binding_mode == BindingMode::WebOriginBound) {
+            return Err(CustodyRefusal::BindingRefused);
+        }
         let Scope { router, store, peer, now, tick, origin, .. } = scope;
+        let web_hash = web
+            .as_ref()
+            .map(|context| self.web_binding(context, proof, origin, now))
+            .transpose()?;
         let holder = holder(peer, connection_id)?;
         let challenge = self.leases().challenge(&proof.body.challenge_nonce, tick)?;
         if challenge.device != proof.body.device_ref
@@ -150,6 +167,17 @@ impl CustodyService {
                 };
                 ProofChannel::DirectExporter { observed_hash: actual, receiving_node: &self.node }
             }
+            BindingMode::WebOriginBound => {
+                let (Some(context), Some(observed)) = (web.as_ref(), web_hash.as_deref()) else {
+                    return Err(CustodyRefusal::BindingRefused);
+                };
+                ProofChannel::WebOriginBound {
+                    observed_hash: observed,
+                    listener_url: &context.listener_url,
+                    origin: &context.origin,
+                    receiving_node: &self.node,
+                }
+            }
         };
         verify_branch_proof_v3(
             &authority,
@@ -182,6 +210,27 @@ impl CustodyService {
             attempt,
             Possession { publication: &publication, authority: &authority, holder, source },
         )
+    }
+    /// Recompute the web binding from the context the gateway's web listener authored.
+    /// Nothing here is taken from the device's proof except its expiry.
+    fn web_binding(
+        &self,
+        context: &ramflux_protocol::custody::WebOriginBindingV1,
+        proof: &Envelope<BranchProofV3>,
+        origin: &Origin,
+        now: u64,
+    ) -> Result<String, CustodyRefusal> {
+        let skew = ramflux_protocol::custody::CLOCK_SKEW_SECONDS;
+        if !matches!(origin, Origin::Proxy)
+            || context.node_id != self.audience
+            || context.issued_at > now.saturating_add(skew)
+            || now > context.expires_at
+            || proof.body.expires_at > context.expires_at
+        {
+            return Err(CustodyRefusal::BindingRefused);
+        }
+        ramflux_crypto::custody::web_origin_binding_hash(context)
+            .map_err(|_| CustodyRefusal::BindingRefused)
     }
     fn possession_authority(
         &self,

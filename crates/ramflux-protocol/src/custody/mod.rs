@@ -12,6 +12,8 @@ pub use network::*;
 pub mod pairing;
 mod proof;
 mod types;
+mod web;
+pub use web::*;
 use crate::{MAX_SAFE_JSON_INTEGER, ProtocolError, canonical_json_bytes, domain, encode_base64url};
 pub use node::*;
 pub use proof::*;

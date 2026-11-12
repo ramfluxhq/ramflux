@@ -12,6 +12,9 @@ pub enum BindingMode {
     DirectExporter,
     HomeRelayReceipt,
     NoChannelBinding,
+    /// Browser carrier: the proof commits to a gateway-authored origin context instead of a
+    /// TLS exporter. Appended last; accepted only on the web listener for a web device.
+    WebOriginBound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

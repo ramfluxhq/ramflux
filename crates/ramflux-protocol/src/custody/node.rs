@@ -50,4 +50,8 @@ pub struct NodeIdentityRecord {
     pub proxy_keys: Vec<ProxyKey>,
     pub revoked_proxy_key_ids: Vec<String>,
     pub channel_binding_modes: Vec<BindingMode>,
+    /// Web listeners and their exact page origins. Absent on the wire when empty, so a
+    /// record of a node without a web listener keeps its bytes and hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub web_listeners: Vec<super::WebListener>,
 }

@@ -172,6 +172,28 @@ fn interval(start: u64, until: u64, overlap: u64) -> Result<(), CryptoError> {
     }
     Ok(())
 }
+/// The web mode and the web listener list are advertised together or not at all.
+fn web_listeners(body: &NodeIdentityRecord) -> Result<(), CryptoError> {
+    use ramflux_protocol::custody::{
+        BindingMode, MAX_WEB_LISTENER_ORIGINS, MAX_WEB_LISTENERS, is_canonical_web_listener_url,
+        is_canonical_web_origin,
+    };
+    let listeners = &body.web_listeners;
+    let advertised = body.channel_binding_modes.contains(&BindingMode::WebOriginBound);
+    let well_formed = listeners.len() <= MAX_WEB_LISTENERS
+        && listeners.windows(2).all(|pair| pair[0].url < pair[1].url)
+        && listeners.iter().all(|listener| {
+            is_canonical_web_listener_url(&listener.url)
+                && !listener.origins.is_empty()
+                && listener.origins.len() <= MAX_WEB_LISTENER_ORIGINS
+                && listener.origins.windows(2).all(|pair| pair[0] < pair[1])
+                && listener.origins.iter().all(|origin| is_canonical_web_origin(origin, true))
+        });
+    if !well_formed || advertised == listeners.is_empty() {
+        return Err(reject("invalid web listener advertisement"));
+    }
+    Ok(())
+}
 fn structure(body: &NodeIdentityRecord) -> Result<(), CryptoError> {
     if let Some(hash) = &body.client_tls_certificate_sha256 {
         bytes(hash, 32)?;
@@ -184,6 +206,7 @@ fn structure(body: &NodeIdentityRecord) -> Result<(), CryptoError> {
     {
         return Err(reject("direct custody mode requires a public certificate pin"));
     }
+    web_listeners(body)?;
     id(&body.node_id)?;
     key(&body.node_signing_public_key)?;
     positive(body.epoch)?;

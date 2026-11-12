@@ -56,6 +56,7 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
                 proof: Box::new(proof),
                 receipt: None,
                 connection_id: refused.connection.clone(),
+                web: None,
             },
             Possession {
                 publication: &refused.publication,
