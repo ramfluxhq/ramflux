@@ -10,6 +10,8 @@ use ed25519_dalek::Signer as _;
 use ramflux_protocol::{custody::DeviceRef, encode_base64url};
 use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, PreparedFullSource};
 
+mod stage;
+
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
@@ -69,7 +71,7 @@ impl LocalPairingParticipant {
         source.encode_fixed_base_source(&snapshot, std::io::sink())?;
         Ok((source.close_ready()?, cancel))
     }
-    fn with_full_branch<R>(
+    pub(super) fn with_full_branch<R>(
         &self,
         reference: &DeviceRef,
         expected_key: &str,

@@ -120,8 +120,14 @@ impl FullBootstrap {
         }
         Ok(())
     }
-    fn fail<T>(&mut self, code: &'static str) -> Result<T, SdkError> {
+    fn clear_ephemeral(&mut self) {
         self.channel.cleanup();
+        self.start = None;
+        self.prepared_source = None;
+        self.request = None;
+    }
+    fn fail<T>(&mut self, code: &'static str) -> Result<T, SdkError> {
+        self.clear_ephemeral();
         self.phase = Phase::Dead;
         Err(SdkError::PairingCode(code))
     }
@@ -290,6 +296,18 @@ impl FullBootstrap {
         native: &dyn PairingNative,
         now: u64,
     ) -> Result<(FullBootstrapFrame, Envelope<DataLease>, FullResumeTrust), SdkError> {
+        let result = self.issue_source_lease_inner(native, now).await;
+        if result.is_err() {
+            self.clear_ephemeral();
+            self.phase = Phase::Dead;
+        }
+        result
+    }
+    async fn issue_source_lease_inner(
+        &mut self,
+        native: &dyn PairingNative,
+        now: u64,
+    ) -> Result<(FullBootstrapFrame, Envelope<DataLease>, FullResumeTrust), SdkError> {
         self.live(now)?;
         if self.role != PairingRole::Initiator || self.phase != Phase::NativeLease {
             return self.fail("WrongContext");
@@ -310,7 +328,7 @@ impl FullBootstrap {
             lease: lease.clone(),
             profile: PROFILE.into(),
         }))?;
-        self.channel.cleanup();
+        self.clear_ephemeral();
         self.phase = Phase::Done;
         Ok((frame, lease, trust))
     }
@@ -318,6 +336,18 @@ impl FullBootstrap {
     /// # Errors
     /// Refuses any other arm/phase, changed grant, forged lease or original-window expiry.
     pub fn accept_destination_lease(
+        &mut self,
+        frame: &FullBootstrapFrame,
+        now: u64,
+    ) -> Result<(Envelope<DataLease>, FullResumeTrust), SdkError> {
+        let result = self.accept_destination_lease_inner(frame, now);
+        if result.is_err() {
+            self.clear_ephemeral();
+            self.phase = Phase::Dead;
+        }
+        result
+    }
+    fn accept_destination_lease_inner(
         &mut self,
         frame: &FullBootstrapFrame,
         now: u64,
@@ -340,7 +370,7 @@ impl FullBootstrap {
             &lease.lease,
             self.start.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?,
         )?;
-        self.channel.cleanup();
+        self.clear_ephemeral();
         self.phase = Phase::Done;
         Ok((lease.lease, trust))
     }

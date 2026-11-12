@@ -108,3 +108,40 @@ fn pairing_full_prepared_manifest_cancel_refuses_before_data_signature() -> Resu
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn pairing_full_prepared_opening_erased_on_lease_and_native_refusal() -> Result {
+    for refuse in [false, true] {
+        let f = fixture()?;
+        let root = tempfile::tempdir()?;
+        let source = prepared(root.path(), 53)?;
+        let mut a = FullBootstrap::new(
+            PairingRole::Initiator,
+            f.a,
+            f.context.clone(),
+            f.node.clone(),
+            f.now,
+        )?;
+        let mut b = FullBootstrap::new(PairingRole::Responder, f.b, f.context, f.node, f.now)?;
+        let (_, start) = a.prepare_source_start(&source, f.now, sign_manifest)?;
+        let mut grant = f.grant;
+        grant.opaque_commitment = start.opaque_commitment.clone();
+        let [start, offer] = a.begin_source(start, &grant, f.now, sign)?;
+        b.receive(&start, f.now, sign)?;
+        let signed = b.receive(&offer, f.now, sign)?.ok_or("signed grant")?;
+        a.receive(&signed, f.now, sign)?;
+        assert!(a.prepared_source.is_some(), "fixture must retain the prepared opening");
+        let calls = Arc::new(AtomicUsize::new(0));
+        // A node signature made for another timestamp fails the exact lease validity gate.
+        let native = Native { calls: calls.clone(), now: if refuse { 1 } else { f.now } };
+        let issued = a.issue_source_lease(&native, f.now).await;
+        assert_eq!(issued.is_err(), refuse);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(a.start.is_none() && a.prepared_source.is_none() && a.request.is_none());
+        if let Ok((frame, _, _)) = issued {
+            b.accept_destination_lease(&frame, f.now)?;
+            assert!(b.start.is_none() && b.prepared_source.is_none() && b.request.is_none());
+        }
+    }
+    Ok(())
+}

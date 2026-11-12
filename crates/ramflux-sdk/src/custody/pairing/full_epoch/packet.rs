@@ -3,7 +3,8 @@
 
 //! Token/scope/Ready bridge to the bounded full cipher. No semantic or native permission.
 use super::{
-    FullEpoch, HttpRelay, PairingRole, SdkError, SecretBase64, encode_base64url, wire, wrong,
+    FullEpoch, FullPairingTransport, PairingRole, SdkError, SecretBase64, encode_base64url, wire,
+    wrong,
 };
 use ramflux_crypto::custody::pairing::FullConfirmedChannel;
 use ramflux_protocol::{
@@ -194,7 +195,7 @@ impl FullPacketEpoch {
     /// Any network/scope/ACK failure retires the epoch. Resume uses fresh HPKE keys.
     pub async fn send(
         &mut self,
-        relay: &HttpRelay,
+        relay: &dyn FullPairingTransport,
         origin: &str,
         packet: EncryptedPacket,
     ) -> Result<(), SdkError> {
@@ -217,7 +218,7 @@ impl FullPacketEpoch {
                 profile: PROFILE.into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let sent: SentFull = relay.full_round(origin, &request).await?;
+            let sent: SentFull = relay.send_full(origin, &request).await?;
             if sent.counter.0 != counter {
                 return Err(wrong());
             }
@@ -238,7 +239,7 @@ impl FullPacketEpoch {
     /// Refuses wrong scope/role or transport errors and retires the local epoch.
     pub async fn send_control(
         &mut self,
-        relay: &HttpRelay,
+        relay: &dyn FullPairingTransport,
         origin: &str,
         control: HpkeConfirmFull,
     ) -> Result<(), SdkError> {
@@ -257,7 +258,7 @@ impl FullPacketEpoch {
                 profile: PROFILE.into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let _: SentFullControl = relay.full_round(origin, &request).await?;
+            let _: SentFullControl = relay.send_full_control(origin, &request).await?;
             self.channel()?;
             Ok(())
         }
@@ -273,7 +274,7 @@ impl FullPacketEpoch {
     /// Refuses expired/retired scope, malformed peer packet or network failure.
     pub async fn poll(
         &mut self,
-        relay: &HttpRelay,
+        relay: &dyn FullPairingTransport,
         origin: &str,
     ) -> Result<Option<EncryptedPacket>, SdkError> {
         let result = async {
@@ -287,7 +288,7 @@ impl FullPacketEpoch {
                 role: self.role.as_str().into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let reply: PolledFull = relay.full_round(origin, &request).await?;
+            let reply: PolledFull = relay.poll_full(origin, &request).await?;
             self.channel()?;
             if let Some(packet) = &reply.packet {
                 self.peer(packet)?;
@@ -303,7 +304,11 @@ impl FullPacketEpoch {
     /// Retire this epoch's tokens/queues only; no lease, source cut or journal cleanup.
     /// # Errors
     /// Returns close transport failure after unconditionally dropping local keys/token.
-    pub async fn close(mut self, relay: &HttpRelay, origin: &str) -> Result<(), SdkError> {
+    pub async fn close(
+        mut self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+    ) -> Result<(), SdkError> {
         let request = CloseFull {
             epoch: self.epoch.clone(),
             kind: "close_full".into(),
@@ -313,7 +318,7 @@ impl FullPacketEpoch {
             token: self.token.take().ok_or_else(wrong)?,
         };
         self.channel = None;
-        let _: ClosedFull = relay.full_round(origin, &request).await?;
+        let _: ClosedFull = relay.close_full(origin, &request).await?;
         Ok(())
     }
 }

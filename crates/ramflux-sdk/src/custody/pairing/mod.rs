@@ -43,8 +43,9 @@ pub use recipient::{
     unadmitted_data_unlock, unlock_with_provider,
 };
 pub use transport::{
-    FreshPairingNative, FullClaimRequest, FullRelayRequest, HttpRelay, PairingConfig,
-    PairingNative, PairingTransport, PreparedCreate, PreparedIssue, ProofPairingNative,
+    FreshPairingNative, FullClaimRequest, FullPairingTransport, FullPortFuture, FullRelayRequest,
+    HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate, PreparedIssue,
+    ProofPairingNative,
 };
 
 #[cfg(test)]

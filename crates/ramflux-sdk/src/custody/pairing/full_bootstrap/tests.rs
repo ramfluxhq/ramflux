@@ -175,7 +175,15 @@ async fn pairing_full_bootstrap_orders_four_controls_and_authenticates_exact_lea
     assert!(a.receive(&signed, f.now, refused)?.is_none());
     let (lease, local, _a_trust) = a.issue_source_lease(&native, f.now).await?;
     assert_eq!(lease.counter, 2);
+    assert!(
+        a.start.is_none() && a.prepared_source.is_none() && a.request.is_none(),
+        "issued lease retained private commitment opening"
+    );
     let (remote, _b_trust) = b2.accept_destination_lease(&lease, f.now)?;
+    assert!(
+        b2.start.is_none() && b2.prepared_source.is_none() && b2.request.is_none(),
+        "accepted lease retained private commitment opening"
+    );
     assert_eq!(canonical_json_bytes(&local)?, canonical_json_bytes(&remote)?);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(unexpected.load(Ordering::SeqCst), 0);

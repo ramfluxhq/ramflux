@@ -4,9 +4,11 @@
 //! S2 Prepare→Apply native issuance and the pairing HTTPS client.
 //! Dormant: talks only to pairing routes; grants no account session.
 mod full;
+mod full_port;
 use crate::SdkError;
 use crate::custody::CustodyConnection;
 pub use full::{FullClaimRequest, FullRelayRequest};
+pub use full_port::{FullPairingTransport, FullPortFuture};
 use ramflux_protocol::custody::Envelope;
 use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::custody::pairing::full_transfer::lease::{DataLease, LeaseRequest};
@@ -356,6 +358,10 @@ async fn apply_prove(prove: &ProveFn, action: CustodyProofAction) -> Result<Nati
 
 /// HTTPS (or in-process) pairing relay. Production is [`HttpRelay`].
 pub trait PairingTransport: std::marker::Send + Sync {
+    /// Optional closed full-profile capability; existing enrollment transports remain unchanged.
+    fn full_transport(&self) -> Option<Arc<dyn FullPairingTransport>> {
+        None
+    }
     fn claim(&self, origin: String, claim: Claim) -> BoxFut<Result<Claimed, SdkError>>;
     fn send(&self, origin: String, send: Send) -> BoxFut<Result<Sent, SdkError>>;
     fn poll(&self, origin: String, poll: Poll) -> BoxFut<Result<Polled, SdkError>>;
@@ -474,6 +480,9 @@ impl HttpRelay {
 }
 
 impl PairingTransport for HttpRelay {
+    fn full_transport(&self) -> Option<Arc<dyn FullPairingTransport>> {
+        Some(Arc::new(self.clone()))
+    }
     fn claim(&self, origin: String, claim: Claim) -> BoxFut<Result<Claimed, SdkError>> {
         let this = self.clone();
         Box::pin(async move { this.round(&origin, "claim", &claim).await })
