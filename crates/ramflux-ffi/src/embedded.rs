@@ -20,6 +20,7 @@ use ramflux_sdk::{
     LocalBusErrorBody, LocalBusFrame, LocalBusFrameKind, SdkError,
 };
 use tokio::sync::{Notify, mpsc};
+use zeroize::Zeroize;
 
 use crate::error::{CoreError, code};
 use crate::port::{CorePort, PortRequest, PortSubscription, UpdateSink};
@@ -270,12 +271,21 @@ fn run_bridge(
 }
 
 async fn run_request(client: LocalBusClient, port: PortRequest, id: u64) {
-    let PortRequest { request, deadline_unix_ms, gate, reply } = port;
+    let PortRequest { mut request, deadline_unix_ms, gate, reply } = port;
     // Everything that can fail without touching the core happens before the claim.
-    let body: serde_json::Value = match serde_json::from_str(&request.body_json) {
+    let parsed = serde_json::from_str::<serde_json::Value>(&request.body_json);
+    // The text may carry a passphrase. The parsed value is wiped by the bus client after it
+    // is encoded; the text is wiped here, whatever the parse result.
+    request.body_json.zeroize();
+    let body = match parsed {
         Ok(body) => body,
         Err(error) => {
-            reply.send(Err(CoreError::plain(code::INVALID_CANONICAL_JSON, error.to_string())));
+            // The parser's message carries a position, never the input.
+            let position = format!("line {} column {}", error.line(), error.column());
+            reply.send(Err(CoreError::plain(
+                code::INVALID_CANONICAL_JSON,
+                format!("request body is not JSON at {position}"),
+            )));
             return;
         }
     };

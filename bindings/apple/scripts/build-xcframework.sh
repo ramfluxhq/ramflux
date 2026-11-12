@@ -68,7 +68,9 @@ fi
 
 echo "== building static libraries ($profile, features: ${features:-none})"
 for target in "$device_target" "$simulator_target"; do
-  cargo build --locked -p ramflux-ffi --lib --target "$target" \
+  # Only the static library: the crate also declares a cdylib for Android, which an Apple
+  # slice does not need and should not have to link.
+  cargo rustc --locked -p ramflux-ffi --lib --crate-type staticlib --target "$target" \
     ${cargo_profile_args[@]+"${cargo_profile_args[@]}"} ${feature_args[@]+"${feature_args[@]}"}
 done
 

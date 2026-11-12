@@ -81,7 +81,9 @@ pub enum NetworkChange {
 }
 
 /// One request to the core.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+///
+/// `Debug` prints the body length, never the body: a body may carry a passphrase.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CoreRequest {
     /// Method name from the API descriptor, for example `account.create`.
     pub method: String,
@@ -96,8 +98,8 @@ pub struct CoreRequest {
     pub operation_id: Option<String>,
 }
 
-/// A completed reply.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+/// A completed reply. `Debug` prints the body length, never the body.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CoreResponse {
     pub method: String,
     pub account_id: Option<String>,
@@ -105,6 +107,31 @@ pub struct CoreResponse {
     pub body_json: String,
     /// The operation key the core executed under, echoed unchanged.
     pub operation_id: Option<String>,
+}
+
+impl std::fmt::Debug for CoreRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CoreRequest")
+            .field("method", &self.method)
+            .field("account_id", &self.account_id)
+            .field("body_bytes", &self.body_json.len())
+            .field("deadline_ms", &self.deadline_ms)
+            .field("operation_id", &self.operation_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for CoreResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CoreResponse")
+            .field("method", &self.method)
+            .field("account_id", &self.account_id)
+            .field("body_bytes", &self.body_json.len())
+            .field("operation_id", &self.operation_id)
+            .finish()
+    }
 }
 
 /// Why the caller stopped waiting before a reply arrived.

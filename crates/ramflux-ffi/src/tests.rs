@@ -429,3 +429,75 @@ fn open_without_a_compatible_host_version_is_refused_before_any_port_exists() {
     let refused = RamfluxCore::open(config);
     assert_eq!(refused.map(|_| ()).map_err(|error| error.code()), Err(code::UNSUPPORTED_VERSION));
 }
+
+#[tokio::test]
+async fn core_api_uniffi_handle_and_error_contract() -> Result<(), CoreError> {
+    let port = Arc::new(ScriptedPort::default());
+    let core = core(&port, 4)?;
+
+    // One handle covers several calls; cancelling it ends every waiter, and is idempotent.
+    let cancel = CancelHandle::new();
+    let mut calls = Vec::new();
+    for key in ["op-a", "op-b"] {
+        let core = Arc::clone(&core);
+        let cancel = Arc::clone(&cancel);
+        calls.push(tokio::spawn(async move { core.execute(send_request(key), cancel).await }));
+    }
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    cancel.cancel();
+    assert!(cancel.is_cancelled());
+    for call in calls {
+        let outcome =
+            call.await.map_err(|error| CoreError::plain(code::INTERNAL, error.to_string()))??;
+        assert_eq!(outcome, ExecuteOutcome::EndedBeforeClaim { end: WaiterEnd::Cancelled });
+    }
+    assert_eq!(port.effects.load(Ordering::SeqCst), 0);
+
+    // Malformed requests are refused before admission with the stable code 1.
+    let mut no_deadline = send_request("op-c");
+    no_deadline.deadline_ms = 0;
+    let refused = core.execute(no_deadline, CancelHandle::new()).await;
+    assert_eq!(refused.map_err(|error| error.code()), Err(code::INVALID_ARGUMENT));
+    let mut empty_key = send_request("op-d");
+    empty_key.operation_id = Some(String::new());
+    let refused = core.execute(empty_key, CancelHandle::new()).await;
+    assert_eq!(refused.map_err(|error| error.code()), Err(code::INVALID_ARGUMENT));
+
+    // The object outlives `close`; every later call is a typed refusal, never a crash.
+    core.close()?;
+    let refused = core.execute(send_request("op-e"), CancelHandle::new()).await;
+    assert_eq!(refused.map_err(|error| error.code()), Err(code::INVALID_ARGUMENT));
+    let (listener, _seen) = recorder();
+    assert!(core.subscribe(filter(1), listener).is_err());
+    let ceremony = core.begin_account_creation("name".to_owned(), None).await;
+    assert_eq!(ceremony.map(|_| ()).map_err(|error| error.code()), Err(code::INVALID_ARGUMENT));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_port_without_the_ceremony_refuses_creation_with_capability_rejected()
+-> Result<(), CoreError> {
+    let port = Arc::new(ScriptedPort::default());
+    let core = core(&port, 4)?;
+    let ceremony = core.begin_account_creation("name".to_owned(), None).await;
+    assert_eq!(ceremony.map(|_| ()).map_err(|error| error.code()), Err(code::CAPABILITY_REJECTED));
+    Ok(())
+}
+
+#[test]
+fn debug_output_of_requests_and_replies_never_contains_the_body() {
+    let mut request = send_request("op-debug");
+    request.body_json = r#"{"passphrase":"correct horse"}"#.to_owned();
+    let printed = format!("{request:?}");
+    assert!(!printed.contains("correct horse"));
+    assert!(printed.contains("body_bytes"));
+    let response = CoreResponse {
+        method: "m".to_owned(),
+        account_id: None,
+        body_json: r#"{"phrase":"secret words"}"#.to_owned(),
+        operation_id: None,
+    };
+    let printed = format!("{:?}", ExecuteOutcome::Completed { response });
+    assert!(!printed.contains("secret words"));
+}
