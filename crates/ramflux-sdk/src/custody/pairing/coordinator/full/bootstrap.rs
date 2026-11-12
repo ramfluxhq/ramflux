@@ -20,6 +20,7 @@ pub(super) struct BootstrapState {
     pub(super) source_manifest: Option<SourceManifest>,
     pub(super) trust: Option<FullResumeTrust>,
     pub(super) keys: Option<FullResumeKeyOwner>,
+    pub(super) signer: Option<Arc<crate::custody::pairing::participant::FullProofSigner>>,
     pub(super) cancel: Option<FullStageIoCancel>,
     pub(super) epoch_job: Option<super::epoch::FullEpochJob>,
     pub(super) epoch_ready: Option<crate::custody::pairing::FullPacketEpoch>,
@@ -113,6 +114,7 @@ impl PairingActor {
                     source_manifest,
                     trust: None,
                     keys: None,
+                    signer: None,
                     cancel: None,
                     epoch_job: None,
                     epoch_ready: None,
@@ -151,7 +153,7 @@ impl PairingActor {
                 state.source_manifest.clone(),
             ))
         })?;
-        let (trust, cancel) = local(self.full_runtime.clone(), move || {
+        let (trust, cancel, signer) = local(self.full_runtime.clone(), move || {
             let source = match (&prepared, &manifest) {
                 (Some(prepared), Some(manifest)) => Some((prepared, manifest)),
                 (None, None) => None,
@@ -159,7 +161,11 @@ impl PairingActor {
             };
             let cancel = participant
                 .retain_full_data_stage(&operation, generation, &trust, &base, source)?;
-            Ok((trust, cancel))
+            // Prepare the weak original-writer/vault-reference scope while the ordinary
+            // frontend still lends its actual DB. The later relay pump retains no DB/key.
+            let signer =
+                Arc::new(participant.prepare_full_proof_signer(&operation, generation, &trust)?);
+            Ok((trust, cancel, signer))
         })
         .await?;
         self.full_runtime.register_stage(cancel.clone())?;
@@ -172,6 +178,7 @@ impl PairingActor {
             state.awaiting_lease = false;
             state.trust = Some(trust);
             state.keys = Some(keys);
+            state.signer = Some(signer);
             state.cancel = Some(cancel);
             Ok(())
         })

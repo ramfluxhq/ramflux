@@ -214,6 +214,7 @@ impl FullPacketEpoch {
     }
     /// Send a previously sealed exact packet on A2. Relay acceptance only releases the
     /// two-packet ciphertext cache; it never retires immutable cuts or proves application.
+    /// Queue Busy retries the same cached ciphertext within the existing request deadline.
     /// # Errors
     /// Any network/scope/ACK failure retires the epoch. Resume uses fresh HPKE keys.
     pub async fn send(
@@ -241,7 +242,20 @@ impl FullPacketEpoch {
                 profile: PROFILE.into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let sent: SentFull = relay.send_full(origin, &request).await?;
+            let sent: SentFull =
+                tokio::time::timeout(super::super::transport::REQUEST_DEADLINE, async {
+                    loop {
+                        self.channel()?;
+                        match relay.send_full(origin, &request).await {
+                            Err(SdkError::PairingCode("Busy")) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                            result => break result,
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| SdkError::PairingCode("ResumeRequired"))??;
             if sent.counter.0 != counter {
                 return Err(wrong());
             }
@@ -368,7 +382,20 @@ impl FullPacketEpoch {
                 role: self.role.as_str().into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let reply: PolledFull = relay.poll_full(origin, &request).await?;
+            let reply: PolledFull =
+                tokio::time::timeout(super::super::transport::REQUEST_DEADLINE, async {
+                    loop {
+                        self.channel()?;
+                        match relay.poll_full(origin, &request).await {
+                            Err(SdkError::PairingCode("Busy")) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                            result => break result,
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| SdkError::PairingCode("ResumeRequired"))??;
             self.channel()?;
             if let Some(packet) = &reply.packet {
                 self.peer(packet)?;

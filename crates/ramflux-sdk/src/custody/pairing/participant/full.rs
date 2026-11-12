@@ -74,20 +74,61 @@ impl LocalPairingParticipant {
         &self,
         anchor: &str,
     ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        self.full_native_stream_head(anchor, None)
+    }
+    pub(crate) fn full_native_stream_head(
+        &self,
+        anchor: &str,
+        new_target: Option<(&str, &DeviceRef)>,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        self.full_native_head_inner(anchor, new_target, false)
+    }
+    fn full_native_head_inner(
+        &self,
+        anchor: &str,
+        new_target: Option<(&str, &DeviceRef)>,
+        unreserved_new: bool,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
         let authority = self.query.current_authority(anchor)?;
         let now = custody::network_now()?;
         let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
         if verified.envelope().body.account_anchor != anchor {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        // A newly staged recipient may have no installed native file yet; its own stage
-        // floor is mandatory instead. Existing native owners retain their normal pins.
-        if custody::account_exists(&self.root, &self.account_id)?
-            && matches!(
-                custody::accept_publication(&self.root, &self.account_id, &authority, now)?,
-                ramflux_crypto::custody::PinOutcome::Fenced(_)
-            )
-        {
+        if !custody::store::authority_exists(&self.root, &self.account_id)? {
+            if unreserved_new
+                && !custody::account_exists(&self.root, &self.account_id)?
+                && self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?.is_none()
+            {
+                return Ok(verified);
+            }
+            let staged = if let Some((operation, reference)) = new_target {
+                super::super::install_store::list_pending(&self.root, &self.account_id)?
+                    .into_iter()
+                    .any(|entry| {
+                        entry.operation_id == operation
+                            && entry.account_anchor == anchor
+                            && entry.recipient_ref == *reference
+                            && entry.recipient_mode == "new"
+                            && entry.install_purpose == "transfer_destination"
+                            && entry.state == "vault_durable"
+                            && entry.record_hash.is_none()
+                            && entry.prior_record_hash.is_none()
+                    })
+            } else {
+                false
+            };
+            if !staged {
+                return Err(SdkError::PairingCode("HeadChanged"));
+            }
+            // Only the exact new target can lack installed pins. Its encrypted job
+            // floor is mandatory in the following actual-writer service operation.
+            return Ok(verified);
+        }
+        if matches!(
+            custody::accept_publication(&self.root, &self.account_id, &authority, now)?,
+            ramflux_crypto::custody::PinOutcome::Fenced(_)
+        ) {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
         Ok(verified)
@@ -101,7 +142,29 @@ impl LocalPairingParticipant {
         common: &ramflux_protocol::custody::pairing::context_v3::CommonV3,
         source: &DeviceRef,
     ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
-        let verified = self.full_native_head(&common.account_anchor)?;
+        self.full_sas_base_inner(common, source, false)
+    }
+    pub(crate) fn full_new_recipient_sas_base(
+        &self,
+        common: &ramflux_protocol::custody::pairing::context_v3::CommonV3,
+        source: &DeviceRef,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        if common.recipient_mode != "new" {
+            return Err(wrong());
+        }
+        self.full_sas_base_inner(common, source, true)
+    }
+    fn full_sas_base_inner(
+        &self,
+        common: &ramflux_protocol::custody::pairing::context_v3::CommonV3,
+        source: &DeviceRef,
+        unreserved_new: bool,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        let verified = if unreserved_new {
+            self.full_native_head_inner(&common.account_anchor, None, true)?
+        } else {
+            self.full_native_head(&common.account_anchor)?
+        };
         let body = &verified.envelope().body;
         if body.account_anchor != common.account_anchor
             || body.master_certificate.body.master_public_key != common.master_public_key

@@ -31,7 +31,7 @@ const CHUNK: usize = 8192;
 /// P06 relay body cap (`PAIRING_MAX_BODY_BYTES`).
 const MAX_BODY: usize = 16 * 1024;
 /// P06 relay request timeout (`PAIRING_REQUEST_TIMEOUT`).
-const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+pub(super) const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 
 type BoxFut<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send>>;
 
