@@ -10,6 +10,7 @@ pub use io_cancel::FullStageIoCancel;
 mod keys;
 mod native_floor;
 mod receiver_input;
+mod receiver_projection;
 mod scalar;
 mod scalar_sql;
 mod source_base;
