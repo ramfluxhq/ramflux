@@ -85,7 +85,7 @@ public final class RamfluxHost: @unchecked Sendable {
         try await onLifecycleQueue { try self.core.close() }
     }
 
-    private func onLifecycleQueue<T: Sendable>(
+    private func onLifecycleQueue<T>(
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
@@ -107,29 +107,23 @@ public final class RamfluxHost: @unchecked Sendable {
         let background = center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            let application = UIApplication.shared
-            var task = UIBackgroundTaskIdentifier.invalid
-            task = application.beginBackgroundTask(withName: "ramflux.suspend") {
-                // Expiration: the system is about to suspend us regardless. End the task;
-                // the core's own suspend deadline bounds the work that is still running.
-                application.endBackgroundTask(task)
-                task = .invalid
-            }
-            Task {
-                do {
-                    let evidence = try await self.suspend()
-                    if !evidence.dataRootLockReleased {
-                        onError(RamfluxHostError.lockStillHeldAtSuspension)
+            // Delivered on the main queue. The background task must begin before this
+            // handler returns, so it is started synchronously here.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let task = BackgroundTask()
+                task.begin(name: "ramflux.suspend")
+                Task { @MainActor in
+                    do {
+                        let evidence = try await self.suspend()
+                        if !evidence.dataRootLockReleased {
+                            onError(RamfluxHostError.lockStillHeldAtSuspension)
+                        }
+                    } catch {
+                        onError(error)
                     }
-                } catch {
-                    onError(error)
-                }
-                await MainActor.run {
-                    if task != .invalid {
-                        application.endBackgroundTask(task)
-                        task = .invalid
-                    }
+                    // Ended only after the core reported the released lock (or failed).
+                    task.end()
                 }
             }
         }
@@ -198,6 +192,28 @@ public final class RamfluxHost: @unchecked Sendable {
         }
     }
 }
+
+#if canImport(UIKit)
+/// One UIKit background task. Used on the main actor only.
+@MainActor
+private final class BackgroundTask {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+
+    func begin(name: String) {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            // Expiration: the system suspends the process regardless. The core's own
+            // suspend deadline bounds the work that is still running.
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+#endif
 
 public enum RamfluxHostError: Error, Sendable {
     /// The core returned from `suspend` without observing the released data-root lock.
