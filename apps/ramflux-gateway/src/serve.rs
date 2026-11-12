@@ -365,9 +365,9 @@ pub(crate) async fn serve_gateway_tcp_listener(
                 remote_addr,
             };
             let stream = ramflux_transport::GatewayTcpTlsStream::Server(tls_stream);
-            if let Err(_error) =
-                Box::pin(crate::session::handle_gateway_tcp_tls_stream(stream, context, started))
-                    .await
+            if (Box::pin(crate::session::handle_gateway_tcp_tls_stream(stream, context, started)))
+                .await
+                .is_err()
             {
                 crate::pre_auth::record_ingress_failure("tcp_tls");
             }

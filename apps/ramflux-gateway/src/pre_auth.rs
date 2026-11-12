@@ -39,6 +39,9 @@ pub(crate) fn configure(
         state.configure_pre_auth_cookie_key(std::path::Path::new(&path))?;
     }
     state.validate_pre_auth_configuration()?;
+    if state.pre_auth_migration_required() {
+        crate::ingress_log::record(crate::ingress_log::Event::LegacyMigration);
+    }
     Ok(())
 }
 
@@ -69,6 +72,6 @@ pub(crate) fn admit_with_clock(
 }
 
 /// Public decoder errors may contain source hints, cookies or other Open fields.
-pub(crate) fn record_ingress_failure(carrier: &'static str) {
-    tracing::warn!(carrier, "gateway public stream failed");
+pub(crate) fn record_ingress_failure(_carrier: &'static str) {
+    crate::ingress_log::record(crate::ingress_log::Event::Failure);
 }

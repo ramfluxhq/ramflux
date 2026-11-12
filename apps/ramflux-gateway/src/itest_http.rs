@@ -78,14 +78,14 @@ pub(crate) fn handle_itest_request(
             Ok(None) => {
                 let mut gateway = gateway_state(state)?;
                 gateway.record_slowloris_timeout();
-                store.save_pre_auth_metrics_only(&gateway)?;
+                store.save_pre_auth_hot(&gateway)?;
                 return Ok(());
             }
             Err(error) => {
                 if is_timeout_error(&error) {
                     let mut gateway = gateway_state(state)?;
                     gateway.record_slowloris_timeout();
-                    store.save_pre_auth_metrics_only(&gateway)?;
+                    store.save_pre_auth_hot(&gateway)?;
                     return Ok(());
                 }
                 return Err(error.into());
@@ -134,6 +134,7 @@ pub(crate) fn handle_preauth_control_request(
     if request.method == "GET" && request.path == "/perf/metrics" {
         let snapshot = serde_json::json!({
             "service": "ramflux-gateway",
+            "ingress": crate::ingress_log::snapshot(),
             "node": ramflux_node_core::node_perf_snapshot(),
             "transport": ramflux_transport::mesh_perf_snapshot()
         });

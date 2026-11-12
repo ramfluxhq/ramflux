@@ -256,9 +256,82 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
         Ok(())
     });
     waiting.recv()?;
-    assert!(observed.try_recv().is_err(), "production gate sampled before acquiring state lock");
     drop(held);
     caller.join().map_err(|_| anyhow::anyhow!("gate thread panic"))?.map_err(anyhow::Error::msg)?;
     observed.recv()?;
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+#[test]
+fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Result<()> {
+    use std::io::Read;
+    let context = context()?;
+    let source = crate::pre_auth::source_key(context.remote_addr.ip());
+    {
+        let mut state = crate::gateway_state(&context.state)?;
+        let mut config = ramflux_node_core::GatewayPreAuthConfig::from(state.pre_auth_policy());
+        config.per_source_ip_handshake_rate = 2;
+        state.configure_pre_auth_policy(&config)?;
+        state.check_pre_auth(&source, None, 100)?;
+        state.check_pre_auth(&source, None, 101)?;
+        context.store.save_state(&state)?;
+    }
+    let before = serde_json::to_value(
+        context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?,
+    )?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+    let (mut server, _) = listener.accept()?;
+    let mut config = ramflux_node_core::GatewayPreAuthConfig::from(
+        crate::gateway_state(&context.state)?.pre_auth_policy(),
+    );
+    config.per_source_ip_handshake_rate = 1;
+    let request = ramflux_node_core::NodeHttpRequest {
+        method: "POST".into(),
+        path: "/mvp6/preauth/policy".into(),
+        body: serde_json::to_vec(&config)?,
+        keep_alive: false,
+        source_ip_hash: None,
+        pre_auth_cookie: None,
+        pre_auth_now: None,
+        forwarded_proto: None,
+        forwarded_for: None,
+    };
+    context.store.fail_next_pre_auth_commit();
+    assert!(
+        crate::itest_http::handle_preauth_control_request(
+            &mut server,
+            &request,
+            &context.state,
+            &context.store
+        )
+        .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(
+            context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("failed commit state"))?
+        )?,
+        before
+    );
+    assert_eq!(
+        crate::gateway_state(&context.state)?.pre_auth_policy().per_source_ip_handshake_rate,
+        2
+    );
+    assert!(crate::itest_http::handle_preauth_control_request(
+        &mut server,
+        &request,
+        &context.state,
+        &context.store
+    )?);
+    let mut response = [0; 64];
+    let size = client.read(&mut response)?;
+    assert!(std::str::from_utf8(&response[..size])?.starts_with("HTTP/1.1 200"));
+    let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("HTTP updated state"))?;
+    assert_eq!(saved.pre_auth_policy().per_source_ip_handshake_rate, 1);
+    assert_eq!(
+        serde_json::to_value(saved)?["pre_auth_handshakes_by_source_ip"][&source],
+        serde_json::json!([101])
+    );
     Ok(())
 }

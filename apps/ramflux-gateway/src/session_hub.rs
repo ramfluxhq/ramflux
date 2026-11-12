@@ -37,6 +37,11 @@ pub(crate) struct GatewayHubEntry {
 
 #[derive(Default)]
 pub(crate) struct GatewaySessionHub {
+    #[cfg(test)]
+    pub(crate) pre_auth_changed: tokio::sync::Notify,
+    #[cfg(test)]
+    captured_stream_waiter:
+        std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>>,
     senders_by_target: AsyncMutex<Arc<Index<GatewayHubEntry>>>,
     next_registration: std::sync::atomic::AtomicU64,
     pub(crate) probe_started: std::sync::atomic::AtomicBool,
@@ -56,6 +61,25 @@ pub(crate) struct GatewaySessionHub {
 }
 
 impl GatewaySessionHub {
+    #[cfg(test)]
+    pub(crate) fn capture_next_stream(
+        &self,
+    ) -> anyhow::Result<tokio::sync::oneshot::Receiver<std::net::SocketAddr>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        *self
+            .captured_stream_waiter
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture waiter lock"))? = Some(send);
+        Ok(receive)
+    }
+    #[cfg(test)]
+    pub(crate) fn captured_stream(&self, peer: std::net::SocketAddr) {
+        if let Ok(mut waiter) = self.captured_stream_waiter.lock()
+            && let Some(waiter) = waiter.take()
+        {
+            let _ = waiter.send(peer);
+        }
+    }
     pub(crate) fn active_session_ids(&self) -> std::collections::BTreeSet<String> {
         let snapshot = self.senders_by_target.blocking_lock().clone();
         snapshot.values().map(|entry| entry.session_id.clone()).collect()

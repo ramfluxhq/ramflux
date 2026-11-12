@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const KEY: &str = "pre_auth_admission_v1";
+pub(super) const LEGACY_CLOCK_KEY: &str = "pre_auth_legacy_clock_v1";
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
@@ -20,6 +21,15 @@ struct Admission {
     source_scheme: String,
     high_water_unix_seconds: u64,
     buckets: BTreeMap<String, Vec<u64>>,
+    metrics: GatewayPreAuthMetrics,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyClock {
+    version: u32,
+    migration_required: bool,
+    high_water_unix_seconds: u64,
     metrics: GatewayPreAuthMetrics,
 }
 
@@ -83,11 +93,42 @@ impl GatewayState {
             if self.pre_auth_legacy {
                 return Err(NodeCoreError::PreAuthMigrationRequired);
             }
-            if self.pre_auth_cookie_key.is_none() && !cfg!(test) {
+            if self.pre_auth_cookie_key.is_none() {
                 return Err(NodeCoreError::PreAuthConfigInvalid);
             }
         }
         Ok(())
+    }
+
+    /// Unit fixtures must explicitly install their public fixture key.
+    #[cfg(test)]
+    pub(crate) fn set_fixture_pre_auth_cookie_key(&mut self) {
+        self.pre_auth_cookie_key =
+            Some(RedactedString::new(self.pre_auth_policy.cookie_secret.clone()));
+    }
+
+    pub(super) fn pre_auth_entries(&self) -> Result<Vec<(&'static str, Vec<u8>)>, NodeCoreError> {
+        validate_policy(&self.pre_auth_policy)?;
+        let admission = if self.pre_auth_legacy {
+            (
+                LEGACY_CLOCK_KEY,
+                crate::serialize_snapshot_value(&LegacyClock {
+                    version: 1,
+                    migration_required: true,
+                    high_water_unix_seconds: self.pre_auth_time_floor,
+                    metrics: self.pre_auth_metrics.clone(),
+                })?,
+            )
+        } else {
+            (KEY, self.admission_bytes()?)
+        };
+        Ok(vec![
+            (
+                crate::GATEWAY_PRE_AUTH_POLICY_KEY,
+                crate::serialize_snapshot_value(&self.pre_auth_policy)?,
+            ),
+            admission,
+        ])
     }
 
     /// Sample under the caller's state lock, before pruning or admission.
@@ -125,7 +166,10 @@ impl GatewayState {
             buckets: self.pre_auth_handshakes_by_source_ip.clone(),
             metrics: self.pre_auth_metrics.clone(),
         };
-        validate_snapshot(&snapshot, &self.pre_auth_policy)?;
+        validate_snapshot(
+            &snapshot,
+            self.pre_auth_policy.per_source_ip_handshake_rate.min(60) as usize,
+        )?;
         let bytes = crate::serialize_snapshot_value(&snapshot)?;
         if bytes.len() > MAX_BYTES {
             return Err(NodeCoreError::PreAuthSnapshotInvalid);
@@ -134,11 +178,7 @@ impl GatewayState {
     }
 }
 
-fn validate_snapshot(
-    snapshot: &Admission,
-    policy: &GatewayPreAuthPolicy,
-) -> Result<(), NodeCoreError> {
-    let rate = policy.per_source_ip_handshake_rate.min(60) as usize;
+fn validate_snapshot(snapshot: &Admission, rate: usize) -> Result<(), NodeCoreError> {
     if snapshot.version != 1
         || snapshot.source_scheme != "transport-peer-v2"
         || snapshot.buckets.len() > 4096
@@ -165,13 +205,15 @@ impl GatewayRedbStore {
         let read = self.db.begin_read().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let table =
             read.open_table(GATEWAY_STATE_TABLE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        let legacy_clock =
+            table.get(LEGACY_CLOCK_KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         if let Some(raw) = table.get(KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))? {
-            if raw.value().len() > MAX_BYTES {
+            if legacy_clock.is_some() || raw.value().len() > MAX_BYTES {
                 return Err(NodeCoreError::PreAuthSnapshotInvalid);
             }
             let snapshot: Admission = serde_json::from_slice(raw.value())
                 .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
-            validate_snapshot(&snapshot, &state.pre_auth_policy)?;
+            validate_snapshot(&snapshot, 60)?;
             state.pre_auth_time_floor = snapshot.high_water_unix_seconds;
             state.pre_auth_handshakes_by_source_ip = snapshot.buckets;
             state.pre_auth_metrics = snapshot.metrics;
@@ -190,6 +232,19 @@ impl GatewayRedbStore {
                         .is_none_or(|object| object.values().any(|v| v.as_u64() != Some(0)));
                 }
             }
+        }
+        if let Some(raw) = legacy_clock {
+            if raw.value().len() > MAX_BYTES {
+                return Err(NodeCoreError::PreAuthSnapshotInvalid);
+            }
+            let clock: LegacyClock = serde_json::from_slice(raw.value())
+                .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
+            if clock.version != 1 || !clock.migration_required {
+                return Err(NodeCoreError::PreAuthSnapshotInvalid);
+            }
+            state.pre_auth_legacy = true;
+            state.pre_auth_time_floor = clock.high_water_unix_seconds;
+            state.pre_auth_metrics = clock.metrics;
         }
         Ok(())
     }

@@ -698,6 +698,7 @@ fn mesh_spiffe_authorization_rejects_service_mismatch() {
 #[test]
 fn gateway_preauth_cookie_rate_limit_and_metrics() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = GatewayState::new();
+    state.set_fixture_pre_auth_cookie_key();
     state.set_pre_auth_policy(GatewayPreAuthPolicy {
         enabled: true,
         per_source_ip_handshake_rate: 1,

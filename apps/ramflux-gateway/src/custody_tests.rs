@@ -373,7 +373,7 @@ async fn quic_refusal_hint_and_slot_reuse() -> Result {
         tx.write_all(&[1]).await?;
         let (mut send, _recv) = incoming.accept_bi().await?;
         assert!(
-            admit_quic(&mut send, &incoming, &limiter, std::time::Instant::now()).await?.is_none()
+            admit_quic(&mut send, &incoming, &limiter, incoming.remote_address().ip(), std::time::Instant::now()).await?.is_none()
         );
         let refused: CustodyServerFrame = decode(&read_custody_tcp_frame(&mut rx).await?, 4096)?;
         assert!(matches!(refused, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, capacity: None, retry: Some(retry) } if retry.scope == ramflux_protocol::custody::RetryScope::NodeCapacity && (1000..=10_000).contains(&retry.retry_after_ms)));
@@ -384,7 +384,7 @@ async fn quic_refusal_hint_and_slot_reuse() -> Result {
         tx.write_all(&[1]).await?;
         let (mut send, _recv) = incoming.accept_bi().await?;
         assert!(
-            admit_quic(&mut send, &incoming, &limiter, std::time::Instant::now()).await?.is_some()
+            admit_quic(&mut send, &incoming, &limiter, incoming.remote_address().ip(), std::time::Instant::now()).await?.is_some()
         );
         Ok(())
     })

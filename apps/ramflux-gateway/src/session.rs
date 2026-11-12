@@ -67,17 +67,20 @@ pub(crate) async fn handle_gateway_quic_connection(
                     hub: Arc::clone(&listener.hub),
                     remote_addr: connection.remote_address(),
                 };
+                #[cfg(test)]
+                context.hub.captured_stream(context.remote_addr);
                 let custody_connection = connection.clone();
 
                 tokio::spawn(async move {
-                    if let Err(_error) = handle_gateway_quic_stream_with_connection(
+                    if (handle_gateway_quic_stream_with_connection(
                         send,
                         recv,
                         context,
                         custody_connection,
                         admitted_at,
-                    )
+                    ))
                     .await
+                    .is_err()
                     {
                         crate::pre_auth::record_ingress_failure("quinn");
                     }
@@ -87,8 +90,8 @@ pub(crate) async fn handle_gateway_quic_connection(
                 quinn::ConnectionError::ApplicationClosed(_)
                 | quinn::ConnectionError::LocallyClosed,
             ) => return,
-            Err(error) => {
-                tracing::warn!(%error, "gateway QUIC connection closed");
+            Err(_) => {
+                crate::pre_auth::record_ingress_failure("quinn");
                 return;
             }
         }
@@ -115,8 +118,14 @@ async fn handle_gateway_quic_stream_with_connection(
             send.finish()?;
             return Ok(());
         };
-        let Some(permit) =
-            crate::custody::admit_quic(&mut send, &connection, &pools.quic, Instant::now()).await?
+        let Some(permit) = crate::custody::admit_quic(
+            &mut send,
+            &connection,
+            &pools.quic,
+            context.remote_addr.ip(),
+            Instant::now(),
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -460,7 +469,7 @@ async fn establish_gateway_session_or_reject(
             {
                 return Err(error);
             }
-            tracing::warn!(%error,request_kind="open","gateway session establishment failed");
+            crate::pre_auth::record_ingress_failure("quinn");
             write_gateway_frame(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
@@ -479,19 +488,16 @@ async fn lookup_gateway_auth_source(
     auth_frame: &ramflux_node_core::GatewayAuthFrame,
     open: &ramflux_node_core::GatewayOpenFrame,
 ) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
-    let registered_auth_key = match registered_gateway_source(context, auth_frame, open).await {
-        Ok(key) => key,
-        Err(error) => {
-            tracing::warn!(%error, request_kind="auth", "gateway authentication source rejected");
-            write_gateway_frame(
-                send,
-                &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: "gateway_auth_source_rejected".into(),
-                },
-            )
-            .await?;
-            return Ok(None);
-        }
+    let Ok(registered_auth_key) = registered_gateway_source(context, auth_frame, open).await else {
+        crate::pre_auth::record_ingress_failure("quinn");
+        write_gateway_frame(
+            send,
+            &ramflux_node_core::GatewayServerFrame::Nack {
+                reason: "gateway_auth_source_rejected".into(),
+            },
+        )
+        .await?;
+        return Ok(None);
     };
     let Some(registered_auth_key) = registered_auth_key else {
         write_gateway_frame(
@@ -823,26 +829,23 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
             .await?;
             continue;
         }
-        let frame = match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(
-            &bytes,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                if let Some(response) = crate::ingress::registration_rejection(&bytes) {
-                    let mut sink = send.lock().await;
-                    ramflux_transport::write_gateway_session_json(&mut **sink, &response).await?;
-                    continue;
-                }
-                tracing::warn!(%error, request_kind="invalid", "gateway session request rejected");
-                write_gateway_handle(
-                    &send,
-                    &ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: "gateway_request_invalid".into(),
-                    },
-                )
-                .await?;
+        let Ok(frame) =
+            ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(&bytes)
+        else {
+            if let Some(response) = crate::ingress::registration_rejection(&bytes) {
+                let mut sink = send.lock().await;
+                ramflux_transport::write_gateway_session_json(&mut **sink, &response).await?;
                 continue;
             }
+            crate::pre_auth::record_ingress_failure("quinn");
+            write_gateway_handle(
+                &send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "gateway_request_invalid".into(),
+                },
+            )
+            .await?;
+            continue;
         };
         let Some(_request) = ramflux_node_core::begin_service_request() else {
             return Ok(());
@@ -2050,13 +2053,16 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
     context: &GatewayQuicContext,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
-    crate::pre_auth::admit_with_clock(
+    let result = crate::pre_auth::admit_with_clock(
         &source,
         open.pre_auth_cookie.as_deref(),
         &context.state,
         &context.store,
         std::time::SystemTime::now,
-    )
+    );
+    #[cfg(test)]
+    context.hub.pre_auth_changed.notify_waiters();
+    result
 }
 
 #[cfg(test)]

@@ -231,3 +231,40 @@ async fn start_compio(
     let address = tokio::time::timeout(Duration::from_secs(15), started).await??;
     Ok((address, stop, thread))
 }
+
+struct DirectQuinn {
+    connection: quinn::Connection,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+}
+impl ramflux_transport::GatewaySessionFrameSink for DirectQuinn {
+    fn custody_exporter(
+        &self,
+        nonce: &[u8; 32],
+    ) -> Result<[u8; 32], ramflux_transport::TransportError> {
+        ramflux_transport::custody_quic_exporter(&self.connection, nonce)
+    }
+    fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+        ramflux_transport::GatewaySessionFrameSink::finish(&mut self.send)
+    }
+    fn send_frame<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> ramflux_transport::GatewaySessionFrameFuture<'a, ()> {
+        ramflux_transport::GatewaySessionFrameSink::send_frame(&mut self.send, bytes)
+    }
+}
+impl ramflux_transport::GatewaySessionFrameSource for DirectQuinn {
+    fn recv_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        ramflux_transport::GatewaySessionFrameSource::recv_frame(&mut self.recv)
+    }
+}
+impl Client {
+    pub(crate) fn direct_quinn(
+        connection: quinn::Connection,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+    ) -> Self {
+        Self { stream: Box::new(DirectQuinn { connection, send, recv }), _connection: None }
+    }
+}

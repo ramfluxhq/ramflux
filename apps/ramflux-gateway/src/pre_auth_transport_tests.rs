@@ -8,7 +8,11 @@ use ramflux_protocol::{Ext, SignatureAlg, SignedFields};
 use std::time::Duration;
 use support::{Fixture, Route, routes};
 
-fn open(claim: &str, now: u64, cookie: Option<String>) -> anyhow::Result<GatewayOpenFrame> {
+pub(crate) fn open(
+    claim: &str,
+    now: u64,
+    cookie: Option<String>,
+) -> anyhow::Result<GatewayOpenFrame> {
     Ok(GatewayOpenFrame {
         protocol_version: ramflux_node_core::GATEWAY_SESSION_PROTOCOL_VERSION.into(),
         transport_kind: "quic_quinn".into(),
@@ -37,7 +41,7 @@ fn fields() -> SignedFields {
         signature: String::new(),
     }
 }
-fn auth(open: &GatewayOpenFrame, seed: [u8; 32]) -> anyhow::Result<GatewayAuthFrame> {
+pub(crate) fn auth(open: &GatewayOpenFrame, seed: [u8; 32]) -> anyhow::Result<GatewayAuthFrame> {
     let root = ramflux_crypto::create_identity_root("peer", [31; 32]);
     let branch = ramflux_crypto::create_device_branch("peer", "device", 1, [32; 32]);
     let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
@@ -117,22 +121,37 @@ async fn exchange(
 #[tokio::test]
 #[ignore = "requires the same-tree router binary; explicit preauth PR CI job"]
 async fn preauth_claim_rotation_transport_matrix() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(120),async {
-        let fixture=Fixture::new().await?;
-        for (index,route) in routes().into_iter().enumerate(){
-            let peer=format!("127.0.0.{}",10+index);
-            established(&exchange(&fixture,route,&peer,open("claim-original",1,None)?).await?)?;
-            cookie(exchange(&fixture,route,&peer,open("claim-rotated",1,None)?).await?)?;
-            cookie(exchange(&fixture,route,&peer,open("claim-original",86_400,None)?).await?)?;
-            cookie(exchange(&fixture,route,&peer,open("both-rotated",172_800,None)?).await?)?;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let fixture = Fixture::new().await?;
+        for (index, route) in routes().into_iter().enumerate() {
+            let peer = format!("127.0.0.{}", 10 + index);
+            established(
+                &exchange(&fixture, route, &peer, open("claim-original", 1, None)?).await?,
+            )?;
+            cookie(exchange(&fixture, route, &peer, open("claim-rotated", 1, None)?).await?)?;
+            cookie(exchange(&fixture, route, &peer, open("claim-original", 86_400, None)?).await?)?;
+            cookie(exchange(&fixture, route, &peer, open("both-rotated", 172_800, None)?).await?)?;
             // A shared table must retain this peer's debt on every other carrier too.
-            for other in routes(){cookie(exchange(&fixture,other,&peer,open("across-transports",1,None)?).await?)?;}
-            let distinct=format!("127.0.0.{}",200+index);
-            established(&exchange(&fixture,route,&distinct,open("claim-original",1,None)?).await?)?;
-            eprintln!("preauth claim rotation {route:?}: allowance, source/time/both rotation, cross-carrier debt, distinct-peer control PASS");
+            for other in routes() {
+                cookie(
+                    exchange(&fixture, other, &peer, open("across-transports", 1, None)?).await?,
+                )?;
+            }
+            let distinct = format!("127.0.0.{}", 200 + index);
+            established(
+                &exchange(&fixture, route, &distinct, open("claim-original", 1, None)?).await?,
+            )?;
+            eprintln!(
+                "preauth claim rotation {route:?}: {}",
+                concat!(
+                    "allowance, source/time/both rotation, ",
+                    "cross-carrier debt, distinct-peer control PASS"
+                )
+            );
         }
         Ok(())
-    }).await?
+    })
+    .await?
 }
 
 #[tokio::test]
@@ -146,38 +165,66 @@ async fn preauth_signed_open_transport_matrix() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::WARN)
         .try_init()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    tokio::time::timeout(Duration::from_secs(120),async {
-        let fixture=Fixture::new().await?;
-        for (index,route) in routes().into_iter().enumerate(){
-            let peer=format!("127.0.0.{}",30+index);
-            let original=open("signed-hint",9_007_199_254_740_991,None)?;
-            let bytes=ramflux_protocol::canonical_json_bytes(&original)?;
-            let hash=ramflux_node_core::gateway_open_hash(&original);
-            established(&exchange(&fixture,route,&peer,original.clone()).await?)?;
-            assert_eq!(ramflux_protocol::canonical_json_bytes(&original)?,bytes);
-            assert_eq!(ramflux_node_core::gateway_open_hash(&original),hash);
-            let cookie=cookie(exchange(&fixture,route,&peer,open("retry-probe",1,None)?).await?)?;
-            let retry=open("new-signed-hint",0,Some(cookie.clone()))?;
-            established(&exchange(&fixture,route,&peer,retry).await?)?;
-            for mutate_time in [false,true] {
-                let mut tampered=open("signed-before-change",1,Some(cookie.clone()))?;
-                let signature=auth(&tampered,[32;32])?;
-                if mutate_time {tampered.pre_auth_now=Some(2);} else {tampered.source_ip_hash=Some("changed-after-sign".into());}
-                let response=fixture.connect(route,&peer).await?.exchange(tampered,signature).await?;
-                anyhow::ensure!(matches!(response,GatewayServerFrame::Nack {ref reason} if reason.contains("open frame body hash mismatch")),"post-sign hint change was not rejected by hash validation: {response:?}");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let fixture = Fixture::new().await?;
+        for (index, route) in routes().into_iter().enumerate() {
+            let peer = format!("127.0.0.{}", 30 + index);
+            let original = open("signed-hint", 9_007_199_254_740_991, None)?;
+            let bytes = ramflux_protocol::canonical_json_bytes(&original)?;
+            let hash = ramflux_node_core::gateway_open_hash(&original);
+            established(&exchange(&fixture, route, &peer, original.clone()).await?)?;
+            assert_eq!(ramflux_protocol::canonical_json_bytes(&original)?, bytes);
+            assert_eq!(ramflux_node_core::gateway_open_hash(&original), hash);
+            let cookie =
+                cookie(exchange(&fixture, route, &peer, open("retry-probe", 1, None)?).await?)?;
+            let retry = open("new-signed-hint", 0, Some(cookie.clone()))?;
+            established(&exchange(&fixture, route, &peer, retry).await?)?;
+            for mutate_time in [false, true] {
+                let mut tampered = open("signed-before-change", 1, Some(cookie.clone()))?;
+                let signature = auth(&tampered, [32; 32])?;
+                if mutate_time {
+                    tampered.pre_auth_now = Some(2);
+                } else {
+                    tampered.source_ip_hash = Some("changed-after-sign".into());
+                }
+                let response =
+                    fixture.connect(route, &peer).await?.exchange(tampered, signature).await?;
+                let hash_rejected = matches!(response, GatewayServerFrame::Nack { ref reason }
+                    if reason.contains("open frame body hash mismatch"));
+                anyhow::ensure!(
+                    hash_rejected,
+                    "post-sign hint hash rejection missing: {response:?}"
+                );
             }
-            let wrong=open("wrong-key",1,Some(cookie.clone()))?;
-            let signature=auth(&wrong,[55;32])?;
-            let response=fixture.connect(route,&peer).await?.exchange(wrong,signature).await?;
-            anyhow::ensure!(matches!(response,GatewayServerFrame::Nack {ref reason} if reason.starts_with("auth rejected:") && !reason.contains("replay")),"wrong-key control did not reach signature enforcement: {response:?}");
-            established(&exchange(&fixture,route,&peer,open("fresh-positive-control",1,Some(cookie))?).await?)?;
-            eprintln!("preauth signed Open {route:?}: original hash, cookie retry, two changed hints, wrong-key and fresh-positive controls PASS");
+            let wrong = open("wrong-key", 1, Some(cookie.clone()))?;
+            let signature = auth(&wrong, [55; 32])?;
+            let response = fixture.connect(route, &peer).await?.exchange(wrong, signature).await?;
+            let signature_rejected = matches!(response, GatewayServerFrame::Nack { ref reason }
+                if reason.starts_with("auth rejected:") && !reason.contains("replay"));
+            anyhow::ensure!(
+                signature_rejected,
+                "wrong-key signature rejection missing: {response:?}"
+            );
+            established(
+                &exchange(&fixture, route, &peer, open("fresh-positive-control", 1, Some(cookie))?)
+                    .await?,
+            )?;
+            eprintln!(
+                "preauth signed Open {route:?}: {}",
+                concat!(
+                    "hash, cookie retry, changed hints, ",
+                    "wrong-key and fresh-positive controls PASS"
+                )
+            );
         }
         privacy_controls(&fixture).await?;
         migration_snapshots(&fixture).await?;
-        crate::custody::tests::pre_auth_matrix::signed_handoff_matrix().await.map_err(|e|anyhow::anyhow!("{e}"))?;
+        crate::custody::tests::pre_auth_matrix::signed_handoff_matrix()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
-    }).await?
+    })
+    .await?
 }
 
 async fn custody_child() -> anyhow::Result<bool> {
@@ -193,6 +240,7 @@ async fn custody_child() -> anyhow::Result<bool> {
                 "--nocapture",
             ])
             .env("RAMFLUX_TEST_PREAUTH_CUSTODY_CHILD", "1")
+            .env("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING", "1")
             .env(
                 "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY",
                 ramflux_crypto::public_key_base64url_from_seed([8; 32]),
@@ -213,7 +261,7 @@ async fn custody_child() -> anyhow::Result<bool> {
         String::from_utf8_lossy(&output.stderr)
     );
     anyhow::ensure!(
-        logs.contains("gateway public stream failed"),
+        logs.contains("gateway ingress aggregate summary"),
         "privacy logging observer did not see the planted decoder failure"
     );
     for sentinel in ["PREAUTH-PRIVATE-SENTINEL", "127.0.0.250"] {
@@ -252,11 +300,13 @@ async fn migration_snapshots(fixture: &Fixture) -> anyhow::Result<()> {
         let expected = crate::pre_auth::source_key(before.parse()?);
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                let value = serde_json::to_value(&*crate::gateway_state(&fixture.context.state)?)?;
-                if value["pre_auth_handshakes_by_source_ip"].get(&expected).is_some() {
+                let changed = fixture.context.hub.pre_auth_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if crate::gateway_state(&fixture.context.state)?.has_pre_auth_source(&expected) {
                     break;
                 }
-                tokio::task::yield_now().await;
+                changed.await;
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -287,9 +337,8 @@ async fn migration_snapshots(fixture: &Fixture) -> anyhow::Result<()> {
             ramflux_transport::read_quic_json_frame(&mut recv2).await?;
         established(&response)?;
         let expected = crate::pre_auth::source_key(after.parse()?);
-        let value = serde_json::to_value(&*crate::gateway_state(&fixture.context.state)?)?;
         anyhow::ensure!(
-            value["pre_auth_handshakes_by_source_ip"].get(&expected).is_some(),
+            crate::gateway_state(&fixture.context.state)?.has_pre_auth_source(&expected),
             "{route:?}: next stream did not capture migrated peer"
         );
         connection.close(0u32.into(), b"matrix complete");

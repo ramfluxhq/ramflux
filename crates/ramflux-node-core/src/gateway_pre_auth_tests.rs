@@ -11,6 +11,7 @@ use std::time::Duration;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn state() -> Result<GatewayState> {
     let mut state = GatewayState::new();
+    state.set_fixture_pre_auth_cookie_key();
     state.set_pre_auth_policy(GatewayPreAuthPolicy {
         enabled: true,
         per_source_ip_handshake_rate: 1,
@@ -133,6 +134,7 @@ fn restart_rollback_and_failed_commit() -> Result {
     state.check_pre_auth(&source(1), None, 100)?;
     fixture.store.save_state(&state)?;
     let mut restored = fixture.restored()?;
+    restored.set_fixture_pre_auth_cookie_key();
     assert!(matches!(
         restored.check_pre_auth(&source(1), None, 99),
         Err(NodeCoreError::PreAuthClockRollback)
@@ -203,7 +205,7 @@ fn bounded_snapshots_and_legacy() -> Result {
     value["buckets"][source(1)] = serde_json::json!([101]);
     bad.push(value);
     let mut value = original.clone();
-    value["buckets"][source(1)] = serde_json::json!([99, 100]);
+    value["buckets"][source(1)] = serde_json::json!([100, 99]);
     bad.push(value);
     let mut value = original.clone();
     value["buckets"] = serde_json::to_value(
@@ -374,5 +376,126 @@ fn concurrent_callers_sample_after_acquiring_the_state_lock() -> Result {
     release.send(())?;
     caller.join().map_err(|_| "caller panicked")??;
     assert_eq!(state.lock().map_err(|_| "state lock")?.pre_auth_time_floor, 101);
+    Ok(())
+}
+
+#[test]
+fn preauth_runtime_policy_and_debt_commit_atomically_across_restart() -> Result {
+    let path = std::env::temp_dir().join(format!(
+        "preauth-policy-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let runtime = crate::GatewayPreAuthConfig {
+        enabled: true,
+        per_source_ip_handshake_rate: 1,
+        ..Default::default()
+    };
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = state()?;
+        let mut policy = state.pre_auth_policy.clone();
+        policy.per_source_ip_handshake_rate = 2;
+        state.set_pre_auth_policy(policy)?;
+        state.check_pre_auth(&source(1), None, 100)?;
+        state.check_pre_auth(&source(1), None, 101)?;
+        store.save_state(&state)?;
+        let configured = store.load_state_with_pre_auth_config(&runtime)?.ok_or("missing state")?;
+        assert_eq!(configured.pre_auth_handshakes_by_source_ip[&source(1)], [101]);
+        store.fail_next_pre_auth_commit();
+        assert!(store.save_state(&configured).is_err());
+    }
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let previous = store.load_state()?.ok_or("previous state missing")?;
+        assert_eq!(previous.pre_auth_policy.per_source_ip_handshake_rate, 2);
+        assert_eq!(previous.pre_auth_handshakes_by_source_ip[&source(1)], [100, 101]);
+        let configured =
+            store.load_state_with_pre_auth_config(&runtime)?.ok_or("configured state missing")?;
+        store.save_pre_auth_hot(&configured)?;
+    }
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let configured = store.load_state()?.ok_or("committed state missing")?;
+        assert_eq!(configured.pre_auth_policy.per_source_ip_handshake_rate, 1);
+        assert_eq!(configured.pre_auth_handshakes_by_source_ip[&source(1)], [101]);
+        // An old out-of-bounds policy must not prevent valid runtime configuration from repairing it.
+        let mut invalid = configured.pre_auth_policy.clone();
+        invalid.window_seconds = 3601;
+        crate::save_snapshot(
+            &store.db,
+            GATEWAY_STATE_TABLE,
+            crate::GATEWAY_PRE_AUTH_POLICY_KEY,
+            &invalid,
+        )?;
+        assert!(store.load_state_with_pre_auth_config(&runtime)?.is_some());
+        assert!(store.load_state()?.is_some());
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn preauth_legacy_disabled_clock_persists_without_promoting_debt() -> Result {
+    let path = std::env::temp_dir().join(format!(
+        "preauth-legacy-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let opaque = br#"{"client-claim":[999999]}"#;
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = GatewayState::new();
+        store.save_state(&state)?;
+        let tx = store.db.begin_write()?;
+        {
+            let mut table = tx.open_table(GATEWAY_STATE_TABLE)?;
+            table.remove(KEY)?;
+            table.insert(crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY, opaque.as_slice())?;
+        }
+        tx.commit()?;
+        state = store.load_state()?.ok_or("legacy state missing")?;
+        assert!(state.pre_auth_migration_required());
+        state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(100))?;
+        store.fail_next_pre_auth_commit();
+        assert!(store.save_pre_auth_hot(&state).is_err());
+        store.save_pre_auth_hot(&state)?;
+    }
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = store.load_state()?.ok_or("legacy restart state missing")?;
+        assert!(state.pre_auth_migration_required());
+        assert!(matches!(
+            state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(99)),
+            Err(NodeCoreError::PreAuthClockRollback)
+        ));
+        let read = store.db.begin_read()?;
+        let table = read.open_table(GATEWAY_STATE_TABLE)?;
+        assert_eq!(
+            table.get(crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY)?.ok_or("legacy debt lost")?.value(),
+            opaque
+        );
+        assert!(table.get(KEY)?.is_none(), "legacy debt must not become trusted admission");
+        drop(table);
+        drop(read);
+        state.record_slowloris_timeout();
+        store.save_pre_auth_hot(&state)?;
+        let enabled = crate::GatewayPreAuthConfig {
+            enabled: true,
+            per_source_ip_handshake_rate: 1,
+            ..Default::default()
+        };
+        let enabled =
+            store.load_state_with_pre_auth_config(&enabled)?.ok_or("migration flag missing")?;
+        assert!(matches!(
+            enabled.validate_pre_auth_configuration(),
+            Err(NodeCoreError::PreAuthMigrationRequired)
+        ));
+    }
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let state = store.load_state()?.ok_or("metrics reopen")?;
+        assert_eq!(state.pre_auth_metrics.slowloris_auth_timeout, 1);
+        assert_eq!(state.pre_auth_time_floor, 100);
+    }
+    std::fs::remove_file(path)?;
     Ok(())
 }

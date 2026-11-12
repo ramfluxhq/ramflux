@@ -15,6 +15,7 @@ mod hub_index;
 #[cfg(all(test, feature = "itest-http"))]
 mod ijson_ingress_tests;
 mod ingress;
+mod ingress_log;
 mod issued_probe;
 #[cfg(feature = "itest-http")]
 mod itest_http;
@@ -81,7 +82,13 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
-        let mut state = match store.load_state()? {
+        let runtime_policy = config
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.pre_auth.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let mut state = match store.load_state_with_pre_auth_config(&runtime_policy)? {
             Some(state) => state,
             None => ramflux_node_core::GatewayState::new(),
         };

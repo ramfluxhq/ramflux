@@ -90,7 +90,7 @@ impl Proxy {
             if std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() != Ok("1") {
                 anyhow::bail!("unbound custody not opted in")
             }
-            tracing::warn!(node_id=%context.node_id,peer=%context.remote_addr,"custody connection explicitly uses no_channel_binding");
+            crate::ingress_log::record(crate::ingress_log::Event::NoChannelBinding);
         }
         let signer = if mode == BindingMode::HomeRelayReceipt {
             let encoded = Zeroizing::new(std::env::var("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED")?);
@@ -307,13 +307,10 @@ pub(crate) async fn admit_quic(
     send: &mut quinn::SendStream,
     connection: &quinn::Connection,
     limiter: &Limiter,
+    captured_peer: std::net::IpAddr,
     started: std::time::Instant,
 ) -> anyhow::Result<Option<ramflux_node_core::CustodyIngressPermit>> {
-    let refusal = match limiter.acquire(
-        connection.remote_address().ip(),
-        Some(connection.stable_id()),
-        started,
-    ) {
+    let refusal = match limiter.acquire(captured_peer, Some(connection.stable_id()), started) {
         Ok(permit) => return Ok(Some(permit)),
         Err(refusal) => refusal.into_frame(),
     };
