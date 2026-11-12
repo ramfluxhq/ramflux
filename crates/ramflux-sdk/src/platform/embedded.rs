@@ -253,12 +253,13 @@ impl Drop for EmbeddedSupervisor {
 
 /// Create the data root owner-only and apply the platform's storage rules to it.
 fn prepare_data_root(root: &Path) -> Result<(), SdkError> {
+    // Android: refuse a root outside the app's no-backup directory before creating anything.
+    #[cfg(target_os = "android")]
+    super::android::storage::require_private_data_root(root)?;
     std::fs::create_dir_all(root)?;
     super::fs::set_owner_only_dir(root)?;
     #[cfg(target_os = "ios")]
     super::apple_container::protect_data_root(root)?;
-    #[cfg(target_os = "android")]
-    super::android::storage::require_private_data_root(root)?;
     Ok(())
 }
 

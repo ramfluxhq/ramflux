@@ -260,13 +260,16 @@ pub fn require_private_data_root(data_root: &Path) -> Result<(), SdkError> {
     }
     let parent = data_root.parent().ok_or(StorageRefusal::NotNormalized)?;
     classify_no_backup_dir(parent)?;
-    let resolved = std::fs::canonicalize(data_root)?;
-    let resolved_parent = resolved.parent().ok_or(StorageRefusal::Redirected)?;
-    classify_no_backup_dir(resolved_parent).map_err(|_| StorageRefusal::Redirected)?;
-    if resolved.file_name().is_none_or(|name| name != DATA_ROOT_DIR) {
-        return Err(StorageRefusal::Redirected.into());
+    // The platform created the no-backup directory; it must not resolve somewhere else.
+    let resolved_parent = std::fs::canonicalize(parent)?;
+    classify_no_backup_dir(&resolved_parent).map_err(|_| StorageRefusal::Redirected)?;
+    // The data root itself may not exist yet, but it may never be a link or a file.
+    match std::fs::symlink_metadata(data_root) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(StorageRefusal::Redirected.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 /// Take an exclusive lock through one descriptor and observe a second descriptor being
