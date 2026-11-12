@@ -13,6 +13,8 @@ struct Pending {
     event_id: Vec<u8>,
     copy_id: String,
     committed_key: String,
+    #[serde(default)]
+    own_sent: bool,
 }
 fn key(target: &str, root: &str) -> String {
     format!("routed/pending-edit/{target}/{root}")
@@ -24,6 +26,7 @@ impl RamfluxClient {
         identity: &g::EventIdentity,
         edit: &g::Edit,
         bytes: &[u8],
+        own_sent: bool,
     ) -> Result<(), SdkError> {
         let target = edit
             .target
@@ -52,6 +55,7 @@ impl RamfluxClient {
                 ramflux_protocol::encode_base64url(&identity.id)
             ),
             committed_key: self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?,
+            own_sent,
         };
         db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
             owner_id: &ramflux_protocol::encode_base64url(&identity.id),
@@ -109,7 +113,26 @@ impl RamfluxClient {
         else {
             return Ok(());
         };
-        match self.apply_generated_edit_entry(&committed.entry, conversation, &raw.bytes) {
+        let applied = if pending.own_sent {
+            (|| {
+                let source = self
+                    .authenticated_device_identity(HeadUse::NewAuthorization, &committed.entry)?;
+                self.apply_generated_edit_authorized(
+                    super::message_mutations::EditContext {
+                        entry: &committed.entry,
+                        source: &source,
+                        imported: None,
+                        own_sent: true,
+                    },
+                    conversation,
+                    &raw.bytes,
+                    None,
+                )
+            })()
+        } else {
+            self.apply_generated_edit_entry(&committed.entry, conversation, &raw.bytes)
+        };
+        match applied {
             Ok(_) | Err(SdkError::InboundRejected(_) | SdkError::GeneratedRefused { .. }) => {
                 db.finish_raw_inner_reparse(&pending.copy_id)?;
                 db.remove_actor_state(&key)?;

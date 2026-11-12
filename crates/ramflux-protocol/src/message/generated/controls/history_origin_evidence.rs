@@ -6,6 +6,7 @@
 use super::super::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[prost(skip_debug)]
 pub struct HistoryOriginEvidence {
     #[prost(bytes = "vec", tag = "1")]
     pub canonical_sender_envelope: ::prost::alloc::vec::Vec<u8>,

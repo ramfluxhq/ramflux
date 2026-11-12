@@ -636,7 +636,11 @@ async fn group_authority_case(change: &str) -> Result<(), SdkError> {
     let mut message = a.client.encrypt_generated_group_message(
         "generated-group",
         "alice",
-        &g::Message { text: "group content".into(), ..Default::default() },
+        &g::Message {
+            text: "group content".into(),
+            erasure_nonce: vec![51; 32],
+            ..Default::default()
+        },
     )?;
     let group = message.sealed_group.as_mut().ok_or_else(|| invalid("group fixture missing"))?;
     match change {
@@ -1229,7 +1233,11 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
     let message = c.client.encrypt_generated_group_message(
         "moderator-group",
         "carol",
-        &g::Message { text: "late target survives".into(), ..Default::default() },
+        &g::Message {
+            text: "late target survives".into(),
+            erasure_nonce: vec![52; 32],
+            ..Default::default()
+        },
     )?;
     let raw = RamfluxClient::encode_generated_inner(
         target_identity,

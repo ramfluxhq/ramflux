@@ -4909,3 +4909,5 @@ receipt exemption, signed-start gate and privacy boundary.
 
 See [Unsupported diagnostics](amendments/s10a-unsupported-diagnostics.md) for
 ordered reason labels, opaque local handles and retirement of those handles.
+
+Private revision entropy amendment for activation: [layer 3 / floor 3](message-private-revision-amendment.md).

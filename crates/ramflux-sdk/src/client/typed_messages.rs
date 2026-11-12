@@ -25,7 +25,8 @@ pub struct MessageCache {
 
 impl MessageCache {
     /// Apply one generated update. A tombstone atomically replaces every cached preview.
-    pub fn apply(&mut self, update: g::MessageUpdate) {
+    pub fn apply(&mut self, mut update: g::MessageUpdate) {
+        g::private_revision::redact_update(&mut update);
         // Typing belongs to the expiring live indicator model, never history previews.
         // Reject it even if a caller supplies a forged durable sequence.
         if matches!(
@@ -210,6 +211,7 @@ impl RamfluxClient {
             if let Some(g::content::Value::Edit(edit)) = content.value.as_ref() {
                 content.value = edit.replacement.clone().map(g::content::Value::Message);
             }
+            g::private_revision::redact_content(&mut content);
             g::message_update::State::Content(content)
         };
         Ok(g::MessageUpdate {

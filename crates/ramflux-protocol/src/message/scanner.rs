@@ -18,6 +18,25 @@ pub(crate) fn scan(
     layer: u32,
     depth: usize,
 ) -> Result<ScanOutcome, ValidationError> {
+    scan_context(
+        descriptor,
+        bytes,
+        layer,
+        depth,
+        !matches!(
+            descriptor.name(),
+            "MessageRequest" | "SendMessage" | "MessageUpdate" | "Content"
+        ),
+    )
+}
+
+fn scan_context(
+    descriptor: &MessageDescriptor,
+    bytes: &[u8],
+    layer: u32,
+    depth: usize,
+    private_body: bool,
+) -> Result<ScanOutcome, ValidationError> {
     if depth > MAX_DEPTH {
         return Err(ValidationError::Limit);
     }
@@ -29,6 +48,7 @@ pub(crate) fn scan(
     let mut counts = BTreeMap::<u32, usize>::new();
     let mut choices = BTreeSet::new();
     let mut outcome = ScanOutcome::Supported;
+    let mut revision_nonce_length = 0;
     let (mut operation, mut payload) = (0, 0);
     let mut object_key: Option<&str> = None;
     let mut map_keys = BTreeMap::<u32, &str>::new();
@@ -38,6 +58,9 @@ pub(crate) fn scan(
             return Err(ValidationError::NonCanonical);
         }
         previous = field.tag;
+        if descriptor.name() == "Message" && field.tag == 17 {
+            revision_nonce_length = field.bytes.len();
+        }
         let Some(schema) = descriptor.get_field(field.tag) else {
             outcome = ScanOutcome::Unsupported;
             continue;
@@ -78,7 +101,7 @@ pub(crate) fn scan(
         if registry::field_layer(descriptor.name(), field.tag).is_none_or(|first| first > layer) {
             outcome = ScanOutcome::Unsupported;
         }
-        if scan_field(&schema, &field, layer, depth)? == ScanOutcome::Unsupported {
+        if scan_field(&schema, &field, layer, depth, private_body)? == ScanOutcome::Unsupported {
             outcome = ScanOutcome::Unsupported;
         }
         if descriptor.name() == "Control" {
@@ -87,6 +110,14 @@ pub(crate) fn scan(
             } else if field.tag >= 16 {
                 payload = field.tag;
             }
+        }
+    }
+    if descriptor.name() == "Message" {
+        let forbidden = !private_body || counts.contains_key(&16);
+        if (forbidden && counts.contains_key(&17))
+            || (!forbidden && layer >= 3 && revision_nonce_length != 32)
+        {
+            return Err(ValidationError::Content);
         }
     }
     if outcome == ScanOutcome::Supported {
@@ -120,6 +151,7 @@ fn scan_field(
     field: &wire::Field<'_>,
     layer: u32,
     depth: usize,
+    private_body: bool,
 ) -> Result<ScanOutcome, ValidationError> {
     let expected = match schema.kind() {
         Kind::Double | Kind::Fixed64 | Kind::Sfixed64 => 1,
@@ -140,7 +172,16 @@ fn scan_field(
         return Err(ValidationError::NonCanonical);
     }
     match schema.kind() {
-        Kind::Message(message) => return scan(&message, field.bytes, layer, depth + 1),
+        Kind::Message(message) => {
+            return scan_context(
+                &message,
+                field.bytes,
+                layer,
+                depth + 1,
+                private_body
+                    && !(schema.parent_message().name() == "SelfSync" && schema.name() == "draft"),
+            );
+        }
         Kind::Enum(enumeration) => {
             let signed = i64::from_le_bytes(field.scalar.to_le_bytes());
             if i32::try_from(signed).ok().and_then(|number| enumeration.get_value(number)).is_none()

@@ -231,6 +231,10 @@ impl RamfluxClient {
             return Err(refused("recursive sealed group"));
         }
         let exact = zeroize::Zeroizing::new(message.encode_to_vec());
+        // The logical producer prepares private entropy once before this call/fan-out.
+        // Refuse an unprepared value rather than minting per-recipient entropy here.
+        g::validation::scan_message("Message", &exact, g::registry::COMPILED_LAYER)
+            .map_err(|_| refused("group Message requires a prepared private revision"))?;
         let native = self.encrypt_group_message(group, sender, &exact)?;
         let source = self.local_device_identity(sender)?;
         from_native(

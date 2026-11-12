@@ -133,6 +133,10 @@ pub fn scan_inner(bytes: &[u8]) -> Result<ScannedInner<'_>, ValidationError> {
             _ => {}
         }
     }
+    // Activation resets incompatible rows; old signed bytes are refused, never repaired.
+    if crate::schema_profile::ACTIVE_STORAGE_GENERATION >= 1 && layer < registry::PROFILE_FLOOR {
+        return Err(ValidationError::Content);
+    }
     if let Some(binding) = registry::kind_binding(kind) {
         if layer < binding.first_layer
             || layer > registry::COMPILED_LAYER
@@ -221,6 +225,9 @@ pub fn validate_service(service: &Service) -> Result<(), ValidationError> {
 /// Returns an error for invalid bounds, unknown entity kinds, mixed sealed content
 /// or a failed mention-span rule.
 pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
+    if !message.erasure_nonce.is_empty() && message.erasure_nonce.len() != 32 {
+        return Err(ValidationError::Content);
+    }
     if message.text.len() > MAX_TEXT_BYTES
         || message.entities.len() > MAX_ENTITIES
         || message.media.len() > MAX_MEDIA
@@ -232,7 +239,8 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
             || !message.entities.is_empty()
             || !message.media.is_empty()
             || message.reply_to.is_some()
-            || message.forward.is_some())
+            || message.forward.is_some()
+            || !message.erasure_nonce.is_empty())
     {
         return Err(ValidationError::Content);
     }

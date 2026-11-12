@@ -6,6 +6,7 @@
 use super::super::*;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
 pub struct Message {
     #[prost(string, tag = "1")]
     pub text: ::prost::alloc::string::String,
@@ -19,6 +20,9 @@ pub struct Message {
     pub media: ::prost::alloc::vec::Vec<MediaRef>,
     #[prost(message, optional, tag = "16")]
     pub sealed_group: ::core::option::Option<GroupSealedContent>,
+    /// Private entropy for erased-revision digests; never part of a public update/header.
+    #[prost(bytes = "vec", tag = "17")]
+    pub erasure_nonce: ::prost::alloc::vec::Vec<u8>,
 }
 impl serde::Serialize for Message {
     #[allow(deprecated)]
@@ -46,6 +50,9 @@ impl serde::Serialize for Message {
         if self.sealed_group.is_some() {
             len += 1;
         }
+        if !self.erasure_nonce.is_empty() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Message", len)?;
         if !self.text.is_empty() {
             struct_ser.serialize_field("text", &self.text)?;
@@ -65,6 +72,14 @@ impl serde::Serialize for Message {
         if let Some(v) = self.sealed_group.as_ref() {
             struct_ser.serialize_field("sealedGroup", v)?;
         }
+        if !self.erasure_nonce.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "erasureNonce",
+                pbjson::private::base64::encode(&self.erasure_nonce).as_str(),
+            )?;
+        }
         struct_ser.end()
     }
 }
@@ -83,6 +98,8 @@ impl<'de> serde::Deserialize<'de> for Message {
             "media",
             "sealed_group",
             "sealedGroup",
+            "erasure_nonce",
+            "erasureNonce",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -92,6 +109,7 @@ impl<'de> serde::Deserialize<'de> for Message {
             Forward,
             Media,
             SealedGroup,
+            ErasureNonce,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -119,6 +137,7 @@ impl<'de> serde::Deserialize<'de> for Message {
                             "forward" => Ok(GeneratedField::Forward),
                             "media" => Ok(GeneratedField::Media),
                             "sealedGroup" | "sealed_group" => Ok(GeneratedField::SealedGroup),
+                            "erasureNonce" | "erasure_nonce" => Ok(GeneratedField::ErasureNonce),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -142,6 +161,7 @@ impl<'de> serde::Deserialize<'de> for Message {
                 let mut forward__ = None;
                 let mut media__ = None;
                 let mut sealed_group__ = None;
+                let mut erasure_nonce__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -184,6 +204,14 @@ impl<'de> serde::Deserialize<'de> for Message {
                             }
                             sealed_group__ = map_.next_value()?;
                         }
+                        GeneratedField::ErasureNonce => {
+                            if erasure_nonce__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("erasureNonce"));
+                            }
+                            erasure_nonce__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
                     }
                 }
                 Ok(Message {
@@ -193,6 +221,7 @@ impl<'de> serde::Deserialize<'de> for Message {
                     forward: forward__,
                     media: media__.unwrap_or_default(),
                     sealed_group: sealed_group__,
+                    erasure_nonce: erasure_nonce__.unwrap_or_default(),
                 })
             }
         }

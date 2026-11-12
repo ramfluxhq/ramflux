@@ -71,8 +71,12 @@ fn group_history_forwarder_cannot_replace_commitments_without_original_signature
     let mut inner = g::Inner::decode(item.exact_inner.as_slice())?;
     let mut message = g::Message::decode(inner.body.as_slice())?;
     let sealed = message.sealed_group.as_mut().ok_or("sealed")?;
-    let plaintext =
-        g::Message { text: "forwarder replacement".into(), ..Default::default() }.encode_to_vec();
+    let plaintext = g::Message {
+        text: "forwarder replacement".into(),
+        erasure_nonce: vec![43; 32],
+        ..Default::default()
+    }
+    .encode_to_vec();
     let aad = crate::group::group_key_associated_data(
         &sealed.group_id,
         &verified.author.device,

@@ -12,9 +12,9 @@ use prost_reflect::{DescriptorPool, MessageDescriptor};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 /// Highest application layer implemented by this schema stage.
-pub const COMPILED_LAYER: u32 = 2;
+pub const COMPILED_LAYER: u32 = 3;
 /// Admitted schema floor; declaration freshness cannot lower it.
-pub const PROFILE_FLOOR: u32 = 2;
+pub const PROFILE_FLOOR: u32 = 3;
 /// Permanently withdrawn kind numbers.
 pub const RESERVED_KINDS: [u32; 3] = [13, 14, 15];
 /// Approved native-field provenance and exact descriptor tags (§3.1).

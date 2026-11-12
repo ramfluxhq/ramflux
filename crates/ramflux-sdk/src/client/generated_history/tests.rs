@@ -318,6 +318,7 @@ fn apply_claim(client: &RamfluxClient, item: &g::HistoryItem) -> TestResult<bool
             entry: &entry,
             source: &author.device,
             imported: Some(item),
+            own_sent: false,
         },
         &original.conversation_id,
         &item.exact_inner,

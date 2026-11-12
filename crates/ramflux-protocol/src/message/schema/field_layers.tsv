@@ -80,6 +80,7 @@ Message	reply_to	3	1
 Message	forward	4	1
 Message	media	5	1
 Message	sealed_group	16	1
+Message	erasure_nonce	17	3
 GroupSealedContent	group_id	1	1
 GroupSealedContent	author	2	1
 GroupSealedContent	key_epoch	3	1
