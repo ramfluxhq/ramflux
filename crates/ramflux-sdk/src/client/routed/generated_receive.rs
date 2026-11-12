@@ -280,32 +280,40 @@ impl RamfluxClient {
         let sealed =
             wrapper.sealed_group.as_ref().ok_or_else(|| invalid("sealed group missing"))?;
         let native = crate::client::generated_group::to_native(sealed)?;
-        let plaintext = zeroize::Zeroizing::new(self.decrypt_group_envelope_for_identity(
+        let decrypted = self.decrypt_group_envelope_with_opening(
             &native,
             &opened.routing.message_id,
             &opened.remote_device,
-        )?);
-        let outcome = validation::scan_message("Message", &plaintext, scanned.layer)
+        )?;
+        let plaintext = &decrypted.plaintext;
+        let origin = self.capture_group_retained_origin(
+            opened,
+            entry,
+            scanned.exact_inner,
+            &decrypted,
+            sealed,
+        )?;
+        let message = g::Message::decode(plaintext.as_slice())
+            .map_err(|_| invalid("invalid group Message"))?;
+        if message.sealed_group.is_some() {
+            return Err(invalid("recursive sealed group"));
+        }
+        let outcome = validation::scan_message("Message", plaintext, scanned.layer)
             .map_err(|error| invalid(&format!("invalid group content: {error}")))?;
         if scanned.outcome == ScanOutcome::Unsupported || outcome == ScanOutcome::Unsupported {
-            self.retain_generated_unsupported(opened, entry, scanned)?;
+            self.retain_generated_unsupported_origin(opened, entry, scanned, origin.as_ref())?;
             let copy = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
             self.account_db()?.put_unsupported_raw_copy(RawInnerCopyWrite {
                 owner_id: &opened.routing.message_id,
                 verified_source_anchor: opened.remote_device.root_commitment(),
                 copy_id: &format!("{copy}/nested-group"),
                 kind: RawInnerCopyKind::NestedGroup,
-                bytes: &plaintext,
+                bytes: plaintext,
                 bounded_metadata: &[],
             })?;
             return Ok(GeneratedProjection::Handled(None));
         }
-        let message = g::Message::decode(plaintext.as_slice())
-            .map_err(|_| invalid("invalid group Message"))?;
         validation::validate_message(&message).map_err(|_| invalid("invalid group content"))?;
-        if message.sealed_group.is_some() {
-            return Err(invalid("recursive sealed group"));
-        }
         self.merge_routed_group_link(&sealed.group_id, &opened.routing.conversation_id)?;
         self.append_plaintext_projection_once(
             &opened.routing.conversation_id,
@@ -315,6 +323,9 @@ impl RamfluxClient {
             metadata,
         )?;
         let db = self.account_db()?;
+        if let Some(origin) = origin.as_ref() {
+            self.persist_known_origin(&opened.routing.message_id, origin)?;
+        }
         db.persist_message_actor_state(
             &opened.routing.message_id,
             &format!("routed/group-projection/{}", opened.routing.message_id),
@@ -323,9 +334,23 @@ impl RamfluxClient {
         db.persist_message_actor_state(
             &opened.routing.message_id,
             &format!("routed/group-content/{}", opened.routing.message_id),
-            &*plaintext,
+            plaintext,
         )?;
         Ok(GeneratedProjection::Handled(Some(message.text.into_bytes())))
+    }
+
+    fn retain_direct_message_origin(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        bytes: &[u8],
+        identity: Option<&g::EventIdentity>,
+    ) -> Result<(), SdkError> {
+        if let Some(origin) = self.capture_retained_origin(opened, entry)? {
+            origin.verify(identity.ok_or_else(|| invalid("Message identity missing"))?, bytes)?;
+            self.persist_known_origin(&opened.routing.message_id, &origin)?;
+        }
+        Ok(())
     }
 
     fn project_known_generated(
@@ -344,6 +369,7 @@ impl RamfluxClient {
                     bytes,
                     metadata,
                 )?;
+                self.retain_direct_message_origin(opened, entry, bytes, identity.as_ref())?;
                 Some(message.text.into_bytes())
             }
             g::content::Value::Edit(_) => {
@@ -630,6 +656,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
+        self.retain_generated_unsupported_origin(opened, entry, scanned, None)
+    }
+
+    fn retain_generated_unsupported_origin(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        scanned: &validation::ScannedInner<'_>,
+        supplied_origin: Option<&crate::client::raw_inner_origin::RetainedOrigin>,
+    ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let target = match scanned.kind {
             3 => g::Edit::decode(scanned.body).ok().and_then(|edit| edit.target),
@@ -648,11 +684,10 @@ impl RamfluxClient {
             }
         }
         let copy_id = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
-        let origin = self.capture_retained_origin(opened, entry)?;
-        let origin_copy = origin
-            .as_ref()
-            .map(super::super::raw_inner_origin::RetainedOrigin::copy_id)
-            .transpose()?;
+        let captured_origin = self.capture_retained_origin(opened, entry)?;
+        let origin = supplied_origin.or(captured_origin.as_ref());
+        let origin_copy =
+            origin.map(super::super::raw_inner_origin::RetainedOrigin::copy_id).transpose()?;
         let provenance = Provenance {
             source: source.storage_key().to_owned(),
             conversation: opened.routing.conversation_id.clone(),
@@ -677,7 +712,7 @@ impl RamfluxClient {
         } else {
             self.ensure_generated_direct_conversation(opened, entry)?;
         }
-        if let (Some(origin), Some(origin_copy)) = (origin.as_ref(), origin_copy.as_ref()) {
+        if let (Some(origin), Some(origin_copy)) = (origin, origin_copy.as_ref()) {
             self.retain_raw_origin_copy(
                 &opened.routing.message_id,
                 source.root_commitment(),

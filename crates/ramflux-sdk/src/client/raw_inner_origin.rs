@@ -7,6 +7,11 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde::{Deserialize, Serialize};
+mod group;
+#[cfg(test)]
+mod group_golden_tests;
+#[cfg(test)]
+mod group_tests;
 
 /// Proves the original signer committed to these bytes; not delivery, freshness or node custody.
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,14 +49,22 @@ impl RetainedOrigin {
         exact_inner: &[u8],
     ) -> Result<VerifiedOrigin, SdkError> {
         let bad = EvidenceError::OriginCommitmentMismatch;
+        g::validation::scan_inner(exact_inner).map_err(|_| bad)?;
+        if self.evidence.report_opening.len() != 32
+            || (identity.group_id.is_some() && self.evidence.group_opening.len() != 64)
+        {
+            return Err(bad.into());
+        }
         let decoded = g::Inner::decode(exact_inner).map_err(|_| bad)?;
-        if !self.evidence.group_plaintext.is_empty()
-            || !self.evidence.group_opening.is_empty()
-            || self.evidence.group_membership.is_some()
-            || decoded.identity.as_ref() != Some(identity)
-            || self.routing.group_id.is_some()
-            || identity.group_id.is_some()
-            || identity.group_epoch.is_some()
+        if decoded.identity.as_ref() != Some(identity) {
+            return Err(bad.into());
+        }
+        if identity.group_id.is_none()
+            && (!self.evidence.group_plaintext.is_empty()
+                || !self.evidence.group_opening.is_empty()
+                || self.evidence.group_membership.is_some()
+                || self.routing.group_id.is_some()
+                || identity.group_epoch.is_some())
         {
             return Err(bad.into());
         }
@@ -79,6 +92,14 @@ impl RetainedOrigin {
             self.evidence.source_authority.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?,
             identity,
         )?;
+        if identity.group_id.is_some() {
+            if outer["delivery_mode"].as_str() != Some("durable")
+                || outer["delivery_class"].as_str() != Some("message")
+            {
+                return Err(bad.into());
+            }
+            self.verify_group_binding(identity, &decoded, &author)?;
+        }
         let mut a0_outer = outer.clone();
         a0_outer["encrypted_payload"] = serde_json::Value::String(String::new());
         // The placeholder is used for A0/header fields only. Signature verification above
@@ -115,6 +136,9 @@ impl RetainedOrigin {
         let issued = u64::try_from(envelope.created_at).map_err(|_| bad)?;
         let expires = issued.checked_add(u64::from(envelope.ttl)).ok_or(bad)?;
         g::original_header::verify_inner_extension(&envelope.ext, exact_inner, issued, expires)?;
+        if identity.group_id.is_some() {
+            self.verify_group_opening(&decoded)?;
+        }
         Ok(VerifiedOrigin { author, outer: envelope })
     }
 }
@@ -124,9 +148,18 @@ impl RamfluxClient {
         opened: &Opened,
         entry: &crate::GatewayInboxEntry,
     ) -> Result<Option<RetainedOrigin>, SdkError> {
-        if entry.envelope.schema != g::outer::CANDIDATE_ENVELOPE_SCHEMA
-            || opened.routing.group_id.is_some()
-        {
+        if opened.routing.group_id.is_some() {
+            return Ok(None);
+        }
+        self.capture_origin_material(opened, entry)
+    }
+
+    fn capture_origin_material(
+        &self,
+        opened: &Opened,
+        entry: &crate::GatewayInboxEntry,
+    ) -> Result<Option<RetainedOrigin>, SdkError> {
+        if entry.envelope.schema != g::outer::CANDIDATE_ENVELOPE_SCHEMA {
             return Ok(None);
         }
         let parsed = ramflux_crypto::parse_report_plaintext(&opened.decrypted.plaintext)?;
@@ -172,17 +205,47 @@ impl RamfluxClient {
         target: Option<&g::MessageRef>,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        let encoded = zeroize::Zeroizing::new(serde_json::to_vec(origin)?);
         db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
             owner_id: owner,
             verified_source_anchor: source,
             copy_id,
             kind: ramflux_storage::RawInnerCopyKind::SourceEvidence,
-            bytes: &serde_json::to_vec(origin)?,
+            bytes: &encoded,
             bounded_metadata: b"source evidence",
         })?;
         if let Some(target) = target {
             db.bind_raw_inner_copy(copy_id, &ramflux_protocol::encode_base64url(&target.id))?;
         }
+        Ok(())
+    }
+}
+
+impl RamfluxClient {
+    pub(crate) fn persist_known_origin(
+        &self,
+        owner: &str,
+        origin: &RetainedOrigin,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        if db.message_is_deleted(owner)?
+            || db
+                .load_actor_state::<bool>(&format!("routed/report-opening-retired/{owner}"))?
+                .unwrap_or(false)
+        {
+            return Err(EvidenceError::ReportOpeningRetired.into());
+        }
+        let encoded = zeroize::Zeroizing::new(serde_json::to_vec(origin)?);
+        // Known evidence follows ordinary local-history policy, not Unsupported owner quotas.
+        // Bound the private record by the existing history-container limit before persistence.
+        if encoded.len() > 4 * 1024 * 1024 {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
+        self.account_db()?.persist_message_actor_state(
+            owner,
+            &format!("routed/origin-evidence/{owner}"),
+            origin,
+        )?;
         Ok(())
     }
 }

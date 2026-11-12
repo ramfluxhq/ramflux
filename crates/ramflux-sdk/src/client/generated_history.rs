@@ -6,6 +6,7 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
+mod ordinary;
 mod pending;
 
 pub(crate) struct Author {
@@ -383,8 +384,8 @@ impl OriginalHeader {
 }
 
 impl RamfluxClient {
-    /// Select the current generated Edit's own C/opening for an explicit report.
-    /// The original and superseded events are non-reportable; no erased body is reconstructed.
+    /// Select the current generated Message/Edit's own C/opening for an explicit report.
+    /// Replaced originals and superseded events are non-reportable; no erased body is reconstructed.
     /// # Errors
     /// Refuses retired/missing evidence or an index that does not name the exact current event.
     pub fn selected_generated_report_evidence(
@@ -396,9 +397,19 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         let id = ramflux_protocol::encode_base64url(event_id);
-        let target = db
-            .load_actor_state::<String>(&format!("routed/report-event/{id}"))?
-            .ok_or(EvidenceError::ReportOpeningRetired)?;
+        let Some(target) = db.load_actor_state::<String>(&format!("routed/report-event/{id}"))?
+        else {
+            if db.message_content(&id)?.is_none()
+                || db
+                    .load_actor_state::<bool>(&format!("routed/report-opening-retired/{id}"))?
+                    .unwrap_or(false)
+            {
+                return Err(EvidenceError::ReportOpeningRetired.into());
+            }
+            let item = self.export_generated_history_item(event_id)?;
+            let proof = item.source_evidence.ok_or(EvidenceError::OriginEvidenceMissing)?;
+            return Ok((item.exact_inner, proof));
+        };
         let inner = db.message_content(&target)?.ok_or(EvidenceError::ReportOpeningRetired)?;
         let event = g::Inner::decode(inner.as_slice())
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
