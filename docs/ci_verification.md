@@ -18,6 +18,9 @@ The nextest `ci` profile retries once and prints flaky results. Its `heavy` grou
 allows one matching test at a time **per nextest invocation**, not across jobs or
 shards. CLI e2e uses nextest with the original feature and ignored-test selection.
 The shutdown profile inherits CI retry settings and keeps its timeout override.
+CLI `e2e_*` binaries, `linux_vault_*` proofs and the Linux vault writer test module
+have `retries = 0`: a second attempt must not inherit leaked processes, ports or
+provider state. Heavy-group scheduling still applies to these tests.
 
 `scripts/ci/run-nextest.py` removes stale JUnit, runs the command, immediately
 reports retries, and copies JUnit to `junit-<label>.xml` before the next invocation.
@@ -42,35 +45,55 @@ success. Hard job cancellation can prevent summary publication.
 
 The independent hosted **Test timing guard** runs
 `python3 -B scripts/ci/test-timing.py --check`. It reads first-party Rust under
-`apps/` and `crates/`, including test directories, test functions, and external
-modules reached through test cfg declarations. Other conditional test paths are
-included conservatively; it does not evaluate target features or expand macros.
+`apps/`, `crates/`, root `tests/`, and `tools/`. Test directories, test functions,
+and modules gated by `cfg(test)` or positive `cfg(all(test, ...))` are test scope.
+`cfg(any(..., test))`, `cfg(not(test))` and `cfg_attr` do not establish test-only
+scope. External module declarations propagate only positive test-only scope.
 
-The scanner removes comments/literals, follows grouped/module/function-value
-aliases in each source file, and recognizes sleep/timeout call syntax across
-line breaks. It hashes normalized complete call expressions, including referenced
-local constant initializers. `tokio::time` calls directly inside a
-`#[tokio::test(start_paused = true)]` function are counted separately and allowed;
-thread sleeps and unresolved timing calls in that function are not virtual time.
-Helpers do not inherit a caller's paused-time exemption.
+The scanner resolves explicit, grouped, aliased and glob imports in lexical
+scope, including `super::*` through declared inline and external modules. Local
+functions/constructors shadow imported names. It recognizes calls to Tokio's
+`sleep`, `sleep_until`, `timeout`, `timeout_at`; std thread `sleep`/`park_timeout`;
+std `TcpStream::connect_timeout` and qualified receiver/Condvar timeout APIs.
+The exact `.recv_timeout`, `.wait_timeout` and `.wait_timeout_while` method forms
+are also covered without receiver-type inference. Project helpers ending in
+`_timeout`, local `timeout()` constructors, and socket timeout setters are not
+sites. Multiline and turbofish calls are supported.
 
-`.config/test-timing-allowlist.toml` temporarily covers existing sites, expiring
-on 2026-12-12. Each entry binds `path`, enclosing `item`, expression SHA-256,
-occurrence `count`, `owner`, `reason`, and `expires`. Added copies, renamed items,
-changed expressions, missing exceptions, or expired entries fail CI. Deleting a
-site is allowed; remove its obsolete exception too. Formatting alone is stable.
+Tokio timing calls in `#[tokio::test(start_paused = true)]` functions, or after a
+resolved `tokio::time::pause()` in the same/enclosing lexical block, are counted
+separately and allowed. A resolved `resume()` ends that exemption. Pausing inside
+another branch/block does not exempt calls outside it; helper functions do not
+inherit their caller's state. std thread/channel waits remain wall-clock calls.
 
-Prefer replacing wall-clock waits with explicit events or virtual time. For an
-unavoidable real-process watchdog, review a narrow exception and expiry. The
-`--seed` mode prints candidate TOML for comparison only: do not replace the entire
-allow-list or extend every expiry to make a failing PR green. To renew, change the
-individual entry with a concrete reason and owner; to remove, delete its row.
+Each allow-list identity is **path + resolved call kind + normalized duration or
+deadline expression**, with a per-file occurrence count. The protected future,
+receiver name and enclosing function/module/impl names are not part of the key.
+Duration imports and referenced constants are normalized; formatting, moving a
+call within a file, and renaming its function do not require exception changes.
+Adding a call or changing its duration does. Receiver/Condvar APIs select their
+actual duration argument, not the receiver/guard or predicate.
 
-This is a bounded lexical guard, not a proof that all timing is virtual. Renamed
-cross-file re-exports, arbitrary wrapper APIs, runtime duration calculations, and
-macro expansions still require review. Because the full call is fingerprinted,
-changes to a protected future may also need an exception update. Do not interpret
-the allow-list as approval of every existing test design.
+`.config/test-timing-allowlist.toml` binds each identity to an `owner`, `reason`
+and inclusive UTC expiry. Initial top-level crate/app groups are staggered over
+2026-12-12, 2026-12-19, 2026-12-26 and 2027-01-02; root tests form their own group.
+CI rejects new/changed sites, expired entries, **stale rows** and excess counts.
+When a site is removed, delete its row or reduce its count in the same PR.
+
+Prefer explicit events or virtual time. For an unavoidable real-process
+watchdog, review a narrow exception. Renew only the affected row with current
+justification, owner and expiry; do not extend a whole weekly group. `--seed`
+prints candidate TOML for review, not an instruction to overwrite the allow-list.
+An explicit `--expires` changes candidate dates; it does not bypass validation.
+
+This is a bounded source guard, not a Rust compiler or a proof of virtual time.
+Function values (including passing `sleep` to another function or assigning a
+timer to a variable), interval/interval_at-driven polling, `Instant::elapsed`
+polling, arbitrary wrappers, generated code and macro expansion remain known
+limits requiring review; no name-based heuristic attempts to infer them.
+Runtime duration calculations are fingerprinted as expressions, not evaluated.
+Unresolvable cross-crate re-exports and receiver types likewise need review.
+The initial exception list does not endorse every existing test design.
 
 ## Advisory mutation report
 

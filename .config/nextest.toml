@@ -13,6 +13,11 @@ final-status-level = "flaky"
 [test-groups.heavy]
 max-threads = 1
 
+# Retrying a real-process crash proof can inherit leaked process/provider state.
+[[profile.ci.overrides]]
+filter = 'binary(/^e2e_/) | test(linux_vault_) | test(custody::vault::linux::writer::tests::)'
+retries = 0
+
 [[profile.ci.overrides]]
 filter = 'binary(graceful_shutdown) | binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group) | test(receive_resync_recovers_)'
 test-group = "heavy"
