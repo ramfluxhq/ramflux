@@ -450,9 +450,25 @@ impl RamfluxClient {
             })?;
         } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
             self.apply_generated_friend_control(entry, identity, friend, bytes)?;
+        } else if let Some(g::control::Payload::GroupKeyControl(key)) = control.payload.as_ref() {
+            self.apply_generated_group_key(opened, entry, identity, key, bytes)?;
+        } else if let Some(g::control::Payload::RecoveryControl(recovery)) =
+            control.payload.as_ref()
+        {
+            self.apply_generated_recovery(opened, entry, identity, recovery, bytes)?;
+        } else if let Some(g::control::Payload::A2i(event)) = control.payload.as_ref() {
+            self.apply_generated_a2i(opened, entry, identity, event, bytes)?;
+        } else if let Some(g::control::Payload::ObjectRevoke(revoke)) = control.payload.as_ref() {
+            self.apply_generated_object_revoke(opened, entry, identity, revoke, bytes)?;
+        } else if matches!(control.operation, 8 | 10) {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Content,
+                reason: "HomeMigration and LivePresence are unavailable in v1".into(),
+            });
         } else {
+            // Only an operation this build has no arm for can arrive here.
             return Err(SdkError::InboundPending(
-                "generated native control executor is not yet activated".into(),
+                "generated control operation is unknown to this build".into(),
             ));
         }
         Ok(())
@@ -760,6 +776,21 @@ impl RamfluxClient {
         }
         if matches!(control.payload.as_ref(), Some(g::control::Payload::OwnHistory(_))) {
             self.authorize_generated_history_page(&source, scanned.body)?;
+        }
+        match control.payload.as_ref() {
+            Some(g::control::Payload::GroupKeyControl(key)) => {
+                self.authorize_generated_group_key(opened, entry, key)?;
+            }
+            Some(g::control::Payload::RecoveryControl(recovery)) => {
+                self.authorize_generated_recovery(opened, entry, recovery)?;
+            }
+            Some(g::control::Payload::A2i(event)) => {
+                self.authorize_generated_a2i(opened, entry, event)?;
+            }
+            Some(g::control::Payload::ObjectRevoke(revoke)) => {
+                self.authorize_generated_object_revoke(opened, entry, revoke)?;
+            }
+            _ => {}
         }
         if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
             self.authorize_generated_friend_control(&source, friend)?;
