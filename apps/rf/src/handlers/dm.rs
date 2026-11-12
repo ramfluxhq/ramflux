@@ -7,6 +7,8 @@ use super::*;
 
 #[path = "dm/wait.rs"]
 mod wait;
+#[path = "dm/unified.rs"]
+mod unified;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
@@ -102,6 +104,17 @@ async fn handle_dm_list(
     bus: &mut LocalBusClient,
     selector: ConversationSelector,
 ) -> Result<(), RfError> {
+    let query = unified::Query {
+        account: selector.account.clone(),
+        conversation: selector.conversation.clone(),
+        limit: selector.limit,
+        before: selector.before.clone(),
+        after_seq: selector.after_seq,
+        message: selector.message.clone(),
+    };
+    if unified::selected(&query)? {
+        return unified::print(bus, &query, false).await;
+    }
     let request = LocalBusConversationRequest { conversation_id: selector.conversation };
     let received = bus
         .request(
@@ -128,6 +141,17 @@ async fn handle_dm_list(
 }
 
 async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), RfError> {
+    let query = unified::Query {
+        account: read.account.clone(),
+        conversation: read.conversation.clone(),
+        limit: read.limit,
+        before: read.before.clone(),
+        after_seq: read.after_seq,
+        message: read.message.clone(),
+    };
+    if unified::selected(&query)? {
+        return unified::print(bus, &query, true).await;
+    }
     let request = LocalBusConversationRequest { conversation_id: read.conversation };
     let received = wait::receive(std::time::Duration::from_secs(read.wait), async || {
         Ok(bus

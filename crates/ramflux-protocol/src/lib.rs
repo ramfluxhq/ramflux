@@ -38,6 +38,7 @@ pub use identity_keys::*;
 pub mod object_relay_v3;
 mod protocol_object;
 mod replay;
+pub mod schema_activation;
 pub mod schema_profile;
 mod signature;
 mod state;

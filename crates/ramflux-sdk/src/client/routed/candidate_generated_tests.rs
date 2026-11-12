@@ -1785,3 +1785,6 @@ fn cleared_self_sync_register_discards_a_prepared_courier_plan_before_ratchet_wo
     );
     Ok(())
 }
+
+#[path = "candidate_read_model_tests.rs"]
+mod read_model;

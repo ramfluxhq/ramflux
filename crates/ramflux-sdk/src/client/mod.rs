@@ -86,6 +86,9 @@ pub mod typed_read_model;
 pub mod typing;
 mod unsupported_view;
 
+#[cfg(test)]
+mod activation_guard_tests;
+
 use crate::prelude::*;
 
 pub struct RamfluxClient {
