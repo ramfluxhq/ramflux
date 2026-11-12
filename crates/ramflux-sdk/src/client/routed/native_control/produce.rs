@@ -79,7 +79,9 @@ impl RamfluxClient {
 
     /// Drop the captured bytes once the transport reports the control delivered. The capture of
     /// a guardian invite holds the recovery share, so it must not outlive delivery.
-    pub(crate) fn retire_generated_peer_control(&self, operation_key: &str) -> Result<(), SdkError> {
+    /// # Errors
+    /// Returns a storage error when the capture row cannot be removed.
+    pub fn retire_generated_peer_control(&self, operation_key: &str) -> Result<(), SdkError> {
         Ok(self.account_db()?.remove_actor_state(&capture_key(operation_key))?)
     }
 
@@ -90,7 +92,10 @@ impl RamfluxClient {
 
     /// `CONTROL_GROUP_KEY` for one recipient device of `conversation` (the group conversation).
     /// `group_epoch` is the verified group state epoch, as in the Snapshot producer.
-    pub(crate) fn generated_group_key_inner(
+    /// Additive candidate API; does not send.
+    /// # Errors
+    /// Refuses a distribution this device did not author or a failed native check.
+    pub fn generated_group_key_inner(
         &self,
         conversation: &str,
         group_epoch: u64,
@@ -121,7 +126,10 @@ impl RamfluxClient {
     }
 
     /// `CONTROL_RECOVERY` invite. Records the issued invite so a later accept can be bound.
-    pub(crate) fn generated_guardian_invite_inner(
+    /// Additive candidate API; does not send.
+    /// # Errors
+    /// Refuses an invite this device did not author or an invite id reused with other terms.
+    pub fn generated_guardian_invite_inner(
         &self,
         invite: &SdkGuardianInviteMessage,
         guardian_root: &str,
@@ -160,7 +168,10 @@ impl RamfluxClient {
     }
 
     /// `CONTROL_RECOVERY` accept, sent by the guardian after the local user accepted the invite.
-    pub(crate) fn generated_guardian_accept_inner(
+    /// Additive candidate API; does not send.
+    /// # Errors
+    /// Refuses an accept this device did not author or a changed retry.
+    pub fn generated_guardian_accept_inner(
         &self,
         accept: &SdkGuardianAcceptMessage,
         owner_root: &str,
@@ -184,7 +195,10 @@ impl RamfluxClient {
     }
 
     /// `CONTROL_A2I` from an already signed native document authored by this device.
-    pub(crate) fn generated_a2i_inner(
+    /// Additive candidate API; does not send.
+    /// # Errors
+    /// Refuses an event this device did not author or one that fails the typed round trip.
+    pub fn generated_a2i_inner(
         &self,
         event: &ramflux_protocol::A2iControlEvent,
         target_root: &str,
@@ -201,7 +215,10 @@ impl RamfluxClient {
     }
 
     /// `CONTROL_OBJECT_REVOKE` for one recipient root of an object this account shared.
-    pub(crate) fn generated_object_revoke_inner(
+    /// Additive candidate API; does not send.
+    /// # Errors
+    /// Refuses incomplete revoke fields or a changed retry.
+    pub fn generated_object_revoke_inner(
         &self,
         revoke: g::ObjectRevokeAccess,
         recipient_root: &str,
