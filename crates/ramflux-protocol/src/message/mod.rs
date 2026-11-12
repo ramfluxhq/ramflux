@@ -17,6 +17,7 @@ pub mod exact_content;
 pub mod history_chain;
 pub mod identity;
 pub mod original_header;
+pub mod private_revision;
 pub use client_class::{
     ClientDeliveryClass, ProviderPush, client_class_from_delivery, client_class_from_notification,
     provider_push,

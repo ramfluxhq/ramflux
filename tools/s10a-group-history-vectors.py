@@ -122,7 +122,7 @@ for counter in range(2):
     context = session + b"send" + n + digest(b"ramflux.committing_aead.header.v1", header) + digest(message_domain, aad)
     keys = hkdf(digest(message_domain, context), secret, message_domain + context, 108)
     aead_key, nonce, commitment_key, opening_key = keys[:32], keys[32:44], keys[44:76], keys[76:108]
-    plaintext = blob(1, "independent signed group " + str(counter))
+    plaintext = blob(1, "independent signed group " + str(counter)) + blob(17, bytes([40+counter])*32)
     ciphertext = ChaCha20Poly1305(aead_key).encrypt(nonce, plaintext, aad + header)
     hh = b64(digest(b"ramflux.committing_aead.header.v1", header))
     ah = b64(digest(b"ramflux.committing_aead.ad.v1", aad))
@@ -138,9 +138,9 @@ for counter in range(2):
     event_id = blake3(lp(b"ramflux.message.id.v1") + lp(root.encode()) + lp(device["device_id"].encode())
                       + device["device_epoch"].to_bytes(8, "big") + lp(conversation.encode()) + (counter+1).to_bytes(8, "big")).digest()
     event = blob(1, event_id) + blob(2, conversation) + blob(3, author) + integer(4, counter+1) + integer(5, 1000+counter) + blob(6, group) + integer(7, 1)
-    exact_inner = integer(1, 2) + integer(2, 1) + blob(3, event) + blob(4, blob(16, sealed))
+    exact_inner = integer(1, 3) + integer(2, 1) + blob(3, event) + blob(4, blob(16, sealed))
     group_binding = lp(group.encode()) + lp(author) + lp((1).to_bytes(8, "big")) + lp(un64(head))
-    header_transcript = b"".join(lp(value) for value in [b"ramflux.message.original_header.v1", (2).to_bytes(4, "big"), (1).to_bytes(4, "big"), event,
+    header_transcript = b"".join(lp(value) for value in [b"ramflux.message.original_header.v1", (3).to_bytes(4, "big"), (1).to_bytes(4, "big"), event,
                                                         now.to_bytes(8, "big"), (now+300).to_bytes(8, "big"), group_binding])
     outer = {"schema": "ramflux.envelope.v2", "version": 2, "domain": "ramflux.envelope.v2", "signing_key_id": "golden-device-key",
              "signature_alg": "ed25519", "envelope_id": "golden-group-"+str(counter), "source_principal_id": body["principal_id"],

@@ -152,6 +152,8 @@ message Message {
   repeated MediaRef media = 5;
   reserved 6 to 15;
   GroupSealedContent sealed_group = 16;
+  // Private entropy for erased-revision digests; never part of a public update/header.
+  bytes erasure_nonce = 17;
 }
 message GroupSealedContent {
   string group_id = 1;

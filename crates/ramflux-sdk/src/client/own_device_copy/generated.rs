@@ -4,7 +4,6 @@
 //! Pair-sealed `CONTROL_OWN_MESSAGE_COPY` envelopes, one per sibling (S10a P07b2 / audit M2).
 
 use super::{OwnCopyDraft, invalid};
-use crate::client::generated_content::GeneratedEventStream;
 use crate::client::generated_control::control_from_payload;
 use crate::client::identity_authority::NativeOperation;
 use crate::client::routed::{Route, SendMaterial};
@@ -25,6 +24,16 @@ impl RamfluxClient {
     pub(crate) fn seal_own_copy_generated(
         &self,
         config: &GatewaySessionConfig,
+        draft: OwnCopyDraft,
+        materials: Vec<SendMaterial>,
+    ) -> Result<Vec<(String, ramflux_protocol::Envelope)>, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.seal_own_copy_generated_in(config, draft, materials))
+    }
+
+    fn seal_own_copy_generated_in(
+        &self,
+        config: &GatewaySessionConfig,
         mut draft: OwnCopyDraft,
         materials: Vec<SendMaterial>,
     ) -> Result<Vec<(String, ramflux_protocol::Envelope)>, SdkError> {
@@ -36,6 +45,11 @@ impl RamfluxClient {
         let messages = std::mem::take(&mut draft.messages);
         let siblings = std::mem::take(&mut draft.siblings);
         let mut envelopes = Vec::with_capacity(messages.len());
+        let identity = self.allocate_generated_identity(
+            &draft.conversation,
+            crate::client::generated_identity::now_ms(),
+            true,
+        )?;
         for (mut message, (material, sibling)) in
             messages.into_iter().zip(materials.into_iter().zip(siblings))
         {
@@ -46,8 +60,9 @@ impl RamfluxClient {
             )?;
             message.conversation_id.clone_from(&draft.conversation);
             message.envelope_id = crate::new_surface_message_id()?;
-            message.message_id.clone_from(&draft.packet.id);
-            let inner = Self::encode_own_message_copy_inner(&draft, &sibling, &body)?;
+            message.message_id = ramflux_protocol::encode_base64url(&identity.id);
+            let inner =
+                self.encode_own_message_copy_inner(&draft, &sibling, &body, identity.clone())?;
             let sealed =
                 self.seal_routed_prepared(config, &message, &inner, Route::control(), material)?;
             let envelope =
@@ -58,21 +73,33 @@ impl RamfluxClient {
     }
 
     fn encode_own_message_copy_inner(
+        &self,
         draft: &OwnCopyDraft,
         sibling: &g::QualifiedDevice,
         body: &[u8],
+        identity: g::EventIdentity,
     ) -> Result<Vec<u8>, SdkError> {
         let payload = if let Some(sent) =
             crate::client::own_sent_message::generated_own_sent_from_prefix(body)?
         {
             own_message_copy::Payload::Sent(sent)
         } else {
-            own_message_copy::Payload::Item(g::HistoryItem {
-                exact_inner: body.to_vec(),
-                tombstone: None,
-                source_evidence: None,
-                ..Default::default()
-            })
+            let inner =
+                g::Inner::decode(body).map_err(|_| invalid("own copy requires exact Inner"))?;
+            let target = if inner.kind == 3 {
+                g::Edit::decode(inner.body.as_slice())
+                    .map_err(|_| invalid("own copy Edit missing"))?
+                    .target
+                    .ok_or_else(|| invalid("own copy Edit target missing"))?
+                    .id
+            } else {
+                inner.identity.ok_or_else(|| invalid("own copy original identity missing"))?.id
+            };
+            let item = self.export_generated_history_item(&target)?;
+            if item.exact_inner != body {
+                return Err(g::original_header::EvidenceError::ReportOpeningRetired.into());
+            }
+            own_message_copy::Payload::Item(item)
         };
         let control =
             control_from_payload(g::control::Payload::OwnMessageCopy(g::OwnMessageCopy {
@@ -82,12 +109,10 @@ impl RamfluxClient {
                 expires_at: draft.expires_at,
                 payload: Some(payload),
             }))?;
-        let mut stream =
-            GeneratedEventStream::new(draft.conversation.clone(), draft.source.clone());
-        if let Some(group) = draft.group.as_deref() {
-            stream = stream.with_group(group, 0);
-        }
-        Self::encode_generated_control(&mut stream, draft.message_id.as_bytes().to_vec(), control)
+        Self::encode_generated_inner(
+            identity,
+            &g::Content { value: Some(g::content::Value::Control(control)) },
+        )
     }
 
     pub(crate) fn receive_generated_own_message_copy(
@@ -96,6 +121,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         copy: &g::OwnMessageCopy,
     ) -> Result<(), SdkError> {
+        self.authorize_generated_own_message_copy(opened, entry, copy)?;
         crate::client::generated_control::validate_control_operation(&g::Control {
             operation: 15,
             payload: Some(g::control::Payload::OwnMessageCopy(copy.clone())),
@@ -143,20 +169,17 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let replay_id = entry.envelope.envelope_id.as_str();
         let key = super::receipts::replay_key(db, &local, entry, replay_id)?;
-        let wire_fingerprint = ramflux_protocol::hash_base64url(super::DOMAIN, &opened.body);
+        // Transport replay uses the authenticated randomized ciphertext claim, never a
+        // retained hash of a copied plaintext body after that body's erase lifetime.
+        let wire_fingerprint = entry.envelope.payload_hash.clone();
         let fingerprint = super::receipts::packet_fingerprint(db, &wire_fingerprint)?;
         if super::receipts::committed(db, &key, &fingerprint, now)? {
             return Ok(());
         }
         super::receipts::remember(db, &key, &fingerprint, context.expires_at, false, now)?;
         let scope = if let Some(sent) = generated.sent {
-            let applied = self.receive_generated_own_sent(
-                &source_identity,
-                generated.conversation,
-                generated.group,
-                copy.created_at,
-                sent,
-            )?;
+            let applied =
+                self.receive_generated_own_sent(entry, &source_identity, copy.created_at, sent)?;
             if !applied {
                 return Err(invalid("own sent message context mismatch"));
             }
@@ -172,14 +195,22 @@ impl RamfluxClient {
             super::ReceiptScope::Private {
                 private_scope: db.own_sent_receipt_scope(&context.source, local.device_id())?,
             }
+        } else if let Some(own_message_copy::Payload::Item(item)) = copy.payload.as_ref() {
+            let nested = g::Inner::decode(item.exact_inner.as_slice())
+                .map_err(|_| invalid("own history Inner missing"))?;
+            if nested
+                .identity
+                .as_ref()
+                .is_none_or(|identity| identity.conversation_id != generated.conversation)
+            {
+                return Err(invalid("own history conversation differs from control"));
+            }
+            self.import_generated_history_message(&source_identity, item)?;
+            super::ReceiptScope::Private {
+                private_scope: db.own_sent_receipt_scope(&context.source, local.device_id())?,
+            }
         } else {
-            self.apply_own_device_control(
-                entry,
-                &source_identity,
-                &context,
-                generated.nested,
-                local.device_id(),
-            )?
+            return Err(invalid("own message copy payload missing"));
         };
         self.persist_own_device_receipt(
             &format!("{}{replay_id}", super::RECEIPTS),
@@ -207,7 +238,6 @@ fn copy_id_for(root: &str, source: &str, message: &str) -> Result<String, SdkErr
 
 struct GeneratedCopyParts<'a> {
     id: &'a str,
-    nested: &'a [u8],
     conversation: &'a str,
     group: Option<&'a str>,
     sent: Option<&'a g::OwnSentMessage>,
@@ -220,14 +250,16 @@ fn generated_copy_parts<'a>(
     match copy.payload.as_ref() {
         Some(own_message_copy::Payload::Sent(sent)) => Ok(GeneratedCopyParts {
             id: sent.envelope_id.as_str(),
-            nested: sent.exact_inner.as_slice(),
             conversation: sent.context.as_ref().map_or("", |ctx| ctx.conversation_id.as_str()),
-            group: None,
+            group: sent
+                .context
+                .as_ref()
+                .and_then(|ctx| ctx.group.as_ref())
+                .map(|group| group.group_id.as_str()),
             sent: Some(sent),
         }),
-        Some(own_message_copy::Payload::Item(item)) => Ok(GeneratedCopyParts {
+        Some(own_message_copy::Payload::Item(_)) => Ok(GeneratedCopyParts {
             id: opened.routing.message_id.as_str(),
-            nested: item.exact_inner.as_slice(),
             conversation: opened.routing.conversation_id.as_str(),
             group: opened.routing.group_id.as_deref(),
             sent: None,

@@ -139,7 +139,9 @@ pub fn decode_send_message(value: &Value) -> Result<g::SendMessage, SdkError> {
 /// Returns an error when required fields are missing or JSON encoding fails.
 pub fn encode_message_update(update: &g::MessageUpdate) -> Result<Value, SdkError> {
     validate_update(update)?;
-    encode_named("MessageUpdate", update)
+    let mut public = update.clone();
+    g::private_revision::redact_update(&mut public);
+    encode_named("MessageUpdate", &public)
 }
 
 /// Decode a generated update and refuse keys that are not descriptor fields.
@@ -148,8 +150,9 @@ pub fn encode_message_update(update: &g::MessageUpdate) -> Result<Value, SdkErro
 /// Returns an error for unknown fields, missing state, or invalid JSON.
 pub fn decode_message_update(value: &Value) -> Result<g::MessageUpdate, SdkError> {
     reject_unknown_keys("MessageUpdate", value)?;
-    let update: g::MessageUpdate = serde_json::from_value(value.clone())?;
+    let mut update: g::MessageUpdate = serde_json::from_value(value.clone())?;
     validate_update(&update)?;
+    g::private_revision::redact_update(&mut update);
     Ok(update)
 }
 
@@ -256,6 +259,9 @@ fn validate_send(send: &g::SendMessage) -> Result<(), SdkError> {
     if send.conversation_id.is_empty() || !(16..=64).contains(&send.operation_id.len()) {
         return Err(invalid("SendMessage requires conversation_id and a 16..64-byte operation_id"));
     }
+    if send.content.as_ref().is_some_and(g::private_revision::public_input_has_nonce) {
+        return Err(invalid("public input cannot select private revision entropy"));
+    }
     let content = send
         .content
         .as_ref()
@@ -263,6 +269,9 @@ fn validate_send(send: &g::SendMessage) -> Result<(), SdkError> {
         .ok_or_else(|| invalid("SendMessage requires content"))?;
     match content {
         g::content::Value::Message(message) => {
+            if !message.erasure_nonce.is_empty() {
+                return Err(invalid("public Message input cannot select private revision entropy"));
+            }
             if let (Some(outer), Some(inner)) = (&send.reply_to, &message.reply_to)
                 && outer != inner
             {

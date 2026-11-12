@@ -6,6 +6,7 @@
 use super::super::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[prost(skip_debug)]
 pub struct Inner {
     #[prost(uint32, tag = "1")]
     pub layer: u32,

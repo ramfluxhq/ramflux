@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 use super::*;
 
-const MESSAGE: &[u8] = b"\x0a\x05hello";
+const MESSAGE: &[u8] = b"\x0a\x05hello\x8a\x01\x20*******************************\x2a";
 fn fixture() -> Result<g::GroupSealedContent, Box<dyn std::error::Error>> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!("golden.json"))?;
     let bytes = |field: &str| {

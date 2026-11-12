@@ -95,6 +95,13 @@ fn generate(root: &Path, check: bool) -> Result<(), Box<dyn Error>> {
         let descriptor_bytes = descriptors.encode_to_vec();
         let mut config = prost_build::Config::new();
         config.out_dir(&temporary).btree_map(["."]);
+        config.skip_debug([
+            ".ramflux.message.v1.Message",
+            ".ramflux.message.v1.Inner",
+            ".ramflux.message.v1.HistoryItem",
+            ".ramflux.message.v1.OwnSentMessage",
+            ".ramflux.message.v1.HistoryOriginEvidence",
+        ]);
         config.compile_fds(descriptors)?;
         pbjson_build::Builder::new()
             .out_dir(&temporary)

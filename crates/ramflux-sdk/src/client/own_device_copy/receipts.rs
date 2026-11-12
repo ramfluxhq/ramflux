@@ -156,6 +156,25 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<OwnCopyAckBinding>, SdkError> {
+        if entry.envelope.delivery_class == ramflux_protocol::DeliveryClass::Message {
+            let db = self.account_db()?;
+            let receipt_key = format!("{RECEIPTS}{}", entry.envelope.envelope_id);
+            if db.load_actor_state::<Receipt>(&receipt_key)?.is_none() {
+                return Ok(None);
+            }
+            let target = self.owned_device_identity()?;
+            let key = replay_key(db, &target, entry, &entry.envelope.envelope_id)?;
+            let fingerprint = packet_fingerprint(db, &entry.envelope.payload_hash)?;
+            // Settlement marks already committed content even if its display/delivery
+            // lifetime expired while the gateway ACK was in flight.
+            if db
+                .load_actor_state::<Committed>(&key)?
+                .is_none_or(|record| record.fingerprint != fingerprint)
+            {
+                return Ok(None);
+            }
+            return Ok(Some(OwnCopyAckBinding { committed_key: key, receipt_key, fingerprint }));
+        }
         if entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl {
             return Ok(None);
         }

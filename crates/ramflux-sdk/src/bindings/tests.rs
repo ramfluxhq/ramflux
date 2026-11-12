@@ -413,3 +413,57 @@ fn generated_error_decode_refuses_code_name_and_detail_mismatches() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+fn public_bindings_strip_private_revision_nonce_and_refuse_selected_input()
+-> Result<(), Box<dyn std::error::Error>> {
+    let message = g::Message {
+        text: "public body".into(),
+        erasure_nonce: vec![203; 32],
+        ..Default::default()
+    };
+    let mut send = g::SendMessage {
+        conversation_id: "conversation".into(),
+        operation_id: vec![1; 16],
+        content: Some(g::Content { value: Some(g::content::Value::Message(message.clone())) }),
+        ..Default::default()
+    };
+    assert!(encode_send_message(&send).is_err());
+    let update = g::MessageUpdate {
+        account_id: "account".into(),
+        journal_sequence: 1,
+        identity: None,
+        state: Some(g::message_update::State::Content(send.content.clone().ok_or("content")?)),
+    };
+    let mut cached = update.clone();
+    cached.identity = Some(g::EventIdentity {
+        id: vec![2; 32],
+        conversation_id: "conversation".into(),
+        ..Default::default()
+    });
+    let mut cache = crate::client::typed_messages::MessageCache::default();
+    cache.apply(cached);
+    let cached =
+        serde_json::to_string(cache.get("conversation", &[2; 32]).ok_or("cached public update")?)?;
+    assert!(!cached.contains("erasureNonce") && !cached.contains("erasure_nonce"));
+    let encoded = encode_message_update(&update)?;
+    let wire = serde_json::to_string(&encoded)?;
+    assert!(!wire.contains("erasureNonce") && !wire.contains("erasure_nonce"));
+    assert!(!wire.contains(&ramflux_protocol::encode_base64url([203; 32])));
+    let public = decode_message_update(&encoded)?;
+    let Some(g::message_update::State::Content(g::Content {
+        value: Some(g::content::Value::Message(public)),
+    })) = public.state
+    else {
+        return Err("public content".into());
+    };
+    assert_eq!(public.erasure_nonce, [] as [u8; 0]);
+    assert_eq!(public.text, message.text);
+    if let Some(g::Content { value: Some(g::content::Value::Message(message)) }) =
+        send.content.as_mut()
+    {
+        message.erasure_nonce.clear();
+    }
+    assert!(encode_send_message(&send).is_ok());
+    Ok(())
+}

@@ -65,7 +65,8 @@ pub fn validate(value: &SelfSync) -> Result<Operation, ValidationError> {
         }
     }
     if let Some(draft) = &value.draft {
-        if draft.sealed_group.is_some()
+        if !draft.erasure_nonce.is_empty()
+            || draft.sealed_group.is_some()
             || !draft.media.is_empty()
             || draft.forward.is_some()
             || draft.text.len() > 65_536

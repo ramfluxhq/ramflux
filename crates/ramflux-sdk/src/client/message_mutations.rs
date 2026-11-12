@@ -5,7 +5,7 @@
 //! This module neither sends a carrier nor admits a stored event.
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
-use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
+use ramflux_protocol::message::registry::{COMPILED_LAYER, kind_binding};
 use ramflux_protocol::message::{DeleteScope, KindId};
 
 /// OV-EDIT-DIGEST transcript over the canonical target and exact content in force.
@@ -55,6 +55,7 @@ pub(crate) struct EditContext<'a> {
     pub entry: &'a crate::GatewayInboxEntry,
     pub source: &'a ramflux_crypto::RootQualifiedDeviceRef,
     pub imported: Option<&'a ramflux_protocol::message::HistoryItem>,
+    pub own_sent: bool,
 }
 
 impl RamfluxClient {
@@ -240,7 +241,7 @@ impl RamfluxClient {
             entry,
         )?;
         self.apply_generated_edit_authorized(
-            EditContext { entry, source: &source, imported: None },
+            EditContext { entry, source: &source, imported: None, own_sent: false },
             conversation,
             exact_inner,
             metadata,
@@ -263,7 +264,7 @@ impl RamfluxClient {
                 context.source.root_commitment(),
             )
         } else {
-            self.park_generated_edit(context.entry, identity, edit, bytes)
+            self.park_generated_edit(context.entry, identity, edit, bytes, context.own_sent)
         }
     }
 
@@ -297,7 +298,11 @@ impl RamfluxClient {
         metadata: Option<&ramflux_storage::MessageMetadata>,
     ) -> Result<bool, SdkError> {
         use ramflux_protocol::message as g;
-        let EditContext { source, imported, .. } = authorization;
+        let EditContext { source, imported, own_sent, .. } = authorization;
+        let historical = imported.is_some() || own_sent;
+        if own_sent && source.root_commitment() != self.own_account_anchor()? {
+            return Err(refused("own-sent Edit requires same-root attestation"));
+        }
         let (identity, content) = Self::decode_generated_inner(exact_inner)?;
         let Some(g::content::Value::Edit(edit)) = content.value else {
             return Err(refused("expected generated Edit"));
@@ -342,7 +347,6 @@ impl RamfluxClient {
             let applied = db.load_actor_state::<EditRegister>(&state_key)?;
             let incoming = (edit.revision, identity.id.as_slice());
             let old_pair = applied.as_ref().map(|state| (state.revision, state.event_id.as_slice()));
-            if imported.is_some() && old_pair.is_some_and(|pair| incoming <= pair) { return Ok(false); }
             let Some(stored) = db.message_content(&target_id)? else {
                 self.park_waiting_generated_edit(authorization, &identity, &edit, exact_inner)?;
                 return Ok(false);
@@ -353,12 +357,12 @@ impl RamfluxClient {
                 .map_err(|_| refused("Edit target must be a Message"))?.to_vec() };
             g::Message::decode(original_content.as_slice()).map_err(|_| refused("Edit target has invalid Message content"))?;
             edit.replacement.as_ref().ok_or_else(|| refused("Edit replacement missing"))?;
-            let digest = if imported.is_some() { [0;32] } else if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
+            let digest = if historical { [0;32] } else if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
                 digest_exact_content(target, &nested)?
             } else { previous_content_digest(target, &stored)? };
             let old_revision = applied.as_ref().map_or(0, |state| state.revision);
-            let fork = imported.is_none() && ((old_revision == edit.revision && old_pair != Some(incoming))
-                || (edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest));
+            let fork = (old_revision == edit.revision && old_pair != Some(incoming))
+                || (!historical && edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest);
             if fork && source.root_commitment() == self.own_account_anchor()? {
                 let losing = if old_pair.is_some_and(|pair| pair < incoming) {
                     applied.as_ref().map_or_else(|| identity.id.clone(), |state| state.event_id.clone())
@@ -499,6 +503,7 @@ pub fn authorize_reaction(target: &StoredTarget) -> Result<(), SdkError> {
 /// Closed Edit/Delete field tags at the S10a floor. A new erasure-relevant field
 /// requires a floor raise; it cannot ride as optional above F.
 pub const ERASURE_FIELDS: &[(&str, u32, u32)] = &[
+    ("Message", 17, 3),
     ("Edit", 1, 2),
     ("Edit", 2, 2),
     ("Edit", 3, 2),
@@ -513,13 +518,13 @@ pub const ERASURE_FIELDS: &[(&str, u32, u32)] = &[
 /// # Errors
 /// Refuses a field above the current floor without raising the floor to match.
 pub fn admit_erasure_field(first_layer: u32, new_floor: u32) -> Result<(), SdkError> {
-    if first_layer > PROFILE_FLOOR && new_floor < first_layer {
+    if new_floor < first_layer {
         return Err(refused("erasure-relevant field above the floor requires a profile reset"));
     }
     Ok(())
 }
 
-/// Kind first-layer for Edit/Delete/Reaction is the S10a floor (2), never 1.
+/// Mutations were introduced at layer 2; the private-revision profile now requires layer 3.
 #[must_use]
 pub fn mutation_first_layer(kind: KindId) -> Option<u32> {
     let number = u32::try_from(i32::from(kind)).ok()?;

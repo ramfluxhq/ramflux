@@ -44,6 +44,7 @@ impl AccountDb {
                 )
                 .optional()?;
             let mut update = update.clone();
+            g::private_revision::redact_update(&mut update);
             if let Some(previous) = previous {
                 update.journal_sequence = previous.seq;
                 if previous.topic != topic

@@ -6,6 +6,7 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
+mod import;
 mod ordinary;
 mod pending;
 
@@ -311,6 +312,7 @@ impl RamfluxClient {
                 entry,
                 source: &edit_author.device,
                 imported: Some(item),
+                own_sent: false,
             },
             &original.conversation_id,
             &item.exact_inner,
