@@ -79,14 +79,7 @@ path.write_text(s.replace(needle,needle+'\n                db.remove_actor_state
 PY
 expect_assertion_failure self_sync_read_draft_pin_mute_revision_authority_and_erasure
 cp "$saved_extra/0" "${extra_files[0]}"
-python3 - "${extra_files[1]}" <<'PY'
-from pathlib import Path
-import sys
-path=Path(sys.argv[1]);s=path.read_text()
-needle='if !reuse {'
-assert s.count(needle)==1
-path.write_text(s.replace(needle,'if true || !reuse {'))
-PY
-expect_assertion_failure self_sync_publication_allocates_once_across_fanout_and_restart
-cp "$saved_extra/1" "${extra_files[1]}"
+# The publication allocator stays unreachable under the adopted CLOSED v0 floor gate.
+# Probe that production gate instead of opening floorless publication for a test.
+tools/s10a-self-sync-floor-bootstrap-btf.sh
 printf 'RECEIVE_BTF_OK\n'

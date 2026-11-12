@@ -251,3 +251,66 @@ impl RamfluxClient {
         )
     }
 }
+
+impl RamfluxClient {
+    /// Prepare one authored plaintext revision before native group encryption and fan-out.
+    /// The returned Inner contains the sealed wrapper; private history retains the exact
+    /// nonce-bearing plaintext Inner with the same event identity.
+    /// # Errors
+    /// Refuses caller-selected private entropy, mismatched author/scope, missing native
+    /// authority, or failed group authorization, capture or sealing.
+    pub fn encrypt_generated_group_inner(
+        &self,
+        group: &str,
+        sender: &str,
+        mut identity: g::EventIdentity,
+        message: &g::Message,
+    ) -> Result<Vec<u8>, SdkError> {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Err(refused("generated group profile is not selected"));
+        }
+        if !message.erasure_nonce.is_empty() || message.sealed_group.is_some() {
+            return Err(refused("generated group input must be an unprepared plaintext revision"));
+        }
+        let own = self.owned_device_identity()?;
+        self.current_custody_authority(own.root_commitment(), crate::custody::network_now()?)?
+            .ok_or(SdkError::NetworkingPending)?;
+        let author = g::QualifiedDevice {
+            account_anchor: own.root_commitment().into(),
+            device_id: own.device_id().into(),
+            device_epoch: self
+                .device_branch
+                .as_ref()
+                .ok_or(SdkError::IdentityRootMissing)?
+                .device_epoch,
+        };
+        if sender != own.device_id() || identity.author.as_ref() != Some(&author) {
+            return Err(refused("generated group author mismatch"));
+        }
+        self.account_db()?.write_transaction(|| {
+            let state = self
+                .account_db()?
+                .shared_group_state(group)?
+                .ok_or_else(|| refused("verified group state missing"))?;
+            if identity.conversation_id != state.view().conversation_id {
+                return Err(refused("generated group conversation mismatch"));
+            }
+            identity.group_id = Some(group.into());
+            identity.group_epoch = Some(state.view().epoch);
+            let exact = zeroize::Zeroizing::new(Self::encode_generated_inner(
+                identity.clone(),
+                &g::Content { value: Some(g::content::Value::Message(message.clone())) },
+            )?);
+            self.capture_own_authored_group(group, sender, &exact)?;
+            let inner =
+                g::Inner::decode(exact.as_slice()).map_err(|_| refused("prepared group Inner"))?;
+            let plaintext = g::Message::decode(inner.body.as_slice())
+                .map_err(|_| refused("prepared group Message"))?;
+            let sealed = self.encrypt_generated_group_message(group, sender, &plaintext)?;
+            Self::encode_generated_inner(
+                identity,
+                &g::Content { value: Some(g::content::Value::Message(sealed)) },
+            )
+        })
+    }
+}

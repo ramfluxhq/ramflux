@@ -742,7 +742,8 @@ impl RamfluxClient {
             _ => self.prepare_shared_group_receive(engine, opened, entry, body).await?,
         };
         let generated_control = shared.is_none()
-            && self.authorize_generated_group_control_body(entry, &opened.routing, body)?;
+            && (super::generated_receive::is_group_key_control(body)
+                || self.authorize_generated_group_control_body(entry, &opened.routing, body)?);
         let legacy = if opened.routing.kind == Kind::GroupControl
             && shared.is_none()
             && !generated_control
@@ -1155,7 +1156,13 @@ impl RamfluxClient {
         let self_sync = crate::client::target_selection::schema_v1_selected()
             && ramflux_protocol::message::validation::scan_inner(body)
                 .is_ok_and(|scanned| scanned.kind == 12);
-        if call || delete_control || erased_reference || retired_original || self_sync {
+        if call
+            || delete_control
+            || erased_reference
+            || retired_original
+            || self_sync
+            || self.generated_edit_reference_erased(body)?
+        {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
             // sensitive ciphertext alongside them, including enclosing copies whose nested
             // original has been retired: committed replay needs only attribution/hash.

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Span Brain
+# Closed v0 forbids this ingress before draft retention or projection.
+# The old ciphertext-only mutation is unreachable until an audited floor carrier exists.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source_file=crates/ramflux-sdk/src/client/routed/receive.rs
-named=stale_self_sync_draft_retains_only_content_free_delivery_receipt
+source_file=crates/ramflux-sdk/src/client/self_sync.rs
+named=floorless_self_sync_draft_refuses_before_delivery_retention
 snapshot=$(mktemp)
 log_file=$(mktemp)
 cp "$source_file" "$snapshot"
@@ -13,14 +15,19 @@ trap restore EXIT
 python3 - "$source_file" <<'PY'
 from pathlib import Path
 import sys
+import re
 p = Path(sys.argv[1]); s = p.read_text()
-old = '|| self_sync'
-assert s.count(old) == 1
-p.write_text(s.replace(old, '|| (self_sync && false)'))
+old = '        Err(SdkError::InboundPending("self sync: authenticated floor/erase bootstrap is unavailable".into(),))'
+pattern = r'\s*'.join(re.escape(c) for c in old if not c.isspace())
+matches = list(re.finditer(pattern, s))
+assert len(matches) == 1, len(matches)
+match = matches[0]
+new = '        Ok(())'
+p.write_text(s[:match.start()] + new + s[match.end():])
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"
-    echo 'self_sync_ciphertext mutant survived' >&2
+    echo 's10a-self-sync-floor-bootstrap-btf.sh mutant survived' >&2
     exit 1
 fi
 if ! rg -q "$named .*FAILED|$named --- FAILED" "$log_file"; then
@@ -28,4 +35,4 @@ if ! rg -q "$named .*FAILED|$named --- FAILED" "$log_file"; then
     echo 'mutant did not reach the named assertion' >&2
     exit 1
 fi
-echo SELF_SYNC_CIPHERTEXT_BTF_OK
+echo SELF_SYNC_FLOORLESS_INGRESS_BTF_OK

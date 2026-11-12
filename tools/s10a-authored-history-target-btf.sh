@@ -7,6 +7,8 @@ source_file=crates/ramflux-sdk/src/client/own_sent_message/authored/delivery.rs
 named=own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_bytes
 snapshot=$(mktemp)
 log_file=$(mktemp)
+# A failing baseline is never mutation evidence.
+timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1 || { cat "$log_file"; rm -f "$snapshot" "$log_file"; exit 1; }
 cp "$source_file" "$snapshot"
 restore() { cp "$snapshot" "$source_file"; rm -f "$snapshot" "$log_file"; }
 trap restore EXIT

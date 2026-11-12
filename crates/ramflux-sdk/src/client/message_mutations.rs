@@ -165,6 +165,9 @@ impl RamfluxClient {
                     identity: db.load_actor_state(&format!("routed/generated-identity/{id}"))?,
                 };
                 self.install_generated_delete_fence(&fence)?;
+                if scope == DeleteScope::Local || source.root_commitment() == target.author_anchor {
+                    self.retire_pending_generated_edit_for_delete(target)?;
+                }
                 if row.is_some() {
                     db.delete_direct_message(
                         conversation,
@@ -322,7 +325,7 @@ impl RamfluxClient {
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let db = self.account_db()?;
         db.write_transaction(|| {
-            if db.message_is_deleted(&target_id)? { return Ok(false); }
+            if db.message_is_deleted(&target_id)? || self.generated_edit_reference_erased(exact_inner)? { return Ok(false); }
             let Some(row) = self.direct_message_by_id(&target_id)? else {
                 self.park_waiting_generated_edit(authorization, &identity, &edit, exact_inner)?;
                 return Ok(false);

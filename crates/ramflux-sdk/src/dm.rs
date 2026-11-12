@@ -520,6 +520,33 @@ pub(crate) fn gateway_envelope_from_sealed(
     Ok(envelope)
 }
 
+/// Dedicated generated durable constructor; the generation-zero constructor stays dormant.
+pub(crate) fn gateway_generated_envelope_from_sealed(
+    config: &GatewaySessionConfig,
+    message: &mut GatewayDirectMessage,
+    sealed: crate::client::routed::SealedRouted,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let (packet, committed, metadata) = sealed.into_parts();
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let mut envelope = gateway_envelope_with_policy(
+        config,
+        message,
+        None,
+        committed.as_deref(),
+        GatewayEnvelopePolicy {
+            mode: "durable",
+            priority: ramflux_protocol::Priority::Normal,
+            outer_profile: Some((ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
+        },
+    )?;
+    add_message_metadata_commitment(config, &mut envelope, metadata)?;
+    ramflux_protocol::message::outer::decode_candidate_outer_ijson(
+        &ramflux_protocol::canonical_json_bytes(&envelope)?,
+    )
+    .map_err(|error| SdkError::InboundRejected(format!("generated outer profile: {error}")))?;
+    Ok(envelope)
+}
+
 pub(crate) fn gateway_ephemeral_envelope_from_sealed(
     config: &GatewaySessionConfig,
     message: &mut GatewayDirectMessage,
@@ -540,8 +567,11 @@ pub(crate) fn gateway_ephemeral_envelope_from_sealed(
         message,
         None,
         committed.as_deref(),
-        "ephemeral",
-        ramflux_protocol::Priority::Low,
+        GatewayEnvelopePolicy {
+            mode: "ephemeral",
+            priority: ramflux_protocol::Priority::Low,
+            outer_profile: None,
+        },
     )
 }
 
@@ -556,8 +586,11 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
         message,
         franking,
         committed_a0,
-        "durable",
-        ramflux_protocol::Priority::Normal,
+        GatewayEnvelopePolicy {
+            mode: "durable",
+            priority: ramflux_protocol::Priority::Normal,
+            outer_profile: None,
+        },
     )
 }
 
@@ -571,23 +604,30 @@ pub(crate) fn candidate_outer_profile(mode: &str) -> (&'static str, u32) {
     }
 }
 
+struct GatewayEnvelopePolicy {
+    mode: &'static str,
+    priority: ramflux_protocol::Priority,
+    outer_profile: Option<(&'static str, u32)>,
+}
+
 fn gateway_envelope_with_policy(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
-    mode: &str,
-    priority: ramflux_protocol::Priority,
+    policy: GatewayEnvelopePolicy,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let mode = policy.mode;
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),
     );
+    let profile = policy.outer_profile.unwrap_or_else(|| candidate_outer_profile(mode));
     let mut envelope = ramflux_protocol::Envelope {
-        schema: candidate_outer_profile(mode).0.to_owned(),
-        version: candidate_outer_profile(mode).1,
-        domain: candidate_outer_profile(mode).0.to_owned(),
+        schema: profile.0.to_owned(),
+        version: profile.1,
+        domain: profile.0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: if ramflux_protocol::schema_profile::schema_v1_live() {
             crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "")
@@ -603,8 +643,13 @@ fn gateway_envelope_with_policy(
         source_device_id: config.device_id.clone(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority,
+        delivery_class: if profile.0 == ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        {
+            ramflux_protocol::DeliveryClass::Message
+        } else {
+            ramflux_protocol::DeliveryClass::OpaqueEvent
+        },
+        priority: policy.priority,
         ttl: message.ttl,
         created_at: message.created_at,
         encrypted_payload,

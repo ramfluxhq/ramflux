@@ -23,6 +23,7 @@ pub(super) struct ReportPolicy<'a> {
     pub local_device_id: &'a str,
     pub mode: &'static str,
     pub priority: ramflux_protocol::Priority,
+    pub outer_profile: Option<(&'static str, u32)>,
 }
 
 /// Nested packet plus the A0 committed at seal. Not a wire struct.
@@ -85,28 +86,6 @@ pub(crate) fn refuse_a0_mismatch(
         return Err(invalid("report a0 drifted from sealed envelope"));
     }
     Ok(())
-}
-
-pub(super) fn assemble_direct_report(
-    client: &RamfluxClient,
-    message: &GatewayDirectMessage,
-    session: &ramflux_crypto::DmSession,
-    inner: &[u8],
-    local_device_id: &str,
-    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
-) -> Result<DirectReport, SdkError> {
-    assemble_report_with_policy(
-        client,
-        message,
-        session,
-        inner,
-        recipient,
-        &ReportPolicy {
-            local_device_id,
-            mode: "durable",
-            priority: ramflux_protocol::Priority::Normal,
-        },
-    )
 }
 
 pub(super) fn assemble_report_with_policy(
@@ -203,10 +182,12 @@ fn report_a0_envelope(
         .device_branch
         .as_ref()
         .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
+    let profile =
+        policy.outer_profile.unwrap_or_else(|| crate::dm::candidate_outer_profile(policy.mode));
     let mut envelope = ramflux_protocol::Envelope {
-        schema: crate::dm::candidate_outer_profile(policy.mode).0.to_owned(),
-        version: crate::dm::candidate_outer_profile(policy.mode).1,
-        domain: crate::dm::candidate_outer_profile(policy.mode).0.to_owned(),
+        schema: profile.0.to_owned(),
+        version: profile.1,
+        domain: profile.0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: sdk_device_signed_fields(local_device_id, ""),
         envelope_id: message.envelope_id.clone(),
@@ -214,7 +195,12 @@ fn report_a0_envelope(
         source_device_id: local_device_id.to_owned(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        delivery_class: if profile.0 == ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        {
+            ramflux_protocol::DeliveryClass::Message
+        } else {
+            ramflux_protocol::DeliveryClass::OpaqueEvent
+        },
         priority: policy.priority.clone(),
         ttl: message.ttl,
         created_at: message.created_at,
@@ -275,4 +261,9 @@ pub(super) fn with_invalid_header_fixture<T>(seal: impl FnOnce() -> T) -> T {
     }
     let _restore = Restore(ALLOW_INVALID_HEADER_FIXTURE.with(|flag| flag.replace(true)));
     seal()
+}
+
+#[cfg(test)]
+pub(super) fn allows_invalid_header_fixture() -> bool {
+    ALLOW_INVALID_HEADER_FIXTURE.with(std::cell::Cell::get)
 }

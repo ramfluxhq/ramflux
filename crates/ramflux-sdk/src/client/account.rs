@@ -184,6 +184,7 @@ impl RamfluxClient {
         self.object_store.replace_persisted(Vec::new(), BTreeMap::new());
         self.active_account_db = Some(db);
         *self.self_sync_restore_clock.borrow_mut() = None;
+        self.self_sync_live_generation.set(None);
         *self.typing_receiver.borrow_mut() = super::typing::TypingReceiver::default();
         *self.typing_sender.borrow_mut() = super::typing::sender::Sender::default();
         self.bind_object_retirement()?;

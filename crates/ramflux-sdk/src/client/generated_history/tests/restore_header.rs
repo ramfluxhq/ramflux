@@ -49,7 +49,8 @@ fn restore_header_agreement_verifies_origins_and_fences_conflicting_dependents()
             let incoming = import_receiver(&incoming_root, &original)?;
             let (ours, theirs) = if reverse { (&second, &first) } else { (&first, &second) };
             assert!(apply_claim(&local, ours)?);
-            assert!(apply_claim(&incoming, &revise(&author, theirs, 9, now + 2)?)?);
+            let incoming_revision = revise(&author, theirs, 9, now + 2)?;
+            assert!(apply_claim(&incoming, &incoming_revision)?);
             incoming.account_db()?.persist_client_record(
                 "test",
                 "unrelated",
@@ -70,6 +71,10 @@ fn restore_header_agreement_verifies_origins_and_fences_conflicting_dependents()
                     Some(before_revision)
                 );
             } else {
+                assert_eq!(
+                    local.account_db()?.message_content(&target)?,
+                    Some(incoming_revision.exact_inner)
+                );
                 assert_eq!(
                     local
                         .account_db()?
@@ -114,5 +119,32 @@ fn restore_header_invalid_local_evidence_is_an_integrity_failure() -> TestResult
     let error =
         merge_into(&local, &root, &incoming).err().ok_or("invalid local evidence accepted")?;
     assert!(error.to_string().contains("invalid local original-header evidence"));
+    Ok(())
+}
+
+#[test]
+fn restore_header_missing_incoming_original_refuses_edit_and_owned_cache() -> TestResult {
+    let origin_root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let author = sender(&origin_root, "restore-missing-header", now)?;
+    let claim = item(&author, &author, now)?;
+    let original = g::original_header::decode_identity(&claim.exact_original_identity)?;
+    let target = ramflux_protocol::encode_base64url(&original.id);
+    let local_root = Root::new()?;
+    let incoming_root = Root::new()?;
+    let local = import_receiver(&local_root, &original)?;
+    let incoming = import_receiver(&incoming_root, &original)?;
+    assert!(apply_claim(&local, &claim)?);
+    assert!(apply_claim(&incoming, &revise(&author, &claim, 9, now + 1)?)?);
+    let before = local.account_db()?.message_content(&target)?;
+    let db = incoming.account_db()?;
+    db.remove_actor_state(&format!("routed/original-header/{target}"))?;
+    let cache = format!("own-copy/prepared/{target}/conflicting-dependent");
+    db.persist_message_actor_state(&target, &cache, &json!({"private":"incoming cache"}))?;
+    let report = merge_into(&local, &local_root, &incoming)?;
+    assert_eq!(report.refused_items.len(), 1);
+    assert_eq!(report.refused_items[0].code, EvidenceError::OriginCommitmentMismatch);
+    assert_eq!(local.account_db()?.message_content(&target)?, before);
+    assert!(!local.account_db()?.actor_state_exists(&cache)?);
     Ok(())
 }

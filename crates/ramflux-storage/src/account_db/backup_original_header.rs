@@ -25,7 +25,7 @@ fn mismatch<T>() -> Result<T, h::EvidenceError> {
 /// commitment all precede comparison. Recipient-specific envelope bytes are excluded.
 fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceError> {
     let bad = h::EvidenceError::OriginCommitmentMismatch;
-    let original: Original = serde_json::from_slice(bytes).map_err(|_| bad)?;
+    let original: Original = ramflux_protocol::parse_i_json(bytes).map_err(|_| bad)?;
     let identity = h::decode_identity(&original.exact_identity)?;
     if ramflux_protocol::encode_base64url(&identity.id) != target {
         return mismatch();

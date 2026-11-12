@@ -97,6 +97,7 @@ impl RamfluxClient {
             inner,
             remote,
             &report::ReportPolicy {
+                outer_profile: None,
                 local_device_id: &engine.config().device_id,
                 mode: "ephemeral",
                 priority: ramflux_protocol::Priority::Low,

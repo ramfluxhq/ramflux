@@ -14,6 +14,7 @@ const PENDING: &str = "own-history/pending/";
 
 #[derive(Deserialize, Serialize)]
 struct Work {
+    binding: String,
     source: g::QualifiedDevice,
     target: g::QualifiedDevice,
     target_certificate: String,
@@ -26,6 +27,8 @@ struct Work {
 }
 
 pub(crate) struct Plan {
+    #[cfg(test)]
+    pub(crate) target: g::QualifiedDevice,
     key: String,
     fingerprint: String,
     pub(crate) request: SendMaterialRequest,
@@ -80,6 +83,12 @@ impl RamfluxClient {
         let (source, _) = self.authored_incarnation(&local)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
+            let mut reserved = std::collections::BTreeSet::new();
+            for key in db.actor_state_keys(PENDING)? {
+                if let Some(work) = db.load_actor_state::<Work>(&key)? {
+                    reserved.insert(work.binding);
+                }
+            }
             for entry in &authority.envelope().body.devices {
                 if entry.device_id == local.device_id() {
                     continue;
@@ -99,13 +108,19 @@ impl RamfluxClient {
                     }
                     let tuple =
                         (&source, &target, &target_certificate, &capture.target, &capture.current);
-                    let binding = format!("own-history/staged/{}", fingerprint(&tuple)?);
-                    if db.actor_state_exists(&binding)? {
+                    let binding = format!(
+                        "own-history/staged/{}",
+                        ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(
+                            &tuple
+                        )?)
+                    );
+                    if db.actor_state_exists(&binding)? || reserved.contains(&binding) {
                         continue;
                     }
                     let staging_id =
                         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
                     let work = Work {
+                        binding: binding.clone(),
                         source: source.clone(),
                         target: target.clone(),
                         target_certificate: target_certificate.clone(),
@@ -123,12 +138,10 @@ impl RamfluxClient {
                             ramflux_protocol::canonical_json_bytes(&work)?.len() as u64,
                         ) > 8 * 1024 * 1024
                     {
-                        return Err(SdkError::InboundPending(
-                            "own history staging capacity".into(),
-                        ));
+                        return Ok(());
                     }
-                    db.persist_message_actor_state(&owner, &binding, &staging_id)?;
                     db.persist_message_actor_state(&owner, &pending, &work)?;
+                    reserved.insert(binding);
                 }
             }
             Ok(())
@@ -175,6 +188,8 @@ impl RamfluxClient {
             work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
             db.persist_message_actor_state(&work.owner, &key, &work)?;
             return Ok(Some(Plan {
+                #[cfg(test)]
+                target: work.target.clone(),
                 fingerprint: fingerprint(&work)?,
                 envelope: work.envelope.clone(),
                 key,
@@ -235,7 +250,7 @@ impl RamfluxClient {
             envelope_id: work.staging_id.clone(),
             source_principal_id: config.principal_id.clone(),
             sender_id: config.device_id.clone(),
-            recipient_device_id: Some(target.storage_key().into()),
+            recipient_device_id: Some(target.device_id().into()),
             recipient_principal_commitment: Some(work.target.account_anchor.clone()),
             target_delivery_id: record["target_delivery_id"]
                 .as_str()
@@ -260,6 +275,13 @@ impl RamfluxClient {
                 return Ok(None);
             }
             if let Some(envelope) = work.envelope {
+                if db.load_actor_state::<String>(&work.binding)?.as_deref()
+                    != Some(work.staging_id.as_str())
+                {
+                    return Err(SdkError::InboundRejected(
+                        "own history sealed mapping missing".into(),
+                    ));
+                }
                 return Ok(Some((plan, envelope)));
             }
             let capture = db
@@ -283,10 +305,15 @@ impl RamfluxClient {
                 identity,
                 &g::Content { value: Some(g::content::Value::Control(control)) },
             )?);
-            let sealed =
-                self.seal_routed_prepared(config, &message, &exact, Route::control(), material)?;
+            let sealed = self.seal_generated_routed_prepared(
+                config,
+                &message,
+                &exact,
+                Route::control(),
+                material,
+            )?;
             let envelope =
-                crate::dm::gateway_envelope_from_sealed(config, &mut message, sealed, None)?;
+                crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
             work.envelope = Some(envelope.clone());
             let (_, used) = db.actor_state_usage(PENDING)?;
             let old = db
@@ -300,6 +327,7 @@ impl RamfluxClient {
             {
                 return Err(SdkError::InboundPending("own history sealed staging capacity".into()));
             }
+            db.persist_message_actor_state(&work.owner, &work.binding, &work.staging_id)?;
             db.persist_message_actor_state(&work.owner, &plan.key, &work)?;
             plan.fingerprint = fingerprint(&work)?;
             plan.envelope = Some(envelope.clone());

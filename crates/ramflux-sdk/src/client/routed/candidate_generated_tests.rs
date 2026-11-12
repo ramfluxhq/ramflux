@@ -263,7 +263,10 @@ async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
         crate::client::identity_authority::HeadUse::NewAuthorization,
         &first,
     )?;
-    assert!(db.load_actor_state::<super::super::super::Committed>(&key)?.is_none());
+    if let Some(marker) = db.load_actor_state::<super::super::super::Committed>(&key)? {
+        assert_eq!(marker.entry.envelope.encrypted_payload, "");
+        assert!(marker.erasure_targets.is_empty());
+    }
     assert!(b.client.event_body(&format!("gateway/delivery/v2/{key}"))?.is_none());
     assert_eq!(db.actor_state_usage("routed/reaction/")?.0, 0);
     Ok(())
@@ -701,7 +704,9 @@ async fn group_authority_case(change: &str) -> Result<(), SdkError> {
     let mut identity = generated_identity(&a, change)?;
     identity.group_id = Some("generated-group".into());
     identity.group_epoch = message.sealed_group.as_ref().map(|group| group.key_epoch);
-    let raw = g::Inner { layer: 2, kind: 1, identity: Some(identity), body }.encode_to_vec();
+    let raw =
+        g::Inner { layer: g::registry::COMPILED_LAYER, kind: 1, identity: Some(identity), body }
+            .encode_to_vec();
     let entry = seal_as(
         &a,
         &b,
@@ -1149,8 +1154,10 @@ async fn message_logical_id_refuses_changed_body_or_hlc_without_retaining_a_body
         if change_hlc {
             inner.identity.as_mut().ok_or_else(|| invalid("identity"))?.hlc += 1;
         } else {
-            inner.body = g::Message { text: "forged replacement".into(), ..Default::default() }
-                .encode_to_vec();
+            let mut changed =
+                g::Message::decode(inner.body.as_slice()).map_err(|_| invalid("message"))?;
+            changed.text = "forged replacement".into();
+            inner.body = changed.encode_to_vec();
         }
         let entry = seal(&a, &b, message("changed-logical-id", "c"), &inner.encode_to_vec())?;
         assert!(matches!(apply(&mut b, &entry).await, Err(SdkError::ReplayMismatch)));
@@ -1705,12 +1712,26 @@ async fn floorless_self_sync_draft_refuses_before_delivery_retention() -> Result
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::owned("alice", "sync-receipt-owner", 231, 232)?;
     let mut b = Fixture::owned("bob", "sync-receipt-owner", 231, 234)?;
-    let value = a.client.change_self_sync("c", g::SelfSync {
-        operation: 2, draft: Some(g::Message { text: "obsolete private draft".into(), ..Default::default() }), ..Default::default()
-    })?;
-    let identity = a.client.allocate_generated_identity("c", crate::client::generated_identity::now_ms(), true)?;
-    let raw = RamfluxClient::encode_generated_inner(identity, &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) })?;
-    for _ in 0..2 { b.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?; }
+    let value = a.client.change_self_sync(
+        "c",
+        g::SelfSync {
+            operation: 2,
+            draft: Some(g::Message { text: "obsolete private draft".into(), ..Default::default() }),
+            ..Default::default()
+        },
+    )?;
+    let identity = a.client.allocate_generated_identity(
+        "c",
+        crate::client::generated_identity::now_ms(),
+        true,
+    )?;
+    let raw = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) },
+    )?;
+    for _ in 0..2 {
+        b.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?;
+    }
     let mut draft = message("stale-sync-delivery", "c");
     draft.source_principal_id = a.config()?.principal_id;
     let entry = seal_as(&a, &b, draft, &raw, Route::control())?;
@@ -1731,15 +1752,27 @@ fn floorless_self_sync_never_prepares_courier_plan_or_ratchet() -> Result<(), Sd
     let b = Fixture::owned("bob", "sync-plan-owner", 221, 224)?;
     super::review::trust(&a, &b)?;
     let target = b.client.owned_device_identity()?;
-    let value = a.client.change_self_sync("c", g::SelfSync {
-        operation: 2, draft: Some(g::Message { text: "erase queued draft".into(), ..Default::default() }), ..Default::default()
-    })?;
+    let value = a.client.change_self_sync(
+        "c",
+        g::SelfSync {
+            operation: 2,
+            draft: Some(g::Message { text: "erase queued draft".into(), ..Default::default() }),
+            ..Default::default()
+        },
+    )?;
     assert!(matches!(a.client.bootstrap_self_sync(&target), Err(SdkError::InboundPending(_))));
     a.client.change_self_sync("c", g::SelfSync { operation: 3, ..Default::default() })?;
     let before = a.client.account_db()?.test_table_fingerprints(&[])?;
     assert!(a.client.prepare_self_sync_repair(&a.config()?)?.is_none());
     assert_eq!(a.client.account_db()?.test_table_fingerprints(&[])?, before);
-    assert!(a.client.self_sync_state("c", &value)?.ok_or_else(|| invalid("clear"))?.value.draft.is_none());
+    assert!(
+        a.client
+            .self_sync_state("c", &value)?
+            .ok_or_else(|| invalid("clear"))?
+            .value
+            .draft
+            .is_none()
+    );
     Ok(())
 }
 
