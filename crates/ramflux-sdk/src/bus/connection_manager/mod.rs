@@ -181,6 +181,7 @@ fn new_shared(
             "delivery-receipts",
             "own-device-copy",
             "self-sync",
+            "own-history",
             "contact-control",
             "surface-resync",
             "pair-reset",
