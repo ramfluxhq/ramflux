@@ -223,9 +223,14 @@ async fn start_compio(
     let thread = std::thread::spawn(move || {
         let runtime = compio::runtime::Runtime::new()?;
         runtime.block_on(async move {
-            let server=ramflux_transport::CompioGatewayQuicServer::bind("127.0.0.1:0",&tls).await?;
-            ready.send(server.local_addr()?).map_err(|_|anyhow::anyhow!("compio readiness receiver closed"))?;
-            tokio::select! {_=stopped=>Ok(()),result=crate::compio_gateway::serve_gateway_compio_endpoint(server,context)=>result}
+            let server = ramflux_transport::CompioGatewayQuicServer::bind("127.0.0.1:0", &tls).await?;
+            let address = server.local_addr()?;
+            ready.send(address)
+                .map_err(|_| anyhow::anyhow!("compio readiness receiver closed"))?;
+            tokio::select! {
+                _ = stopped => Ok(()),
+                result = crate::compio_gateway::serve_gateway_compio_endpoint(server, context) => result,
+            }
         })
     });
     let address = tokio::time::timeout(Duration::from_secs(15), started).await??;

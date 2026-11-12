@@ -266,7 +266,12 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
 #[test]
 fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Result<()> {
     use std::io::Read;
-    let context = context()?;
+    let mut context = context()?;
+    let path = std::env::temp_dir().join(format!(
+        "preauth-http-policy-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(&path)?);
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
     {
         let mut state = crate::gateway_state(&context.state)?;
@@ -308,30 +313,38 @@ fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Resul
         )
         .is_err()
     );
-    assert_eq!(
-        serde_json::to_value(
-            context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("failed commit state"))?
-        )?,
-        before
-    );
+
     assert_eq!(
         crate::gateway_state(&context.state)?.pre_auth_policy().per_source_ip_handshake_rate,
         2
     );
+    let state = std::sync::Arc::clone(&context.state);
+    drop(context);
+    let store = ramflux_node_core::GatewayRedbStore::open(&path)?;
+    assert_eq!(
+        serde_json::to_value(
+            store.load_state()?.ok_or_else(|| anyhow::anyhow!("failed commit reopen"))?
+        )?,
+        before
+    );
     assert!(crate::itest_http::handle_preauth_control_request(
         &mut server,
         &request,
-        &context.state,
-        &context.store
+        &state,
+        &store
     )?);
     let mut response = [0; 64];
     let size = client.read(&mut response)?;
     assert!(std::str::from_utf8(&response[..size])?.starts_with("HTTP/1.1 200"));
-    let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("HTTP updated state"))?;
+    drop(store);
+    let store = ramflux_node_core::GatewayRedbStore::open(&path)?;
+    let saved = store.load_state()?.ok_or_else(|| anyhow::anyhow!("HTTP updated reopen"))?;
     assert_eq!(saved.pre_auth_policy().per_source_ip_handshake_rate, 1);
     assert_eq!(
         serde_json::to_value(saved)?["pre_auth_handshakes_by_source_ip"][&source],
         serde_json::json!([101])
     );
+    drop(store);
+    std::fs::remove_file(path)?;
     Ok(())
 }
