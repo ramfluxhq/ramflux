@@ -23,7 +23,8 @@ use crate::wire::{
 };
 
 /// Facts fixed when the browser was linked. None of them comes from the connection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebLinkPins {
     /// The listener URL this build dials, in canonical form.
     pub listener_url: String,

@@ -171,6 +171,63 @@ fn check_web_capabilities(capabilities: &[String], origin: &str) -> Result<(), W
     Ok(())
 }
 
+/// The public keys of a freshly generated web device and the secrets that stay in its vault.
+pub struct NewWebDevice {
+    pub payload: LinkPayload,
+    pub secrets: crate::vault_format::VaultSecrets,
+}
+
+/// Entropy for a new web device: every value comes from the platform random source.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+pub struct LinkEntropy {
+    pub branch_signing_seed: [u8; 32],
+    pub agreement_identity_seed: [u8; 32],
+    pub database_key: [u8; 32],
+    pub device_id: [u8; 16],
+    pub link_nonce: [u8; 16],
+}
+
+/// Generate this browser's own device keys and the payload it shows. The keys are a branch
+/// signing key and an agreement identity key; a browser never generates or receives an account
+/// key.
+///
+/// OPEN-VALUE: the device id format (`web_` plus 16 random bytes in base64url).
+///
+/// # Errors
+/// Returns [`WebError::Link`] when the listener URL or origin is not canonical.
+pub fn new_web_device(
+    node_id: &str,
+    listener_url: &str,
+    origin: &str,
+    created_at: u64,
+    entropy: &LinkEntropy,
+) -> Result<NewWebDevice, WebError> {
+    if !is_canonical_listener_url(listener_url) || !is_serialized_origin(origin) {
+        return Err(WebError::Link("listener or origin is not canonical"));
+    }
+    let signing = ed25519_dalek::SigningKey::from_bytes(&entropy.branch_signing_seed);
+    let agreement = x25519_dalek::StaticSecret::from(entropy.agreement_identity_seed);
+    let payload = LinkPayload {
+        v: 1,
+        node_id: node_id.to_owned(),
+        origin: origin.to_owned(),
+        listener_url: listener_url.to_owned(),
+        device_id: format!("web_{}", encode_base64url(entropy.device_id)),
+        branch_signing_public_key: encode_base64url(signing.verifying_key().to_bytes()),
+        agreement_identity_public_key: encode_base64url(
+            x25519_dalek::PublicKey::from(&agreement).to_bytes(),
+        ),
+        link_nonce: encode_base64url(entropy.link_nonce),
+        created_at,
+    };
+    let secrets = crate::vault_format::VaultSecrets {
+        branch_signing_seed: encode_base64url(entropy.branch_signing_seed),
+        agreement_identity_seed: encode_base64url(entropy.agreement_identity_seed),
+        database_key: encode_base64url(entropy.database_key),
+    };
+    Ok(NewWebDevice { payload, secrets })
+}
+
 /// Why a linked browser cannot currently authenticate, as shown to the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -249,6 +306,25 @@ mod tests {
             web_origin_capability(ORIGIN),
             "web_secondary".to_owned(),
         ]
+    }
+
+    #[test]
+    fn a_new_web_device_publishes_only_public_keys() {
+        let entropy = LinkEntropy {
+            branch_signing_seed: [1; 32],
+            agreement_identity_seed: [2; 32],
+            database_key: [3; 32],
+            device_id: [4; 16],
+            link_nonce: [5; 16],
+        };
+        let device = new_web_device("node-a", "wss://gw.example.org/v1/session", ORIGIN, NOW, &entropy);
+        let Ok(device) = device else { unreachable!("canonical inputs") };
+        let shown = serde_json::to_string(&device.payload).unwrap_or_default();
+        assert!(!shown.contains(&device.secrets.branch_signing_seed));
+        assert!(!shown.contains(&device.secrets.agreement_identity_seed));
+        assert!(!shown.contains(&device.secrets.database_key));
+        assert!(device.payload.device_id.starts_with("web_"));
+        assert!(new_web_device("node-a", "ws://gw.example.org/v1/session", ORIGIN, NOW, &entropy).is_err());
     }
 
     #[test]

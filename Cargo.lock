@@ -3726,12 +3726,14 @@ dependencies = [
  "ramflux-crypto",
  "ramflux-protocol",
  "ramflux-storage",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "thiserror 2.0.21",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "x25519-dalek",
  "zeroize",
 ]
 
