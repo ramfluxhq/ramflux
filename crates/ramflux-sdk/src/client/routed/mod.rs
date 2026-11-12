@@ -414,9 +414,16 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             self.authorize_self_sync(&local, &message.conversation_id)?;
             g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
+            self.require_native_operation(&remote, NativeOperation::Sync)?;
             let inner = self.self_sync_publication_inner(&message.conversation_id, &value)?;
+            let identity = <g::Inner as prost::Message>::decode(inner.as_slice())
+                .map_err(|_| invalid("SelfSync publication identity missing"))?
+                .identity
+                .ok_or_else(|| invalid("SelfSync publication identity missing"))?;
+            let mut message = message.clone();
+            message.message_id = ramflux_protocol::encode_base64url(&identity.id);
             let sealed = self.seal_routed_with_route(
-                message,
+                &message,
                 &inner,
                 Route::control(),
                 SealPair {
@@ -427,7 +434,6 @@ impl RamfluxClient {
                     bundle,
                 },
             )?;
-            let mut message = message.clone();
             let envelope = crate::dm::gateway_envelope_from_sealed(
                 engine.config(),
                 &mut message,

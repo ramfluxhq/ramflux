@@ -512,3 +512,6 @@ OwnSentMessage	ciphertext_digest	5	SentMessage.ciphertext_hash	optional bytes
 OwnSentMessage	context	6	SentMessage.context	OwnContext
 OwnSentMessage	authored_at	7	SentMessage.authored_at	optional int64
 OwnSentMessage	exact_inner	8	SentMessage.body_base64	bytes
+GroupControlBody	snapshot	5	SharedGroupPacket	GroupControlBodySnapshot
+GroupControlBodySnapshot	snapshot	1	SharedGroupPacket.snapshot_base64	NativeGroupSnapshot
+GroupControlBodySnapshot	distribution	2	SharedGroupPacket.distribution_base64	optional GroupKeyDistribution

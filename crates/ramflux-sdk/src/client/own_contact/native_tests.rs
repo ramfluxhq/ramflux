@@ -29,11 +29,12 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     let now = crate::custody::network_now()?;
     let current =
         ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
+    let signing_seed = zeroize::Zeroizing::new(ramflux_crypto::random_32()?);
     let branch = ramflux_crypto::create_device_branch(
         &own.manifest.principal_id,
         "sibling",
         1,
-        ramflux_crypto::random_32()?,
+        *signing_seed,
     );
     let agreement = ramflux_crypto::X25519KeyPair::from_seed(ramflux_crypto::random_32()?);
     let mut certificate = native.publication.record.body.devices[0]
@@ -51,15 +52,36 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     native.publication.record =
         primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
     own.client.observe_custody_manifest(&native, &own.manifest.principal_commitment, now)?;
+    assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
+    assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 0);
+    let sibling = ramflux_protocol::custody::DeviceRef {
+        account_anchor: own.manifest.principal_commitment.clone(),
+        device_id: "sibling".into(),
+        device_epoch: 1,
+    };
+    let mut seeds = zeroize::Zeroizing::new([0; 64]);
+    seeds[..32].copy_from_slice(signing_seed.as_ref());
+    seeds[32..].copy_from_slice(&agreement.secret.to_bytes());
+    let credentials = crate::custody::BranchCredentials::from_vault_seeds(
+        &own.manifest.principal_id,
+        &sibling,
+        &seeds,
+    )?;
+    let verified =
+        ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
+    let qualified =
+        ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&verified, "sibling")?;
+    native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
+        device_ref: sibling,
+        target_delivery_id: qualified.storage_key().into(),
+        prekey_bundle: serde_json::to_value(credentials.prekey_bundle()?)?,
+        message_layer: None,
+    });
+    let fetched = crate::prekey::SdkDeviceManifestResponse::from_native((*native).clone())?;
+    own.client.persist_fetched_identity_directory(&fetched)?;
     let before = crate::bus::own_device_copy::copy_id(&own.client, "public-id")?;
     own.client.device_branch = None;
     assert_eq!(crate::bus::own_device_copy::copy_id(&own.client, "public-id")?, before);
-    assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
-    assert_eq!(
-        own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0,
-        1,
-        "native enrollment queues accepted SelfSync even before sibling prekey refresh"
-    );
     assert_eq!(own.client.stage_contact_backfill_batch()?, 1);
     assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);

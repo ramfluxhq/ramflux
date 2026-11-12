@@ -114,6 +114,9 @@ pub(super) fn from_generated(value: &g::GroupStateControl) -> Result<GroupContro
                 value.control.as_ref().ok_or_else(|| invalid("group transfer missing"))?,
             )?),
         },
+        Some(g::group_control_body::Value::Snapshot(_)) => {
+            return Err(invalid("snapshot requires its native bootstrap validator"));
+        }
         None => return Err(invalid("native group control body missing")),
     };
     Ok(GroupControlPacket::new(body))
@@ -129,12 +132,21 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Option<Decoded>, SdkError> {
         && let Ok(inner) = g::Inner::decode(bytes)
         && inner.kind == 8
     {
-        let control = g::Control::decode(inner.body.as_slice())
-            .map_err(|_| invalid("generated group control malformed"))?;
+        let body = zeroize::Zeroizing::new(inner.body);
+        let control = super::snapshot_generated::SeedControl(
+            g::Control::decode(body.as_slice())
+                .map_err(|_| invalid("generated group control malformed"))?,
+        );
         if let Some(g::control::Payload::GroupState(value)) = control.payload.as_ref() {
             crate::client::generated_control::validate_control_native(&control)?;
             let scanned = g::validation::scan_inner(bytes)
                 .map_err(|_| invalid("generated group Inner malformed"))?;
+            if matches!(
+                value.body.as_ref().and_then(|body| body.value.as_ref()),
+                Some(g::group_control_body::Value::Snapshot(_))
+            ) {
+                return Ok(None);
+            }
             return Ok(Some(Decoded {
                 packet: from_generated(value)?,
                 supported: scanned.outcome == g::validation::ScanOutcome::Supported,
@@ -157,6 +169,13 @@ impl crate::RamfluxClient {
         route: &crate::client::routed::Routing,
         bytes: &[u8],
     ) -> Result<bool, SdkError> {
+        if super::snapshot_generated::decode(bytes)?.is_some() {
+            let state = super::bootstrap::decode_packet(bytes)?
+                .ok_or_else(|| invalid("snapshot state missing"))?;
+            self.authorize_native_snapshot_state(&state, entry, route)?;
+            self.prepare_shared_group_payload(state, bytes)?;
+            return Ok(true);
+        }
         let Some(decoded) = decode(bytes)? else {
             return Ok(false);
         };

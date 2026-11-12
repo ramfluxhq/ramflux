@@ -3,11 +3,20 @@
 
 //! Native directory backfill queues current registers once for each certified sibling incarnation.
 use super::{RamfluxClient, SdkError};
+use crate::client::identity_authority::NativeOperation;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::custody::DeviceRef;
 
 impl RamfluxClient {
     pub(crate) fn stage_native_self_sync_bootstrap(&self) -> Result<(), SdkError> {
+        self.stage_native_self_sync_registers(true)
+    }
+
+    pub(crate) fn stage_native_self_sync_publications(&self) -> Result<(), SdkError> {
+        self.stage_native_self_sync_registers(false)
+    }
+
+    fn stage_native_self_sync_registers(&self, enrollment_only: bool) -> Result<(), SdkError> {
         let db = self.account_db()?;
         if db.actor_state_keys("self-sync/state/")?.is_empty() {
             return Ok(());
@@ -36,6 +45,13 @@ impl RamfluxClient {
         {
             return Ok(());
         }
+        match self.require_native_operation(&local, NativeOperation::Sync) {
+            Ok(()) => {}
+            // Enrollment invalidates the directory freshness stamp. Backfill must be
+            // able to fetch the new roster before bootstrap can authorize it.
+            Err(SdkError::FreshHeadRequired { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         db.write_transaction(|| {
             for entry in &authority.envelope().body.devices {
                 if entry.device_id == local.device_id() {
@@ -50,6 +66,9 @@ impl RamfluxClient {
                 };
                 let sibling =
                     RootQualifiedDeviceRef::from_custody_record(&authority, &entry.device_id)?;
+                if db.client_device_record(&sibling)?.is_none() {
+                    continue;
+                }
                 let marker = format!(
                     "self-sync/bootstrap/{}/{}/{}/{}",
                     local.storage_key(),
@@ -57,11 +76,13 @@ impl RamfluxClient {
                     sibling.storage_key(),
                     certificate.cert_id
                 );
-                if db.load_actor_state::<bool>(&marker)?.unwrap_or(false) {
+                if enrollment_only && db.load_actor_state::<bool>(&marker)?.unwrap_or(false) {
                     continue;
                 }
                 self.bootstrap_self_sync(&sibling)?;
-                db.persist_actor_state(&marker, &true)?;
+                if enrollment_only {
+                    db.persist_actor_state(&marker, &true)?;
+                }
             }
             Ok(())
         })
