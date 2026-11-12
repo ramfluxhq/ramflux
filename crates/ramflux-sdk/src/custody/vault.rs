@@ -132,10 +132,13 @@ pub const VAULT_CLASS_LOGIN_KEYCHAIN: &str = "software_os_credential_login_keych
 pub struct NativePrimaryVault;
 #[cfg(target_os = "macos")]
 mod native;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "android", test))]
 mod presence;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "android", test))]
 mod primary_items;
+/// Android Keystore provider; also built for host tests with a fake Keystore.
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod android;
 impl PrimaryVault for NativePrimaryVault {
     fn vault_class(&self) -> &'static str {
         #[cfg(target_os = "macos")]

@@ -49,6 +49,9 @@ object-ipc-crash-seam = []
 # tests only. Opt-in per build; the production-absence variant never enables it, and storage
 # refuses it under RAMFLUX_PRODUCTION_BUILD.
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
+# Android only, default off: compile the optional FCM wake-token surface. Core messaging never
+# needs it; without this feature the Android build has no vendor-push code path at all.
+android-push-fcm = []
 
 [dependencies]
 ed25519-dalek.workspace = true
@@ -92,6 +95,10 @@ dbus-secret-service = { version = "=4.1.0", default-features = false, features =
 chacha20poly1305 = { version = "=0.10.1" }
 chacha20 = { version = "=0.9.1", features = ["zeroize"] }
 poly1305 = { version = "=0.8.0", features = ["zeroize"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android Keystore has no NDK interface; the vault reaches it through a Kotlin helper.
+jni = { version = "0.22.4", default-features = false }
 
 [dev-dependencies]
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }

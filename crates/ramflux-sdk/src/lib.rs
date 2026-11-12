@@ -35,6 +35,8 @@ mod platform;
 pub use platform::lifecycle::{
     HostLifecycle, HostPaths, LifecycleState, LifecycleTransition, SuspendReport,
 };
+#[cfg(target_os = "android")]
+pub use platform::android;
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,

@@ -9,3 +9,7 @@ pub(crate) mod fs;
 pub(crate) mod listener;
 /// Platform-neutral in-process host lifecycle (phones). Shared by the iOS and Android cores.
 pub mod lifecycle;
+/// Android host seams: private storage, backup rules, lifecycle, network and push policy.
+/// Also built for host tests; nothing here is reachable on another platform.
+#[cfg(any(target_os = "android", test))]
+pub mod android;

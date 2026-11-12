@@ -24,6 +24,11 @@ pub(crate) use store::{
 };
 pub(crate) use store::{finish_recovery, pending_restore};
 pub(crate) use vault::require_vault_reference;
+#[cfg(target_os = "android")]
+pub use vault::android::{
+    AndroidKeystoreVault, VAULT_CLASS_ANDROID_STRONGBOX, VAULT_CLASS_ANDROID_TEE,
+    VAULT_CLASS_ANDROID_UNVERIFIED, install_android_vault,
+};
 pub use vault::{
     BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,

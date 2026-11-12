@@ -152,6 +152,15 @@ pub(super) fn primary_provider(
     }
     #[cfg(not(any(test, feature = "itest-memory-vault")))]
     let _ = config;
+    // Android has no other provider: the Keystore vault fails closed until the host
+    // application installed it, and it never falls back to a software or file vault.
+    #[cfg(target_os = "android")]
+    {
+        // The desktop provider type stays imported but is never constructed on Android.
+        let _ = NativePrimaryVault;
+        std::sync::Arc::new(crate::custody::AndroidKeystoreVault::process())
+    }
+    #[cfg(not(target_os = "android"))]
     std::sync::Arc::new(NativePrimaryVault)
 }
 
