@@ -13,6 +13,15 @@ use crate::{
 };
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
 
+/// Funded fixture allocation that fits the hosted CI temporary filesystem.
+pub fn gateway_replay_fixture_config() -> crate::GatewayReplayConfig {
+    crate::GatewayReplayConfig {
+        root_budget: 16,
+        per_root_share: 32_768,
+        storage_budget_bytes: 512 * 1024 * 1024,
+    }
+}
+
 pub fn gateway_registered_key(
     open: &GatewayOpenFrame,
 ) -> Result<DeviceAuthKeyResponse, ramflux_crypto::CryptoError> {

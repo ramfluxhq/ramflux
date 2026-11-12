@@ -107,12 +107,18 @@ fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>
     let registered = gateway_registered_key(&open)?;
     {
         let store = GatewayRedbStore::open(&path)?;
-        store.configure_replay(GatewayReplayConfig::small_node(), 1_760_000_001)?;
+        store.configure_replay(
+            crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
+            1_760_000_001,
+        )?;
         store.write_guard()?.authenticate_gateway(&open, &auth, &registered, 1_760_000_001)?;
     }
     for now in [1_760_000_002, 1_760_000_003] {
         let store = GatewayRedbStore::open(&path)?;
-        store.configure_replay(GatewayReplayConfig::small_node(), now)?;
+        store.configure_replay(
+            crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
+            now,
+        )?;
         let mut state = store.load_state()?.ok_or("missing state")?;
         assert!(state.replay_guard_state_mut().is_empty(), "startup materialized replay evidence");
         assert!(matches!(
@@ -132,7 +138,10 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     ));
     let store = GatewayRedbStore::open(&path)?;
-    store.configure_replay(GatewayReplayConfig::small_node(), 1_760_000_000)?;
+    store.configure_replay(
+        crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
+        1_760_000_000,
+    )?;
     let mut state = GatewayState::new();
     store.save_state(&state)?;
     let snapshots = store.full_snapshot_commit_count();

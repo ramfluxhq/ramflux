@@ -78,7 +78,10 @@ async fn real_router_with_state(
     let mut context = crate::session::tests::test_gateway_context()?;
     context.store =
         Arc::new(ramflux_node_core::GatewayRedbStore::open(child.1.join("gateway.redb"))?);
-    context.store.configure_replay(ramflux_node_core::GatewayReplayConfig::small_node(), 0)?;
+    context.store.configure_replay(
+        ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
+        0,
+    )?;
     {
         let state = crate::gateway_state(&context.state)?;
         context.store.save_state(&state)?;

@@ -188,9 +188,9 @@ retention = "{mesh_addr}"
 public_listen_addr = "{gateway_addr}"
 
 [gateway.replay]
-root_budget = 256
+root_budget = 16
 per_root_share = 32768
-storage_budget_bytes = 8589934592
+storage_budget_bytes = 536870912
 
 [signaling]
 turn_udp_addr = "{signaling_addr}"

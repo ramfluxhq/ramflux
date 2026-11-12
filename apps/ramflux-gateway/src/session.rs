@@ -2657,7 +2657,10 @@ pub(crate) mod tests {
             NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(&store_path)?);
-        store.configure_replay(ramflux_node_core::GatewayReplayConfig::small_node(), 0)?;
+        store.configure_replay(
+            ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
+            0,
+        )?;
         let mut state = ramflux_node_core::GatewayState::new();
         crate::pre_auth::tests::mount_key(&mut state, &store_path.with_extension("cookie"))?;
         store.save_state(&state)?;
@@ -2677,7 +2680,7 @@ pub(crate) mod tests {
                     .collect(),
             },
             gateway: Some(ramflux_node_core::GatewayConfig {
-                replay: ramflux_node_core::GatewayReplayConfig::small_node(),
+                replay: ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
                 pre_auth: None,
                 public_listen_addr: "127.0.0.1:0".to_owned(),
             }),

@@ -43,7 +43,10 @@ fn renewal_case(inject_obsolete_index: bool) -> Result<(), Box<dyn std::error::E
     let key = renewed.replay_tuple_key(&source)?;
     {
         let store = GatewayRedbStore::open(&path)?;
-        store.configure_replay(crate::GatewayReplayConfig::small_node(), 0)?;
+        store.configure_replay(
+            crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
+            0,
+        )?;
         for request in &requests {
             store.save_auth_replay(&source, request, 0)?;
         }
@@ -66,7 +69,10 @@ fn renewal_case(inject_obsolete_index: bool) -> Result<(), Box<dyn std::error::E
         store.save_auth_replay(&source, &next, 101)?;
     }
     let store = GatewayRedbStore::open(&path)?;
-    store.configure_replay(crate::GatewayReplayConfig::small_node(), 102)?;
+    store.configure_replay(
+        crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
+        102,
+    )?;
     assert!(store.load_state()?.ok_or("renewed state")?.replay_guard_state_mut().is_empty());
     assert!(
         matches!(

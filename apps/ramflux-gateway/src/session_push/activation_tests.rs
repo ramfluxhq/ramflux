@@ -1146,7 +1146,10 @@ async fn cross_gateway_setup() -> anyhow::Result<CrossGateway> {
     destination.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(
         child.1.join("gateway-b.redb"),
     )?);
-    destination.store.configure_replay(ramflux_node_core::GatewayReplayConfig::small_node(), 0)?;
+    destination.store.configure_replay(
+        ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
+        0,
+    )?;
     ready(&context).await?;
     ready(&destination).await?;
     Ok(CrossGateway { child, context, destination, remote })
