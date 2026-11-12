@@ -212,6 +212,9 @@ impl GatewaySessionConfig {
     }
 
     fn from_parts(parts: GatewaySessionConfigParts) -> Self {
+        // Serial and a private monitor unless a phone host installed process-wide defaults.
+        let (connection_race, network_monitor) =
+            crate::platform::session_defaults::session_defaults();
         let now = now_unix_timestamp();
         Self {
             custody_networking_pending: false,
@@ -252,8 +255,8 @@ impl GatewaySessionConfig {
             push_route_retry: super::PushRouteRetry::default(),
             push_route_last_seq: 0,
             session_push_advertise: false,
-            connection_race: ConnectionRace::default(),
-            network_monitor: crate::platform::network::NetworkMonitor::new(),
+            connection_race,
+            network_monitor,
             #[cfg(all(feature = "http-connect-proxy", not(windows)))]
             http_proxy: None,
         }

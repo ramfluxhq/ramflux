@@ -104,6 +104,14 @@ impl AndroidHost {
         &self.monitor
     }
 
+    /// Make this host's network monitor and the raced `Auto` order the defaults of every
+    /// gateway session the supervisor opens. Call once, before the first `on_foreground`.
+    /// Returns `false` when defaults were already installed for this process.
+    #[must_use]
+    pub fn install_session_defaults(&self) -> bool {
+        crate::platform::session_defaults::install_mobile_session_defaults(self.monitor.clone())
+    }
+
     /// The validated storage layout, for the vault installation.
     #[must_use]
     pub const fn storage(&self) -> &AndroidStorage {

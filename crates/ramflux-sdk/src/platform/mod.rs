@@ -27,3 +27,5 @@ pub mod connect_policy;
 pub mod android;
 /// Host network-change reports and per-network path memory; neutral on every target.
 pub(crate) mod network;
+/// Process-wide gateway session defaults a phone host may install; unset by default.
+pub(crate) mod session_defaults;

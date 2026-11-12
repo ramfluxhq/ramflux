@@ -105,6 +105,12 @@ every callback to `AndroidHost::network()`. Do not call synchronous
 `ConnectivityManager` getters inside a callback. Forward
 `ACTION_DEVICE_IDLE_MODE_CHANGED` to `on_device_idle_changed`.
 
+Create one `NetworkMonitor`, pass it to `AndroidHost::new`, and call
+`AndroidHost::install_session_defaults()` once before the first
+`on_foreground()`. From then on every gateway session the core opens shares
+that monitor and uses the raced order, and the transport that worked is
+remembered per network for ten minutes.
+
 The session uses the `Auto` transport (QUIC raced against TCP+TLS on 443) on
 the default network. It never binds a specific `Network`, including under a
 VPN. A metered network only defers bulk transfers the user did not ask for.

@@ -40,6 +40,7 @@ pub use platform::embedded::{DEFAULT_SUSPEND_DEADLINE, EmbeddedConfig, EmbeddedS
 pub use platform::connect_policy;
 #[cfg(target_os = "android")]
 pub use platform::android;
+pub use platform::session_defaults::install_mobile_session_defaults;
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,
