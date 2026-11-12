@@ -33,6 +33,7 @@ pub(crate) mod generated_group;
 mod generated_history;
 mod generated_identity;
 mod generated_pending_edit;
+mod generated_restore;
 pub(crate) mod generated_surface;
 pub mod group;
 mod group_control_roots;

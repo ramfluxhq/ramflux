@@ -14,6 +14,8 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Local marker: a merge touched parked Edits, so the client must re-run its parked-Edit resolver.
+pub const PARKED_EDIT_REVIEW: &str = "backup/parked-edit-review";
 const REGISTER: &str = "routed/edit-revision/";
 const PENDING: [&str; 2] = ["routed/pending-edit/", "routed/pending-history-edit/"];
 /// Content-free attribution and replay state that survives retirement of a losing revision.
@@ -354,7 +356,20 @@ impl BackupDatabase {
             }
             self.exclude_divergent_named_copies(&target)?;
         }
-        self.merge_pending_edit_registers()
+        self.merge_pending_edit_registers()?;
+        let parked: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 OR substr(state_kind,1,length(?2))=?2) OR EXISTS(SELECT 1 FROM incoming.runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 OR substr(state_kind,1,length(?2))=?2)",
+            params![PENDING[0], PENDING[1]],
+            |row| row.get(0),
+        )?;
+        if parked {
+            // A target may now exist beside an Edit that was parked in the other copy.
+            db.execute(
+                "INSERT INTO main.runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json",
+                params![PARKED_EDIT_REVIEW, b"true".as_slice()],
+            )?;
+        }
+        Ok(())
     }
 
     /// The same winning Edit may be retained under one copy id with recipient-specific bytes.

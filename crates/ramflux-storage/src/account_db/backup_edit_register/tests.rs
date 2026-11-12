@@ -423,3 +423,47 @@ fn own_sent_attestation_copy_restores_and_stays_fenced_by_deletion() -> TestResu
     absent_everywhere(&merged, b"own-attestation-canary")?;
     finish(merged, [erased, archive])
 }
+
+#[test]
+fn restore_keeps_greatest_parked_edit_and_marks_review() -> TestResult {
+    let parked = |name: &str, event: u8, bytes: &[u8]| -> Result<Side, Box<dyn std::error::Error>> {
+        let (root, db) = crate::tests::test_db(name)?;
+        let copy_id = format!("early-edit/target/{event}");
+        db.write_transaction(|| {
+            db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                owner_id: &format!("edit-event-{event}"),
+                verified_source_anchor: "author-root",
+                copy_id: &copy_id,
+                kind: RawInnerCopyKind::OuterInner,
+                bytes,
+                bounded_metadata: &[],
+            })
+        })?;
+        db.persist_actor_state(
+            "routed/pending-edit/target/author-root",
+            &json!({"revision":3,"event_id":vec![event; 16],"copy_id":copy_id,"committed_key":"routed/committed/none"}),
+        )?;
+        Ok(Side { root, db })
+    };
+    for incoming_wins in [true, false] {
+        let low = parked("parked-restore-low", 1, b"parked-losing-edit-canary")?;
+        let high = parked("parked-restore-high", 9, b"parked-winning-edit")?;
+        let merged = if incoming_wins { restore(&low, &high)? } else { restore(&high, &low)? };
+        let stored: Vec<u8> = merged.db.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind='routed/pending-edit/target/author-root'",
+            [],
+            |row| row.get(0),
+        )?;
+        let stored: EditPair = serde_json::from_slice(&stored)?;
+        assert_eq!(Some(stored), pair(3, 9), "incoming_wins={incoming_wins}");
+        absent_everywhere(&merged, b"parked-losing-edit-canary")?;
+        let review: Vec<u8> = merged.db.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
+            [PARKED_EDIT_REVIEW],
+            |row| row.get(0),
+        )?;
+        assert_eq!(review, b"true");
+        finish(merged, [low, high])?;
+    }
+    Ok(())
+}
