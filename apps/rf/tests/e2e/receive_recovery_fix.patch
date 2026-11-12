@@ -1,0 +1,150 @@
+diff --git a/crates/ramflux-sdk/src/bus/connection_manager/receive_ledger.rs b/crates/ramflux-sdk/src/bus/connection_manager/receive_ledger.rs
+index 8e3b6b996..183f1d3f4 100644
+--- a/crates/ramflux-sdk/src/bus/connection_manager/receive_ledger.rs
++++ b/crates/ramflux-sdk/src/bus/connection_manager/receive_ledger.rs
+@@ -180,6 +180,7 @@ async fn drive_page(
+                     turn,
+                     generation,
+                     seq,
++                    retries,
+                     call_timeout,
+                     backpressure,
+                 )
+@@ -239,32 +240,38 @@ async fn stage_page_entry(
+     call_timeout: std::time::Duration,
+     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+ ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+-    let Some(record) = records.iter().find(|row| row.entry.inbox_seq == sequence) else {
+-        require_disk_stage(writer, turn, generation, sequence).await?;
+-        sync_reorder_cursor(handle, turn.cursor)?;
+-        return Ok((false, backpressure));
++    let mut input = if let Some(record) = records.iter().find(|row| row.entry.inbox_seq == sequence)
++    {
++        select_resume_input(record.entry.clone(), retries)
++    } else {
++        let key = retries
++            .iter()
++            .find(|(_, input)| input.entry.inbox_seq == sequence)
++            .map(|(key, _)| key.clone());
++        let Some(input) = key.and_then(|key| retries.remove(&key)) else {
++            require_disk_stage(writer, turn, generation, sequence).await?;
++            sync_reorder_cursor(handle, turn.cursor)?;
++            return Ok((false, backpressure));
++        };
++        input
+     };
+-    let retry_key =
+-        retries.remove(&entry_id(&record.entry)).and_then(|prepared| prepared.retry_key);
+-    let (accepted, next) = apply_entry(
+-        handle,
+-        work,
+-        generation,
+-        ReceiveEntry {
+-            entry: record.entry.clone(),
+-            retry_key,
+-            replay: false,
+-            turn: Some(turn.clone()),
+-        },
+-        call_timeout,
+-        backpressure,
+-    )
+-    .await?;
++    input.turn = Some(turn.clone());
++    let (accepted, next) =
++        apply_entry(handle, work, generation, input, call_timeout, backpressure).await?;
+     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+     sync_reorder_cursor(handle, turn.cursor)?;
+     Ok((accepted, next))
+ }
+ 
++/// Resume may enrich authority metadata. A recovered W0 packet remains the admitted input.
++fn select_resume_input(
++    entry: crate::GatewayInboxEntry,
++    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
++) -> ReceiveEntry {
++    let recovered = retries.remove(&entry_id(&entry));
++    recovered.unwrap_or(ReceiveEntry { entry, retry_key: None, replay: false, turn: None })
++}
++
+ /// Resume pages can omit a body the gateway has retired. Durable W0 is then the source of truth.
+ async fn require_disk_stage(
+     writer: &Writer,
+@@ -541,6 +548,7 @@ async fn fetch_apply_point(
+     turn: &mut ReceiveTurn,
+     generation: u64,
+     seq: u64,
++    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
+     call_timeout: std::time::Duration,
+     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+ ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+@@ -553,20 +561,11 @@ async fn fetch_apply_point(
+                 apply_point_on(writer, turn, generation, seq, point_entry(turn, seq)).await?;
+             match entry_point_step(turn, seq, outcome)? {
+                 EntryPoint::Stage => {
+-                    let (accepted, next) = apply_entry(
+-                        handle,
+-                        work,
+-                        generation,
+-                        ReceiveEntry {
+-                            entry: record.entry,
+-                            retry_key: None,
+-                            replay: false,
+-                            turn: Some(turn.clone()),
+-                        },
+-                        call_timeout,
+-                        backpressure,
+-                    )
+-                    .await?;
++                    let mut input = select_resume_input(record.entry, retries);
++                    input.turn = Some(turn.clone());
++                    let (accepted, next) =
++                        apply_entry(handle, work, generation, input, call_timeout, backpressure)
++                            .await?;
+                     let _ = accepted;
+                     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+                     Ok((false, next))
+@@ -801,3 +800,7 @@ mod entry_point_tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++#[path = "receive_ledger_recovery_tests.rs"]
++mod recovery_tests;
+diff --git a/crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs b/crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs
+index 2bad085b5..5eb81df41 100644
+--- a/crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs
++++ b/crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs
+@@ -162,7 +162,7 @@ pub(crate) fn prepare_receive_turn(
+     Ok(plan)
+ }
+ 
+-/// Adds each recovered staged/held entry to the plan unless the plan already carries it.
++/// Disk W0 bytes override matching retry hints; admission coordinates remain unchanged.
+ fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryInput]) {
+     merge_retry_inputs(&mut plan.retries, inputs);
+ }
+@@ -177,11 +177,12 @@ fn merge_retry_inputs(retries: &mut Vec<ReceiveEntry>, inputs: &[ramflux_storage
+                 continue;
+             }
+         };
+-        let known = retries.iter().any(|prepared| {
++        if let Some(prepared) = retries.iter_mut().find(|prepared| {
+             prepared.entry.inbox_seq == entry.inbox_seq
+                 && prepared.entry.envelope.envelope_id == entry.envelope.envelope_id
+-        });
+-        if !known {
++        }) {
++            prepared.entry = entry;
++        } else {
+             retries.push(ReceiveEntry { entry, retry_key: None, replay: false, turn: None });
+         }
+     }
+@@ -294,3 +295,7 @@ pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
+     let _reset = Reset;
+     f()
+ }
++
++#[cfg(test)]
++#[path = "w0_recovery_tests.rs"]
++mod recovery_tests;

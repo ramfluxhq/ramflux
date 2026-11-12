@@ -22,23 +22,16 @@ def main():
     os.chdir(Path(__file__).resolve().parents[4])
     source = Path("crates/ramflux-sdk/src/bus/connection_manager/receive_ledger.rs")
     original = source.read_bytes()
-    anchor = b"let recovered = retries.remove(&entry_id(&entry));"
-    if original.count(anchor) != 1:
-        raise RuntimeError("recovered-input selection anchor is ambiguous")
     merge = Path("crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs")
     merge_original = merge.read_bytes()
-    merge_anchor = b"prepared.entry = entry;"
-    if merge_original.count(merge_anchor) != 1:
-        raise RuntimeError("durable packet merge anchor is ambiguous")
+    patch = Path("apps/rf/tests/e2e/receive_recovery_fix.patch").resolve()
     build = ["cargo", "build", "-p", "ramflux-rf", "--features", "itest-memory-vault"]
     test = ["cargo", "nextest", "run", "--profile", "ci", "--no-tests=fail", "--retries", "0",
             "-p", "ramflux-rf", "--features", "itest-memory-vault", "--test", "e2e_resume",
             "-E", "test(b7_group_read_before_setup_ack_keeps_catchup_live)",
             "--run-ignored", "ignored-only", "--test-threads=1"]
     try:
-        source.write_bytes(original.replace(anchor,
-            b"let recovered = retries.remove(&entry_id(&entry)).filter(|_| false);"))
-        merge.write_bytes(merge_original.replace(merge_anchor, b"let _ = (prepared, entry);"))
+        subprocess.run(["patch", "--batch", "--reverse", "-p1", "-i", str(patch)], check=True)
         code, _ = run(build, args.log_dir / "group-broken-build.log")
         if code:
             raise RuntimeError("broken receive path did not compile")
