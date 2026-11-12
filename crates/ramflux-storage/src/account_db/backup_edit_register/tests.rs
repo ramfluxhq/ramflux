@@ -296,7 +296,7 @@ fn restore_erasure_dominates_edit_in_both_directions() -> TestResult {
         let merged = if local_erased { restore(&erased, &live)? } else { restore(&live, &erased)? };
         assert_eq!(register(&merged)?, None, "local_erased={local_erased}");
         assert_eq!(body(&merged)?, None);
-        for canary in [b"erased-side-body-canary".as_slice(), b"live-side-body-canary"] {
+        for canary in [b"erased-side-body-canary".as_slice(), b"live-side-body-canary".as_slice()] {
             absent_everywhere(&merged, canary)?;
         }
         let proofs: i64 = merged.db.query_row(
