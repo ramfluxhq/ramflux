@@ -28,9 +28,19 @@ pub(super) fn broadcast(
                 if is_transient(event) && subscriber.outbound.capacity() <= 1 {
                     return !subscriber.outbound.is_closed();
                 }
+                if !is_transient(event) && signals_lag() && subscriber.outbound.capacity() <= 1 {
+                    // The reserved final slot carries the lag notice. The subscriber then
+                    // resumes from the durable journal instead of silently missing an event.
+                    lagged(subscriber, event);
+                    return false;
+                }
                 match subscriber.outbound.try_send(event.clone()) {
                     Ok(()) => true,
                     Err(mpsc::error::TrySendError::Full(_)) if is_transient(event) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) if signals_lag() => {
+                        lagged(subscriber, event);
+                        false
+                    }
                     Err(_) => false,
                 }
             } else {
@@ -38,6 +48,27 @@ pub(super) fn broadcast(
             }
         });
     }
+}
+
+/// Unified message events never drop a slow subscriber silently. Dormant with the generation.
+fn signals_lag() -> bool {
+    crate::client::target_selection::schema_v1_selected()
+}
+
+/// Final frame of an overflowing subscription. Committed events stay in the durable journal;
+/// the consumer resubscribes from its applied cursor or takes a new snapshot.
+fn lagged(subscriber: &LocalBusSubscriber, event: &LocalBusFrame) {
+    let mut frame = event.clone();
+    frame.kind = LocalBusFrameKind::Event;
+    "stream".clone_into(&mut frame.sdk_api);
+    "stream.lagged".clone_into(&mut frame.method);
+    frame.seq = None;
+    frame.body = serde_json::json!({
+        "last_delivered_seq": serde_json::Value::Null,
+        "dropped_frame_id": event.frame_id,
+        "dropped_topic": event.method,
+    });
+    let _ = subscriber.outbound.try_send(frame);
 }
 
 pub(super) async fn publish(
