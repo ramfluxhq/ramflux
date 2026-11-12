@@ -138,9 +138,11 @@ impl RamfluxClient {
     pub fn encode_generated_delete(
         stream: &mut GeneratedEventStream,
         event_id: Vec<u8>,
-        delete: g::Delete,
+        mut delete: g::Delete,
     ) -> Result<Vec<u8>, SdkError> {
         let identity = stream.next(event_id)?;
+        delete.tombstone_id =
+            g::identity::delete_tombstone(&identity.id).map_err(content_error)?.to_vec();
         Self::encode_generated_inner(
             identity,
             &g::Content { value: Some(g::content::Value::Delete(delete)) },
@@ -153,9 +155,10 @@ impl RamfluxClient {
     pub fn encode_generated_reaction(
         stream: &mut GeneratedEventStream,
         event_id: Vec<u8>,
-        reaction: g::Reaction,
+        mut reaction: g::Reaction,
     ) -> Result<Vec<u8>, SdkError> {
         let identity = stream.next(event_id)?;
+        reaction.operation_id.clone_from(&identity.id);
         Self::encode_generated_inner(
             identity,
             &g::Content { value: Some(g::content::Value::Reaction(reaction)) },

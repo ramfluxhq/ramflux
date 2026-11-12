@@ -25,7 +25,7 @@ struct Prepared {
     origin: Option<(ramflux_storage::RawInnerCopy, super::raw_inner_origin::RetainedOrigin)>,
 }
 // Bump when executable reparse policy changes without a descriptor change.
-const REPARSE_POLICY: &str = "native-origin-1";
+const REPARSE_POLICY: &str = "original-channel-2";
 fn decoder_marker() -> String {
     format!(
         "{}/{}/{}",
@@ -67,73 +67,7 @@ impl RamfluxClient {
                 let Some(prepared) = prepared else {
                     return Ok(false);
                 };
-                if let Some((copy, origin)) = prepared.origin.as_ref() {
-                    if db.raw_inner_copy(&copy.copy_id)?.as_ref() != Some(copy) {
-                        return Ok(false);
-                    }
-                    if origin.verify(&prepared.identity, &snapshot.copy.bytes).is_err() {
-                        return Ok(false);
-                    }
-                } else {
-                    self.require_cached_root_authority(HeadUse::HistoricalRead, &prepared.source)?;
-                }
-                if !self.raw_reparse_scope_allowed(
-                    &prepared.source,
-                    &prepared.provenance.conversation,
-                )? {
-                    return Ok(false);
-                }
-                let Prepared { identity, content, provenance, origin, .. } = prepared;
-                let metadata =
-                    db.message_metadata(&provenance.conversation, &provenance.message)?;
-                db.bind_raw_inner_copy(&snapshot.copy.copy_id, &provenance.message)?;
-                db.replace_generated_message_content(
-                    &provenance.conversation,
-                    &provenance.message,
-                    &snapshot.copy.bytes,
-                    &metadata,
-                )?;
-                db.put_known_content_evidence(
-                    &provenance.message,
-                    &provenance.conversation,
-                    &snapshot.copy.bytes,
-                    &snapshot.metadata,
-                    &[],
-                )?;
-                db.persist_message_actor_state(
-                    &provenance.message,
-                    &format!("routed/generated-identity/{}", provenance.message),
-                    &identity,
-                )?;
-                if let Some((copy, origin)) = origin.as_ref() {
-                    db.persist_message_actor_state(
-                        &provenance.message,
-                        &format!("routed/origin-evidence/{}", provenance.message),
-                        origin,
-                    )?;
-                    db.finish_raw_inner_reparse(&copy.copy_id)?;
-                }
-                db.remove_actor_state(&format!("routed/unsupported/{}", provenance.message))?;
-                let update = g::MessageUpdate {
-                    account_id: db.local_account_id.clone(),
-                    identity: Some(identity),
-                    journal_sequence: 0,
-                    state: Some(g::message_update::State::Content(content)),
-                };
-                let marker = format!(
-                    "routed/reparse/{}/{}/{}",
-                    snapshot.copy.copy_id,
-                    ramflux_protocol::encode_base64url(snapshot.copy.digest),
-                    decoder
-                );
-                db.append_message_update(
-                    &marker,
-                    "message.schema.updated",
-                    &update,
-                    crate::time::now_unix_timestamp(),
-                )?;
-                db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
-                Ok(true)
+                self.install_raw_reparse(&snapshot, prepared, &decoder)
             })?;
             if projected {
                 progress.projected += 1;
@@ -143,6 +77,152 @@ impl RamfluxClient {
         }
         Ok(progress)
     }
+    fn install_raw_reparse(
+        &self,
+        snapshot: &RawInnerReparseRow,
+        prepared: Prepared,
+        decoder: &str,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        if let Some((copy, origin)) = prepared.origin.as_ref() {
+            if db.raw_inner_copy(&copy.copy_id)?.as_ref() != Some(copy) {
+                return Ok(false);
+            }
+            if origin.verify(&prepared.identity, &snapshot.copy.bytes).is_err() {
+                return Ok(false);
+            }
+        } else {
+            self.require_cached_root_authority(HeadUse::HistoricalRead, &prepared.source)?;
+        }
+        if !self.raw_reparse_scope_allowed(&prepared.source, &prepared.provenance.conversation)? {
+            return Ok(false);
+        }
+        if !self.raw_reparse_policy(snapshot, &prepared)? {
+            return Ok(false);
+        }
+        self.project_raw_reparse(snapshot, prepared, decoder)
+    }
+
+    fn raw_reparse_policy(
+        &self,
+        snapshot: &RawInnerReparseRow,
+        prepared: &Prepared,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        if prepared.provenance.original_mode == "ephemeral" {
+            self.discard_raw_reparse(snapshot, prepared)?;
+            return Ok(false);
+        }
+        match prepared.content.value.as_ref() {
+            Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => (),
+            Some(g::content::Value::Delete(delete)) if prepared.origin.is_some() => {
+                // A failed peer authorization rolls back only this copy's effects,
+                // preserving its attempted marker and progress for other sources.
+                let applied = db.write_transaction(|| {
+                    self.apply_generated_delete_authorized(
+                        &prepared.source,
+                        &prepared.identity,
+                        &prepared.provenance.conversation,
+                        delete,
+                    )
+                });
+                if let Err(error) = applied {
+                    return match error {
+                        SdkError::Storage(_) => Err(error),
+                        _ => Ok(false),
+                    };
+                }
+            }
+            // Service has no v1 native pin executor. Cosmetic data cannot create
+            // that authority. Other native kinds never execute retroactively.
+            Some(
+                g::content::Value::Service(_)
+                | g::content::Value::Typing(_)
+                | g::content::Value::Control(_)
+                | g::content::Value::Call(_)
+                | g::content::Value::Task(_)
+                | g::content::Value::Surface(_),
+            ) => {
+                self.discard_raw_reparse(snapshot, prepared)?;
+                return Ok(false);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn project_raw_reparse(
+        &self,
+        snapshot: &RawInnerReparseRow,
+        prepared: Prepared,
+        decoder: &str,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let Prepared { identity, content, provenance, origin, .. } = prepared;
+        let metadata = db.message_metadata(&provenance.conversation, &provenance.message)?;
+        db.bind_raw_inner_copy(&snapshot.copy.copy_id, &provenance.message)?;
+        db.replace_generated_message_content(
+            &provenance.conversation,
+            &provenance.message,
+            &snapshot.copy.bytes,
+            &metadata,
+        )?;
+        db.put_known_content_evidence(
+            &provenance.message,
+            &provenance.conversation,
+            &snapshot.copy.bytes,
+            &snapshot.metadata,
+            &[],
+        )?;
+        db.persist_message_actor_state(
+            &provenance.message,
+            &format!("routed/generated-identity/{}", provenance.message),
+            &identity,
+        )?;
+        if let Some((copy, origin)) = origin.as_ref() {
+            db.persist_message_actor_state(
+                &provenance.message,
+                &format!("routed/origin-evidence/{}", provenance.message),
+                origin,
+            )?;
+            db.finish_raw_inner_reparse(&copy.copy_id)?;
+        }
+        db.remove_actor_state(&format!("routed/unsupported/{}", provenance.message))?;
+        let update = g::MessageUpdate {
+            account_id: db.local_account_id.clone(),
+            identity: Some(identity),
+            journal_sequence: 0,
+            state: Some(g::message_update::State::Content(content)),
+        };
+        let marker = format!(
+            "routed/reparse/{}/{}/{}",
+            snapshot.copy.copy_id,
+            ramflux_protocol::encode_base64url(snapshot.copy.digest),
+            decoder
+        );
+        db.append_message_update(
+            &marker,
+            "message.schema.updated",
+            &update,
+            crate::time::now_unix_timestamp(),
+        )?;
+        db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
+        Ok(true)
+    }
+
+    fn discard_raw_reparse(
+        &self,
+        snapshot: &RawInnerReparseRow,
+        prepared: &Prepared,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        if let Some((copy, _)) = &prepared.origin {
+            db.finish_raw_inner_reparse(&copy.copy_id)?;
+        }
+        db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
+        Ok(())
+    }
+
     fn prepare_raw_reparse(
         &self,
         snapshot: &RawInnerReparseRow,
@@ -156,19 +236,15 @@ impl RamfluxClient {
         let Ok((identity, content)) = Self::decode_generated_inner(&snapshot.copy.bytes) else {
             return Ok(None);
         };
-        match content.value.as_ref() {
-            Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => (),
-            _ => return Ok(None),
-        }
         let Ok(provenance) = serde_json::from_slice::<Provenance>(&snapshot.metadata) else {
             return Ok(None);
         };
-        if provenance.original_mode != "durable"
+        if !matches!(provenance.original_mode.as_str(), "durable" | "ephemeral")
             || snapshot.copy.kind != ramflux_storage::RawInnerCopyKind::OuterInner
             || snapshot.copy.copy_id != provenance.outer_receipt_key
             || identity.group_id.is_some()
             || identity.group_epoch.is_some()
-            || g::identity::verify(&identity).is_err()
+            || (scanned.kind != 7 && g::identity::verify(&identity).is_err())
             || provenance.message != snapshot.copy.owner_id
             || provenance.message != ramflux_protocol::encode_base64url(&identity.id)
             || identity.conversation_id != provenance.conversation
@@ -197,7 +273,8 @@ impl RamfluxClient {
             };
             let envelope = &verified.outer;
             if route.kind != Kind::Direct
-                || envelope.delivery_class != ramflux_protocol::DeliveryClass::Message
+                || (scanned.kind == 1
+                    && envelope.delivery_class != ramflux_protocol::DeliveryClass::Message)
                 || origin.routing != route
                 || route.message_id != provenance.message
                 || envelope.envelope_id != provenance.envelope_id

@@ -94,8 +94,11 @@ fn generated_message_media_group_and_receipt_paths_round_trip() -> TestResult {
     let sealed = GroupSealedContent {
         group_id: "g1".into(),
         ciphertext: vec![1, 2, 3],
-        event_id: b"group-event".to_vec(),
-        native_authority_proof: vec![7; 8],
+        event_id: g::identity::derive(&author(), "c1", 1)?.to_vec(),
+        author: Some(author()),
+        key_epoch: 3,
+        group_state_hash: vec![7; 32],
+        native_authority_proof: Vec::new(),
         ..Default::default()
     };
     let group_bytes = RamfluxClient::encode_generated_message(
@@ -117,7 +120,7 @@ fn generated_message_media_group_and_receipt_paths_round_trip() -> TestResult {
     let forward = Forward {
         original: Some(named_ref()),
         original_display_name: Some("Alice".into()),
-        origin_assertion: vec![11; 16],
+        origin_assertion: Vec::new(),
     };
     let forwarded = RamfluxClient::encode_generated_message(
         &mut stream,
@@ -143,7 +146,10 @@ fn generated_message_media_group_and_receipt_paths_round_trip() -> TestResult {
     assert_ne!(scanned.kind, g::KindId::KindMessage as u32);
     let (receipt_identity, receipt_content) =
         RamfluxClient::decode_generated_inner(&receipt_bytes)?;
-    assert_eq!(receipt_identity.id, b"rcpt-1");
+    assert_eq!(
+        receipt_identity.id,
+        g::identity::derive(&author(), "c1", receipt_identity.device_sequence)?
+    );
     match receipt_content.value {
         Some(content::Value::Receipt(ref decoded)) => {
             assert_eq!(decoded, &receipt);

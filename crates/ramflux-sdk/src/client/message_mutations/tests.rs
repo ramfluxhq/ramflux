@@ -17,11 +17,7 @@ fn author() -> QualifiedDevice {
 }
 
 fn named() -> MessageRef {
-    MessageRef {
-        id: b"target".to_vec(),
-        conversation_id: "c".into(),
-        author_anchor: "root-a".into(),
-    }
+    MessageRef { id: vec![8; 32], conversation_id: "c".into(), author_anchor: "root-a".into() }
 }
 
 fn stored(conversation: ConversationKind, tombstoned: bool) -> StoredTarget {
@@ -57,7 +53,13 @@ fn encode_edit_delete(scope: FanoutScope) -> TestResult {
     let (delete_id, delete_content) = RamfluxClient::decode_generated_inner(&delete)?;
     assert_eq!(edit_id.device_sequence + 1, delete_id.device_sequence);
     assert!(matches!(edit_content.value, Some(content::Value::Edit(_))));
-    assert!(matches!(delete_content.value, Some(content::Value::Delete(_))));
+    let Some(content::Value::Delete(delete)) = delete_content.value else {
+        return Err("Delete content missing".into());
+    };
+    assert_eq!(
+        delete.tombstone_id,
+        ramflux_protocol::message::identity::delete_tombstone(&delete_id.id)?
+    );
     assert_eq!(
         mutation_encoding(KindId::KindEdit, PROFILE_FLOOR)?,
         Encoding::Typed { kind: KindId::KindEdit, layer: PROFILE_FLOOR }
@@ -105,8 +107,11 @@ fn edit_reaction_delete_authorization() -> TestResult {
         b"rxn-1".to_vec(),
         Reaction { target: Some(named()), token: "👍".into(), ..Default::default() },
     )?;
-    let (_, content) = RamfluxClient::decode_generated_inner(&reaction)?;
-    assert!(matches!(content.value, Some(content::Value::Reaction(_))));
+    let (identity, content) = RamfluxClient::decode_generated_inner(&reaction)?;
+    let Some(content::Value::Reaction(reaction)) = content.value else {
+        return Err("Reaction content missing".into());
+    };
+    assert_eq!(reaction.operation_id, identity.id);
     Ok(())
 }
 
