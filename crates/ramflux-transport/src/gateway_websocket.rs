@@ -54,12 +54,7 @@ pub struct WebSocketTlsGatewayClient;
 /// A gateway session stream carried as binary WebSocket messages inside TLS 1.3.
 pub struct WebSocketTlsGatewayBidiStream {
     stream: GatewayTcpTlsStream,
-    /// Bytes read from TLS and not yet parsed.
-    inbound: Vec<u8>,
-    /// Payload of the message being reassembled.
-    message: Vec<u8>,
-    in_message: bool,
-    fragments: usize,
+    assembler: MessageAssembler,
     /// Encoded frames not yet fully written; survives a cancelled send or receive.
     outbound: Vec<u8>,
     outbound_offset: usize,
@@ -293,10 +288,7 @@ impl WebSocketTlsGatewayClient {
             Self,
             WebSocketTlsGatewayBidiStream {
                 stream,
-                inbound: Vec::new(),
-                message: Vec::new(),
-                in_message: false,
-                fragments: 0,
+                assembler: MessageAssembler::default(),
                 outbound: Vec::new(),
                 outbound_offset: 0,
                 read_deadline: None,
@@ -325,40 +317,34 @@ async fn upgrade(stream: &mut GatewayTcpTlsStream, authority: &str) -> Result<()
     validate_upgrade_response(&head, &key)
 }
 
-impl WebSocketTlsGatewayBidiStream {
-    fn queue_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError> {
-        let mut mask = [0_u8; 4];
-        secure_random(&mut mask)?;
-        encode_client_frame(opcode, payload, mask, &mut self.outbound)
+/// Reassembles server frames into messages. It performs no I/O.
+#[derive(Default)]
+struct MessageAssembler {
+    /// Bytes read from TLS and not yet parsed.
+    inbound: Vec<u8>,
+    /// Payload of the message being reassembled.
+    message: Vec<u8>,
+    in_message: bool,
+    fragments: usize,
+}
+
+impl MessageAssembler {
+    fn has_partial_input(&self) -> bool {
+        !self.inbound.is_empty() || self.in_message
     }
 
-    /// Write queued bytes. Progress is recorded after every write, so a cancelled caller
-    /// leaves a consistent queue that the next operation continues.
-    async fn flush_outbound(&mut self) -> Result<(), TransportError> {
-        while self.outbound_offset < self.outbound.len() {
-            let pending = self.outbound.get(self.outbound_offset..).unwrap_or_default();
-            let written = self.stream.write(pending).await?;
-            if written == 0 {
-                return Err(TransportError::Io(io::ErrorKind::WriteZero.into()));
-            }
-            self.outbound_offset = self.outbound_offset.saturating_add(written);
-        }
-        if !self.outbound.is_empty() {
-            self.outbound.clear();
-            self.outbound_offset = 0;
-            self.stream.flush().await?;
-        }
-        Ok(())
-    }
-
-    /// Consume complete frames from `inbound`. Returns a message when one is complete.
-    fn take_message(&mut self, max: usize) -> Result<Option<Vec<u8>>, TransportError> {
+    /// Consume complete frames from `inbound`. Returns a message when one is complete; the
+    /// payload of every Ping consumed on the way is appended to `pings`.
+    fn take_message(
+        &mut self,
+        max: usize,
+        pings: &mut Vec<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
         loop {
             let Some(header) = parse_server_frame_header(&self.inbound)? else {
                 return Ok(None);
             };
-            let is_data = header.opcode < OPCODE_CLOSE;
-            if is_data {
+            if header.opcode < OPCODE_CLOSE {
                 // Refuse on the running total before the crossing fragment is buffered.
                 let total = self.message.len().saturating_add(header.payload_len);
                 if total > max {
@@ -391,7 +377,7 @@ impl WebSocketTlsGatewayBidiStream {
                     self.in_message = true;
                 }
                 OPCODE_TEXT => return Err(protocol_error("websocket text message refused")),
-                OPCODE_PING => self.queue_frame(OPCODE_PONG, &payload)?,
+                OPCODE_PING => pings.push(payload),
                 OPCODE_PONG => {}
                 OPCODE_CLOSE => {
                     return Err(TransportError::Io(io::Error::new(
@@ -403,21 +389,49 @@ impl WebSocketTlsGatewayBidiStream {
             }
         }
     }
+}
 
-    fn has_partial_input(&self) -> bool {
-        !self.inbound.is_empty() || self.in_message
+impl WebSocketTlsGatewayBidiStream {
+    fn queue_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), TransportError> {
+        let mut mask = [0_u8; 4];
+        secure_random(&mut mask)?;
+        encode_client_frame(opcode, payload, mask, &mut self.outbound)
+    }
+
+    /// Write queued bytes. Progress is recorded after every write, so a cancelled caller
+    /// leaves a consistent queue that the next operation continues.
+    async fn flush_outbound(&mut self) -> Result<(), TransportError> {
+        while self.outbound_offset < self.outbound.len() {
+            let pending = self.outbound.get(self.outbound_offset..).unwrap_or_default();
+            let written = self.stream.write(pending).await?;
+            if written == 0 {
+                return Err(TransportError::Io(io::ErrorKind::WriteZero.into()));
+            }
+            self.outbound_offset = self.outbound_offset.saturating_add(written);
+        }
+        if !self.outbound.is_empty() {
+            self.outbound.clear();
+            self.outbound_offset = 0;
+            self.stream.flush().await?;
+        }
+        Ok(())
     }
 
     /// Read one message. With `idle`, no deadline runs until the first byte of a message
     /// arrives; a started message must complete within the stream timeout.
     async fn read_message(&mut self, max: usize, idle: bool) -> Result<Vec<u8>, TransportError> {
         loop {
-            if let Some(message) = self.take_message(max)? {
+            let mut pings = Vec::new();
+            let taken = self.assembler.take_message(max, &mut pings);
+            for ping in pings {
+                self.queue_frame(OPCODE_PONG, &ping)?;
+            }
+            if let Some(message) = taken? {
                 self.read_deadline = None;
                 return Ok(message);
             }
             self.flush_outbound().await?;
-            let deadline = if idle && !self.has_partial_input() {
+            let deadline = if idle && !self.assembler.has_partial_input() {
                 self.read_deadline = None;
                 None
             } else {
@@ -434,7 +448,7 @@ impl WebSocketTlsGatewayBidiStream {
             if read == 0 {
                 return Err(TransportError::Io(io::ErrorKind::UnexpectedEof.into()));
             }
-            self.inbound.extend_from_slice(chunk.get(..read).unwrap_or_default());
+            self.assembler.inbound.extend_from_slice(chunk.get(..read).unwrap_or_default());
         }
     }
 }
@@ -551,6 +565,71 @@ mod tests {
         let unmasked: Vec<u8> =
             body.iter().zip(mask.iter().cycle()).map(|(byte, key)| byte ^ key).collect();
         assert_eq!(unmasked, payload);
+    }
+
+    fn server_frame(first: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![first];
+        if payload.len() <= 125 {
+            frame.push(u8::try_from(payload.len()).unwrap_or(0));
+        } else if let Ok(len) = u16::try_from(payload.len()) {
+            frame.push(126);
+            frame.extend_from_slice(&len.to_be_bytes());
+        } else {
+            frame.push(127);
+            frame.extend_from_slice(&u64::try_from(payload.len()).unwrap_or(0).to_be_bytes());
+        }
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn one_binary_message_is_one_frame_body_and_fragments_reassemble() {
+        let mut assembler = MessageAssembler::default();
+        let mut pings = Vec::new();
+        assembler.inbound.extend(server_frame(0x82, b"{\"frame_type\":\"heartbeat\"}"));
+        assembler.inbound.extend(server_frame(0x02, b"ab"));
+        assembler.inbound.extend(server_frame(0x89, b"p"));
+        assembler.inbound.extend(server_frame(0x80, b"cd"));
+        let first = assembler.take_message(1024, &mut pings).ok().flatten();
+        assert_eq!(first.as_deref(), Some(&b"{\"frame_type\":\"heartbeat\"}"[..]));
+        let second = assembler.take_message(1024, &mut pings).ok().flatten();
+        assert_eq!(second.as_deref(), Some(&b"abcd"[..]));
+        assert_eq!(pings, vec![b"p".to_vec()]);
+        assert!(!assembler.has_partial_input());
+    }
+
+    #[test]
+    fn oversize_is_refused_on_the_running_total_before_the_payload_arrives() {
+        let mut assembler = MessageAssembler::default();
+        let mut pings = Vec::new();
+        assembler.inbound.extend(server_frame(0x02, &[0_u8; 600]));
+        assert_eq!(assembler.take_message(1000, &mut pings).ok(), Some(None));
+        // Only the header of the crossing fragment has arrived; no payload is buffered.
+        assembler.inbound.extend([0x80, 126, 0x01, 0x91]);
+        assert!(matches!(
+            assembler.take_message(1000, &mut pings),
+            Err(TransportError::FrameTooLarge { len: 1001 })
+        ));
+    }
+
+    #[test]
+    fn text_close_stray_continuation_and_fragment_floods_are_refused() {
+        let mut pings = Vec::new();
+        let mut text = MessageAssembler::default();
+        text.inbound.extend(server_frame(0x81, b"hello"));
+        assert!(text.take_message(1024, &mut pings).is_err());
+        let mut close = MessageAssembler::default();
+        close.inbound.extend(server_frame(0x88, &4401_u16.to_be_bytes()));
+        assert!(close.take_message(1024, &mut pings).is_err());
+        let mut stray = MessageAssembler::default();
+        stray.inbound.extend(server_frame(0x80, b"x"));
+        assert!(stray.take_message(1024, &mut pings).is_err());
+        let mut flood = MessageAssembler::default();
+        flood.inbound.extend(server_frame(0x02, b"x"));
+        for _ in 0..GATEWAY_WEBSOCKET_MAX_FRAGMENTS {
+            flood.inbound.extend(server_frame(0x00, b"x"));
+        }
+        assert!(flood.take_message(1024 * 1024, &mut pings).is_err());
     }
 
     #[test]
