@@ -541,7 +541,8 @@ impl RamfluxClient {
             if validate_known && self.self_sync_reference_matches(reference)? == Some(false) {
                 return Err(refused("reference does not match authenticated target"));
             }
-            if validate_known && !self.account_db()?.message_is_deleted(&id)?
+            if validate_known
+                && !self.account_db()?.message_is_deleted(&id)?
                 && let Some(target) = self.direct_message_by_id(&id)?
                 && target.conversation_id != conversation
             {
