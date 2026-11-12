@@ -5,7 +5,7 @@
 
 mod account_db;
 mod sync_path;
-pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
+pub use account_db::backup::{AccountBackupSnapshot, BackupCounts, FullTransferCut};
 pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,
 };
@@ -88,10 +88,10 @@ pub use account_db::AccountDb;
 pub use account_db::full_transfer::{
     CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
     FullBaseSourceEncoding, FullForwardReader, FullScalarInputCounts, FullScalarSourceCounts,
-    FullSourcePreparation, FullSourcePreparationCancel, FullStageKey, FullTransferSchema,
-    FullTransferStage, MergeRule, PreparedFullSource, StageDirection, VariantRule,
-    WrappedFullStageKey, copy_full_scalar_record, full_census_hash, full_transfer_catalog,
-    write_full_scalar_sql_row,
+    FullSourcePreparation, FullSourcePreparationCancel, FullStageKey, FullTargetObservation,
+    FullTransferSchema, FullTransferStage, MergeRule, PreparedFullSource, StageDirection,
+    VariantRule, WrappedFullStageKey, copy_full_scalar_record, full_census_hash,
+    full_transfer_catalog, write_full_scalar_sql_row,
 };
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{

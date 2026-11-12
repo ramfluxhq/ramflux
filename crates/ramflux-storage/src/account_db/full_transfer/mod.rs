@@ -20,6 +20,7 @@ mod stage;
 mod stage_chunks;
 mod stage_reader;
 mod stage_validation;
+mod target_observation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
 pub use receiver_input::FullScalarInputCounts;
 pub use source_base::FullBaseSourceEncoding;
@@ -29,6 +30,7 @@ pub use source_preparation::{
 pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;
 pub use stage_reader::FullForwardReader;
+pub use target_observation::FullTargetObservation;
 
 #[cfg(test)]
 mod stage_tests;

@@ -70,6 +70,9 @@ fn active_writers() -> &'static Mutex<BTreeMap<PathBuf, WriterOwner>> {
 }
 
 impl Connection {
+    pub(crate) fn same_worker(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.inner, &other.inner)
+    }
     pub(crate) fn owned_path(&self) -> &Path {
         &self.inner.path
     }
