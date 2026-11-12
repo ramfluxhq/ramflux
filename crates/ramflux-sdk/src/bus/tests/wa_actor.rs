@@ -954,6 +954,12 @@ async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
         1,
         "oversize fetch_entry must refresh C before the next resume"
     );
+    let handle = account_of(&runtime)?.connection.as_ref().ok_or("handle")?;
+    assert!(
+        handle.receive_observations().snapshot().page_fetches > 0,
+        "the production point-fetch path owns its counter"
+    );
+
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
@@ -1285,6 +1291,9 @@ async fn push_without_polling_case() -> Case {
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     fill_sealed(&mut fixture, 1, 1).await?;
     let connected = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    let before = handle.receive_observations().snapshot();
+    assert!(before.resume_requests > 0 && before.catch_up_passes > 0);
+    assert_eq!(before.deliver_frames, 0);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(5)).await;
     pump_anchored(&mut runtime, &handle).await?;
@@ -1297,6 +1306,11 @@ async fn push_without_polling_case() -> Case {
     publish_deliver(&handle, seq1);
     pump_anchored(&mut runtime, &handle).await?;
     assert_eq!(snap(&runtime)?.cursor, 1, "Deliver applies without a poll");
+    let after = handle.receive_observations().snapshot();
+    assert_eq!(after.deliver_frames, 1, "real intake increments the frame observation");
+    assert_eq!(after.resume_requests, before.resume_requests);
+    assert_eq!(after.catch_up_passes, before.catch_up_passes);
+
     assert_eq!(
         gateway.lock().map_err(|_| "gateway")?.resumes.len(),
         connected,
@@ -1359,6 +1373,17 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     drive_flush(&mut runtime, true).await?;
     assert_eq!(snap(&runtime)?.cursor, 2, "first catch-up applies both live messages");
     assert_eq!(acked(&gateway)?, 2, "WA ACKs both live sequences");
+    assert_eq!(
+        account_of(&runtime)?
+            .connection
+            .as_ref()
+            .ok_or("handle")?
+            .receive_observations()
+            .snapshot()
+            .last_acked_seq,
+        2,
+        "successful real ACK response advances the observation"
+    );
     assert!(snap(&runtime)?.intents.is_empty(), "ACK settles live intents");
     let applied = applied_message_ids(&runtime)?;
     assert_eq!(

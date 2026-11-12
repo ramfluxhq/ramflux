@@ -391,7 +391,12 @@ jobs:
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
           python3 -B scripts/ci/run-nextest.py --label e2e_harness -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
+          # Includes b1_same_node_bidirectional_dm_uses_deliver_without_resume and
+          # two_nodes_have_separate_identities_cas_and_stores (Demo B).
           python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
+          # Demo B: b7_offline_twenty_dms_three_group_messages_wal,
+          # b7_offline_twenty_dms_three_group_messages_redb_only,
+          # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only.
           python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1

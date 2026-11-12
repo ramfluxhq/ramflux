@@ -409,6 +409,14 @@ impl AccountRuntime {
             backpressure,
         ))
         .await;
+        #[cfg(any(test, feature = "itest-memory-vault"))]
+        if result.is_ok() {
+            let cursor = super::super::push_receiver::apply_w1::read_cursor(
+                account.client.account_db()?,
+                &target,
+            )?;
+            handle.receive_observations().committed(turn.cursor, cursor);
+        }
         let result = match result {
             Ok(applied) => {
                 super::super::push_receiver::apply_w1::replay_projected(account).map(|()| applied)
@@ -821,7 +829,12 @@ fn refresh_receive_status(
             let counters = db.receive_status_counters(&account.target_delivery_id)?;
             let mode = handle.session_mode();
             Some(ReceiveStatus {
+                observations: handle.receive_observations().snapshot(),
                 mode: mode.receive_label().to_owned(),
+                committed_cursor: super::super::push_receiver::apply_w1::read_cursor(
+                    db,
+                    &account.target_delivery_id,
+                )?,
                 last_catch_up_at: handle.last_catch_up_at_ms(),
                 catch_ups_total: handle.catch_ups_total(),
                 inbox_gaps_total: counters.inbox_gaps_total,

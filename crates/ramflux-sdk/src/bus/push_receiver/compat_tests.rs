@@ -306,6 +306,8 @@ fn legacy_deadline_clock_skew() -> Result<(), SdkError> {
         "checked add refuses overflow"
     );
     let status = crate::bus::connection_manager::ReceiveStatus {
+        observations: crate::bus::connection_manager::ReceiveObservation::default(),
+        committed_cursor: 0,
         mode: "compat".into(),
         last_catch_up_at: None,
         catch_ups_total: 0,

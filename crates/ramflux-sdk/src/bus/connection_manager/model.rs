@@ -25,7 +25,10 @@ pub(crate) enum ConnectionPhase {
 /// Committed receive counters the manager publishes when the ledger is Activated (D6).
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct ReceiveStatus {
+    #[serde(flatten)]
+    pub observations: super::ReceiveObservation,
     pub mode: String,
+    pub committed_cursor: u64,
     pub last_catch_up_at: Option<u64>,
     pub catch_ups_total: u64,
     pub inbox_gaps_total: u64,

@@ -106,6 +106,7 @@ async fn apply_capable(
 ) -> Result<(), SdkError> {
     match &*event {
         CapableEvent::Deliver { entry, incarnation_id, retain_until } => {
+            handle.receive_observations().deliver();
             Box::pin(stage_and_admit(
                 handle,
                 work,

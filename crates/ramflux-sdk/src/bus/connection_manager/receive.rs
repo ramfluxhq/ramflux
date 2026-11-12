@@ -321,6 +321,7 @@ async fn run_one_anchored(
     trigger: ReceiveTrigger,
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Option<(bool, bool)> {
+    handle.receive_observations().catch_up();
     tracing::trace!(?trigger, generation, "account receive pass");
     #[cfg(test)]
     handle
@@ -465,6 +466,7 @@ async fn catch_up(
     let limit = plan.limit.min(RECEIVE_PAGE_LIMIT);
     let mut pages = 0_u32;
     loop {
+        handle.receive_observations().resume();
         let entries = handle
             .call(
                 move |engine| Box::pin(engine.resume_authoritative_after(cursor, limit)),
@@ -732,6 +734,7 @@ async fn flush_compat_acks(
     let mut lookups = Vec::with_capacity(sequences.len());
     for &sequence in &sequences {
         let after = sequence.saturating_sub(1);
+        handle.receive_observations().resume();
         let lookup = match handle
             .call(
                 move |engine| Box::pin(engine.resume_after(after, LOOKUP_LIMIT as usize)),
@@ -811,6 +814,11 @@ async fn apply_ack_results_flush(
     sequences: Vec<u64>,
     results: Vec<ramflux_storage::ReceiveAckResult>,
 ) -> Result<(), SdkError> {
+    for result in &results {
+        if matches!(result.outcome, ReceiveAckOutcome::Acked | ReceiveAckOutcome::AlreadySettled) {
+            handle.receive_observations().acked(&incarnation, result.sequence);
+        }
+    }
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::AckFlush {
         generation,

@@ -5,6 +5,8 @@
 
 mod model;
 pub(crate) mod receive;
+mod receive_observations;
+pub(crate) use receive_observations::Observation as ReceiveObservation;
 pub(crate) mod resync;
 pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigger};
 mod account_work;
@@ -99,6 +101,7 @@ struct Shared {
     session_mode: std::sync::Mutex<crate::gateway::session_push::SessionMode>,
     compat_session: std::sync::Mutex<crate::bus::push_receiver::compat::CompatSession>,
     catch_ups_total: AtomicU64,
+    receive_observations: receive_observations::Counters,
     last_catch_up_at_ms: std::sync::Mutex<Option<u64>>,
     fallback_clock_unverified: std::sync::atomic::AtomicBool,
     snapshot: RwLock<NetworkingSnapshot>,
@@ -163,6 +166,7 @@ fn new_shared(
         session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Legacy),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
         catch_ups_total: AtomicU64::new(0),
+        receive_observations: receive_observations::Counters::default(),
         last_catch_up_at_ms: std::sync::Mutex::new(None),
         fallback_clock_unverified: std::sync::atomic::AtomicBool::new(false),
         snapshot: RwLock::new(NetworkingSnapshot::pending(generation)),
@@ -521,7 +525,17 @@ impl ConnectionHandle {
         let _ = self.safety_refresh.try_send(root.to_owned());
     }
     pub(crate) fn snapshot(&self) -> NetworkingSnapshot {
-        self.shared.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        let mut snapshot =
+            self.shared.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if let Some(receive) = &mut snapshot.receive {
+            receive.observations = self.receive_observations().snapshot();
+            receive.observations.last_acked_seq =
+                self.receive_observations().acked_for(receive.incarnation.as_deref());
+        }
+        snapshot
+    }
+    pub(crate) fn receive_observations(&self) -> &receive_observations::Counters {
+        &self.shared.receive_observations
     }
     pub(crate) fn snapshot_watch(&self) -> watch::Receiver<u64> {
         self.shared.changed.subscribe()

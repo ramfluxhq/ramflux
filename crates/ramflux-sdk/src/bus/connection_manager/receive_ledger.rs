@@ -360,6 +360,7 @@ async fn resume_push(
     limit: usize,
     call_timeout: std::time::Duration,
 ) -> Result<ResumePage, SdkError> {
+    handle.receive_observations().resume();
     match handle
         .call(
             move |engine| Box::pin(engine.resume_page(after, limit)),
@@ -384,6 +385,7 @@ async fn resume_legacy(
     use crate::bus::push_receiver::compat::{FRAME_MAX_BYTES, FrameOutcome, on_legacy_frame};
     let mut session = handle.compat_session();
     let want = usize::try_from(session.limit).unwrap_or(limit).min(limit);
+    handle.receive_observations().resume();
     let entries = handle
         .call(
             move |engine| Box::pin(engine.resume_after(after, want)),
@@ -401,6 +403,7 @@ async fn resume_legacy(
         FrameOutcome::RetryFresh { limit: sticky } => {
             handle.set_compat_session(session);
             let sticky_usize = usize::try_from(sticky).unwrap_or(1);
+            handle.receive_observations().resume();
             let retry = handle
                 .call(
                     move |engine| Box::pin(engine.resume_after(after, sticky_usize)),
@@ -552,6 +555,7 @@ async fn fetch_apply_point(
     call_timeout: std::time::Duration,
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+    handle.receive_observations().fetch();
     let reply = handle
         .call(move |engine| Box::pin(engine.fetch_entry(seq)), Instant::now() + call_timeout)
         .await?;

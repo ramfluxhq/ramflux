@@ -71,3 +71,92 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
     Ok(())
 }
+
+#[ignore = "real-process Demo B B1 single-node: CLI e2e CI job"]
+#[test]
+fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()> {
+    let stack = boot_stack()?;
+    let alice_d = start_daemon(&stack, "alice")?;
+    let bob_d = start_daemon(&stack, "bob")?;
+    configure_node(&alice_d, &stack.discovery_url)?;
+    configure_node(&bob_d, &stack.discovery_url)?;
+    let alice = create_account(&alice_d, "Alice")?;
+    let bob = create_account(&bob_d, "Bob")?;
+    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    let conversation = unique("demo-b-live");
+    for (sender_d, sender, recipient_d, recipient, body) in [
+        (&alice_d, &alice, &bob_d, &bob, "B1 Alice to Bob"),
+        (&bob_d, &bob, &alice_d, &alice, "B1 Bob to Alice"),
+    ] {
+        let before = e2e::wait_receive_settled(recipient_d, recipient)?;
+        let ids = [unique("b1-first"), unique("b1-second")];
+        for id in &ids {
+            dm_send(sender_d, sender, recipient, &conversation, id, body)?;
+        }
+        for id in &ids {
+            wait_node_observed_ack(&stack, recipient, id)?;
+        }
+        let after = e2e::wait_receive_settled(recipient_d, recipient)?;
+        assert!(
+            e2e::receive_counter(&after, "deliver_frames")?
+                > e2e::receive_counter(&before, "deliver_frames")?,
+            "B1 must receive Deliver frames: before={before} after={after}"
+        );
+        for counter in ["resume_requests", "page_fetches", "catch_up_passes"] {
+            assert_eq!(after[counter], before[counter], "B1 {counter}: {before} -> {after}");
+        }
+        let received = wait_dm_texts(recipient_d, recipient, &conversation, &[body, body])?;
+        for owner in [(sender_d, sender), (recipient_d, recipient)] {
+            let view = e2e::rf_json(
+                &owner.0.socket,
+                &["dm", "read", "--account", &owner.1.id, "--conversation", &conversation],
+            )?;
+            for id in &ids {
+                let count = ["decrypted_messages", "messages"]
+                    .iter()
+                    .filter_map(|key| view[*key].as_array())
+                    .flatten()
+                    .filter(|row| {
+                        row["message_id"].as_str().or_else(|| row["id"].as_str())
+                            == Some(id.as_str())
+                    })
+                    .count();
+                assert_eq!(
+                    count, 1,
+                    "same logical message id {id} exactly once in both DB views: {view}"
+                );
+            }
+        }
+        let first = inbox_seq_from_read(&received, &ids[0]).ok_or("first inbox sequence")?;
+        let second = inbox_seq_from_read(&received, &ids[1]).ok_or("second inbox sequence")?;
+        assert_eq!(second, first + 1, "B1 Deliver sequences must be consecutive");
+        assert!(
+            e2e::receive_counter(&after, "last_acked_seq")?
+                <= e2e::receive_counter(&after, "committed_cursor")?,
+            "{after}"
+        );
+        eprintln!("B1 recipient={} before={before} after={after}", recipient.id);
+    }
+    Ok(())
+}
+
+#[ignore = "two-node harness calibration for the controller's post-demo federation module; CLI e2e CI job"]
+#[test]
+fn two_nodes_have_separate_identities_cas_and_stores() -> e2e::Result<()> {
+    let a = e2e::boot_node("node-a", true)?;
+    let b = e2e::boot_node("node-b", false)?;
+    assert_ne!(a.node_id, b.node_id);
+    assert_ne!(a.root, b.root);
+    assert_ne!(a.admin_url, b.admin_url);
+    for path in ["secrets/node-signing.key", "certs/ca.pem"] {
+        assert_ne!(std::fs::read(a.root.join(path))?, std::fs::read(b.root.join(path))?);
+    }
+    for node in [&a, &b] {
+        for service in ["ramflux-router", "ramflux-gateway"] {
+            assert!(
+                node.root.join("state").join(service).join(format!("{service}.redb")).is_file()
+            );
+        }
+    }
+    Ok(())
+}

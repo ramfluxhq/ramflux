@@ -70,6 +70,8 @@ pub struct Stack {
     pub discovery_url: String,
     pub gateway_public: String,
     pub router_mesh: String,
+    pub node_id: String,
+    pub admin_url: String,
     _servers: Vec<ChildGuard>,
 }
 
@@ -127,9 +129,19 @@ fn stop_daemon_process(socket: &Path, child: &mut ChildGuard) {
 }
 
 pub fn boot_stack() -> Result<Stack> {
+    boot_stack_with_wal(true)
+}
+
+/// Explicit node storage selection; do not inherit the runner's WAL setting.
+pub fn boot_stack_with_wal(wal: bool) -> Result<Stack> {
+    boot_node(NODE_ID, wal)
+}
+
+/// Boot an independent node, including its own CA, signing identity and stores.
+pub fn boot_node(node_id: &str, wal: bool) -> Result<Stack> {
     let mut last = None;
     for attempt in 1..=BOOT_ATTEMPTS {
-        match boot_stack_once() {
+        match boot_stack_once(node_id, wal) {
             Ok(stack) => return Ok(stack),
             Err(error) if attempt < BOOT_ATTEMPTS && is_addr_in_use(&error) => {
                 last = Some(error);
@@ -147,7 +159,7 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
         || text.contains("addrinuse")
 }
 
-fn boot_stack_once() -> Result<Stack> {
+fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
     let mut guard = RootGuard { path: root.clone(), keep: false };
@@ -157,7 +169,7 @@ fn boot_stack_once() -> Result<Stack> {
     create_ca(&root)?;
     let services = ["ramflux-federation", "ramflux-router", "ramflux-retention", "ramflux-gateway"];
     for service in services {
-        issue_service_cert(&root, service)?;
+        issue_service_cert(&root, service, node_id)?;
     }
     let mesh: Vec<String> =
         services.iter().map(|_| free_tcp_addr()).collect::<std::io::Result<_>>()?;
@@ -166,30 +178,17 @@ fn boot_stack_once() -> Result<Stack> {
     let public_addr = free_tcp_addr()?;
     let admin_addr = free_tcp_addr()?;
     let signing_seed = root.join("secrets").join("node-signing.key");
-    write_seed_file(&signing_seed, &[0xA1; 32])?;
+    let seed = ramflux_crypto::blake3_256("ramflux.cli.e2e.node.v1", node_id.as_bytes());
+    write_seed_file(&signing_seed, &seed)?;
     let route_key = root.join("secrets").join("notify-route.key");
     write_seed_file(&route_key, &[0x11; 32])?;
-    let custody = init_custody(&root, &signing_seed)?;
+    let custody = init_custody(&root, &signing_seed, node_id, seed)?;
     let router_async = free_udp_addr()?;
     for (service, mesh_addr) in services.iter().zip(mesh.iter()) {
-        write_service_toml(&root, service, mesh_addr, &mesh, &gateway_tcp)?;
+        write_service_toml(&root, service, mesh_addr, &mesh, &gateway_tcp, node_id)?;
     }
     let mut servers = Vec::new();
-    let order = [
-        ("ramflux-federation", federation_ready()),
-        (
-            "ramflux-router",
-            &["router mesh mTLS surface listening", "router async QUIC ingress listening"][..],
-        ),
-        ("ramflux-retention", &["retention mesh mTLS surface listening"][..]),
-        (
-            "ramflux-gateway",
-            &[
-                "gateway QUIC session surface listening",
-                "gateway TCP-TLS session surface listening",
-            ][..],
-        ),
-    ];
+    let order = startup_order();
     let ca_pem = root.join("certs").join("ca.pem");
     for (service, markers) in order {
         let mut command = Command::new(sibling_bin(service)?);
@@ -197,6 +196,9 @@ fn boot_stack_once() -> Result<Stack> {
             .arg("--config")
             .arg(root.join("certs").join(format!("{service}.toml")))
             .env("RAMFLUX_SHUTDOWN_GRACE_SECONDS", "3")
+            .env("RAMFLUX_ROUTER_WAL", if wal { "1" } else { "0" })
+            .env("RAMFLUX_ROUTER_WAL_PIPELINE", "0")
+            .env_remove("RAMFLUX_ROUTER_WAL_DIR")
             .env("RAMFLUX_NODE_STATE_DIR", root.join("state"))
             .env("RAMFLUX_NOTIFY_ROUTE_KEY_FILE", &route_key)
             .env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE", &signing_seed)
@@ -207,7 +209,9 @@ fn boot_stack_once() -> Result<Stack> {
             .env("RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR", &gateway_quic)
             .env("RAMFLUX_CLIENT_GATEWAY_TCP_ADDR", &gateway_tcp)
             .env("RAMFLUX_CLIENT_GATEWAY_SERVER_NAME", "localhost")
-            .env("RAMFLUX_FEDERATION_NODE_ID", NODE_ID)
+            .env("RAMFLUX_FEDERATION_NODE_ID", node_id)
+            .env("RAMFLUX_FEDERATION_ADMIN_TOKEN", "cli-e2e-admin")
+            .env("RAMFLUX_CLIENT_PREKEY_HTTP_URL", format!("http://{public_addr}"))
             .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
             .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
             .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
@@ -231,9 +235,49 @@ fn boot_stack_once() -> Result<Stack> {
         servers.push(child);
     }
     let discovery_url = format!("http://{public_addr}");
-    let record = fetch_client_discovery(&discovery_url)?;
-    assert_discovery_addr(&record, "gateway_quic_addr", &gateway_quic)?;
-    assert_discovery_addr(&record, "gateway_tcp_addr", &gateway_tcp)?;
+    validate_discovery(&root, &discovery_url, &gateway_quic, &gateway_tcp)?;
+    let router_mesh = mesh.get(1).cloned().ok_or("router mesh address")?;
+    guard.keep = true;
+    let node_id = node_id.to_owned();
+    let admin_url = format!("http://{admin_addr}");
+    Ok(Stack {
+        root,
+        discovery_url,
+        gateway_public: gateway_tcp,
+        router_mesh,
+        node_id,
+        admin_url,
+        _servers: servers,
+    })
+}
+
+fn startup_order() -> [(&'static str, &'static [&'static str]); 4] {
+    [
+        ("ramflux-federation", federation_ready()),
+        (
+            "ramflux-router",
+            &["router mesh mTLS surface listening", "router async QUIC ingress listening"][..],
+        ),
+        ("ramflux-retention", &["retention mesh mTLS surface listening"][..]),
+        (
+            "ramflux-gateway",
+            &[
+                "gateway QUIC session surface listening",
+                "gateway TCP-TLS session surface listening",
+            ][..],
+        ),
+    ]
+}
+
+fn validate_discovery(
+    root: &Path,
+    discovery_url: &str,
+    gateway_quic: &str,
+    gateway_tcp: &str,
+) -> Result<()> {
+    let record = fetch_client_discovery(discovery_url)?;
+    assert_discovery_addr(&record, "gateway_quic_addr", gateway_quic)?;
+    assert_discovery_addr(&record, "gateway_tcp_addr", gateway_tcp)?;
     let advertised_name = record
         .get("gateway_server_name")
         .and_then(Value::as_str)
@@ -241,10 +285,8 @@ fn boot_stack_once() -> Result<Stack> {
     if advertised_name != "localhost" {
         return Err(format!("discovery gateway_server_name {advertised_name} != localhost").into());
     }
-    probe_gateway_tls(&root.join("certs").join("ca.pem"), &gateway_tcp)?;
-    let router_mesh = mesh.get(1).cloned().ok_or("router mesh address")?;
-    guard.keep = true;
-    Ok(Stack { root, discovery_url, gateway_public: gateway_tcp, router_mesh, _servers: servers })
+    probe_gateway_tls(&root.join("certs").join("ca.pem"), gateway_tcp)?;
+    Ok(())
 }
 
 fn fetch_client_discovery(origin: &str) -> Result<Value> {
@@ -267,9 +309,14 @@ struct CustodyEnv {
     proxy_signing_seed: String,
 }
 
-fn init_custody(root: &Path, signing_seed: &Path) -> Result<CustodyEnv> {
+fn init_custody(
+    root: &Path,
+    signing_seed: &Path,
+    node_id: &str,
+    seed: [u8; 32],
+) -> Result<CustodyEnv> {
     let output_dir = root.join("custody");
-    let public = ramflux_crypto::public_key_base64url_from_seed([0xA1; 32]);
+    let public = ramflux_crypto::public_key_base64url_from_seed(seed);
     let mut command = Command::new(rf_bin());
     command
         .args([
@@ -278,7 +325,7 @@ fn init_custody(root: &Path, signing_seed: &Path) -> Result<CustodyEnv> {
             "node",
             "custody-init",
             "--node-id",
-            NODE_ID,
+            node_id,
             "--node-signing-seed",
         ])
         .arg(signing_seed)
@@ -383,6 +430,14 @@ pub fn restart_daemon(daemon: Daemon) -> Result<Daemon> {
 }
 
 fn spawn_daemon(socket: PathBuf, data_root: PathBuf) -> Result<Daemon> {
+    spawn_daemon_with_env(socket, data_root, &[])
+}
+
+pub fn spawn_daemon_with_env(
+    socket: PathBuf,
+    data_root: PathBuf,
+    env: &[(&str, &str)],
+) -> Result<Daemon> {
     std::fs::create_dir_all(&data_root)?;
     let mut command = Command::new(rf_bin());
     command
@@ -391,6 +446,8 @@ fn spawn_daemon(socket: PathBuf, data_root: PathBuf) -> Result<Daemon> {
         .args(["daemon", "start", "--data-root"])
         .arg(&data_root)
         .arg("--itest-memory-vault")
+        .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
+        .envs(env.iter().copied())
         .env("RUST_LOG", "info");
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
@@ -443,7 +500,13 @@ pub fn unlock_account_with_timeout(
     account: &Account,
     budget: Duration,
 ) -> Result<Value> {
-    let unlocked = rf_json_env(
+    let unlocked = unlock_account_without_wait(daemon, account)?;
+    wait_networking_live_with_timeout(daemon, &account.id, budget)?;
+    Ok(unlocked)
+}
+
+pub fn unlock_account_without_wait(daemon: &Daemon, account: &Account) -> Result<Value> {
+    rf_json_env(
         &daemon.socket,
         &[
             "account",
@@ -454,9 +517,45 @@ pub fn unlock_account_with_timeout(
             "RAMFLUX_ACCOUNT_PASSPHRASE",
         ],
         &[("RAMFLUX_ACCOUNT_PASSPHRASE", PASSPHRASE)],
+    )
+}
+
+/// Wait for the production post-commit marker and require an actual abort exit.
+pub fn await_receive_crash(mut daemon: Daemon) -> Result<(PathBuf, PathBuf, String)> {
+    use std::os::unix::process::ExitStatusExt as _;
+    let path = daemon.data_root.join("daemon.log");
+    wait_for_log_markers(&path, &["RECEIVE_CRASH "], POLL_TIMEOUT)?;
+    let status = daemon.child.group.wait()?;
+    if status.signal() != Some(6) {
+        return Err(format!("receive failpoint did not abort: {status}").into());
+    }
+    let log = std::fs::read_to_string(path)?;
+    let socket = daemon.socket.clone();
+    let root = daemon.data_root.clone();
+    if socket.exists() {
+        std::fs::remove_file(&socket)?;
+    }
+    drop(daemon);
+    Ok((socket, root, log))
+}
+
+pub fn receive_counter(status: &Value, key: &str) -> Result<u64> {
+    status[key].as_u64().ok_or_else(|| format!("missing receive counter {key}: {status}").into())
+}
+
+pub fn wait_receive_settled(daemon: &Daemon, account: &Account) -> Result<Value> {
+    let status = poll_json(
+        daemon,
+        &["account", "status", "--account", &account.id],
+        POLL_TIMEOUT,
+        |status| {
+            let receive = &status["networking_snapshot"]["receive"];
+            receive["catch_ups_total"].as_u64().is_some_and(|count| count > 0)
+                && receive["ack_intents_pending"] == 0
+                && receive["held_entries"] == 0
+        },
     )?;
-    wait_networking_live_with_timeout(daemon, &account.id, budget)?;
-    Ok(unlocked)
+    Ok(status["networking_snapshot"]["receive"].clone())
 }
 
 pub fn exchange_contacts(a: &Daemon, alice: &Account, b: &Daemon, bob: &Account) -> Result<()> {
@@ -1502,7 +1601,7 @@ fn create_ca(root: &Path) -> Result<()> {
     ])
 }
 
-fn issue_service_cert(root: &Path, service: &str) -> Result<()> {
+fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
     let certs = root.join("certs");
     let key = certs.join(format!("{service}.key"));
     let csr = certs.join(format!("{service}.csr"));
@@ -1513,7 +1612,7 @@ fn issue_service_cert(root: &Path, service: &str) -> Result<()> {
     std::fs::write(
         &ext,
         format!(
-            "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:{service},DNS:localhost,IP:127.0.0.1,URI:spiffe://localhost/{spiffe}\n"
+            "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:{service},DNS:localhost,DNS:{node_id},IP:127.0.0.1,URI:spiffe://{node_id}/{spiffe}\n"
         ),
     )?;
     openssl(&[
@@ -1555,6 +1654,7 @@ fn write_service_toml(
     listen: &str,
     mesh: &[String],
     gateway_public: &str,
+    node_id: &str,
 ) -> Result<()> {
     let certs = root.join("certs");
     let database = root.join("state").join(service).join(format!("{service}.redb"));
@@ -1568,7 +1668,7 @@ fn write_service_toml(
     std::fs::write(
         certs.join(format!("{service}.toml")),
         format!(
-            r#"node_id = "{NODE_ID}"
+            r#"node_id = "{node_id}"
 service_id = "{service}"
 redb_path = "{}"
 node_service_signing_seed_b64url = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio"
