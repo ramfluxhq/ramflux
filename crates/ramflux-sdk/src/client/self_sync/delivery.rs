@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Conditional private-register courier plans; the writer owns every ratchet/store change.
-use super::{RamfluxClient, Reference, SdkError, g, refused};
+use super::{RamfluxClient, Reference, SdkError, State, g, refused, refresh::Generation};
 use crate::client::{
     identity_authority::NativeOperation,
     routed::{Route, SendMaterial, SendMaterialRequest},
@@ -32,6 +32,9 @@ struct Pending {
     envelope: Option<ramflux_protocol::Envelope>,
     submitted: bool,
     references: Vec<Reference>,
+    // Roster generation the envelope was sealed under; never reused across a refresh.
+    #[serde(default)]
+    refresh: Option<Generation>,
 }
 
 pub(crate) struct Plan {
@@ -41,6 +44,7 @@ pub(crate) struct Plan {
     target: RootQualifiedDeviceRef,
     target_epoch: u64,
     target_certificate: Option<String>,
+    generation: Option<Generation>,
     value: Zeroizing<Vec<u8>>,
     pub(crate) message: GatewayDirectMessage,
     pub(crate) request: SendMaterialRequest,
@@ -55,6 +59,17 @@ impl RamfluxClient {
         if !crate::client::target_selection::schema_v1_selected() {
             return Ok(None);
         }
+        // A restored archive never sends before its fresh activation completes.
+        if self.require_backup_outbound_ready().is_err() {
+            return Ok(None);
+        }
+        // Cross the refresh barrier first: a new roster or local incarnation retires
+        // what was sealed or queued for the previous one before anything is staged.
+        let generation = match self.enter_self_sync_refresh() {
+            Ok(generation) => generation,
+            Err(SdkError::InboundPending(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         self.stage_native_self_sync_publications()?;
         let db = self.account_db()?;
         for key in db.actor_state_keys("self-sync/repair/")? {
@@ -62,7 +77,24 @@ impl RamfluxClient {
                 .load_actor_state::<serde_json::Value>(&key)?
                 .ok_or_else(|| refused("repair disappeared"))?;
             let repair: Repair = serde_json::from_value(encoded.clone())?;
-            let target = self.device_identity(&repair.target)?;
+            // Restore merges replace registers below the SDK. A queued body that is no
+            // longer the committed register, or that names a target failing reference
+            // authentication, is retired instead of being sent or blocking the courier.
+            if !self.self_sync_repair_matches_register(&repair)?
+                || !self.self_sync_repair_references_authentic(&repair)?
+            {
+                self.retire_self_sync_repair(&key)?;
+                continue;
+            }
+            let target = match self.device_identity(&repair.target) {
+                Ok(target) => target,
+                // A device removed from the verified roster is a retired target.
+                Err(SdkError::Crypto(_)) => {
+                    self.retire_self_sync_repair(&key)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !self.self_sync_target_admitted(&target, repair.target_epoch)?
                 || self.self_sync_target_certificate(&target)? != repair.target_certificate
             {
@@ -88,7 +120,8 @@ impl RamfluxClient {
                 let cached = db.load_actor_state::<Pending>(&pending)?;
                 let epoch =
                     self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch;
-                let cached = cached.filter(|cached| cached.source_epoch == epoch);
+                let cached = cached
+                    .filter(|cached| cached.source_epoch == epoch && cached.refresh == generation);
                 if cached.as_ref().is_some_and(|cached| cached.submitted) {
                     continue;
                 }
@@ -115,6 +148,7 @@ impl RamfluxClient {
                     target,
                     target_epoch: repair.target_epoch,
                     target_certificate: repair.target_certificate.clone(),
+                    generation,
                     value: body.clone(),
                     message,
                     request,
@@ -124,6 +158,32 @@ impl RamfluxClient {
             self.retire_self_sync_repair(&key)?;
         }
         Ok(None)
+    }
+
+    fn self_sync_repair_matches_register(&self, repair: &Repair) -> Result<bool, SdkError> {
+        let Some(state) = self.account_db()?.load_actor_state::<State>(&repair.scope)? else {
+            return Ok(false);
+        };
+        Ok(state.conversation_id == repair.conversation_id
+            && state.exact_body.as_slice() == repair.exact_body.as_slice()
+            && state.read_marker_body.as_ref().map(|body| body.exact_body.as_slice())
+                == repair.read_marker_body.as_ref().map(|body| body.as_slice()))
+    }
+
+    // The receiver verifies references again; the sender never forwards a register whose
+    // reference is known locally to name another conversation, author root or identity.
+    fn self_sync_repair_references_authentic(&self, repair: &Repair) -> Result<bool, SdkError> {
+        for body in [Some(&repair.exact_body), repair.read_marker_body.as_ref()].into_iter().flatten()
+        {
+            let value = g::self_sync::decode_stored_body(body)
+                .map_err(|_| refused("repair value malformed"))?;
+            match self.self_sync_references(&repair.conversation_id, &value, true) {
+                Ok(_) => {}
+                Err(SdkError::InboundRejected(_)) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     fn retire_self_sync_repair(&self, key: &str) -> Result<(), SdkError> {
@@ -219,6 +279,16 @@ impl RamfluxClient {
         {
             return Ok(false);
         }
+        // The plan was prepared under one roster generation and commits only under it.
+        if self.self_sync_refresh_generation()? != plan.generation {
+            return Ok(false);
+        }
+        let repair: Repair = serde_json::from_value(row)?;
+        if !self.self_sync_repair_matches_register(&repair)?
+            || !self.self_sync_repair_references_authentic(&repair)?
+        {
+            return Ok(false);
+        }
         if !self.self_sync_target_admitted(&plan.target, plan.target_epoch)?
             || self.self_sync_target_certificate(&plan.target)? != plan.target_certificate
         {
@@ -275,6 +345,7 @@ impl RamfluxClient {
                 envelope: Some(envelope.clone()),
                 submitted: false,
                 references: repair.references,
+                refresh: plan.generation.clone(),
             };
             if db.actor_state_exists(&plan.pending)? {
                 db.retire_self_sync_actor(&plan.pending)?;
