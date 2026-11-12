@@ -134,6 +134,13 @@ impl RamfluxClient {
         device: &str,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
         if self.born_v3_account.as_ref().is_some_and(|a| a.record().body.account_anchor == root) {
+            // Enrollment and scope changes can advance the verified directory beyond
+            // the account loaded at unlock. Never name siblings from that stale roster.
+            if let Some(authority) =
+                self.current_custody_authority(root, crate::custody::network_now()?)?
+            {
+                return Ok(RootQualifiedDeviceRef::from_custody_record(&authority, device)?);
+            }
             return self.own_custody_device(device)?.ok_or(SdkError::IdentityRootMissing);
         }
         if let (Some(own), Some(branch)) = (&self.identity_root, &self.device_branch)
