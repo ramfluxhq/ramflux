@@ -167,3 +167,5 @@ fn pairing_full_source_preparation_rejects_live_schema_change_after_cut() -> Tes
     );
     Ok(())
 }
+
+mod bind;

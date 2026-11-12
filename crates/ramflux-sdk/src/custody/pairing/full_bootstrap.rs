@@ -74,6 +74,11 @@ pub struct FullBootstrap {
     deadline: std::time::Instant,
     start: Option<StartFull>,
     request: Option<LeaseRequest>,
+    prepared_source: Option<(
+        ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+        StartFull,
+        [u8; 32],
+    )>,
 }
 impl FullBootstrap {
     /// # Errors
@@ -99,6 +104,7 @@ impl FullBootstrap {
             deadline,
             start: None,
             request: None,
+            prepared_source: None,
         };
         owner.live(now)?;
         Ok(owner)
@@ -153,6 +159,17 @@ impl FullBootstrap {
         self.live(now)?;
         if self.role != PairingRole::Initiator || self.phase != Phase::Start {
             return self.fail("WrongContext");
+        }
+        if let Some((_, frozen, _)) = &self.prepared_source {
+            let proposed = FullSasControl::Start(start.clone())
+                .encode_secret()
+                .map_err(|error| wire(&error))?;
+            let expected = FullSasControl::Start(frozen.clone())
+                .encode_secret()
+                .map_err(|error| wire(&error))?;
+            if proposed.as_slice() != expected.as_slice() {
+                return self.fail("WrongContext");
+            }
         }
         let grant = verify_full_grant_offer(
             &self.context,
@@ -331,3 +348,6 @@ impl FullBootstrap {
 
 #[cfg(test)]
 mod tests;
+
+mod source;
+pub use source::FullSourceManifestSigningRequest;
