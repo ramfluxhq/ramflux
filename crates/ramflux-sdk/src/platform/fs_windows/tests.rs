@@ -314,8 +314,7 @@ fn the_sqlcipher_file_opens_only_as_the_same_user() -> Result<(), String> {
     }
 
     let connection = open(&database).map_err(text)?;
-    let value: String = connection
-        .query_row("SELECT value FROM marker", [], |row| row.get(0))
-        .map_err(text)?;
+    let value: String =
+        connection.query_row("SELECT value FROM marker", [], |row| row.get(0)).map_err(text)?;
     if value == "kept" { Ok(()) } else { Err(format!("unexpected value {value:?}")) }
 }
