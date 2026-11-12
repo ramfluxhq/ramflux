@@ -88,6 +88,7 @@ impl SessionConnector for GatewayConnector {
 
 #[derive(Clone)]
 pub(crate) struct SessionMetadata {
+    pub ephemeral_negotiated: bool,
     pub config: GatewaySessionConfig,
     pub session: GatewaySessionState,
     pub mode: crate::gateway::session_push::SessionMode,

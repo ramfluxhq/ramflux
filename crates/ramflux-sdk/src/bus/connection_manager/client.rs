@@ -9,6 +9,7 @@ use crate::prelude::*;
 use tokio::time::Instant;
 
 pub(crate) struct SessionClient {
+    ephemeral_negotiated: bool,
     pub config: GatewaySessionConfig,
     session: GatewaySessionState,
     handle: ConnectionHandle,
@@ -23,6 +24,7 @@ impl SessionClient {
         deadline: Instant,
     ) -> Self {
         Self {
+            ephemeral_negotiated: metadata.ephemeral_negotiated,
             config: metadata.config,
             session: metadata.session,
             generation: metadata.generation,
@@ -91,6 +93,9 @@ impl GatewaySessionAccess for SessionClient {
     }
     fn session(&self) -> &GatewaySessionState {
         &self.session
+    }
+    fn ephemeral_negotiated(&self) -> bool {
+        self.ephemeral_negotiated
     }
     fn heartbeat(&mut self) -> GatewayCallFuture<'_, ()> {
         Box::pin(self.handle.call_generation(

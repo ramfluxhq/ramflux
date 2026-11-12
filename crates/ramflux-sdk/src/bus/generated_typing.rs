@@ -65,9 +65,7 @@ pub(super) async fn execute(
                 })),
             };
             // Best effort clear; never reconnect, queue or retry a blur notification.
-            if let Some(engine) = account.engine.as_mut() {
-                let _ = account.client.send_generated_typing_request(engine, &request).await;
-            }
+            let _ = send_live(account, &request).await;
         }
         return Ok(Some(ActorResponse {
             body: serde_json::Value::Null,
@@ -96,18 +94,33 @@ pub(super) async fn execute(
         .into());
     }
     let account = local_bus_account_mut(state, account_id)?;
+    let update = send_live(account, &request).await?;
+    Ok(Some(ActorResponse {
+        body: crate::bindings::encode_message_update(&update)?,
+        events: Vec::new(),
+        nodes: None,
+    }))
+}
+
+async fn send_live(
+    account: &mut super::state::LocalBusAccountState,
+    request: &g::MessageRequest,
+) -> Result<g::MessageUpdate, SdkError> {
+    if account.connection.is_some() {
+        // Capture only an already live generation. Typing never starts a connection.
+        let mut session = account.live_session_client().map_err(|_| {
+            AdapterError::new(
+                GeneratedErrorCode::EphemeralUnavailable,
+                "typing requires a live ephemeral host",
+            )
+        })?;
+        return account.client.send_generated_typing_request(&mut session, request).await;
+    }
     let engine = account.engine.as_mut().ok_or_else(|| {
         AdapterError::new(
             GeneratedErrorCode::EphemeralUnavailable,
             "typing requires a live ephemeral host",
         )
     })?;
-    // Borrow in place: cancellation never removes the live account engine. No resume
-    // metadata, response or journal capture belongs to this transient request.
-    let update = account.client.send_generated_typing_request(engine, &request).await?;
-    Ok(Some(ActorResponse {
-        body: crate::bindings::encode_message_update(&update)?,
-        events: Vec::new(),
-        nodes: None,
-    }))
+    account.client.send_generated_typing_request(engine, request).await
 }

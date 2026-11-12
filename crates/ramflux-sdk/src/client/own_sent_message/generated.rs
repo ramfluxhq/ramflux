@@ -9,6 +9,26 @@ use super::{
 use crate::client::identity_authority::{HeadUse, NativeOperation};
 use prost::Message as _;
 
+fn own_sent_erasure_owners(
+    identity: &g::EventIdentity,
+    content: &g::Content,
+) -> Result<Vec<String>, SdkError> {
+    let ids = match content.value.as_ref() {
+        Some(g::content::Value::Message(_)) => vec![identity.id.clone()],
+        Some(g::content::Value::Edit(edit)) => {
+            edit.target.iter().map(|target| target.id.clone()).collect()
+        }
+        Some(g::content::Value::Reaction(reaction)) => {
+            reaction.target.iter().map(|target| target.id.clone()).collect()
+        }
+        Some(g::content::Value::Delete(delete)) => {
+            delete.targets.iter().map(|target| target.id.clone()).collect()
+        }
+        _ => return Err(invalid("own sent content is not a permitted plaintext event")),
+    };
+    Ok(ids.into_iter().map(ramflux_protocol::encode_base64url).collect())
+}
+
 impl RamfluxClient {
     pub(crate) fn authorize_generated_own_sent(
         &self,
@@ -106,6 +126,12 @@ impl RamfluxClient {
             self.device_identity_for_root(&original.account_anchor, &original.device_id)?;
         self.account_db()?.write_transaction(|| {
             self.bind_generated_own_sent_context(&packet, &identity)?;
+            let owners = own_sent_erasure_owners(&identity, &content)?;
+            let Some(replay) =
+                self.own_sent_logical_replay(&original, &identity, &sent.exact_inner, owners)?
+            else {
+                return Ok(true);
+            };
             match content.value.as_ref() {
                 Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => {
                     self.project_generated_own_sent_message(
@@ -147,6 +173,7 @@ impl RamfluxClient {
                 }
                 _ => return Err(invalid("own sent content is not a permitted plaintext event")),
             }
+            self.commit_own_sent_logical_replay(&replay)?;
             Ok(true)
         })
     }
@@ -468,6 +495,67 @@ mod tests {
             &sent
         )?);
         assert_eq!(own.client.direct_message_by_id(&sent.message_id)?.ok_or("row")?.created_at, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn own_sent_erased_event_cannot_retarget_another_message() -> TestResult {
+        let (own, first) = fixture().await?;
+        let source = own.client.owned_device_identity()?;
+        let conversation = &first.context.as_ref().ok_or("context")?.conversation_id;
+        own.client.receive_generated_own_sent(&entry()?, &source, 42, &first)?;
+        let mut second = first.clone();
+        let identity = own.client.allocate_generated_identity(conversation, 1001, false)?;
+        second.message_id = ramflux_protocol::encode_base64url(&identity.id);
+        second.exact_inner = RamfluxClient::encode_generated_inner(
+            identity,
+            &g::Content {
+                value: Some(g::content::Value::Message(g::Message {
+                    text: "surviving target".into(),
+                    ..Default::default()
+                })),
+            },
+        )?;
+        own.client.receive_generated_own_sent(&entry()?, &source, 42, &second)?;
+        let mut edited = first.clone();
+        let identity = own.client.allocate_generated_identity(conversation, 1002, false)?;
+        edited.message_id = ramflux_protocol::encode_base64url(&identity.id);
+        edited.exact_inner = RamfluxClient::encode_generated_inner(
+            identity,
+            &g::Content {
+                value: Some(g::content::Value::Edit(g::Edit {
+                    target: Some(g::MessageRef {
+                        id: ramflux_protocol::decode_base64url(&first.message_id)?,
+                        conversation_id: conversation.clone(),
+                        author_anchor: source.root_commitment().into(),
+                    }),
+                    revision: 1,
+                    previous_content_digest: vec![1; 32],
+                    replacement: Some(g::Message {
+                        text: "erased replacement".into(),
+                        ..Default::default()
+                    }),
+                })),
+            },
+        )?;
+        own.client.receive_generated_own_sent(&entry()?, &source, 42, &edited)?;
+        let db = own.client.account_db()?;
+        db.delete_direct_message(conversation, &first.message_id, "self", "erase-own-edit")?;
+        let mut inner = g::Inner::decode(edited.exact_inner.as_slice())?;
+        let mut edit = g::Edit::decode(inner.body.as_slice())?;
+        edit.target.as_mut().ok_or("target")?.id =
+            ramflux_protocol::decode_base64url(&second.message_id)?;
+        inner.body = edit.encode_to_vec();
+        edited.exact_inner = inner.encode_to_vec();
+        assert!(own.client.receive_generated_own_sent(&entry()?, &source, 42, &edited)?);
+        assert_eq!(db.message_content(&second.message_id)?, Some(second.exact_inner));
+        assert!(db.message_content(&first.message_id)?.is_none());
+        assert_eq!(db.actor_state_usage("own-device/sent-event/")?.0, 3);
+        assert_eq!(
+            db.actor_state_usage("own-device/sent-event-body/")?.0,
+            1,
+            "only the surviving target may retain a plaintext fingerprint"
+        );
         Ok(())
     }
 }

@@ -297,6 +297,7 @@ fn update(handle: &ConnectionHandle, change: impl FnOnce(&mut NetworkingSnapshot
 pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessionEngine) {
     *handle.shared.metadata.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
         Some(SessionMetadata {
+            ephemeral_negotiated: engine.ephemeral_negotiated,
             config: engine.config.clone(),
             session: engine.session().clone(),
             mode: engine.mode.clone(),
@@ -408,7 +409,7 @@ async fn connect_attempt(
             let prepared_config=prepare(handle,config.clone(),deadline).await?;
             let mut connected=connector.connect(prepared_config,deadline).await?;
             reconcile_receive_epoch(handle, &mut connected).await?;
-            install(handle,SessionMetadata {config:connected.config.clone(),session:connected.session().clone(),mode:connected.mode.clone(),generation:handle.generation()}).await?;
+            install(handle,SessionMetadata {ephemeral_negotiated:connected.ephemeral_negotiated,config:connected.config.clone(),session:connected.session().clone(),mode:connected.mode.clone(),generation:handle.generation()}).await?;
             Ok(connected)
         })=>match result {
             Ok(result)=>result,

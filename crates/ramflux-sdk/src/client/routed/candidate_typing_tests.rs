@@ -61,6 +61,7 @@ fn typing_envelope_at(
     let mut config = a.config()?;
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
     let mut draft = message(id, "c");
     draft.created_at = created;
     draft.ttl = ttl;
