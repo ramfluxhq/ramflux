@@ -19,14 +19,16 @@ default = []
 # primary-authority code.
 primary-authority = []
 account-recovery = []
-# S-STORE probe: link the shared storage crate (rusqlite with bundled SQLCipher, which resolves
-# to sqlite-wasm-rs on this target). Off until the spike passes; see `store_policy::StoreEngine`.
-opfs-sqlcipher = ["dep:ramflux-storage", "dep:rusqlite"]
+# S-STORE probe: build SQLCipher for this target. On wasm32-unknown-unknown rusqlite's
+# `bundled-sqlcipher` resolves to sqlite-wasm-rs (SQLCipher with bundled LibTomCrypt). The shared
+# storage crate cannot be linked yet (fs2 has no wasm backend), so the probe links rusqlite
+# directly. Off by default; the store stays closed until `store_policy::StoreEngine` has an
+# implementation on the `opfs-sahpool` VFS.
+opfs-sqlcipher = ["dep:rusqlite"]
 
 [dependencies]
 ramflux-protocol = { workspace = true }
 ramflux-crypto = { workspace = true }
-ramflux-storage = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -43,9 +45,8 @@ js-sys = "0.3"
 getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
-# S-STORE probe only: on this target rusqlite's `bundled-sqlcipher` builds through sqlite-wasm-rs,
-# which needs this rusqlite feature (the storage crate disables rusqlite's default features).
-rusqlite = { workspace = true, optional = true, features = ["ffi-sqlite-wasm-rs"] }
+# S-STORE probe only (feature `opfs-sqlcipher`).
+rusqlite = { workspace = true, optional = true, features = ["bundled-sqlcipher", "ffi-sqlite-wasm-rs"] }
 
 [lints.rust]
 warnings = "deny"

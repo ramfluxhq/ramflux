@@ -3725,7 +3725,6 @@ dependencies = [
  "js-sys",
  "ramflux-crypto",
  "ramflux-protocol",
- "ramflux-storage",
  "rusqlite",
  "serde",
  "serde_json",
