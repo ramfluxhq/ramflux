@@ -120,6 +120,8 @@ pub(crate) fn same_metadata_identity(
     matches!(files::path_identity(path), Ok(Some(found)) if found == (device, inode))
 }
 
+// Kept for parity with the Unix seam; only the Unix socket listener calls it today.
+#[allow(dead_code)]
 pub(crate) fn same_device_inode(path: &Path, device: u64, inode: u64) -> Result<bool, SdkError> {
     Ok(files::path_identity(path)? == Some((device, inode)))
 }
@@ -129,6 +131,9 @@ pub(crate) fn same_device_inode(path: &Path, device: u64, inode: u64) -> Result<
 ///
 /// # Errors
 /// Returns the OS error.
+// The SDK renames through the standard library, which also replaces in one step. This call
+// adds the wait for the disk and is the one to use for new Windows-only call sites.
+#[allow(dead_code)]
 pub(crate) fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     files::move_file(from, to, true)
 }
@@ -228,4 +233,5 @@ pub(crate) fn ensure_data_root(root: &Path) -> Result<(), SdkError> {
 }
 
 #[cfg(test)]
+#[path = "fs_windows/tests.rs"]
 mod tests;
