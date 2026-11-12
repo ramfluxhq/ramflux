@@ -79,8 +79,10 @@ async fn ephemeral_session_loop_persists_nothing() -> TestResult {
     let context = fixture.context.clone();
     // The addressee is live on this gateway, so an accepted ephemeral really enqueues.
     let (target_send, _target_frames) = sink();
-    let _registration =
-        context.hub.register("alice-target".into(), "peer-session".into(), target_send).await?;
+    let _registration = context
+        .hub
+        .register_ephemeral("alice-target".into(), "peer-session".into(), target_send, None, 64)
+        .await?;
     let baseline = persisted(&context)?;
     let online = json!({"outcome":"online","gateway_id":"ramflux-gateway"});
 

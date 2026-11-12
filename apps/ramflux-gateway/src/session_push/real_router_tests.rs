@@ -135,5 +135,5 @@ async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()>
 #[path = "activation_tests.rs"]
 mod activation;
 
-#[path = "activation_account.rs"]
+#[path = "activation_account_tests.rs"]
 mod activation_account;

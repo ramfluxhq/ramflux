@@ -32,6 +32,10 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "durable_mode.rs:rejected_security",
         Class::NonIngress("typed refusal construction; no envelope persist"),
     ),
+    (
+        "ephemeral_forward.rs:originate",
+        Class::NonIngress("authenticated transient-only forward; no durable envelope ingress"),
+    ),
     ("itest_http.rs:dispatch_protected_itest_request", Class::Edge),
     ("quic_dispatch.rs:forward_quic_envelope", Class::Edge),
     ("session.rs:handle_gateway_submit", Class::Edge),
@@ -67,7 +71,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (6, 4));
+    assert_eq!((non_ingress_count, edge_count), (7, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
