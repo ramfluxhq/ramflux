@@ -87,9 +87,9 @@ mod sqlite_work;
 pub use account_db::AccountDb;
 pub use account_db::full_transfer::{
     CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
-    FullBaseSourceEncoding, FullForwardReader, FullScalarInputCounts, FullScalarSourceCounts,
-    FullSourcePreparation, FullSourcePreparationCancel, FullStageIoCancel, FullStageKey,
-    FullTargetObservation, FullTransferSchema, FullTransferStage, FullUnionEncoding,
+    FullBaseSourceEncoding, FullForwardReader, FullLocalUnlockGuard, FullScalarInputCounts,
+    FullScalarSourceCounts, FullSourcePreparation, FullSourcePreparationCancel, FullStageIoCancel,
+    FullStageKey, FullTargetObservation, FullTransferSchema, FullTransferStage, FullUnionEncoding,
     FullUnionEncodingBuilder, MergeRule, PreparedFullSource, StageDirection, VariantRule,
     WrappedFullStageKey, copy_full_scalar_record, full_census_hash, full_transfer_catalog,
     write_full_scalar_sql_row,

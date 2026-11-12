@@ -476,6 +476,9 @@ impl PairingActor {
             self.clear_completed_secrets();
             return self.status_update();
         }
+        if self.advance_full_epoch().await? {
+            return self.status_update();
+        }
         for _ in 0..SYNC_STEPS {
             self.flush_send().await?;
             let polled = match self.poll_once().await {

@@ -8,6 +8,8 @@ mod inventory;
 mod io_cancel;
 pub use io_cancel::FullStageIoCancel;
 mod keys;
+mod local_unlock;
+pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
 mod receiver_input;
 mod receiver_projection;

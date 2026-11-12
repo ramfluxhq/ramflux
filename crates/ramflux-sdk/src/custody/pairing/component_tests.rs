@@ -15,6 +15,8 @@ use ramflux_protocol::custody::pairing::local_dto::{
 use ramflux_protocol::custody::{CustodyAuthority, Publication, object_hash};
 use std::sync::{Arc, Mutex};
 
+mod full_relay;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Node {
@@ -70,10 +72,12 @@ struct Rig {
     participant_b: Arc<LocalPairingParticipant>,
     participant_a: Arc<LocalPairingParticipant>,
     node: Arc<Node>,
+    full_hellos:
+        Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
     recipient_root: tempfile::TempDir,
     original_devices: Vec<ramflux_protocol::custody::Device>,
     now: u64,
-    _source: ComponentSource,
+    source: ComponentSource,
     _node_root: tempfile::TempDir,
     _clock: crate::time::FixedClock,
 }
@@ -116,8 +120,9 @@ impl ComponentSource {
 
 type FixtureTransports = (
     Arc<dyn PairingNative>,
-    Arc<super::tests::MemoryRelay>,
+    Arc<dyn PairingTransport>,
     Option<ramflux_crypto::custody::VerifiedNodeRecord>,
+    Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
 );
 fn fixture_transports(
     full: bool,
@@ -126,7 +131,7 @@ fn fixture_transports(
     node: Arc<Node>,
 ) -> Result<FixtureTransports, Box<dyn std::error::Error>> {
     let relay_store = Arc::new(Mutex::new(PairingRelayStore::new(PairingRelayConfig {
-        clock: clock as Arc<dyn PairingClock>,
+        clock: if full { full_relay::clock(clock) } else { clock as Arc<dyn PairingClock> },
         node_seed: if full { ramflux_crypto::fixture_signing_key().to_bytes() } else { [7; 32] },
         public_origin: "https://relay.example:443".into(),
     })?));
@@ -139,13 +144,21 @@ fn fixture_transports(
     } else {
         None
     };
-    let native: Arc<dyn PairingNative> = match &verified_node {
+    let full_hellos = Arc::new(Mutex::new(Vec::new()));
+    let (native, relay): (Arc<dyn PairingNative>, Arc<dyn PairingTransport>) = match &verified_node
+    {
         Some(identity) => {
-            Arc::new(FullNativeFixture { store: relay_store, node, identity: identity.clone() })
+            let full = Arc::new(FullNativeFixture {
+                store: relay_store,
+                node,
+                identity: identity.clone(),
+                full_hellos: full_hellos.clone(),
+            });
+            (full.clone(), full)
         }
-        None => Arc::new(super::tests::StoreNative { store: relay_store }),
+        None => (Arc::new(super::tests::StoreNative { store: relay_store }), relay),
     };
-    Ok((native, relay, verified_node))
+    Ok((native, relay, verified_node, full_hellos))
 }
 
 impl Rig {
@@ -168,7 +181,7 @@ impl Rig {
         let account_ref =
             source_account.record().body.master_certificate.body.primary_device_ref.clone();
         let clock = TestPairingClock::new(now);
-        let (native, relay, verified_node) =
+        let (native, relay, verified_node, full_hellos) =
             fixture_transports(full, now, clock.clone(), node.clone())?;
         let participant_a = Arc::new(LocalPairingParticipant {
             root: source.root.0.clone(),
@@ -242,10 +255,11 @@ impl Rig {
             participant_b,
             participant_a,
             node,
+            full_hellos,
             recipient_root,
             original_devices,
             now,
-            _source: source,
+            source,
             _node_root: node_root,
             _clock: fixed_clock,
         })
@@ -261,10 +275,11 @@ async fn pairing_recipient_activates_only_exact_durable_publication() -> TestRes
         participant_b,
         participant_a: _,
         node: _,
+        full_hellos: _,
         recipient_root,
         original_devices,
         now,
-        _source,
+        source: _source,
         _node_root,
         _clock,
     } = Rig::open().await?;
@@ -435,10 +450,13 @@ fn assert_retained_roster(
 }
 
 /// Real native lease verifier/current `RouterCore` owner; the fixture relay remains in-process.
+#[derive(Clone)]
 struct FullNativeFixture {
     store: Arc<Mutex<PairingRelayStore>>,
     node: Arc<Node>,
     identity: ramflux_crypto::custody::VerifiedNodeRecord,
+    full_hellos:
+        Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
 }
 impl PairingNative for FullNativeFixture {
     fn issue(
@@ -516,6 +534,13 @@ impl PairingNative for FullNativeFixture {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn pairing_full_actor_bootstrap_commits_data_only_stages_before_a3() -> TestResult {
+    let (mut rig, operation, anchor) = Box::pin(bootstrap_full_rig()).await?;
+    assert_full_bootstrap_preserves_uncertain_rows(&rig, &operation, &anchor)?;
+    assert_full_cancel_fences_stage(&mut rig, &operation).await?;
+    Ok(())
+}
+
+async fn bootstrap_full_rig() -> Result<(Rig, String, String), Box<dyn std::error::Error>> {
     let mut rig = Rig::open_profile(true).await?;
     assert_declared_full_source(&rig.participant_a)?;
     let result = rig.primary.begin_full(full_begin(rig.now)).await?;
@@ -591,9 +616,7 @@ async fn pairing_full_actor_bootstrap_commits_data_only_stages_before_a3() -> Te
         "data-only bootstrap changed native authority"
     );
     assert_full_data_stages(&rig, &operation)?;
-    assert_full_bootstrap_preserves_uncertain_rows(&rig, &operation, &anchor)?;
-    assert_full_cancel_fences_stage(&mut rig, &operation).await?;
-    Ok(())
+    Ok((rig, operation, anchor))
 }
 
 fn assert_full_data_stages(rig: &Rig, operation: &str) -> TestResult {
@@ -769,5 +792,85 @@ async fn checked_full_status(
     if matches!(value.phase.as_str(), "rejected" | "expired" | "cancelled") {
         return Err(format!("{role} terminal: {} / {:?}", value.phase, value.result).into());
     }
+    Ok(())
+}
+
+// Keep paused time from jumping over local database/vault worker work. This follows the
+// SDK actor test hold; each protocol timer advance below is explicit.
+struct ClockHold {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+impl ClockHold {
+    fn new() -> Self {
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _ = wait.recv();
+        });
+        Self { release: Some(release), worker: Some(worker) }
+    }
+    async fn finish(mut self) -> TestResult {
+        self.release.take();
+        self.worker.take().ok_or("clock hold")?.await?;
+        Ok(())
+    }
+}
+impl Drop for ClockHold {
+    fn drop(&mut self) {
+        self.release.take();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pairing_full_initial_epoch_uses_a3_with_sas_keys() -> TestResult {
+    use ramflux_protocol::custody::pairing::{PairingWire, context_v3::TranscriptV3};
+    let hold = ClockHold::new();
+    let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+    let frozen = {
+        let slot = rig.participant_a.db.lock().map_err(|_| "DB")?;
+        let stage = slot.as_ref().ok_or("DB")?.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            rig.now,
+        )?;
+        TranscriptV3::from_wire_bytes(&stage.resume_record()?.transcript)?
+    };
+    rig.primary.sync_relay().await?;
+    // Actual frontend handback: the background signer must not need a parked DB loan.
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    assert!(rig.participant_a.db.lock().map_err(|_| "DB")?.is_none());
+    rig.secondary.sync_relay().await?;
+    let mut ready = false;
+    for _ in 0..16 {
+        rig.primary.sync_relay().await?;
+        rig.secondary.sync_relay().await?;
+        let (sent, received) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = sent.send(());
+        });
+        received.await?;
+        if rig.primary.full_epoch_ready_for_test() && rig.secondary.full_epoch_ready_for_test() {
+            ready = true;
+            break;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(ready, "actual native A3/original-proof/HPKE/Ready did not complete");
+    {
+        let seen = rig.full_hellos.lock().map_err(|_| "hello observations")?;
+        assert_eq!(seen.len(), 2);
+        for (role, key) in [
+            ("initiator", frozen.initiator.hpke_key.as_deref().ok_or("source HPKE")?),
+            ("responder", frozen.responder.hpke_key.as_deref().ok_or("target HPKE")?),
+        ] {
+            assert!(
+                seen.iter().any(|hello| hello.role == role && hello.hpke_key == key),
+                "initial A3 key differs from own frozen SAS key: {role}"
+            );
+        }
+    }
+
+    assert!(rig.source.client.account_db()?.pairing_adoption()?.is_none());
+    hold.finish().await?;
     Ok(())
 }

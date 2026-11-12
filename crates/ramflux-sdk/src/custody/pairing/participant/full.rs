@@ -10,7 +10,9 @@ use ed25519_dalek::Signer as _;
 use ramflux_protocol::{custody::DeviceRef, encode_base64url};
 use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, PreparedFullSource};
 
+mod proof_signer;
 mod stage;
+pub(crate) use proof_signer::FullProofSigner;
 
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
@@ -71,15 +73,7 @@ impl LocalPairingParticipant {
         source.encode_fixed_base_source(&snapshot, std::io::sink())?;
         Ok((source.close_ready()?, cancel))
     }
-    pub(super) fn with_full_branch<R>(
-        &self,
-        reference: &DeviceRef,
-        expected_key: &str,
-        use_branch: impl FnOnce(&custody::BranchCredentials) -> Result<R, SdkError>,
-    ) -> Result<R, SdkError> {
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
-        self.full_selected_db(db, Some(&reference.account_anchor))?;
+    fn full_branch_vault_ref(&self, reference: &DeviceRef) -> Result<String, SdkError> {
         let pending = super::super::install_store::list_pending(&self.root, &self.account_id)?
             .into_iter()
             .find(|row| &row.recipient_ref == reference);
@@ -95,6 +89,18 @@ impl LocalPairingParticipant {
             }
             account.branch_vault_ref().to_owned()
         };
+        Ok(vault_ref)
+    }
+    pub(super) fn with_full_branch<R>(
+        &self,
+        reference: &DeviceRef,
+        expected_key: &str,
+        use_branch: impl FnOnce(&custody::BranchCredentials) -> Result<R, SdkError>,
+    ) -> Result<R, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.full_selected_db(db, Some(&reference.account_anchor))?;
+        let vault_ref = self.full_branch_vault_ref(reference)?;
         let branch = self.vault.load_branch(&vault_ref, &reference.account_anchor, reference)?;
         if encode_base64url(branch.signing.signing_key.verifying_key().to_bytes()) != expected_key {
             return Err(wrong());
