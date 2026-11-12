@@ -17,6 +17,7 @@ use ramflux_protocol::custody::pairing::{
     local_dto::FullTransferBegin,
 };
 use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
+mod bootstrap;
 
 pub(super) struct FullCeremony {
     pub(super) common: CommonV3,
@@ -27,6 +28,7 @@ pub(super) struct FullCeremony {
     pub(super) hpke: Option<HpkeSecrets>,
     pub(super) prepared: Option<PreparedFullSource>,
     cancelled: Option<FullSourcePreparationCancel>,
+    bootstrap: Option<bootstrap::BootstrapState>,
 }
 impl FullCeremony {
     fn new(
@@ -44,6 +46,7 @@ impl FullCeremony {
             hpke: None,
             prepared,
             cancelled,
+            bootstrap: None,
         }
     }
 }
@@ -56,6 +59,7 @@ impl Drop for FullCeremony {
         self.transcript.take();
         self.node.take();
         self.sas_base.take();
+        self.bootstrap.take();
         if let Some(hpke) = &mut self.hpke {
             hpke.cleanup();
         }

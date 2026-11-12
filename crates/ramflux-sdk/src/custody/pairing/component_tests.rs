@@ -68,20 +68,94 @@ struct Rig {
     secondary: PairingActor,
     clock: Arc<TestPairingClock>,
     participant_b: Arc<LocalPairingParticipant>,
+    participant_a: Arc<LocalPairingParticipant>,
+    node: Arc<Node>,
     recipient_root: tempfile::TempDir,
     original_devices: Vec<ramflux_protocol::custody::Device>,
     now: u64,
-    _source: crate::client::native_test_support::Fixture,
+    _source: ComponentSource,
     _node_root: tempfile::TempDir,
     _clock: crate::time::FixedClock,
 }
 
+// A fresh native account before its first ordinary network initialization. The full-profile
+// test exports all of its actual rows; the separately tested initialized account remains refused
+// for undeclared local events/actors. No rows are deleted or skipped to admit either source.
+struct ComponentSource {
+    client: crate::RamfluxClient,
+    vault: Arc<crate::custody::tests::TestVault>,
+    root: crate::custody::tests::Root,
+}
+impl ComponentSource {
+    async fn open(full: bool, now: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        if !full {
+            let fixture =
+                crate::client::native_test_support::Fixture::new("component-source").await?;
+            return Ok(Self { client: fixture.client, vault: fixture.vault, root: fixture.root });
+        }
+        let root = crate::custody::tests::Root::new()?;
+        let vault = Arc::new(crate::custody::tests::TestVault::default());
+        let account = crate::custody::tests::create_with_device(
+            &root.0,
+            "component-source",
+            "primary",
+            vault.as_ref(),
+            now,
+        )?;
+        let mut client = crate::RamfluxClient::new();
+        client.open_account_index(&root.0)?;
+        client.seal_new_account_data(
+            "component-source",
+            &account.record().body.account_anchor,
+            b"fresh-source-data",
+        )?;
+        client.unlock_account("component-source", b"fresh-source-data")?;
+        Ok(Self { client, vault, root })
+    }
+}
+
+type FixtureTransports = (
+    Arc<dyn PairingNative>,
+    Arc<super::tests::MemoryRelay>,
+    Option<ramflux_crypto::custody::VerifiedNodeRecord>,
+);
+fn fixture_transports(
+    full: bool,
+    now: u64,
+    clock: Arc<TestPairingClock>,
+    node: Arc<Node>,
+) -> Result<FixtureTransports, Box<dyn std::error::Error>> {
+    let relay_store = Arc::new(Mutex::new(PairingRelayStore::new(PairingRelayConfig {
+        clock: clock as Arc<dyn PairingClock>,
+        node_seed: if full { ramflux_crypto::fixture_signing_key().to_bytes() } else { [7; 32] },
+        public_origin: "https://relay.example:443".into(),
+    })?));
+    let relay = Arc::new(super::tests::MemoryRelay { store: relay_store.clone() });
+    let verified_node = if full {
+        Some(
+            crate::custody::network_tests::node(now, ramflux_protocol::encode_base64url([29; 32]))
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let native: Arc<dyn PairingNative> = match &verified_node {
+        Some(identity) => {
+            Arc::new(FullNativeFixture { store: relay_store, node, identity: identity.clone() })
+        }
+        None => Arc::new(super::tests::StoreNative { store: relay_store }),
+    };
+    Ok((native, relay, verified_node))
+}
+
 impl Rig {
     async fn open() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_profile(false).await
+    }
+    async fn open_profile(full: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let now = crate::custody::network_now()?;
         let fixed_clock = crate::time::FixedClock::set(i64::try_from(now)?);
-        let mut source =
-            crate::client::native_test_support::Fixture::new("component-source").await?;
+        let mut source = ComponentSource::open(full, now).await?;
         let recipient_root = tempfile::tempdir()?;
         let node_root = tempfile::tempdir()?;
         let node = Arc::new(Node {
@@ -94,13 +168,8 @@ impl Rig {
         let account_ref =
             source_account.record().body.master_certificate.body.primary_device_ref.clone();
         let clock = TestPairingClock::new(now);
-        let relay_store = Arc::new(Mutex::new(PairingRelayStore::new(PairingRelayConfig {
-            clock: clock.clone() as Arc<dyn PairingClock>,
-            node_seed: [7; 32],
-            public_origin: "https://relay.example:443".into(),
-        })?));
-        let relay = Arc::new(super::tests::MemoryRelay { store: relay_store.clone() });
-        let native = Arc::new(super::tests::StoreNative { store: relay_store });
+        let (native, relay, verified_node) =
+            fixture_transports(full, now, clock.clone(), node.clone())?;
         let participant_a = Arc::new(LocalPairingParticipant {
             root: source.root.0.clone(),
             account_id: "component-source".into(),
@@ -161,11 +230,18 @@ impl Rig {
             config,
         );
         secondary.set_participant(participant_b.clone());
+        if let Some(identity) = verified_node {
+            primary.set_full_node(identity.clone());
+            secondary.set_full_node(identity);
+        }
+
         Ok(Self {
             primary,
             secondary,
             clock,
             participant_b,
+            participant_a,
+            node,
             recipient_root,
             original_devices,
             now,
@@ -183,6 +259,8 @@ async fn pairing_recipient_activates_only_exact_durable_publication() -> TestRes
         mut secondary,
         clock,
         participant_b,
+        participant_a: _,
+        node: _,
         recipient_root,
         original_devices,
         now,
@@ -354,4 +432,342 @@ fn assert_retained_roster(
     assert_eq!(admitted.record().body.devices.len(), 2);
     assert_eq!(admitted.primary_vault_ref(), "");
     assert!(admitted.group_primary(vault).is_err());
+}
+
+/// Real native lease verifier/current `RouterCore` owner; the fixture relay remains in-process.
+struct FullNativeFixture {
+    store: Arc<Mutex<PairingRelayStore>>,
+    node: Arc<Node>,
+    identity: ramflux_crypto::custody::VerifiedNodeRecord,
+}
+impl PairingNative for FullNativeFixture {
+    fn issue(
+        &self,
+        spec: ramflux_protocol::custody::pairing::native::CreateSpec,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ramflux_protocol::custody::pairing::native::Issued, SdkError>,
+                > + Send,
+        >,
+    > {
+        PairingNative::issue(&super::tests::StoreNative { store: self.store.clone() }, spec)
+    }
+    fn create(
+        &self,
+        request: ramflux_protocol::custody::pairing::native::Create,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ramflux_protocol::custody::pairing::native::Created, SdkError>,
+                > + Send,
+        >,
+    > {
+        PairingNative::create(&super::tests::StoreNative { store: self.store.clone() }, request)
+    }
+    fn full_node(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError>,
+                > + Send,
+        >,
+    > {
+        let identity = self.identity.clone();
+        Box::pin(async move { Ok(identity) })
+    }
+    fn data_lease(
+        &self,
+        request: ramflux_protocol::custody::pairing::full_transfer::lease::LeaseRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ramflux_protocol::custody::Envelope<
+                            ramflux_protocol::custody::pairing::full_transfer::lease::DataLease,
+                        >,
+                        SdkError,
+                    >,
+                > + Send,
+        >,
+    > {
+        let node = self.node.clone();
+        let store = self.store.clone();
+        let identity = self.identity.clone();
+        Box::pin(async move {
+            let anchor = request.grant.source_ref.account_anchor.clone();
+            node.core
+                .with_current_pairing_authority(
+                    &anchor,
+                    crate::custody::network_now()?,
+                    |current| {
+                        store
+                            .lock()
+                            .map_err(|_| {
+                                ramflux_node_core::pairing_relay::PairingRelayError::WrongContext
+                            })?
+                            .issue_data_lease(&request, current, &identity)
+                    },
+                )
+                .map_err(|error| SdkError::LocalBus(error.to_string()))
+        })
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn pairing_full_actor_bootstrap_commits_data_only_stages_before_a3() -> TestResult {
+    let mut rig = Rig::open_profile(true).await?;
+    assert_declared_full_source(&rig.participant_a)?;
+    let result = rig.primary.begin_full(full_begin(rig.now)).await?;
+    let Outcome::Begin { value: begun } = result.outcome else { return Err("full begin".into()) };
+    let anchor = begun.invite_token.invitation.body.account_anchor.clone();
+    let operation = begun.operation_id.clone();
+    let generation = begun.generation;
+    rig.secondary
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Target".into(),
+        })
+        .await?;
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation.clone(),
+        generation,
+    };
+    for _ in 0..32 {
+        rig.clock.advance_ms(1001);
+        checked_full_status(&mut rig.primary, &request, "source").await?;
+        rig.clock.advance_ms(1001);
+        checked_full_status(&mut rig.secondary, &request, "target").await?;
+        if rig.primary.displayed_transcript().is_ok()
+            && rig.secondary.displayed_transcript().is_ok()
+        {
+            break;
+        }
+    }
+    let th = rig.primary.displayed_transcript().map_err(|error| format!("source SAS: {error}"))?;
+    assert_eq!(th, rig.secondary.displayed_transcript()?);
+    let confirm = Confirm {
+        schema: "ramflux.pairing.Confirm.v2".into(),
+        version: 2,
+        operation_id: operation.clone(),
+        generation,
+        transcript_hash: th,
+        r#match: true,
+    };
+    rig.clock.advance_ms(1001);
+    rig.primary.confirm(&confirm).await?;
+    rig.clock.advance_ms(1001);
+    rig.secondary.confirm(&confirm).await?;
+    let mut linked = false;
+    for _ in 0..32 {
+        rig.clock.advance_ms(1001);
+        checked_full_status(&mut rig.primary, &request, "source").await?;
+        rig.clock.advance_ms(1001);
+        checked_full_status(&mut rig.secondary, &request, "target").await?;
+        let references = |participant: &LocalPairingParticipant| -> Result<_, SdkError> {
+            let slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+            let row = slot
+                .as_ref()
+                .ok_or(SdkError::AccountDbNotUnlocked)?
+                .pairing_live_rows()?
+                .into_iter()
+                .find(|row| row.operation_id == operation)
+                .ok_or(SdkError::PairingCode("NotFound"))?;
+            Ok(row.full_stage_reference()?)
+        };
+        if references(&rig.participant_a)?.is_some() && references(&rig.participant_b)?.is_some() {
+            linked = true;
+            break;
+        }
+    }
+    assert!(linked, "bootstrap did not commit both actual data-only stage links");
+    assert_eq!(
+        rig.original_devices,
+        rig.node.current_authority(&anchor)?.publication.record.body.devices,
+        "data-only bootstrap changed native authority"
+    );
+    assert_full_data_stages(&rig, &operation)?;
+    assert_full_bootstrap_preserves_uncertain_rows(&rig, &operation, &anchor)?;
+    assert_full_cancel_fences_stage(&mut rig, &operation).await?;
+    Ok(())
+}
+
+fn assert_full_data_stages(rig: &Rig, operation: &str) -> TestResult {
+    use ramflux_protocol::custody::pairing::PairingWire;
+    for (participant, role) in [
+        (&rig.participant_a, ramflux_crypto::custody::pairing::PairingRole::Initiator),
+        (&rig.participant_b, ramflux_crypto::custody::pairing::PairingRole::Responder),
+    ] {
+        let slot = participant.db.lock().map_err(|_| "DB")?;
+        let db = slot.as_ref().ok_or("DB")?;
+        let stage = db.open_full_transfer_stage(operation, role, rig.now)?;
+        let record = stage.resume_record()?;
+        assert_eq!(record.role, role);
+        let _: ramflux_protocol::custody::pairing::context_v3::TranscriptV3 =
+            ramflux_protocol::custody::pairing::context_v3::TranscriptV3::from_wire_bytes(
+                &record.transcript,
+            )?;
+        assert!(db.pairing_adoption()?.is_none(), "data-only stage granted installation");
+    }
+    Ok(())
+}
+
+fn assert_full_bootstrap_preserves_uncertain_rows(
+    rig: &Rig,
+    operation: &str,
+    anchor: &str,
+) -> TestResult {
+    use ramflux_crypto::custody::pairing::{FullResumeTrust, PairingRole};
+    let participant = &rig.participant_b;
+    let (record, original) = {
+        let slot = participant.db.lock().map_err(|_| "DB")?;
+        let db = slot.as_ref().ok_or("DB")?;
+        let stage = db.open_full_transfer_stage(operation, PairingRole::Responder, rig.now)?;
+        let record = stage.resume_record()?;
+        let row = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .ok_or("live row")?;
+        (record, row)
+    };
+    let node =
+        crate::custody::network_tests::node(rig.now, ramflux_protocol::encode_base64url([29; 32]))
+            .map_err(|error| error.to_string())?;
+    let own_ref = record.grant.destination_ref.clone();
+    let own_key = record.grant.branch_keys.destination.clone();
+    let trust = FullResumeTrust::restore_local_stage(record, &node, &own_ref, &own_key, rig.now)?;
+    let base =
+        ramflux_crypto::custody::verify_publication(&rig.node.current_authority(anchor)?, rig.now)?;
+    for phase in ["mutually_confirmed", "prepared", "submitted", "cancelled", "expired", "rejected"]
+    {
+        let mut row = original.clone();
+        row.phase = phase.into();
+        if phase != "mutually_confirmed" {
+            row.candidate_id = Some(operation.into());
+            row.proposal_hash = Some(ramflux_protocol::encode_base64url([91; 32]));
+        }
+        {
+            let slot = participant.db.lock().map_err(|_| "DB")?;
+            slot.as_ref().ok_or("DB")?.put_pairing_live(&row)?;
+        }
+        assert!(
+            matches!(
+                participant.retain_full_data_stage(operation, row.generation, &trust, &base, None),
+                Err(SdkError::PairingCode("WrongContext"))
+            ),
+            "fresh bootstrap replaced a linked or uncertain row: {phase}"
+        );
+        let slot = participant.db.lock().map_err(|_| "DB")?;
+        let db = slot.as_ref().ok_or("DB")?;
+        let retained = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .ok_or("live row")?;
+        assert_eq!(retained, row, "bootstrap changed uncertainty metadata");
+        db.put_pairing_live(&original)?;
+    }
+    Ok(())
+}
+
+fn assert_declared_full_source(participant: &LocalPairingParticipant) -> TestResult {
+    let slot = participant.db.lock().map_err(|_| "DB")?;
+    let db = slot.as_ref().ok_or("DB")?;
+    let rules = ramflux_storage::full_transfer_catalog();
+    let schema = db.inspect_full_transfer_schema(rules)?;
+    let undeclared: Vec<_> = schema
+        .families
+        .iter()
+        .zip(rules)
+        .filter(|(family, rule)| family.source_rows.0 > 0 && rule.require_typed_codec().is_err())
+        .map(|(family, _)| family.id.as_str())
+        .collect();
+    assert!(undeclared.is_empty(), "fixture contains undeclared owners: {undeclared:?}");
+    Ok(())
+}
+
+async fn assert_full_cancel_fences_stage(rig: &mut Rig, operation: &str) -> TestResult {
+    rig.secondary.lock().await?;
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "DB")?;
+        let db = slot.as_ref().ok_or("DB")?;
+        let row = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .ok_or("live row")?;
+        assert_eq!(row.phase, "cancelled");
+        assert!(row.full_stage_reference()?.is_some(), "cancel erased resume uncertainty");
+        assert!(
+            db.open_full_transfer_stage(
+                operation,
+                ramflux_crypto::custody::pairing::PairingRole::Responder,
+                rig.now,
+            )
+            .is_err(),
+            "cancelled actor left a reopenable data stage"
+        );
+    }
+    Ok(())
+}
+
+fn full_begin(now: u64) -> ramflux_protocol::custody::pairing::local_dto::FullTransferBegin {
+    use ramflux_protocol::custody::pairing::{
+        context_v3::{DataSelectionV3, FullAccountData, TransferProfile},
+        local_dto::FullTransferBegin,
+    };
+    FullTransferBegin {
+        schema: "ramflux.pairing.TransferBegin.v3".into(),
+        version: 3,
+        recipient_mode: "new".into(),
+        destination_ref: None,
+        capabilities: vec!["group".into(), "message".into(), "register".into(), "sync".into()],
+        lease_not_before: now,
+        lease_expires_at: now + 604_800,
+        data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
+        transfer_profile: TransferProfile::FullAccountDataV1,
+        display_name: "Source".into(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pairing_full_network_initialized_source_refuses_undeclared_events_and_actors() -> TestResult
+{
+    let mut rig = Rig::open().await?;
+    assert!(matches!(
+        rig.primary.begin_full(full_begin(rig.now)).await,
+        Err(SdkError::PairingField("UnsupportedRecord"))
+    ));
+    assert!(rig.primary.displayed_transcript().is_err());
+    let slot = rig.participant_a.db.lock().map_err(|_| "DB")?;
+    let db = slot.as_ref().ok_or("DB")?;
+    let schema = db.inspect_full_transfer_schema(ramflux_storage::full_transfer_catalog())?;
+    for family in ["sql/local_event_log", "sql/runtime_actor_state"] {
+        assert!(
+            schema.families.iter().any(|item| item.id == family && item.source_rows.0 > 0),
+            "fixture no longer exercises undeclared owner {family}"
+        );
+    }
+    Ok(())
+}
+
+async fn checked_full_status(
+    actor: &mut PairingActor,
+    request: &ramflux_protocol::custody::pairing::local_dto::StatusRequest,
+    role: &str,
+) -> TestResult {
+    actor.status(request).await?;
+    let value = actor.sync_relay().await?;
+    let Outcome::Update { value } = value.outcome else {
+        return Err("full status".into());
+    };
+    if matches!(value.phase.as_str(), "rejected" | "expired" | "cancelled") {
+        return Err(format!("{role} terminal: {} / {:?}", value.phase, value.result).into());
+    }
+    Ok(())
 }

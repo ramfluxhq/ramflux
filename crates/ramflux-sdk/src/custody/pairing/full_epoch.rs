@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Memory-only A3 driver. No SAS approval, native authority, database loan or persisted token.
-use super::{HttpRelay, transport::wire};
+use super::{FullPairingTransport, HttpRelay, transport::wire};
 use crate::SdkError;
 use ramflux_crypto::custody::pairing::{
     FullResumeAttempt, FullResumeKeyOwner, FullResumeTrust, HpkeSecrets, PairingRole,
@@ -55,6 +55,47 @@ pub struct FullEpoch {
     binding: ramflux_protocol::custody::pairing::full_transfer::DataBinding,
     expires_at: u64,
 }
+impl FullEpoch {
+    /// Poll B's control using only this original-proof-verified role token and local scope.
+    /// The returned ciphertext is still opened against B's own frozen info/AAD.
+    /// # Errors
+    /// Refuses initiator scope, lease expiry, malformed control or transport failure.
+    pub async fn poll_destination_control(
+        &self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+    ) -> Result<
+        Option<ramflux_protocol::custody::pairing::full_transfer::relay::HpkeConfirmFull>,
+        SdkError,
+    > {
+        use ramflux_protocol::custody::pairing::full_transfer::relay::PollFullControl;
+        if self.role != PairingRole::Responder {
+            return Err(wrong());
+        }
+        if crate::custody::network_now()? >= self.expires_at {
+            return Err(SdkError::PairingCode("LeaseExpired"));
+        }
+        let request = PollFullControl {
+            epoch: self.epoch.clone(),
+            kind: "poll_full_control".into(),
+            lease_id: self.lease_id.clone(),
+            profile: PROFILE.into(),
+            role: self.role.as_str().into(),
+            token: self.token.clone(),
+        };
+        let reply = relay.poll_full_control(origin, &request).await?;
+        reply.validate().map_err(|error| wire(&error))?;
+        if let Some(control) = &reply.control
+            && (control.epoch != self.epoch
+                || control.lease_id != self.lease_id
+                || control.role != "initiator")
+        {
+            return Err(wrong());
+        }
+        Ok(reply.control)
+    }
+}
+
 struct Negotiation<'a> {
     trust: &'a FullResumeTrust,
     lease: Envelope<DataLease>,
@@ -240,7 +281,7 @@ impl<'a> Negotiation<'a> {
         }
     }
 }
-impl HttpRelay {
+impl dyn FullPairingTransport + '_ {
     /// Run A-first discovery and dual original-branch proofs, including the first epoch.
     /// `keys` preserves only the still-unused SAS private half in memory; every later key
     /// is fresh. The signer must bind its actual unlocked branch to the typed request.
@@ -262,17 +303,17 @@ impl HttpRelay {
             loop {
                 run.live()?;
                 if let Some(proof) = &run.proof {
-                    let reply = self.full_prove(origin, proof).await?;
+                    let reply = self.prove_full(origin, proof).await?;
                     if let Some(ready) = run.token(reply)? {
                         return Ok(ready);
                     }
                 } else {
                     let reply = if !sent_hello && let Some(hello) = &run.hello {
-                        let value = self.full_claim::<FullDiscovery>(origin, hello).await?;
+                        let value = self.hello_full(origin, hello).await?;
                         sent_hello = true;
                         value
                     } else {
-                        match self.full_claim::<FullDiscovery>(origin, &run.poll()).await {
+                        match self.discover_full(origin, &run.poll()).await {
                             Ok(value) => value,
                             Err(SdkError::PairingCode("NotFound")) if run.hello.is_none() => {
                                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -293,6 +334,21 @@ impl HttpRelay {
         })
         .await
         .map_err(|_| SdkError::PairingCode("ResumeRequired"))?
+    }
+}
+
+impl HttpRelay {
+    /// Run A3 using the same closed full transport port as the coordinator.
+    /// # Errors
+    /// Refuses changed operands, invalid peer proof, expiry or relay failure.
+    pub async fn negotiate_full_epoch(
+        &self,
+        origin: &str,
+        trust: &FullResumeTrust,
+        keys: &mut FullResumeKeyOwner,
+        sign: impl FnMut(&FullResumeProofSigningRequest<'_>) -> Result<String, SdkError>,
+    ) -> Result<FullEpoch, SdkError> {
+        (self as &dyn FullPairingTransport).negotiate_full_epoch(origin, trust, keys, sign).await
     }
 }
 

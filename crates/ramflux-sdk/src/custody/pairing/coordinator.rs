@@ -1093,6 +1093,11 @@ impl PairingActor {
         if let Some(native) = &self.native {
             native.close();
         }
+        let full_terminal = self
+            .ceremony
+            .as_ref()
+            .filter(|c| c.full.is_some() || c.cleanup == "pending")
+            .map(|c| (c.operation_id.clone(), c.generation));
         let close = self.ceremony.as_mut().map(|c| {
             match &mut c.sas {
                 SasHold::Pending(pending) => pending.cleanup(),
@@ -1102,7 +1107,8 @@ impl PairingActor {
             c.sas = SasHold::None;
             c.phase = phase.into();
             c.result = Some(code.into());
-            c.cleanup = if c.full.is_some() { "pending" } else { "done" }.into();
+            c.cleanup =
+                if c.full.is_some() || c.cleanup == "pending" { "pending" } else { "done" }.into();
             c.full.take();
             c.emoji = None;
             c.displayed_th = None;
@@ -1122,12 +1128,27 @@ impl PairingActor {
                 },
             )
         });
+        // Full owners/caches/readers were cancelled above, before waiting for the DB loan.
+        // Preserve candidate and stage metadata even when publication might have escaped.
+        let durable_terminal = if let (Some((operation, generation)), Some(participant)) =
+            (full_terminal, self.participant.clone())
+        {
+            let phase = phase.to_owned();
+            tokio::task::spawn_blocking(move || {
+                participant.mark_full_data_terminal(&operation, generation, &phase)
+            })
+            .await
+            .unwrap_or_else(|_| Err(SdkError::PairingCode("VaultUnavailable")))
+        } else {
+            Ok(())
+        };
         if let Some((origin, close)) = close {
             let _ = self.transport.close(origin, close).await;
             if let Some(c) = self.ceremony.as_mut() {
                 c.token.zeroize();
             }
         }
+        durable_terminal?;
         self.actor_generation = self.actor_generation.saturating_add(1);
         self.status_update()
     }
