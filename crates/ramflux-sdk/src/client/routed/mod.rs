@@ -761,3 +761,10 @@ pub(crate) fn validate_routed_ciphertext(entry: &GatewayInboxEntry) -> Result<()
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(crate) async fn native_typing_pair_fixture() -> crate::client::native_test_support::TestResult<
+    (crate::client::native_test_support::Fixture, crate::client::native_test_support::Fixture),
+> {
+    Box::pin(tests::candidate_ephemeral::native_pair()).await
+}

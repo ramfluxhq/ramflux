@@ -90,7 +90,7 @@ methods! {
         "mcp.approval.granted",
         "mcp.server.add",
         "mcp.tool.started",
-        "message.delete",
+        "message.focus", "message.delete",
         "message.receipt.delivered",
         "message.receipt.read",
         "object.get.finish",
@@ -239,6 +239,9 @@ pub(super) fn requires_network(
     account_has_relay: bool,
     spool_has_relay: Option<bool>,
 ) -> bool {
+    if super::generated_typing::is_request(method, params) {
+        return false;
+    }
     let Some(entry) = classify(method) else {
         return false;
     };

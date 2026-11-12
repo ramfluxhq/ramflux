@@ -371,14 +371,16 @@ impl AccountActor {
         let method = super::method_table::classify(&command.request.method);
         let lifecycle = method
             .is_some_and(|method| method.route == super::method_table::MethodRoute::Lifecycle);
-        let needs_network = self.reader_pool().map_or_else(
-            |_| {
-                method.is_some_and(|method| {
-                    method.class == super::method_table::MethodClass::NeedsNetwork
-                })
-            },
-            |pool| pool.requires_network(&command.request),
-        );
+        let needs_network =
+            !super::generated_typing::is_request(&command.request.method, &command.request.body)
+                && self.reader_pool().map_or_else(
+                    |_| {
+                        method.is_some_and(|method| {
+                            method.class == super::method_table::MethodClass::NeedsNetwork
+                        })
+                    },
+                    |pool| pool.requires_network(&command.request),
+                );
         let admission = super::command_admission::CommandAdmission::new(
             tokio::time::Instant::now(),
             &self.timeouts,

@@ -35,6 +35,7 @@ pub mod dispatch;
 mod events;
 #[expect(dead_code, reason = "resume fence port follows in the next integration round")]
 mod gateway_resume;
+mod generated_typing;
 pub(crate) mod group_conversation;
 mod group_delivery;
 pub mod io;
@@ -102,3 +103,6 @@ mod account_error_tests;
 
 #[cfg(test)]
 mod custody_daemon_tests;
+
+#[cfg(test)]
+mod generated_typing_tests;

@@ -6,7 +6,7 @@ use super::{RamfluxClient, SdkDmX3dhHeader, SdkError};
 use crate::client::identity_authority::HeadUse;
 pub(super) type SendPair = (ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]);
 impl RamfluxClient {
-    pub(super) fn sendable_pair(
+    pub(crate) fn sendable_pair(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
