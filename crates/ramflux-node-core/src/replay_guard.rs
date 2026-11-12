@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::NodeCoreError;
 
-#[path = "replay_guard/current_entries.rs"]
-mod current_entries;
+#[path = "replay_guard/legacy_replay.rs"]
+mod legacy_replay;
 
 /// Admission caps retain the protocol's full seven-day validity; exhaustion rejects
 /// new requests rather than forgetting any unexpired identity.
@@ -44,7 +44,7 @@ pub struct NodeReplayGuardState {
 
 #[derive(Default, Deserialize)]
 struct ReplaySnapshot {
-    #[serde(default, deserialize_with = "current_entries::deserialize_entries")]
+    #[serde(default, deserialize_with = "legacy_replay::deserialize_entries")]
     accepted_by_key: BTreeMap<String, i64>,
     #[serde(default)]
     root_by_key: BTreeMap<String, String>,
@@ -185,7 +185,16 @@ impl NodeReplayGuardState {
         }
         self.prune(now_unix_seconds);
         let key = envelope_replay_tuple_key(source, envelope);
-        if self.accepted_by_key.contains_key(&key) {
+        let legacy = format!(
+            "envelope/v2/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url(&envelope.envelope_id)
+        );
+        let isolated = format!("legacy/replay/{}", ramflux_protocol::encode_base64url(&legacy));
+        if self.accepted_by_key.contains_key(&key)
+            || self.accepted_by_key.contains_key(&legacy)
+            || self.accepted_by_key.contains_key(&isolated)
+        {
             return Ok(false);
         }
         self.insert_entry(key, expires_at);
@@ -199,7 +208,15 @@ impl NodeReplayGuardState {
         now: i64,
     ) -> bool {
         let key = envelope_replay_tuple_key(source, envelope);
-        self.accepted_by_key.get(&key).is_some_and(|expiry| *expiry >= now)
+        let legacy = format!(
+            "envelope/v2/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url(&envelope.envelope_id)
+        );
+        let isolated = format!("legacy/replay/{}", ramflux_protocol::encode_base64url(&legacy));
+        [key, legacy, isolated]
+            .iter()
+            .any(|key| self.accepted_by_key.get(key).is_some_and(|expiry| *expiry >= now))
     }
 
     #[must_use]
@@ -222,6 +239,7 @@ impl NodeReplayGuardState {
     }
 
     pub(crate) fn restore_accepted(&mut self, key: String, expires_at: i64) {
+        let key = legacy_replay::isolate_unknown_key(key);
         self.insert_entry(key, expires_at);
     }
 

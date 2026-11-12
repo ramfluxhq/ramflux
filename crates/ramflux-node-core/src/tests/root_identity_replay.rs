@@ -49,11 +49,18 @@ fn request_replay_keys_bind_root_and_unambiguous_tuple_fields()
 }
 
 #[test]
-fn old_replay_key_shapes_are_refused() {
-    let guard = serde_json::from_value::<NodeReplayGuardState>(serde_json::json!({
-        "accepted_by_key": {"bob:next-bob-envelope:next-bob-envelope": 1_760_003_600}
-    }));
-    assert!(guard.is_err());
+fn legacy_unknown_root_replay_rows_cannot_preclaim_current_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut message = envelope("next-bob-envelope", "target", DeliveryClass::OpaqueEvent);
+    message.source_device_id = "bob".into();
+    let mut guard: NodeReplayGuardState = serde_json::from_value(serde_json::json!({
+        "accepted_by_key": {"bob:next-bob-envelope:next-bob-envelope": message.created_at + 3600}
+    }))?;
+    let bob = replay_source("bob")?;
+    guard.check_envelope(&bob, &message, message.created_at)?;
+    assert_eq!(guard.len(), 2);
+    assert!(guard.accepted_entries().any(|(key, _)| key.starts_with("legacy/replay/")));
+    Ok(())
 }
 
 #[test]
