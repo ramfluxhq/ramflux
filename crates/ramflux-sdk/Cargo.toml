@@ -20,6 +20,9 @@ itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = []
+# HTTP CONNECT proxy for the TCP + TLS gateway carrier. Default-off (a later desktop need) and
+# without effect on Windows targets.
+http-connect-proxy = ["ramflux-transport/http-connect-proxy"]
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]

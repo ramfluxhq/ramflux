@@ -7,3 +7,5 @@
 pub(crate) mod fs;
 #[cfg(unix)]
 pub(crate) mod listener;
+/// Host network-change reports and per-network path memory; neutral on every target.
+pub(crate) mod network;

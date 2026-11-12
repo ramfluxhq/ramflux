@@ -55,6 +55,17 @@ pub enum GatewaySessionTransportKind {
     TcpTls,
 }
 
+/// How [`GatewaySessionTransportKind::Auto`] orders its carriers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConnectionRace {
+    /// QUIC for `quic_fallback_timeout`, then TCP + TLS. The desktop default.
+    #[default]
+    Serial,
+    /// QUIC first, TCP + TLS 300 ms later, the first completed TLS handshake wins, and the
+    /// winner is remembered per network for ten minutes. Required on phones.
+    Raced,
+}
+
 struct GatewaySessionConfigParts {
     transport_kind: GatewaySessionTransportKind,
     bind_addr: SocketAddr,
@@ -127,6 +138,15 @@ pub struct GatewaySessionConfig {
     /// from the receive-activation discriminator (Activated iff advertised). Test
     /// constructors may set it directly for negotiation unit tests without a DB.
     pub(crate) session_push_advertise: bool,
+    /// Carrier ordering for `Auto`. Ignored by the explicit transport kinds.
+    pub connection_race: ConnectionRace,
+    /// Host network reports and the per-network path memory. Clones share state, so the
+    /// memory survives reconnects with the config.
+    pub network_monitor: crate::platform::network::NetworkMonitor,
+    /// Explicitly configured HTTP proxy. While set, `Auto` never dials QUIC and the stream
+    /// carrier runs inside a CONNECT tunnel with TLS still end to end.
+    #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+    pub http_proxy: Option<ramflux_transport::HttpConnectProxy>,
 }
 
 impl GatewaySessionConfig {
@@ -232,6 +252,46 @@ impl GatewaySessionConfig {
             push_route_retry: super::PushRouteRetry::default(),
             push_route_last_seq: 0,
             session_push_advertise: false,
+            connection_race: ConnectionRace::default(),
+            network_monitor: crate::platform::network::NetworkMonitor::new(),
+            #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+            http_proxy: None,
+        }
+    }
+
+    /// Select how `Auto` orders its carriers.
+    #[must_use]
+    pub const fn with_connection_race(mut self, race: ConnectionRace) -> Self {
+        self.connection_race = race;
+        self
+    }
+
+    /// Share the host's network monitor so path memory follows the reported network.
+    #[must_use]
+    pub fn with_network_monitor(
+        mut self,
+        monitor: crate::platform::network::NetworkMonitor,
+    ) -> Self {
+        self.network_monitor = monitor;
+        self
+    }
+
+    /// Route the stream carrier through an explicitly configured HTTP CONNECT proxy.
+    #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+    #[must_use]
+    pub fn with_http_proxy(mut self, proxy: ramflux_transport::HttpConnectProxy) -> Self {
+        self.http_proxy = Some(proxy);
+        self
+    }
+
+    pub(crate) const fn has_http_proxy(&self) -> bool {
+        #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+        {
+            self.http_proxy.is_some()
+        }
+        #[cfg(not(all(feature = "http-connect-proxy", not(windows))))]
+        {
+            false
         }
     }
 

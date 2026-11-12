@@ -378,6 +378,30 @@ impl GatewaySessionEngine {
         Ok(())
     }
 
+    /// Probe this connection after the host reported a network change: one `Heartbeat` with
+    /// a three-second deadline. The session neither relies on connection migration nor opens
+    /// a second session while the first one still answers.
+    ///
+    /// On [`crate::NetworkChangeOutcome::Reconnect`] the caller drops this connection and
+    /// reconnects with `Resume` (for example through [`Self::reconnect`]).
+    ///
+    /// # Errors
+    /// Currently never fails: a refused, lost or silent heartbeat is reported as
+    /// `Reconnect`. The `Result` leaves room for a refusal that must not be retried.
+    pub async fn probe_after_network_change(
+        &mut self,
+    ) -> Result<crate::NetworkChangeOutcome, SdkError> {
+        let deadline = ramflux_transport::NETWORK_CHANGE_PROBE_DEADLINE;
+        match tokio::time::timeout(deadline, self.heartbeat()).await {
+            Ok(Ok(())) => Ok(crate::NetworkChangeOutcome::Survived),
+            Ok(Err(_)) | Err(_) => {
+                let network = self.config.network_monitor.current_network();
+                self.config.network_monitor.record_dial_failure(network);
+                Ok(crate::NetworkChangeOutcome::Reconnect)
+            }
+        }
+    }
+
     /// # Errors
     /// Returns an error when the session cannot be probed or reconnected.
     pub async fn ensure_live(&mut self, last_seen_inbox_seq: u64) -> Result<(), SdkError> {
@@ -960,6 +984,11 @@ pub(crate) async fn open_gateway_session_transport(
     SdkError,
 > {
     match config.transport_kind {
+        GatewaySessionTransportKind::Auto
+            if config.connection_race == super::ConnectionRace::Raced || config.has_http_proxy() =>
+        {
+            super::auto_dial::open_auto_raced(config).await
+        }
         GatewaySessionTransportKind::Auto => {
             match open_quic_gateway_session_transport(config, config.quic_fallback_timeout).await {
                 Ok((transport, stream)) => {

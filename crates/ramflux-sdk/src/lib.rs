@@ -155,8 +155,13 @@ pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,
     SdkFederatedSubmitResponse,
 };
+pub use platform::network::{
+    NetworkChangeKind, NetworkChangeOutcome, NetworkKey, NetworkMonitor, NetworkSnapshot,
+    is_network_blocked,
+};
+pub mod client_constraints;
 pub use gateway::{
-    GatewayAuthFrame, GatewayCallFuture, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
+    ConnectionRace, GatewayAuthFrame, GatewayCallFuture, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
     GatewayDirectMessage, GatewayInboxEntry, GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery,
     GatewayOwnDeviceFanoutFrame, GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery,
     GatewayPushProvider, GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame,

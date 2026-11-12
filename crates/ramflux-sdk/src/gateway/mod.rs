@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 pub mod access;
+mod auto_dial;
 pub mod engine;
 mod ephemeral;
 pub(crate) mod transport_opener;
