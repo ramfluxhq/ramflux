@@ -111,6 +111,7 @@ struct Shared {
     courier_wakes: std::collections::BTreeMap<&'static str, Arc<Notify>>,
     account_work: Option<mpsc::Sender<AccountWork>>,
     call_changed: Arc<Notify>,
+    receive_idle: Notify,
     stop_reason: std::sync::Mutex<Option<DisconnectReason>>,
     #[cfg(test)]
     removals: std::sync::Mutex<Vec<CallRemoval>>,
@@ -188,6 +189,7 @@ fn new_shared(
         .collect(),
         account_work,
         call_changed: Arc::new(Notify::new()),
+        receive_idle: Notify::new(),
         #[cfg(test)]
         live_waiters: std::sync::atomic::AtomicUsize::new(0),
         #[cfg(test)]
@@ -266,6 +268,8 @@ impl Drop for InFlight {
     fn drop(&mut self) {
         self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Release);
         self.0.call_changed.notify_one();
+        // Receive scheduling must not compete with the resident host for one permit.
+        self.0.receive_idle.notify_one();
     }
 }
 

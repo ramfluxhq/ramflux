@@ -282,7 +282,7 @@ async fn wait_engine_idle(
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     loop {
-        let idle = handle.shared.call_changed.notified();
+        let idle = handle.shared.receive_idle.notified();
         if handle.in_flight_calls() == 0 {
             return true;
         }
@@ -1036,4 +1036,40 @@ async fn redrive_apply_page(
     .await?;
     crate::bus::push_receiver::apply_w1::replay_projected(account)?;
     Ok(applied)
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    #[tokio::test]
+    async fn receive_idle_wake_is_independent_of_resident_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handle, _io) = crate::bus::connection_manager::tests::fixture().await?;
+        handle.stop().await;
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            let previous = handle.shared.call_changed.notified();
+            tokio::pin!(previous);
+            if previous.as_mut().poll(&mut context).is_pending() {
+                break;
+            }
+        }
+        let call = super::super::InFlight::new(&handle.shared);
+        let resident = handle.shared.call_changed.notified();
+        tokio::pin!(resident);
+        resident.as_mut().enable();
+        let mut stop = handle.stop.subscribe();
+        let receive = super::wait_engine_idle(&handle, &mut stop);
+        tokio::pin!(receive);
+        assert!(receive.as_mut().poll(&mut context).is_pending());
+        drop(call);
+        assert!(resident.as_mut().poll(&mut context).is_ready(), "resident host keeps its wake");
+        assert!(
+            matches!(receive.as_mut().poll(&mut context), Poll::Ready(true)),
+            "call completion must also wake receive catch-up after the resident host takes its permit"
+        );
+        Ok(())
+    }
 }
