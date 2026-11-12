@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -182,6 +183,7 @@ impl DiskVault {
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
+        #[cfg(unix)]
         options.mode(0o600);
         match options.open(self.slot(reference)) {
             Ok(mut file) => {

@@ -195,7 +195,9 @@ fn home_authorization_stays_unavailable_without_user_presence() -> Result<(), St
 fn a_second_user_cannot_read_or_unprotect_an_entry() -> Result<(), String> {
     let user = std::env::var("RAMFLUX_TEST_SECOND_USER").map_err(text)?;
     let password = std::env::var("RAMFLUX_TEST_SECOND_USER_PASSWORD").map_err(text)?;
-    let (_root, vault) = vault()?;
+    // A directory the second user can read, so the refusal comes from the vault's access list.
+    let (root, control) = crate::platform::fs::tests::shared_tempdir()?;
+    let vault = WindowsDpapiVault::for_data_root(root.path());
     vault.store_new(PRIMARY, &key(5)).map_err(text)?;
     let path = vault.entry_path(PRIMARY).map_err(text)?;
     let protected = std::fs::read(&path).map_err(text)?;
@@ -204,6 +206,8 @@ fn a_second_user_cannot_read_or_unprotect_an_entry() -> Result<(), String> {
     let other_vault = vault.clone();
     let (opened, unprotected, loaded) = std::thread::spawn(move || {
         let guard = impersonate_user(&user, &password).map_err(text)?;
+        std::fs::read(&control)
+            .map_err(|error| format!("the control file is not readable: {error}"))?;
         // The access list refuses the file; the blob itself, had it leaked, does not open
         // under another user's DPAPI keys.
         let opened = std::fs::File::open(&path).map(|_| ());

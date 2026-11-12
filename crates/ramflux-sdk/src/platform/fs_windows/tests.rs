@@ -40,6 +40,25 @@ fn as_second_user<T: Send + 'static>(
     .map_err(|_| "impersonating thread failed".to_owned())?
 }
 
+/// A directory the second user can otherwise read, with a control file that proves it. The
+/// default temporary directory lies inside the first user's profile, which already refuses
+/// other users, so a refusal there would say nothing about the owner-only access list.
+pub(crate) fn shared_tempdir() -> Result<(tempfile::TempDir, PathBuf), String> {
+    let public = std::env::var_os("PUBLIC").ok_or("PUBLIC is not set")?;
+    let dir = tempfile::Builder::new().prefix("rf-test-").tempdir_in(public).map_err(text)?;
+    let control = dir.path().join("control");
+    std::fs::write(&control, b"control").map_err(text)?;
+    Ok((dir, control))
+}
+
+/// The second user reads the control file: the directory itself does not refuse them.
+fn control_is_readable(control: &Path) -> Result<(), String> {
+    let control = control.to_path_buf();
+    as_second_user(move || std::fs::read(control))?
+        .map(|_| ())
+        .map_err(|error| format!("the control file is not readable by the second user: {error}"))
+}
+
 fn denied<T>(result: std::io::Result<T>, what: &str) -> Result<(), String> {
     match result {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
@@ -226,7 +245,8 @@ fn a_final_symbolic_link_is_refused() -> Result<(), String> {
 #[test]
 #[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
 fn a_second_user_cannot_open_owner_only_files_or_take_the_lock() -> Result<(), String> {
-    let dir = tempfile::tempdir().map_err(text)?;
+    let (dir, control) = shared_tempdir()?;
+    control_is_readable(&control)?;
     let root = dir.path().join("ramflux").join("profile");
     ensure_data_root(&root).map_err(text)?;
     let file = root.join("manifest.json");
@@ -257,7 +277,8 @@ fn a_second_user_cannot_open_owner_only_files_or_take_the_lock() -> Result<(), S
 #[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
 fn the_sqlcipher_file_opens_only_as_the_same_user() -> Result<(), String> {
     const KEY: &str = "x'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'";
-    let dir = tempfile::tempdir().map_err(text)?;
+    let (dir, control) = shared_tempdir()?;
+    control_is_readable(&control)?;
     let root = dir.path().join("ramflux").join("profile");
     ensure_data_root(&root).map_err(text)?;
     let database = root.join("account.db");

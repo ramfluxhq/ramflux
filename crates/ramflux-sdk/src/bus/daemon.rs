@@ -332,7 +332,7 @@ pub(crate) async fn dispatch_local_bus_request(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

@@ -185,9 +185,18 @@ pub(super) async fn socket(
     daemon: Rc<Supervisor>,
 ) -> Result<(LocalBusClient, tokio::task::JoinHandle<Result<(), SdkError>>), SdkError> {
     let path = spec.root.join("observer.sock");
+    #[cfg(unix)]
     let listener = UnixListener::bind(&path)?;
+    #[cfg(windows)]
+    let listener = crate::platform::listener::bind(&path)?;
     let client = LocalBusClient::connect(&path).await?;
+    #[cfg(unix)]
     let (stream, _) = listener.accept().await?;
+    #[cfg(windows)]
+    let stream = {
+        use crate::platform::listener::BusListener as _;
+        listener.accept().await?
+    };
     let task = tokio::task::spawn_local(crate::bus::connection::handle(stream, daemon, 1));
     std::fs::remove_file(path)?;
     Ok((client, task))

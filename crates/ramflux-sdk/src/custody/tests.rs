@@ -358,6 +358,7 @@ fn custody_nonhuman_genesis_requires_current_local_human_custody() -> Result {
 
 #[test]
 fn agent_bundle_is_private_custodian_bound_and_one_shot() -> Result {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let root = Root::new()?;
     let vault = TestVault::default();
@@ -382,6 +383,7 @@ fn agent_bundle_is_private_custodian_bound_and_one_shot() -> Result {
     assert!(!agent.to_string().contains("provisioning_vault_ref"));
     let path = root.0.join("agent.bundle");
     super::store::export_agent_credentials(&root.0, "human", "agent", &path, &vault, now)?;
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     let bytes = std::fs::read(&path)?;
     let bundle: super::store::AgentProvisioningBundle = serde_json::from_slice(&bytes)?;

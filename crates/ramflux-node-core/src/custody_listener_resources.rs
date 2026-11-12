@@ -54,6 +54,7 @@ pub fn custody_listener_resources(
         ))
     }
 }
+#[cfg_attr(not(unix), allow(dead_code))]
 fn validate_nofile(h: usize, a: usize, soft: u64) -> Result<(), NodeCoreError> {
     if (h as u64) + (a as u64) + 512 > soft {
         return Err(NodeCoreError::InvalidConfiguration(format!(
@@ -141,6 +142,7 @@ fn pending_connection_error(error: &io::Error) -> bool {
     let _ = error;
     false
 }
+#[cfg_attr(not(unix), allow(dead_code))]
 fn pending_linux_connection_error(errno: i32) -> bool {
     #[cfg(target_os = "linux")]
     {
