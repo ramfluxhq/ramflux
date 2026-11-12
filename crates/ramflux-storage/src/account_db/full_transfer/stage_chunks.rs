@@ -143,6 +143,8 @@ impl FullTransferStage<'_> {
         self.db.require_full_stage_unlock()?;
         self.connection.call(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("DELETE FROM receiver_scalar_record WHERE manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
+            tx.execute("DELETE FROM receiver_scalar_input WHERE manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
             tx.execute("DELETE FROM chunk WHERE direction=0 AND manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
             tx.execute("DELETE FROM manifest WHERE direction=0 AND verified=0", [])?;
             tx.execute(
