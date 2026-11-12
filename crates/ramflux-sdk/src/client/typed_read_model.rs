@@ -157,6 +157,36 @@ fn erasure_view(delete: &g::Delete) -> ErasureView {
     ErasureView { scope, tombstone_id: ramflux_protocol::encode_base64url(&delete.tombstone_id) }
 }
 
+/// Media keys never enter the read model: recipient key slots and the manifest read capability
+/// stay with the object reader, which alone opens media for the local device.
+fn strip_media_keys(message: &mut g::Message) {
+    for media in &mut message.media {
+        media.key_slots.clear();
+        if let Some(manifest) = media.large_manifest.as_mut() {
+            manifest.key_slots.clear();
+            manifest.read_capability.fill(0);
+            manifest.read_capability.clear();
+        }
+    }
+}
+
+fn strip_content_media_keys(content: &mut g::Content) {
+    match content.value.as_mut() {
+        Some(g::content::Value::Message(message)) => strip_media_keys(message),
+        Some(g::content::Value::SelfSync(sync)) => {
+            if let Some(draft) = sync.draft.as_mut() {
+                strip_media_keys(draft);
+            }
+        }
+        Some(g::content::Value::Edit(edit)) => {
+            if let Some(replacement) = edit.replacement.as_mut() {
+                strip_media_keys(replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn encoded_len<T: Serialize>(value: &T) -> Result<usize, SdkError> {
     Ok(serde_json::to_vec(value)?.len())
 }
@@ -399,7 +429,8 @@ impl RamfluxClient {
                     reason: unsupported.reason,
                 });
             }
-            Some(g::message_update::State::Content(content)) => {
+            Some(g::message_update::State::Content(mut content)) => {
+                strip_content_media_keys(&mut content);
                 view.state = "content";
                 view.kind = content.value.as_ref().map_or("unspecified", kind_name);
                 if let Some(g::content::Value::Message(body)) = content.value.as_ref() {
@@ -425,5 +456,78 @@ impl RamfluxClient {
             }
         }
         Ok(view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_model_content_carries_no_media_key_or_read_capability() -> Result<(), SdkError> {
+        let slot = g::MediaKeySlot {
+            recipient: None,
+            encrypted_key: b"slot-key-material".to_vec(),
+            format: 1,
+        };
+        let message = g::Message {
+            text: "caption".into(),
+            media: vec![g::MediaRef {
+                object_id: "object".into(),
+                key_slots: vec![slot.clone()],
+                large_manifest: Some(g::MediaManifest {
+                    key_slots: vec![slot],
+                    read_capability: b"read-capability-secret".to_vec(),
+                    relay_origin: "relay".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for value in [
+            g::content::Value::Message(message.clone()),
+            g::content::Value::Edit(g::Edit {
+                replacement: Some(message.clone()),
+                ..Default::default()
+            }),
+            g::content::Value::SelfSync(g::SelfSync {
+                draft: Some(message.clone()),
+                ..Default::default()
+            }),
+        ] {
+            let mut content = g::Content { value: Some(value) };
+            strip_content_media_keys(&mut content);
+            let stripped = match content.value {
+                Some(g::content::Value::Message(message)) => message,
+                Some(g::content::Value::Edit(edit)) => edit.replacement.unwrap_or_default(),
+                Some(g::content::Value::SelfSync(sync)) => sync.draft.unwrap_or_default(),
+                _ => g::Message::default(),
+            };
+            let media = stripped.media.first().ok_or(SdkError::PayloadTooLarge)?;
+            assert_eq!((stripped.text.as_str(), media.object_id.as_str()), ("caption", "object"));
+            assert!(media.key_slots.is_empty());
+            let manifest = media.large_manifest.as_ref().ok_or(SdkError::PayloadTooLarge)?;
+            assert!(manifest.key_slots.is_empty() && manifest.read_capability.is_empty());
+            assert_eq!(manifest.relay_origin, "relay");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn erasure_scope_names_are_closed() {
+        for (scope, name) in [
+            (g::DeleteScope::Local as i32, "local"),
+            (g::DeleteScope::Everyone as i32, "everyone"),
+            (9_999, "unspecified"),
+        ] {
+            let view = erasure_view(&g::Delete {
+                scope,
+                tombstone_id: vec![1; 32],
+                ..Default::default()
+            });
+            assert_eq!(view.scope, name);
+            assert_eq!(view.tombstone_id.len(), 43);
+        }
     }
 }
