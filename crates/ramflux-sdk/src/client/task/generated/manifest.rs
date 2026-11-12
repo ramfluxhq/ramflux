@@ -111,66 +111,7 @@ impl RamfluxClient {
         if manifest.principal_id != expected_principal {
             return Err(invalid("task manifest principal mismatch"));
         }
-        let native_custody = manifest
-            .custody
-            .as_ref()
-            .map(|value| canonical::<ramflux_protocol::custody::CustodyManifest>(&value.canonical))
-            .transpose()?;
-        let native = SdkDeviceManifestResponse {
-            custody: manifest
-                .custody
-                .as_ref()
-                .map(|value| canonical(&value.canonical).map(Box::new))
-                .transpose()?,
-            signed_device_set: manifest
-                .signed_device_set
-                .as_ref()
-                .map(|value| canonical(&value.canonical))
-                .transpose()?,
-            principal_id: manifest.principal_id.clone(),
-            principal_commitment: manifest.principal_commitment.clone(),
-            root_public_key: manifest.root_public_key.clone(),
-            devices: manifest
-                .devices
-                .iter()
-                .map(|device| {
-                    Ok(SdkDeviceManifestEntry {
-                        principal_id: device.principal_id.clone(),
-                        principal_commitment: device.principal_commitment.clone(),
-                        device_id: device.device_id.clone(),
-                        device_epoch: device.device_epoch,
-                        branch_public_key: device.branch_public_key.clone(),
-                        target_delivery_id: device.target_delivery_id.clone(),
-                        message_layer: native_custody.as_ref().and_then(|custody| {
-                            custody
-                                .publication
-                                .record
-                                .body
-                                .devices
-                                .iter()
-                                .find(|native| native.device_id == device.device_id)
-                                .and_then(|native| native.message_layer.clone())
-                        }),
-                        branch_proof: device
-                            .branch_proof
-                            .as_ref()
-                            .map(|value| canonical(&value.canonical))
-                            .transpose()?,
-                        prekey_bundle: canonical(
-                            &device
-                                .prekey_bundle
-                                .as_ref()
-                                .ok_or_else(|| invalid("task manifest prekey bundle missing"))?
-                                .canonical,
-                        )?,
-                        branch_authorized_event_id: device.branch_authorized_event_id.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, SdkError>>()?,
-        };
-        // The native deserializer owns mixed custody/legacy projection consistency.
-        let native: SdkDeviceManifestResponse =
-            serde_json::from_value(serde_json::to_value(native)?)?;
+        let native = generated_manifest_fields(manifest)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let commitment = if native.principal_id == local.principal_id {
             self.surface_local_root_commitment()?
@@ -181,6 +122,99 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("task manifest has no trusted principal commitment"))?
         };
         crate::client::contact::verify_device_manifest(&native, &commitment)?;
+        Ok(native)
+    }
+}
+
+fn generated_manifest_fields(
+    manifest: &g::NativeDeviceManifest,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let native_custody = manifest
+        .custody
+        .as_ref()
+        .map(|value| canonical::<ramflux_protocol::custody::CustodyManifest>(&value.canonical))
+        .transpose()?;
+    let native = SdkDeviceManifestResponse {
+        custody: manifest
+            .custody
+            .as_ref()
+            .map(|value| canonical(&value.canonical).map(Box::new))
+            .transpose()?,
+        signed_device_set: manifest
+            .signed_device_set
+            .as_ref()
+            .map(|value| canonical(&value.canonical))
+            .transpose()?,
+        principal_id: manifest.principal_id.clone(),
+        principal_commitment: manifest.principal_commitment.clone(),
+        root_public_key: manifest.root_public_key.clone(),
+        devices: manifest
+            .devices
+            .iter()
+            .map(|device| {
+                Ok(SdkDeviceManifestEntry {
+                    principal_id: device.principal_id.clone(),
+                    principal_commitment: device.principal_commitment.clone(),
+                    device_id: device.device_id.clone(),
+                    device_epoch: device.device_epoch,
+                    branch_public_key: device.branch_public_key.clone(),
+                    target_delivery_id: device.target_delivery_id.clone(),
+                    message_layer: native_custody.as_ref().and_then(|custody| {
+                        custody
+                            .publication
+                            .record
+                            .body
+                            .devices
+                            .iter()
+                            .find(|native| native.device_id == device.device_id)
+                            .and_then(|native| native.message_layer.clone())
+                    }),
+                    branch_proof: device
+                        .branch_proof
+                        .as_ref()
+                        .map(|value| canonical(&value.canonical))
+                        .transpose()?,
+                    prekey_bundle: canonical(
+                        &device
+                            .prekey_bundle
+                            .as_ref()
+                            .ok_or_else(|| invalid("task manifest prekey bundle missing"))?
+                            .canonical,
+                    )?,
+                    branch_authorized_event_id: device.branch_authorized_event_id.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, SdkError>>()?,
+    };
+    // The native deserializer owns mixed custody/legacy projection consistency.
+    let native: SdkDeviceManifestResponse = serde_json::from_value(serde_json::to_value(native)?)?;
+    Ok(native)
+}
+
+impl RamfluxClient {
+    /// The caller's authenticated same-root Sync link authorizes this explicit peer root.
+    /// This decoder verifies native evidence without installing directory keys.
+    pub(crate) fn decode_generated_own_contact_manifest(
+        manifest: &g::NativeDeviceManifest,
+        peer_root: &str,
+    ) -> Result<SdkDeviceManifestResponse, SdkError> {
+        let native =
+            generated_manifest_fields(manifest).map_err(|_| SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Content,
+                reason: "own contact native manifest fields invalid".into(),
+            })?;
+        if native.custody.is_none() {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                reason: "own contact requires native custody evidence".into(),
+            });
+        }
+        crate::client::contact::verify_device_manifest(&native, peer_root).map_err(|_| {
+            SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                reason: "own contact native manifest authority mismatch".into(),
+            }
+        })?;
         Ok(native)
     }
 }

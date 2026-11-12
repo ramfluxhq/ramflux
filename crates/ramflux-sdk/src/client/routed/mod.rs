@@ -768,3 +768,11 @@ pub(crate) async fn native_typing_pair_fixture() -> crate::client::native_test_s
 > {
     Box::pin(tests::candidate_ephemeral::native_pair()).await
 }
+
+#[cfg(test)]
+pub(crate) fn native_typing_delivery_fixture(
+    a: &crate::client::native_test_support::Fixture,
+    b: &crate::client::native_test_support::Fixture,
+) -> crate::client::native_test_support::TestResult<(ramflux_protocol::Envelope, Vec<String>)> {
+    tests::candidate_ephemeral::native_typing_delivery(a, b)
+}

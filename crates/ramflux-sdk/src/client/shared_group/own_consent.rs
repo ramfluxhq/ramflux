@@ -39,6 +39,45 @@ fn signing(consent: &Consent) -> Result<serde_json::Value, SdkError> {
         .remove("signature");
     Ok(serde_json::json!({"domain":DOMAIN,"body":value}))
 }
+fn canonical_leaf<T: serde::de::DeserializeOwned + serde::Serialize>(
+    bytes: &[u8],
+) -> Result<T, SdkError> {
+    if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES {
+        return Err(super::invalid("group consent native leaf byte budget"));
+    }
+    let value: T = ramflux_protocol::parse_i_json(bytes)?;
+    if ramflux_protocol::canonical_json_bytes(&value)? != bytes {
+        return Err(super::invalid("group consent native leaf must be exact canonical JSON"));
+    }
+    Ok(value)
+}
+
+fn generated_consent(
+    value: &ramflux_protocol::message::OwnGroupConsent,
+) -> Result<Consent, SdkError> {
+    Ok(Consent {
+        schema: value.schema.clone(),
+        actor: canonical_leaf(
+            &value
+                .actor
+                .as_ref()
+                .ok_or_else(|| super::invalid("group consent actor missing"))?
+                .canonical,
+        )?,
+        snapshot: canonical_leaf(
+            &value
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| super::invalid("group consent snapshot missing"))?
+                .canonical,
+        )?,
+        accepted: value.accepted,
+        issued_at: value.issued_at,
+        expires_at: value.expires_at,
+        signature: value.signature.clone(),
+    })
+}
+
 impl RamfluxClient {
     pub(super) fn own_group_acceptance(
         &self,
@@ -145,7 +184,15 @@ impl RamfluxClient {
             return Err(super::invalid("group consent byte budget"));
         }
         let consent: Consent = ramflux_protocol::parse_i_json(raw)?;
-        let state = self.verify_own_group_consent(source, &consent)?;
+        self.apply_own_group_consent(source, &consent)
+    }
+
+    fn apply_own_group_consent(
+        &self,
+        source: &RootQualifiedDeviceRef,
+        consent: &Consent,
+    ) -> Result<bool, SdkError> {
+        let state = self.verify_own_group_consent(source, consent)?;
         let group = &state.view().group_id;
         if self
             .account_db()?
@@ -165,13 +212,31 @@ impl RamfluxClient {
             return Ok(true);
         }
         self.account_db()?.write_transaction(|| -> Result<bool, SdkError> {
-            if !self.save_own_group_decision(&consent, &state)? {
+            if !self.save_own_group_decision(consent, &state)? {
                 return Ok(true);
             }
             self.apply_own_group_invitation_decision(&state, consent.accepted, consent.expires_at)?;
             Ok(true)
         })
     }
+    pub(crate) fn authorize_generated_own_group_consent(
+        &self,
+        source: &RootQualifiedDeviceRef,
+        value: &ramflux_protocol::message::OwnGroupConsent,
+    ) -> Result<(), SdkError> {
+        let consent = generated_consent(value)?;
+        self.verify_own_group_consent(source, &consent)?;
+        Ok(())
+    }
+
+    pub(crate) fn receive_generated_own_group_consent(
+        &self,
+        source: &RootQualifiedDeviceRef,
+        value: &ramflux_protocol::message::OwnGroupConsent,
+    ) -> Result<bool, SdkError> {
+        self.apply_own_group_consent(source, &generated_consent(value)?)
+    }
+
     fn verify_own_group_consent(
         &self,
         source: &RootQualifiedDeviceRef,
@@ -326,6 +391,78 @@ mod tests {
         }
         drop((phone, laptop, stranger));
         std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generated_native_group_consent_uses_exact_leaf_and_signed_authority()
+    -> crate::client::native_test_support::TestResult {
+        use crate::client::native_test_support::Fixture;
+        use ramflux_protocol::message as g;
+        let own = Box::pin(Fixture::new("generated-native-consent")).await?;
+        let primary = own
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("account")?
+            .group_primary(own.vault.as_ref())?;
+        let state = own.client.shared_group_create_with_primary(
+            "typed-consent-group",
+            "typed-consent-thread",
+            None,
+            &own.config.target_delivery_id,
+            Some(&primary),
+        )?;
+        let source = own.client.owned_device_identity()?;
+        let now = now_unix_timestamp();
+        let mut consent = Consent {
+            schema: DOMAIN.into(),
+            actor: own.client.owned_group_actor(&own.config.target_delivery_id)?,
+            snapshot: state.snapshot().clone(),
+            accepted: true,
+            issued_at: now,
+            expires_at: now + 600,
+            signature: String::new(),
+        };
+        consent.signature = ramflux_crypto::sign_with_device_branch(
+            own.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &signing(&consent)?,
+        )?;
+        let value = g::OwnGroupConsent {
+            schema: consent.schema.clone(),
+            actor: Some(g::NativeGroupActor {
+                canonical: ramflux_protocol::canonical_json_bytes(&consent.actor)?,
+            }),
+            snapshot: Some(g::NativeGroupSnapshot {
+                canonical: ramflux_protocol::canonical_json_bytes(&consent.snapshot)?,
+            }),
+            accepted: consent.accepted,
+            issued_at: consent.issued_at,
+            expires_at: consent.expires_at,
+            signature: consent.signature.clone(),
+        };
+        own.client.authorize_generated_own_group_consent(&source, &value)?;
+        assert!(own.client.receive_generated_own_group_consent(&source, &value)?);
+        let before = own
+            .client
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&key("typed-consent-group"))?;
+        let mut invalid = value.clone();
+        invalid.accepted = false;
+        assert!(own.client.authorize_generated_own_group_consent(&source, &invalid).is_err());
+        assert!(own.client.receive_generated_own_group_consent(&source, &invalid).is_err());
+        let mut invalid = value.clone();
+        invalid.actor.as_mut().ok_or("actor")?.canonical.push(b' ');
+        assert!(own.client.authorize_generated_own_group_consent(&source, &invalid).is_err());
+        let mut invalid = value;
+        invalid.snapshot.as_mut().ok_or("snapshot")?.canonical.push(b' ');
+        assert!(own.client.authorize_generated_own_group_consent(&source, &invalid).is_err());
+        assert_eq!(
+            own.client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>(&key("typed-consent-group"))?,
+            before
+        );
         Ok(())
     }
 }

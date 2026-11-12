@@ -147,6 +147,32 @@ async fn retired_original_redelivery_never_replaces_current_edit() -> Result<(),
         committed.entry.envelope.encrypted_payload.is_empty(),
         "retired ciphertext must not be retained again"
     );
+    // A different outer event id must also honor the nested target's retirement fence.
+    let referenced = commit_content(
+        &a,
+        &mut b,
+        "retired-target-reaction",
+        g::content::Value::Reaction(g::Reaction {
+            target: Some(target.clone()),
+            token: "👍".into(),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    let referenced_receipt = b.client.authenticated_committed_key(
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+        &referenced,
+    )?;
+    let retained = b
+        .client
+        .account_db()?
+        .load_actor_state::<super::super::super::Committed>(&referenced_receipt)?
+        .ok_or_else(|| invalid("referenced receipt"))?;
+    assert!(
+        retained.entry.envelope.encrypted_payload.is_empty(),
+        "a distinct enclosing event must honor its referenced original's retirement fence"
+    );
+    assert!(b.client.event_body(&format!("gateway/delivery/v2/{referenced_receipt}"))?.is_none());
     assert_eq!(b.client.account_db()?.message_content(&id)?, Some(current.clone()));
     assert_eq!(
         b.client.direct_message_by_id(&id)?.ok_or_else(|| invalid("projection"))?.encrypted_body,

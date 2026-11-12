@@ -1113,10 +1113,14 @@ impl RamfluxClient {
         let (delete_control, mut erasure_targets) =
             super::generated_receive::mutation_erasure_targets(body);
         let erased_reference = erasure_targets.iter().try_fold(false, |erased, target| {
-            self.account_db()?
-                .message_is_deleted(&target.message_id)
-                .map(|deleted| erased || deleted)
-                .map_err(SdkError::from)
+            let db = self.account_db()?;
+            let retired = db
+                .load_actor_state::<bool>(&format!(
+                    "routed/report-opening-retired/{}",
+                    target.message_id
+                ))?
+                .unwrap_or(false);
+            Ok::<_, SdkError>(erased || retired || db.message_is_deleted(&target.message_id)?)
         })?;
         let call = opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
         let retired_original = self
@@ -1128,7 +1132,8 @@ impl RamfluxClient {
             .unwrap_or(false);
         if call || delete_control || erased_reference || retired_original {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
-            // call ciphertext alongside them: committed replay needs only attribution/hash.
+            // sensitive ciphertext alongside them, including enclosing copies whose nested
+            // original has been retired: committed replay needs only attribution/hash.
             retained.envelope.encrypted_payload.clear();
             erasure_targets.clear();
             self.append_event(&entry.envelope.envelope_id, if call { "call.control.committed" } else { "message.control.committed" }, &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;

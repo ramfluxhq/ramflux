@@ -538,3 +538,18 @@ async fn typing_missing_negotiated_echo_refuses_before_ratchet_or_allowance_writ
     assert_eq!(engine.wire_writes, 0);
     Ok(())
 }
+
+pub(crate) fn native_typing_delivery(
+    a: &Native,
+    b: &Native,
+) -> TestResult<(ramflux_protocol::Envelope, Vec<String>)> {
+    let mut config = a.config.clone();
+    config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
+    let message = draft(a, b, "native-host-typing", 5)?;
+    Ok((
+        a.client.prepare_typing_delivery(&mut engine, &message, true)?,
+        allowed_receiver_state(b, a)?,
+    ))
+}

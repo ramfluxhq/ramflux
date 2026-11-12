@@ -130,6 +130,39 @@ pub(crate) async fn fixture() -> Result<(ConnectionHandle, SessionIo), Box<dyn s
     handle.require_live(Duration::from_secs(600)).await?;
     Ok((handle, io))
 }
+struct NegotiatedEphemeralConnector(Connector);
+impl SessionConnector for NegotiatedEphemeralConnector {
+    fn connect(
+        &self,
+        config: GatewaySessionConfig,
+        deadline: tokio::time::Instant,
+    ) -> SessionFuture<'_, GatewaySessionEngine> {
+        Box::pin(async move {
+            let mut engine = self.0.connect(config, deadline).await?;
+            engine.ephemeral_negotiated = true;
+            Ok(engine)
+        })
+    }
+}
+
+pub(crate) async fn ephemeral_fixture_for(
+    config: GatewaySessionConfig,
+) -> Result<(ConnectionHandle, SessionIo), Box<dyn std::error::Error>> {
+    let limits = limits();
+    let frame = limits.frame;
+    let (sessions, mut receive) = mpsc::unbounded_channel();
+    let handle = ConnectionHandle::start_with(
+        config,
+        None,
+        limits,
+        Arc::new(NegotiatedEphemeralConnector(Connector { sessions, frame })),
+        None,
+    );
+    let io = receive.recv().await.ok_or("connector did not enter")?;
+    handle.require_live(Duration::from_secs(600)).await?;
+    Ok((handle, io))
+}
+
 pub(crate) fn reconnecting_fixture(
     limits: RuntimeTimeouts,
 ) -> Result<(ConnectionHandle, mpsc::UnboundedReceiver<SessionIo>), Box<dyn std::error::Error>> {
