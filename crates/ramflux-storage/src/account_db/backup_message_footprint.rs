@@ -23,8 +23,13 @@ impl BackupDatabase {
                      WHERE i.source_anchor<>l.source_anchor
                  ) OR EXISTS(
                      SELECT 1 FROM incoming.raw_inner_copy i JOIN main.raw_inner_copy l USING(copy_id)
-                     WHERE i.owner_id<>l.owner_id OR i.copy_kind<>l.copy_kind
-                        OR i.raw_digest<>l.raw_digest OR i.raw_bytes<>l.raw_bytes
+                     WHERE (i.owner_id<>l.owner_id OR i.copy_kind<>l.copy_kind
+                        OR i.raw_digest<>l.raw_digest OR i.raw_bytes<>l.raw_bytes)
+                       AND NOT EXISTS(
+                         SELECT 1 FROM backup_erased_copy e
+                         WHERE e.database_name='incoming' AND e.table_name='raw_inner_copy'
+                           AND e.row_id=i.rowid
+                       )
                  )",
                 [],
                 |row| row.get(0),

@@ -299,6 +299,7 @@ impl BackupDatabase {
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
+            super::restore_floor::refuse_schema_downgrade(&self.db)?;
             let tables = self.begin_merge_inputs(candidate, after_capture)?;
             let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             super::large_segments::retirement::merge_floors(&self.db)?;
@@ -310,6 +311,8 @@ impl BackupDatabase {
             self.archive_group_transfer(&preserved_actor)?;
             let self_sync_floors = self.merge_self_sync_floors()?;
             self.merge_generated_identity_floors()?;
+            // Losing Edit revisions are fenced before any incoming row is archived or merged.
+            self.merge_edit_registers()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
