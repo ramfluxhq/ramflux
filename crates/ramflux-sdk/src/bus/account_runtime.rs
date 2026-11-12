@@ -354,6 +354,8 @@ impl AccountRuntime {
             }
             self.reap_upload_jobs();
             self.reap_fetch_jobs();
+            let pairing =
+                crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => break,
@@ -378,6 +380,23 @@ impl AccountRuntime {
                     }
                 } => { self.publish_transient_updates(); continue; },
                 command = self.receiver.recv() => command,
+                () = async {
+                    match pairing {
+                        Some(signal) => signal.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(account) = self.state.accounts.get(&self.id)
+                        && let Err(error) = account.client.account_db().and_then(|db| {
+                            crate::custody::pairing::service_full_transfer(
+                                &self.state.config.data_root, &self.id, db,
+                            )
+                        }) {
+                        tracing::warn!(error_code=local_bus_error_code(&error),
+                            "pairing local data step deferred; account remains open");
+                    }
+                    continue;
+                },
                 outcome = async {
                     match self.courier.as_mut() {
                         Some(courier) => courier.recv().await,

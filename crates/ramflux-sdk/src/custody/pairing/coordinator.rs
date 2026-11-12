@@ -34,7 +34,10 @@ mod full;
 pub(super) use full::cancel::FullRuntimeCancel;
 mod registry;
 mod workflow;
+#[cfg(test)]
+pub(crate) use registry::settle_actor_data_for_test;
 pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
+pub(crate) use registry::{service_full_transfer, work_signal};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
@@ -151,6 +154,21 @@ enum SasHold {
 }
 
 impl PairingActor {
+    fn note_background_error(&mut self, error: &SdkError) {
+        let code = Self::background_error_code(error);
+        if let Some(c) = &mut self.ceremony {
+            c.result = Some(code.into());
+        }
+    }
+    fn background_error_code(error: &SdkError) -> &'static str {
+        match error {
+            SdkError::PairingCode(code)
+            | SdkError::PairingField(code)
+            | SdkError::Crypto(CryptoError::Pairing(code))
+            | SdkError::Storage(ramflux_storage::StorageError::PairingField(code)) => code,
+            _ => "ResumeRequired",
+        }
+    }
     #[must_use]
     pub fn new(
         identity: PairingIdentity,
@@ -1118,6 +1136,11 @@ impl PairingActor {
             .as_mut()
             .and_then(|c| c.full.as_mut())
             .and_then(full::FullCeremony::take_epoch_job);
+        let stream = self
+            .ceremony
+            .as_mut()
+            .and_then(|c| c.full.as_mut())
+            .and_then(full::FullCeremony::take_stream_job);
         if let Some(c) = self.ceremony.as_mut() {
             c.full.take();
             match &mut c.sas {
@@ -1136,6 +1159,9 @@ impl PairingActor {
         if let Some(epoch) = epoch {
             epoch.abort_and_drain().await;
         }
+        if let Some(stream) = stream {
+            stream.abort_and_drain().await;
+        }
         self.full_runtime.drain_local_jobs().await;
         if let Some(participant) = &self.participant {
             participant.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
@@ -1148,6 +1174,11 @@ impl PairingActor {
             .as_mut()
             .and_then(|c| c.full.as_mut())
             .and_then(full::FullCeremony::take_epoch_job);
+        let stream = self
+            .ceremony
+            .as_mut()
+            .and_then(|c| c.full.as_mut())
+            .and_then(full::FullCeremony::take_stream_job);
         if let Some(native) = &self.native {
             native.close();
         }
@@ -1188,6 +1219,9 @@ impl PairingActor {
         });
         if let Some(epoch) = epoch {
             epoch.abort_and_drain().await;
+        }
+        if let Some(stream) = stream {
+            stream.abort_and_drain().await;
         }
         self.full_runtime.drain_local_jobs().await;
         self.full_runtime.drain_local_work();

@@ -21,6 +21,8 @@ pub(super) struct Entry {
     cancelled: AtomicBool,
     native: Option<Arc<dyn PairingNative>>,
     full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
+    work: Arc<tokio::sync::Notify>,
+    pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Entry {
     pub(super) fn require_live(&self) -> Result<(), SdkError> {
@@ -53,15 +55,41 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
     }
     let native = actor.native.clone();
     let full_runtime = actor.full_runtime.clone();
-    owners.insert(
-        key,
-        Arc::new(Entry {
-            actor: tokio::sync::Mutex::new(actor),
-            native,
-            full_runtime,
-            cancelled: AtomicBool::new(false),
-        }),
-    );
+    let entry = Arc::new(Entry {
+        actor: tokio::sync::Mutex::new(actor),
+        native,
+        full_runtime,
+        cancelled: AtomicBool::new(false),
+        work: Arc::new(tokio::sync::Notify::new()),
+        pump: Mutex::new(None),
+    });
+    owners.insert(key, entry.clone());
+    drop(owners);
+    // Pure synchronous SDK callers may drive their actor explicitly. The bus installs
+    // within its account runtime and always owns this separate relay-only pump.
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let owner = Arc::downgrade(&entry);
+        let task = runtime.spawn(async move {
+            while let Some(entry) = owner.upgrade() {
+                if entry.require_live().is_err() {
+                    break;
+                }
+                {
+                    let mut actor = entry.actor.lock().await;
+                    if entry.require_live().is_err() {
+                        break;
+                    }
+                    if let Err(error) = actor.sync_relay().await {
+                        actor.note_background_error(&error);
+                    }
+                }
+                entry.work.notify_one();
+                drop(entry);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+        *entry.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+    }
     Ok(())
 }
 /// Fence callbacks and close the proof connection immediately on owner lock/disconnect.
@@ -78,6 +106,11 @@ pub fn remove_actor(root: &Path, account_id: &str) -> Result<(), SdkError> {
 /// Returns root lookup errors. Missing owners are already retired.
 pub async fn remove_actor_and_drain(root: &Path, account_id: &str) -> Result<(), SdkError> {
     if let Some(entry) = remove_entry(root, account_id)? {
+        let pump = entry.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(pump) = pump {
+            pump.abort();
+            let _ = pump.await;
+        }
         entry.actor.lock().await.retire_owned_runtime().await;
     }
     Ok(())
@@ -95,11 +128,44 @@ fn remove_entry(root: &Path, account_id: &str) -> Result<Option<Arc<Entry>>, Sdk
         crate::custody::pairing::cancel_credential(&key.0, account_id);
         entry.cancelled.store(true, Ordering::Release);
         entry.full_runtime.stop();
+        if let Some(pump) =
+            entry.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
+        {
+            pump.abort();
+        }
         if let Some(native) = &entry.native {
             native.close();
         }
     }
     Ok(entry)
+}
+
+pub(crate) fn work_signal(root: &Path, account: &str) -> Option<Arc<tokio::sync::Notify>> {
+    find(root, account).ok().map(|entry| entry.work.clone())
+}
+pub(crate) fn service_full_transfer(
+    root: &Path,
+    account: &str,
+    db: &ramflux_storage::AccountDb,
+) -> Result<bool, SdkError> {
+    let entry = match find(root, account) {
+        Ok(entry) => entry,
+        Err(SdkError::PairingCode("NotFound")) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    entry.require_live()?;
+    let Ok(mut actor) = entry.actor.try_lock() else { return Ok(false) };
+    actor.service_full_transfer(db)
+}
+#[cfg(test)]
+pub(crate) async fn settle_actor_data_for_test(
+    root: &Path,
+    account: &str,
+) -> Result<bool, SdkError> {
+    let entry = find(root, account)?;
+    let actor = entry.actor.lock().await;
+    actor.settle_full_local_jobs_for_test().await;
+    Ok(actor.full_base_disk_complete_for_test())
 }
 pub(super) fn find(root: &Path, account_id: &str) -> Result<Arc<Entry>, SdkError> {
     let key = key(root, account_id)?;

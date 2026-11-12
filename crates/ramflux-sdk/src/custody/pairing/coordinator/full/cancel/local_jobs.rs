@@ -72,6 +72,15 @@ impl FullRuntimeCancel {
             }
         }
     }
+    #[cfg(test)]
+    pub(crate) async fn settle_local_jobs(&self) {
+        let jobs = std::mem::take(
+            &mut *self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for job in jobs {
+            let _ = job.completion.await;
+        }
+    }
 }
 
 #[cfg(test)]
