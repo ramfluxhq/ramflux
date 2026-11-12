@@ -177,7 +177,7 @@ pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupC
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlcipher"))]
 mod tests {
     use super::*;
     use crate::{AccountIndex, EncryptionMode};

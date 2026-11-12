@@ -46,6 +46,7 @@ pub(super) fn assert_fresh_install(root: &std::path::Path, source: &BackupDataba
 }
 
 #[test]
+#[cfg(feature = "sqlcipher")]
 fn native_archive_keeps_subkey_bundle_without_source_unlock_capability() -> TestResult {
     let (root, db) = crate::tests::test_db("mac-native-archive")?;
     seed_deleted(&db)?;
