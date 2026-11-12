@@ -669,10 +669,10 @@ fn retain_upgrade_candidate(
             metadata: &ramflux_storage::MessageMetadata::default(),
             created_at: 1,
         })?;
-        db.persist_message_actor_state(
+        client.persist_generated_unsupported_view(
             &id,
-            &format!("routed/unsupported/{id}"),
-            &g::UnsupportedView::default(),
+            &copy_id,
+            &g::validation::scan_inner(&candidate.encode_to_vec())?,
         )?;
         Ok(())
     })?;
@@ -743,6 +743,17 @@ fn reparse_preserves_original_channel_and_authority() -> TestResult {
             assert!(!db.actor_state_exists(&format!("routed/generated-identity/{delete_id}"))?);
         }
         assert_eq!(db.unsupported_raw_quota(None)?.owners, 0);
+        assert_eq!(
+            db.actor_state_keys("routed/raw-handle/")?,
+            Vec::<String>::new(),
+            "discarded content retained actionable raw handles"
+        );
+        assert_eq!(
+            db.load_actor_state::<g::UnsupportedView>(&format!("routed/unsupported/{pin_id}"))?
+                .ok_or("non-actionable diagnostic")?
+                .raw_handle,
+            Vec::<u8>::new()
+        );
         assert_eq!(client.reparse_raw_inner_page()?.projected, 0);
     }
     Ok(())

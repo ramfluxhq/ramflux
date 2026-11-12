@@ -4906,3 +4906,6 @@ older text/entities-only restrictions. Exact rules/tests are OV-EDIT-HISTORY in 
 See [activation amendments](amendments/s10a-dm-ephemeral-boundary.md) for the
 canonical root-pair DM transcript, reserved namespace and Typing operation
 receipt exemption, signed-start gate and privacy boundary.
+
+See [Unsupported diagnostics](amendments/s10a-unsupported-diagnostics.md) for
+ordered reason labels, opaque local handles and retirement of those handles.
