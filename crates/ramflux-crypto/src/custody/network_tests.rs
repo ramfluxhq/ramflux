@@ -395,3 +395,140 @@ fn proof_decoder_rejects_unknown_fields_null_binding_and_noncanonical_binary() -
     }
     Ok(())
 }
+
+const WEB_URL: &str = "wss://gw.example.org/v1/session";
+const WEB_ORIGIN: &str = "https://app.example.org";
+
+fn web_node_body() -> NodeIdentityRecord {
+    let mut body = node_body();
+    body.channel_binding_modes.push(BindingMode::WebOriginBound);
+    body.web_listeners =
+        vec![WebListener { url: WEB_URL.into(), origins: vec![WEB_ORIGIN.into()] }];
+    body
+}
+fn web_context() -> WebOriginBindingV1 {
+    WebOriginBindingV1 {
+        schema: WEB_ORIGIN_BINDING_SCHEMA.into(),
+        version: 1,
+        node_id: "node".into(),
+        listener_url: WEB_URL.into(),
+        origin: WEB_ORIGIN.into(),
+        transport_kind: TRANSPORT_KIND_WEBSOCKET.into(),
+        gateway_nonce: encode_base64url([31; 32]),
+        issued_at: NOW,
+        expires_at: NOW + 300,
+    }
+}
+/// The fixture's native device signing a `web_origin_bound` proof for `context`.
+fn web_proof(context: &WebOriginBindingV1) -> TestResult<Envelope<BranchProofV3>> {
+    let mut body = proof(BindingMode::WebOriginBound)?.body;
+    body.transport_binding = web_origin_binding_hash(context)?;
+    Ok(sign_branch_proof_v3(&crate::create_device_branch("vector.example", "primary", 1, [3; 32]), body)?)
+}
+fn reason(result: Result<(), crate::CryptoError>) -> Option<&'static str> {
+    match result {
+        Err(crate::CryptoError::IdentityAuthority(reason)) => Some(reason),
+        _ => None,
+    }
+}
+
+#[test]
+fn native_device_key_is_refused_through_the_web_channel_even_with_a_valid_receipt() -> TestResult {
+    let node = node(web_node_body())?;
+    let context = web_context();
+    let proof = web_proof(&context)?;
+    let hash = web_origin_binding_hash(&context)?;
+    // The proxy signs for the web mode exactly as it does for the relay mode.
+    let receipt =
+        sign_proxy_acceptance(&key(7), &node, &proof, &hash, encode_base64url([23; 32]), NOW)?;
+    let result = verify_branch_proof_v3(
+        &authority()?,
+        &proof,
+        &challenge(BindingMode::WebOriginBound),
+        "message",
+        ProofChannel::WebOriginBound {
+            receipt: &receipt,
+            context: &context,
+            historical_node: &node,
+            current_node: &node,
+        },
+        NOW,
+    );
+    assert_eq!(reason(result), Some("device is not a web device linked to this origin"));
+    Ok(())
+}
+
+#[test]
+fn web_origin_bound_proof_is_refused_on_every_native_channel() -> TestResult {
+    let node = node(web_node_body())?;
+    let context = web_context();
+    let proof = web_proof(&context)?;
+    let hash = web_origin_binding_hash(&context)?;
+    let receipt =
+        sign_proxy_acceptance(&key(7), &node, &proof, &hash, encode_base64url([23; 32]), NOW)?;
+    let challenge = challenge(BindingMode::WebOriginBound);
+    let channels = [
+        ProofChannel::DirectExporter { observed_hash: &hash, receiving_node: &node },
+        ProofChannel::HomeRelayReceipt {
+            receipt: &receipt,
+            historical_node: &node,
+            current_node: &node,
+        },
+        ProofChannel::NoChannelBinding { operator_opt_in: true, receiving_node: &node },
+    ];
+    for channel in channels {
+        assert!(
+            verify_branch_proof_v3(&authority()?, &proof, &challenge, "message", channel, NOW)
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn proxy_does_not_vouch_for_a_web_binding_the_node_record_does_not_advertise() -> TestResult {
+    let plain = node(node_body())?;
+    let context = web_context();
+    let proof = web_proof(&context)?;
+    let hash = web_origin_binding_hash(&context)?;
+    assert!(
+        sign_proxy_acceptance(&key(7), &plain, &proof, &hash, encode_base64url([23; 32]), NOW)
+            .is_err()
+    );
+    // A binding for another origin is not what the proof signed.
+    let mut other = context.clone();
+    other.origin = "https://other.example.org".into();
+    let advertised = node(web_node_body())?;
+    assert!(
+        sign_proxy_acceptance(
+            &key(7),
+            &advertised,
+            &proof,
+            &web_origin_binding_hash(&other)?,
+            encode_base64url([23; 32]),
+            NOW
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn node_record_advertises_the_web_mode_and_its_listeners_together_or_not_at_all() -> TestResult {
+    assert!(node(web_node_body()).is_ok());
+    let mut mode_only = web_node_body();
+    mode_only.web_listeners.clear();
+    assert!(node(mode_only).is_err());
+    let mut listeners_only = web_node_body();
+    listeners_only.channel_binding_modes.pop();
+    assert!(node(listeners_only).is_err());
+    for bad in ["https://app.example.org/", "http://app.example.org", "null", "*"] {
+        let mut body = web_node_body();
+        body.web_listeners[0].origins = vec![bad.into()];
+        assert!(node(body).is_err(), "{bad}");
+    }
+    let mut bad_url = web_node_body();
+    bad_url.web_listeners[0].url = "wss://gw.example.org:443/v1/session".into();
+    assert!(node(bad_url).is_err());
+    Ok(())
+}
