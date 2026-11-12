@@ -14,8 +14,8 @@ struct Pending {
     copy_id: String,
     committed_key: String,
 }
-fn key(target: &str) -> String {
-    format!("routed/pending-edit/{target}")
+fn key(target: &str, root: &str) -> String {
+    format!("routed/pending-edit/{target}/{root}")
 }
 impl RamfluxClient {
     pub(crate) fn park_generated_edit(
@@ -31,8 +31,13 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::InboundRejected("edit target missing".into()))?;
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if target.author_anchor != source.root_commitment() {
+            return Err(SdkError::InboundRejected(
+                "early Edit author claim differs from source".into(),
+            ));
+        }
         let db = self.account_db()?;
-        let key = key(&target_id);
+        let key = key(&target_id, source.root_commitment());
         if let Some(old) = db.load_actor_state::<Pending>(&key)? {
             if (edit.revision, identity.id.as_slice()) <= (old.revision, old.event_id.as_slice()) {
                 return Ok(());
@@ -67,7 +72,31 @@ impl RamfluxClient {
         target_id: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        let key = key(target_id);
+        let Some(original) = db.load_actor_state::<g::EventIdentity>(&format!(
+            "routed/generated-identity/{target_id}"
+        ))?
+        else {
+            return Ok(());
+        };
+        let Some(author) = original.author.as_ref() else {
+            return Ok(());
+        };
+        // A known header/placeholder does not mean Message content is available.
+        // Keep the parked edit until its target can actually be edited.
+        if db.message_content(target_id)?.is_none() {
+            return Ok(());
+        }
+        let key = key(target_id, &author.account_anchor);
+        // A foreign root can name a predictable target id before the target exists,
+        // but its register cannot replace the original author's greatest-pair Edit.
+        for (other, pending) in
+            db.message_actor_entries::<Pending>(target_id, "routed/pending-edit/")?
+        {
+            if other != key {
+                db.finish_raw_inner_reparse(&pending.copy_id)?;
+                db.remove_actor_state(&other)?;
+            }
+        }
         let Some(pending) = db.load_actor_state::<Pending>(&key)? else {
             return Ok(());
         };
