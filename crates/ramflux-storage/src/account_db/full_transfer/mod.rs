@@ -3,6 +3,7 @@
 
 //! Device-local full-transfer staging owners. They grant no native authority.
 mod catalog;
+mod fixed_union;
 mod inventory;
 mod keys;
 mod native_floor;
