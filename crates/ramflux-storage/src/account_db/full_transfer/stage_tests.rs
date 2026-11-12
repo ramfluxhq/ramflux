@@ -629,3 +629,40 @@ fn pairing_full_stage_reader_seeks_across_encrypted_slots_and_retires_on_corrupt
     assert!(!verified, "reading a root-checked stream must not grant DataVerified");
     Ok(())
 }
+
+#[test]
+fn pairing_full_stage_io_cancel_retires_existing_reader_without_erasing_retained_slots()
+-> TestResult {
+    let (_root, db) = crate::tests::test_db("stage-reader-io-cancel")?;
+    let (record, manifest, plaintext) = fixture()?;
+    let hash = record.base_manifest_hash.clone();
+    let mut stage = db.create_full_stage_for_test(record, 604_900)?;
+    stage.retain_forward_manifest(&manifest, &manifest.manifest.families)?;
+    for (index, chunk) in plaintext.chunks(CHUNK_BYTES as usize).enumerate() {
+        stage.retain_forward_chunk(&hash, index as u64, chunk)?;
+    }
+    let cancel = stage.io_cancel_handle();
+    let mut reader = stage.forward_reader(&hash)?;
+    let mut prefix = [0; 8];
+    reader.read_exact(&mut prefix)?;
+    cancel.cancel();
+    let mut untouched = [123; 8];
+    assert!(reader.read(&mut untouched).is_err());
+    assert_eq!(untouched, [123; 8]);
+    assert!(reader.seek(SeekFrom::Start(0)).is_err());
+    drop(reader);
+    assert!(stage.forward_reader(&hash).is_err());
+    assert!(
+        stage.directory.join("seg-f-0-0.bin").exists(),
+        "I/O cancellation deleted durable data required for reconciliation"
+    );
+    assert_eq!(
+        stage.connection.query_row(
+            "SELECT count(*) FROM chunk WHERE manifest_hash=?1",
+            rusqlite::params![hash],
+            |row| row.get::<_, u64>(0)
+        )?,
+        manifest.manifest.chunk_count.0
+    );
+    Ok(())
+}

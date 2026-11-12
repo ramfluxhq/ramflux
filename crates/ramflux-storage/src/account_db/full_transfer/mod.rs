@@ -5,6 +5,8 @@
 mod catalog;
 mod fixed_union;
 mod inventory;
+mod io_cancel;
+pub use io_cancel::FullStageIoCancel;
 mod keys;
 mod native_floor;
 mod receiver_input;
@@ -22,6 +24,7 @@ mod stage_chunks;
 mod stage_reader;
 mod stage_validation;
 mod target_observation;
+mod union_encoding;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
 pub use receiver_input::FullScalarInputCounts;
 pub use source_base::FullBaseSourceEncoding;
@@ -32,6 +35,7 @@ pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;
 pub use stage_reader::FullForwardReader;
 pub use target_observation::FullTargetObservation;
+pub use union_encoding::{FullUnionEncoding, FullUnionEncodingBuilder};
 
 #[cfg(test)]
 mod stage_tests;

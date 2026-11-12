@@ -60,7 +60,7 @@ impl FullTransferStage<'_> {
         catalog: &[Family],
         role: PairingRole,
     ) -> Result<(), StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         manifest.validate().map_err(|error| match error {
             ramflux_protocol::custody::pairing::WireError::Field("NoSpace") => no_space(),
             _ => manifest_error(),
@@ -140,7 +140,7 @@ impl FullTransferStage<'_> {
         let cut = body.snapshot_cut.0;
         let kind = if body.kind == ManifestKind::Base { "base" } else { "delta" };
         let root = body.chunks_root.clone();
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         self.connection.call(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute("DELETE FROM receiver_scalar_record WHERE manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
@@ -188,7 +188,7 @@ impl FullTransferStage<'_> {
         index: u64,
         plaintext: &[u8],
     ) -> Result<bool, StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         let manifest = self.forward_manifest(manifest_hash)?;
         let body = &manifest.manifest;
         if index >= body.chunk_count.0 {
@@ -245,7 +245,7 @@ impl FullTransferStage<'_> {
         file.write_all(encrypted.as_file_bytes())?;
         file.sync_all()?;
         std::fs::File::open(&self.directory)?.sync_all()?;
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         self.connection.execute(
             "INSERT INTO chunk(direction,manifest_hash,idx,length,digest,file_durable) VALUES(0,?1,?2,?3,?4,1)",
             params![manifest_hash,index,expected,digest.as_slice()],
@@ -258,7 +258,7 @@ impl FullTransferStage<'_> {
     /// # Errors
     /// Refuses wrong owners/manifests or failure to persist the repaired prefix.
     pub fn revalidate_forward_prefix(&self, hash: &str) -> Result<Option<u64>, StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         let manifest = self.forward_manifest(hash)?;
         let mut next = 0;
         while next < manifest.manifest.chunk_count.0 {
@@ -296,7 +296,7 @@ impl FullTransferStage<'_> {
     /// # Errors
     /// Refuses incomplete/corrupt streams or a root mismatch.
     pub fn verify_forward_root(&self, hash: &str) -> Result<(), StorageError> {
-        self.db.require_full_stage_unlock()?;
+        self.require_io()?;
         let manifest = self.forward_manifest(hash)?;
         let body = &manifest.manifest;
         let mut root = RootHasher::new(body.total_bytes.0).map_err(|_| mismatch())?;
