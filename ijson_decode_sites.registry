@@ -36,6 +36,7 @@ apps/ramflux-gateway/src/clients.rs | router_post_json_until | 1 | E | excluded=
 apps/ramflux-gateway/src/custody.rs | is_open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/custody.rs | quic_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/custody.rs | tcp_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-gateway/src/custody_web.rs | handshake | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/device_set_limit.rs | admit_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/ingress.rs | parse_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/ingress.rs | parse_inner | 2 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
@@ -89,6 +90,7 @@ apps/ramflux-gateway/src/session_push/test_support.rs | send_frame | 1 | E | exc
 apps/ramflux-gateway/src/session_push/test_support.rs | serve | 1 | E | excluded=test support server fixture; not a received production ingress
 apps/ramflux-gateway/src/submit_fixtures.rs | signed_submit | 1 | E | excluded=signed submit test fixture decoding; not a received production ingress
 apps/ramflux-gateway/src/submit_fixtures.rs | test_envelope | 1 | E | excluded=envelope test fixture decoding; not a received production ingress
+apps/ramflux-gateway/src/web_ingress/socket.rs | classify | 1 | E | excluded=outbound server frame re-encoding; not an ingress decoder
 apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

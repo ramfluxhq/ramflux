@@ -6,7 +6,6 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseCode {
     Normal,
-    GoingAway,
     ProtocolError,
     UnsupportedData,
     Policy,
@@ -25,7 +24,6 @@ impl CloseCode {
     pub(crate) const fn code(self) -> u16 {
         match self {
             Self::Normal => 1000,
-            Self::GoingAway => 1001,
             Self::ProtocolError => 1002,
             Self::UnsupportedData => 1003,
             Self::Policy => 1008,
@@ -44,7 +42,6 @@ impl CloseCode {
     pub(crate) const fn reason(self) -> &'static str {
         match self {
             Self::Normal => "normal",
-            Self::GoingAway => "going_away",
             Self::ProtocolError => "protocol_error",
             Self::UnsupportedData => "unsupported_data",
             Self::Policy => "policy",

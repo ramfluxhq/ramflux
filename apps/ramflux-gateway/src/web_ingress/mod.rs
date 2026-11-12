@@ -40,6 +40,7 @@ pub(crate) const WEB_SESSION_FRAME_MAX_BYTES: usize =
 /// is shorter today; this ceiling holds if that ever changes.
 pub(crate) const WEB_SESSION_MAX_LIFETIME_SECS: u64 = 43_200;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const REAUTH_BACKSTOP_GRACE: Duration = Duration::from_secs(30);
 
 /// Whether the operator switched the web listener on.
 #[must_use]
@@ -276,7 +277,11 @@ async fn session(
     let result = tokio::select! {
         biased;
         () = capacity.revoked() => return Some(CloseCode::AuthRefused),
-        () = tokio::time::sleep_until(tokio::time::Instant::from_std(reauth_at)) => {
+        // The session loop ends itself at the grant deadline, between requests. This is
+        // only a backstop, so it never cancels a request between its commit and reply.
+        () = tokio::time::sleep_until(
+            tokio::time::Instant::from_std(reauth_at + REAUTH_BACKSTOP_GRACE),
+        ) => {
             return Some(if socket.shared.established() {
                 CloseCode::ReauthRequired
             } else {

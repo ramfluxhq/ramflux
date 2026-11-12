@@ -143,7 +143,7 @@ impl<R: AsyncRead + Unpin> MessageReader<R> {
         }
         // Enforce the cap on the running total before a single payload byte is buffered.
         let buffered = self.partial.as_ref().map_or(0, |partial| partial.bytes.len());
-        let total = u64::try_from(buffered)
+        u64::try_from(buffered)
             .ok()
             .and_then(|buffered| buffered.checked_add(header.len))
             .filter(|total| u64::try_from(cap).is_ok_and(|cap| *total <= cap))
@@ -154,7 +154,6 @@ impl<R: AsyncRead + Unpin> MessageReader<R> {
         }
         let len = usize::try_from(header.len)
             .map_err(|_| ReadEnd::Violation(CloseCode::MessageTooBig))?;
-        let _ = total;
         let payload = self.payload(len).await?;
         let mut partial = self.partial.take().unwrap_or_else(|| Partial {
             bytes: Vec::new(),
