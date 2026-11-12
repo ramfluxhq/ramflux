@@ -911,7 +911,12 @@ fn rekey_provider_failure_rolls_back_db_key_and_wrapped_key() -> Result<(), Stor
     drop(db);
 
     let reopened = AccountDb::open(&index, "acct", &key)?;
-    assert_eq!(reopened.encryption_mode(), EncryptionMode::SqlCipher);
+    let expected_mode = if cfg!(feature = "sqlcipher") {
+        EncryptionMode::SqlCipher
+    } else {
+        EncryptionMode::InsecureTestSqlite
+    };
+    assert_eq!(reopened.encryption_mode(), expected_mode);
     assert!(AccountDb::open(&index, "acct", &new_key).is_err());
     let _ = fs::remove_dir_all(root);
     Ok(())

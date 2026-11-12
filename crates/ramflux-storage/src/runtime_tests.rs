@@ -4,6 +4,7 @@
 use super::*;
 
 #[test]
+#[cfg(feature = "sqlcipher")]
 fn runtime_wal_sqlcipher_snapshot_and_rekey() -> Result<(), StorageError> {
     let (root, mut writer) = test_db("wal-cipher-probe")?;
     assert_eq!(writer.encryption_mode(), EncryptionMode::SqlCipher);
