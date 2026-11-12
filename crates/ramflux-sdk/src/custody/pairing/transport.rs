@@ -73,6 +73,11 @@ pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>>;
+    /// Read the receiving-node identity from the existing configured, verified pin owner.
+    /// This opens no new connection and accepts no invitation/discovery-only trust anchor.
+    fn full_node(&self) -> BoxFut<Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError>> {
+        Box::pin(async { Err(SdkError::PairingCode("UpdateRequired")) })
+    }
     /// A data lease uses this ceremony's separate proof connection and grants no session.
     fn data_lease(&self, _request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
         Box::pin(async { Err(SdkError::PairingCode("UpdateRequired")) })
@@ -133,6 +138,18 @@ impl<S> FreshPairingNative<S> {
 impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static> PairingNative
     for FreshPairingNative<S>
 {
+    fn full_node(&self) -> BoxFut<Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError>> {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
+        Box::pin(async move {
+            let connection = connection.ok_or(SdkError::PairingCode("WrongContext"))?;
+            connection.lock().await.pins.current_record(crate::custody::network_now()?)
+        })
+    }
     fn data_lease(&self, request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
         let connection = self
             .connection

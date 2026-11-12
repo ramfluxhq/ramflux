@@ -69,6 +69,12 @@ impl PairingActor {
     }
 
     pub(super) async fn advance_workflow(&mut self) -> Result<(), SdkError> {
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+            if self.ceremony.as_ref().is_some_and(|c| !c.channels.is_empty()) {
+                return Err(SdkError::PairingCode("UpdateRequired"));
+            }
+            return Ok(());
+        }
         let Some(participant) = self.participant.clone() else {
             if self.ceremony.as_ref().is_some_and(|c| !c.channels.is_empty()) {
                 return Err(SdkError::PairingCode("UpdateRequired"));

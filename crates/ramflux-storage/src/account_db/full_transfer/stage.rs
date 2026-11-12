@@ -109,6 +109,11 @@ impl AccountDb {
             .find(|row| row.operation_id == operation_id)
             .ok_or_else(context)?;
         row.validate()?;
+        if matches!(row.phase.as_str(), "cancelled" | "expired" | "rejected" | "completed") {
+            // Retained reconciliation material is not a fresh data opportunity. A separate
+            // reconciliation-only owner must never mint HPKE/relay state from these rows.
+            return Err(context());
+        }
         let reference = row.full_stage_reference()?.ok_or_else(context)?;
         if reference.lease_expires_at.0 <= now {
             return Err(StorageError::PairingField("LeaseExpired"));

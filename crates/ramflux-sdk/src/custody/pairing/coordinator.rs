@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
+mod full;
 mod registry;
 mod workflow;
 pub use registry::{install_actor, remove_actor};
@@ -91,6 +92,7 @@ pub struct PairingActor {
     native: Option<Arc<dyn PairingNative>>,
     transport: Arc<dyn PairingTransport>,
     config: PairingConfig,
+    full_node: Option<ramflux_crypto::custody::VerifiedNodeRecord>,
     actor_generation: u64,
     frontend_generation: u64,
     ceremony: Option<Ceremony>,
@@ -118,6 +120,7 @@ struct Ceremony {
     displayed_th: Option<[u8; 32]>,
     displayed_proposal: Option<String>,
     common: Option<Common>,
+    full: Option<full::FullCeremony>,
     peer_ref: Option<DeviceRef>,
     peer_name: Option<String>,
     result: Option<String>,
@@ -159,12 +162,19 @@ impl PairingActor {
             native,
             transport,
             config,
+            full_node: None,
             actor_generation: 1,
             frontend_generation: 1,
             ceremony: None,
             unsolicited: 0,
             recipient_stage: None,
         }
+    }
+
+    /// Set the full-profile receiving-node record from the configured native pin owner.
+    /// Never populate this port from an invitation or node-asserted key alone.
+    pub fn set_full_node(&mut self, node: ramflux_crypto::custody::VerifiedNodeRecord) {
+        self.full_node = Some(node);
     }
 
     /// Attach the device-local storage participant used by SDK, bus and CLI ceremonies.
@@ -390,6 +400,9 @@ impl PairingActor {
     pub async fn approve(&mut self, approve: &Approve) -> Result<LocalResult, SdkError> {
         approve.validate().map_err(|e| wire(&e))?;
         self.require_open()?;
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
         if !self.identity.is_primary {
             return Err(SdkError::PairingCode("PrimaryRequired"));
         }
@@ -583,6 +596,7 @@ impl PairingActor {
             displayed_th: None,
             displayed_proposal: None,
             common: open.common,
+            full: None,
             peer_ref: None,
             peer_name: None,
             result: None,
@@ -610,6 +624,9 @@ impl PairingActor {
         local_ref: &DeviceRef,
         keys: Option<(String, String)>,
     ) -> Result<(), SdkError> {
+        if ceremony.full.is_some() {
+            return Self::start_full_sas(ceremony, local_ref, keys);
+        }
         if !matches!(ceremony.sas, SasHold::None) {
             return Err(SdkError::PairingCode("WrongContext"));
         }
@@ -638,6 +655,9 @@ impl PairingActor {
     }
 
     fn queue_offer(ceremony: &mut Ceremony) -> Result<(), SdkError> {
+        if ceremony.full.is_some() {
+            return Self::queue_full_offer(ceremony);
+        }
         let common = ceremony.common.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?;
         let offer = ContextOffer {
             schema: "ramflux.pairing.ContextOffer.v2".into(),
@@ -654,6 +674,9 @@ impl PairingActor {
     }
 
     fn queue_commit(ceremony: &mut Ceremony) -> Result<(), SdkError> {
+        if ceremony.full.is_some() {
+            return Self::queue_full_commit(ceremony);
+        }
         let SasHold::Pending(pending) = &ceremony.sas else {
             return Err(SdkError::PairingCode("WrongContext"));
         };
@@ -802,6 +825,9 @@ impl PairingActor {
         };
         let commitment = decode32(&value.commitment)?;
         self.with_ceremony_mut(|c| {
+            if c.full.is_some() {
+                return Self::ingest_full_commit(c, peer, commitment);
+            }
             let SasHold::Pending(pending) = &mut c.sas else {
                 return Err(SdkError::PairingCode("WrongContext"));
             };
@@ -845,6 +871,9 @@ impl PairingActor {
             c.offer_chunks.clear();
             assemble_chunks(&chunks)
         })?;
+        if self.ceremony.as_ref().is_some_and(|c| c.invitation.purpose == "primary_transfer") {
+            return self.finish_full_offer(&assembled).await;
+        }
         let offer = ContextOffer::from_wire_bytes(&assembled).map_err(|e| wire(&e))?;
         offer.validate().map_err(|e| wire(&e))?;
         let local_ref = self.identity.local_ref.clone();
@@ -931,6 +960,9 @@ impl PairingActor {
             c.reveal_chunks.clear();
             assemble_chunks(&chunks)
         })?;
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+            return self.with_ceremony_mut(|c| Self::finish_full_reveal(c, &assembled));
+        }
         let reveal = Reveal::from_wire_bytes(&assembled).map_err(|e| wire(&e))?;
         let salt = decode32(&reveal.salt)?;
         let peer = reveal.context.clone();
@@ -999,6 +1031,9 @@ impl PairingActor {
     }
 
     fn maybe_reveal(&mut self) -> Result<(), SdkError> {
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+            return self.with_ceremony_mut(Self::maybe_full_reveal);
+        }
         let should = self.with_ceremony(|c| {
             Ok(!c.reveal_sent && matches!(&c.sas, SasHold::Pending(_)) && c.phase == "commitments")
         })?;
@@ -1067,7 +1102,8 @@ impl PairingActor {
             c.sas = SasHold::None;
             c.phase = phase.into();
             c.result = Some(code.into());
-            c.cleanup = "done".into();
+            c.cleanup = if c.full.is_some() { "pending" } else { "done" }.into();
+            c.full.take();
             c.emoji = None;
             c.displayed_th = None;
             c.displayed_proposal = None;
