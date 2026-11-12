@@ -32,7 +32,7 @@ required-features = ["bindgen-cli"]
 default = []
 # Links the full SDK and adapts its in-process supervisor to `CorePort`. Phone apps enable it.
 # It is off by default so that adding this crate changes nothing for desktop builds.
-embedded = ["dep:ramflux-sdk", "dep:tokio"]
+embedded = ["dep:ramflux-sdk", "dep:tokio", "dep:zeroize"]
 # Builds the bindings generator binary. Never enabled in a shipped library.
 bindgen-cli = ["uniffi/cli"]
 
@@ -46,6 +46,7 @@ blake3 = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-sdk = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "rt", "sync", "time"] }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

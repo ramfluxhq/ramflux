@@ -14,6 +14,19 @@ fn supervisor(root: &Root) -> EmbeddedSupervisor {
     EmbeddedSupervisor::new(EmbeddedConfig::new(HostPaths { data_root: root.0.clone() }))
 }
 
+fn pending_wal_bytes(directory: &std::path::Path) -> std::io::Result<u64> {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            bytes += pending_wal_bytes(&entry.path())?;
+        } else if entry.file_name().to_string_lossy().ends_with("-wal") {
+            bytes += entry.metadata()?.len();
+        }
+    }
+    Ok(bytes)
+}
+
 fn lock_is_held(root: &Root) -> bool {
     matches!(DataRootLock::acquire(&root.0), Err(SdkError::DataRootInUse))
 }
@@ -59,6 +72,8 @@ fn suspend_leaves_no_open_descriptor_under_the_data_root() -> TestResult {
     if let Some(open) = open_descriptors_under(&root.0) {
         assert_eq!(open, 0, "a store or lock descriptor survived suspension");
     }
+    // The WAL is checkpointed before the lock is released: no write-ahead data is left.
+    assert_eq!(pending_wal_bytes(&root.0)?, 0, "a WAL still held frames at suspension");
     host.stop()?;
     Ok(())
 }
@@ -172,5 +187,35 @@ async fn in_process_client_gets_daemon_status_and_fails_after_suspension() -> Te
     drop(fresh);
     let stopping = std::sync::Arc::clone(&host);
     tokio::task::spawn_blocking(move || stopping.stop()).await??;
+    Ok(())
+}
+
+#[test]
+fn ceremony_connections_exist_only_while_running_and_reach_the_supervisor() -> TestResult {
+    let root = Root::new()?;
+    let host = supervisor(&root);
+    assert!(host.connect_creation().is_err(), "no ceremony before start");
+    assert!(host.connect_recovery().is_err(), "no recovery before start");
+    host.start()?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+    let mut ceremony = host.connect_creation()?;
+    // Cancelling with nothing pending is answered by the supervisor's custody-setup path.
+    // Whatever it answers, it is an answer: the frame crossed the in-process carrier.
+    let answer = runtime.block_on(ceremony.cancel());
+    assert!(
+        !matches!(answer, Err(SdkError::Io(_) | SdkError::LocalBus(_))),
+        "the ceremony frame did not reach the supervisor: {answer:?}"
+    );
+
+    // An open ceremony connection must not keep the store or the lock at suspension.
+    let report = host.suspend()?;
+    assert!(report.supervisor_joined);
+    assert!(report.data_root_lock_released);
+    assert!(lock_is_free(&root.0)?);
+    // The connection died with the supervisor; the next exchange fails instead of hanging.
+    assert!(runtime.block_on(ceremony.cancel()).is_err());
+    assert!(host.connect_creation().is_err(), "no ceremony while suspended");
+    host.stop()?;
     Ok(())
 }

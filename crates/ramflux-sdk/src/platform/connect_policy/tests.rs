@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bind family, mobile host rule, staggered connect and the QUIC / TCP+TLS race.
+//! Bind family, mobile host rule and the staggered connect.
 
 use std::cell::RefCell;
 
@@ -28,6 +28,17 @@ fn bind_address_follows_the_destination_family() {
     assert!(bound.is_ipv6());
     assert!(bound.ip().is_unspecified());
     assert_eq!(bound.port(), 0);
+}
+
+#[test]
+fn session_bind_changes_only_a_wildcard_of_the_wrong_family() {
+    let v4_wildcard = SocketAddr::from(([0, 0, 0, 0], 0));
+    let pinned = SocketAddr::from(([127, 0, 0, 1], 4000));
+    assert_eq!(effective_bind_addr(v4_wildcard, v4(1)), v4_wildcard);
+    assert_eq!(effective_bind_addr(v4_wildcard, v6(1)), bind_addr_for(v6(1)));
+    assert_eq!(effective_bind_addr(bind_addr_for(v6(1)), v4(1)), v4_wildcard);
+    assert_eq!(effective_bind_addr(pinned, v6(1)), pinned);
+    assert_eq!(effective_bind_addr(pinned, v4(1)), pinned);
 }
 
 #[test]
@@ -101,112 +112,12 @@ async fn all_addresses_failing_returns_the_last_error() {
     assert!(empty.is_err());
 }
 
-#[tokio::test(start_paused = true)]
-async fn auto_keeps_quic_when_it_completes_inside_the_head_start() -> TestResult {
-    let tcp_started = RefCell::new(false);
-    let (value, winner) = race_quic_tcp(
-        async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Ok::<_, SdkError>("quic")
-        },
-        async {
-            *tcp_started.borrow_mut() = true;
-            Ok("tcp")
-        },
-        None,
-        TCP_RACE_DELAY,
-    )
-    .await?;
-    assert_eq!((value, winner), ("quic", RaceWinner::Quic));
-    assert!(!*tcp_started.borrow(), "TCP must not start inside the QUIC head start");
+#[tokio::test]
+async fn session_endpoints_pair_each_address_with_a_bind_of_its_family() -> TestResult {
+    let endpoints = GatewayHost::for_mobile("2001:db8::1", 443)?.session_endpoints().await?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].gateway_addr, v6(1));
+    assert!(endpoints[0].bind_addr.is_ipv6());
+    assert_eq!(SessionEndpoint::for_remote(v4(1)).bind_addr, SocketAddr::from(([0, 0, 0, 0], 0)));
     Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn auto_falls_to_tcp_after_300_ms_when_udp_is_dropped() -> TestResult {
-    let begin = tokio::time::Instant::now();
-    let (value, winner) = race_quic_tcp(
-        std::future::pending::<Result<&str, SdkError>>(),
-        async { Ok("tcp") },
-        None,
-        TCP_RACE_DELAY,
-    )
-    .await?;
-    assert_eq!((value, winner), ("tcp", RaceWinner::TcpTls));
-    assert_eq!(begin.elapsed(), TCP_RACE_DELAY);
-    assert_eq!(winner.transport_kind(), GatewaySessionTransportKind::TcpTls);
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn auto_starts_tcp_at_once_when_quic_fails_and_reports_tcp_error_when_both_fail() {
-    let begin = tokio::time::Instant::now();
-    let won = race_quic_tcp(
-        async { Err::<&str, _>(refused("udp blocked")) },
-        async { Ok("tcp") },
-        None,
-        TCP_RACE_DELAY,
-    )
-    .await;
-    assert!(matches!(won, Ok(("tcp", RaceWinner::TcpTls))));
-    assert_eq!(begin.elapsed(), Duration::ZERO);
-    let lost: Result<(&str, RaceWinner), SdkError> = race_quic_tcp(
-        async { Err(refused("udp blocked")) },
-        async { Err(refused("network blocked")) },
-        None,
-        TCP_RACE_DELAY,
-    )
-    .await;
-    assert!(matches!(lost, Err(SdkError::LocalBus(message)) if message == "network blocked"));
-}
-
-#[tokio::test(start_paused = true)]
-async fn remembered_tcp_starts_first_and_quic_is_still_raced() -> TestResult {
-    let quic_started = RefCell::new(false);
-    let (_, winner) = race_quic_tcp(
-        async {
-            *quic_started.borrow_mut() = true;
-            std::future::pending::<Result<(), SdkError>>().await
-        },
-        async { Ok(()) },
-        Some(RaceWinner::TcpTls),
-        TCP_RACE_DELAY,
-    )
-    .await?;
-    assert_eq!(winner, RaceWinner::TcpTls);
-    assert!(!*quic_started.borrow());
-    let (_, winner) = race_quic_tcp(
-        async { Ok(()) },
-        std::future::pending::<Result<(), SdkError>>(),
-        Some(RaceWinner::TcpTls),
-        TCP_RACE_DELAY,
-    )
-    .await?;
-    assert_eq!(winner, RaceWinner::Quic);
-    Ok(())
-}
-
-#[test]
-fn transport_memory_lasts_ten_minutes_per_network() {
-    let mut memory = TransportMemory::new();
-    let now = Instant::now();
-    assert_eq!(memory.preferred("cell", now), None);
-    memory.remember("cell", RaceWinner::TcpTls, now);
-    assert_eq!(memory.preferred("cell", now + Duration::from_secs(599)), Some(RaceWinner::TcpTls));
-    assert_eq!(memory.preferred("wifi", now), None);
-    assert_eq!(memory.preferred("cell", now + TRANSPORT_MEMORY), None);
-    memory.remember("cell", RaceWinner::Quic, now);
-    memory.forget("cell");
-    assert_eq!(memory.preferred("cell", now), None);
-}
-
-#[test]
-fn transport_memory_is_bounded() {
-    let mut memory = TransportMemory::new();
-    let now = Instant::now();
-    for index in 0..100_u32 {
-        memory.remember(&format!("net-{index}"), RaceWinner::Quic, now + Duration::from_secs(u64::from(index)));
-    }
-    assert!(memory.networks.len() <= MAX_REMEMBERED_NETWORKS);
-    assert!(memory.preferred("net-99", now + Duration::from_secs(99)).is_some());
 }

@@ -96,6 +96,13 @@ pub(crate) trait BusListener: Sized {
 /// # Errors
 /// Returns an error when the socket cannot be bound or the mode cannot be set.
 pub(crate) fn bind(path: &Path) -> Result<UnixBusListener, SdkError> {
+    // Phones are `unix`, but an app must not expose a socket: they embed the supervisor on
+    // the in-process carrier. The socket daemon refuses to start there.
+    if cfg!(any(target_os = "ios", target_os = "android")) {
+        return Err(SdkError::LocalBus(
+            "the socket carrier is not available on this platform".to_owned(),
+        ));
+    }
     <UnixBusListener as BusListener>::bind(path)
 }
 

@@ -13,9 +13,14 @@ use zeroize::Zeroizing;
 /// Creation remains bound to this dedicated same-user connection until confirm or cancel.
 /// Dropping the client cancels pending setup; secret bodies never enter `LocalBusFrame`.
 pub struct LocalBusCreationClient {
-    stream: crate::platform::fs::LocalSocketStream,
+    stream: Box<dyn CeremonyStream>,
     sequence: u64,
 }
+
+/// Byte stream of one ceremony connection: the Unix socket, or the in-process carrier of an
+/// embedded supervisor. The frames and the secret handling are the same on both.
+trait CeremonyStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync> CeremonyStream for T {}
 
 /// Public pending ceremony metadata, safe for UI state and expiry timers.
 #[derive(Debug, Deserialize)]
@@ -74,7 +79,14 @@ impl LocalBusCreationClient {
     /// # Errors
     /// Returns socket or peer-policy failures.
     pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
-        Ok(Self { stream: crate::platform::listener::connect(socket).await?, sequence: 0 })
+        Ok(Self::from_stream(crate::platform::listener::connect(socket).await?))
+    }
+
+    /// Build the client over an already connected stream (the in-process carrier).
+    pub(crate) fn from_stream(
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+    ) -> Self {
+        Self { stream: Box::new(stream), sequence: 0 }
     }
 
     /// Begin without caller seeds or identifiers; the daemon allocates all account identifiers.
@@ -408,6 +420,13 @@ impl LocalBusRecoveryClient {
     /// Returns socket/peer-policy failures.
     pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
         Ok(Self(LocalBusCreationClient::connect(socket).await?))
+    }
+
+    /// Build the client over an already connected stream (the in-process carrier).
+    pub(crate) fn from_stream(
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+    ) -> Self {
+        Self(LocalBusCreationClient::from_stream(stream))
     }
     /// Begin only at the user's explicit request. This sends no recovery secret.
     /// # Errors

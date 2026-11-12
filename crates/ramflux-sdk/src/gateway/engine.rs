@@ -998,7 +998,7 @@ async fn open_quic_gateway_session_transport(
     SdkError,
 > {
     let mut client = ramflux_transport::QuicGatewayClient::connect(
-        config.bind_addr,
+        crate::platform::connect_policy::effective_bind_addr(config.bind_addr, config.gateway_addr),
         config.gateway_addr,
         &config.server_name,
         &config.ca_cert,
@@ -1016,9 +1016,10 @@ async fn open_tcp_tls_gateway_session_transport(
     (GatewaySessionClientTransport, Box<dyn ramflux_transport::GatewaySessionTransport + Send>),
     SdkError,
 > {
+    let tcp_gateway_addr = config.tcp_gateway_addr.unwrap_or(config.gateway_addr);
     let (client, stream) = ramflux_transport::TcpTlsGatewayClient::connect(
-        config.bind_addr,
-        config.tcp_gateway_addr.unwrap_or(config.gateway_addr),
+        crate::platform::connect_policy::effective_bind_addr(config.bind_addr, tcp_gateway_addr),
+        tcp_gateway_addr,
         &config.server_name,
         &config.ca_cert,
         config.timeout,
