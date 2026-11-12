@@ -248,6 +248,7 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
     let caller = std::thread::spawn(move || -> Result<(), String> {
         began.send(()).map_err(|e| e.to_string())?;
         super::admit_with_clock(&peer, None, &shared.state, &shared.store, || {
+            assert!(shared.state.try_lock().is_err(), "clock sampled without holding state lock");
             let _ = sampled.send(());
             at(102)
         })

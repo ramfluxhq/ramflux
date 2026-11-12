@@ -239,7 +239,7 @@ async fn migration_snapshots(fixture: &Fixture) -> anyhow::Result<()> {
         let (mut send, mut recv) = connection.open_bi().await?;
         let original = open("migration-original", 1, None)?;
         let signature = auth(&original, [32; 32])?;
-        ramflux_transport::write_quic_json_frame(
+        ramflux_transport::write_quic_json_message(
             &mut send,
             &ramflux_node_core::GatewayClientFrame::Open { open: original },
         )
@@ -258,7 +258,7 @@ async fn migration_snapshots(fixture: &Fixture) -> anyhow::Result<()> {
         })
         .await??;
         endpoint.rebind(std::net::UdpSocket::bind(format!("{after}:0"))?)?;
-        ramflux_transport::write_quic_json_frame(
+        ramflux_transport::write_quic_json_message(
             &mut send,
             &ramflux_node_core::GatewayClientFrame::Auth { auth: signature },
         )
@@ -269,12 +269,12 @@ async fn migration_snapshots(fixture: &Fixture) -> anyhow::Result<()> {
         let (mut send2, mut recv2) = connection.open_bi().await?;
         let second = open("migration-next-stream", 1, None)?;
         let signature = auth(&second, [32; 32])?;
-        ramflux_transport::write_quic_json_frame(
+        ramflux_transport::write_quic_json_message(
             &mut send2,
             &ramflux_node_core::GatewayClientFrame::Open { open: second },
         )
         .await?;
-        ramflux_transport::write_quic_json_frame(
+        ramflux_transport::write_quic_json_message(
             &mut send2,
             &ramflux_node_core::GatewayClientFrame::Auth { auth: signature },
         )
