@@ -117,10 +117,12 @@ pub(crate) fn handle_preauth_control_request(
         let policy: ramflux_node_core::GatewayPreAuthConfig =
             serde_json::from_slice(&request.body)?;
         let mut gateway = gateway_state(state)?;
-        gateway.configure_pre_auth_policy(&policy)?;
-        gateway.validate_pre_auth_configuration()?;
-        let response = ramflux_node_core::GatewayPreAuthConfig::from(gateway.pre_auth_policy());
-        store.save_state(&gateway)?;
+        let mut configured = gateway.clone();
+        configured.configure_pre_auth_policy(&policy)?;
+        configured.validate_pre_auth_configuration()?;
+        let response = ramflux_node_core::GatewayPreAuthConfig::from(configured.pre_auth_policy());
+        store.save_state(&configured)?;
+        *gateway = configured;
         ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         return Ok(true);
     }

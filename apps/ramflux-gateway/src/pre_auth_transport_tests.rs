@@ -23,7 +23,11 @@ fn open(claim: &str, now: u64, cookie: Option<String>) -> anyhow::Result<Gateway
         max_inflight_upstream: 4,
         pre_auth_cookie: cookie,
         pre_auth_now: Some(now),
-        source_ip_hash: Some(claim.into()),
+        // Shape-valid claims calibrate restoring source trust without tripping snapshot validation.
+        source_ip_hash: Some(ramflux_crypto::blake3_256_base64url(
+            "preauth.client_claim.fixture",
+            claim.as_bytes(),
+        )),
     })
 }
 fn fields() -> SignedFields {
