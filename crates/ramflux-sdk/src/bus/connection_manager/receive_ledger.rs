@@ -180,6 +180,7 @@ async fn drive_page(
                     turn,
                     generation,
                     seq,
+                    retries,
                     call_timeout,
                     backpressure,
                 )
@@ -239,30 +240,36 @@ async fn stage_page_entry(
     call_timeout: std::time::Duration,
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
-    let Some(record) = records.iter().find(|row| row.entry.inbox_seq == sequence) else {
-        require_disk_stage(writer, turn, generation, sequence).await?;
-        sync_reorder_cursor(handle, turn.cursor)?;
-        return Ok((false, backpressure));
+    let mut input = if let Some(record) = records.iter().find(|row| row.entry.inbox_seq == sequence)
+    {
+        select_resume_input(record.entry.clone(), retries)
+    } else {
+        let key = retries
+            .iter()
+            .find(|(_, input)| input.entry.inbox_seq == sequence)
+            .map(|(key, _)| key.clone());
+        let Some(input) = key.and_then(|key| retries.remove(&key)) else {
+            require_disk_stage(writer, turn, generation, sequence).await?;
+            sync_reorder_cursor(handle, turn.cursor)?;
+            return Ok((false, backpressure));
+        };
+        input
     };
-    let retry_key =
-        retries.remove(&entry_id(&record.entry)).and_then(|prepared| prepared.retry_key);
-    let (accepted, next) = apply_entry(
-        handle,
-        work,
-        generation,
-        ReceiveEntry {
-            entry: record.entry.clone(),
-            retry_key,
-            replay: false,
-            turn: Some(turn.clone()),
-        },
-        call_timeout,
-        backpressure,
-    )
-    .await?;
+    input.turn = Some(turn.clone());
+    let (accepted, next) =
+        apply_entry(handle, work, generation, input, call_timeout, backpressure).await?;
     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
     sync_reorder_cursor(handle, turn.cursor)?;
     Ok((accepted, next))
+}
+
+/// Resume may enrich authority metadata. A recovered W0 packet remains the admitted input.
+fn select_resume_input(
+    entry: crate::GatewayInboxEntry,
+    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
+) -> ReceiveEntry {
+    let recovered = retries.remove(&entry_id(&entry));
+    recovered.unwrap_or(ReceiveEntry { entry, retry_key: None, replay: false, turn: None })
 }
 
 /// Resume pages can omit a body the gateway has retired. Durable W0 is then the source of truth.
@@ -541,6 +548,7 @@ async fn fetch_apply_point(
     turn: &mut ReceiveTurn,
     generation: u64,
     seq: u64,
+    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
     call_timeout: std::time::Duration,
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
@@ -553,20 +561,11 @@ async fn fetch_apply_point(
                 apply_point_on(writer, turn, generation, seq, point_entry(turn, seq)).await?;
             match entry_point_step(turn, seq, outcome)? {
                 EntryPoint::Stage => {
-                    let (accepted, next) = apply_entry(
-                        handle,
-                        work,
-                        generation,
-                        ReceiveEntry {
-                            entry: record.entry,
-                            retry_key: None,
-                            replay: false,
-                            turn: Some(turn.clone()),
-                        },
-                        call_timeout,
-                        backpressure,
-                    )
-                    .await?;
+                    let mut input = select_resume_input(record.entry, retries);
+                    input.turn = Some(turn.clone());
+                    let (accepted, next) =
+                        apply_entry(handle, work, generation, input, call_timeout, backpressure)
+                            .await?;
                     let _ = accepted;
                     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
                     Ok((false, next))
@@ -801,3 +800,7 @@ mod entry_point_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "receive_ledger_recovery_tests.rs"]
+mod recovery_tests;

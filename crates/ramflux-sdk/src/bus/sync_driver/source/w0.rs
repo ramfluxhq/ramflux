@@ -162,7 +162,7 @@ pub(crate) fn prepare_receive_turn(
     Ok(plan)
 }
 
-/// Adds each recovered staged/held entry to the plan unless the plan already carries it.
+/// Disk W0 bytes override matching retry hints; admission coordinates remain unchanged.
 fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryInput]) {
     merge_retry_inputs(&mut plan.retries, inputs);
 }
@@ -177,11 +177,12 @@ fn merge_retry_inputs(retries: &mut Vec<ReceiveEntry>, inputs: &[ramflux_storage
                 continue;
             }
         };
-        let known = retries.iter().any(|prepared| {
+        if let Some(prepared) = retries.iter_mut().find(|prepared| {
             prepared.entry.inbox_seq == entry.inbox_seq
                 && prepared.entry.envelope.envelope_id == entry.envelope.envelope_id
-        });
-        if !known {
+        }) {
+            prepared.entry = entry;
+        } else {
             retries.push(ReceiveEntry { entry, retry_key: None, replay: false, turn: None });
         }
     }
@@ -294,3 +295,7 @@ pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
     let _reset = Reset;
     f()
 }
+
+#[cfg(test)]
+#[path = "w0_recovery_tests.rs"]
+mod recovery_tests;
