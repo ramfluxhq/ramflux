@@ -163,3 +163,32 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn self_sync_sent_draft_issues_one_explicit_clear_and_retires_draft_body() -> TestResult {
+    let own = Fixture::new("self-sync-draft-sent").await?;
+    assert!(own.client.clear_self_sync_draft_after_send(THREAD)?.is_none(), "no draft, no clear");
+    let draft = own.client.change_self_sync(
+        THREAD,
+        g::SelfSync {
+            operation: 2,
+            draft: Some(g::Message { text: "draft canary text".into(), ..Default::default() }),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(draft.revision, 1);
+    let clear = own.client.clear_self_sync_draft_after_send(THREAD)?.ok_or("clear")?;
+    assert_eq!((clear.operation, clear.revision), (3, 2));
+    let state = own.client.self_sync_state(THREAD, &clear)?.ok_or("state")?;
+    assert_eq!(state.value.operation, 3);
+    assert!(
+        !state.exact_body.windows(17).any(|window| window == b"draft canary text"),
+        "the sent draft body does not survive in the register"
+    );
+    assert!(
+        own.client.clear_self_sync_draft_after_send(THREAD)?.is_none(),
+        "a repeated send never re-issues a revision"
+    );
+    assert_eq!(own.client.self_sync_state(THREAD, &clear)?.ok_or("state")?.value.revision, 2);
+    Ok(())
+}
