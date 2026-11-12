@@ -6,6 +6,8 @@ mod handlers;
 mod keychain;
 mod logging;
 mod utils;
+#[cfg(windows)]
+mod windows_paths;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -37,6 +39,8 @@ async fn main() {
 
 async fn run() -> Result<(), RfError> {
     let cli = Cli::parse();
+    #[cfg(windows)]
+    let cli = windows_paths::with_defaults(cli)?;
     match cli.command {
         Command::Vault(command) => handlers::vault::handle(command).await,
         Command::Node(command) => handlers::node::handle_node(cli.socket, command).await,

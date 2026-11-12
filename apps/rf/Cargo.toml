@@ -48,6 +48,9 @@ thiserror = "2.0"
 tokio = { version = "1.42", features = ["macros", "rt", "rt-multi-thread"] }
 zeroize = "1.8"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+# Descriptor-relative private files and process probes; node custody provisioning is Unix-only.
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
