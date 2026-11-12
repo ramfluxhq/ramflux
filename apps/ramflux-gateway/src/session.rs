@@ -310,10 +310,23 @@ async fn handle_gateway_session_transport_inner(
     }
 
     let auth_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    let auth_result = {
-        let mut gateway = gateway_state(&context.state)?;
-        context.store.authenticate(&mut gateway, &open, &auth_frame, auth_now, &registered_auth_key)
-    };
+    let auth_result = (|| -> Result<_, ramflux_node_core::NodeCoreError> {
+        let writer = context.store.write_guard()?;
+        let source = {
+            let mut gateway = context.state.lock().map_err(|_| {
+                ramflux_node_core::NodeCoreError::Redb("gateway state poisoned".into())
+            })?;
+            ramflux_node_core::validate_gateway_auth_with_replay(
+                &open,
+                &auth_frame,
+                auth_now,
+                gateway.replay_guard_state_mut(),
+                &registered_auth_key,
+            )?
+        };
+        writer.save_auth_replay(&source, &auth_frame.signed_request, auth_now)?;
+        Ok(source)
+    })();
     if let Err(ref error) = auth_result {
         write_gateway_frame(
             &mut *send,
@@ -616,28 +629,30 @@ pub(crate) async fn establish_gateway_session(
     };
     let negotiated = crate::session_push::negotiate(context, auth_frame, &descriptor).await?;
     let resume_token = {
-        let mut gateway = gateway_state(&context.state)?;
-        let resume = gateway.issue_resume_token(ramflux_node_core::GatewayResumeIssueInput {
-            session_id: &session_id,
-            target_delivery_id: &open.target_delivery_id,
-            device_id: &open.device_id,
-            device_epoch: auth_frame.device_proof.device_epoch,
-            issued_at: now,
-            window_seconds: resume_window_seconds,
-        });
-        gateway.open_session(ramflux_node_core::GatewaySession {
-            session_id: session_id.clone(),
-            target_delivery_id: open.target_delivery_id.clone(),
-            device_id: open.device_id.clone(),
-            opened_at: now,
-            last_heartbeat_at: now,
-            lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
-        });
-        context.store.save_authenticated_session(
-            &gateway,
-            &session_id,
-            &resume.metadata.resume_token_hash,
-        )?;
+        let writer = context.store.write_guard()?;
+        let (resume, checkpoint) = {
+            let mut gateway = gateway_state(&context.state)?;
+            let resume = gateway.issue_resume_token(ramflux_node_core::GatewayResumeIssueInput {
+                session_id: &session_id,
+                target_delivery_id: &open.target_delivery_id,
+                device_id: &open.device_id,
+                device_epoch: auth_frame.device_proof.device_epoch,
+                issued_at: now,
+                window_seconds: resume_window_seconds,
+            });
+            gateway.open_session(ramflux_node_core::GatewaySession {
+                session_id: session_id.clone(),
+                target_delivery_id: open.target_delivery_id.clone(),
+                device_id: open.device_id.clone(),
+                opened_at: now,
+                last_heartbeat_at: now,
+                lifecycle: ramflux_node_core::GatewaySessionLifecycle::Live,
+            });
+            let checkpoint = gateway
+                .session_checkpoint(&session_id, Some(&resume.metadata.resume_token_hash))?;
+            (resume, checkpoint)
+        };
+        writer.save_session_checkpoint(&checkpoint)?;
         resume.token
     };
     let accepted_cursor = router_cursor_async(&context.router, &open.target_delivery_id).await?;
@@ -713,7 +728,7 @@ fn gateway_session_id_for_open(
 
 /// Marks the authenticated session live with server time. Retention metadata is recreated if
 /// it is missing, so an authenticated session never ends because its record was pruned.
-fn refresh_session_activity(
+pub(crate) fn refresh_session_activity(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
 ) -> anyhow::Result<()> {
@@ -1246,15 +1261,16 @@ pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
     body: &T,
 ) -> anyhow::Result<()> {
     let now = verify_gateway_session_signed_request(runtime, signed_request, method, path, body)?;
+    let writer = context.store.write_guard()?;
     {
         let mut gateway = gateway_state(&context.state)?;
-        gateway.replay_guard_state_mut().check_signed_request(
+        gateway.replay_guard_state_mut().check_gateway_signed_request(
             &runtime.source_identity,
             signed_request,
             now,
         )?;
-        context.store.save_auth_replay(&runtime.source_identity, signed_request, now)?;
     }
+    writer.save_auth_replay(&runtime.source_identity, signed_request, now)?;
     Ok(())
 }
 
@@ -1536,14 +1552,17 @@ pub(crate) async fn handle_gateway_own_device_fanout(
     }
     let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
     let replay_rejection = {
-        let mut gateway = gateway_state(&context.state)?;
-        let result = gateway.replay_guard_state_mut().check_signed_request(
-            &runtime.source_identity,
-            &fanout.signed_request,
-            submit_now,
-        );
+        let writer = context.store.write_guard()?;
+        let result = {
+            let mut gateway = gateway_state(&context.state)?;
+            gateway.replay_guard_state_mut().check_gateway_signed_request(
+                &runtime.source_identity,
+                &fanout.signed_request,
+                submit_now,
+            )
+        };
         if result.is_ok() {
-            context.store.save_auth_replay(
+            writer.save_auth_replay(
                 &runtime.source_identity,
                 &fanout.signed_request,
                 submit_now,
@@ -1965,9 +1984,13 @@ pub(crate) async fn handle_gateway_close(
     reason: String,
 ) -> anyhow::Result<()> {
     {
-        let mut gateway = gateway_state(&context.state)?;
-        gateway.drain(&runtime.session_id)?;
-        context.store.save_state(&gateway)?;
+        let writer = context.store.write_guard()?;
+        let checkpoint = {
+            let mut gateway = gateway_state(&context.state)?;
+            gateway.drain(&runtime.session_id)?;
+            gateway.session_checkpoint(&runtime.session_id, None)?
+        };
+        writer.save_session_checkpoint(&checkpoint)?;
     }
     write_gateway_handle(
         send,
@@ -2055,7 +2078,6 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
         &source,
         open.pre_auth_cookie.as_deref(),
         &context.state,
-        &context.store,
         std::time::SystemTime::now,
     );
     #[cfg(test)]

@@ -2,25 +2,60 @@
 // Copyright (c) 2026 Span Brain
 
 //! Keep live sinks while expiring disconnected session metadata and resume checkpoints.
+pub(crate) fn checkpoint_once_at(
+    context: &crate::serve::GatewayListenerContext,
+    time: std::time::SystemTime,
+) -> anyhow::Result<()> {
+    // Writer ordering precedes state capture; a blocked writer never owns the state mutex.
+    let writer = context.store.write_guard()?;
+    let active = context.hub.retention_snapshot();
+    let (checkpoint, now) = {
+        let mut state = crate::gateway_state(&context.state)?;
+        let now = state.observe_pre_auth_time(time)?;
+        state.prune_retained_sessions_bounded(
+            now,
+            crate::session::gateway_resume_window_seconds(),
+            |session| {
+                active
+                    .get(&session.target_delivery_id)
+                    .is_some_and(|entry| entry.session_id == session.session_id)
+            },
+        );
+        (state.admission_checkpoint(now), now)
+    };
+    writer.save_admission_checkpoint(&checkpoint)?;
+    crate::gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
+    writer.prune_session_rows(now, crate::session::gateway_resume_window_seconds())?;
+    Ok(())
+}
+
 pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Result<()> {
+    let observer = context.clone();
+    ramflux_node_core::spawn_service_worker("gateway-admission-health", move |_| {
+        let mut was_unavailable = false;
+        while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(10)) {
+            if let Ok(mut state) = crate::gateway_state(&observer.state) {
+                let unavailable = state
+                    .observe_admission_checkpoint_health(ramflux_node_core::now_unix_seconds());
+                if unavailable {
+                    tracing::warn!(
+                        checkpoint_outages = state.pre_auth_metrics().checkpoint_outages,
+                        checkpoint_failures = state.pre_auth_metrics().checkpoint_failures,
+                        "gateway admission checkpoint unavailable"
+                    );
+                } else if was_unavailable {
+                    tracing::info!("gateway admission checkpoint recovered");
+                }
+                was_unavailable = unavailable;
+            }
+        }
+    })?;
     ramflux_node_core::spawn_service_worker("gateway-retention", move |_| {
         while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(10)) {
-            let active = context.hub.active_session_ids();
-            let result = (|| -> anyhow::Result<()> {
-                let mut state = crate::gateway_state(&context.state)?;
-                let now = state.observe_pre_auth_time(std::time::SystemTime::now())?;
-                state.prune_retained_sessions(
-                    now,
-                    crate::session::gateway_resume_window_seconds(),
-                    &active,
-                );
-                let checkpoint = state.admission_checkpoint(now);
-                context.store.save_state(&checkpoint)?;
-                state.install_admission_checkpoint(&checkpoint);
-                Ok(())
-            })();
-            if let Err(error) = result {
-                tracing::warn!(%error,"gateway retention deferred");
+            if checkpoint_once_at(&context, std::time::SystemTime::now()).is_err()
+                && let Ok(mut state) = crate::gateway_state(&context.state)
+            {
+                state.record_admission_checkpoint_failure();
             }
         }
     })?;
@@ -30,6 +65,78 @@ pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use ramflux_node_core::{GatewaySession, GatewaySessionLifecycle, GatewayState};
+
+    #[test]
+    fn slow_checkpoint_commit_does_not_block_authenticated_activity_and_recovers()
+    -> anyhow::Result<()> {
+        use std::{
+            sync::mpsc,
+            time::{Duration, UNIX_EPOCH},
+        };
+        let context = crate::session::tests::test_gateway_context()?;
+        let listener = crate::pre_auth_transport_tests::support::listener_context(&context);
+        let checkpoint = crate::gateway_state(&context.state)?.admission_checkpoint(100);
+        context.store.save_admission_checkpoint(&checkpoint)?;
+        crate::gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
+        crate::gateway_state(&context.state)?.open_session(GatewaySession {
+            session_id: "active".into(),
+            target_delivery_id: "target".into(),
+            device_id: "device".into(),
+            opened_at: 100,
+            last_heartbeat_at: 100,
+            lifecycle: GatewaySessionLifecycle::Live,
+        });
+        let root = ramflux_crypto::create_identity_root("principal", [51; 32]);
+        let branch = ramflux_crypto::create_device_branch("principal", "device", 1, [52; 32]);
+        let runtime = crate::GatewaySessionRuntime {
+            session_push: None,
+            ephemeral: false,
+            push_limit: 256,
+            source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
+                &root, &branch,
+            )?,
+            session_id: "active".into(),
+            resume_token: "token".into(),
+            principal_id: "principal".into(),
+            device_id: "device".into(),
+            target_delivery_id: "target".into(),
+            device_epoch: 1,
+            branch_public_key: ramflux_crypto::public_key_base64url_from_seed([52; 32]),
+            supports_forward_ack: false,
+            ephemeral_rate: std::sync::Arc::default(),
+        };
+        let (entered, observed) = mpsc::channel();
+        let (release, waiting) = mpsc::channel();
+        context.store.pause_next_admission_commit(entered, waiting)?;
+        let worker = std::thread::spawn(move || {
+            super::checkpoint_once_at(&listener, UNIX_EPOCH + Duration::from_secs(120))
+                .map_err(|error| error.to_string())
+        });
+        // A semantic write-transaction barrier; timeout is only a deadlock watchdog.
+        observed.recv_timeout(Duration::from_secs(10))?;
+        assert!(context.state.try_lock().is_ok(), "checkpoint fsync held the gateway state mutex");
+        crate::session::refresh_session_activity(&context, &runtime)?;
+        assert!(crate::gateway_state(&context.state)?.observe_admission_checkpoint_health(131));
+        assert_eq!(crate::gateway_state(&context.state)?.pre_auth_metrics().checkpoint_outages, 1);
+        let error = crate::pre_auth::admit_with_clock("source", None, &context.state, || {
+            UNIX_EPOCH + Duration::from_secs(131)
+        })
+        .err()
+        .map(|error| error.to_string());
+        assert_eq!(error.as_deref(), Some("checkpoint_unavailable"));
+        release.send(())?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("checkpoint worker panicked"))?
+            .map_err(anyhow::Error::msg)?;
+        assert!(!crate::gateway_state(&context.state)?.observe_admission_checkpoint_health(132));
+        assert!(
+            crate::pre_auth::admit_with_clock("source", None, &context.state, || UNIX_EPOCH
+                + Duration::from_secs(132))?
+            .is_none()
+        );
+        Ok(())
+    }
 
     #[test]
     fn retention_keeps_disconnected_sessions_for_the_configured_resume_window() {

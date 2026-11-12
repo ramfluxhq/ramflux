@@ -91,7 +91,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             &std::collections::BTreeSet::new(),
         );
         let checkpoint = state.admission_checkpoint(now);
-        store.save_state(&checkpoint)?;
+        store.save_state(&state)?;
+        store.save_admission_checkpoint(&checkpoint)?;
         state.install_admission_checkpoint(&checkpoint);
         tracing::info!(service, node_id = config.node_id, "gateway state initialized");
         let router = router_mesh_client(&config)?;

@@ -97,7 +97,7 @@ pub(crate) fn handle_itest_request(
     if handle_preauth_control_request(stream, &request, state, store)? {
         return Ok(());
     }
-    if let Some(challenge) = pre_auth_gate(&request, stream.peer_addr()?.ip(), state, store)? {
+    if let Some(challenge) = pre_auth_gate(&request, stream.peer_addr()?.ip(), state)? {
         ramflux_node_core::write_itest_json_response(stream, "401 Unauthorized", &challenge)?;
         return Ok(());
     }
@@ -114,12 +114,13 @@ pub(crate) fn handle_preauth_control_request(
     if request.method == "POST" && request.path == "/mvp6/preauth/policy" {
         let policy: ramflux_node_core::GatewayPreAuthConfig =
             serde_json::from_slice(&request.body)?;
+        let writer = store.write_guard()?;
         let mut gateway = gateway_state(state)?;
         let mut configured = gateway.clone();
         configured.configure_pre_auth_policy(&policy)?;
         configured.validate_pre_auth_configuration()?;
         let response = ramflux_node_core::GatewayPreAuthConfig::from(configured.pre_auth_policy());
-        store.save_state(&configured)?;
+        writer.save_state(&configured)?;
         *gateway = configured;
         ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         return Ok(true);

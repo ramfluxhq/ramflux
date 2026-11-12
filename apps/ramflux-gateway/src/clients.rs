@@ -170,9 +170,8 @@ pub(crate) fn pre_auth_gate(
     request: &ramflux_node_core::NodeHttpRequest,
     peer: std::net::IpAddr,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
-    store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    crate::pre_auth::admit(peer, request.pre_auth_cookie.as_deref(), state, store)
+    crate::pre_auth::admit(peer, request.pre_auth_cookie.as_deref(), state)
 }
 
 pub(crate) fn gateway_state(

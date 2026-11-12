@@ -11,12 +11,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const KEY: &str = "pre_auth_admission_v1";
-pub(super) const LEGACY_CLOCK_KEY: &str = "pre_auth_legacy_clock_v1";
-const RESERVATION_KEY: &str = "pre_auth_reservation_v1";
+const RESERVATION_KEY: &str = "pre_auth_reservation_v2";
+const POLICY_REVISION_KEY: &str = "pre_auth_policy_revision_v2";
 pub const PRE_AUTH_CHECKPOINT_SECONDS: u64 = 30;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Admission {
     version: u32,
@@ -26,13 +26,39 @@ struct Admission {
     metrics: GatewayPreAuthMetrics,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyClock {
-    version: u32,
-    migration_required: bool,
-    high_water_unix_seconds: u64,
-    metrics: GatewayPreAuthMetrics,
+/// Bounded admission-only copy; no sessions, frame queues or replay entries.
+#[derive(Clone)]
+pub struct GatewayAdmissionCheckpoint {
+    policy: GatewayPreAuthPolicy,
+    admission: Admission,
+    revision: u64,
+    deadline: u64,
+    prior_cooldown: u64,
+}
+impl GatewayAdmissionCheckpoint {
+    fn entries(&self) -> Result<Vec<(&'static str, Vec<u8>)>, NodeCoreError> {
+        validate_snapshot(
+            &self.admission,
+            self.policy.per_source_ip_handshake_rate.min(60) as usize,
+        )?;
+        let bytes = crate::serialize_snapshot_value(&self.admission)?;
+        if bytes.len() > MAX_BYTES {
+            return Err(NodeCoreError::PreAuthSnapshotInvalid);
+        }
+        Ok(vec![
+            (crate::GATEWAY_PRE_AUTH_POLICY_KEY, crate::serialize_snapshot_value(&self.policy)?),
+            (KEY, bytes),
+            (POLICY_REVISION_KEY, crate::serialize_snapshot_value(&self.revision)?),
+            (
+                RESERVATION_KEY,
+                crate::serialize_snapshot_value(&(
+                    self.deadline,
+                    self.policy.window_seconds,
+                    self.prior_cooldown,
+                ))?,
+            ),
+        ])
+    }
 }
 
 pub(super) fn validate_policy(policy: &GatewayPreAuthPolicy) -> Result<(), NodeCoreError> {
@@ -88,16 +114,11 @@ impl GatewayState {
     }
 
     /// # Errors
-    /// Rejects invalid configuration, unmigrated debt, or a missing mounted production key.
+    /// Rejects invalid configuration, a missing mounted production key.
     pub fn validate_pre_auth_configuration(&self) -> Result<(), NodeCoreError> {
         validate_policy(&self.pre_auth_policy)?;
-        if self.pre_auth_policy.enabled {
-            if self.pre_auth_legacy {
-                return Err(NodeCoreError::PreAuthMigrationRequired);
-            }
-            if self.pre_auth_cookie_key.is_none() {
-                return Err(NodeCoreError::PreAuthConfigInvalid);
-            }
+        if self.pre_auth_policy.enabled && self.pre_auth_cookie_key.is_none() {
+            return Err(NodeCoreError::PreAuthConfigInvalid);
         }
         Ok(())
     }
@@ -111,37 +132,14 @@ impl GatewayState {
 
     pub(super) fn pre_auth_entries(&self) -> Result<Vec<(&'static str, Vec<u8>)>, NodeCoreError> {
         validate_policy(&self.pre_auth_policy)?;
-        let admission = if self.pre_auth_legacy {
-            (
-                LEGACY_CLOCK_KEY,
-                crate::serialize_snapshot_value(&LegacyClock {
-                    version: 1,
-                    migration_required: true,
-                    high_water_unix_seconds: self.pre_auth_time_floor,
-                    metrics: self.pre_auth_metrics.clone(),
-                })?,
-            )
-        } else {
-            (KEY, self.admission_bytes()?)
-        };
-        let mut entries = vec![
+        Ok(vec![
             (
                 crate::GATEWAY_PRE_AUTH_POLICY_KEY,
                 crate::serialize_snapshot_value(&self.pre_auth_policy)?,
             ),
-            admission,
-        ];
-        if let Some(deadline) = self.pre_auth_runtime_deadline {
-            entries.push((
-                RESERVATION_KEY,
-                crate::serialize_snapshot_value(&(
-                    deadline,
-                    self.pre_auth_policy.window_seconds,
-                    self.pre_auth_restart_until,
-                ))?,
-            ));
-        }
-        Ok(entries)
+            (KEY, self.admission_bytes()?),
+            (POLICY_REVISION_KEY, crate::serialize_snapshot_value(&self.pre_auth_policy_revision)?),
+        ])
     }
 
     /// Sample under the caller's state lock, before pruning or admission.
@@ -168,26 +166,56 @@ impl GatewayState {
         time: SystemTime,
     ) -> Result<crate::GatewayPreAuthDecision, NodeCoreError> {
         let now = self.observe_pre_auth_time(time)?;
-        if self.pre_auth_runtime_deadline.is_some_and(|deadline| now > deadline) {
-            return Err(NodeCoreError::PreAuthClockRollback);
+        if self.observe_admission_checkpoint_health(now) {
+            return Err(NodeCoreError::PreAuthCheckpointUnavailable);
         }
         self.check_pre_auth(source, cookie, now)
+    }
+
+    /// Observe reservation liveness without changing the trusted admission clock.
+    /// Returns true while checkpoint coverage is unavailable.
+    pub fn observe_admission_checkpoint_health(&mut self, now: u64) -> bool {
+        let unavailable = self.pre_auth_runtime_deadline.is_some_and(|deadline| now > deadline);
+        if unavailable && !self.pre_auth_checkpoint_stalled {
+            self.pre_auth_metrics.checkpoint_outages =
+                self.pre_auth_metrics.checkpoint_outages.saturating_add(1);
+            self.pre_auth_checkpoint_stalled = true;
+        }
+        unavailable
     }
 
     /// Reserve the next checkpoint interval before serving Opens. The caller must
     /// publish this deadline only after committing the checkpoint.
     #[must_use]
-    pub fn admission_checkpoint(&self, now: u64) -> Self {
-        let mut checkpoint = self.clone();
-        checkpoint.pre_auth_time_floor = checkpoint.pre_auth_time_floor.max(now);
-        checkpoint.pre_auth_runtime_deadline =
-            Some(now.saturating_add(PRE_AUTH_CHECKPOINT_SECONDS));
-        checkpoint
+    pub fn admission_checkpoint(&self, now: u64) -> GatewayAdmissionCheckpoint {
+        let floor = self.pre_auth_time_floor.max(now);
+        GatewayAdmissionCheckpoint {
+            policy: self.pre_auth_policy.clone(),
+            admission: Admission {
+                version: 1,
+                source_scheme: "transport-peer-v2".into(),
+                high_water_unix_seconds: floor,
+                buckets: self.pre_auth_handshakes_by_source_ip.clone(),
+                metrics: self.pre_auth_metrics.clone(),
+            },
+            revision: self.pre_auth_policy_revision,
+            deadline: floor.saturating_add(PRE_AUTH_CHECKPOINT_SECONDS),
+            prior_cooldown: self.pre_auth_restart_until,
+        }
     }
 
-    /// Publish the successfully committed deadline without losing concurrent debt.
-    pub fn install_admission_checkpoint(&mut self, checkpoint: &Self) {
-        self.pre_auth_runtime_deadline = checkpoint.pre_auth_runtime_deadline;
+    /// Publish a committed reservation; concurrent debt stays in memory.
+    pub fn install_admission_checkpoint(&mut self, checkpoint: &GatewayAdmissionCheckpoint) {
+        if self.pre_auth_policy_revision == checkpoint.revision {
+            self.pre_auth_runtime_deadline = Some(checkpoint.deadline);
+            self.pre_auth_checkpoint_stalled = false;
+        }
+    }
+
+    /// Record a bounded aggregate worker failure; Opens never emit individual logs.
+    pub fn record_admission_checkpoint_failure(&mut self) {
+        self.pre_auth_metrics.checkpoint_failures =
+            self.pre_auth_metrics.checkpoint_failures.saturating_add(1);
     }
 
     pub(super) fn admission_bytes(&self) -> Result<Vec<u8>, NodeCoreError> {
@@ -230,6 +258,49 @@ fn validate_snapshot(snapshot: &Admission, rate: usize) -> Result<(), NodeCoreEr
 }
 
 impl GatewayRedbStore {
+    /// Commit admission metadata without holding the caller's gateway state lock.
+    /// # Errors
+    /// Rejects stale policy snapshots, invalid data and storage failures.
+    pub fn save_admission_checkpoint(
+        &self,
+        checkpoint: &GatewayAdmissionCheckpoint,
+    ) -> Result<(), NodeCoreError> {
+        self.write_guard()?.save_admission_checkpoint(checkpoint)
+    }
+
+    pub(super) fn save_admission_checkpoint_unlocked(
+        &self,
+        checkpoint: &GatewayAdmissionCheckpoint,
+    ) -> Result<(), NodeCoreError> {
+        let entries = checkpoint.entries()?;
+        let write = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        {
+            let mut table = write
+                .open_table(GATEWAY_STATE_TABLE)
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            let revision: u64 = table
+                .get(POLICY_REVISION_KEY)
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+                .map(|raw| serde_json::from_slice(raw.value()))
+                .transpose()
+                .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?
+                .unwrap_or_default();
+            if revision > checkpoint.revision {
+                return Err(NodeCoreError::PreAuthCheckpointStale);
+            }
+            for (key, bytes) in &entries {
+                table
+                    .insert(*key, bytes.as_slice())
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            }
+        }
+        self.before_admission_commit()?;
+        write.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        self.durable_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     pub(super) fn load_pre_auth_admission(
         &self,
         state: &mut GatewayState,
@@ -237,10 +308,17 @@ impl GatewayRedbStore {
         let read = self.db.begin_read().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let table =
             read.open_table(GATEWAY_STATE_TABLE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        let legacy_clock =
-            table.get(LEGACY_CLOCK_KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        for obsolete in [
+            "pre_auth_legacy_clock_v1",
+            crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY,
+            crate::GATEWAY_PRE_AUTH_METRICS_KEY,
+        ] {
+            if table.get(obsolete).map_err(|e| NodeCoreError::Redb(e.to_string()))?.is_some() {
+                return Err(NodeCoreError::GatewayStateResetRequired);
+            }
+        }
         if let Some(raw) = table.get(KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))? {
-            if legacy_clock.is_some() || raw.value().len() > MAX_BYTES {
+            if raw.value().len() > MAX_BYTES {
                 return Err(NodeCoreError::PreAuthSnapshotInvalid);
             }
             let snapshot: Admission = serde_json::from_slice(raw.value())
@@ -249,34 +327,12 @@ impl GatewayRedbStore {
             state.pre_auth_time_floor = snapshot.high_water_unix_seconds;
             state.pre_auth_handshakes_by_source_ip = snapshot.buckets;
             state.pre_auth_metrics = snapshot.metrics;
-        } else {
-            // Old keys and timestamps have no trustworthy source provenance. Do not decode debt.
-            for key in [crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY, crate::GATEWAY_PRE_AUTH_METRICS_KEY]
-            {
-                if let Some(raw) = table.get(key).map_err(|e| NodeCoreError::Redb(e.to_string()))? {
-                    if raw.value().len() > MAX_BYTES {
-                        return Err(NodeCoreError::PreAuthSnapshotInvalid);
-                    }
-                    let value: serde_json::Value = serde_json::from_slice(raw.value())
-                        .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
-                    state.pre_auth_legacy |= value
-                        .as_object()
-                        .is_none_or(|object| object.values().any(|v| v.as_u64() != Some(0)));
-                }
-            }
         }
-        if let Some(raw) = legacy_clock {
-            if raw.value().len() > MAX_BYTES {
-                return Err(NodeCoreError::PreAuthSnapshotInvalid);
-            }
-            let clock: LegacyClock = serde_json::from_slice(raw.value())
+        if let Some(raw) =
+            table.get(POLICY_REVISION_KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))?
+        {
+            state.pre_auth_policy_revision = serde_json::from_slice(raw.value())
                 .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
-            if clock.version != 1 || !clock.migration_required {
-                return Err(NodeCoreError::PreAuthSnapshotInvalid);
-            }
-            state.pre_auth_legacy = true;
-            state.pre_auth_time_floor = clock.high_water_unix_seconds;
-            state.pre_auth_metrics = clock.metrics;
         }
         if let Some(raw) =
             table.get(RESERVATION_KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))?
@@ -287,9 +343,11 @@ impl GatewayRedbStore {
             if window > 3600 || prior_cooldown > floor.saturating_add(3600) {
                 return Err(NodeCoreError::PreAuthSnapshotInvalid);
             }
+            state.pre_auth_time_floor = state.pre_auth_time_floor.max(floor);
             state.pre_auth_restart_until = prior_cooldown
                 .max(floor.saturating_add(window.max(state.pre_auth_policy.window_seconds)));
         }
+        state.pre_auth_handshakes_by_source_ip.retain(|_, events| !events.is_empty());
         state.pre_auth_expiry = state
             .pre_auth_handshakes_by_source_ip
             .iter()

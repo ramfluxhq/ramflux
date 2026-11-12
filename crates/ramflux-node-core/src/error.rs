@@ -3,6 +3,16 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("gateway_replay_capacity")]
+    GatewayReplayCapacity,
+    #[error(
+        "unsupported gateway state format; stop the gateway, back up then remove its gateway redb file and sidecars, and restart to create format v2 (do not remove account or other service stores)"
+    )]
+    GatewayStateResetRequired,
+    #[error("checkpoint_unavailable")]
+    PreAuthCheckpointUnavailable,
+    #[error("stale admission checkpoint")]
+    PreAuthCheckpointStale,
     #[error("clock_invalid")]
     PreAuthClockInvalid,
     #[error("clock_rollback")]
@@ -13,8 +23,6 @@ pub enum NodeCoreError {
     PreAuthConfigInvalid,
     #[error("invalid pre-auth admission snapshot")]
     PreAuthSnapshotInvalid,
-    #[error("pre-auth legacy admission state requires migration")]
-    PreAuthMigrationRequired,
     #[error("attachment authority history is full")]
     AttachmentAuthorityHistoryCapacity,
     #[error("payload_too_large")]

@@ -167,15 +167,12 @@ fn http_headers_cannot_rotate_source_or_advance_server_clock() -> anyhow::Result
         forwarded_proto: None,
         forwarded_for: Some("198.51.100.1".to_owned()),
     };
-    assert!(crate::pre_auth_gate(&request, peer, &context.state, &context.store)?.is_none());
+    assert!(crate::pre_auth_gate(&request, peer, &context.state)?.is_none());
     request.source_ip_hash = Some("next-claim".to_owned());
     request.pre_auth_now = Some(86_400);
     request.forwarded_for = Some("198.51.100.2".to_owned());
-    assert!(crate::pre_auth_gate(&request, peer, &context.state, &context.store)?.is_some());
-    assert!(
-        crate::pre_auth_gate(&request, "192.0.2.2".parse()?, &context.state, &context.store)?
-            .is_none()
-    );
+    assert!(crate::pre_auth_gate(&request, peer, &context.state)?.is_some());
+    assert!(crate::pre_auth_gate(&request, "192.0.2.2".parse()?, &context.state)?.is_none());
     Ok(())
 }
 
@@ -232,43 +229,27 @@ fn preauth_wire_and_peer_boundary_matrix() -> anyhow::Result<()> {
 }
 
 #[test]
-fn production_gate_samples_clock_under_lock_and_checkpoint_refuses_failed_commit()
--> anyhow::Result<()> {
+fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyhow::Result<()> {
     use std::time::{Duration, UNIX_EPOCH};
     let context = context()?;
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
     let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
-    assert!(
-        super::admit_with_clock(&source, None, &context.state, &context.store, || at(100))?
-            .is_none()
-    );
-    context.store.save_pre_auth_hot(&gateway_state(&context.state)?.admission_checkpoint(100))?;
+    assert!(super::admit_with_clock(&source, None, &context.state, || at(100))?.is_none());
+    let checkpoint = gateway_state(&context.state)?.admission_checkpoint(100);
+    context.store.save_admission_checkpoint(&checkpoint)?;
+    gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
     let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
-    assert_eq!(serde_json::to_value(&saved)?["pre_auth_time_floor"], 100);
-    let invalid = super::admit_with_clock(&source, None, &context.state, &context.store, || {
+    assert_eq!(serde_json::to_value(&saved)?["pre_auth_time_floor"], 130);
+    let invalid = super::admit_with_clock(&source, None, &context.state, || {
         UNIX_EPOCH - Duration::from_secs(1)
     })
     .err()
     .ok_or_else(|| anyhow::anyhow!("pre-epoch accepted"))?;
     assert_eq!(invalid.to_string(), "clock_invalid");
-    let rollback =
-        super::admit_with_clock(&source, None, &context.state, &context.store, || at(99))
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("rollback accepted"))?;
+    let rollback = super::admit_with_clock(&source, None, &context.state, || at(99))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("rollback accepted"))?;
     assert_eq!(rollback.to_string(), "clock_rollback");
-    context.store.fail_next_pre_auth_commit();
-    assert!(
-        context
-            .store
-            .save_pre_auth_hot(&gateway_state(&context.state)?.admission_checkpoint(101))
-            .is_err()
-    );
-    let saved = context.store.load_state()?.ok_or_else(|| anyhow::anyhow!("saved state"))?;
-    assert_eq!(serde_json::to_value(saved)?["pre_auth_time_floor"], 100);
-    assert!(
-        super::admit_with_clock(&source, None, &context.state, &context.store, || at(101))?
-            .is_some()
-    );
     let held = crate::gateway_state(&context.state)?;
     let (began, waiting) = std::sync::mpsc::channel();
     let shared = context.clone();
@@ -276,7 +257,7 @@ fn production_gate_samples_clock_under_lock_and_checkpoint_refuses_failed_commit
     let (sampled, observed) = std::sync::mpsc::channel();
     let caller = std::thread::spawn(move || -> Result<(), String> {
         began.send(()).map_err(|e| e.to_string())?;
-        super::admit_with_clock(&peer, None, &shared.state, &shared.store, || {
+        super::admit_with_clock(&peer, None, &shared.state, || {
             assert!(shared.state.try_lock().is_err(), "clock sampled without holding state lock");
             let _ = sampled.send(());
             at(102)
@@ -288,6 +269,14 @@ fn production_gate_samples_clock_under_lock_and_checkpoint_refuses_failed_commit
     drop(held);
     caller.join().map_err(|_| anyhow::anyhow!("gate thread panic"))?.map_err(anyhow::Error::msg)?;
     observed.recv()?;
+    let checkpoint = gateway_state(&context.state)?.admission_checkpoint(110);
+    context.store.fail_next_pre_auth_commit();
+    assert!(context.store.save_admission_checkpoint(&checkpoint).is_err());
+    let error = super::admit_with_clock(&source, None, &context.state, || at(131))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("Open survived failed checkpoint past reservation"))?;
+    assert_eq!(error.to_string(), "checkpoint_unavailable");
+
     Ok(())
 }
 
@@ -409,7 +398,7 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
     let source = super::source_key(context.remote_addr.ip());
     {
         let checkpoint = gateway_state(&context.state)?.admission_checkpoint(100);
-        context.store.save_pre_auth_hot(&checkpoint)?;
+        context.store.save_admission_checkpoint(&checkpoint)?;
         gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
     }
     for index in 0..16 {
@@ -418,7 +407,6 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
             &source,
             frame.pre_auth_cookie.as_deref(),
             &context.state,
-            &context.store,
             || UNIX_EPOCH + Duration::from_secs(101),
         )?;
         assert_eq!(challenge.is_some(), index > 0);
@@ -426,7 +414,7 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
     // The committed clock floor survives even if every recent Open was lost.
     // A stalled checkpoint worker fails closed after its reservation expires.
     assert!(
-        super::admit_with_clock(&source, None, &context.state, &context.store, || UNIX_EPOCH
+        super::admit_with_clock(&source, None, &context.state, || UNIX_EPOCH
             + Duration::from_secs(131))
         .is_err()
     );

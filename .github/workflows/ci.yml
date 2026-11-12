@@ -962,8 +962,8 @@ jobs:
       - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
         if: ${{ !cancelled() }}
         run: |
-          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix)'
-          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix)'
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state)'
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'

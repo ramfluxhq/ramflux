@@ -89,13 +89,9 @@ pub(crate) const SIGNALING_STATE_KEY: &str = "signaling_state";
 pub(crate) const GATEWAY_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("gateway_state_v1");
 pub(crate) const GATEWAY_CHALLENGE_STATE_KEY: &str = "challenge_state";
-pub(crate) const GATEWAY_SESSION_CHECKPOINT_KEY: &str = "session_checkpoint";
-pub(crate) const GATEWAY_DELIVERY_FRAME_QUEUE_KEY: &str = "delivery_frame_queue";
 pub(crate) const GATEWAY_PRE_AUTH_POLICY_KEY: &str = "pre_auth_policy";
 pub(crate) const GATEWAY_PRE_AUTH_METRICS_KEY: &str = "pre_auth_metrics";
 pub(crate) const GATEWAY_PRE_AUTH_RATE_STATE_KEY: &str = "pre_auth_rate_state";
-pub(crate) const GATEWAY_REPLAY_GUARD_STATE_KEY: &str = "replay_guard_state";
-pub(crate) const GATEWAY_RESUME_TOKEN_INDEX_KEY: &str = "resume_token_index";
 
 pub(crate) fn open_redb_with_table(
     path: impl AsRef<Path>,

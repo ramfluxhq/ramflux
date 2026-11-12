@@ -49,18 +49,11 @@ fn request_replay_keys_bind_root_and_unambiguous_tuple_fields()
 }
 
 #[test]
-fn legacy_unknown_root_replay_rows_cannot_preclaim_current_keys()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut message = envelope("next-bob-envelope", "target", DeliveryClass::OpaqueEvent);
-    message.source_device_id = "bob".into();
-    let mut guard: NodeReplayGuardState = serde_json::from_value(serde_json::json!({
-        "accepted_by_key": {"bob:next-bob-envelope:next-bob-envelope": message.created_at + 3600}
-    }))?;
-    let bob = replay_source("bob")?;
-    guard.check_envelope(&bob, &message, message.created_at)?;
-    assert_eq!(guard.len(), 2);
-    assert!(guard.accepted_entries().any(|(key, _)| key.starts_with("legacy/replay/")));
-    Ok(())
+fn old_replay_key_shapes_are_refused() {
+    let guard = serde_json::from_value::<NodeReplayGuardState>(serde_json::json!({
+        "accepted_by_key": {"bob:next-bob-envelope:next-bob-envelope": 1_760_003_600}
+    }));
+    assert!(guard.is_err());
 }
 
 #[test]
@@ -224,16 +217,113 @@ fn signed_request_capacity_is_root_scoped_and_survives_restore()
     let auth = gateway_auth_frame(&open, "capacity-request", 1_760_000_000)?;
     let bob = replay_source("bob")?;
     let mut guard = NodeReplayGuardState::new();
-    for index in 0..crate::replay_guard::MAX_REQUESTS_PER_DEVICE {
+    for index in 0..crate::replay_guard::GATEWAY_REPLAY_SHARE {
         let mut request = auth.signed_request.clone();
         request.request_id = format!("capacity-{index}");
-        guard.check_signed_request(&bob, &request, 1_760_000_001)?;
+        guard.check_gateway_signed_request(&bob, &request, 1_760_000_001)?;
     }
     let mut guard: NodeReplayGuardState = serde_json::from_slice(&serde_json::to_vec(&guard)?)?;
-    assert!(guard.check_signed_request(&bob, &auth.signed_request, 1_760_000_001).is_err());
+    assert!(guard.check_gateway_signed_request(&bob, &auth.signed_request, 1_760_000_001).is_err());
     let root = ramflux_crypto::create_identity_root("mallory", [0xa1; 32]);
     let branch = ramflux_crypto::create_device_branch("mallory", "bob", 1, [0xa2; 32]);
     let mallory = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-    guard.check_signed_request(&mallory, &auth.signed_request, 1_760_000_001)?;
+    guard.check_gateway_signed_request(&mallory, &auth.signed_request, 1_760_000_001)?;
+    Ok(())
+}
+
+#[test]
+fn router_envelopes_ignore_gateway_replay_capacity() -> Result<(), Box<dyn std::error::Error>> {
+    let bob = replay_source("bob")?;
+    let mut message = envelope("router-beyond-gateway-cap", "target", DeliveryClass::OpaqueEvent);
+    message.source_device_id = "bob".into();
+    let mut guard = NodeReplayGuardState::new();
+    // Exercise the exact r1 rejection boundary; these current request keys remain live.
+    for index in 0..262_144_u64 {
+        let mut digest = [0_u8; 32];
+        digest.get_mut(..8).ok_or("digest prefix")?.copy_from_slice(&index.to_be_bytes());
+        guard.restore_accepted(
+            format!("request/v2/{}", ramflux_protocol::encode_base64url(digest)),
+            message.created_at + 3600,
+        );
+    }
+    let admitted = guard.accept_envelope_once(&bob, &message, message.created_at);
+    assert!(
+        matches!(admitted, Ok(true)),
+        "gateway quota leaked into router envelope admission: {admitted:?}"
+    );
+    assert!(!guard.accept_envelope_once(&bob, &message, message.created_at)?);
+    Ok(())
+}
+
+#[test]
+fn gateway_root_admission_preserves_honest_auth_and_submit_after_saturation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join(format!(
+        "gateway-root-shares-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let now = 1_760_000_000;
+    let open = gateway_open_frame("bob", "honest-initial");
+    let auth = gateway_auth_frame(&open, "honest-initial", now)?;
+    let registered = gateway_registered_key(&open)?;
+    let mut state = GatewayState::new();
+    let store = GatewayRedbStore::open(&path)?;
+    let honest = store.authenticate(&mut state, &open, &auth, now + 1, &registered)?;
+    for index in 0..crate::replay_guard::GATEWAY_REPLAY_ROOTS - 1 {
+        let seed = u8::try_from(index + 80)?;
+        let root = ramflux_crypto::create_identity_root("admitted-attacker", [seed; 32]);
+        let branch =
+            ramflux_crypto::create_device_branch("admitted-attacker", "bob", 1, [seed; 32]);
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
+        let mut request = auth.signed_request.clone();
+        request.request_id = format!("attacker-{index}");
+        state.replay_guard_state_mut().check_gateway_signed_request(&source, &request, now + 1)?;
+        store.save_auth_replay(&source, &request, now + 1)?;
+    }
+    let outsider_root = ramflux_crypto::create_identity_root("unallocated", [241; 32]);
+    let outsider_branch = ramflux_crypto::create_device_branch("unallocated", "bob", 1, [242; 32]);
+    let outsider =
+        ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&outsider_root, &outsider_branch)?;
+    assert!(matches!(
+        state.replay_guard_state_mut().check_gateway_signed_request(
+            &outsider,
+            &auth.signed_request,
+            now + 1
+        ),
+        Err(NodeCoreError::GatewayReplayCapacity)
+    ));
+    let next_open = gateway_open_frame("bob", "honest-reauth");
+    let next_auth = gateway_auth_frame(&next_open, "honest-reauth", now)?;
+    store.authenticate(&mut state, &next_open, &next_auth, now + 1, &registered)?;
+    let mut submit = auth.signed_request.clone();
+    submit.request_id = "honest-submit".into();
+    submit.path = "/gateway/session/own-device-fanout".into();
+    state.replay_guard_state_mut().check_gateway_signed_request(&honest, &submit, now + 1)?;
+    store.save_auth_replay(&honest, &submit, now + 1)?;
+    drop(store);
+    let store = GatewayRedbStore::open(&path)?;
+    let mut restored = store.load_state()?.ok_or("root shares missing")?;
+    let late = now + ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS + 1;
+    let mut fresh = submit.clone();
+    fresh.created_at = late;
+    fresh.expires_at = late + 60;
+    fresh.request_id = "honest-after-expiry".into();
+    assert!(matches!(
+        restored.replay_guard_state_mut().check_gateway_signed_request(&outsider, &fresh, late),
+        Err(NodeCoreError::GatewayReplayCapacity)
+    ));
+    restored.replay_guard_state_mut().check_gateway_signed_request(&honest, &fresh, late)?;
+    store.save_auth_replay(&honest, &fresh, late)?;
+    drop(store);
+    let store = GatewayRedbStore::open(&path)?;
+    let mut restored = store.load_state()?.ok_or("reserved roots lost on restart")?;
+    assert!(matches!(
+        restored.replay_guard_state_mut().check_gateway_signed_request(&outsider, &fresh, late),
+        Err(NodeCoreError::GatewayReplayCapacity)
+    ));
+    fresh.request_id = "honest-after-second-restart".into();
+    restored.replay_guard_state_mut().check_gateway_signed_request(&honest, &fresh, late)?;
+    drop(store);
+    std::fs::remove_file(path)?;
     Ok(())
 }

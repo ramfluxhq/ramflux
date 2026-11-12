@@ -372,3 +372,94 @@ async fn privacy_controls(fixture: &Fixture) -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires same-tree router; explicit gateway admission CI row"]
+async fn gateway_transport_auth_does_not_snapshot_state() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        use std::{sync::mpsc, time::UNIX_EPOCH};
+        let fixture = Fixture::new().await?;
+        let now = ramflux_node_core::now_unix_seconds();
+        let checkpoint = crate::gateway_state(&fixture.context.state)?.admission_checkpoint(now);
+        fixture.context.store.save_admission_checkpoint(&checkpoint)?;
+        crate::gateway_state(&fixture.context.state)?.install_admission_checkpoint(&checkpoint);
+        let before_full = fixture.context.store.full_snapshot_commit_count();
+        let before_commits = fixture.context.store.durable_commit_count();
+        let mut client = fixture.connect(Route::Tcp, "127.0.0.88").await?;
+        let open = open("admission-cost", 1, None)?;
+        let signature = auth(&open, [32; 32])?;
+        established(&client.exchange(open, signature).await?)?;
+        assert_eq!(
+            fixture.context.store.full_snapshot_commit_count(),
+            before_full,
+            "real auth wiring wrote a whole-state snapshot"
+        );
+        assert_eq!(fixture.context.store.durable_commit_count() - before_commits, 2);
+        let (entered, observed) = mpsc::channel();
+        let (release, waiting) = mpsc::channel();
+        fixture.context.store.pause_next_admission_commit(entered, waiting)?;
+        let listener = support::listener_context(&fixture.context);
+        let worker = std::thread::spawn(move || {
+            crate::retention::checkpoint_once_at(
+                &listener,
+                UNIX_EPOCH + Duration::from_secs(now + 10),
+            )
+            .map_err(|error| error.to_string())
+        });
+        observed.recv_timeout(Duration::from_secs(10))?;
+        assert!(
+            crate::gateway_state(&fixture.context.state)?
+                .observe_admission_checkpoint_health(now + 31)
+        );
+        let refused = crate::pre_auth::admit_with_clock(
+            "outage-source",
+            None,
+            &fixture.context.state,
+            || UNIX_EPOCH + Duration::from_secs(now + 31),
+        )
+        .err()
+        .map(|error| error.to_string());
+        assert_eq!(refused.as_deref(), Some("checkpoint_unavailable"));
+        client
+            .stream
+            .send_frame(&serde_json::to_vec(&ramflux_node_core::GatewayClientFrame::Heartbeat {
+                now: 7331,
+            })?)
+            .await?;
+        let bytes = client.stream.recv_frame().await?;
+        assert!(
+            matches!(
+                serde_json::from_slice::<GatewayServerFrame>(&bytes)?,
+                GatewayServerFrame::Heartbeat { now: 7331 }
+            ),
+            "established heartbeat stalled"
+        );
+        release.send(())?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("checkpoint worker panicked"))?
+            .map_err(anyhow::Error::msg)?;
+        assert!(
+            !crate::gateway_state(&fixture.context.state)?
+                .observe_admission_checkpoint_health(now + 32)
+        );
+        assert!(
+            crate::pre_auth::admit_with_clock(
+                "recovered-source",
+                None,
+                &fixture.context.state,
+                || UNIX_EPOCH + Duration::from_secs(now + 32)
+            )?
+            .is_none()
+        );
+        assert_eq!(fixture.context.store.full_snapshot_commit_count(), before_full);
+        fixture.context.store.save_state(&*crate::gateway_state(&fixture.context.state)?)?;
+        assert_eq!(
+            fixture.context.store.full_snapshot_commit_count(),
+            before_full + 1,
+            "full snapshot calibration"
+        );
+        Ok(())
+    })
+    .await?
+}

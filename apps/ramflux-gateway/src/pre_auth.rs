@@ -51,9 +51,6 @@ pub(crate) fn configure(
         state.configure_pre_auth_cookie_key(std::path::Path::new(&path))?;
     }
     state.validate_pre_auth_configuration()?;
-    if state.pre_auth_migration_required() {
-        crate::ingress_log::record(crate::ingress_log::Event::LegacyMigration);
-    }
     Ok(())
 }
 
@@ -62,16 +59,14 @@ pub(crate) fn admit(
     peer: IpAddr,
     cookie: Option<&str>,
     state: &std::sync::Arc<std::sync::Mutex<ramflux_node_core::GatewayState>>,
-    store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    admit_with_clock(&source_key(peer), cookie, state, store, std::time::SystemTime::now)
+    admit_with_clock(&source_key(peer), cookie, state, std::time::SystemTime::now)
 }
 
 pub(crate) fn admit_with_clock(
     source: &str,
     cookie: Option<&str>,
     state: &std::sync::Arc<std::sync::Mutex<ramflux_node_core::GatewayState>>,
-    _store: &ramflux_node_core::GatewayRedbStore,
     clock: impl FnOnce() -> std::time::SystemTime,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
     let mut gateway = crate::gateway_state(state)?;

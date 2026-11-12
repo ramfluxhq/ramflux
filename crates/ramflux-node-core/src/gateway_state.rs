@@ -3,19 +3,23 @@
 
 #![allow(unused_imports)]
 
-#[path = "gateway_admission_store.rs"]
-mod admission_store;
+#[path = "gateway_replay_journal.rs"]
+mod replay_journal;
+#[path = "gateway_session_overlay.rs"]
+mod session_overlay;
+pub use session_overlay::GatewaySessionCheckpoint;
 #[path = "gateway_pre_auth.rs"]
 mod pre_auth_state;
+#[path = "gateway_store_format.rs"]
+mod store_format;
+pub use pre_auth_state::GatewayAdmissionCheckpoint;
 
 use crate::{
-    GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_DELIVERY_FRAME_QUEUE_KEY, GATEWAY_PRE_AUTH_METRICS_KEY,
-    GATEWAY_PRE_AUTH_POLICY_KEY, GATEWAY_PRE_AUTH_RATE_STATE_KEY, GATEWAY_REPLAY_GUARD_STATE_KEY,
-    GATEWAY_RESUME_TOKEN_INDEX_KEY, GATEWAY_SESSION_CHECKPOINT_KEY, GATEWAY_STATE_TABLE,
-    GatewayPreAuthChallengeResponse, GatewayPreAuthDecision, GatewayPreAuthMetrics,
-    GatewayPreAuthPolicy, NodeCoreError, NodeReplayGuardState, PRE_AUTH_PROTOCOL_VERSION,
-    PreAuthChallenge, load_snapshot, open_redb_with_table, save_snapshot, save_snapshot_batch,
-    serialize_snapshot_value,
+    GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_PRE_AUTH_METRICS_KEY, GATEWAY_PRE_AUTH_POLICY_KEY,
+    GATEWAY_PRE_AUTH_RATE_STATE_KEY, GATEWAY_STATE_TABLE, GatewayPreAuthChallengeResponse,
+    GatewayPreAuthDecision, GatewayPreAuthMetrics, GatewayPreAuthPolicy, NodeCoreError,
+    NodeReplayGuardState, PRE_AUTH_PROTOCOL_VERSION, PreAuthChallenge, load_snapshot,
+    open_redb_with_table, save_snapshot, save_snapshot_batch, serialize_snapshot_value,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use redb::{ReadableDatabase, TableDefinition};
@@ -103,7 +107,11 @@ pub struct GatewayState {
     #[serde(default)]
     pre_auth_handshakes_by_source_ip: BTreeMap<String, Vec<u64>>,
     #[serde(skip)]
-    pre_auth_legacy: bool,
+    pre_auth_policy_revision: u64,
+    #[serde(skip)]
+    pre_auth_checkpoint_stalled: bool,
+    #[serde(skip)]
+    retention_cursors: [Option<String>; 3],
     #[serde(skip)]
     pre_auth_expiry: BTreeSet<(u64, String)>,
     #[serde(skip)]
@@ -139,6 +147,10 @@ impl GatewayState {
         policy: GatewayPreAuthPolicy,
     ) -> Result<(), NodeCoreError> {
         pre_auth_state::validate_policy(&policy)?;
+        self.pre_auth_policy_revision = self
+            .pre_auth_policy_revision
+            .checked_add(1)
+            .ok_or(NodeCoreError::PreAuthConfigInvalid)?;
         self.pre_auth_policy = policy;
         self.trim_pre_auth_debt();
         Ok(())
@@ -151,12 +163,6 @@ impl GatewayState {
                 events.drain(..events.len() - rate);
             }
         }
-    }
-
-    /// Whether opaque legacy debt still requires an explicit migration.
-    #[must_use]
-    pub const fn pre_auth_migration_required(&self) -> bool {
-        self.pre_auth_legacy
     }
 
     /// Narrow predicate for causal admission observers; does not expose source data in logs.
@@ -430,6 +436,45 @@ impl GatewayState {
         Some(metadata.clone())
     }
 
+    /// Visit at most 64 rows in each metadata family; the timer never scans all sessions.
+    pub fn prune_retained_sessions_bounded(
+        &mut self,
+        now: u64,
+        window: u64,
+        mut active: impl FnMut(&GatewaySession) -> bool,
+    ) {
+        self.replay_guard_state.prune(i64::try_from(now).unwrap_or(i64::MAX));
+        for id in next_retention_keys(&self.sessions_by_id, &mut self.retention_cursors[0]) {
+            if self.sessions_by_id.get(&id).is_some_and(|session| {
+                session.lifecycle == GatewaySessionLifecycle::Closed
+                    || (!active(session) && now.saturating_sub(session.last_heartbeat_at) > window)
+            }) {
+                self.sessions_by_id.remove(&id);
+                self.frames_by_session.remove(&id);
+            }
+        }
+        for hash in
+            next_retention_keys(&self.resume_token_index_by_hash, &mut self.retention_cursors[1])
+        {
+            if self.resume_token_index_by_hash.get(&hash).is_some_and(|token| {
+                !self.sessions_by_id.contains_key(&token.session_id)
+                    || now < token.issued_at
+                    || now.saturating_sub(token.issued_at) > window
+            }) {
+                self.resume_token_index_by_hash.remove(&hash);
+            }
+        }
+        for id in next_retention_keys(&self.challenges_by_id, &mut self.retention_cursors[2]) {
+            if self
+                .challenges_by_id
+                .get(&id)
+                .is_some_and(|challenge| challenge.used || challenge.expires_at <= now)
+            {
+                self.challenges_by_id.remove(&id);
+            }
+        }
+    }
+
     /// Expire disconnected/closed sessions, their frame queues, challenges and resume indexes.
     pub fn prune_retained_sessions(
         &mut self,
@@ -465,6 +510,19 @@ impl GatewayState {
     pub fn queued_frame_count(&self, session_id: &str) -> usize {
         self.frames_by_session.get(session_id).map_or(0, Vec::len)
     }
+}
+
+fn next_retention_keys<T>(rows: &BTreeMap<String, T>, cursor: &mut Option<String>) -> Vec<String> {
+    let keys: Vec<String> = match cursor.as_ref() {
+        Some(start) => rows
+            .range((std::ops::Bound::Excluded(start.clone()), std::ops::Bound::Unbounded))
+            .take(64)
+            .map(|(key, _)| key.clone())
+            .collect(),
+        None => rows.keys().take(64).cloned().collect(),
+    };
+    *cursor = if keys.len() == 64 { keys.last().cloned() } else { None };
+    keys
 }
 
 #[must_use]
@@ -577,6 +635,9 @@ fn write_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
 
 pub struct GatewayRedbStore {
     db: redb::Database,
+    write_gate: std::sync::Mutex<()>,
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    admission_commit_pause: std::sync::Mutex<Option<AdmissionCommitPause>>,
     #[cfg(any(test, feature = "durability-test-hooks"))]
     fail_pre_auth_commit: std::sync::atomic::AtomicBool,
     #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -585,13 +646,127 @@ pub struct GatewayRedbStore {
     full_snapshot_commits: std::sync::atomic::AtomicUsize,
 }
 
+#[cfg(any(test, feature = "durability-test-hooks"))]
+struct AdmissionCommitPause {
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// Acquire before the gateway state mutex; durable I/O then happens after releasing state.
+pub struct GatewayStoreWriter<'a> {
+    store: &'a GatewayRedbStore,
+    _guard: std::sync::MutexGuard<'a, ()>,
+}
+
+impl GatewayStoreWriter<'_> {
+    /// # Errors
+    /// Returns storage errors; caller must release its state lock before committing.
+    pub fn save_auth_replay(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &ramflux_protocol::SignedRequest,
+        now: i64,
+    ) -> Result<(), NodeCoreError> {
+        self.store.save_auth_replay_unlocked(source, request, now)
+    }
+    /// # Errors
+    /// Returns invalid snapshot, stale policy or storage errors.
+    pub fn save_admission_checkpoint(
+        &self,
+        checkpoint: &GatewayAdmissionCheckpoint,
+    ) -> Result<(), NodeCoreError> {
+        self.store.save_admission_checkpoint_unlocked(checkpoint)
+    }
+    /// # Errors
+    /// Returns serialization or storage errors.
+    pub fn save_session_checkpoint(
+        &self,
+        checkpoint: &GatewaySessionCheckpoint,
+    ) -> Result<(), NodeCoreError> {
+        self.store.save_session_checkpoint_unlocked(checkpoint)
+    }
+    /// Remove at most 64 expired session rows and 64 token rows outside the state lock.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn prune_session_rows(&self, now: u64, window: u64) -> Result<(), NodeCoreError> {
+        self.store.prune_session_rows_unlocked(now, window)
+    }
+    /// # Errors
+    /// Returns serialization or storage errors for an explicit full checkpoint.
+    pub fn save_state(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
+        self.store.save_state_unlocked(state)
+    }
+}
+
 impl GatewayRedbStore {
+    /// Serialize durable writers without blocking ordinary state operations on disk I/O.
+    /// # Errors
+    /// Returns an error if a writer panicked while owning the serialization gate.
+    pub fn write_guard(&self) -> Result<GatewayStoreWriter<'_>, NodeCoreError> {
+        let guard = self
+            .write_gate
+            .lock()
+            .map_err(|_| NodeCoreError::Redb("gateway writer poisoned".into()))?;
+        Ok(GatewayStoreWriter { store: self, _guard: guard })
+    }
+
+    /// Pause one real checkpoint after its writes and before its durable commit.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    /// Pause the next checkpoint at its commit barrier.
+    /// # Errors
+    /// Returns a poisoned test-hook mutex error.
+    pub fn pause_next_admission_commit(
+        &self,
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), NodeCoreError> {
+        *self
+            .admission_commit_pause
+            .lock()
+            .map_err(|_| NodeCoreError::Redb("checkpoint hook poisoned".into()))? =
+            Some(AdmissionCommitPause { started, release });
+        Ok(())
+    }
+
+    fn record_incremental_commit(&self) {
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        self.durable_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn before_admission_commit(&self) -> Result<(), NodeCoreError> {
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        {
+            if self.fail_pre_auth_commit.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
+            }
+            let pause = self
+                .admission_commit_pause
+                .lock()
+                .map_err(|_| NodeCoreError::Redb("checkpoint hook poisoned".into()))?
+                .take();
+            if let Some(pause) = pause {
+                pause
+                    .started
+                    .send(())
+                    .map_err(|_| NodeCoreError::Redb("checkpoint observer gone".into()))?;
+                pause
+                    .release
+                    .recv()
+                    .map_err(|_| NodeCoreError::Redb("checkpoint release gone".into()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
-        let db = open_redb_with_table(path, GATEWAY_STATE_TABLE)?;
+        let db = store_format::open(path)?;
         Ok(Self {
             db,
+            write_gate: std::sync::Mutex::new(()),
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            admission_commit_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "durability-test-hooks"))]
             fail_pre_auth_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -603,26 +778,19 @@ impl GatewayRedbStore {
 
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
-    /// Once the replay journal is active, callers commit signed-request evidence
-    /// with `authenticate` or `save_auth_replay`; this checkpoints other state only.
+    /// Callers commit signed-request evidence with `save_auth_replay`; this explicit
+    /// checkpoint never serializes or writes the replay map.
     pub fn save_state(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
+        self.write_guard()?.save_state(state)
+    }
+
+    fn save_state_unlocked(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
         let mut entries = vec![
             (GATEWAY_CHALLENGE_STATE_KEY, serialize_snapshot_value(&state.challenges_by_id)?),
-            (GATEWAY_SESSION_CHECKPOINT_KEY, serialize_snapshot_value(&state.sessions_by_id)?),
-            (GATEWAY_DELIVERY_FRAME_QUEUE_KEY, serialize_snapshot_value(&state.frames_by_session)?),
-            (
-                GATEWAY_RESUME_TOKEN_INDEX_KEY,
-                serialize_snapshot_value(&state.resume_token_index_by_hash)?,
-            ),
+            ("gateway_initialized_v2", b"true".to_vec()),
         ];
-        if !self.replay_journal_active()? {
-            entries.push((
-                GATEWAY_REPLAY_GUARD_STATE_KEY,
-                serialize_snapshot_value(&state.replay_guard_state)?,
-            ));
-        }
         entries.extend(state.pre_auth_entries()?);
-        self.save_full_gateway_entries(&entries)?;
+        self.save_full_gateway_entries(&entries, state)?;
         #[cfg(any(test, feature = "durability-test-hooks"))]
         self.full_snapshot_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -631,6 +799,7 @@ impl GatewayRedbStore {
     /// # Errors
     /// Returns an error when policy and admission/legacy clock state cannot be committed together.
     pub fn save_pre_auth_hot(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
+        let _writer = self.write_guard()?;
         self.save_gateway_entries(&state.pre_auth_entries()?)
     }
 
@@ -685,10 +854,10 @@ impl GatewayRedbStore {
         &self,
         config: Option<&crate::GatewayPreAuthConfig>,
     ) -> Result<Option<GatewayState>, NodeCoreError> {
-        let sessions =
-            load_snapshot(&self.db, GATEWAY_STATE_TABLE, GATEWAY_SESSION_CHECKPOINT_KEY)?;
-        let initialized = sessions.is_some();
-        let sessions_by_id = sessions.unwrap_or_default();
+        let saved_policy: Option<GatewayPreAuthPolicy> =
+            load_snapshot(&self.db, GATEWAY_STATE_TABLE, GATEWAY_PRE_AUTH_POLICY_KEY)?;
+        let initialized = saved_policy.is_some();
+        let sessions_by_id = self.load_sessions()?;
         let mut state = GatewayState {
             challenges_by_id: load_snapshot(
                 &self.db,
@@ -697,46 +866,27 @@ impl GatewayRedbStore {
             )?
             .unwrap_or_default(),
             sessions_by_id,
-            frames_by_session: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_DELIVERY_FRAME_QUEUE_KEY,
-            )?
-            .unwrap_or_default(),
-            pre_auth_policy: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_PRE_AUTH_POLICY_KEY,
-            )?
-            .unwrap_or_default(),
+            frames_by_session: self.load_frames()?,
+            pre_auth_policy: saved_policy.unwrap_or_default(),
             pre_auth_metrics: GatewayPreAuthMetrics::default(),
             pre_auth_handshakes_by_source_ip: BTreeMap::new(),
             pre_auth_time_floor: 0,
             pre_auth_cookie_key: None,
-            pre_auth_legacy: false,
+            pre_auth_policy_revision: 0,
+            pre_auth_checkpoint_stalled: false,
+            retention_cursors: [None, None, None],
             pre_auth_expiry: BTreeSet::new(),
             pre_auth_expiry_by_source: BTreeMap::new(),
             pre_auth_runtime_deadline: None,
             pre_auth_restart_until: 0,
-            replay_guard_state: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_REPLAY_GUARD_STATE_KEY,
-            )?
-            .unwrap_or_default(),
-            resume_token_index_by_hash: load_snapshot(
-                &self.db,
-                GATEWAY_STATE_TABLE,
-                GATEWAY_RESUME_TOKEN_INDEX_KEY,
-            )?
-            .unwrap_or_default(),
+            replay_guard_state: NodeReplayGuardState::new(),
+            resume_token_index_by_hash: self.load_tokens()?,
         };
         if let Some(config) = config {
             state.configure_pre_auth_policy(config)?;
         } else if pre_auth_state::validate_policy(&state.pre_auth_policy).is_err() {
             state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig::default())?;
         }
-        self.load_session_overlay(&mut state)?;
         self.load_replay_journal(&mut state)?;
         self.load_pre_auth_admission(&mut state)?;
         state.trim_pre_auth_debt();
@@ -744,7 +894,6 @@ impl GatewayRedbStore {
             && state.sessions_by_id.is_empty()
             && state.replay_guard_state.is_empty()
             && state.pre_auth_time_floor == 0
-            && !state.pre_auth_legacy
             && state.pre_auth_handshakes_by_source_ip.is_empty()
             && state.pre_auth_metrics == GatewayPreAuthMetrics::default()
         {

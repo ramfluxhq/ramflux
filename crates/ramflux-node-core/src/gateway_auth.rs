@@ -124,6 +124,6 @@ pub fn validate_gateway_auth_with_replay(
     {
         return Err(NodeCoreError::ItestHttp("gateway root identity mismatch".into()));
     }
-    replay_guard.check_signed_request(&source, &auth.signed_request, now)?;
+    replay_guard.check_gateway_signed_request(&source, &auth.signed_request, now)?;
     Ok(source)
 }

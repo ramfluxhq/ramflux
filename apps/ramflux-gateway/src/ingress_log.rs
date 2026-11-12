@@ -14,19 +14,17 @@ const SUMMARY_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) enum Event {
     Failure,
     NoChannelBinding,
-    LegacyMigration,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(crate) struct Counts {
     pub failures: u64,
     pub no_channel_binding: u64,
-    pub legacy_migrations: u64,
 }
 
 #[derive(Default)]
 struct Counters {
-    totals: [AtomicU64; 3],
+    totals: [AtomicU64; 2],
     last_summary: Mutex<Option<Instant>>,
 }
 
@@ -35,7 +33,6 @@ impl Counters {
         Counts {
             failures: self.totals[0].load(Ordering::Relaxed),
             no_channel_binding: self.totals[1].load(Ordering::Relaxed),
-            legacy_migrations: self.totals[2].load(Ordering::Relaxed),
         }
     }
     fn record_at(&self, event: Event, now: Instant) -> Option<Counts> {
@@ -64,7 +61,6 @@ pub(crate) fn record(event: Event) {
         tracing::warn!(
             failures = counts.failures,
             no_channel_binding = counts.no_channel_binding,
-            legacy_migrations = counts.legacy_migrations,
             "gateway ingress aggregate summary"
         );
     }
@@ -84,10 +80,7 @@ mod tests {
         assert!(
             counters.record_at(Event::NoChannelBinding, now + Duration::from_secs(29)).is_none()
         );
-        let counts = counters.record_at(Event::LegacyMigration, now + SUMMARY_INTERVAL);
-        assert!(matches!(
-            counts,
-            Some(Counts { failures: 101, no_channel_binding: 1, legacy_migrations: 1 })
-        ));
+        let counts = counters.record_at(Event::Failure, now + SUMMARY_INTERVAL);
+        assert!(matches!(counts, Some(Counts { failures: 102, no_channel_binding: 1 })));
     }
 }

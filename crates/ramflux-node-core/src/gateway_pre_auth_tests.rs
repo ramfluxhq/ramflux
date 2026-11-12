@@ -232,19 +232,8 @@ fn bounded_snapshots_and_legacy() -> Result {
         )?;
     }
     tx.commit()?;
-    let mut restored = fixture.restored()?;
-    assert!(matches!(
-        restored.validate_pre_auth_configuration(),
-        Err(NodeCoreError::PreAuthMigrationRequired)
-    ));
-    restored.pre_auth_policy.enabled = false;
-    fixture.store.save_state(&restored)?;
-    let mut restored = fixture.restored()?;
-    restored.pre_auth_policy.enabled = true;
-    assert!(matches!(
-        restored.validate_pre_auth_configuration(),
-        Err(NodeCoreError::PreAuthMigrationRequired)
-    ));
+    assert!(matches!(fixture.store.load_state(), Err(NodeCoreError::GatewayStateResetRequired)));
+
     Ok(())
 }
 fn configuration_bounds() -> Result {
@@ -439,72 +428,6 @@ fn preauth_runtime_policy_and_debt_commit_atomically_across_restart() -> Result 
 }
 
 #[test]
-fn preauth_legacy_disabled_clock_persists_without_promoting_debt() -> Result {
-    let path = std::env::temp_dir().join(format!(
-        "preauth-legacy-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
-    let opaque = br#"{"client-claim":[999999]}"#;
-    {
-        let store = GatewayRedbStore::open(&path)?;
-        let mut state = GatewayState::new();
-        store.save_state(&state)?;
-        let tx = store.db.begin_write()?;
-        {
-            let mut table = tx.open_table(GATEWAY_STATE_TABLE)?;
-            table.remove(KEY)?;
-            table.insert(crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY, opaque.as_slice())?;
-        }
-        tx.commit()?;
-        state = store.load_state()?.ok_or("legacy state missing")?;
-        assert!(state.pre_auth_migration_required());
-        state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(100))?;
-        store.fail_next_pre_auth_commit();
-        assert!(store.save_pre_auth_hot(&state).is_err());
-        store.save_pre_auth_hot(&state)?;
-    }
-    {
-        let store = GatewayRedbStore::open(&path)?;
-        let mut state = store.load_state()?.ok_or("legacy restart state missing")?;
-        assert!(state.pre_auth_migration_required());
-        assert!(matches!(
-            state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(99)),
-            Err(NodeCoreError::PreAuthClockRollback)
-        ));
-        let read = store.db.begin_read()?;
-        let table = read.open_table(GATEWAY_STATE_TABLE)?;
-        assert_eq!(
-            table.get(crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY)?.ok_or("legacy debt lost")?.value(),
-            opaque
-        );
-        assert!(table.get(KEY)?.is_none(), "legacy debt must not become trusted admission");
-        drop(table);
-        drop(read);
-        state.record_slowloris_timeout();
-        store.save_pre_auth_hot(&state)?;
-        let enabled = crate::GatewayPreAuthConfig {
-            enabled: true,
-            per_source_ip_handshake_rate: 1,
-            ..Default::default()
-        };
-        let enabled =
-            store.load_state_with_pre_auth_config(&enabled)?.ok_or("migration flag missing")?;
-        assert!(matches!(
-            enabled.validate_pre_auth_configuration(),
-            Err(NodeCoreError::PreAuthMigrationRequired)
-        ));
-    }
-    {
-        let store = GatewayRedbStore::open(&path)?;
-        let state = store.load_state()?.ok_or("metrics reopen")?;
-        assert_eq!(state.pre_auth_metrics.slowloris_auth_timeout, 1);
-        assert_eq!(state.pre_auth_time_floor, 100);
-    }
-    std::fs::remove_file(path)?;
-    Ok(())
-}
-
-#[test]
 fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
     let path = std::env::temp_dir().join(format!(
         "preauth-cooldown-{}.redb",
@@ -519,7 +442,7 @@ fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
             window_seconds: 3600,
             ..GatewayPreAuthPolicy::default()
         })?;
-        store.save_pre_auth_hot(&state.admission_checkpoint(100))?;
+        store.save_admission_checkpoint(&state.admission_checkpoint(100))?;
     }
     {
         let store = GatewayRedbStore::open(&path)?;
@@ -527,7 +450,7 @@ fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
         let mut config = crate::GatewayPreAuthConfig::from(state.pre_auth_policy());
         config.window_seconds = 1;
         state.configure_pre_auth_policy(&config)?;
-        store.save_pre_auth_hot(&state.admission_checkpoint(131))?;
+        store.save_admission_checkpoint(&state.admission_checkpoint(131))?;
     }
     let store = GatewayRedbStore::open(&path)?;
     let mut state = store.load_state()?.ok_or("missing second reservation")?;
@@ -544,22 +467,162 @@ fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
 }
 
 #[test]
-fn disabled_admission_restarts_inside_the_checkpoint_reservation() -> Result {
+fn disabled_admission_refuses_time_below_the_checkpoint_reservation() -> Result {
     let fixture = Store::new()?;
-    fixture.store.save_pre_auth_hot(&GatewayState::new().admission_checkpoint(100))?;
+    fixture.store.save_admission_checkpoint(&GatewayState::new().admission_checkpoint(100))?;
     let mut restored = fixture.restored()?;
     let source = source(1);
+    assert!(matches!(
+        restored.check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(101)),
+        Err(NodeCoreError::PreAuthClockRollback)
+    ));
     assert_eq!(
         restored.check_pre_auth_system_time(
             &source,
             None,
-            UNIX_EPOCH + Duration::from_secs(101)
+            UNIX_EPOCH + Duration::from_secs(130)
         )?,
         Decision::Accepted
     );
-    assert!(matches!(
-        restored.check_pre_auth_system_time(&source, None, UNIX_EPOCH + Duration::from_secs(99)),
-        Err(NodeCoreError::PreAuthClockRollback)
+    Ok(())
+}
+
+#[test]
+fn restart_rejects_clock_below_committed_reservation_in_both_modes() -> Result {
+    for enabled in [false, true] {
+        let path = std::env::temp_dir().join(format!(
+            "preauth-reservation-fence-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
+        {
+            let store = GatewayRedbStore::open(&path)?;
+            let mut current = state()?;
+            current.pre_auth_policy.enabled = enabled;
+            let checkpoint = current.admission_checkpoint(100);
+            store.save_admission_checkpoint(&checkpoint)?;
+            current.install_admission_checkpoint(&checkpoint);
+            assert!(matches!(
+                current.check_pre_auth_system_time(
+                    &source(1),
+                    None,
+                    UNIX_EPOCH + Duration::from_secs(105)
+                )?,
+                Decision::Accepted
+            ));
+        }
+        let store = GatewayRedbStore::open(&path)?;
+        let mut restored = store.load_state()?.ok_or("reservation missing")?;
+        restored.set_fixture_pre_auth_cookie_key();
+        assert!(
+            matches!(
+                restored.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(102)),
+                Err(NodeCoreError::PreAuthClockRollback)
+            ),
+            "startup accepted a clock below its reservation, enabled={enabled}"
+        );
+        assert!(
+            matches!(
+                restored.check_pre_auth_system_time(
+                    &source(1),
+                    None,
+                    UNIX_EPOCH + Duration::from_secs(102)
+                ),
+                Err(NodeCoreError::PreAuthClockRollback)
+            ),
+            "Open accepted rollback, enabled={enabled}"
+        );
+        assert_eq!(restored.pre_auth_time_floor, 130);
+        drop(store);
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_checkpoint_payload_is_independent_of_sessions() -> Result {
+    let mut current = state()?;
+    current.check_pre_auth(&source(1), None, 100)?;
+    let initial = current.admission_checkpoint(100).entries()?;
+    for index in 0..2000 {
+        let id = format!("session-{index}");
+        current.open_session(crate::GatewaySession {
+            session_id: id.clone(),
+            target_delivery_id: id.clone(),
+            device_id: "device".into(),
+            opened_at: 100,
+            last_heartbeat_at: 100,
+            lifecycle: crate::GatewaySessionLifecycle::Live,
+        });
+        current.frames_by_session.insert(
+            id.clone(),
+            vec![crate::GatewayFrame::Deliver {
+                session_id: id,
+                envelope_id: "envelope".into(),
+                payload_hash: "x".repeat(4096),
+            }],
+        );
+    }
+    assert_eq!(current.admission_checkpoint(100).entries()?, initial);
+    Ok(())
+}
+
+#[test]
+fn empty_rate_zero_sources_are_reclaimed_on_reopen() -> Result {
+    let path = std::env::temp_dir().join(format!(
+        "preauth-empty-sources-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     ));
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        let mut current = state()?;
+        current.pre_auth_policy.per_source_ip_handshake_rate = 0;
+        current.pre_auth_handshakes_by_source_ip =
+            (0..4096).map(|index| (source(index), Vec::new())).collect();
+        store.save_pre_auth_hot(&current)?;
+    }
+    let store = GatewayRedbStore::open(&path)?;
+    let mut restored = store.load_state()?.ok_or("rate-zero state")?;
+    restored.set_fixture_pre_auth_cookie_key();
+    assert!(restored.pre_auth_handshakes_by_source_ip.is_empty());
+    assert!(restored.pre_auth_expiry_by_source.is_empty());
+    assert!(matches!(restored.check_pre_auth(&source(4097), None, 100)?, Decision::Challenge(_)));
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn stale_checkpoint_cannot_overwrite_newer_runtime_policy() -> Result {
+    let fixture = Store::new()?;
+    let mut current = state()?;
+    let stale = current.admission_checkpoint(100);
+    let mut replacement = current.pre_auth_policy.clone();
+    replacement.per_source_ip_handshake_rate = 2;
+    current.set_pre_auth_policy(replacement)?;
+    fixture.store.save_state(&current)?;
+    assert!(matches!(
+        fixture.store.save_admission_checkpoint(&stale),
+        Err(NodeCoreError::PreAuthCheckpointStale)
+    ));
+    assert_eq!(fixture.restored()?.pre_auth_policy.per_source_ip_handshake_rate, 2);
+    Ok(())
+}
+
+#[test]
+fn failed_checkpoint_commit_keeps_the_previous_reservation() -> Result {
+    let fixture = Store::new()?;
+    let mut current = state()?;
+    let first = current.admission_checkpoint(100);
+    fixture.store.save_admission_checkpoint(&first)?;
+    current.install_admission_checkpoint(&first);
+    let second = current.admission_checkpoint(110);
+    fixture.store.fail_next_pre_auth_commit();
+    assert!(fixture.store.save_admission_checkpoint(&second).is_err());
+    assert_eq!(current.pre_auth_runtime_deadline, Some(130));
+    assert_eq!(fixture.restored()?.pre_auth_time_floor, 130);
+    fixture.store.save_admission_checkpoint(&second)?;
+    current.install_admission_checkpoint(&second);
+    assert_eq!(current.pre_auth_runtime_deadline, Some(140));
+    assert_eq!(fixture.restored()?.pre_auth_time_floor, 140);
     Ok(())
 }

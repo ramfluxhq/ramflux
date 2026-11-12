@@ -25,7 +25,7 @@ struct BindSpec {
 
 #[derive(Clone)]
 pub(crate) struct GatewayHubEntry {
-    session_id: String,
+    pub(crate) session_id: String,
     pub(crate) token: GatewayRegistrationToken,
     pub(crate) queue: crate::push_queue::PushQueue,
     pub(crate) incarnation: Option<String>,
@@ -80,9 +80,8 @@ impl GatewaySessionHub {
             let _ = waiter.send(peer);
         }
     }
-    pub(crate) fn active_session_ids(&self) -> std::collections::BTreeSet<String> {
-        let snapshot = self.senders_by_target.blocking_lock().clone();
-        snapshot.values().map(|entry| entry.session_id.clone()).collect()
+    pub(crate) fn retention_snapshot(&self) -> Arc<Index<GatewayHubEntry>> {
+        self.senders_by_target.blocking_lock().clone()
     }
     pub(crate) async fn snapshot(&self) -> Arc<Index<GatewayHubEntry>> {
         self.senders_by_target.lock().await.clone()

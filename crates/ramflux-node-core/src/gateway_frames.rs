@@ -97,6 +97,10 @@ pub struct GatewayPreAuthMetrics {
     pub pre_auth_cookie_failed: u64,
     pub deviceproof_rate_limited: u64,
     pub slowloris_auth_timeout: u64,
+    #[serde(default)]
+    pub checkpoint_failures: u64,
+    #[serde(default)]
+    pub checkpoint_outages: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
