@@ -70,6 +70,36 @@ impl AccountDb {
     }
 }
 
+/// Restore-side retirement of a losing revision's indexed payload copies.
+/// The caller holds the merge transaction and names only content-free rows in `keep`.
+pub(super) fn retire_for_restore(
+    db: &Connection,
+    message: &str,
+    keep: &[String],
+) -> rusqlite::Result<()> {
+    if !super::message_footprint::table_exists(db, "message_footprint")? {
+        return Ok(());
+    }
+    let mut query = db.prepare("SELECT kind,locator FROM message_footprint WHERE message_id=?1")?;
+    let copies = query
+        .query_map([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    for (kind, locator) in copies {
+        retire_copy(db, &kind, &locator, keep)?;
+    }
+    if super::message_footprint::table_exists(db, "raw_inner_evidence")? {
+        db.execute("DELETE FROM raw_inner_evidence WHERE message_id=?1", [message])?;
+    }
+    db.execute("INSERT INTO runtime_privacy_maintenance VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1", [])?;
+    Ok(())
+}
+
+/// Restore-side removal of one named private actor row and its outbox copies.
+pub(super) fn retire_actor_for_restore(db: &Connection, key: &str) -> rusqlite::Result<()> {
+    retire_actor(db, key)
+}
+
 fn retire_actor(db: &Connection, key: &str) -> rusqlite::Result<()> {
     let independently_owned: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM object_reference_actor a JOIN object_message_reference m USING(reference_hash) WHERE a.state_kind=?1) OR EXISTS(SELECT 1 FROM object_payload_actor a JOIN object_retention_payload p USING(commitment) WHERE a.state_kind=?1 AND (p.owner_count>0 OR p.retention_class='standalone'))", [key], |row| row.get(0))?;
     if independently_owned {
