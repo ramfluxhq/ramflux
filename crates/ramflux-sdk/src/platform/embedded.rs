@@ -111,6 +111,32 @@ impl EmbeddedSupervisor {
         Ok(LocalBusClient::from_io(reader, writer))
     }
 
+    /// Open one dedicated in-process connection for an account-creation ceremony. The
+    /// ceremony frames and their erasing buffers are the ones the desktop socket carries;
+    /// dropping the client cancels a pending ceremony.
+    ///
+    /// # Errors
+    /// Returns an error when the supervisor is not running.
+    pub fn connect_creation(&self) -> Result<crate::LocalBusCreationClient, SdkError> {
+        Ok(crate::LocalBusCreationClient::from_stream(self.connect_stream()?))
+    }
+
+    /// Open one dedicated in-process connection for an account-recovery ceremony.
+    ///
+    /// # Errors
+    /// Returns an error when the supervisor is not running.
+    pub fn connect_recovery(&self) -> Result<crate::LocalBusRecoveryClient, SdkError> {
+        Ok(crate::LocalBusRecoveryClient::from_stream(self.connect_stream()?))
+    }
+
+    fn connect_stream(&self) -> Result<tokio::io::DuplexStream, SdkError> {
+        let running = self.running.lock().map_err(poisoned)?;
+        let Some(running) = running.as_ref() else {
+            return Err(SdkError::LocalBus("embedded supervisor is not running".to_owned()));
+        };
+        running.connector.connect()
+    }
+
     fn set_state(&self, state: LifecycleState) -> Result<(), SdkError> {
         *self.state.lock().map_err(poisoned)? = state;
         Ok(())

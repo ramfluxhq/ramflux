@@ -15,15 +15,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use ramflux_protocol::PrincipalKind;
 use ramflux_sdk::{
     EmbeddedConfig, EmbeddedSupervisor, HostLifecycle, HostPaths, LifecycleState, LocalBusClient,
-    LocalBusErrorBody, LocalBusFrame, LocalBusFrameKind, SdkError,
+    LocalBusCreationClient, LocalBusErrorBody, LocalBusFrame, LocalBusFrameKind, SdkError,
 };
 use tokio::sync::{Notify, mpsc};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{CoreError, code};
-use crate::port::{CorePort, PortRequest, PortSubscription, UpdateSink};
+use crate::ceremony::{CreatedAccount, PendingCeremony};
+use crate::port::{
+    CeremonyPort, CorePort, PortFuture, PortRequest, PortSubscription, UpdateSink,
+};
 use crate::types::{
     CoreConfig, CoreResponse, CoreState, NetworkChange, SubscribeFilter, SubscriptionEnd,
     SuspendEvidence, UpdateRow, UpdateState,
@@ -179,6 +183,35 @@ impl CorePort for EmbeddedPort {
         })
     }
 
+    fn begin_account(
+        &self,
+        display_name: String,
+        node_id: Option<String>,
+    ) -> PortFuture<(PendingCeremony, Arc<dyn CeremonyPort>)> {
+        // The ceremony has its own connection, so its secrets never share a frame, a queue or
+        // a task with ordinary requests. The in-process pipe needs no runtime of its own.
+        let client = self.supervisor.connect_creation();
+        Box::pin(async move {
+            let mut client = client.map_err(|error| lifecycle_error(&error))?;
+            let begun = match node_id.as_deref() {
+                Some(node) => {
+                    client.begin_with_node(&display_name, PrincipalKind::Human, node).await
+                }
+                None => client.begin(&display_name, PrincipalKind::Human).await,
+            };
+            let pending = begun.map_err(|error| ceremony_error(&error))?;
+            let port: Arc<dyn CeremonyPort> =
+                Arc::new(Ceremony { client: Arc::new(tokio::sync::Mutex::new(client)) });
+            Ok((
+                PendingCeremony {
+                    ceremony_id: pending.ceremony_id,
+                    expires_in_ms: pending.expires_in_ms,
+                },
+                port,
+            ))
+        })
+    }
+
     fn subscribe(
         &self,
         filter: SubscribeFilter,
@@ -208,6 +241,97 @@ impl CorePort for EmbeddedPort {
             }
         }
     }
+}
+
+/// One creation ceremony on its dedicated in-process connection. Dropping it drops the
+/// connection, which cancels a ceremony that was not confirmed.
+struct Ceremony {
+    client: Arc<tokio::sync::Mutex<LocalBusCreationClient>>,
+}
+
+impl CeremonyPort for Ceremony {
+    fn show_once(&self) -> PortFuture<String> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let phrase =
+                client.lock().await.show_once().await.map_err(|error| ceremony_error(&error))?;
+            // The erasing buffer ends here: the phrase must cross the boundary as a host
+            // string to be shown. The host shows it once and lets it go.
+            Ok(phrase.as_str().to_owned())
+        })
+    }
+
+    fn hidden_challenge(&self) -> PortFuture<Vec<u8>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let positions = client
+                .lock()
+                .await
+                .hidden_challenge()
+                .await
+                .map_err(|error| ceremony_error(&error))?;
+            Ok(positions.to_vec())
+        })
+    }
+
+    fn confirm(&self, words: Vec<String>, passphrase: String) -> PortFuture<CreatedAccount> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            // Move the host strings straight into erasing buffers.
+            let passphrase = Zeroizing::new(passphrase);
+            let mut words = words.into_iter().map(Zeroizing::new);
+            let (Some(first), Some(second), Some(third), None) =
+                (words.next(), words.next(), words.next(), words.next())
+            else {
+                return Err(CoreError::plain(code::INVALID_ARGUMENT, "exactly three words"));
+            };
+            let created = client
+                .lock()
+                .await
+                .confirm(&[first, second, third], &passphrase)
+                .await
+                .map_err(|error| ceremony_error(&error))?;
+            Ok(CreatedAccount {
+                account_id: created.account_id,
+                display_name: created.display_name,
+                state: wire_name(&created.state),
+                networking: wire_name(&created.networking),
+            })
+        })
+    }
+
+    fn cancel(&self) -> PortFuture<()> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client.lock().await.cancel().await.map_err(|error| ceremony_error(&error))
+        })
+    }
+}
+
+/// The wire name of a state enum (`unlocked`, `networking_pending`, `live`).
+fn wire_name<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(name)) => name,
+        Ok(other) => other.to_string(),
+        Err(_) => "unknown".to_owned(),
+    }
+}
+
+/// Map a ceremony failure to the stable numeric code, following the C ABI table. The variant
+/// name travels as `reason_code`; the message never contains ceremony input.
+fn ceremony_error(error: &SdkError) -> CoreError {
+    let (numeric, reason) = match error {
+        SdkError::CustodyConfirmationFailed => (code::AUTH_FAILED, "CustodyConfirmationFailed"),
+        SdkError::CustodyExpired => (code::AUTH_FAILED, "CustodyExpired"),
+        SdkError::CustodyAccountConflict => (code::AUTH_FAILED, "CustodyAccountConflict"),
+        SdkError::CustodyVaultUnavailable => (code::PERMISSION_DENIED, "CustodyVaultUnavailable"),
+        SdkError::CustodyVault(_) => (code::PERMISSION_DENIED, "CustodyVault"),
+        SdkError::NoNodeSelected => (code::TRANSPORT_UNAVAILABLE, "NoNodeSelected"),
+        SdkError::CustodySetupInvalid => (code::INVALID_ARGUMENT, "CustodySetupInvalid"),
+        SdkError::Io(_) | SdkError::LocalBus(_) => (code::TRANSPORT_UNAVAILABLE, "CarrierClosed"),
+        _ => (code::INTERNAL, "Unclassified"),
+    };
+    CoreError::from_code(numeric, error.to_string(), Some(reason.to_owned()), None)
 }
 
 struct Stream(Arc<Notify>);
@@ -427,11 +551,13 @@ fn refusal(error: Option<LocalBusErrorBody>) -> CoreError {
         "ObjectErased" => code::OBJECT_ERASED,
         "ObjectIdentityConflict" => code::OBJECT_IDENTITY_CONFLICT,
         "ObjectOwnershipUnverified" => code::OBJECT_OWNERSHIP_UNVERIFIED,
-        "CapabilityDenied" => code::CAPABILITY_REJECTED,
-        "authorization_rejected" | "GroupLeaseUnavailable" | "RemoteAppApprovalRequired" => {
-            code::PERMISSION_DENIED
-        }
-        "GrantInvalidated" => code::MCP_GRANT_REJECTED,
+        "authorization_rejected"
+        | "GroupLeaseUnavailable"
+        | "RemoteAppApprovalRequired"
+        | "CapabilityDenied"
+        | "GrantInvalidated"
+        | "CustodyVaultUnavailable"
+        | "AttachmentDeleted" => code::PERMISSION_DENIED,
         "Unavailable" | "NoNodeSelected" | "TaskDeliveryTimeout" => code::TRANSPORT_UNAVAILABLE,
         "storage_unavailable"
         | "AccountNotOpen"
