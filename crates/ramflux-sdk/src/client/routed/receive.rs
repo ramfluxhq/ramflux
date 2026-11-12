@@ -1152,7 +1152,10 @@ impl RamfluxClient {
                 opened.routing.message_id
             ))?
             .unwrap_or(false);
-        if call || delete_control || erased_reference || retired_original {
+        let self_sync = crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body)
+                .is_ok_and(|scanned| scanned.kind == 12);
+        if call || delete_control || erased_reference || retired_original || self_sync {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
             // sensitive ciphertext alongside them, including enclosing copies whose nested
             // original has been retired: committed replay needs only attribution/hash.
@@ -1186,9 +1189,8 @@ fn deferred_generated_group<'a>(
     shared: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
     body: &[u8],
 ) -> Option<&'a crate::client::shared_group::PreparedSharedGroup> {
-    shared.filter(|shared| {
-        matches!(shared, crate::client::shared_group::PreparedSharedGroup::Control(_))
-            && crate::client::target_selection::schema_v1_selected()
+    shared.filter(|_| {
+        crate::client::target_selection::schema_v1_selected()
             && ramflux_protocol::message::validation::scan_inner(body)
                 .is_ok_and(|scanned| scanned.kind == 8)
     })

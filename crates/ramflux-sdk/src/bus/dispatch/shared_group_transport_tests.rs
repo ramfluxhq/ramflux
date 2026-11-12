@@ -133,20 +133,37 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
 #[tokio::test]
 async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_frame() -> TestResult
 {
+    use crate::client::native_test_support::Fixture;
     use ramflux_protocol::group_state::{
         GroupStateChange, MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_MEMBERS, SharedGroupRole,
     };
-    let root = runtime_tests::root("group-frame-cap");
-    let mut source = runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let source = Box::pin(Fixture::new("native-group-frame-source")).await?;
+    let peer = Box::pin(Fixture::new("native-group-frame-peer")).await?;
+    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    let primary = source
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("account")?
+        .group_primary(source.vault.as_ref())?;
+    source.client.shared_group_create_with_primary(
+        "group",
+        "group-thread",
+        Some("Shared name".into()),
+        &source.config.target_delivery_id,
+        Some(&primary),
     )?;
-    let super::dm_tests::PeerFixture { peers, config, address: _, directory } =
-        super::dm_tests::peer_fixture_devices(&root, &mut source, &["device-peer-0"]).await?;
-    create_group(&source.client, peers[0].client.owned_group_actor("peer-0")?.identity)?;
-    populate_member_cap(&source.client)?;
+    source.client.shared_group_change_with_primary(
+        "group",
+        &source.config.target_delivery_id,
+        GroupStateChange::Add {
+            member: peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity,
+            role: SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    populate_member_cap(&source.client, &source.config.target_delivery_id, &primary)?;
     let state = source
         .client
         .account_db()?
@@ -160,10 +177,11 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
     )?
     .identity;
     assert!(matches!(
-        source.client.shared_group_change(
+        source.client.shared_group_change_with_primary(
             "group",
-            "sender",
-            GroupStateChange::Add { member: extra, role: SharedGroupRole::Member }
+            &source.config.target_delivery_id,
+            GroupStateChange::Add { member: extra, role: SharedGroupRole::Member },
+            Some(&primary)
         ),
         Err(SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(
@@ -171,50 +189,49 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
             )
         )))
     ));
-    let payload = source.client.shared_group_packet(&state, true)?;
+    let recipient = peer.client.owned_device_identity()?;
+    let payload = source.client.shared_group_packet_for_recipient(&state, &recipient)?;
+    assert_eq!(
+        ramflux_protocol::message::validation::scan_inner(&payload)?.outcome,
+        ramflux_protocol::message::validation::ScanOutcome::Supported
+    );
     let captured = Arc::new(Mutex::new(Vec::new()));
     let gateway = super::fixture::RecordingGateway::new(captured.clone());
     let lengths = gateway.frame_lengths.clone();
-    let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), Box::new(gateway));
-    let recipient = peers[0].client.owned_device_identity()?;
+    let mut engine =
+        GatewaySessionEngine::with_test_transport(source.config.clone(), Box::new(gateway));
     let mut message = GatewayDirectMessage {
         conversation_id: "group-thread".into(),
-        message_id: "max-state".into(),
+        message_id: RamfluxClient::shared_group_packet_message_id(&payload, "max-state")?,
         envelope_id: "max-state".into(),
-        source_principal_id: config.principal_id.clone(),
-        sender_id: config.device_id.clone(),
+        source_principal_id: source.config.principal_id.clone(),
+        sender_id: source.config.device_id.clone(),
         recipient_device_id: Some(recipient.device_id().into()),
         recipient_principal_commitment: Some(recipient.root_commitment().into()),
-        target_delivery_id: "peer-0".into(),
+        target_delivery_id: recipient.storage_key().into(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    let sealed = source
-        .client
-        .seal_routed_as(
-            &mut engine,
-            &message,
-            &payload,
-            crate::client::routed::Route::group_control("group"),
-        )
-        .await?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    engine
-        .submit_envelope(crate::dm::gateway_direct_message_envelope(&config, &message, None)?)
-        .await?;
+    let sealed = source.client.seal_routed_prepared(
+        &source.config,
+        &message,
+        &payload,
+        crate::client::routed::Route::group_control("group"),
+        crate::client::routed::SendMaterial {
+            manifest: None,
+            bundle: Some(peer.manifest.devices.first().ok_or("peer device")?.prekey_bundle.clone()),
+        },
+    )?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&source.config, &mut message, sealed, None)?;
+    engine.submit_envelope(envelope).await?;
     assert_eq!(captured.lock().map_err(|_| "capture lock")?.len(), 1);
     let state_bytes = ramflux_protocol::canonical_json_bytes(state.snapshot())?.len();
     let frame_bytes = *lengths.lock().map_err(|_| "length lock")?.last().ok_or("missing submit")?;
-    eprintln!(
-        "group cap: members={} state_bytes={state_bytes} frame_bytes={frame_bytes} budget={MAX_GROUP_STATE_BYTES}",
-        state.view().members.len()
-    );
     assert!(state_bytes <= MAX_GROUP_STATE_BYTES);
     assert!(frame_bytes <= 10 * state_bytes + 64 * 1024);
     assert!(frame_bytes <= 1024 * 1024);
-    drop((source, peers, directory));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -235,7 +252,11 @@ async fn assert_work_window_yields(source: &mut LocalBusAccountState, first: Val
     Ok(())
 }
 
-fn populate_member_cap(client: &RamfluxClient) -> TestResult {
+fn populate_member_cap(
+    client: &RamfluxClient,
+    target: &str,
+    primary: &ramflux_crypto::custody::SelfSigningKey,
+) -> TestResult {
     for index in 2..ramflux_protocol::group_state::MAX_GROUP_STATE_MEMBERS {
         let mut seed = [0xd5; 32];
         seed[..8].copy_from_slice(&u64::try_from(index)?.to_le_bytes());
@@ -250,13 +271,14 @@ fn populate_member_cap(client: &RamfluxClient) -> TestResult {
             &format!("target-{index}"),
         )?
         .identity;
-        client.shared_group_change(
+        client.shared_group_change_with_primary(
             "group",
-            "sender",
+            target,
             ramflux_protocol::group_state::GroupStateChange::Add {
                 member: identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
+            Some(primary),
         )?;
     }
     Ok(())

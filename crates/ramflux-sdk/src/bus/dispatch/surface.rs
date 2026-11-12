@@ -20,7 +20,9 @@ pub(crate) async fn dispatch_surface(
     state: &mut LocalBusDaemonState,
     _connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    dispatch_surface_inner(request, state).await.map_err(crate::surface_refusal::map_surface_error)
+    Box::pin(dispatch_surface_inner(request, state))
+        .await
+        .map_err(crate::surface_refusal::map_surface_error)
 }
 async fn dispatch_surface_inner(
     request: &LocalBusFrame,

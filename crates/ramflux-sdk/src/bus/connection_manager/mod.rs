@@ -176,6 +176,7 @@ fn new_shared(
         courier_wakes: [
             "delivery-receipts",
             "own-device-copy",
+            "self-sync",
             "contact-control",
             "surface-resync",
             "pair-reset",

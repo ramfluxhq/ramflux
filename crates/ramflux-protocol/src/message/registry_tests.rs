@@ -105,7 +105,7 @@ fn verify_approved_fields() -> TestResult {
         assert_eq!(actual, expected, "{message}.{name}");
         count += 1;
     }
-    assert_eq!(count, 513, "approved section 3.1 mapping coverage");
+    assert_eq!(count, 516, "approved section 3.1 mapping coverage");
     Ok(())
 }
 

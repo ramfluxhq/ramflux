@@ -166,6 +166,21 @@ fn validate_group_state(state: &g::GroupStateControl) -> Result<(), SdkError> {
             }
         }
         Some(g::group_control_body::Value::Transfer(transfer)) => validate_transfer(transfer),
+        Some(g::group_control_body::Value::Snapshot(snapshot)) => {
+            require_canonical(
+                snapshot.snapshot.as_ref().map(|leaf| leaf.canonical.as_slice()),
+                "group snapshot requires native state",
+            )?;
+            if snapshot.distribution.as_ref().is_some_and(|value| {
+                value.sender_key_seed.len() != 32
+                    || value.group_id.is_empty()
+                    || value.sender_id.is_empty()
+                    || value.group_key_epoch == 0
+            }) {
+                return Err(refused("group snapshot distribution incomplete"));
+            }
+            Ok(())
+        }
         None => Err(refused("group state requires a typed body")),
     }
 }

@@ -593,12 +593,22 @@ impl RamfluxClient {
                 return Err(invalid("group identity conflicts with route"));
             }
             self.require_native_operation(&source, NativeOperation::Group)?;
-            self.require_routed_group_member(group_id, entry)?;
-            if !self.group_state(group_id)?.members.contains(source.device_id()) {
+            if opened.routing.kind != Kind::GroupControl {
+                self.require_routed_group_member(group_id, entry)?;
+            }
+            if opened.routing.kind != Kind::GroupControl
+                && !self.group_state(group_id)?.members.contains(source.device_id())
+            {
                 return Err(SdkError::InboundRejected("group author lacks a current role".into()));
             }
         }
-        if matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl) {
+        if opened.routing.kind == Kind::GroupControl
+            && !(scanned.kind == 8
+                && g::Control::decode(scanned.body).is_ok_and(|control| control.operation == 4))
+        {
+            return Err(invalid("group control route requires GroupState Control"));
+        }
+        if opened.routing.kind == Kind::GroupMessage {
             self.require_routed_group_member(
                 opened.routing.group_id.as_deref().ok_or_else(|| invalid("group missing"))?,
                 entry,
@@ -622,10 +632,6 @@ impl RamfluxClient {
                     return Err(invalid("sealed group and event identity disagree"));
                 }
                 self.check_generated_group_source(group, &opened.remote_device, entry)?;
-            } else if opened.routing.kind == Kind::GroupControl {
-                return Err(SdkError::InboundPending(
-                    "generated group control executor is not yet activated".into(),
-                ));
             } else {
                 let epoch = identity
                     .as_ref()

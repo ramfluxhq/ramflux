@@ -1250,7 +1250,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             },
             distribution_base64: ramflux_protocol::encode_base64url(&distribution),
         };
-        let message = GatewayDirectMessage {
+        let mut message = GatewayDirectMessage {
             conversation_id,
             message_id: envelope_id.clone(),
             envelope_id,
@@ -1264,7 +1264,8 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             ttl: account.client.content_ttl()?,
         };
         let payload_bytes = group_distribution_payload(
-            &account.client, engine.config(), group_id, &payload)?;
+            &account.client, engine.config(), group_id, &payload, &recipient)?;
+        normalize_generated_group_distribution(&mut message, &payload_bytes)?;
         let value = send_group_sender_key_distribution_message(
             &account.client,
             &mut engine,
@@ -1315,6 +1316,7 @@ fn group_distribution_payload(
     config: &GatewaySessionConfig,
     group_id: &str,
     legacy: &SdkGroupSenderKeyDistributionEnvelope,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> Result<Vec<u8>, SdkError> {
     if let Some(state) = client.account_db()?.shared_group_state(group_id)? {
         let state = ramflux_crypto::resign_group_state_snapshot(
@@ -1322,10 +1324,26 @@ fn group_distribution_payload(
             &client.owned_group_actor(&config.target_delivery_id)?,
             &state,
         )?;
-        client.shared_group_packet(&state, true)
+        client.shared_group_packet_for_recipient(&state, recipient)
     } else {
         Ok(serde_json::to_vec(legacy)?)
     }
+}
+
+fn normalize_generated_group_distribution(
+    message: &mut GatewayDirectMessage,
+    payload: &[u8],
+) -> Result<(), SdkError> {
+    if crate::client::target_selection::schema_v1_selected() {
+        let inner = <ramflux_protocol::message::Inner as prost::Message>::decode(payload)
+            .map_err(|_| SdkError::ReplayMismatch)?;
+        message
+            .conversation_id
+            .clone_from(&inner.identity.as_ref().ok_or(SdkError::ReplayMismatch)?.conversation_id);
+        message.message_id =
+            RamfluxClient::shared_group_packet_message_id(payload, &message.message_id)?;
+    }
+    Ok(())
 }
 
 struct DistributionMessage<'a> {
