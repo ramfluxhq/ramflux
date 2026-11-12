@@ -192,3 +192,62 @@ async fn self_sync_sent_draft_issues_one_explicit_clear_and_retires_draft_body()
     assert_eq!(own.client.self_sync_state(THREAD, &clear)?.ok_or("state")?.value.revision, 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn self_sync_courier_never_forwards_register_with_unauthenticated_reference() -> TestResult {
+    let own = Fixture::new("self-sync-courier-reference").await?;
+    let id = blake3::hash(b"pinned before arrival").as_bytes().to_vec();
+    // The pin target is unknown at first, so the register is stored as received.
+    let pin = own.client.change_self_sync(
+        THREAD,
+        g::SelfSync {
+            operation: 4,
+            pin: Some(g::MessageRef {
+                id: id.clone(),
+                conversation_id: THREAD.into(),
+                author_anchor: "claimed-root".into(),
+            }),
+            ..Default::default()
+        },
+    )?;
+    let state = own.client.self_sync_state(THREAD, &pin)?.ok_or("state")?;
+    let scope = own
+        .client
+        .account_db()?
+        .actor_state_keys("self-sync/state/")?
+        .pop()
+        .ok_or("register scope")?;
+    let local = own.client.owned_device_identity()?;
+    let db = own.client.account_db()?;
+    let repair = json!({
+        "conversation_id": THREAD, "scope": scope, "target": local.storage_key(),
+        "target_epoch": own.client.self_sync_target_epoch(&local)?,
+        "target_certificate": own.client.self_sync_target_certificate(&local)?,
+        "exact_body": state.exact_body, "references": [], "read_marker_body": null,
+    });
+    db.write_transaction(|| {
+        // The authenticated target arrives and belongs to another author root.
+        db.persist_actor_state(
+            &format!("routed/generated-identity/{}", ramflux_protocol::encode_base64url(&id)),
+            &g::EventIdentity {
+                id: id.clone(),
+                conversation_id: THREAD.into(),
+                author: Some(g::QualifiedDevice {
+                    account_anchor: "actual-root".into(),
+                    device_id: "peer-device".into(),
+                    device_epoch: 1,
+                }),
+                ..Default::default()
+            },
+        )?;
+        db.persist_actor_state("self-sync/repair/unauthentic", &repair)?;
+        Ok::<(), SdkError>(())
+    })?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let _planned = own.client.prepare_self_sync_repair(&own.config);
+    assert!(
+        !db.actor_state_exists("self-sync/repair/unauthentic")?,
+        "a register naming a target under the wrong author root is retired, not forwarded"
+    );
+    Ok(())
+}
