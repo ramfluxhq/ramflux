@@ -19,6 +19,12 @@ fn hash(manifest: &SourceManifest) -> Result<String, SdkError> {
     manifest_hash(manifest).map(encode_base64url).map_err(|error| wire(&error))
 }
 impl FullStreamWork {
+    fn note_durable(&self, manifest: &SourceManifest, chunks: u64) -> Result<(), SdkError> {
+        let progress = super::super::status::FullProgress::observed(manifest, chunks)?;
+        *self.progress.lock().map_err(|_| SdkError::PairingCode("Busy"))? = progress;
+        Ok(())
+    }
+
     async fn fresh(&mut self) -> Result<(), SdkError> {
         self.runtime.require_live()?;
         let participant = self.participant.clone();
@@ -100,6 +106,7 @@ impl FullStreamWork {
             return Err(mismatch());
         }
         let mut next = durable_through.map_or(0, |prefix| prefix.0 + 1);
+        self.note_durable(&manifest, next)?;
         while next < chunks {
             self.fresh().await?;
             let encrypted = {
@@ -125,6 +132,7 @@ impl FullStreamWork {
                 return Err(mismatch());
             }
             next += 1;
+            self.note_durable(&manifest, next)?;
         }
         self.runtime.require_live()?;
         // Receipt frees no immutable cut and authorizes no candidate. Keep the exact
@@ -154,6 +162,7 @@ impl FullStreamWork {
         if next == chunks {
             self.io.verify_forward_root(&hash).await?;
         }
+        self.note_durable(&manifest, next)?;
         self.receipt(&hash, prefix).await?;
         while next < chunks {
             let DataPacket::Chunk { manifest_hash, index, length, digest, bytes } =
@@ -178,6 +187,7 @@ impl FullStreamWork {
             if next + 1 == chunks {
                 self.io.verify_forward_root(&hash).await?;
             }
+            self.note_durable(&manifest, next + 1)?;
             self.receipt(&hash, Some(next)).await?;
             next += 1;
         }

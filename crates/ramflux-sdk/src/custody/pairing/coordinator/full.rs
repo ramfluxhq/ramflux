@@ -20,6 +20,7 @@ use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod bootstrap;
 pub(super) mod cancel;
 mod epoch;
+mod status;
 mod stream;
 
 pub(super) struct FullCeremony {

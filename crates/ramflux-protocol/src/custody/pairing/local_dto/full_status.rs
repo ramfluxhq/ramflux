@@ -163,6 +163,51 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn pairing_full_status_carriers_are_closed_and_status_only()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use super::super::{FullStatusEvent, LocalEvent, LocalResult, Outcome};
+        let status = FullStatus::from_wire_bytes(VECTOR)?;
+        let result = LocalResult {
+            schema: "ramflux.pairing.LocalResult.v2".into(),
+            version: 2,
+            outcome: Outcome::FullStatus { value: Box::new(status.clone()) },
+        };
+        result.validate_method("transfer.status")?;
+        let expected = [
+            br#"{"outcome":{"tag":"full_status","value":"#.as_slice(),
+            VECTOR,
+            br#"},"schema":"ramflux.pairing.LocalResult.v2","version":2}"#.as_slice(),
+        ]
+        .concat();
+        assert_eq!(result.to_wire_bytes()?, expected);
+        assert_eq!(LocalResult::from_wire_bytes(&result.to_wire_bytes()?)?, result);
+        for method in ["pair.status", "transfer.begin", "transfer.prepare", "pair.confirm"] {
+            assert!(result.validate_method(method).is_err(), "accepted {method}");
+        }
+        let event = LocalEvent::FullStatus {
+            schema: "ramflux.pairing.LocalEvent.v2".into(),
+            version: 2,
+            outcome: FullStatusEvent::FullStatus { value: Box::new(status) },
+        };
+        let expected_event = [
+            br#"{"outcome":{"tag":"full_status","value":"#.as_slice(),
+            VECTOR,
+            br#"},"schema":"ramflux.pairing.LocalEvent.v2","version":2}"#.as_slice(),
+        ]
+        .concat();
+        assert_eq!(event.to_wire_bytes()?, expected_event);
+        assert_eq!(LocalEvent::from_wire_bytes(&event.to_wire_bytes()?)?, event);
+        let mut mixed = serde_json::to_value(&event)?;
+        mixed.as_object_mut().ok_or("event")?.insert("update".into(), serde_json::json!({}));
+        assert!(LocalEvent::from_wire_bytes(&crate::canonical_json_bytes(&mixed)?).is_err());
+        let mut unknown = serde_json::to_value(event)?;
+        unknown["outcome"]["tag"] = serde_json::json!("installed");
+        assert!(LocalEvent::from_wire_bytes(&crate::canonical_json_bytes(&unknown)?).is_err());
+        assert!(LocalEvent::from_wire_bytes(&vec![b' '; LocalEvent::LIMIT + 1]).is_err());
+        assert!(LocalResult::from_wire_bytes(&vec![b' '; LocalResult::LIMIT + 1]).is_err());
+        Ok(())
+    }
+    #[test]
     fn pairing_full_status_legacy_categories_keep_exact_full_errors() {
         assert_eq!(FullError::from_code("NoSpace"), Some(FullError::NoSpace));
         assert_eq!(FullError::from_code("nospace"), None);

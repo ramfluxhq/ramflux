@@ -334,6 +334,7 @@ impl PairingWire for BeginResult {
 pub enum Outcome {
     Begin { value: Box<BeginResult> },
     Update { value: Box<Update> },
+    FullStatus { value: Box<FullStatus> },
     Error { error: Failure },
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +348,7 @@ impl PairingWire for LocalResult {
     fn received_limit(&self) -> usize {
         match self.outcome {
             Outcome::Begin { .. } => 18_432,
-            Outcome::Update { .. } => 4608,
+            Outcome::Update { .. } | Outcome::FullStatus { .. } => 4608,
             Outcome::Error { .. } => 1024,
         }
     }
@@ -359,6 +360,10 @@ impl PairingWire for LocalResult {
                 value.validate()?;
             }
             Outcome::Update { value } => {
+                value.validate()?;
+                budget(self, 4608)?;
+            }
+            Outcome::FullStatus { value } => {
                 value.validate()?;
                 budget(self, 4608)?;
             }
@@ -394,24 +399,43 @@ impl LocalResult {
             "method",
         )?;
         require(
+            !matches!(self.outcome, Outcome::FullStatus { .. }) || method == "transfer.status",
+            "full_status_method",
+        )?;
+        require(
             matches!(self.outcome, Outcome::Error { .. })
                 || begin == matches!(self.outcome, Outcome::Begin { .. }),
             "result_method",
         )
     }
 }
+/// The v2 update event is byte-compatible. Full progress uses the same tagged
+/// success arm as `LocalResult`, with no optional fields or mixed alternatives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalEvent {
-    pub schema: String,
-    pub version: u32,
-    pub update: Update,
+#[serde(untagged, deny_unknown_fields)]
+pub enum LocalEvent {
+    Update { schema: String, version: u32, update: Box<Update> },
+    FullStatus { schema: String, version: u32, outcome: FullStatusEvent },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FullStatusEvent {
+    FullStatus { value: Box<FullStatus> },
 }
 impl PairingWire for LocalEvent {
     const LIMIT: usize = 4608;
     fn validate(&self) -> Result<()> {
-        header(&self.schema, self.version, "LocalEvent")?;
-        self.update.validate()?;
+        match self {
+            Self::Update { schema, version, update } => {
+                header(schema, *version, "LocalEvent")?;
+                update.validate()?;
+            }
+            Self::FullStatus { schema, version, outcome } => {
+                header(schema, *version, "LocalEvent")?;
+                let FullStatusEvent::FullStatus { value } = outcome;
+                value.validate()?;
+            }
+        }
         budget(self, Self::LIMIT)
     }
 }

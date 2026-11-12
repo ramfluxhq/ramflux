@@ -60,5 +60,7 @@ pub(crate) enum PairingAction {
         approved: bool,
     },
     Status(PairingOperation),
+    /// Show full-transfer stage, durable byte totals and the exact typed refusal.
+    TransferStatus(PairingOperation),
     Cancel(PairingOperation),
 }

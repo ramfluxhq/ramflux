@@ -27,6 +27,7 @@ pub(super) struct FullStreamState {
     pub(super) job: Option<FullStreamJob>,
     pub(super) complete: Option<SourceManifest>,
     failure: Option<&'static str>,
+    pub(super) progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
 }
 pub(in crate::custody::pairing::coordinator) struct FullStreamJob(
     Option<JoinHandle<Result<FullStreamFinished, SdkError>>>,
@@ -79,6 +80,7 @@ fn wrong() -> SdkError {
 }
 struct FullStreamWork {
     packet: FullPacketEpoch,
+    progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
     io: FullLocalIoPort,
     participant: Arc<LocalPairingParticipant>,
     runtime: Arc<FullRuntimeCancel>,
@@ -176,7 +178,13 @@ impl PairingActor {
         let packet = state.epoch_ready.take().ok_or_else(wrong)?;
         let (io, service) = io.into_port();
         let runtime = self.full_runtime.clone();
+        let progress = Arc::new(std::sync::Mutex::new(
+            manifest.as_ref().map_or(Ok(super::status::FullProgress::default()), |manifest| {
+                super::status::FullProgress::observed(manifest, 0)
+            })?,
+        ));
         let work = FullStreamWork {
+            progress: progress.clone(),
             packet,
             io,
             participant,
@@ -194,6 +202,7 @@ impl PairingActor {
         });
         let _ = runtime.register_job(job.abort_handle());
         state.stream = Some(FullStreamState {
+            progress,
             service: Some(service),
             job: Some(FullStreamJob(Some(job))),
             complete: None,
