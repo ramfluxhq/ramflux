@@ -521,10 +521,16 @@ pub fn unlock_account_without_wait(daemon: &Daemon, account: &Account) -> Result
 }
 
 /// Wait for the production post-commit marker and require an actual abort exit.
-pub fn await_receive_crash(mut daemon: Daemon) -> Result<(PathBuf, PathBuf, String)> {
+pub fn await_receive_crash(
+    mut daemon: Daemon,
+    account: &Account,
+) -> Result<(PathBuf, PathBuf, String)> {
     use std::os::unix::process::ExitStatusExt as _;
     let path = daemon.data_root.join("daemon.log");
-    wait_for_log_markers(&path, &["RECEIVE_CRASH "], POLL_TIMEOUT)?;
+    if let Err(error) = wait_for_log_markers(&path, &["RECEIVE_CRASH "], POLL_TIMEOUT) {
+        let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id]);
+        return Err(format!("{error}; receive_crash_status={status:?}").into());
+    }
     let status = daemon.child.group.wait()?;
     if status.signal() != Some(6) {
         return Err(format!("receive failpoint did not abort: {status}").into());

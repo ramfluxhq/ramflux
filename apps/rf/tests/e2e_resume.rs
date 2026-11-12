@@ -156,8 +156,9 @@ fn restart_bob(
         return Ok(daemon);
     }
     let unlock = e2e::unlock_account_without_wait(&daemon, bob);
-    let (socket, root, log) =
-        e2e::await_receive_crash(daemon).map_err(|error| format!("{error}; unlock={unlock:?}"))?;
+    let (socket, root, log) = e2e::await_receive_crash(daemon, bob).map_err(|error| {
+        format!("{error}; unlock={unlock:?}; logs={}", e2e::dump_logs(stack, &[]))
+    })?;
     let line = log.lines().find(|line| line.contains("RECEIVE_CRASH ")).ok_or("crash marker")?;
     let field = |key: &str| -> e2e::Result<u64> {
         line.split_whitespace()
