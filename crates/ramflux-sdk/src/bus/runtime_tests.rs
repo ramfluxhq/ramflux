@@ -1219,3 +1219,74 @@ mod lifecycle_registry;
 mod lifecycle_takeover;
 
 mod reconciliation;
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_transient_subscription_is_live_only_and_removed_on_resubscribe()
+-> Result<(), SdkError> {
+    LocalSet::new()
+        .run_until(async {
+            let root = root("transient-subscription");
+            let account = actor_account(&root, "alice", None, Arc::new(AtomicBool::new(false)));
+            let supervisor = supervisor(&root, BTreeMap::from([("alice".into(), account)]))?;
+            let (client, server) = client(Rc::clone(&supervisor), 1).await?;
+            client
+                .request_frame(request("open", "alice", "conversation.list", serde_json::json!({})))
+                .await?;
+            let (tx, mut rx) = mpsc::channel(16);
+            let connection = LocalBusConnectionState::new(2, tx);
+            let mut event = request(
+                "",
+                "alice",
+                ramflux_protocol::message::TRANSIENT_TOPIC,
+                serde_json::json!({"live":true}),
+            );
+            event.kind = LocalBusFrameKind::Event;
+            event.seq = Some(0);
+            event.frame_id = "before-subscribe".into();
+            supervisor.broadcast(&[event.clone()]);
+            supervisor
+                .subscribe_stream(
+                    request(
+                        "subscribe",
+                        "alice",
+                        "bus.subscribe",
+                        serde_json::json!({"topics":["message.transient"]}),
+                    ),
+                    &connection,
+                )
+                .await?;
+            let ack = rx.recv().await.ok_or_else(|| failure("subscription acknowledgement"))?;
+            assert_eq!(ack.kind, LocalBusFrameKind::Response);
+            assert!(rx.try_recv().is_err(), "transient subscription replayed old traffic");
+            event.frame_id = "after-subscribe".into();
+            supervisor.broadcast(&[event.clone()]);
+            let received = rx.try_recv().map_err(|_| failure("missing live transient event"))?;
+            assert_eq!(received.frame_id, "after-subscribe");
+            assert_eq!(received.seq, Some(0));
+            supervisor
+                .subscribe_stream(
+                    request(
+                        "resubscribe",
+                        "alice",
+                        "bus.subscribe",
+                        serde_json::json!({"topics":[]}),
+                    ),
+                    &connection,
+                )
+                .await?;
+            assert_eq!(
+                rx.recv().await.ok_or_else(|| failure("resubscribe acknowledgement"))?.kind,
+                LocalBusFrameKind::Response
+            );
+            supervisor.broadcast(&[event]);
+            assert!(rx.try_recv().is_err(), "resubscribe retained a stale transient subscriber");
+            supervisor.disconnect(2);
+            drop(client);
+            let _ = server.await;
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
+}

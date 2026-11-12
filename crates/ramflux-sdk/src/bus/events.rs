@@ -11,6 +11,10 @@ pub(super) struct EventBatch {
     pub accepted: oneshot::Sender<()>,
 }
 
+pub(super) fn is_transient(frame: &LocalBusFrame) -> bool {
+    frame.method == ramflux_protocol::message::TRANSIENT_TOPIC && frame.seq == Some(0)
+}
+
 pub(super) fn broadcast(
     subscribers: &mut BTreeMap<u64, LocalBusSubscriber>,
     events: &[LocalBusFrame],
@@ -20,7 +24,15 @@ pub(super) fn broadcast(
             if event.account_id.as_deref() == Some(&subscriber.account_id)
                 && subscriber.topics.contains(&event.method)
             {
-                subscriber.outbound.try_send(event.clone()).is_ok()
+                // Keep the final slot available for the durable stream's lagged notice.
+                if is_transient(event) && subscriber.outbound.capacity() <= 1 {
+                    return !subscriber.outbound.is_closed();
+                }
+                match subscriber.outbound.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) if is_transient(event) => true,
+                    Err(_) => false,
+                }
             } else {
                 true
             }
@@ -90,4 +102,62 @@ pub(super) async fn publish(
 
 fn closed() -> SdkError {
     SdkError::LocalBus("subscription router stopped before outbox acceptance".to_owned())
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+
+    #[test]
+    fn transient_overflow_keeps_subscriber_and_durable_slot() -> Result<(), SdkError> {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut subscribers = BTreeMap::from([(
+            1,
+            LocalBusSubscriber {
+                account_id: "a".into(),
+                topics: BTreeSet::from([
+                    ramflux_protocol::message::TRANSIENT_TOPIC.into(),
+                    "message.received".into(),
+                ]),
+                outbound: tx,
+            },
+        )]);
+        let mut frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            ramflux_protocol::message::TRANSIENT_TOPIC,
+            serde_json::json!({}),
+        );
+        frame.kind = LocalBusFrameKind::Event;
+        frame.seq = Some(0);
+        broadcast(&mut subscribers, &[frame.clone(), frame.clone(), frame]);
+        assert_eq!(subscribers.len(), 1);
+        let mut durable = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            "message.received",
+            serde_json::json!({}),
+        );
+        durable.kind = LocalBusFrameKind::Event;
+        durable.seq = Some(40);
+        broadcast(&mut subscribers, &[durable]);
+        assert_eq!(subscribers.len(), 1);
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(0));
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(40));
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        let mut closed_frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            ramflux_protocol::message::TRANSIENT_TOPIC,
+            serde_json::json!({}),
+        );
+        closed_frame.seq = Some(0);
+        broadcast(&mut subscribers, &[closed_frame]);
+        assert!(subscribers.is_empty());
+        Ok(())
+    }
 }

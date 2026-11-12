@@ -96,6 +96,9 @@ impl AccountDb {
         at: i64,
         subject: Option<&str>,
     ) -> Result<JournalEvent, StorageError> {
+        if topic == ramflux_protocol::message::TRANSIENT_TOPIC {
+            return Err(StorageError::AuthorizationRejected);
+        }
         let bytes = serde_json::to_vec(body)?;
         if bytes.len() > 512 * 1024 {
             return Err(StorageError::AuthorizationRejected);

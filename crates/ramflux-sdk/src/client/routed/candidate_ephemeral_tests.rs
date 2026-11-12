@@ -279,11 +279,33 @@ async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> Tes
         TypingOutcome::Duplicate
     );
     assert_tables_unchanged(&b.client, &allowed, &before)?;
-    let _ = receiver.drain_updates();
-    receiver.poll(now + 5000, mono + Duration::from_secs(5));
-    let updates = receiver.drain_updates();
+    // Native authentication and decryption feed the same generated update consumed
+    // by every binding, without allocating a durable cursor or operation receipt.
+    let updates = receiver.drain_message_updates("ephemeral-receiver")?;
     assert_eq!(updates.len(), 1);
-    assert!(!updates[0].typing.active);
+    let frame = crate::bindings::transient_message_frame(&updates[0])?;
+    assert_eq!(frame.method, g::TRANSIENT_TOPIC);
+    assert_eq!(frame.seq, Some(0));
+    assert_eq!(frame.request_id, "");
+    assert_eq!(crate::bindings::decode_message_update(&frame.body)?, updates[0]);
+    let mut invalid = updates[0].clone();
+    invalid.journal_sequence = 1;
+    assert!(crate::bindings::transient_message_frame(&invalid).is_err());
+    invalid.journal_sequence = 0;
+    invalid.identity.as_mut().ok_or("identity")?.device_sequence = 1;
+    assert!(crate::bindings::transient_message_frame(&invalid).is_err());
+    receiver.poll(now + 5000, mono + Duration::from_secs(5));
+    assert!(receiver.drain_message_updates("").is_err());
+    let updates = receiver.drain_message_updates("ephemeral-receiver")?;
+    assert_eq!(updates.len(), 1);
+    let frame = crate::bindings::transient_message_frame(&updates[0])?;
+    assert_eq!(frame.seq, Some(0));
+    assert!(matches!(
+        updates[0].state.as_ref(),
+        Some(g::message_update::State::Content(g::Content {
+            value: Some(g::content::Value::Typing(g::Typing { active: false, .. }))
+        }))
+    ));
     let expired = a.client.prepare_typing_delivery(
         &mut engine,
         &draft(&a, &b, "expired-typing", 5)?,
@@ -440,5 +462,61 @@ fn assert_tables_unchanged(
     let changed =
         keys.into_iter().filter(|key| actual.get(*key) != expected.get(*key)).collect::<Vec<_>>();
     assert_eq!(changed, Vec::<&String>::new(), "unexpected persistent table changes");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn account_transient_generation_reset_and_durable_message_clear() -> TestResult {
+    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = Box::pin(native_pair()).await?;
+    let mut config = a.config.clone();
+    config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    let first = draft(&a, &b, "held-before-generation-end", 5)?;
+    let envelope = a.client.prepare_typing_delivery(&mut engine, &first, true)?;
+    let now = u64::try_from(first.created_at)? * 1000;
+    let mono = Instant::now();
+    assert_eq!(
+        b.client.receive_transient_content(&envelope, "primary", now - 1000, mono)?,
+        TypingOutcome::Held
+    );
+    b.client.reset_transient_content();
+    assert_eq!(
+        b.client.drain_transient_updates(
+            "ephemeral-receiver",
+            now,
+            mono + Duration::from_secs(1)
+        )?,
+        Vec::<g::MessageUpdate>::new()
+    );
+    let message = draft(&a, &b, "visible-before-message", 5)?;
+    let now = u64::try_from(message.created_at)? * 1000;
+    let envelope = a.client.prepare_typing_delivery(&mut engine, &message, true)?;
+    assert_eq!(
+        b.client.receive_transient_content(&envelope, "primary", now, mono)?,
+        TypingOutcome::Visible
+    );
+    assert_eq!(b.client.drain_transient_updates("ephemeral-receiver", now, mono)?.len(), 1);
+    Box::pin(establish(&a, &mut b, "message-clears-typing")).await?;
+    let updates = b.client.drain_transient_updates("ephemeral-receiver", now, mono)?;
+    assert_eq!(updates.len(), 1, "durable Message must clear visible author state after commit");
+    assert_eq!(updates[0].journal_sequence, 0);
+    assert!(matches!(
+        updates[0].state.as_ref(),
+        Some(g::message_update::State::Content(g::Content {
+            value: Some(g::content::Value::Typing(g::Typing { active: false, .. }))
+        }))
+    ));
+    let before = b.client.account_db()?.test_table_fingerprints(&[])?;
+    b.client.reset_transient_content();
+    assert_eq!(
+        b.client.drain_transient_updates(
+            "ephemeral-receiver",
+            now + 5000,
+            mono + Duration::from_secs(5)
+        )?,
+        Vec::<g::MessageUpdate>::new()
+    );
+    assert_tables_unchanged(&b.client, &[], &before)?;
     Ok(())
 }

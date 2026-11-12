@@ -333,6 +333,30 @@ impl TypingReceiver {
         }
     }
 
+    /// Drain generated transient updates with sequence zero. No durable cursor advances.
+    /// # Errors
+    /// Refuses an empty account id without consuming queued updates.
+    pub fn drain_message_updates(
+        &mut self,
+        account_id: &str,
+    ) -> Result<Vec<g::MessageUpdate>, SdkError> {
+        if account_id.is_empty() {
+            return Err(SdkError::LocalBus("Typing update requires an account id".into()));
+        }
+        Ok(self
+            .drain_updates()
+            .into_iter()
+            .map(|update| g::MessageUpdate {
+                account_id: account_id.into(),
+                journal_sequence: 0,
+                identity: Some(update.identity),
+                state: Some(g::message_update::State::Content(g::Content {
+                    value: Some(g::content::Value::Typing(update.typing)),
+                })),
+            })
+            .collect())
+    }
+
     /// Drain only volatile typed updates. No history is reconstructed on reconnect.
     pub fn drain_updates(&mut self) -> Vec<TypingUpdate> {
         std::mem::take(&mut self.updates)
@@ -343,5 +367,44 @@ impl TypingReceiver {
             self.updates.remove(0);
         }
         self.updates.push(update);
+    }
+}
+
+impl RamfluxClient {
+    /// Receive authenticated live ephemeral content into this account's volatile state.
+    /// The connection owner must reset this state whenever its source generation ends.
+    /// # Errors
+    /// Returns ordinary source, crypto, scope or retention failures without a durable receipt.
+    pub fn receive_transient_content(
+        &self,
+        envelope: &Envelope,
+        local_device: &str,
+        now_ms: u64,
+        monotonic: Instant,
+    ) -> Result<TypingOutcome, SdkError> {
+        self.typing_receiver.borrow_mut().receive(self, envelope, local_device, now_ms, monotonic)
+    }
+
+    /// Poll and drain only this account's live generated updates. Sequence is always zero.
+    /// # Errors
+    /// Refuses an empty local account identifier without consuming updates.
+    pub fn drain_transient_updates(
+        &self,
+        account_id: &str,
+        now_ms: u64,
+        monotonic: Instant,
+    ) -> Result<Vec<g::MessageUpdate>, SdkError> {
+        if account_id != self.account_db()?.local_account_id {
+            return Err(SdkError::LocalBus("transient account mismatch".into()));
+        }
+        let mut receiver = self.typing_receiver.borrow_mut();
+        receiver.poll(now_ms, monotonic);
+        receiver.drain_message_updates(account_id)
+    }
+
+    /// Forget held, displayed, deduplication and queued state when a live source ends.
+    /// Reconnecting never replays a prior source's indicators.
+    pub fn reset_transient_content(&self) {
+        *self.typing_receiver.borrow_mut() = TypingReceiver::default();
     }
 }

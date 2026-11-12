@@ -26,6 +26,16 @@ pub struct MessageCache {
 impl MessageCache {
     /// Apply one generated update. A tombstone atomically replaces every cached preview.
     pub fn apply(&mut self, update: g::MessageUpdate) {
+        // Typing belongs to the expiring live indicator model, never history previews.
+        // Reject it even if a caller supplies a forged durable sequence.
+        if matches!(
+            update.state.as_ref(),
+            Some(g::message_update::State::Content(g::Content {
+                value: Some(g::content::Value::Typing(_))
+            }))
+        ) {
+            return;
+        }
         if self.account_id.as_ref().is_some_and(|account| *account != update.account_id) {
             return;
         }
@@ -368,5 +378,42 @@ mod tests {
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+    #[test]
+    fn history_cache_never_keeps_typing_or_uses_its_cursor_or_account() {
+        let mut cache = MessageCache::default();
+        let identity =
+            g::EventIdentity { id: vec![7; 32], conversation_id: "c".into(), ..Default::default() };
+        for sequence in [0, 99] {
+            cache.apply(g::MessageUpdate {
+                account_id: "wrong-account".into(),
+                journal_sequence: sequence,
+                identity: Some(identity.clone()),
+                state: Some(g::message_update::State::Content(g::Content {
+                    value: Some(g::content::Value::Typing(g::Typing {
+                        active: true,
+                        expires_at: 5,
+                    })),
+                })),
+            });
+        }
+        assert_eq!(cache.cursor(), 0);
+        assert!(cache.get("c", &identity.id).is_none(), "Typing entered durable history cache");
+        cache.apply(g::MessageUpdate {
+            account_id: "real-account".into(),
+            journal_sequence: 40,
+            identity: Some(identity.clone()),
+            state: Some(g::message_update::State::Tombstone(g::Delete::default())),
+        });
+        assert_eq!(cache.cursor(), 40);
+        assert!(matches!(
+            cache.get("c", &identity.id).and_then(|update| update.state.as_ref()),
+            Some(g::message_update::State::Tombstone(_))
+        ));
     }
 }

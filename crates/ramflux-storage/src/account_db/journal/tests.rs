@@ -936,3 +936,22 @@ fn migrating_a_removed_r5_member_does_not_reactivate_its_pin() -> Result<(), Sto
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn transient_topic_never_enters_replay_or_advances_cursor() -> Result<(), StorageError> {
+    let (root, db) = database()?;
+    let before = db.journal_bounds()?;
+    let error = db.append_journal(
+        "typing:1",
+        ramflux_protocol::message::TRANSIENT_TOPIC,
+        &serde_json::json!({"journal_sequence":"0"}),
+        1,
+        None,
+    );
+    assert!(matches!(error, Err(StorageError::AuthorizationRejected)));
+    assert_eq!(db.journal_bounds()?, before);
+    assert_eq!(db.journal_after(0, 128)?, Vec::<JournalEvent>::new());
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
