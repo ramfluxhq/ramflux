@@ -711,10 +711,9 @@ impl GatewayRedbStore {
     }
 
     /// Pause one real checkpoint after its writes and before its durable commit.
-    #[cfg(any(test, feature = "durability-test-hooks"))]
-    /// Pause the next checkpoint at its commit barrier.
     /// # Errors
     /// Returns a poisoned test-hook mutex error.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
     pub fn pause_next_admission_commit(
         &self,
         started: std::sync::mpsc::Sender<()>,
@@ -785,10 +784,8 @@ impl GatewayRedbStore {
     }
 
     fn save_state_unlocked(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
-        let mut entries = vec![
-            (GATEWAY_CHALLENGE_STATE_KEY, serialize_snapshot_value(&state.challenges_by_id)?),
-            ("gateway_initialized_v2", b"true".to_vec()),
-        ];
+        let mut entries =
+            vec![(GATEWAY_CHALLENGE_STATE_KEY, serialize_snapshot_value(&state.challenges_by_id)?)];
         entries.extend(state.pre_auth_entries()?);
         self.save_full_gateway_entries(&entries, state)?;
         #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -797,7 +794,7 @@ impl GatewayRedbStore {
     }
 
     /// # Errors
-    /// Returns an error when policy and admission/legacy clock state cannot be committed together.
+    /// Returns an error when policy and admission clock state cannot be committed together.
     pub fn save_pre_auth_hot(&self, state: &GatewayState) -> Result<(), NodeCoreError> {
         let _writer = self.write_guard()?;
         self.save_gateway_entries(&state.pre_auth_entries()?)

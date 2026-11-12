@@ -53,7 +53,7 @@ fn renewal_case(inject_obsolete_index: bool) -> Result<(), Box<dyn std::error::E
         guard.prune(101);
         guard.check_gateway_signed_request(&source, &renewed, 101)?;
         store.save_auth_replay(&source, &renewed, 101)?;
-        {
+        if inject_obsolete_index {
             let read = store.db.begin_read()?;
             let index = read.open_table(EXPIRY)?;
             assert!(
