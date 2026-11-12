@@ -25,6 +25,11 @@ def main():
     anchor = b"let recovered = retries.remove(&entry_id(&entry));"
     if original.count(anchor) != 1:
         raise RuntimeError("recovered-input selection anchor is ambiguous")
+    merge = Path("crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs")
+    merge_original = merge.read_bytes()
+    merge_anchor = b"prepared.entry = entry;"
+    if merge_original.count(merge_anchor) != 1:
+        raise RuntimeError("durable packet merge anchor is ambiguous")
     build = ["cargo", "build", "-p", "ramflux-rf", "--features", "itest-memory-vault"]
     test = ["cargo", "nextest", "run", "--profile", "ci", "--no-tests=fail", "--retries", "0",
             "-p", "ramflux-rf", "--features", "itest-memory-vault", "--test", "e2e_resume",
@@ -33,6 +38,7 @@ def main():
     try:
         source.write_bytes(original.replace(anchor,
             b"let recovered = retries.remove(&entry_id(&entry)).filter(|_| false);"))
+        merge.write_bytes(merge_original.replace(merge_anchor, b"let _ = (prepared, entry);"))
         code, _ = run(build, args.log_dir / "group-broken-build.log")
         if code:
             raise RuntimeError("broken receive path did not compile")
@@ -42,6 +48,7 @@ def main():
         print("GROUP_RECOVERY_BTF_BROKEN: named regression failed with receive stage conflict", flush=True)
     finally:
         source.write_bytes(original)
+        merge.write_bytes(merge_original)
         restored, _ = run(build, args.log_dir / "group-restored-build.log")
         if restored:
             raise RuntimeError("restored receive path failed to build")
