@@ -56,6 +56,7 @@ jobs:
           python3 -B scripts/ci/report-flakes.py --self-test
           python3 -B scripts/ci/report-mutants.py --self-test
           python3 -B scripts/ci/run-nextest.py --self-test
+          python3 -B scripts/ci/run-libtest.py --self-test
           python3 -B scripts/ci/test-timing.py --self-test
 
   test-timing:
@@ -259,6 +260,9 @@ jobs:
     name: Build test archive (sdk)
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: ci-speed-01-linux-x64
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -283,7 +287,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
+          cache-targets: false
           shared-key: arch-sdk
+
+      - name: Install pinned sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.19.0
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -291,7 +301,15 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Archive
+        env:
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
         run: cargo nextest archive -p ramflux-sdk --features durability-test-hooks --archive-file sdk.tar.zst
+
+      - name: Compiler cache statistics
+        if: always()
+        run: |
+          sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -305,6 +323,9 @@ jobs:
     name: Build test archive (rest)
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: ci-speed-01-linux-x64
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -329,7 +350,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
+          cache-targets: false
           shared-key: arch-rest
+
+      - name: Install pinned sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.19.0
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -337,7 +364,15 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Archive
+        env:
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
         run: cargo nextest archive --workspace --exclude ramflux-sdk --archive-file rest.tar.zst
+
+      - name: Compiler cache statistics
+        if: always()
+        run: |
+          sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -402,11 +437,108 @@ jobs:
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
-  linux-vault-platform:
-    name: Linux vault platform fixture
+  vault-platform:
+    name: Linux vault platform stages
+    needs: build-rest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        timeout-minutes: 3
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install platform fixture tools
+        timeout-minutes: 8
+        run: bash scripts/linux-vault-install-tools.sh
+      - name: Install nextest
+        timeout-minutes: 10
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+      - name: Download default-feature rest archive
+        id: download-rest
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-rest
+      - name: Retry download default-feature rest archive
+        if: steps.download-rest.outcome != 'success'
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-rest
+      - name: Cache pinned oracle source archive
+        timeout-minutes: 2
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/linux-vault-oracle/source.tar.gz
+          key: linux-vault-oracle-source-${{ hashFiles('scripts/linux-vault-vectors.py') }}
+      - name: Verify pinned independent libsodium C oracle
+        # A cache hit still verifies the source checksum and builds the C oracle.
+        timeout-minutes: 10
+        run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
+      - name: Private user, D-Bus and actual systemd credential smoke
+        timeout-minutes: 15
+        run: sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY bash scripts/linux-vault-ci.sh rest.tar.zst
+      - name: Upload vault JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-vault-platform
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: error
+
+  vault-init:
+    name: Linux vault init stages
+    needs: build-sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        timeout-minutes: 3
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install platform fixture tools
+        timeout-minutes: 8
+        run: bash scripts/linux-vault-install-tools.sh
+      - name: Install nextest
+        timeout-minutes: 10
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+      - name: Download default-feature SDK archive
+        id: download-sdk
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-sdk
+      - name: Retry download default-feature SDK archive
+        if: steps.download-sdk.outcome != 'success'
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-sdk
+      - name: Real systemd init crash and owned-pipe cleanup proofs
+        timeout-minutes: 8
+        run: |
+          NEXTEST=$(command -v cargo-nextest)
+          sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY python3 -B scripts/ci/run-nextest.py --label vault-init -- "$NEXTEST" nextest run --profile ci --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
+      - name: Upload vault JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-vault-init
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: error
+
+  vault-secret-service:
+    name: Linux vault Secret Service stages
     needs: [build-rest, build-sdk]
     runs-on: ubuntu-24.04
-    # Budget for one archive-download retry plus the 15-minute D-Bus step bound.
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -448,26 +580,6 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-sdk
-      - name: Cache pinned oracle source archive
-        timeout-minutes: 2
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: ${{ runner.temp }}/linux-vault-oracle/source.tar.gz
-          key: linux-vault-oracle-source-${{ hashFiles('scripts/linux-vault-vectors.py') }}
-      - name: Verify pinned independent libsodium C oracle
-        # A cache hit still verifies the source checksum and builds the C oracle.
-        timeout-minutes: 10
-        run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
-      - name: Private user, D-Bus and actual systemd credential smoke
-        timeout-minutes: 15
-        run: sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY bash scripts/linux-vault-ci.sh rest.tar.zst
-      - name: Real systemd init crash and owned-pipe cleanup proofs
-        timeout-minutes: 8
-        run: |
-          NEXTEST=$(command -v cargo-nextest)
-          sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY python3 -B scripts/ci/run-nextest.py --label vault-init -- "$NEXTEST" nextest run --profile ci --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
-
-
       - name: Real local Secret Service initialization and cleanup proofs
         timeout-minutes: 8
         run: |
@@ -478,8 +590,29 @@ jobs:
           mapfile -t platform < <(find target/debug/deps -maxdepth 1 -type f -name 'linux_vault_platform-*' -executable)
           test "${#sdk[@]}" -eq 1
           test "${#platform[@]}" -eq 1
-          sudo bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
+          sudo --preserve-env=PATH python3 -B scripts/ci/run-libtest.py --junit target/nextest/ci/junit-vault-secret-service.xml -- bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
+      - name: Upload vault JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-vault-secret-service
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: error
 
+  # Preserve the existing check name for consumers and future branch protection.
+  linux-vault-platform:
+    name: Linux vault platform fixture
+    if: always()
+    needs: [vault-platform, vault-init, vault-secret-service]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all vault stages
+        env:
+          PLATFORM: ${{ needs.vault-platform.result }}
+          INIT: ${{ needs.vault-init.result }}
+          SECRET_SERVICE: ${{ needs.vault-secret-service.result }}
+        run: test "$PLATFORM" = success && test "$INIT" = success && test "$SECRET_SERVICE" = success
 
   # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
   # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs
