@@ -27,6 +27,13 @@ services:
       # v3 issuance material is operator-provided; the gateway fails closed when absent.
       RAMFLUX_GATEWAY_V3_ISSUER_SEED: "${RF_COMPOSE_GATEWAY_V3_ISSUER_SEED:?see deploy/compose-inputs.json migration}"
       RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE: "${RF_COMPOSE_GATEWAY_V3_ISSUER_CERT_FILE:?see deploy/compose-inputs.json migration}"
+      # Web ingress (docs/security/gateway-web-ingress.md). Off by default: an empty listen
+      # address starts no listener, and no web port is published by this file.
+      RAMFLUX_GATEWAY_WEB_LISTEN: "${RF_COMPOSE_GATEWAY_WEB_LISTEN:-}"
+      RAMFLUX_GATEWAY_WEB_TLS_CERT: "${RF_COMPOSE_GATEWAY_WEB_TLS_CERT:-}"
+      RAMFLUX_GATEWAY_WEB_TLS_KEY: "${RF_COMPOSE_GATEWAY_WEB_TLS_KEY:-}"
+      RAMFLUX_GATEWAY_WEB_URL: "${RF_COMPOSE_GATEWAY_WEB_URL:-}"
+      RAMFLUX_GATEWAY_WEB_ORIGINS: "${RF_COMPOSE_GATEWAY_WEB_ORIGINS:-}"
     volumes:
       - node-privacy:/etc/ramflux/config/node-identity
       - gateway-redb:/var/lib/ramflux/gateway
@@ -69,6 +76,8 @@ services:
       RAMFLUX_CUSTODY_AUTHENTICATED_POOL: "${RF_COMPOSE_CUSTODY_AUTHENTICATED_POOL:-}"
       RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS: "${RF_COMPOSE_CUSTODY_AUTH_TIMEOUT_MS:-}"
       RAMFLUX_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE: "${RF_COMPOSE_CUSTODY_PREAUTH_HANDSHAKES_PER_SOURCE:-}"
+      # Proxy ids allowed to vouch for web_origin_bound proofs; empty refuses the web mode.
+      RAMFLUX_CUSTODY_WEB_PROXY_IDS: "${RF_COMPOSE_CUSTODY_WEB_PROXY_IDS:-}"
       RAMFLUX_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE: "${RF_COMPOSE_CUSTODY_CHALLENGES_PER_IP_PER_MINUTE:-}"
       RAMFLUX_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE: "${RF_COMPOSE_CUSTODY_CHALLENGES_PER_PREFIX_PER_MINUTE:-}"
       RAMFLUX_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE: "${RF_COMPOSE_CUSTODY_CHALLENGES_PER_NODE_PER_MINUTE:-}"

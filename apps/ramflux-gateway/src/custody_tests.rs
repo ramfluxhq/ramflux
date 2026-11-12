@@ -77,6 +77,7 @@ fn authority(now: u64) -> Result<AuthorityFixture> {
             }],
             revoked_proxy_key_ids: vec![],
             channel_binding_modes: vec![BindingMode::HomeRelayReceipt],
+            web_listeners: Vec::new(),
         },
     )?;
     let node = verify_node_identity_record(

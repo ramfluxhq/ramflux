@@ -19,6 +19,8 @@ pub(crate) const GATEWAY_FIRST_FRAME_TIMEOUT: std::time::Duration =
 const _: () = assert!(ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES == 1_048_576);
 
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
+/// Downstream entry window of a session carried by the web listener.
+pub(crate) const WEB_DOWNSTREAM_WINDOW_ENTRIES: usize = 16;
 const GATEWAY_V3_ISSUER_SEED_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_SEED";
 const GATEWAY_V3_ISSUER_CERT_FILE_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE";
 
@@ -271,7 +273,25 @@ async fn handle_gateway_session_transport_inner(
         .await?;
         return Ok(());
     };
-    match pre_auth_gate_for_gateway_open(&open, &context) {
+    // A grant is connection-local state of the listener that issued it, so it names the
+    // carrier. `Open.transport_kind` must belong to that carrier.
+    let web = grant.as_ref().is_some_and(super::custody::GatewayGrant::is_web);
+    if !super::custody::transport_kind_allowed(&open.transport_kind, web) {
+        write_gateway_frame(
+            &mut *send,
+            &ramflux_node_core::GatewayServerFrame::Nack {
+                reason: "transport_kind_refused".to_owned(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    // On the web listener an Open is reachable only after a verified `web_origin_bound`
+    // proof and after that listener's own in-memory admission, so it is not an
+    // unauthenticated Open: the durable pre-auth commit under the global state lock is
+    // not repeated for it.
+    let pre_auth = if web { Ok(None) } else { pre_auth_gate_for_gateway_open(&open, &context) };
+    match pre_auth {
         Ok(Some(challenge)) => {
             write_gateway_frame(
                 &mut *send,
@@ -335,7 +355,7 @@ async fn handle_gateway_session_transport_inner(
         return Ok(());
     }
 
-    let Some(runtime) = establish_gateway_session_or_reject(
+    let Some(mut runtime) = establish_gateway_session_or_reject(
         &mut *send,
         &context,
         &open,
@@ -347,6 +367,10 @@ async fn handle_gateway_session_transport_inner(
     else {
         return Ok(());
     };
+    if web {
+        // A browser tab cannot apply backpressure; keep its downstream window small.
+        runtime.push_limit = runtime.push_limit.min(WEB_DOWNSTREAM_WINDOW_ENTRIES);
+    }
     drop(auth_request);
     run_registered_gateway_session(send, recv, context, runtime, grant).await
 }

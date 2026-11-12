@@ -17,9 +17,13 @@ itest-http = ["ramflux-node-core/itest-http"]
 # loader). Never enabled by production gateway binaries — default gateway loads no object relay HMAC
 # key, rejects the v2 frame, and issues no v2 token. The v3 GatewayIssued path is unaffected.
 itest-local-mint = []
+# Web ingress (PLATFORM-01 M5): the separate WebSocket listener for linked web devices.
+# Compiled out by default; when compiled it still starts only if RAMFLUX_GATEWAY_WEB_LISTEN is set.
+web-ingress = ["dep:base64", "dep:ring"]
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true }
 zeroize = { workspace = true }
 quinn = { workspace = true }
@@ -27,6 +31,7 @@ ramflux-crypto = { workspace = true }
 ramflux-node-core = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
+ring = { version = "0.17", optional = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }

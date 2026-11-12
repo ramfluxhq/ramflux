@@ -36,14 +36,14 @@ pub enum ProofChannel<'a> {
         operator_opt_in: bool,
         receiving_node: &'a VerifiedNodeRecord,
     },
-    /// Web listener. `observed_hash` is recomputed by the verifier from the context the
-    /// gateway authored for that connection; `listener_url` and `origin` are that
-    /// context's values and must be advertised by the receiving node.
+    /// Web listener. The gateway is a proxy: it authored `context` for that connection,
+    /// compared its digest with the proof and signed `receipt` with a node-authorised
+    /// proxy key. The verifier recomputes the digest and checks the receipt.
     WebOriginBound {
-        observed_hash: &'a str,
-        listener_url: &'a str,
-        origin: &'a str,
-        receiving_node: &'a VerifiedNodeRecord,
+        receipt: &'a Envelope<RelayAcceptance>,
+        context: &'a ramflux_protocol::custody::WebOriginBindingV1,
+        historical_node: &'a VerifiedNodeRecord,
+        current_node: &'a VerifiedNodeRecord,
     },
 }
 
@@ -86,10 +86,7 @@ fn carrier_class(capabilities: &[String], web_origin: Option<&str>) -> Result<()
         None => Ok(()),
         Some(origin) => {
             let expected = web_origin_capability(origin);
-            if secondary
-                && capabilities.iter().any(|cap| *cap == expected)
-                && !capabilities.iter().any(|cap| cap == "register")
-            {
+            if secondary && capabilities.iter().any(|cap| *cap == expected) {
                 Ok(())
             } else {
                 Err(reject("device is not a web device linked to this origin"))
@@ -186,9 +183,9 @@ pub fn verify_branch_proof_v3(
     structure(body)?;
     let recipient = match channel {
         ProofChannel::DirectExporter { receiving_node, .. }
-        | ProofChannel::NoChannelBinding { receiving_node, .. }
-        | ProofChannel::WebOriginBound { receiving_node, .. } => receiving_node,
-        ProofChannel::HomeRelayReceipt { current_node, .. } => current_node,
+        | ProofChannel::NoChannelBinding { receiving_node, .. } => receiving_node,
+        ProofChannel::HomeRelayReceipt { current_node, .. }
+        | ProofChannel::WebOriginBound { current_node, .. } => current_node,
     };
     if body.audience != recipient.envelope().body.node_id {
         return Err(reject("branch proof audience differs from receiving node"));
@@ -223,7 +220,7 @@ pub fn verify_branch_proof_v3(
     carrier_class(
         &certificate.capabilities,
         match channel {
-            ProofChannel::WebOriginBound { origin, .. } => Some(origin),
+            ProofChannel::WebOriginBound { context, .. } => Some(context.origin.as_str()),
             _ => None,
         },
     )?;
@@ -255,19 +252,26 @@ pub fn verify_branch_proof_v3(
                 return Err(reject("explicit no-channel-binding opt-in required"));
             }
         }
-        ProofChannel::WebOriginBound { observed_hash, listener_url, origin, receiving_node } => {
-            allows(receiving_node, BindingMode::WebOriginBound)?;
-            bytes(observed_hash, 32)?;
-            let advertised = receiving_node.envelope().body.web_listeners.iter().any(|listener| {
-                listener.url == listener_url && listener.origins.iter().any(|o| o == origin)
+        ProofChannel::WebOriginBound { receipt, context, historical_node, current_node } => {
+            allows(current_node, BindingMode::WebOriginBound)?;
+            let live = &current_node.envelope().body;
+            let advertised = live.web_listeners.iter().any(|listener| {
+                listener.url == context.listener_url
+                    && listener.origins.iter().any(|origin| *origin == context.origin)
             });
+            // The digest is recomputed here from the gateway-authored context; the
+            // device's bytes are only compared with it.
             if !advertised
-                || capability != "message"
                 || body.binding_mode != BindingMode::WebOriginBound
-                || body.transport_binding != observed_hash
+                || context.node_id != live.node_id
+                || now > context.expires_at
+                || context.issued_at > now.saturating_add(CLOCK_SKEW_SECONDS)
+                || body.expires_at > context.expires_at
+                || body.transport_binding != web_origin_binding_hash(context)?
             {
                 return Err(reject("web origin binding mismatch"));
             }
+            verify_proxy_acceptance(proof, receipt, historical_node, current_node, now)?;
         }
     }
     Ok(())
@@ -283,7 +287,14 @@ fn verify_proxy_acceptance(
     if ramflux_protocol::canonical_json_bytes(receipt)?.len() > 8192 {
         return Err(reject("proxy receipt byte limit"));
     }
-    allows(historical, BindingMode::HomeRelayReceipt)?;
+    // A receipt vouches for exactly the mode the device signed; both proxied modes use it.
+    if !matches!(
+        proof.body.binding_mode,
+        BindingMode::HomeRelayReceipt | BindingMode::WebOriginBound
+    ) {
+        return Err(reject("proxy receipt cannot vouch for this binding mode"));
+    }
+    allows(historical, proof.body.binding_mode)?;
     let body = &receipt.body;
     let p = &proof.body;
     let history = &historical.envelope().body;
@@ -353,10 +364,12 @@ pub fn sign_proxy_acceptance(
     bytes(observed_hash, 32)?;
     bytes(&receipt_id, 32)?;
     time(now)?;
-    if p.binding_mode != BindingMode::HomeRelayReceipt || p.transport_binding != observed_hash {
+    if !matches!(p.binding_mode, BindingMode::HomeRelayReceipt | BindingMode::WebOriginBound)
+        || p.transport_binding != observed_hash
+    {
         return Err(reject("proxy must independently observe the client exporter"));
     }
-    allows(node, BindingMode::HomeRelayReceipt)?;
+    allows(node, p.binding_mode)?;
     let public = encode_base64url(signer.verifying_key().to_bytes());
     let descriptor = node
         .envelope()
@@ -394,4 +407,121 @@ pub fn sign_proxy_acceptance(
         signer.sign(&signing_bytes(domain::CUSTODY_RELAY_ACCEPTANCE, &body)?).to_bytes(),
     );
     Ok(Envelope { body, signature })
+}
+
+#[cfg(test)]
+mod web_binding_tests {
+    use super::{carrier_class, web_origin_binding_hash, web_origin_capability};
+    use ramflux_protocol::custody::WebOriginBindingV1;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    const ORIGIN: &str = "https://app.example.org";
+
+    fn context() -> WebOriginBindingV1 {
+        let nonce: Vec<u8> = (0_u8..32).collect();
+        WebOriginBindingV1 {
+            schema: "ramflux.web_origin_binding.v1".to_owned(),
+            version: 1,
+            node_id: "node-test-1".to_owned(),
+            listener_url: "wss://gw.example.org/v1/session".to_owned(),
+            origin: ORIGIN.to_owned(),
+            transport_kind: "websocket".to_owned(),
+            gateway_nonce: ramflux_protocol::encode_base64url(nonce),
+            issued_at: 1_794_500_000,
+            expires_at: 1_794_500_300,
+        }
+    }
+
+    fn capabilities(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The design's vector (PLATFORM-WEB-INGRESS-01 §15) was computed outside the
+    /// repository. A mismatch here is a finding to report, not a constant to adjust.
+    #[test]
+    fn binding_value_matches_the_published_test_vector() -> TestResult {
+        let canonical = ramflux_protocol::canonical_json_bytes(&context())?;
+        assert_eq!(
+            String::from_utf8(canonical)?,
+            concat!(
+                r#"{"expires_at":1794500300,"gateway_nonce":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","#,
+                r#""issued_at":1794500000,"listener_url":"wss://gw.example.org/v1/session","#,
+                r#""node_id":"node-test-1","origin":"https://app.example.org","#,
+                r#""schema":"ramflux.web_origin_binding.v1","transport_kind":"websocket","version":1}"#,
+            )
+        );
+        assert_eq!(
+            web_origin_binding_hash(&context())?,
+            "CKlX68oOgKaKA1Ge--x80MJRhxwqiB4o5NeJDQ-nW9w"
+        );
+        assert_eq!(
+            web_origin_capability(ORIGIN),
+            "web_origin.487C9TSCgR2-ucQeh7narsodVJyxrDUqvu46Ghtt9Js"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn binding_value_changes_with_every_context_field() -> TestResult {
+        let base = web_origin_binding_hash(&context())?;
+        let mut other_origin = context();
+        other_origin.origin = "https://other.example.org".to_owned();
+        let mut other_listener = context();
+        other_listener.listener_url = "wss://gw2.example.org/v1/session".to_owned();
+        let mut other_node = context();
+        other_node.node_id = "node-test-2".to_owned();
+        let mut other_nonce = context();
+        other_nonce.gateway_nonce = ramflux_protocol::encode_base64url([7_u8; 32]);
+        let mut later = context();
+        later.issued_at += 1;
+        later.expires_at += 1;
+        for changed in [other_origin, other_listener, other_node, other_nonce, later] {
+            assert_ne!(web_origin_binding_hash(&changed)?, base);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_context_has_no_binding_value() {
+        let mut wrong_window = context();
+        wrong_window.expires_at += 1;
+        let mut wrong_kind = context();
+        wrong_kind.transport_kind = "webtransport".to_owned();
+        let mut short_nonce = context();
+        short_nonce.gateway_nonce = ramflux_protocol::encode_base64url([7_u8; 16]);
+        let mut http_listener = context();
+        http_listener.listener_url = "ws://gw.example.org/v1/session".to_owned();
+        for malformed in [wrong_window, wrong_kind, short_nonce, http_listener] {
+            assert!(web_origin_binding_hash(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn web_secondary_device_is_refused_on_native_channels() {
+        let marker = web_origin_capability(ORIGIN);
+        let web = capabilities(&["message", "register", &marker, "web_secondary"]);
+        assert!(carrier_class(&web, None).is_err());
+        // Either marker alone is enough to keep the key off the native listeners.
+        assert!(carrier_class(&capabilities(&["message", "web_secondary"]), None).is_err());
+        assert!(carrier_class(&capabilities(&["message", &marker]), None).is_err());
+        assert!(carrier_class(&capabilities(&["message", "register"]), None).is_ok());
+    }
+
+    #[test]
+    fn device_without_web_secondary_is_refused_on_web_listener() {
+        let marker = web_origin_capability(ORIGIN);
+        assert!(carrier_class(&capabilities(&["message", "register"]), Some(ORIGIN)).is_err());
+        assert!(carrier_class(&capabilities(&["message", "register", &marker]), Some(ORIGIN)).is_err());
+        let web = capabilities(&["message", "register", &marker, "web_secondary"]);
+        assert!(carrier_class(&web, Some(ORIGIN)).is_ok());
+    }
+
+    #[test]
+    fn certificate_origin_marker_must_match_received_origin() {
+        let marker = web_origin_capability(ORIGIN);
+        let web = capabilities(&["message", "register", &marker, "web_secondary"]);
+        assert!(carrier_class(&web, Some("https://evil.example")).is_err());
+        assert!(carrier_class(&web, Some("https://app.example.org/")).is_err());
+    }
 }

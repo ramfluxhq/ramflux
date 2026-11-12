@@ -125,3 +125,86 @@ pub fn is_canonical_web_origin(origin: &str, allow_dev_loopback: bool) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        WebListener, is_canonical_web_listener_url, is_canonical_web_origin, web_listener_authority,
+    };
+    use crate::custody::{BindingMode, NodeIdentityRecord};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn record(web_listeners: Vec<WebListener>) -> NodeIdentityRecord {
+        NodeIdentityRecord {
+            schema: "ramflux.identity.node_record.v1".to_owned(),
+            version: 1,
+            node_id: "node".to_owned(),
+            node_signing_public_key: "key".to_owned(),
+            client_tls_certificate_sha256: None,
+            epoch: 1,
+            previous_record_hash: None,
+            issued_at: 1,
+            receipt_keys: Vec::new(),
+            revoked_receipt_key_ids: Vec::new(),
+            proxy_keys: Vec::new(),
+            revoked_proxy_key_ids: Vec::new(),
+            channel_binding_modes: vec![BindingMode::HomeRelayReceipt],
+            web_listeners,
+        }
+    }
+
+    #[test]
+    fn node_record_without_web_listeners_keeps_its_canonical_hash() -> TestResult {
+        let bytes = crate::canonical_json_bytes(&record(Vec::new()))?;
+        let text = String::from_utf8(bytes)?;
+        assert!(!text.contains("web_listeners"));
+        // A record written before the field existed still decodes, and re-encodes equal.
+        let decoded: NodeIdentityRecord = crate::custody::decode(text.as_bytes(), 4096)?;
+        assert_eq!(crate::canonical_json_bytes(&decoded)?, text.as_bytes());
+        // An explicit empty list is not the canonical form and is refused.
+        let explicit = text.replacen('{', r#"{"web_listeners":[],"#, 1);
+        assert!(crate::custody::decode::<NodeIdentityRecord>(explicit.as_bytes(), 4096).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn web_binding_mode_and_listener_use_the_contract_wire_names() -> TestResult {
+        assert_eq!(serde_json::to_string(&BindingMode::WebOriginBound)?, r#""web_origin_bound""#);
+        let listed = record(vec![WebListener {
+            url: "wss://gw.example.org/v1/session".to_owned(),
+            origins: vec!["https://app.example.org".to_owned()],
+        }]);
+        let value = serde_json::to_value(&listed)?;
+        assert_eq!(value["web_listeners"][0]["url"], "wss://gw.example.org/v1/session");
+        assert_eq!(value["web_listeners"][0]["origins"][0], "https://app.example.org");
+        Ok(())
+    }
+
+    #[test]
+    fn listener_url_and_origin_canonical_forms() {
+        assert!(is_canonical_web_listener_url("wss://gw.example.org/v1/session"));
+        assert!(is_canonical_web_listener_url("wss://gw.example.org:8443/v1/session"));
+        assert_eq!(
+            web_listener_authority("wss://gw.example.org:8443/v1/session"),
+            Some("gw.example.org:8443")
+        );
+        for url in [
+            "wss://gw.example.org:443/v1/session",
+            "wss://GW.example.org/v1/session",
+            "wss://gw.example.org/v1/session/",
+            "wss://gw.example.org/v1/session?x",
+            "wss://user@gw.example.org/v1/session",
+            "ws://gw.example.org/v1/session",
+            "wss:///v1/session",
+        ] {
+            assert!(!is_canonical_web_listener_url(url), "{url}");
+        }
+        assert!(is_canonical_web_origin("https://app.example.org", false));
+        assert!(is_canonical_web_origin("http://localhost:5173", true));
+        for origin in ["null", "*", "https://app.example.org/", "http://app.example.org", ""] {
+            assert!(!is_canonical_web_origin(origin, true), "{origin}");
+        }
+        assert!(!is_canonical_web_origin("http://localhost:5173", false));
+    }
+}

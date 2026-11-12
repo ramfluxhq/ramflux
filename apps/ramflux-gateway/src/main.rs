@@ -42,6 +42,8 @@ mod session_response;
 mod state;
 mod submit_source;
 mod voice;
+#[cfg(feature = "web-ingress")]
+mod web_ingress;
 
 use std::sync::{Arc, Mutex};
 

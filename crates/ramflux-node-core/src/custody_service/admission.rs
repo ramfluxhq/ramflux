@@ -12,6 +12,20 @@ use super::{
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
+/// Proxy ids whose receipts may vouch for `web_origin_bound` proofs (comma-separated).
+/// Unset by default, so the authority refuses the web mode until an operator opts in.
+pub(crate) const WEB_PROXY_IDS_ENV: &str = "RAMFLUX_CUSTODY_WEB_PROXY_IDS";
+
+/// The only proof actions a web device may run: open a session, manage its own prekeys.
+pub(crate) fn web_action_allowed(action: &CustodyProofAction) -> bool {
+    matches!(
+        action,
+        CustodyProofAction::OpenSession
+            | CustodyProofAction::Register { .. }
+            | CustodyProofAction::RegisterUpdate { .. }
+            | CustodyProofAction::PrekeyStatus { .. }
+    )
+}
 pub(super) struct ProofAttempt {
     pub action: CustodyProofAction,
     pub proof: Box<Envelope<BranchProofV3>>,
@@ -69,10 +83,10 @@ impl CustodyService {
         if binding_mode == BindingMode::DirectExporter && matches!(origin, Origin::Proxy) {
             return Err(CustodyRefusal::BindingRefused);
         } // Mesh is never the client-facing hop.
-        // A web device may only open a session, and only through the gateway's web listener.
+        // A web device reaches the authority only through the gateway's web listener, and
+        // only to open a session or manage its own prekeys. No account authority here.
         if binding_mode == BindingMode::WebOriginBound
-            && !(matches!(origin, Origin::Proxy)
-                && matches!(action, CustodyProofAction::OpenSession))
+            && !(matches!(origin, Origin::Proxy) && web_action_allowed(&action))
         {
             return Err(CustodyRefusal::BindingRefused);
         }
@@ -105,10 +119,9 @@ impl CustodyService {
             return Err(CustodyRefusal::BindingRefused);
         }
         let Scope { router, store, peer, now, tick, origin, .. } = scope;
-        let web_hash = web
-            .as_ref()
-            .map(|context| self.web_binding(context, proof, origin, now))
-            .transpose()?;
+        if web.is_some() {
+            self.web_proxy(receipt.as_deref(), &attempt.action, origin)?;
+        }
         let holder = holder(peer, connection_id)?;
         let challenge = self.leases().challenge(&proof.body.challenge_nonce, tick)?;
         if challenge.device != proof.body.device_ref
@@ -168,14 +181,11 @@ impl CustodyService {
                 ProofChannel::DirectExporter { observed_hash: actual, receiving_node: &self.node }
             }
             BindingMode::WebOriginBound => {
-                let (Some(context), Some(observed)) = (web.as_ref(), web_hash.as_deref()) else {
-                    return Err(CustodyRefusal::BindingRefused);
-                };
                 ProofChannel::WebOriginBound {
-                    observed_hash: observed,
-                    listener_url: &context.listener_url,
-                    origin: &context.origin,
-                    receiving_node: &self.node,
+                    receipt: receipt.as_deref().ok_or(CustodyRefusal::BindingRefused)?,
+                    context: web.as_ref().ok_or(CustodyRefusal::BindingRefused)?,
+                    historical_node: historical.as_ref().ok_or(CustodyRefusal::BindingRefused)?,
+                    current_node: &self.node,
                 }
             }
         };
@@ -211,26 +221,23 @@ impl CustodyService {
             Possession { publication: &publication, authority: &authority, holder, source },
         )
     }
-    /// Recompute the web binding from the context the gateway's web listener authored.
-    /// Nothing here is taken from the device's proof except its expiry.
-    fn web_binding(
+    /// Web/native proxy-role separation. A web proof is accepted only over the mesh, only
+    /// for an allow-listed action, and only with a receipt from a proxy id the operator
+    /// listed for the web listener. With no id listed, every web proof is refused.
+    fn web_proxy(
         &self,
-        context: &ramflux_protocol::custody::WebOriginBindingV1,
-        proof: &Envelope<BranchProofV3>,
+        receipt: Option<&Envelope<RelayAcceptance>>,
+        action: &CustodyProofAction,
         origin: &Origin,
-        now: u64,
-    ) -> Result<String, CustodyRefusal> {
-        let skew = ramflux_protocol::custody::CLOCK_SKEW_SECONDS;
-        if !matches!(origin, Origin::Proxy)
-            || context.node_id != self.audience
-            || context.issued_at > now.saturating_add(skew)
-            || now > context.expires_at
-            || proof.body.expires_at > context.expires_at
-        {
+    ) -> Result<(), CustodyRefusal> {
+        let receipt = receipt.ok_or(CustodyRefusal::BindingRefused)?;
+        let listed = crate::environment::var(WEB_PROXY_IDS_ENV).is_ok_and(|ids| {
+            ids.split(',').map(str::trim).any(|id| !id.is_empty() && id == receipt.body.relay_id)
+        });
+        if !matches!(origin, Origin::Proxy) || !web_action_allowed(action) || !listed {
             return Err(CustodyRefusal::BindingRefused);
         }
-        ramflux_crypto::custody::web_origin_binding_hash(context)
-            .map_err(|_| CustodyRefusal::BindingRefused)
+        Ok(())
     }
     fn possession_authority(
         &self,
@@ -795,3 +802,29 @@ fn home_operation(
 
 #[cfg(test)]
 mod dm_fs_v3_tests;
+
+#[cfg(test)]
+mod web_action_tests {
+    use super::{CustodyProofAction, web_action_allowed};
+
+    #[test]
+    fn proof_actions_outside_open_session_and_own_prekey_ops_are_refused_for_web_devices() {
+        assert!(web_action_allowed(&CustodyProofAction::OpenSession));
+        assert!(web_action_allowed(&CustodyProofAction::Register {
+            prekey_bundle: serde_json::Value::Null,
+        }));
+        // Publication, home migration and pairing carry account authority.
+        let refused = [
+            r#"{"operation":"pairing_issue"}"#,
+            r#"{"operation":"pairing_create"}"#,
+            r#"{"operation":"publish"}"#,
+            r#"{"operation":"home_migration"}"#,
+        ];
+        for text in refused {
+            // Shapes that do not parse are refused earlier, at the decoder.
+            if let Ok(action) = serde_json::from_str::<CustodyProofAction>(text) {
+                assert!(!web_action_allowed(&action), "{text}");
+            }
+        }
+    }
+}

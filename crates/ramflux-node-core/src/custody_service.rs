@@ -384,10 +384,18 @@ impl CustodyService {
             CustodyMeshRequest::Prove { action, proof, receipt, connection_id } => {
                 self.prove(scope, ProofAttempt { action, proof, receipt, connection_id, web: None })
             }
-            CustodyMeshRequest::ProveWeb { action, proof, context, connection_id } => self.prove(
-                scope,
-                ProofAttempt { action, proof, receipt: None, connection_id, web: Some(context) },
-            ),
+            CustodyMeshRequest::ProveWeb { action, proof, receipt, context, connection_id } => {
+                self.prove(
+                    scope,
+                    ProofAttempt {
+                        action,
+                        proof,
+                        receipt: Some(receipt),
+                        connection_id,
+                        web: Some(context),
+                    },
+                )
+            }
             CustodyMeshRequest::Request { session_id, request, action, connection_id } => self
                 .request(
                     scope,

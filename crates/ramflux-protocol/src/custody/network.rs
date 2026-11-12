@@ -361,6 +361,8 @@ pub enum CustodyMeshRequest {
     ProveWeb {
         action: CustodyProofAction,
         proof: Box<Envelope<BranchProofV3>>,
+        /// Proxy acceptance signed by the web listener's node-authorised proxy key.
+        receipt: Box<Envelope<RelayAcceptance>>,
         context: super::WebOriginBindingV1,
         connection_id: String,
     },

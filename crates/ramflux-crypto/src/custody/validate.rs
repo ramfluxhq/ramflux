@@ -134,7 +134,7 @@ pub(super) fn branch_body(body: &BranchCertificate) -> Result<(), CryptoError> {
         return Err(reject("branch lease exceeds 30 days"));
     }
     if body.capabilities.is_empty()
-        || body.capabilities.len() > 6
+        || body.capabilities.len() > 7
         || !body.capabilities.windows(2).all(|pair| pair[0] < pair[1])
     {
         return Err(reject("invalid custody branch capabilities"));
@@ -142,8 +142,10 @@ pub(super) fn branch_body(body: &BranchCertificate) -> Result<(), CryptoError> {
     web_capability_shape(&body.capabilities)
 }
 /// Native certificates keep the closed five-name set. A web certificate carries exactly
-/// one `web_origin.<base64url SHA-256>` marker together with `web_secondary` and
-/// `message`, may add `call`, `group` and `sync`, and never carries `register`.
+/// one `web_origin.<base64url SHA-256>` marker together with `web_secondary`, `message`
+/// and `register` (session authentication and the device's own prekeys need both), and
+/// may add `call`, `group` and `sync`. `web_secondary` is a deny marker for account
+/// management; one marker without the other is invalid.
 fn web_capability_shape(capabilities: &[String]) -> Result<(), CryptoError> {
     use ramflux_protocol::custody::{CAPABILITY_WEB_ORIGIN_PREFIX, CAPABILITY_WEB_SECONDARY};
     let mut origins = 0_usize;
@@ -165,7 +167,7 @@ fn web_capability_shape(capabilities: &[String]) -> Result<(), CryptoError> {
         }
     }
     let native = origins == 0 && !secondary && capabilities.len() <= 5;
-    let web = origins == 1 && secondary && message && !register;
+    let web = origins == 1 && secondary && message && register;
     if native || web { Ok(()) } else { Err(reject("invalid custody branch capabilities")) }
 }
 pub(super) fn record_structure(body: &DeviceSet) -> Result<(), CryptoError> {
@@ -299,6 +301,17 @@ fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
     {
         return Err(reject("local primary must remain represented in its roster"));
     }
+    // `web_secondary` is a deny marker: a linked web device is never the primary.
+    if body.devices.iter().any(|d| {
+        d.device_id == cert.primary_device_ref.device_id
+            && d.branch_certificate.as_ref().is_some_and(|certificate| {
+                certificate.body.capabilities.iter().any(|capability| {
+                    capability == ramflux_protocol::custody::CAPABILITY_WEB_SECONDARY
+                })
+            })
+    }) {
+        return Err(reject("a web secondary device cannot be the primary device"));
+    }
     Ok(())
 }
 
@@ -342,4 +355,49 @@ fn message_layer_declaration(
             &signature,
         )
         .map_err(|_| reject("message-layer branch signature verification failed"))
+}
+
+#[cfg(test)]
+mod web_capability_tests {
+    use super::web_capability_shape;
+
+    const MARKER: &str = "web_origin.487C9TSCgR2-ucQeh7narsodVJyxrDUqvu46Ghtt9Js";
+
+    fn shape(names: &[&str]) -> bool {
+        let capabilities: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        web_capability_shape(&capabilities).is_ok()
+    }
+
+    #[test]
+    fn native_capability_set_is_unchanged() {
+        assert!(shape(&["call", "group", "message", "register", "sync"]));
+        assert!(shape(&["message"]));
+        assert!(!shape(&["admin"]));
+    }
+
+    #[test]
+    fn web_certificate_carries_both_markers_with_message_and_register() {
+        assert!(shape(&["message", "register", MARKER, "web_secondary"]));
+        assert!(shape(&["call", "group", "message", "register", "sync", MARKER, "web_secondary"]));
+    }
+
+    #[test]
+    fn certificate_with_one_marker_only_is_invalid() {
+        assert!(!shape(&["message", "register", "web_secondary"]));
+        assert!(!shape(&["message", "register", MARKER]));
+    }
+
+    #[test]
+    fn web_certificate_without_register_or_message_is_invalid() {
+        assert!(!shape(&["message", MARKER, "web_secondary"]));
+        assert!(!shape(&["register", MARKER, "web_secondary"]));
+    }
+
+    #[test]
+    fn web_origin_marker_must_be_one_canonical_sha256() {
+        assert!(!shape(&["message", "register", "web_origin.short", "web_secondary"]));
+        assert!(!shape(&["message", "register", "web_origin.", "web_secondary"]));
+        let second = "web_origin.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert!(!shape(&["message", "register", second, MARKER, "web_secondary"]));
+    }
 }

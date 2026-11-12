@@ -74,6 +74,17 @@ pub(crate) fn serve_gateway_quic(
         hub: Arc::new(GatewaySessionHub::default()),
     };
     crate::retention::start(context.clone())?;
+    // The web listener is a separate socket with its own key; off unless configured.
+    #[cfg(feature = "web-ingress")]
+    crate::web_ingress::start(config, context.clone())?;
+    #[cfg(not(feature = "web-ingress"))]
+    if ramflux_node_core::environment::var("RAMFLUX_GATEWAY_WEB_LISTEN")
+        .is_ok_and(|value| !value.trim().is_empty())
+    {
+        return Err(anyhow::anyhow!(
+            "RAMFLUX_GATEWAY_WEB_LISTEN is set but web-ingress is not compiled"
+        ));
+    }
     if let Some(forward_listen_addr) = gateway_forward_listen_addr(config, &context.peers) {
         spawn_gateway_forward_mesh_thread(
             forward_listen_addr,

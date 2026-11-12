@@ -3374,6 +3374,7 @@ name = "ramflux-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "compio",
  "ed25519-dalek",
  "quinn",
@@ -3385,6 +3386,7 @@ dependencies = [
  "ramflux-transport",
  "rcgen",
  "redb",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",
