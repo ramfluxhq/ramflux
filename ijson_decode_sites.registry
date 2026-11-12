@@ -181,6 +181,7 @@ apps/rf/src/handlers/daemon.rs | handle_daemon | 1 | E | excluded=decode is not 
 apps/rf/src/handlers/device.rs | handle_device | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/device.rs | handle_device_sync | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/device.rs | handle_device_sync | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/rf/src/handlers/dm/unified.rs | request_body | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/mcp.rs | handle_mcp | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/node_custody/operation_lock.rs | acquire | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/object.rs | handle_object | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
