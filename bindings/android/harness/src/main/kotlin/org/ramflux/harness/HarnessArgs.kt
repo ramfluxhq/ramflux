@@ -13,9 +13,11 @@ data class HarnessArgs(
     val phase: String,
     /** Node URL of the local gateway as the emulator sees it, e.g. the host loopback alias. */
     val nodeUrl: String,
-    /** Body of `account.create`. The account label and node are the driver's choice. */
-    val accountCreateBody: String,
-    /** Body of `account.unlock`, or null when a created account is already unlocked. */
+    /** Display name of the account the ceremony creates. */
+    val displayName: String,
+    /** Passphrase given to the creation ceremony. A fixture value, never a user's. */
+    val passphrase: String,
+    /** Body of `account.unlock` for the second run, or null when it is not needed. */
     val accountUnlockBody: String?,
     /** Body of `contact.card.import` carrying the peer's contact card. */
     val peerCardImportBody: String,
@@ -37,7 +39,8 @@ data class HarnessArgs(
             return HarnessArgs(
                 phase = required("phase"),
                 nodeUrl = required("nodeUrl"),
-                accountCreateBody = arguments("accountCreateBody") ?: "{\"label\":\"m4-harness\"}",
+                displayName = arguments("displayName") ?: "m4-harness",
+                passphrase = required("passphrase"),
                 accountUnlockBody = arguments("accountUnlockBody"),
                 peerCardImportBody = arguments("peerCardImportBody") ?: "{}",
                 conversationId = arguments("conversationId") ?: "",

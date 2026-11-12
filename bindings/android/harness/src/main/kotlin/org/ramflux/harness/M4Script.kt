@@ -20,7 +20,8 @@ import org.ramflux.sdk.ffi.SubscribeFilter
 /**
  * The Android core acceptance script, in two runs separated by a process kill.
  *
- * First run: start the in-process core, add the local node, create an account, import the
+ * First run: start the in-process core, add the local node, create an account through the
+ * recovery-phrase ceremony, import the
  * peer's card, send one direct message, record what was sent, and return to the caller,
  * which kills the process without suspending or closing anything.
  *
@@ -49,13 +50,12 @@ class M4Script(
         val node = call("node.add", null, JSONObject().put("url", args.nodeUrl).put("refresh", false))
         journal.put("node", node.toString())
 
-        val created = call("account.create", null, JSONObject(args.accountCreateBody), "m4-create")
-        val account = created.getString("local_account_id")
+        val account = createAccount(node.optString("node_id").ifEmpty { null })
         journal.put("account", account)
-        journal.put("principal", created.getString("principal_id"))
-        journal.put("device", created.getString("device_id"))
+        val status = call("account.status", account, JSONObject())
+        journal.put("principal", status.getString("principal_id"))
+        journal.put("device", status.getString("device_id"))
 
-        args.accountUnlockBody?.let { call("account.unlock", account, JSONObject(it), "m4-unlock") }
         call("contact.card.import", account, JSONObject(args.peerCardImportBody), "m4-contact")
 
         val sent = call("message.submit", account, submitBody(FIRST_MESSAGE, "first"), FIRST_OPERATION)
@@ -117,7 +117,7 @@ class M4Script(
         client.start()
         call("node.add", null, JSONObject().put("url", args.nodeUrl).put("refresh", false))
         val refused = try {
-            call("account.create", null, JSONObject(args.accountCreateBody), "m4-create-refused")
+            createAccount(null)
             null
         } catch (error: CoreException) {
             error
@@ -127,6 +127,17 @@ class M4Script(
         check(accounts.length() == 0) { "a refused creation left an account behind: $accounts" }
         journal.put("vault_refusal", refused.toString())
     }
+
+    /**
+     * The creation ceremony as a user would walk it: read the phrase once, then answer the
+     * three positions the core asks for. Returns the new account id.
+     */
+    private suspend fun createAccount(nodeId: String?): String =
+        client.beginAccountCreation(args.displayName, nodeId).use { ceremony ->
+            val words = ceremony.showOnce().trim().split(Regex("\\s+"))
+            val answer = ceremony.hiddenChallenge().map { position -> words[position - 1] }
+            ceremony.confirm(answer, args.passphrase).accountId
+        }
 
     private fun collectUpdates(scope: CoroutineScope, account: String): Job = scope.launch {
         client.updates(SubscribeFilter(account, emptyList(), null, 0u)).collect { event ->

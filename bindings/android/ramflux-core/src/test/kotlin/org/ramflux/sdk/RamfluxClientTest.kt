@@ -109,6 +109,9 @@ class RamfluxClientTest {
             return call.reply.await()
         }
 
+        override suspend fun beginAccountCreation(displayName: String, nodeId: String?): AccountCreation =
+            throw UnsupportedOperationException("not part of these tests")
+
         override fun subscribe(filter: SubscribeFilter, listener: UpdateListener): SubscriptionHandle {
             this.filter = filter
             this.listener = listener

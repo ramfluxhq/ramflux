@@ -42,6 +42,14 @@ pub(super) struct V2Error {
 
 pub(super) type V2Result<T> = Result<T, V2Error>;
 
+impl std::fmt::Display for V2Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} ({}): {}", self.code.name(), self.code as i32, self.message)
+    }
+}
+
+impl std::error::Error for V2Error {}
+
 impl V2Error {
     pub(super) fn new(code: RamfluxErrorCode, message: impl Into<String>) -> Self {
         Self {

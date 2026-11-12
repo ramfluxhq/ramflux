@@ -3,13 +3,16 @@
 
 package org.ramflux.sdk
 
+import org.ramflux.sdk.ffi.AccountCeremony
 import org.ramflux.sdk.ffi.CancelHandle
 import org.ramflux.sdk.ffi.CoreConfig
 import org.ramflux.sdk.ffi.CoreRequest
+import org.ramflux.sdk.ffi.CreatedAccount
 import org.ramflux.sdk.ffi.CoreState
 import org.ramflux.sdk.ffi.ExecuteOutcome
 import org.ramflux.sdk.ffi.Negotiated
 import org.ramflux.sdk.ffi.NetworkChange
+import org.ramflux.sdk.ffi.PendingCeremony
 import org.ramflux.sdk.ffi.RamfluxCore
 import org.ramflux.sdk.ffi.SubscribeFilter
 import org.ramflux.sdk.ffi.Subscription
@@ -29,6 +32,26 @@ interface SubscriptionHandle : AutoCloseable {
 
     /** End the stream. Idempotent. */
     fun cancel()
+}
+
+/**
+ * The account-creation ceremony. Creation is not an `execute` request: the recovery
+ * phrase is shown once, hidden, and three of its words are asked back before the account
+ * exists. The single confirmation attempt cannot be repeated.
+ */
+interface AccountCreation : AutoCloseable {
+    val pending: PendingCeremony
+
+    /** The recovery phrase. Returned once; show it, then discard it. */
+    suspend fun showOnce(): String
+
+    /** Three one-based word positions to ask the user for, after the phrase was hidden. */
+    suspend fun hiddenChallenge(): List<Int>
+
+    /** Consume the single confirmation attempt and open the account. */
+    suspend fun confirm(words: List<String>, passphrase: String): CreatedAccount
+
+    suspend fun cancel()
 }
 
 /**
@@ -60,6 +83,8 @@ interface CoreBridge {
 
     suspend fun execute(request: CoreRequest, cancel: CancelToken): ExecuteOutcome
 
+    suspend fun beginAccountCreation(displayName: String, nodeId: String?): AccountCreation
+
     fun subscribe(filter: SubscribeFilter, listener: UpdateListener): SubscriptionHandle
 }
 
@@ -83,6 +108,22 @@ internal class UniffiCoreBridge(private val core: RamfluxCore) : CoreBridge {
         override fun cancel() = subscription.cancel()
 
         override fun close() = subscription.close()
+    }
+
+    private class Ceremony(private val ceremony: AccountCeremony) : AccountCreation {
+        override val pending: PendingCeremony get() = ceremony.pending()
+
+        override suspend fun showOnce(): String = ceremony.showOnce()
+
+        override suspend fun hiddenChallenge(): List<Int> =
+            ceremony.hiddenChallenge().map { it.toInt() and 0xff }
+
+        override suspend fun confirm(words: List<String>, passphrase: String): CreatedAccount =
+            ceremony.confirm(words, passphrase)
+
+        override suspend fun cancel() = ceremony.cancel()
+
+        override fun close() = ceremony.close()
     }
 
     override fun negotiated(): Negotiated = core.negotiated()
@@ -114,6 +155,9 @@ internal class UniffiCoreBridge(private val core: RamfluxCore) : CoreBridge {
             ?: throw IllegalArgumentException("cancel token was not created by this bridge")
         return core.execute(request, token.handle)
     }
+
+    override suspend fun beginAccountCreation(displayName: String, nodeId: String?): AccountCreation =
+        Ceremony(core.beginAccountCreation(displayName, nodeId))
 
     override fun subscribe(filter: SubscribeFilter, listener: UpdateListener): SubscriptionHandle =
         Stream(core.subscribe(filter, listener))

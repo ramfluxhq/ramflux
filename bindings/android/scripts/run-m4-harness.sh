@@ -18,8 +18,9 @@
 # pass what the device needs:
 #
 #   RAMFLUX_NODE_URL                 node URL as the device sees it (emulator: host alias)
-#   RAMFLUX_ACCOUNT_CREATE_BODY      JSON body of account.create
-#   RAMFLUX_ACCOUNT_UNLOCK_BODY      JSON body of account.unlock (optional)
+#   RAMFLUX_PASSPHRASE               fixture passphrase for the creation ceremony
+#   RAMFLUX_DISPLAY_NAME             account display name (optional)
+#   RAMFLUX_ACCOUNT_UNLOCK_BODY      JSON body of account.unlock for the second run (optional)
 #   RAMFLUX_PEER_CARD_IMPORT_BODY    JSON body of contact.card.import with the peer's card
 #   RAMFLUX_CONVERSATION_ID          conversation of the direct message
 #   RAMFLUX_TARGET_DELIVERY_ID       delivery id of the peer
@@ -43,7 +44,8 @@ fail() { echo "m4-harness: FAIL: $*" >&2; exit 1; }
 # %q quoting keeps a JSON value one argument through `adb shell`.
 arg() { [ -n "${2:-}" ] && printf ' -e %s %q' "$1" "$2" || true; }
 instrument_args="$(arg nodeUrl "$RAMFLUX_NODE_URL")\
-$(arg accountCreateBody "${RAMFLUX_ACCOUNT_CREATE_BODY:-}")\
+$(arg passphrase "${RAMFLUX_PASSPHRASE:?set RAMFLUX_PASSPHRASE to the fixture passphrase}")\
+$(arg displayName "${RAMFLUX_DISPLAY_NAME:-}")\
 $(arg accountUnlockBody "${RAMFLUX_ACCOUNT_UNLOCK_BODY:-}")\
 $(arg peerCardImportBody "${RAMFLUX_PEER_CARD_IMPORT_BODY:-}")\
 $(arg conversationId "${RAMFLUX_CONVERSATION_ID:-}")\

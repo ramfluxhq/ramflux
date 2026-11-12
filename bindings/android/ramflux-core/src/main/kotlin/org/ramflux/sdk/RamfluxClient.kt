@@ -99,6 +99,16 @@ class RamfluxClient internal constructor(
     fun networkChanged(change: NetworkChange) = bridge.networkChanged(change)
 
     /**
+     * Begin creating an account on [nodeId] (or the default node). The returned ceremony
+     * shows the recovery phrase once and asks three words back; close it when done.
+     *
+     * @throws org.ramflux.sdk.ffi.CoreException `CapabilityRejected` when the core cannot
+     *   carry the ceremony, `CryptoFailed` when no hardware-backed vault is available.
+     */
+    suspend fun beginAccountCreation(displayName: String, nodeId: String? = null): AccountCreation =
+        bridge.beginAccountCreation(displayName, nodeId)
+
+    /**
      * Run one request and return its reply.
      *
      * @throws org.ramflux.sdk.ffi.CoreException the core's typed refusal or failure.
