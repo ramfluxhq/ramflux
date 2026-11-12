@@ -188,10 +188,23 @@ impl RamfluxClient {
         })
     }
 
+    /// Start the native history transfer to one named own device (the importing device).
+    /// The account's history courier then delivers the pages; progress is durable.
+    /// # Errors
+    /// Refuses an unknown device, the local device and a device without Sync authority.
+    pub fn start_generated_history_transfer(
+        &self,
+        target_device_id: &str,
+    ) -> Result<bool, SdkError> {
+        let root = self.own_account_anchor()?;
+        let target = self.device_identity_for_root(&root, target_device_id)?;
+        self.stage_generated_history_transfer(&target)
+    }
+
     /// Start a transfer to every admitted own-root sibling. Returns the number started.
     /// # Errors
     /// Returns authority and storage errors; an account without siblings starts nothing.
-    pub(crate) fn stage_generated_history_transfers(&self) -> Result<usize, SdkError> {
+    pub fn start_generated_history_transfers(&self) -> Result<usize, SdkError> {
         let local = self.owned_device_identity()?;
         let now = crate::custody::network_now()?;
         let Some(authority) = self.current_custody_authority(local.root_commitment(), now)? else {
@@ -210,16 +223,6 @@ impl RamfluxClient {
             }
         }
         Ok(started)
-    }
-
-    /// Content-free progress of the transfer to `target`.
-    /// # Errors
-    /// Returns storage errors.
-    pub(crate) fn generated_history_transfer(
-        &self,
-        target: &RootQualifiedDeviceRef,
-    ) -> Result<Option<Outgoing>, SdkError> {
-        Ok(self.account_db()?.load_actor_state(&transfer_key(target))?)
     }
 
     /// Build the next page strictly after `cursor`. Pages are homogeneous per conversation,

@@ -11,7 +11,8 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
     let prepared = writer
         .apply(|account| {
             let config = account.gateway_config.clone();
-            Ok(account.client.prepare_generated_history_delivery(&config)?.map(|plan| (config, plan)))
+            let plan = account.client.prepare_generated_history_delivery(&config)?;
+            Ok(plan.map(|plan| (config, plan)))
         })
         .await?;
     let Some((config, mut plan)) = prepared else { return Ok(false) };
