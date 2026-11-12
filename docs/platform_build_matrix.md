@@ -12,7 +12,7 @@ fails; it never skips.
 |---|---|---|---|---|---|
 | Linux desktop and node | `x86_64-unknown-linux-gnu` | `ci.yml` (all jobs), `release.yml` `build` | Linux | full tests, release tar | no (see below) |
 | macOS desktop | `aarch64-apple-darwin` | `release.yml` `build` | `macos-latest` | release tar | no |
-| Windows | `x86_64-pc-windows-msvc` | the `windows-latest` check job that ships with the Windows host module | `windows-latest` | check | no |
+| Windows | `x86_64-pc-windows-msvc` | `windows.yml` `windows-host` ("Windows host (rf.exe, pipe, vault, store)") | `windows-latest` | host checks | no |
 | Android | `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android` | `platform-targets.yml` `android` | `ubuntu-latest` + image NDK | `cargo check` | no |
 | iOS device | `aarch64-apple-ios` | `platform-targets.yml` `ios` | `macos-latest` | `cargo check` | no |
 | iOS simulator | `aarch64-apple-ios-sim` | `platform-targets.yml` `ios` | `macos-latest` | `cargo check` | no |
@@ -20,9 +20,8 @@ fails; it never skips.
 
 There is no Intel macOS slice and no `i686` Android slice.
 
-The Windows job is defined once, with the Windows host module. This workflow
-does not add a second `windows-latest` job; when that job lands, put its job
-name in the Windows row above.
+The Windows job is defined once, in `windows.yml`, with the Windows host
+module. `platform-targets.yml` does not add a second `windows-latest` job.
 
 ## The platform-targets workflow
 
