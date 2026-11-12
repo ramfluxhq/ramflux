@@ -725,11 +725,13 @@ impl LocalBusDaemonState {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn unregister_connection(&mut self, connection_id: u64) {
         self.subscribers.remove(&connection_id);
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn broadcast_events(&mut self, events: &[LocalBusFrame]) {
         let mut stale_connections = BTreeSet::new();
         for event in events {

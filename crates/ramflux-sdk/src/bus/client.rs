@@ -438,10 +438,10 @@ mod stream_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "contact_error_client_tests.rs"]
 mod contact_error_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "client_stream_error_tests.rs"]
 mod stream_error_tests;

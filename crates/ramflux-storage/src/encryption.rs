@@ -140,8 +140,8 @@ impl VaultSecretSource for FileVaultSecretSource {
         let mut file = options.open(&path)?;
         file.write_all(&secret)?;
         file.sync_all()?;
-        fs::File::open(parent)?.sync_all()?;
-        fs::File::open(&self.root)?.sync_all()?;
+        crate::sync_path::sync_path(parent)?;
+        crate::sync_path::sync_path(&self.root)?;
         #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Ok(secret)

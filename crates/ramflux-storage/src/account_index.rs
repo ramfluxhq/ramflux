@@ -34,9 +34,9 @@ impl AccountIndex {
         let account_dir = self.root.join(format!("accounts/{local_account_id}"));
         fs::create_dir_all(account_dir.join("objects"))?;
         let writer = crate::account_writer::AccountWriter::acquire(&self.root, local_account_id)?;
-        fs::File::open(&account_dir)?.sync_all()?;
-        fs::File::open(self.root.join("accounts"))?.sync_all()?;
-        fs::File::open(&self.root)?.sync_all()?;
+        crate::sync_path::sync_path(&account_dir)?;
+        crate::sync_path::sync_path(self.root.join("accounts"))?;
+        crate::sync_path::sync_path(&self.root)?;
         Ok(writer)
     }
 

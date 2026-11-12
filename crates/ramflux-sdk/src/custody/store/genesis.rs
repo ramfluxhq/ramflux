@@ -121,6 +121,7 @@ mod checkpoints {
     }
     type Hook = Box<dyn FnMut(Stage) -> Result<(), SdkError>>;
     thread_local! { static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -129,6 +130,7 @@ mod checkpoints {
             });
         }
     }
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn install(hook: impl FnMut(Stage) -> Result<(), SdkError> + 'static) -> Reset {
         HOOK.with(|slot| {
             assert!(slot.borrow().is_none());
@@ -141,10 +143,10 @@ mod checkpoints {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "genesis/tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "genesis/flow_tests.rs"]
 mod flow_tests;

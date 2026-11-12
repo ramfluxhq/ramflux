@@ -68,6 +68,8 @@ impl ServiceShutdown {
     /// # Errors
     /// Returns an error for an invalid grace period, duplicate installation, or signal failure.
     pub fn install(service: &'static str) -> Result<Self, NodeCoreError> {
+        // Only the Unix signal handler uses the grace period; it is still validated everywhere.
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let grace = shutdown_grace_period()?;
         let runtime = Arc::new(ShutdownRuntime {
             token: CancellationToken::new(),

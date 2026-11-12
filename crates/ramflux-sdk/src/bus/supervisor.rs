@@ -765,6 +765,7 @@ impl Supervisor {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn lifecycle_task_count(&self) -> usize {
         self.lifecycle_tasks.borrow().len()
     }
