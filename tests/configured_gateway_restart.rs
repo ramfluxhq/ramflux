@@ -8,7 +8,7 @@ use super::*;
 pub fn crash_restart(binary: &str, enabled: bool) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new("ramflux-gateway")?;
     let cookie = fixture.root.join("admission-cookie.key");
-    std::fs::write(&cookie, ramflux_protocol::encode_base64url([31; 32]))?;
+    std::fs::write(&cookie, b"Hx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
