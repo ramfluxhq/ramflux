@@ -110,14 +110,7 @@ fn config(roots: u64, share: u64) -> crate::GatewayReplayConfig {
     }
 }
 fn root_count(store: &GatewayRedbStore) -> Result<u64, NodeCoreError> {
-    Ok(store
-        .db
-        .begin_read()
-        .map_err(error)?
-        .open_table(ROOTS)
-        .map_err(error)?
-        .len()
-        .map_err(error)?)
+    store.db.begin_read().map_err(error)?.open_table(ROOTS).map_err(error)?.len().map_err(error)
 }
 #[test]
 fn inclusive_expiry_releases_zero_live_roots_without_resurrection()
@@ -140,7 +133,8 @@ fn inclusive_expiry_releases_zero_live_roots_without_resurrection()
         );
         let mut next = request(202, 200);
         next.created_at = 101;
-        store.save_auth_replay(&bob, &next, 101)?;
+        let admitted = store.save_auth_replay(&bob, &next, 101);
+        assert!(admitted.is_ok(), "zero-live root reservation was not released: {admitted:?}");
         assert_eq!(root_count(&store)?, 1);
         assert!(
             store.db.begin_read()?.open_table(REPLAY)?.len()? > 64,
@@ -195,13 +189,36 @@ fn pending_failed_commit_never_installs_or_reserves_a_root_after_reopen()
 }
 #[test]
 fn disk_replay_storage_measurement_and_bounded_restore() -> Result<(), Box<dyn std::error::Error>> {
+    const IDENTITIES: usize = 32_768;
+    // Isolate allocation measurements from parallel tests in the parent harness.
+    if cfg!(target_os = "linux") && std::env::var_os("RAMFLUX_REPLAY_MEMORY_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "gateway_state::replay_journal::tests::disk_replay_storage_measurement_and_bounded_restore", "--nocapture"])
+            .env("RAMFLUX_REPLAY_MEMORY_CHILD", "1").output()?;
+        eprintln!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "isolated replay memory/storage proof failed");
+        return Ok(());
+    }
+    let before_memory = replay_peak_resident_bytes()?;
+    let now = i64::MAX - 2000;
+    let expiry = i64::MAX - 1000;
     let path = test_path()?;
     let owner = source(3)?;
     let store = GatewayRedbStore::open(&path)?;
-    store.configure_replay(config(1, 8192), 0)?;
+    store.configure_replay(config(1, 65536), now)?;
+    // Exercise the maximum generation/expiry widths, not only early small counters.
+    let write = store.db.begin_write()?;
+    write.open_table(META)?.insert("generation", u64::MAX - 1)?;
+    write.commit()?;
     let baseline = std::fs::metadata(&path)?.len();
-    for index in 0..4096 {
-        store.save_auth_replay(&owner, &request(index, 1000), 0)?;
+    for index in 0..IDENTITIES {
+        let mut next = request(index, expiry);
+        next.created_at = now;
+        store.save_auth_replay(&owner, &next, now)?;
     }
     let bytes = std::fs::metadata(&path)?.len();
     let read = store.db.begin_read()?;
@@ -211,32 +228,55 @@ fn disk_replay_storage_measurement_and_bounded_restore() -> Result<(), Box<dyn s
         read.open_table(OWN_EXPIRY)?.stats()?,
         read.open_table(ROOTS)?.stats()?,
         read.open_table(ROOT_EXPIRY)?.stats()?,
+        read.open_table(META)?.stats()?,
     ];
     let stored: u64 = stats.iter().map(redb::TableStats::stored_bytes).sum();
     let overhead: u64 =
         stats.iter().map(|stats| stats.metadata_bytes() + stats.fragmented_bytes()).sum();
     eprintln!(
-        "REPLAY_STORAGE_MEASURED identities=4096 initial_file_bytes={baseline} final_file_bytes={bytes} growth_bytes_per_identity={} all_index_stored_bytes_per_identity={} index_metadata_and_fragmentation_bytes_per_identity={} page_cache_bytes={}",
-        (bytes - baseline) / 4096,
-        stored / 4096,
-        overhead / 4096,
+        "REPLAY_STORAGE_MEASURED identities={IDENTITIES} initial_file_bytes={baseline} final_file_bytes={bytes} growth_bytes_per_identity={} all_index_stored_bytes_per_identity={} index_metadata_and_fragmentation_bytes_per_identity={} page_cache_bytes={}",
+        (bytes - baseline) / u64::try_from(IDENTITIES)?,
+        stored / u64::try_from(IDENTITIES)?,
+        overhead / u64::try_from(IDENTITIES)?,
         super::super::GATEWAY_REPLAY_PAGE_CACHE_BYTES
     );
-    assert_eq!(read.open_table(REPLAY)?.len()?, 4096);
+    assert_eq!(read.open_table(REPLAY)?.len()?, u64::try_from(IDENTITIES)?);
+    assert!(
+        stored + overhead > u64::try_from(super::super::GATEWAY_REPLAY_PAGE_CACHE_BYTES)?,
+        "fixture must exceed replay page cache and force eviction"
+    );
+    let maximum_row = serialize_snapshot_value(&ReplayEntry {
+        owner: owner.root_commitment().to_owned(),
+        expiry,
+        generation: u64::MAX,
+    })?
+    .len();
+    assert!(maximum_row <= 256, "maximum encoded replay row exceeds decoder bound");
+    eprintln!("REPLAY_ROW_MAX_ENCODED_BYTES={maximum_row}");
     drop(read);
     drop(store);
     for _ in 0..2 {
         let store = GatewayRedbStore::open(&path)?;
-        store.configure_replay(config(1, 8192), 0)?;
+        store.configure_replay(config(1, 65536), now)?;
         assert!(
             store.load_state()?.ok_or("missing state")?.replay_guard_state_mut().is_empty(),
             "startup loaded all evidence into memory"
         );
         assert!(matches!(
-            store.save_auth_replay(&owner, &request(1, 1000), 0),
+            {
+                let mut replay = request(1, expiry);
+                replay.created_at = now;
+                store.save_auth_replay(&owner, &replay, now)
+            },
             Err(NodeCoreError::ReplayGuard(_))
         ));
     }
+    let memory_growth = replay_peak_resident_bytes()?.saturating_sub(before_memory);
+    eprintln!("REPLAY_MEMORY_PEAK_GROWTH_BYTES={memory_growth} including allocation overhead");
+    assert!(
+        memory_growth <= u64::try_from(super::super::GATEWAY_REPLAY_MEMORY_LIMIT_BYTES)?,
+        "replay allocation growth exceeds 64MiB including overhead"
+    );
     const {
         assert!(
             super::super::GATEWAY_REPLAY_PAGE_CACHE_BYTES
@@ -272,6 +312,107 @@ fn own_expired_share_is_reclaimed_before_other_roots_backlog()
         ),
         "share reclamation forgot live evidence"
     );
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn replay_peak_resident_bytes() -> Result<u64, Box<dyn std::error::Error>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(0);
+    }
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .ok_or("peak resident size missing")?;
+    let kib = value
+        .split_whitespace()
+        .next()
+        .ok_or("peak resident size value missing")?
+        .parse::<u64>()?;
+    kib.checked_mul(1024).ok_or_else(|| "peak resident size overflow".into())
+}
+
+#[test]
+fn old_generation_gc_cannot_charge_or_remove_a_new_live_reservation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = test_path()?;
+    let owner = source(11)?;
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        store.configure_replay(config(1, 1024), 0)?;
+        for index in 0..1000 {
+            store.save_auth_replay(&owner, &request(index, 100), 0)?;
+        }
+        let mut next = request(1001, 200);
+        next.created_at = 101;
+        store.save_auth_replay(&owner, &next, 101)?;
+        assert!(store.db.begin_read()?.open_table(REPLAY)?.len()? > 900);
+    }
+    let store = GatewayRedbStore::open(&path)?;
+    store.configure_replay(config(1, 1024), 102)?;
+    assert_eq!(root_count(&store)?, 1, "old generation cleanup released the new live root");
+    let root = decode_root(
+        store
+            .db
+            .begin_read()?
+            .open_table(ROOTS)?
+            .get(owner.root_commitment())?
+            .ok_or("live root")?
+            .value(),
+    )?;
+    assert_eq!(root.count, 1, "old rows changed the new generation count");
+    let mut next = request(1002, 200);
+    next.created_at = 102;
+    assert!(matches!(
+        store.save_auth_replay(&source(12)?, &next, 102),
+        Err(NodeCoreError::GatewayReplayCapacity)
+    ));
+    store.save_auth_replay(&owner, &next, 102)?;
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+#[test]
+fn durable_replay_gc_visits_at_most_sixty_four_identities() -> Result<(), Box<dyn std::error::Error>>
+{
+    let path = test_path()?;
+    let store = GatewayRedbStore::open(&path)?;
+    store.configure_replay(config(1, 1024), 0)?;
+    let owner = source(13)?;
+    for index in 0..1000 {
+        store.save_auth_replay(&owner, &request(index, 100), 0)?;
+    }
+    store.save_auth_replay(&owner, &request(1001, 1000), 0)?;
+    store.write_guard()?.prune_replay(101)?;
+    assert_eq!(store.db.begin_read()?.open_table(REPLAY)?.len()?, 1001 - 64);
+    assert!(matches!(
+        store.save_auth_replay(&owner, &request(1001, 1000), 101),
+        Err(NodeCoreError::ReplayGuard(_))
+    ));
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+#[test]
+fn unfunded_configuration_refuses_before_any_root_or_fence_write()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = test_path()?;
+    let store = GatewayRedbStore::open(&path)?;
+    for bytes in [1, u64::MAX] {
+        let config = crate::GatewayReplayConfig { storage_budget_bytes: bytes, ..config(1, 4) };
+        assert!(matches!(
+            store.configure_replay(config, 0),
+            Err(NodeCoreError::GatewayReplayUnfunded)
+        ));
+    }
+    assert_eq!(root_count(&store)?, 0);
+    assert!(store.db.begin_read()?.open_table(META)?.is_empty()?);
+    assert!(matches!(
+        store.save_auth_replay(&source(14)?, &request(0, 100), 0),
+        Err(NodeCoreError::GatewayReplayUnfunded)
+    ));
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

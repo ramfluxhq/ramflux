@@ -141,9 +141,15 @@ storage_budget_bytes = 137438953472
 ```
 
 `disk_replay_storage_measurement_and_bounded_restore` records actual file growth
-and replay-tree page bytes for4096 committed identities; deployment sizing must
-include every index, page overhead and database working space. Its measurements
-are evidence for that fixture, not a physical upper bound for arbitrary workloads.
+and all-index bytes for32768 committed identities with maximum-width generation
+and expiry counters. Deployment sizing must include every index, page overhead
+and database working space. Measured on the QA fixture:632 bytes/identity file
+growth,350 stored bytes plus205
+bytes of index metadata/fragmentation; maximum encoded replay body118 bytes
+(decoder bound256). The fixture exceeds the8MiB cache and checks replay after
+cache eviction/reopen. Its isolated Linux process checks peak resident allocation
+growth including overhead against64MiB. These measurements are evidence for that
+fixture, not a physical upper bound for arbitrary workloads.
 Authentication and each signed operation commit one root-owned identity and its
 indexes outside the global state mutex. Establishment commits a session/token pair.
 

@@ -95,7 +95,7 @@ impl GatewayRedbStore {
         {
             let roots = write.open_table(ROOTS).map_err(error)?.len().map_err(error)?;
             let mut meta = write.open_table(META).map_err(error)?;
-            let old_share = meta.get("share").map_err(error)?.map(|raw| raw.value()).unwrap_or(0);
+            let old_share = meta.get("share").map_err(error)?.map_or(0, |raw| raw.value());
             if roots > config.root_budget || (roots > 0 && config.per_root_share < old_share) {
                 return Err(NodeCoreError::GatewayReplayUnfunded);
             }
@@ -168,23 +168,10 @@ impl GatewayRedbStore {
                 root_expiry.remove((old.latest_expiry, source.root_commitment())).map_err(error)?;
                 root = None;
             }
-            let mut root = match root {
-                Some(root) => root,
-                None => {
-                    if roots.len().map_err(error)? >= config.root_budget {
-                        return Err(NodeCoreError::GatewayReplayCapacity);
-                    }
-                    let mut meta = write.open_table(META).map_err(error)?;
-                    let generation = meta
-                        .get("generation")
-                        .map_err(error)?
-                        .map(|raw| raw.value())
-                        .unwrap_or(0)
-                        .checked_add(1)
-                        .ok_or(NodeCoreError::GatewayReplayCapacity)?;
-                    meta.insert("generation", generation).map_err(error)?;
-                    RootReservation { generation, count: 0, latest_expiry: request.expires_at }
-                }
+            let mut root = if let Some(root) = root {
+                root
+            } else {
+                allocate_root(&write, config, roots.len().map_err(error)?, request.expires_at)?
             };
             if let Some(previous) = previous {
                 expiry.remove((previous.expiry, key.as_str())).map_err(error)?;
@@ -245,6 +232,26 @@ impl GatewayRedbStore {
         write.commit().map_err(error)
     }
 }
+fn allocate_root(
+    write: &redb::WriteTransaction,
+    config: GatewayReplayConfig,
+    existing_roots: u64,
+    expiry: i64,
+) -> Result<RootReservation, NodeCoreError> {
+    if existing_roots >= config.root_budget {
+        return Err(NodeCoreError::GatewayReplayCapacity);
+    }
+    let mut meta = write.open_table(META).map_err(error)?;
+    let generation = meta
+        .get("generation")
+        .map_err(error)?
+        .map_or(0, |raw| raw.value())
+        .checked_add(1)
+        .ok_or(NodeCoreError::GatewayReplayCapacity)?;
+    meta.insert("generation", generation).map_err(error)?;
+    Ok(RootReservation { generation, count: 0, latest_expiry: expiry })
+}
+
 impl GatewayStoreWriter<'_> {
     /// Verify root binding and signatures, then atomically admit the durable replay identity.
     /// # Errors

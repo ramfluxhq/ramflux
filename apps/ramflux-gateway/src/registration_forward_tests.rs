@@ -13,8 +13,17 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 pub(crate) fn registration(
     now: i64,
 ) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
-    let root = ramflux_crypto::create_identity_root("peer", [31; 32]);
-    let branch = ramflux_crypto::create_device_branch("peer", "device", 1, [32; 32]);
+    registration_for(now, "peer", "device", "delivery", [31; 32])
+}
+pub(crate) fn registration_for(
+    now: i64,
+    principal: &str,
+    device: &str,
+    delivery: &str,
+    root_seed: [u8; 32],
+) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
+    let root = ramflux_crypto::create_identity_root(principal, root_seed);
+    let branch = ramflux_crypto::create_device_branch(principal, device, 1, [32; 32]);
     let agreement = X25519KeyPair::from_seed([33; 32]);
     let branch_public_key = encode_base64url(branch.signing_key.verifying_key().to_bytes());
     let keys = ramflux_crypto::device_key_commitments(
@@ -39,7 +48,7 @@ pub(crate) fn registration(
             principal_kind: PrincipalKind::Human,
             device_set_epoch: 1,
             devices: vec![SignedDeviceSetEntry {
-                device_id: "device".into(),
+                device_id: device.into(),
                 device_epoch: 1,
                 signing_key_commitment: keys.0,
                 agreement_key_commitment: keys.1,
@@ -56,7 +65,7 @@ pub(crate) fn registration(
         branch_public_key,
         proof,
         device_set: Some(set),
-        target_delivery_id: "delivery".into(),
+        target_delivery_id: delivery.into(),
         gateway_id: "gw-x".into(),
         session_id: "session-b".into(),
         push_alias_hash: None,

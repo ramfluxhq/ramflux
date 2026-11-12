@@ -15,7 +15,10 @@ pub fn crash_restart(binary: &str, enabled: bool) -> Result<(), Box<dyn std::err
         std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o600))?;
     }
     let mut config = std::fs::OpenOptions::new().append(true).open(&fixture.config)?;
-    writeln!(config, "\n[gateway.pre_auth]\nenabled = {enabled}")?;
+    writeln!(
+        config,
+        "\n[gateway.pre_auth]\nenabled = {enabled}\nper_source_ip_handshake_rate = 1"
+    )?;
     let spawn = || -> Result<ChildGuard, Box<dyn std::error::Error>> {
         Ok(ChildGuard(
             configured_command(binary, "ramflux-gateway", &fixture, "idle")?

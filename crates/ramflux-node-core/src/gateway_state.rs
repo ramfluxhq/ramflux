@@ -19,7 +19,7 @@ pub use session_overlay::GatewaySessionCheckpoint;
 mod pre_auth_state;
 #[path = "gateway_store_format.rs"]
 mod store_format;
-pub use pre_auth_state::GatewayAdmissionCheckpoint;
+pub use pre_auth_state::{GatewayAdmissionCheckpoint, PRE_AUTH_CHECKPOINT_SECONDS};
 
 use crate::{
     GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_PRE_AUTH_POLICY_KEY, GATEWAY_STATE_TABLE,

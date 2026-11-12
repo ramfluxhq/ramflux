@@ -10,13 +10,13 @@ use std::sync::{
     mpsc,
 };
 
-fn signed_operation(index: usize) -> anyhow::Result<GatewayClientFrame> {
+fn signed_operation(index: usize, device: &str) -> anyhow::Result<GatewayClientFrame> {
     let now = ramflux_node_core::now_unix_seconds();
     // Issuer material is deliberately absent: a valid signed wrapper must commit first,
     // then return the ordinary business refusal. No token is issued by this fixture.
     let body: ramflux_node_core::RelayTokenV3IssueRequest = serde_json::from_value(
         serde_json::json!({
-            "requester_device_id":"device", "requester_device_hash":"hash", "requester_public_key":"key", "requester_device_epoch":1,
+            "requester_device_id":device, "requester_device_hash":"hash", "requester_public_key":"key", "requester_device_epoch":1,
             "owner_signing_key_id":"device", "owner_public_key":"key", "owner_home_node_id":"node", "owner_principal_id":"peer", "owner_device_epoch":1,
             "issuer_node_id":"node", "gateway_instance_id":"gateway", "audience_node_id":"node", "relay_instance_id":null,
             "object_id":"object", "manifest_hash":"manifest", "chunk_id":"chunk", "capabilities":[], "authorization_kind":"owner_session", "authorization_binding_hash":"binding", "delete_after_ack":false,
@@ -25,6 +25,8 @@ fn signed_operation(index: usize) -> anyhow::Result<GatewayClientFrame> {
         }),
     )?;
     let mut signed_request = auth(&open("wrapper", 0, None)?, [32; 32])?.signed_request;
+    signed_request.source_device_id = device.into();
+    signed_request.signed.signing_key_id = device.into();
     signed_request.path = "/relay/v1/token/v3/issue".into();
     signed_request.device_proof_hash = "already_authed".into();
     signed_request.request_id = format!("writer-outage-{index}");
@@ -50,9 +52,18 @@ async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
         let fixture = Fixture::new().await?;
         let mut clients = Vec::new();
         for index in 0..10 {
+            let device = format!("outage-device-{index}");
+            let principal = format!("outage-principal-{index}");
+            let delivery = format!("outage-delivery-{index}");
+            let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+            let mut registration = crate::registration_forward_tests::registration_for(now, &principal, &device, &delivery, [u8::try_from(index+64)?;32]).map_err(|error|anyhow::anyhow!("{error}"))?;
+            registration.gateway_id = fixture.context.gateway_id.clone();
+            let _: ramflux_node_core::IdentityRegistrationResponse = crate::router_post_json_async(&fixture.context.router, "/mvp1/identity/register", &registration).await?;
             let mut client = fixture.connect(Route::Tcp, &format!("127.0.0.{}", 110+index)).await?;
-            let open = open("writer-outage", 0, None)?;
-            established(&client.exchange(open.clone(), auth(&open, [32;32])?).await?)?;
+            let mut open = open("writer-outage", 0, None)?;
+            open.device_id = device; open.target_delivery_id = delivery;
+            let auth = auth_for(&open, [32;32], &principal, &registration.principal_commitment)?;
+            established(&client.exchange(open, auth).await?)?;
             clients.push(client);
         }
         let (entered, observed) = mpsc::channel();
@@ -63,25 +74,29 @@ async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
         let worker = std::thread::spawn(move || store.save_admission_checkpoint(&checkpoint));
         observed.recv_timeout(Duration::from_secs(5))?;
         // A wall-clock watchdog releases the gate even if a broken implementation blocks
-        // both Tokio workers. The heartbeat deadline then fails by assertion, not a hang.
+        // both Tokio workers. The progress barrier then fails by assertion, not a hang.
         let recovered = Arc::new(AtomicBool::new(false));
         let control = recovered.clone();
+        let released = Arc::new(AtomicBool::new(false));
+        let gate_released = released.clone();
         let (finish, watchdog) = mpsc::channel();
         let watchdog = std::thread::spawn(move || {
             let completed = watchdog.recv_timeout(Duration::from_secs(8)).is_ok();
             control.store(completed, Ordering::SeqCst);
+            gate_released.store(true, Ordering::SeqCst);
             let _ = release.send(());
         });
         let before = fixture.context.store.durable_commit_count();
         for (index, client) in clients.iter_mut().take(8).enumerate() {
-            client.stream.send_frame(&serde_json::to_vec(&signed_operation(index)?)?).await?;
+            client.stream.send_frame(&serde_json::to_vec(&signed_operation(index, &format!("outage-device-{index}"))?)?).await?;
         }
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while fixture.context.store.pending_network_writes() < 8 { tokio::task::yield_now().await; }
-        }).await?;
+        while fixture.context.store.pending_network_writes() < 8 {
+            assert!(!released.load(Ordering::SeqCst), "network workers blocked before bounded pending admission");
+            tokio::task::yield_now().await;
+        }
         assert_eq!(fixture.context.store.pending_network_writes(), 8);
         let overflow = clients.get_mut(8).ok_or_else(|| anyhow::anyhow!("overflow client"))?;
-        overflow.stream.send_frame(&serde_json::to_vec(&signed_operation(8)?)?).await?;
+        overflow.stream.send_frame(&serde_json::to_vec(&signed_operation(8, "outage-device-8")?)?).await?;
         assert!(matches!(response(overflow).await?, GatewayServerFrame::Nack {reason} if reason.contains("gateway_writer_busy")), "overflow must return typed retryable busy");
         let heartbeat = clients.get_mut(9).ok_or_else(|| anyhow::anyhow!("heartbeat client"))?;
         heartbeat.stream.send_frame(&serde_json::to_vec(&GatewayClientFrame::Heartbeat { now:7331 })?).await?;
@@ -99,7 +114,7 @@ async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
         assert_eq!(fixture.context.store.durable_commit_count()-before, 9);
         assert_eq!(fixture.context.store.pending_network_writes(), 0);
         let client = clients.get_mut(8).ok_or_else(|| anyhow::anyhow!("recovery client"))?;
-        client.stream.send_frame(&serde_json::to_vec(&signed_operation(9)?)?).await?;
+        client.stream.send_frame(&serde_json::to_vec(&signed_operation(9, "outage-device-8")?)?).await?;
         assert!(matches!(response(client).await?, GatewayServerFrame::Nack {reason} if reason.contains("capability is missing")));
         assert_eq!(fixture.context.store.durable_commit_count()-before, 10);
         Ok(())

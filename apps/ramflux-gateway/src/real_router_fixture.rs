@@ -96,6 +96,7 @@ pub(crate) async fn real_router_with_custody(
     context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(
         child.1.join("gateway.redb"),
     )?);
+    context.store.configure_replay(ramflux_node_core::GatewayReplayConfig::small_node(), 0)?;
     context.store.save_state(&*crate::gateway_state(&context.state)?)?;
     context.hub.probe_started.store(true, Ordering::Release);
     context.router = crate::RouterMeshClient {

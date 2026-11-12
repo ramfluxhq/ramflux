@@ -34,7 +34,7 @@ fn wait_with(
         }
         if !logged {
             tracing::info!(
-                wait_seconds = delay.as_secs(),
+                wait_seconds = delay.as_secs_f64(),
                 "gateway waiting for committed crash reservation"
             );
             logged = true;
@@ -46,14 +46,15 @@ fn wait_with(
 pub(crate) fn final_checkpoint(
     state: &Arc<Mutex<GatewayState>>,
     store: &GatewayRedbStore,
-) -> anyhow::Result<()> {
+) -> Result<(), NodeCoreError> {
     let writer = store.write_guard()?;
     let (checkpoint, now) = {
-        let mut state = crate::gateway_state(state)?;
+        let mut state =
+            state.lock().map_err(|_| NodeCoreError::Redb("gateway state poisoned".into()))?;
         let now = state.observe_pre_auth_time(SystemTime::now())?;
         (state.final_admission_checkpoint(now), now)
     };
-    writer.prune_replay(i64::try_from(now)?)?;
+    writer.prune_replay(i64::try_from(now).map_err(|_| NodeCoreError::PreAuthClockInvalid)?)?;
     writer.save_admission_checkpoint(&checkpoint)?;
     Ok(())
 }
@@ -73,6 +74,7 @@ mod tests {
             let mut state = GatewayState::new();
             state.set_pre_auth_policy(ramflux_node_core::GatewayPreAuthPolicy {
                 enabled,
+                per_source_ip_handshake_rate: 1,
                 ..Default::default()
             })?;
             state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(100))?;
@@ -95,14 +97,13 @@ mod tests {
             let mut rolled = store
                 .load_state()?
                 .ok_or_else(|| anyhow::anyhow!("missing rollback checkpoint"))?;
-            let error = wait_with(
+            let result = wait_with(
                 &mut rolled,
                 || UNIX_EPOCH + Duration::from_secs(99),
-                |_| panic!("true rollback must refuse without waiting"),
-            )
-            .expect_err("true rollback accepted");
+                |_| Err(NodeCoreError::PreAuthSnapshotInvalid),
+            );
             assert!(matches!(
-                error.downcast_ref::<NodeCoreError>(),
+                result.as_ref().err().and_then(|error| error.downcast_ref::<NodeCoreError>()),
                 Some(NodeCoreError::PreAuthClockRollback)
             ));
             store.save_admission_checkpoint(&state.final_admission_checkpoint(100))?;
@@ -112,7 +113,7 @@ mod tests {
                 wait_with(
                     &mut clean,
                     || UNIX_EPOCH + Duration::from_secs(100),
-                    |_| panic!("clean restart waited")
+                    |_| Err(NodeCoreError::PreAuthSnapshotInvalid)
                 )?,
                 100
             );
