@@ -29,6 +29,7 @@ pub use creation_client::{
 mod custody_response;
 mod custody_setup;
 pub mod daemon;
+pub(crate) mod embedded;
 pub(crate) mod data_root_lock;
 pub(crate) mod delivery_receipts;
 pub mod dispatch;

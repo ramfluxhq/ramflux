@@ -35,6 +35,9 @@ mod platform;
 pub use platform::lifecycle::{
     HostLifecycle, HostPaths, LifecycleState, LifecycleTransition, SuspendReport,
 };
+#[cfg(unix)]
+pub use platform::embedded::{DEFAULT_SUSPEND_DEADLINE, EmbeddedConfig, EmbeddedSupervisor};
+pub use platform::connect_policy;
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,

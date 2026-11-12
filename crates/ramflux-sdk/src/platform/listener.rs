@@ -17,6 +17,13 @@ pub(crate) struct PeerCred {
     unix_uid: u32,
 }
 
+impl PeerCred {
+    /// Credential of this process, for a carrier that never leaves it.
+    pub(crate) fn current_process() -> Self {
+        Self { unix_uid: rustix::process::getuid().as_raw() }
+    }
+}
+
 /// Opaque bound-socket identity. The Unix implementation stores pathname, device, and inode.
 pub(crate) struct EndpointId {
     path: PathBuf,

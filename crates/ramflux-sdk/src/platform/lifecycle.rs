@@ -109,6 +109,7 @@ pub trait HostLifecycle: Send + Sync {
 }
 
 /// Refusal for a transition that is not legal from the current state.
+#[cfg_attr(not(unix), allow(dead_code, reason = "the embedded supervisor is Unix-only today"))]
 pub(crate) fn illegal(state: LifecycleState, transition: LifecycleTransition) -> SdkError {
     SdkError::LocalBus(format!("lifecycle transition {transition:?} is not legal from {state:?}"))
 }
