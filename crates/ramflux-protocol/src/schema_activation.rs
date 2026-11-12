@@ -78,7 +78,7 @@ pub fn is_met(name: &str) -> bool {
 
 const _: () = assert!(
     activation_allowed(ACTIVE_STORAGE_GENERATION, &PRECONDITIONS),
-    "ACTIVE_STORAGE_GENERATION left zero while an activation precondition is unmet; \
+    "ACTIVE_STORAGE_GENERATION is not zero while an activation precondition is unmet; \
      see schema_activation::PRECONDITIONS"
 );
 
