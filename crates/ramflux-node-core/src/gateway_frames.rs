@@ -30,7 +30,7 @@ pub struct PreAuthChallenge {
 pub const PRE_AUTH_PROTOCOL_VERSION: &str = "ramflux.itest.http.v1";
 pub const DEFAULT_PRE_AUTH_COOKIE_SECRET: &str = "ramflux-itest-pre-auth-cookie-secret-v1";
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GatewayPreAuthPolicy {
     pub enabled: bool,
     pub per_source_ip_handshake_rate: u32,
@@ -38,6 +38,16 @@ pub struct GatewayPreAuthPolicy {
     pub cookie_ttl_seconds: u64,
     pub auth_deadline_ms: u64,
     pub cookie_secret: String,
+}
+
+impl std::fmt::Debug for GatewayPreAuthPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayPreAuthPolicy")
+            .field("admission", &GatewayPreAuthConfig::from(self))
+            .field("cookie_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Default for GatewayPreAuthPolicy {

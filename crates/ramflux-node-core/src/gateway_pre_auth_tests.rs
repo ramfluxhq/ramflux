@@ -271,6 +271,7 @@ fn mounted_key_rotation_and_resume() -> Result {
         Err(NodeCoreError::PreAuthConfigInvalid)
     ));
     state.pre_auth_policy.cookie_secret = "resume-secret".into();
+    assert!(!format!("{state:?}").contains("resume-secret"));
     state.configure_pre_auth_cookie_key(&path)?;
     state.check_pre_auth(&source(1), None, 100)?;
     let cookie = challenge(&mut state, &source(1), 100)?;

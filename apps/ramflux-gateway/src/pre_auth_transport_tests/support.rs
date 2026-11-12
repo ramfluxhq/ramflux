@@ -65,8 +65,9 @@ impl Fixture {
             });
         }
         let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-        let request = crate::registration_forward_tests::registration(now)
+        let mut request = crate::registration_forward_tests::registration(now)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        request.gateway_id = context.gateway_id.clone();
         let _: ramflux_node_core::IdentityRegistrationResponse =
             crate::router_post_json_async(&context.router, "/mvp1/identity/register", &request)
                 .await?;
