@@ -310,23 +310,8 @@ async fn handle_gateway_session_transport_inner(
     }
 
     let auth_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    let auth_result = (|| -> Result<_, ramflux_node_core::NodeCoreError> {
-        let writer = context.store.write_guard()?;
-        let source = {
-            let mut gateway = context.state.lock().map_err(|_| {
-                ramflux_node_core::NodeCoreError::Redb("gateway state poisoned".into())
-            })?;
-            ramflux_node_core::validate_gateway_auth_with_replay(
-                &open,
-                &auth_frame,
-                auth_now,
-                gateway.replay_guard_state_mut(),
-                &registered_auth_key,
-            )?
-        };
-        writer.save_auth_replay(&source, &auth_frame.signed_request, auth_now)?;
-        Ok(source)
-    })();
+    let auth_result =
+        authenticate_gateway_request(&context, &open, &auth_frame, auth_now, &registered_auth_key);
     if let Err(ref error) = auth_result {
         write_gateway_frame(
             &mut *send,
@@ -599,6 +584,31 @@ pub(crate) async fn read_gateway_auth_frame(
             Ok(None)
         }
     }
+}
+
+fn authenticate_gateway_request(
+    context: &GatewayQuicContext,
+    open: &ramflux_node_core::GatewayOpenFrame,
+    auth_frame: &ramflux_node_core::GatewayAuthFrame,
+    auth_now: i64,
+    registered_auth_key: &ramflux_node_core::DeviceAuthKeyResponse,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, ramflux_node_core::NodeCoreError> {
+    let writer = context.store.write_guard()?;
+    let source = {
+        let mut gateway = context
+            .state
+            .lock()
+            .map_err(|_| ramflux_node_core::NodeCoreError::Redb("gateway state poisoned".into()))?;
+        ramflux_node_core::validate_gateway_auth_with_replay(
+            open,
+            auth_frame,
+            auth_now,
+            gateway.replay_guard_state_mut(),
+            registered_auth_key,
+        )?
+    };
+    writer.save_auth_replay(&source, &auth_frame.signed_request, auth_now)?;
+    Ok(source)
 }
 
 pub(crate) async fn establish_gateway_session(
@@ -1532,6 +1542,27 @@ fn committed_submit_entry(
     })
 }
 
+fn fanout_replay_rejection(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    fanout: &ramflux_node_core::GatewayOwnDeviceFanoutFrame,
+    submit_now: i64,
+) -> anyhow::Result<Option<String>> {
+    let writer = context.store.write_guard()?;
+    let result = {
+        let mut gateway = gateway_state(&context.state)?;
+        gateway.replay_guard_state_mut().check_gateway_signed_request(
+            &runtime.source_identity,
+            &fanout.signed_request,
+            submit_now,
+        )
+    };
+    if result.is_ok() {
+        writer.save_auth_replay(&runtime.source_identity, &fanout.signed_request, submit_now)?;
+    }
+    Ok(result.err().map(|error| format!("fanout replay rejected: {error}")))
+}
+
 pub(crate) async fn handle_gateway_own_device_fanout(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
@@ -1551,25 +1582,7 @@ pub(crate) async fn handle_gateway_own_device_fanout(
         return Ok(());
     }
     let submit_now = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX);
-    let replay_rejection = {
-        let writer = context.store.write_guard()?;
-        let result = {
-            let mut gateway = gateway_state(&context.state)?;
-            gateway.replay_guard_state_mut().check_gateway_signed_request(
-                &runtime.source_identity,
-                &fanout.signed_request,
-                submit_now,
-            )
-        };
-        if result.is_ok() {
-            writer.save_auth_replay(
-                &runtime.source_identity,
-                &fanout.signed_request,
-                submit_now,
-            )?;
-        }
-        result.err().map(|error| format!("fanout replay rejected: {error}"))
-    };
+    let replay_rejection = fanout_replay_rejection(context, runtime, fanout, submit_now)?;
     if let Some(reason) = replay_rejection {
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
         return Ok(());

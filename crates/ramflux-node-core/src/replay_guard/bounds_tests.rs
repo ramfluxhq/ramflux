@@ -35,7 +35,7 @@ fn gateway_root_shares_protect_existing_accounts() -> Result<(), NodeCoreError> 
     guard.accept_gateway_request_key("honest-submit".into(), "honest".into(), 604_800)?;
     assert!(guard.accepted_by_key.contains_key("honest-auth"));
     assert_eq!(guard.admitted_roots.len(), 4);
-    assert!(GATEWAY_REPLAY_SHARE >= 20_164);
+    const { assert!(GATEWAY_REPLAY_SHARE >= 20_164) };
     assert_eq!(GATEWAY_REPLAY_CAPACITY, GATEWAY_REPLAY_ROOTS * GATEWAY_REPLAY_SHARE);
     Ok(())
 }
