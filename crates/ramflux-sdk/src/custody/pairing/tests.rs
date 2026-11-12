@@ -173,10 +173,34 @@ async fn pairing_disabled_without_opt_in() -> TestResult {
     let config = PairingConfig { enabled: false, extra_root_ca_pem: None };
     assert!(!config.enabled);
     let mut fx = Fixture::with_config(config)?;
-    match fx.primary.begin(begin_body()).await {
-        Err(SdkError::PairingCode("NotFound")) => Ok(()),
-        other => Err(format!("disabled begin: {other:?}").into()),
+    assert!(matches!(fx.primary.begin(begin_body()).await, Err(SdkError::PairingCode("NotFound"))));
+    let root = tempfile::tempdir()?;
+    assert!(
+        matches!(
+            super::install_actor(root.path(), "primary".into(), fx.primary),
+            Err(SdkError::PairingCode("NotFound"))
+        ),
+        "disabled actor was installed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_disabled_status_and_relay_refuse_existing_ceremony() -> TestResult {
+    let mut fx = Fixture::open()?;
+    let (operation, generation) = joined(&mut fx).await?;
+    let request = status_req(&operation, generation);
+    fx.primary.set_enabled_for_test(false);
+    for result in [
+        fx.primary.status(&request).await,
+        fx.primary.transfer_status(&request).await,
+        fx.primary.sync_relay().await,
+    ] {
+        assert!(matches!(result, Err(SdkError::PairingCode("NotFound"))), "{result:?}");
     }
+    fx.primary.set_enabled_for_test(true);
+    fx.primary.status(&request).await?;
+    Ok(())
 }
 
 #[tokio::test]

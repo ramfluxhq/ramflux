@@ -175,7 +175,7 @@ impl FullUnionEncodingBuilder<'_, '_> {
     }
 }
 
-fn visit(
+pub(super) fn visit(
     db: &rusqlite::Connection,
     nonce: &[u8; 32],
     owners: &[String; 2],

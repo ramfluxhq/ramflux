@@ -113,6 +113,8 @@ enum FullLocalAction {
     RetainManifest { manifest: Box<SourceManifest> },
     RetainChunk { hash: String, index: u64, digest: [u8; 32], bytes: Zeroizing<Vec<u8>> },
     VerifyForwardRoot { hash: String },
+    PinReceiverBase { hash: String },
+    ProjectReceiverBase { copy: Box<ramflux_storage::FullReceiverBaseCopy> },
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
@@ -122,6 +124,8 @@ enum FullLocalResult {
     ReverseManifestRetained,
     DurablePrefix(Option<u64>),
     ForwardRootChecked,
+    ReceiverPinned(Box<ramflux_storage::FullPinnedReceiverBase>),
+    ReceiverProjected(Box<ramflux_storage::FullReceiverBaseCopy>),
 }
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
@@ -183,23 +187,7 @@ impl FullLocalIoRequest {
                 if self.scope.role != PairingRole::Responder {
                     return Err(wrong());
                 }
-                if manifest.manifest.census_hash
-                    != ramflux_protocol::encode_base64url(ramflux_storage::full_census_hash(
-                        full_transfer_catalog(),
-                    )?)
-                {
-                    return Err(SdkError::PairingCode("SchemaMismatch"));
-                }
-                let catalog: Vec<Family> = full_transfer_catalog()
-                    .iter()
-                    .map(ramflux_storage::FamilyRule::manifest_family)
-                    .collect::<Result<_, _>>()?;
-                let hash = ramflux_protocol::encode_base64url(
-                    ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)
-                        .map_err(|error| wire(&error))?,
-                );
-                stage.retain_forward_manifest(&manifest, &catalog)?;
-                FullLocalResult::DurablePrefix(stage.revalidate_forward_prefix(&hash)?)
+                retain_forward_manifest(&mut stage, &manifest)?
             }
             FullLocalAction::RetainChunk { hash, index, digest, bytes } => {
                 if self.scope.role != PairingRole::Responder
@@ -210,6 +198,19 @@ impl FullLocalIoRequest {
                 }
                 stage.retain_forward_chunk(&hash, index, &bytes)?;
                 FullLocalResult::DurablePrefix(stage.revalidate_forward_prefix(&hash)?)
+            }
+            FullLocalAction::PinReceiverBase { hash } => {
+                if self.scope.role != PairingRole::Responder {
+                    return Err(wrong());
+                }
+                FullLocalResult::ReceiverPinned(Box::new(stage.pin_receiver_base(&hash)?))
+            }
+            FullLocalAction::ProjectReceiverBase { mut copy } => {
+                if self.scope.role != PairingRole::Responder {
+                    return Err(wrong());
+                }
+                copy.project(&stage)?;
+                FullLocalResult::ReceiverProjected(copy)
             }
             FullLocalAction::VerifyForwardRoot { hash } => {
                 if self.scope.role != PairingRole::Responder {
@@ -222,6 +223,29 @@ impl FullLocalIoRequest {
         self.scope.require_db(db)?;
         Ok(FullLocalIoReply(result))
     }
+}
+
+fn retain_forward_manifest(
+    stage: &mut ramflux_storage::FullTransferStage<'_>,
+    manifest: &SourceManifest,
+) -> Result<FullLocalResult, SdkError> {
+    if manifest.manifest.census_hash
+        != ramflux_protocol::encode_base64url(ramflux_storage::full_census_hash(
+            full_transfer_catalog(),
+        )?)
+    {
+        return Err(SdkError::PairingCode("SchemaMismatch"));
+    }
+    let catalog: Vec<Family> = full_transfer_catalog()
+        .iter()
+        .map(ramflux_storage::FamilyRule::manifest_family)
+        .collect::<Result<_, _>>()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(manifest)
+            .map_err(|error| wire(&error))?,
+    );
+    stage.retain_forward_manifest(manifest, &catalog)?;
+    Ok(FullLocalResult::DurablePrefix(stage.revalidate_forward_prefix(&hash)?))
 }
 
 /// Data-only local stage access bound to one actual ceremony, account and generation.

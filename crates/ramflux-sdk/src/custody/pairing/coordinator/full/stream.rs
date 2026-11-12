@@ -21,12 +21,14 @@ mod work;
 pub(super) struct FullStreamFinished {
     pub(super) packet: FullPacketEpoch,
     pub(super) manifest: SourceManifest,
+    receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
 }
 pub(super) struct FullStreamState {
     service: Option<FullLocalIoService>,
     pub(super) job: Option<FullStreamJob>,
     pub(super) complete: Option<SourceManifest>,
     failure: Option<&'static str>,
+    receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
     pub(super) progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
 }
 pub(in crate::custody::pairing::coordinator) struct FullStreamJob(
@@ -62,13 +64,14 @@ impl FullStreamState {
             let result = outcome
                 .map_err(|_| SdkError::PairingCode("Retired"))
                 .and_then(std::convert::identity);
-            let FullStreamFinished { packet, manifest } = match result {
+            let FullStreamFinished { packet, manifest, receiver } = match result {
                 Ok(finished) => finished,
                 Err(error) => {
                     self.failure = Some(PairingActor::background_error_code(&error));
                     return Err(error);
                 }
             };
+            self.receiver = receiver;
             self.complete = Some(manifest);
             return Ok(Some(packet));
         }
@@ -206,9 +209,20 @@ impl PairingActor {
             service: Some(service),
             job: Some(FullStreamJob(Some(job))),
             complete: None,
+            receiver: None,
             failure: None,
         });
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn full_receiver_base_projected_for_test(&self) -> bool {
+        self.ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .and_then(|full| full.bootstrap.as_ref())
+            .and_then(|state| state.stream.as_ref())
+            .and_then(|stream| stream.receiver.as_ref())
+            .is_some_and(|copy| copy.projected_input().is_some() && copy.union_encoding().is_some())
     }
     #[cfg(test)]
     pub(crate) fn full_base_disk_complete_for_test(&self) -> bool {

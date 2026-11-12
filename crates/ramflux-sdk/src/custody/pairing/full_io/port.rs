@@ -67,6 +67,35 @@ impl FullLocalIoLoan {
     }
 }
 impl FullLocalIoPort {
+    /// Pin the actual target through its ordinary owner's short local loan.
+    /// Copy the returned view in a root-owned blocking worker after the loan ends.
+    /// # Errors
+    /// Refuses wrong scope/role, foreign input or a changed selected writer.
+    pub async fn pin_receiver_base(
+        &mut self,
+        hash: &str,
+    ) -> Result<Box<ramflux_storage::FullPinnedReceiverBase>, SdkError> {
+        let FullLocalResult::ReceiverPinned(pinned) =
+            self.request(FullLocalAction::PinReceiverBase { hash: hash.into() }).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(pinned)
+    }
+    /// Apply signed base records to the exact receiver-owned copy. This is not DV.
+    /// # Errors
+    /// Refuses changed B/stage, bad input or typed conflicts; failed copies are erased.
+    pub async fn project_receiver_base(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+    ) -> Result<Box<ramflux_storage::FullReceiverBaseCopy>, SdkError> {
+        let FullLocalResult::ReceiverProjected(copy) =
+            self.request(FullLocalAction::ProjectReceiverBase { copy }).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(copy)
+    }
     /// Retain this endpoint's independently fetched native head before applying its
     /// pre-publication role/key gate. This does not grant publication or tail admission.
     /// The stream owner must fetch through its own native query, never a peer/relay hint.

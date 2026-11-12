@@ -41,6 +41,7 @@ fn actors() -> &'static Mutex<HashMap<Key, Arc<Entry>>> {
 /// # Errors
 /// Refuses a foreign account/root, an existing owner or an unavailable root.
 pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Result<(), SdkError> {
+    actor.require_open()?;
     let key = (std::fs::canonicalize(root)?, account_id);
     if actor.identity.account_id != key.1
         || actor.participant.as_ref().is_some_and(|participant| {

@@ -37,6 +37,7 @@ impl PairingActor {
         &mut self,
         request: &StatusRequest,
     ) -> Result<LocalResult, SdkError> {
+        self.require_open()?;
         let legacy = self.status(request).await?;
         let Some(value) = self.current_full_status()? else { return Ok(legacy) };
         Ok(LocalResult {
