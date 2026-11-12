@@ -67,12 +67,18 @@ fn resign(request: &mut SignedRequest) -> TestResult {
     Ok(())
 }
 
-/// Persisted and in-memory gateway state, serialized: byte-identical means nothing was written.
+/// Session metadata, memory state and committed-write counters. Replay evidence stays on disk
+/// rather than being materialized by load_state; the durable control below calibrates detection.
 pub(super) fn snapshot(context: &crate::GatewayQuicContext) -> TestResult<Vec<u8>> {
     let disk = context.store.load_state()?;
     let memory =
         context.state.lock().map_err(|_| anyhow::anyhow!("gateway state poisoned"))?.clone();
-    Ok(serde_json::to_vec(&(disk, memory))?)
+    Ok(serde_json::to_vec(&(
+        disk,
+        memory,
+        context.store.durable_commit_count(),
+        context.store.full_snapshot_commit_count(),
+    ))?)
 }
 
 struct Outcome {
@@ -138,6 +144,7 @@ async fn ephemeral_ingress_persists_nothing() -> TestResult {
 
     // Control: the persisting validator does change this snapshot, so the rows above are sensitive.
     let control = submit(&runtime, "np-control", 5, |_| {})?;
+    let commits = context.store.durable_commit_count();
     crate::session::validate_gateway_session_signed_request(
         &context,
         &runtime,
@@ -147,6 +154,25 @@ async fn ephemeral_ingress_persists_nothing() -> TestResult {
         &control.envelope,
     )?;
     anyhow::ensure!(snapshot(&context)? != before, "control: persisting validator wrote nothing");
+    assert_eq!(context.store.durable_commit_count(), commits + 1);
+    let replay = crate::session::validate_gateway_session_signed_request(
+        &context,
+        &runtime,
+        &control.signed_request,
+        "POST",
+        "/gateway/session/submit",
+        &control.envelope,
+    );
+    assert!(
+        matches!(
+            replay
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<ramflux_node_core::NodeCoreError>()),
+            Some(ramflux_node_core::NodeCoreError::ReplayGuard(_))
+        ),
+        "durable control must actually protect its identity"
+    );
     Ok(())
 }
 
