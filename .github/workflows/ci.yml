@@ -453,6 +453,9 @@ jobs:
           python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
+          # Unified rows explicitly report dormancy until the separately audited activation.
+          cargo build -p ramflux-rf --bin rf --features itest-memory-vault,itest-rfd-fault
+          python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
 
       - name: Upload CLI JUnit
         if: always()

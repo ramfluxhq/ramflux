@@ -207,6 +207,13 @@ impl RamfluxClient {
             "routed/own-sent-attestation/{owner}/{}",
             ramflux_protocol::encode_base64url(&identity.id)
         );
+        // Independent live and history couriers may attest the same exact revision.
+        // Keep the first verified proof: enclosing controls and transport metadata
+        // differ, while the private owner and exact nested bytes remain identical.
+        if let Some(existing) = db.load_actor_state::<OwnSentAttestation>(&key)? {
+            existing.verify(&sent.exact_inner, &self.own_account_anchor()?)?;
+            return Ok(());
+        }
         db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
             owner_id: owner,
             verified_source_anchor: &self.own_account_anchor()?,
@@ -395,6 +402,38 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn own_attestation_duplicate_reuses_only_verified_exact_revision() -> TestResult {
+        let (own, first, sent) = fixture().await?;
+        let db = own.client.account_db()?;
+        let owner = &sent.message_id;
+        db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &first))?;
+        let key = db.message_actor_keys(owner, "routed/own-sent-attestation/")?
+            .into_iter().next().ok_or("first proof")?;
+        let retained = db.raw_inner_copy(&key)?.ok_or("first raw proof")?.bytes;
+        let mut outer = g::Inner::decode(first.exact_outer_inner.as_slice())?;
+        let mut control = g::Control::decode(outer.body.as_slice())?;
+        let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_mut() else {
+            return Err("copy".into());
+        };
+        let Some(g::own_message_copy::Payload::Sent(repeated)) = copy.payload.as_mut() else {
+            return Err("sent".into());
+        };
+        repeated.envelope_id = "independent-history-envelope".into();
+        outer.body = control.encode_to_vec();
+        let second = signed_proof(&own, outer.identity.as_ref().ok_or("identity")?,
+            outer.encode_to_vec(), crate::custody::network_now()?)?;
+        assert_ne!(first.exact_outer_inner, second.exact_outer_inner);
+        db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &second))?;
+        assert_eq!(db.raw_inner_copy(&key)?.ok_or("retained proof")?.bytes, retained);
+        let mut corrupt = first;
+        corrupt.origin.evidence.report_opening[0] ^= 1;
+        db.persist_actor_state(&key, &corrupt)?;
+        assert!(db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &second)).is_err(),
+            "an invalid local proof must never win duplicate reconciliation");
+        Ok(())
+    }
+
     fn bind_private_thread(own: &Fixture, sent: &g::OwnSentMessage) -> TestResult {
         let context = sent.context.as_ref().ok_or("context")?;
         own.client.account_db()?.persist_client_record(

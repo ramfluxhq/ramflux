@@ -261,3 +261,59 @@ fn unified_receipt_and_delete_reach_the_peer_read_model() -> e2e::Result<()> {
     assert!(!single.to_string().contains(&body));
     Ok(())
 }
+
+/// Real services and daemon restart surround a test-only mutation at the receiving
+/// daemon's wire handoff. This is deliberately distinct from a router WAL mutation.
+#[cfg(feature = "itest-rfd-fault")]
+#[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
+#[test]
+fn unified_tampered_commitment_never_reaches_the_reader_after_restart() -> e2e::Result<()> {
+    if dormant("tampered binding") { return Ok(()); }
+    let stack = boot_stack()?;
+    let alice_d = start_daemon(&stack, "alice")?;
+    let bob_d = start_daemon(&stack, "bob")?;
+    configure_node(&alice_d, &stack.discovery_url)?;
+    configure_node(&bob_d, &stack.discovery_url)?;
+    let alice = create_account(&alice_d, "Alice")?;
+    let bob = create_account(&bob_d, "Bob")?;
+    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    let conversation = unique("unified-binding");
+    let calibration = "untouched binding calibration".to_owned();
+    dm_send(&alice_d, &alice, &bob, &conversation, &unique("good"), &calibration)?;
+    wait_synced(&bob_d, &bob, &conversation, std::slice::from_ref(&calibration))?;
+    let (socket, root) = crash_daemon(bob_d)?;
+    let envelope = unique("tampered-binding");
+    let secret = "tampered binding must never appear";
+    dm_send(&alice_d, &alice, &bob, &conversation, &envelope, secret)?;
+    let marker = stack.root.join("binding-injection.marker");
+    let marker_text = marker.to_str().ok_or("marker path")?;
+    let env = [
+        ("RAMFLUX_SDK_ITEST_RFD_FAULT_MODE", "dm-recv-tamper-binding"),
+        ("RAMFLUX_SDK_ITEST_RFD_FAULT_MARKER", marker_text),
+        ("RAMFLUX_SDK_ITEST_BINDING_ENVELOPE", envelope.as_str()),
+    ];
+    let bob_d = e2e::spawn_daemon_with_env(socket, root, &env)?;
+    unlock_account_with_timeout(&bob_d, &bob, Duration::from_secs(10))?;
+    e2e::wait_json(&bob_d, &["account", "status", "--account", &bob.id], |_| marker.exists())?;
+    assert_tampered_absent(&bob_d, &bob, &conversation, &calibration, secret)?;
+    let (socket, root) = crash_daemon(bob_d)?;
+    std::fs::remove_file(&marker)?;
+    let bob_d = e2e::spawn_daemon_with_env(socket, root, &env)?;
+    unlock_account_with_timeout(&bob_d, &bob, Duration::from_secs(10))?;
+    // The bad entry must be retried from durable state, never converted into a visible row.
+    e2e::wait_json(&bob_d, &["account", "status", "--account", &bob.id], |_| marker.exists())?;
+    assert_tampered_absent(&bob_d, &bob, &conversation, &calibration, secret)?;
+    Ok(())
+}
+
+#[cfg(feature = "itest-rfd-fault")]
+fn assert_tampered_absent(daemon: &Daemon, account: &Account, conversation: &str, calibration: &str, secret: &str) -> e2e::Result<()> {
+    let page = rf_json(&daemon.socket, &["dm", "list", "--account", &account.id, "--conversation", conversation, "--limit", "100"])?;
+    assert_eq!(page["schema"], SCHEMA);
+    assert_eq!(texts(&page, "messages"), vec![calibration.to_owned()]);
+    assert!(!page.to_string().contains(secret));
+    let stream = changes(daemon, account, conversation, 0)?;
+    assert_eq!(texts(&stream, "changes"), vec![calibration.to_owned()]);
+    assert!(!stream.to_string().contains(secret));
+    Ok(())
+}

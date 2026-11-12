@@ -100,6 +100,32 @@ pub(crate) async fn barrier(point: Mode) -> Result<(), crate::error::SdkError> {
     Ok(())
 }
 
+/// Test-only wire handoff mutation inside the receiving daemon. Reapplied on every
+/// retry of the selected envelope, so an untouched retry cannot accidentally satisfy
+/// the negative row. No mutation or marker code exists in ordinary SDK builds.
+pub(crate) fn tamper_received_binding(
+    entry: &crate::GatewayInboxEntry,
+) -> Result<Option<Box<crate::GatewayInboxEntry>>, crate::SdkError> {
+    if std::env::var(MODE_ENV).ok().as_deref() != Some("dm-recv-tamper-binding")
+        || std::env::var("RAMFLUX_SDK_ITEST_BINDING_ENVELOPE").ok().as_deref()
+            != Some(entry.envelope.envelope_id.as_str())
+    {
+        return Ok(None);
+    }
+    let Some(commitment) = entry.envelope.report_commitment.as_deref() else {
+        return Err(crate::SdkError::LocalBus("selected test envelope has no commitment".into()));
+    };
+    let mut bytes = ramflux_protocol::decode_base64url(commitment)
+        .map_err(|_| crate::SdkError::LocalBus("test commitment malformed".into()))?;
+    let first = bytes.first_mut()
+        .ok_or_else(|| crate::SdkError::LocalBus("test commitment empty".into()))?;
+    *first ^= 1;
+    let mut changed = entry.clone();
+    changed.envelope.report_commitment = Some(ramflux_protocol::encode_base64url(bytes));
+    write_marker()?;
+    Ok(Some(Box::new(changed)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
