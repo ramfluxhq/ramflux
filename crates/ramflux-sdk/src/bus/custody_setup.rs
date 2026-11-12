@@ -161,7 +161,9 @@ pub(super) fn primary_provider(
         std::sync::Arc::new(crate::custody::AndroidKeystoreVault::process())
     }
     #[cfg(not(target_os = "android"))]
-    std::sync::Arc::new(NativePrimaryVault)
+    {
+        std::sync::Arc::new(NativePrimaryVault)
+    }
 }
 
 async fn apply(

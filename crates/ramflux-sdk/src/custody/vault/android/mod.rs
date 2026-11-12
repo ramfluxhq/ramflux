@@ -125,13 +125,23 @@ impl AndroidKeystoreVault {
         Self { host: Some(Arc::new(host)) }
     }
 
+    /// Delete every vault entry and both Keystore wrapping keys.
+    ///
+    /// The host calls this only after the user chose "delete and link as a new device" for
+    /// an orphaned vault. Primary material that was only in this vault is gone afterwards.
+    ///
+    /// # Errors
+    /// `CustodyVaultUnavailable` when no vault is installed; I/O and Keystore failures.
+    pub fn erase_orphaned_entries(&self) -> Result<(), SdkError> {
+        self.items()?.erase_all()
+    }
+
     fn items(&self) -> Result<&KeystoreItems, SdkError> {
         match &self.host {
             Some(host) => Ok(&host.items),
-            None => PROCESS_HOST
-                .get()
-                .map(|host| &host.items)
-                .ok_or(SdkError::CustodyVaultUnavailable),
+            None => {
+                PROCESS_HOST.get().map(|host| &host.items).ok_or(SdkError::CustodyVaultUnavailable)
+            }
         }
     }
 
@@ -204,8 +214,7 @@ impl PrimaryVault for AndroidKeystoreVault {
         ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
         SdkError,
     > {
-        let items =
-            self.items().map_err(|_| crate::custody::home_authorization::unavailable())?;
+        let items = self.items().map_err(|_| crate::custody::home_authorization::unavailable())?;
         // The presence item is wrapped by the authentication-bound key, so this read cannot
         // complete without a fresh user authentication enforced by the Keystore.
         let primary = presence::approved_primary(

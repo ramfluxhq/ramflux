@@ -8,9 +8,7 @@
 //! ciphertext and tag. Every header byte is also part of the associated data, so a blob moved
 //! to another reference, key kind or claimed level fails authentication in the Keystore.
 
-use super::keystore::{
-    GCM_IV_LEN, GCM_TAG_LEN, KeyKind, MAX_SECRET_LEN, SecurityLevel, Wrapped,
-};
+use super::keystore::{GCM_IV_LEN, GCM_TAG_LEN, KeyKind, MAX_SECRET_LEN, SecurityLevel, Wrapped};
 
 const MAGIC: &[u8; 4] = b"RFAV";
 const VERSION: u8 = 1;
@@ -79,7 +77,8 @@ impl Envelope {
         }
         let mut iv = [0_u8; GCM_IV_LEN];
         iv.copy_from_slice(&header[7..7 + GCM_IV_LEN]);
-        let length = usize::from(u16::from_be_bytes([header[HEADER_LEN - 2], header[HEADER_LEN - 1]]));
+        let length =
+            usize::from(u16::from_be_bytes([header[HEADER_LEN - 2], header[HEADER_LEN - 1]]));
         if length != ciphertext.len() || length < GCM_TAG_LEN {
             return Err(Malformed);
         }

@@ -312,9 +312,11 @@ mod tests {
 
     #[test]
     fn accepts_only_the_private_no_backup_directory() {
-        for accepted in
-            ["/data/user/0/org.ramflux.app/no_backup", "/data/data/org.ramflux.app/no_backup", "/data/user/10/org.ramflux.app/no_backup"]
-        {
+        for accepted in [
+            "/data/user/0/org.ramflux.app/no_backup",
+            "/data/data/org.ramflux.app/no_backup",
+            "/data/user/10/org.ramflux.app/no_backup",
+        ] {
             assert_eq!(classify_no_backup_dir(Path::new(accepted)), Ok(()), "{accepted}");
         }
     }
@@ -361,9 +363,15 @@ mod tests {
         let root = dir.path().join("ramflux");
         std::fs::create_dir(&root)?;
         assert!(require_private_data_root(&root).is_err());
-        assert!(require_private_data_root(Path::new("/data/user/0/org.ramflux.app/files/ramflux")).is_err());
+        assert!(
+            require_private_data_root(Path::new("/data/user/0/org.ramflux.app/files/ramflux"))
+                .is_err()
+        );
         assert!(require_private_data_root(Path::new("/storage/emulated/0/ramflux")).is_err());
-        assert!(require_private_data_root(Path::new("/data/user/0/org.ramflux.app/no_backup/other")).is_err());
+        assert!(
+            require_private_data_root(Path::new("/data/user/0/org.ramflux.app/no_backup/other"))
+                .is_err()
+        );
         Ok(())
     }
 

@@ -73,6 +73,31 @@ impl KeystoreItems {
         require_hardware(level).map_err(refuse)
     }
 
+    /// Remove every entry and both wrapping keys. This is the "delete the orphan and link
+    /// as a new device" action; nothing can be recovered from the vault afterwards.
+    pub(crate) fn erase_all(&self) -> Result<(), SdkError> {
+        match std::fs::read_dir(&self.dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry?.path();
+                    let owned = path
+                        .extension()
+                        .is_some_and(|extension| extension == ENTRY_SUFFIX || extension == "tmp");
+                    if owned {
+                        std::fs::remove_file(&path)?;
+                    }
+                }
+                self.sync_directory()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        for kind in [KeyKind::Background, KeyKind::Presence] {
+            self.bridge.delete_key(kind).map_err(refuse)?;
+        }
+        Ok(())
+    }
+
     /// File name: a domain-separated hash, so a reference never becomes a path component.
     fn path(&self, reference: &str) -> Result<PathBuf, SdkError> {
         if !valid_reference(reference) {

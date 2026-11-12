@@ -189,14 +189,18 @@ mod tests {
                 "{domain}"
             );
         }
-        let included = DATA_EXTRACTION_RULES_XML
-            .replacen("<cloud-backup>", "<cloud-backup><include domain=\"file\" path=\".\"/>", 1);
+        let included = DATA_EXTRACTION_RULES_XML.replacen(
+            "<cloud-backup>",
+            "<cloud-backup><include domain=\"file\" path=\".\"/>",
+            1,
+        );
         assert_eq!(check_data_extraction_rules(&included), Err(BackupRuleDefect::IncludesContent));
     }
 
     #[test]
     fn manifest_defects_are_named() {
-        let allowed = MANIFEST.replace("android:allowBackup=\"false\"", "android:allowBackup=\"true\"");
+        let allowed =
+            MANIFEST.replace("android:allowBackup=\"false\"", "android:allowBackup=\"true\"");
         assert_eq!(check_manifest(&allowed), Err(BackupRuleDefect::AllowBackupNotFalse));
         let no_rules = MANIFEST
             .replace("android:dataExtractionRules=\"@xml/ramflux_data_extraction_rules\"", "");

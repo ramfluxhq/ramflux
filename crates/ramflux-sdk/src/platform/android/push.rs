@@ -234,7 +234,10 @@ mod tests {
     fn manifest_keeps_vendor_push_optional() -> Result<(), Box<dyn std::error::Error>> {
         let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))?;
         assert!(manifest.contains("\ndefault = []\n"), "a default feature was added");
-        assert!(manifest.contains("\nandroid-push-fcm = []\n"), "the push feature gained a dependency");
+        assert!(
+            manifest.contains("\nandroid-push-fcm = []\n"),
+            "the push feature gained a dependency"
+        );
         for vendor in ["firebase", "fcm =", "gms", "play-services"] {
             let lowered = manifest.to_lowercase();
             let hits = lowered.matches(vendor).count();
@@ -254,9 +257,16 @@ mod tests {
 
     #[test]
     fn wake_carrying_any_other_field_is_refused() {
-        for leaked in
-            ["envelope_id", "conversation_id", "sender", "encrypted_hint", "ciphertext", "preview", "body", "title"]
-        {
+        for leaked in [
+            "envelope_id",
+            "conversation_id",
+            "sender",
+            "encrypted_hint",
+            "ciphertext",
+            "preview",
+            "body",
+            "title",
+        ] {
             let wake =
                 WakePayload::parse([("wake_id", WAKE_ID), ("class", "message"), (leaked, "x")]);
             assert_eq!(wake, Err(WakeRefusal::UnexpectedField), "{leaked}");
@@ -268,11 +278,20 @@ mod tests {
         let cases = [
             (vec![("class", "message")], WakeRefusal::MissingField),
             (vec![("wake_id", WAKE_ID)], WakeRefusal::MissingField),
-            (vec![("wake_id", WAKE_ID), ("wake_id", WAKE_ID), ("class", "message")], WakeRefusal::MissingField),
+            (
+                vec![("wake_id", WAKE_ID), ("wake_id", WAKE_ID), ("class", "message")],
+                WakeRefusal::MissingField,
+            ),
             (vec![("wake_id", WAKE_ID), ("class", "conference_wake")], WakeRefusal::UnknownClass),
             (vec![("wake_id", ""), ("class", "message")], WakeRefusal::MalformedWakeId),
-            (vec![("wake_id", "wake_0193a7c2"), ("class", "message")], WakeRefusal::MalformedWakeId),
-            (vec![("wake_id", "target:abc:content"), ("class", "message")], WakeRefusal::MalformedWakeId),
+            (
+                vec![("wake_id", "wake_0193a7c2"), ("class", "message")],
+                WakeRefusal::MalformedWakeId,
+            ),
+            (
+                vec![("wake_id", "target:abc:content"), ("class", "message")],
+                WakeRefusal::MalformedWakeId,
+            ),
         ];
         for (fields, refusal) in cases {
             assert_eq!(WakePayload::parse(fields), Err(refusal));

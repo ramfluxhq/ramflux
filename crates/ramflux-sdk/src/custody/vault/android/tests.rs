@@ -145,7 +145,11 @@ impl KeystoreBridge for FakeKeystore {
     }
 }
 
-fn vault(dir: &Path, keystore: &Arc<FakeKeystore>, strongbox: StrongBoxPreference) -> AndroidKeystoreVault {
+fn vault(
+    dir: &Path,
+    keystore: &Arc<FakeKeystore>,
+    strongbox: StrongBoxPreference,
+) -> AndroidKeystoreVault {
     let bridge: Arc<dyn KeystoreBridge> = keystore.clone();
     AndroidKeystoreVault::with_host(VaultHost::new(dir.join("vault"), bridge, strongbox))
 }
@@ -429,6 +433,23 @@ fn branch_and_provisioning_entries_are_insert_only_and_deletable() -> TestResult
 }
 
 #[test]
+fn erasing_an_orphaned_vault_removes_entries_and_keys() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let keystore = tee();
+    let vault = vault(dir.path(), &keystore, StrongBoxPreference::TeeOnly);
+    vault.store_new(REFERENCE, &primary_key(4))?;
+    vault.store_branch("branch:one", &Zeroizing::new([3_u8; 64]))?;
+    vault.erase_orphaned_entries()?;
+    assert_eq!(std::fs::read_dir(dir.path().join("vault"))?.count(), 0);
+    assert!(keystore.state().map_err(|_| "poisoned")?.keys.is_empty());
+    assert!(vault.load_primary(REFERENCE).is_err());
+    // A new device identity can be stored afterwards under a fresh wrapping key.
+    vault.store_new(REFERENCE, &primary_key(9))?;
+    assert_eq!(vault.load_primary(REFERENCE)?.public_key(), primary_key(9).public_key());
+    Ok(())
+}
+
+#[test]
 fn uninstalled_process_vault_fails_closed() {
     // No test installs the process host, so the production entry point is still unarmed.
     let vault = AndroidKeystoreVault::process();
@@ -449,7 +470,9 @@ fn provider_sources_name_no_fallback_vault() -> TestResult {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/custody/vault/android");
     for name in ["mod.rs", "blob_store.rs", "keystore.rs", "envelope.rs", "jni_bridge.rs"] {
         let source = std::fs::read_to_string(dir.join(name))?;
-        for forbidden in ["MemoryPrimaryVault", "memory_vault", "FileVault::", "aes_gcm", "Aes256Gcm"] {
+        for forbidden in
+            ["MemoryPrimaryVault", "memory_vault", "FileVault::", "aes_gcm", "Aes256Gcm"]
+        {
             assert!(!source.contains(forbidden), "{name} references {forbidden}");
         }
     }
