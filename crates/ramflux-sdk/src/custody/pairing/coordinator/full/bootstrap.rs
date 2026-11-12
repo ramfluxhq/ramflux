@@ -39,14 +39,15 @@ async fn local<T: std::marker::Send + 'static>(
     runtime: Arc<super::cancel::FullRuntimeCancel>,
     work: impl FnOnce() -> Result<T, SdkError> + std::marker::Send + 'static,
 ) -> Result<T, SdkError> {
-    tokio::task::spawn_blocking(move || {
-        let _local = runtime.local_work()?;
-        let result = work()?;
-        runtime.require_live()?;
-        Ok(result)
-    })
-    .await
-    .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?
+    runtime
+        .clone()
+        .run_blocking(move || {
+            let _local = runtime.local_work()?;
+            let result = work()?;
+            runtime.require_live()?;
+            Ok(result)
+        })
+        .await
 }
 impl PairingActor {
     fn queue_full_bootstrap(&mut self, frame: FullBootstrapFrame) -> Result<(), SdkError> {

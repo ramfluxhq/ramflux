@@ -69,13 +69,29 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
 /// # Errors
 /// Returns root lookup errors. Missing owners are already removed.
 pub fn remove_actor(root: &Path, account_id: &str) -> Result<(), SdkError> {
+    drop(remove_entry(root, account_id)?);
+    Ok(())
+}
+/// Fence first, then erase the actor and join even detached blocking/epoch work before
+/// ordinary account lock completes. Saved data-only/uncertain-publication rows remain.
+/// # Errors
+/// Returns root lookup errors. Missing owners are already retired.
+pub async fn remove_actor_and_drain(root: &Path, account_id: &str) -> Result<(), SdkError> {
+    if let Some(entry) = remove_entry(root, account_id)? {
+        entry.actor.lock().await.retire_owned_runtime().await;
+    }
+    Ok(())
+}
+fn remove_entry(root: &Path, account_id: &str) -> Result<Option<Arc<Entry>>, SdkError> {
     let key = match key(root, account_id) {
         Ok(key) => key,
-        Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     let entry = actors().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
-    if let Some(entry) = entry {
+    if let Some(entry) = &entry {
         crate::custody::pairing::cancel_credential(&key.0, account_id);
         entry.cancelled.store(true, Ordering::Release);
         entry.full_runtime.stop();
@@ -83,7 +99,7 @@ pub fn remove_actor(root: &Path, account_id: &str) -> Result<(), SdkError> {
             native.close();
         }
     }
-    Ok(())
+    Ok(entry)
 }
 pub(super) fn find(root: &Path, account_id: &str) -> Result<Arc<Entry>, SdkError> {
     let key = key(root, account_id)?;

@@ -9,7 +9,10 @@ mod full_bootstrap;
 mod full_epoch;
 mod full_io;
 pub use full_epoch::{FullEpoch, FullPacketEpoch, FullResumeProofSigningRequest};
-pub use full_io::{FullReverseManifestDraft, FullTransferLocalIo};
+pub use full_io::{
+    FullLocalIoLoan, FullLocalIoPort, FullLocalIoService, FullReverseManifestDraft,
+    FullTransferLocalIo,
+};
 pub mod full_generation;
 pub use full_bootstrap::{
     FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest, FullSourceManifestSigningRequest,
@@ -28,7 +31,7 @@ pub mod transfer_payload;
 mod transport;
 pub use coordinator::{
     PairingActor, PairingIdentity, handle_bus, install_actor, pairing_enabled, remove_actor,
-    validate_head_advance,
+    remove_actor_and_drain, validate_head_advance,
 };
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};

@@ -58,7 +58,7 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.lock" => {
             let account_id = request_account_id(request)?.to_owned();
-            local_bus_account_lock(state, &account_id)?;
+            local_bus_account_lock(state, &account_id).await?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
                 "locked": true,
@@ -172,7 +172,7 @@ pub(crate) fn local_bus_account_response(
     }
 }
 
-fn local_bus_account_lock(
+async fn local_bus_account_lock(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<(), SdkError> {
@@ -187,7 +187,7 @@ fn local_bus_account_lock(
             None,
         )?;
     }
-    crate::custody::pairing::remove_actor(&state.config.data_root, account_id)?;
+    crate::custody::pairing::remove_actor_and_drain(&state.config.data_root, account_id).await?;
     let removed = state.accounts.remove(account_id);
     if removed.is_none() {
         return Err(SdkError::AccountNotOpen(account_id.to_owned()));
@@ -274,6 +274,11 @@ async fn local_bus_account_backup_import(
         &manifest,
         state.account_index.clone(),
     )?;
+    crate::custody::pairing::remove_actor_and_drain(
+        &state.config.data_root,
+        &manifest.local_account_id,
+    )
+    .await?;
     state.accounts.remove(&manifest.local_account_id);
     // Backup import is an offline root/account restore. Rejoining gateway and publishing a fresh
     // device prekey is a separate device-activation flow, so do not touch the network here.

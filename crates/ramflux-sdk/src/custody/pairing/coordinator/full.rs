@@ -33,6 +33,10 @@ pub(super) struct FullCeremony {
     bootstrap: Option<bootstrap::BootstrapState>,
 }
 impl FullCeremony {
+    pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
+        self.bootstrap.as_mut().and_then(|state| state.epoch_job.take())
+    }
+
     fn new(
         common: CommonV3,
         source: Option<(PreparedFullSource, FullSourcePreparationCancel)>,
@@ -80,9 +84,10 @@ impl PairingActor {
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         let common = common.clone();
         let source = source.clone();
-        tokio::task::spawn_blocking(move || participant.full_sas_base(&common, &source))
+        self.full_runtime
+            .clone()
+            .run_blocking(move || participant.full_sas_base(&common, &source))
             .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?
     }
     pub(super) fn start_full_sas(
         c: &mut Ceremony,
@@ -301,12 +306,15 @@ impl PairingActor {
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         // Complete source census/typed encoding before any Issue/Create allocation.
         let runtime = self.full_runtime.clone();
-        let source = tokio::task::spawn_blocking(move || {
-            let _local = runtime.local_work()?;
-            participant.prepare_full_source()
-        })
-        .await
-        .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+        let source = self
+            .full_runtime
+            .clone()
+            .run_blocking(move || {
+                let _local = runtime.local_work()?;
+                participant
+                    .prepare_full_source_with_cancel(|cancel| runtime.register_preparation(cancel))
+            })
+            .await?;
         if let Err(error) = self.full_runtime.require_live() {
             source.1.cancel();
             return Err(error);
@@ -370,12 +378,13 @@ impl PairingActor {
         if let Some(participant) = self.participant.clone() {
             let invitation = invite_envelope.clone();
             let runtime = self.full_runtime.clone();
-            tokio::task::spawn_blocking(move || {
-                let _local = runtime.local_work()?;
-                participant.record_invitation(&invitation, generation)
-            })
-            .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+            self.full_runtime
+                .clone()
+                .run_blocking(move || {
+                    let _local = runtime.local_work()?;
+                    participant.record_invitation(&invitation, generation)
+                })
+                .await?;
         }
         let mut ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: request_id.clone(),

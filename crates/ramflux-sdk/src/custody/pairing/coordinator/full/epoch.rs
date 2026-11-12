@@ -20,7 +20,9 @@ struct FullEpochFinished {
     keys: FullResumeKeyOwner,
     packet: Result<FullPacketEpoch, SdkError>,
 }
-pub(super) struct FullEpochJob(Option<JoinHandle<FullEpochFinished>>);
+pub(in crate::custody::pairing::coordinator) struct FullEpochJob(
+    Option<JoinHandle<FullEpochFinished>>,
+);
 impl Drop for FullEpochJob {
     fn drop(&mut self) {
         if let Some(task) = &self.0 {
@@ -31,6 +33,12 @@ impl Drop for FullEpochJob {
 impl FullEpochJob {
     fn finished(&self) -> bool {
         self.0.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+    pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
     async fn finish(mut self) -> Result<FullEpochFinished, SdkError> {
         self.0
@@ -129,10 +137,20 @@ fn start(
         .unwrap_or_else(|_| Err(SdkError::PairingCode("ResumeRequired")));
         FullEpochFinished { trust, keys, packet }
     });
-    owner.register_job(task.abort_handle())?;
+    // Retain even an already-aborted join owner: dropping its handle here could leave
+    // private epoch output alive after the root has been fenced.
+    let _ = owner.register_job(task.abort_handle());
     Ok(FullEpochJob(Some(task)))
 }
 impl crate::custody::pairing::PairingActor {
+    #[cfg(test)]
+    pub(crate) fn full_epoch_in_flight_for_test(&self) -> bool {
+        self.ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .and_then(|full| full.bootstrap.as_ref())
+            .is_some_and(|state| state.epoch_job.is_some())
+    }
     #[cfg(test)]
     pub(crate) async fn full_send_manifest_for_test(
         &mut self,
@@ -218,22 +236,22 @@ impl crate::custody::pairing::PairingActor {
         let participant =
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         let trust = state.trust.take().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let keys = state.keys.take().ok_or(SdkError::PairingCode("WrongContext"))?;
         let operation = c.operation_id.clone();
         let generation = c.generation;
         let cancelled = state.cancel.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let runtime = self.full_runtime.clone();
-        let (trust, keys, signer) = tokio::task::spawn_blocking(move || {
-            let signer = (|| {
-                let _local = runtime.local_work()?;
-                participant.prepare_full_proof_signer(&operation, generation, &trust)
-            })();
-            (trust, keys, signer)
-        })
-        .await
-        .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?;
+        let (trust, signer) = self
+            .full_runtime
+            .clone()
+            .run_blocking(move || {
+                let signer = (|| {
+                    let _local = runtime.local_work()?;
+                    participant.prepare_full_proof_signer(&operation, generation, &trust)
+                })();
+                Ok((trust, signer))
+            })
+            .await?;
         state.trust = Some(trust);
-        state.keys = Some(keys);
         let signer = signer?;
         let trust = state.trust.take().ok_or(SdkError::PairingCode("WrongContext"))?;
         let keys = state.keys.take().ok_or(SdkError::PairingCode("WrongContext"))?;
