@@ -758,6 +758,9 @@ crates/ramflux-sdk/src/prekey.rs | sdk_tcp_tls_gateway_request | 1 | C | admissi
 crates/ramflux-sdk/src/prekey/http_async.rs | request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey/manifest.rs | deserialize | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/surface_refusal.rs | renderer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | merge_pending_edit_registers | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | merge_pending_edit_registers | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | registers | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_object_erasure.rs | scan_copies | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_object_metadata.rs | references | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_selector_admission.rs | validate_graph | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
