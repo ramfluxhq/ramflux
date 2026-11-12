@@ -87,3 +87,11 @@ fn pairing_full_participant_preflight_refuses_foreign_selected_database_and_root
     );
     Ok(())
 }
+
+impl LocalPairingParticipant {
+    pub(in crate::custody::pairing) fn full_test_participant(
+        root: &std::path::Path,
+    ) -> ResultOf<Self> {
+        participant(root)
+    }
+}

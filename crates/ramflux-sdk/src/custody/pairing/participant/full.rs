@@ -29,6 +29,29 @@ impl LocalPairingParticipant {
         }
         Ok(())
     }
+    /// Fetch/verify the exact public native base before freezing the v3 SAS context.
+    /// No account/vault mutex is held over the existing native query port.
+    /// # Errors
+    /// Refuses a changed head/master/root or unavailable existing native freshness.
+    pub(crate) fn full_sas_base(
+        &self,
+        common: &ramflux_protocol::custody::pairing::context_v3::CommonV3,
+        source: &DeviceRef,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        let authority = self.query.current_authority(&common.account_anchor)?;
+        let verified =
+            ramflux_crypto::custody::verify_publication(&authority, custody::network_now()?)?;
+        let body = &verified.envelope().body;
+        if body.account_anchor != common.account_anchor
+            || body.master_certificate.body.master_public_key != common.master_public_key
+            || body.master_certificate.body.primary_device_ref != *source
+            || body.device_set_epoch != common.device_set_epoch
+            || ramflux_protocol::custody::object_hash(verified.envelope())? != common.record_hash
+        {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
+        Ok(verified)
+    }
     /// Complete typed preflight/cut/root before the coordinator invokes native Issue.
     /// Returns no DB/vault lock, key, SAS approval or publication permission.
     /// # Errors

@@ -62,6 +62,11 @@ impl NodePins {
         let head = self.root.join("head.json");
         if head.try_exists()? { Ok(Some(read(&head, 1024)?)) } else { Ok(None) }
     }
+    pub(super) fn current_record(&self, now: u64) -> Result<VerifiedNodeRecord, SdkError> {
+        let _lock = self.lock()?;
+        let hash: String = read(&self.root.join("head.json"), 1024)?;
+        self.history(&hash, now)
+    }
     pub(super) fn observe(
         &self,
         record: &Envelope<NodeIdentityRecord>,

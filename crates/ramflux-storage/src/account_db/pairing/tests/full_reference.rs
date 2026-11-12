@@ -412,3 +412,70 @@ fn pairing_full_stage_metadata_survives_restart_without_account_schema_or_plaint
     );
     Ok(())
 }
+
+#[test]
+fn pairing_full_terminal_live_row_refuses_data_reopen_and_retains_stage() -> TestResult {
+    let (root, mut db) = crate::tests::test_db("full-terminal-data-reopen")?;
+    let record = local_stage_record_fixture()?;
+    let stage = db.create_full_stage_for_test(record, 604_900)?;
+    let reference = stage.reference().clone();
+    drop(stage);
+    let mut row = linked_row()?;
+    row.expires_at = 604_900;
+    row.context = Some(reference.to_wire_bytes()?);
+    db.put_pairing_live(&row)?;
+    assert!(
+        db.open_full_transfer_stage(
+            &row.operation_id,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            100
+        )
+        .is_ok()
+    );
+    let directory = root.join("custody_accounts/acct/full-transfer").join(&reference.stage_id);
+    let files = ["stage.key", "stage.db"]
+        .map(|name| -> Result<_, std::io::Error> {
+            Ok((name, blake3::hash(&std::fs::read(directory.join(name))?)))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    for phase in ["cancelled", "expired", "rejected", "completed"] {
+        row.phase = phase.into();
+        if phase == "completed" {
+            row.proposal_hash = Some(h(42));
+            row.candidate_id = Some(row.operation_id.clone());
+        }
+        db.put_pairing_live(&row)?;
+        drop(db);
+        let index = AccountIndex::open(&root)?;
+        db =
+            AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
+        assert!(
+            matches!(
+                db.open_full_transfer_stage(
+                    &row.operation_id,
+                    ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                    100
+                ),
+                Err(crate::StorageError::PairingField("WrongContext"))
+            ),
+            "terminal row reopened data channel: {phase}"
+        );
+        for (name, expected) in &files {
+            assert!(
+                blake3::hash(&std::fs::read(directory.join(name))?) == *expected,
+                "terminal data refusal changed retained stage artifact"
+            );
+        }
+        assert!(
+            db.pairing_live_rows()?
+                .first()
+                .ok_or("retained live row")?
+                .full_stage_reference()?
+                .as_ref()
+                == Some(&reference),
+            "terminal refusal removed reconciliation reference"
+        );
+    }
+    Ok(())
+}

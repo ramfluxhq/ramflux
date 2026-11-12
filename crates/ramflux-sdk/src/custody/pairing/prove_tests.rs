@@ -363,3 +363,48 @@ async fn pairing_fresh_proof_connection_closes_and_cannot_reappear_after_cancel(
     assert!(connected.lifetime.upgrade().is_none(), "cancelled late connection must be dropped");
     Ok(())
 }
+
+#[tokio::test]
+async fn pairing_full_node_record_comes_from_owned_proof_connection_and_does_not_reopen()
+-> TestResult {
+    let connected = connect_mock_mode(true).await?;
+    let spec = dummy_spec(
+        &connected.connection.account().record().body.account_anchor,
+        "primary",
+        object_hash(connected.connection.account().record())?,
+    );
+    let slot = Arc::new(Mutex::new(Some(connected.connection)));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let native = super::FreshPairingNative::with_factory(Arc::new({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let slot = slot.clone();
+            Box::pin(async move {
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(SdkError::PairingCode("Busy"))
+            })
+        }
+    }));
+    assert!(native.full_node().await.is_err(), "node read opened an unowned proof connection");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    native.issue(spec).await?;
+    let node = native.full_node().await?;
+    assert_eq!(node.envelope().body.node_id, "node");
+    assert_eq!(
+        node.envelope().body.node_signing_public_key,
+        ramflux_crypto::fixture_public_key_base64url()
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    native.close();
+    assert!(native.full_node().await.is_err(), "closed proof owner returned pinned node");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "node read re-opened retired connection"
+    );
+    assert!(connected.lifetime.upgrade().is_none(), "public node result retained proof connection");
+    Ok(())
+}
