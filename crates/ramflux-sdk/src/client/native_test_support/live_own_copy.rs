@@ -1,107 +1,137 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Real phrase-created native authority and private prekeys for ordinary feature unit tests.
-use crate::{
-    GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig, RamfluxClient,
-    custody::tests::{Root, TestVault, create_with_device},
-    prekey::SdkDeviceManifestResponse,
-};
-use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, DeviceRef, Publication};
-use std::sync::Arc;
+//! The live generated own-copy worker uses the same native raw-Inner carrier as history.
+use super::*;
+use crate::client::own_device_copy::OwnMessageInput;
+use ramflux_protocol::message as g;
 
-pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-pub(crate) struct Fixture {
-    pub(crate) client: RamfluxClient,
-    pub(crate) vault: Arc<TestVault>,
-    pub(crate) manifest: SdkDeviceManifestResponse,
-    pub(crate) config: GatewaySessionConfig,
-    pub(crate) root: Root,
+#[tokio::test(flavor = "current_thread")]
+async fn native_live_own_copy_uses_generated_outer_and_retains_the_enclosing_control_proof()
+-> TestResult {
+    let mut source = Fixture::new("live-copy-source").await?;
+    let peer = Fixture::new("live-copy-peer").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let conversation = g::dm_scope::derive(
+        &source.client.own_account_anchor()?,
+        &peer.client.own_account_anchor()?,
+    )?;
+    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.establish_friend_link(
+        "authored-link",
+        &source.client.own_account_anchor()?,
+        &peer.client.own_account_anchor()?,
+    )?;
+    source
+        .client
+        .receive_generated_own_contact(&super::authored::authored_contact(&source, &peer)?)?;
+    let identity = source.client.allocate_generated_identity(
+        &conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let owner = ramflux_protocol::encode_base64url(&identity.id);
+    let exact = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "live own-copy body".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    super::authored::capture_before_enrollment(&source, &peer, &conversation, &owner, &exact)?;
+    let mut sibling = source.enroll_sibling("live-copy-sibling", "sibling").await?;
+    Box::pin(super::authored_edit::deliver_contact(&source, &peer, &mut sibling, &conversation))
+        .await?;
+    let db = source.client.account_db()?;
+    let key = db
+        .actor_state_keys("own-device/send/")?
+        .into_iter()
+        .next()
+        .ok_or("live own-copy intent")?;
+    let queued: serde_json::Value = db.load_actor_state(&key)?.ok_or("queued intent")?;
+    let intent = &queued["intent"];
+    let bytes = ramflux_protocol::decode_base64url(intent["body"].as_str().ok_or("intent bytes")?)?;
+    let draft = source
+        .client
+        .prepare_own_copy_draft(
+            &source.config,
+            OwnMessageInput {
+                id: intent["id"].as_str().ok_or("original envelope")?,
+                created_at: intent["created_at"].as_i64().ok_or("authored time")?,
+                conversation: &conversation,
+                group: None,
+                body: &bytes,
+            },
+            source.manifest.clone(),
+        )?
+        .ok_or("live draft")?;
+    let copies = source.client.seal_own_copy_generated(
+        &source.config,
+        draft,
+        vec![source.material_for(&sibling)?],
+    )?;
+    assert_eq!(copies.len(), 1);
+    let (_, envelope) = copies.into_iter().next().ok_or("copy")?;
+    assert_eq!(envelope.schema, g::outer::CANDIDATE_ENVELOPE_SCHEMA);
+    assert_eq!(envelope.delivery_class, ramflux_protocol::DeliveryClass::Message);
+    sibling.receive(envelope, 2).await?;
+    assert_eq!(sibling.client.account_db()?.message_content(&owner)?, Some(exact.clone()));
+    assert_eq!(
+        sibling
+            .client
+            .account_db()?
+            .actor_state_keys(&format!("routed/own-sent-attestation/{owner}/"))?
+            .len(),
+        1
+    );
+    assert!(
+        sibling
+            .client
+            .export_generated_history_item(&ramflux_protocol::decode_base64url(&owner)?)
+            .is_err()
+    );
+    Box::pin(reconcile_history_after_live_copy(
+        &source,
+        &mut sibling,
+        &conversation,
+        &owner,
+        &exact,
+    ))
+    .await?;
+    Ok(())
 }
-impl Fixture {
-    pub(crate) async fn new(id: &str) -> TestResult<Self> {
-        Self::with_device(id, "primary").await
-    }
-    pub(crate) async fn with_device(id: &str, device: &str) -> TestResult<Self> {
-        let root = Root::new()?;
-        let vault = Arc::new(TestVault::default());
-        let now = crate::custody::network_now()?;
-        let account = create_with_device(&root.0, id, device, vault.as_ref(), now)?;
-        let anchor = account.record().body.account_anchor.clone();
-        let mut client = RamfluxClient::new();
-        client.open_account_index(&root.0)?;
-        client.seal_new_account_data(id, &anchor, b"native fixture data passphrase")?;
-        client.unlock_account(id, b"native fixture data passphrase")?;
-        client.initialize_born_v3_branch(device, vault.clone()).await?;
-        Self::ready(client, root, vault, id, device, account.record().clone())
-    }
-    fn ready(
-        client: RamfluxClient,
-        root: Root,
-        vault: Arc<TestVault>,
-        id: &str,
-        device: &str,
-        record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
-    ) -> TestResult<Self> {
-        let anchor = record.body.account_anchor.clone();
-        let identity = client.owned_device_identity()?;
-        let bundle = client.load_x3dh_private_state(&identity)?.bundle;
-        let manifest = SdkDeviceManifestResponse::from_native(CustodyManifest {
-            publication: Publication { record, compacted_ids: None },
-            custodian_publication: None,
-            devices: vec![CustodyManifestDevice {
-                device_ref: DeviceRef {
-                    account_anchor: anchor,
-                    device_id: device.into(),
-                    device_epoch: 1,
-                },
-                target_delivery_id: identity.storage_key().into(),
-                prekey_bundle: serde_json::to_value(bundle)?,
-                message_layer: None,
-            }],
-        })?;
-        client.persist_fetched_identity_directory(&manifest)?;
-        let endpoint = GatewayQuicEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse()?,
-            gateway_addr: "127.0.0.1:1".parse()?,
-            server_name: "unused.example".into(),
-            ca_cert: root.0.join("unused.pem"),
-            principal_id: manifest.principal_id.clone(),
-            device_id: device.into(),
-            target_delivery_id: identity.storage_key().into(),
-            prekey_http_url: None,
-        };
-        let mut config = GatewaySessionConfig::auto(endpoint)
-            .with_native_custody(GatewayCustodyConfig {
-                account_root: root.0.clone(),
-                account_id: id.into(),
-                node_id: "fixture-node".into(),
-                node_public_key: ramflux_protocol::encode_base64url([7; 32]),
-                vault: vault.clone(),
-            })
-            .with_account_identity(&client)?;
-        // These local feature tests install the already certified branch as the live proof
-        // handoff does. They create no network session and make no transport-proof claim.
-        config.device_branch =
-            Some(Arc::new(client.device_branch.as_ref().ok_or("branch")?.clone()));
-        config.source_identity = Some(identity);
-        assert!(client.identity_root.is_none());
-        Ok(Self { client, vault, manifest, config, root })
-    }
+
+async fn reconcile_history_after_live_copy(
+    source: &Fixture,
+    target: &mut Fixture,
+    conversation: &str,
+    owner: &str,
+    exact: &[u8],
+) -> TestResult {
+    let before = target.client.generated_message_changes(conversation, 0, 100)?.next_after;
+    let plan = source
+        .client
+        .prepare_authored_history(&source.config)?
+        .ok_or("historical copy after live delivery")?;
+    let (_, envelope) = source
+        .client
+        .seal_authored_history(&source.config, plan, source.material_for(target)?)?
+        .ok_or("historical envelope")?;
+    target.receive(envelope, 3).await?;
+    assert_eq!(target.client.account_db()?.message_content(owner)?, Some(exact.to_vec()));
+    assert_eq!(
+        target.client.generated_message_changes(conversation, before, 100)?.changes.len(),
+        0
+    );
+    assert_eq!(
+        target
+            .client
+            .account_db()?
+            .actor_state_keys(&format!("routed/own-sent-attestation/{owner}/"))?
+            .len(),
+        1
+    );
+    Ok(())
 }
-
-mod history;
-mod sibling;
-
-#[path = "native_test_support/authored.rs"]
-mod authored;
-
-mod authored_edit;
-
-mod authored_epoch;
-
-mod authored_group;
-
-mod authored_edit_erasure;
-
-mod live_own_copy;

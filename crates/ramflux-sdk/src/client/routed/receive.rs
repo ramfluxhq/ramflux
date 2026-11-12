@@ -396,6 +396,10 @@ impl RamfluxClient {
         opts: ApplyOpts,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
+        #[cfg(feature = "itest-rfd-fault")]
+        let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
+        #[cfg(feature = "itest-rfd-fault")]
+        let entry = fault_entry.as_deref().unwrap_or(entry);
         let consume_erased = CONSUME_ERASED;
         let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {

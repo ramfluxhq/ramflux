@@ -15,9 +15,13 @@ use serde::{Deserialize, Serialize};
 
 /// Fixed typed recognition only; source/group/key authority still runs inside W1.
 pub(super) fn is_group_key_control(bytes: &[u8]) -> bool {
-    validation::scan_inner(bytes).is_ok_and(|scanned| scanned.kind == 8
-        && g::Control::decode(scanned.body).is_ok_and(|control| control.operation == 5
-            && matches!(control.payload, Some(g::control::Payload::GroupKeyControl(_)))))
+    validation::scan_inner(bytes).is_ok_and(|scanned| {
+        scanned.kind == 8
+            && g::Control::decode(scanned.body).is_ok_and(|control| {
+                control.operation == 5
+                    && matches!(control.payload, Some(g::control::Payload::GroupKeyControl(_)))
+            })
+    })
 }
 
 pub(super) enum GeneratedProjection {
@@ -627,7 +631,8 @@ impl RamfluxClient {
         }
         if opened.routing.kind == Kind::GroupControl
             && !(scanned.kind == 8
-                && g::Control::decode(scanned.body).is_ok_and(|control| matches!(control.operation, 4 | 5)))
+                && g::Control::decode(scanned.body)
+                    .is_ok_and(|control| matches!(control.operation, 4 | 5)))
         {
             return Err(invalid("group control route requires GroupState or GroupKey Control"));
         }

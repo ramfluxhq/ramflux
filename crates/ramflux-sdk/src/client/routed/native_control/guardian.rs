@@ -205,7 +205,7 @@ impl RamfluxClient {
                 if native.inviter_principal_id != principal
                     || native.inviter_device_id != source.device_id()
                     || peer_record["device_epoch"].as_u64() != Some(native.inviter_device_epoch)
-                    || native.signed.signing_key_id != source.device_id()
+                    || native.signed.signing_key_id != format!("device:{}", source.device_id())
                     || native.inviter_device_public_key_base64url != key
                     || native.guardian_principal_id != local
                     || native.guardian_principal_id == native.inviter_principal_id
@@ -234,7 +234,7 @@ impl RamfluxClient {
                 if native.guardian_principal_id != principal
                     || native.guardian_device_id != source.device_id()
                     || peer_record["device_epoch"].as_u64() != Some(native.guardian_device_epoch)
-                    || native.signed.signing_key_id != source.device_id()
+                    || native.signed.signing_key_id != format!("device:{}", source.device_id())
                     || native.guardian_device_public_key_base64url != key
                     || native.owner_principal_id != local
                     || native.accept_id != format!("guardian_accept:{}", native.invite_id)
@@ -382,7 +382,7 @@ impl RamfluxClient {
             || signing_key != invite.inviter_device_public_key_base64url
             || invite.guardian_principal_id != self.local_principal_id()?
             || current["device_epoch"].as_u64() != Some(invite.inviter_device_epoch)
-            || invite.signed.signing_key_id != source.device_id()
+            || invite.signed.signing_key_id != format!("device:{}", source.device_id())
             || invite.expires_at <= crate::time::now_unix_timestamp()
         {
             return Err(authority("pending guardian authority expired or changed"));

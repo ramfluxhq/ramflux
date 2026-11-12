@@ -4,6 +4,7 @@
 //! Peer-authored generated controls (`GROUP_KEY`, RECOVERY, A2I, `OBJECT_REVOKE`): one exact-replay
 //! ledger shared by the four native executors. Each executor lives in its own module.
 pub(super) mod a2i;
+mod delivery;
 mod group_key;
 mod guardian;
 mod object_revoke;

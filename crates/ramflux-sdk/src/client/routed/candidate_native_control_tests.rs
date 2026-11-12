@@ -59,7 +59,7 @@ fn manual_entry(
 
 fn signed_fields(device: &str) -> ramflux_protocol::SignedFields {
     ramflux_protocol::SignedFields {
-        signing_key_id: device.into(),
+        signing_key_id: format!("device:{device}"),
         signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
         signature: String::new(),
     }

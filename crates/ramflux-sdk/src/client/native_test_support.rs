@@ -107,3 +107,5 @@ mod authored_edit_erasure;
 mod live_own_copy;
 
 mod generated_routes;
+
+mod peer_control_send;
