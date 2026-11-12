@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::ceremony::AccountCeremony;
 use crate::error::{CoreError, code};
 use crate::listener::UpdateListener;
 use crate::port::{CorePort, PortRequest, UpdateSink};
@@ -191,6 +192,21 @@ impl RamfluxCore {
         // is consumed by the port either way.
         self.port.submit(PortRequest { request, deadline_unix_ms, gate, reply })?;
         waiter.await
+    }
+
+    /// Begin creating an account. `node_id` binds a confirmed home node to the new account.
+    ///
+    /// # Errors
+    /// `CapabilityRejected` (4) when the core cannot carry the ceremony on this carrier;
+    /// otherwise the core's refusal (unknown node, invalid name, unavailable vault).
+    pub async fn begin_account_creation(
+        &self,
+        display_name: String,
+        node_id: Option<String>,
+    ) -> Result<Arc<AccountCeremony>, CoreError> {
+        self.ensure_open()?;
+        let (pending, port) = self.port.begin_account(display_name, node_id).await?;
+        Ok(AccountCeremony::new(pending, port))
     }
 
     /// Open an update stream. Rows are delivered to `listener` within the granted credit.

@@ -18,11 +18,21 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi_bindgen.rs"
 required-features = ["bindgen-cli"]
 
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi_bindgen_swift.rs"
+required-features = ["bindgen-cli"]
+
+[[bin]]
+name = "ramflux-ffi-stamp"
+path = "src/bin/stamp.rs"
+required-features = ["bindgen-cli"]
+
 [features]
 default = []
 # Links the full SDK and adapts its in-process supervisor to `CorePort`. Phone apps enable it.
 # It is off by default so that adding this crate changes nothing for desktop builds.
-embedded = ["dep:ramflux-sdk"]
+embedded = ["dep:ramflux-sdk", "dep:tokio"]
 # Builds the bindings generator binary. Never enabled in a shipped library.
 bindgen-cli = ["uniffi/cli"]
 
@@ -35,6 +45,7 @@ serde_json = { workspace = true }
 blake3 = { workspace = true }
 ramflux-protocol = { workspace = true }
 ramflux-sdk = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

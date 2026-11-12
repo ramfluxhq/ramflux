@@ -120,13 +120,17 @@ fn next_step(shared: &Shared) -> Step {
 fn deliver(shared: &Shared, listener: &dyn UpdateListener) {
     loop {
         // The lock is never held across a listener call.
-        match next_step(shared) {
+        let applied = match next_step(shared) {
             Step::Lag { resume_after, skipped } => listener.on_lag(resume_after, skipped),
             Step::Rows(rows) => listener.on_updates(rows),
             Step::End(end) => {
-                listener.on_end(end);
+                let _ = listener.on_end(end);
                 return;
             }
+        };
+        if applied.is_err() {
+            // The host could not apply the call. Stop producing; the journal keeps the rows.
+            shared.finish(SubscriptionEnd::Failed);
         }
     }
 }
