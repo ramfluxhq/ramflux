@@ -37,6 +37,15 @@ impl FullTransferStage<'_> {
         hash: &str,
         rules: &[FamilyRule],
     ) -> Result<(), StorageError> {
+        self.visit_forward_scalar_records(hash, rules, |_, _, _| Ok(()))
+    }
+
+    pub(super) fn visit_forward_scalar_records(
+        &self,
+        hash: &str,
+        rules: &[FamilyRule],
+        mut visit: impl FnMut(&RecordHeader, u64, u64) -> Result<(), StorageError>,
+    ) -> Result<(), StorageError> {
         let manifest = self.forward_manifest(hash)?;
         let body = &manifest.manifest;
         let catalog =
@@ -77,6 +86,7 @@ impl FullTransferStage<'_> {
             {
                 return Err(mismatch());
             }
+            visit(&header.0, start, encoded)?;
             previous = Some((index, Zeroizing::new(header.0.key.clone())));
         }
         if reader.stream_position()? != body.total_bytes.0

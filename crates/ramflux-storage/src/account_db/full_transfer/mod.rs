@@ -6,6 +6,7 @@ mod catalog;
 mod inventory;
 mod keys;
 mod native_floor;
+mod receiver_input;
 mod scalar;
 mod scalar_sql;
 mod source_base;
@@ -19,6 +20,7 @@ mod stage_chunks;
 mod stage_reader;
 mod stage_validation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
+pub use receiver_input::FullScalarInputCounts;
 pub use source_base::FullBaseSourceEncoding;
 pub use source_preparation::{
     FullSourcePreparation, FullSourcePreparationCancel, PreparedFullSource,

@@ -340,12 +340,71 @@ fn pairing_full_stage_scalar_input_checks_order_counts_and_bytes_without_data_ve
             accepted,
             "{case}"
         );
+        check_receiver_input(&stage, &hash, &manifest, &stream, ids.len() as u64, accepted)?;
         let verified = stage.connection.query_row(
             "SELECT verified FROM manifest WHERE manifest_hash=?1",
             rusqlite::params![hash],
             |row| row.get::<_, bool>(0),
         )?;
         assert!(!verified, "input validation cannot stand in for durable application: {case}");
+    }
+    Ok(())
+}
+fn check_receiver_input(
+    stage: &super::FullTransferStage<'_>,
+    hash: &str,
+    manifest: &SourceManifest,
+    stream: &[u8],
+    expected_records: u64,
+    accepted: bool,
+) -> TestResult {
+    let indexed = stage.index_forward_scalar_records(hash, &[SCALAR_RULE]);
+    assert_eq!(indexed.is_ok(), accepted, "atomic receiver index: receiver input");
+    let (indexed_records, completed): (u64, u64) = stage.connection.query_row(
+            "SELECT (SELECT count(*) FROM receiver_scalar_record),(SELECT count(*) FROM receiver_scalar_input)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+    assert_eq!(
+        indexed_records,
+        if accepted { expected_records } else { 0 },
+        "rollback: receiver input"
+    );
+    assert_eq!(completed, u64::from(accepted), "no incomplete input marker: receiver input");
+    if accepted {
+        let counts = indexed?;
+        assert_eq!(counts.records, expected_records);
+        assert_eq!(counts.encoded_bytes, stream.len() as u64);
+        assert_eq!(
+            stage.index_forward_scalar_records(hash, &[SCALAR_RULE])?,
+            counts,
+            "exact input retry: receiver input"
+        );
+        let foreign: u64 = stage.connection.query_row(
+            "SELECT count(*) FROM receiver_scalar_record WHERE source_ref<>?1",
+            rusqlite::params![String::from_utf8(canonical_json_bytes(
+                &manifest.manifest.source_ref
+            )?)?],
+            |row| row.get(0),
+        )?;
+        assert_eq!(foreign, 0, "source must come from retained signed manifest");
+        // A retry must not trust the old completion marker after ciphertext corruption.
+        if !stream.is_empty() {
+            let path = stage.directory.join("seg-f-0-0.bin");
+            let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+            file.seek(SeekFrom::Start(12))?;
+            file.write_all(&[0; 16])?;
+            file.sync_all()?;
+            assert!(
+                stage.index_forward_scalar_records(hash, &[SCALAR_RULE]).is_err(),
+                "saved input marker hid corrupted retained bytes"
+            );
+            let retained: u64 = stage.connection.query_row(
+                "SELECT count(*) FROM receiver_scalar_record",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(retained, counts.records, "failed retry must roll back atomically");
+        }
     }
     Ok(())
 }
