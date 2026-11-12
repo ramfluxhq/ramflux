@@ -42,4 +42,17 @@ if ! grep -rq 'fun `\?shutdown`\?(' "$out_dir"; then
   echo "generate-bindings: RamfluxCore.close was not renamed to shutdown; check uniffi.toml" >&2
   exit 1
 fi
-echo "generate-bindings: $generated Kotlin file(s) in $out_dir"
+
+# Record what these bindings were generated from. The handshake sends this stamp, so a
+# library of another binding API version or descriptor is detected when the core opens.
+stamp_dir="$out_dir/org/ramflux/sdk/ffi"
+mkdir -p "$stamp_dir"
+(
+  cd "$workspace"
+  cargo run --locked -p ramflux-ffi --features bindgen-cli --bin ramflux-ffi-stamp -- kotlin
+) | sed 's/^package .*/package org.ramflux.sdk.ffi/' >"$stamp_dir/HostBindingStamp.kt"
+grep -q 'DESCRIPTOR_FINGERPRINT' "$stamp_dir/HostBindingStamp.kt" || {
+  echo "generate-bindings: the binding stamp was not generated" >&2
+  exit 1
+}
+echo "generate-bindings: $generated Kotlin file(s) and the binding stamp in $out_dir"

@@ -21,14 +21,17 @@ import kotlinx.coroutines.sync.withLock
 import org.ramflux.sdk.ffi.ApiVersion
 import org.ramflux.sdk.ffi.CoreConfig
 import org.ramflux.sdk.ffi.CoreState
+import org.ramflux.sdk.ffi.HostBindingStamp
 import org.ramflux.sdk.ffi.HostHandshake
 import org.ramflux.sdk.ffi.NetworkChange
-import org.ramflux.sdk.ffi.descriptorFingerprint
 
 /** Android placement of the core: where its data lives and when it must let go of it. */
 object RamfluxAndroid {
-    /** Binding API this wrapper was written against. */
-    private val HOST_API = ApiVersion(major = 1u, minor = 0u)
+    /** Binding API the bundled bindings were generated from (written by the build). */
+    private val HOST_API = ApiVersion(
+        major = HostBindingStamp.API_MAJOR.toUInt(),
+        minor = HostBindingStamp.API_MINOR.toUInt(),
+    )
 
     private val CAPABILITIES =
         listOf("execute.v1", "lifecycle.v1", "network.v1", "subscribe.credit.v1")
@@ -45,7 +48,8 @@ object RamfluxAndroid {
         dataRoot = dataRoot(context.applicationContext).absolutePath,
         handshake = HostHandshake(
             api = HOST_API,
-            descriptorFingerprint = descriptorFingerprint(),
+            // The generation-time value, not the library's own answer: a mismatch must show.
+            descriptorFingerprint = HostBindingStamp.DESCRIPTOR_FINGERPRINT,
             capabilities = CAPABILITIES,
         ),
         maxPendingUpdates = maxPendingUpdates,
