@@ -165,8 +165,7 @@ fn is_inside(path: &Path, ancestor: &Path) -> bool {
     let path = lower(path);
     let ancestor = lower(ancestor);
     let ancestor = ancestor.trim_end_matches('\\');
-    path == ancestor
-        || path.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('\\'))
+    path == ancestor || path.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('\\'))
 }
 
 /// Refuse a data root under the roaming application-data folder. A roaming profile can copy

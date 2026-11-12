@@ -3,8 +3,8 @@
 
 //! Client-local storage primitives for MVP-1 multi-account tests.
 
-mod sync_path;
 mod account_db;
+mod sync_path;
 pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
 pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,

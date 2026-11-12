@@ -93,7 +93,9 @@ fn branch_and_provisioning_entries_round_trip_with_their_lengths() -> Result<(),
 fn the_file_holds_no_plaintext_seed_and_belongs_to_the_user() -> Result<(), String> {
     let (_root, vault) = vault()?;
     let seed = [0x5a_u8; 32];
-    vault.store_new(PRIMARY, &SelfSigningKey::from_vault_seed(&Zeroizing::new(seed))).map_err(text)?;
+    vault
+        .store_new(PRIMARY, &SelfSigningKey::from_vault_seed(&Zeroizing::new(seed)))
+        .map_err(text)?;
     let path = vault.entry_path(PRIMARY).map_err(text)?;
     let bytes = std::fs::read(&path).map_err(text)?;
     if bytes.windows(seed.len()).any(|window| window == seed) {

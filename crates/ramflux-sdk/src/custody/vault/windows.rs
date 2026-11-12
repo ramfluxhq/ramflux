@@ -159,8 +159,7 @@ impl WindowsDpapiVault {
             return Err(SdkError::CustodyVaultUnavailable);
         }
         let record = Self::encode(reference, secret)?;
-        let protected =
-            dpapi::protect(&record, &Self::entropy(reference)).map_err(unavailable)?;
+        let protected = dpapi::protect(&record, &Self::entropy(reference)).map_err(unavailable)?;
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).map_err(unavailable)?;
         let temporary = path.with_extension(format!("tmp-{:016x}", u64::from_be_bytes(nonce)));

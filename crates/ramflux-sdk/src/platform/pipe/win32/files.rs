@@ -262,7 +262,8 @@ pub(crate) fn identity(file: &File) -> io::Result<(u64, u64)> {
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let index = (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
     Ok((u64::from(information.dwVolumeSerialNumber), index))
 }
 
