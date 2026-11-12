@@ -239,15 +239,16 @@ impl WebCore {
     }
 
     /// Storage facts as a JSON string: persistence, the durability wording, quota, and what was
-    /// found at start. With `request` the user agent is asked for persistence first.
+    /// found at start. `page_persist` is the answer of `navigator.storage.persist()` when the
+    /// page just asked (that method does not exist in workers); without it the worker reads
+    /// `persisted()`.
     ///
     /// # Errors
     /// Fails where IndexedDB is missing.
-    pub async fn storage_status(&self, request: bool) -> Result<String, JsError> {
-        let persistence = if request {
-            storage::request_persistence().await
-        } else {
-            storage::persistence().await
+    pub async fn storage_status(&self, page_persist: Option<bool>) -> Result<String, JsError> {
+        let persistence = match page_persist {
+            Some(_) => storage::persistence_from_page(page_persist),
+            None => storage::persistence().await,
         };
         let opfs = storage::opfs_root().await.is_ok();
         let vault = BrowserVault::open().await.map_err(|error| js_error(&error))?;

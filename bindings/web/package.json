@@ -1,0 +1,25 @@
+{
+  "name": "@ramflux/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser host for a linked secondary ramflux device. Built from source; never published.",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "files": ["pkg", "dist"],
+  "exports": {
+    ".": { "types": "./dist/client.d.ts", "default": "./dist/client.js" },
+    "./worker": "./dist/worker.js",
+    "./service-worker": "./dist/service-worker.js",
+    "./core": { "types": "./pkg/ramflux_web.d.ts", "default": "./pkg/ramflux_web.js" }
+  },
+  "scripts": {
+    "build": "sh scripts/build.sh",
+    "build:wasm": "sh scripts/build.sh wasm",
+    "build:ts": "tsc -p tsconfig.json",
+    "check:role": "sh scripts/check-web-role.sh",
+    "check:wasm": "cargo check -p ramflux-web --target wasm32-unknown-unknown"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}

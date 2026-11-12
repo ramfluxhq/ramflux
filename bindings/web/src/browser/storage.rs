@@ -22,10 +22,12 @@ pub async fn persistence() -> Persistence {
     answer(js::call_async_optional("persisted").await)
 }
 
-/// `navigator.storage.persist()`. Called after linking, which is a user gesture. A refusal is
-/// normal and is shown, never treated as an error.
-pub async fn request_persistence() -> Persistence {
-    answer(js::call_async_optional("persist").await)
+/// The answer of `navigator.storage.persist()`, which the page must call: the method does not
+/// exist in workers. The page calls it after linking (a user gesture) and passes the result
+/// here. A refusal is normal and is shown, never treated as an error.
+#[must_use]
+pub fn persistence_from_page(granted: Option<bool>) -> Persistence {
+    answer(granted.map(JsValue::from_bool))
 }
 
 fn answer(value: Option<JsValue>) -> Persistence {

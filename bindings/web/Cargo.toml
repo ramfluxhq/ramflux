@@ -19,10 +19,14 @@ default = []
 # primary-authority code.
 primary-authority = []
 account-recovery = []
+# S-STORE probe: link the shared storage crate (rusqlite with bundled SQLCipher, which resolves
+# to sqlite-wasm-rs on this target). Off until the spike passes; see `store_policy::StoreEngine`.
+opfs-sqlcipher = ["dep:ramflux-storage"]
 
 [dependencies]
 ramflux-protocol = { workspace = true }
 ramflux-crypto = { workspace = true }
+ramflux-storage = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
