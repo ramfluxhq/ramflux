@@ -363,7 +363,7 @@ impl RamfluxClient {
         }
         Ok(Some(source))
     }
-    fn raw_reparse_scope_allowed(
+    pub(crate) fn raw_reparse_scope_allowed(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         conversation: &str,

@@ -78,3 +78,51 @@ impl AccountDb {
         Ok((result, commits.load(Ordering::Relaxed)))
     }
 }
+
+impl AccountDb {
+    /// Hash every logical table row, excluding only explicitly named actor-state keys.
+    /// Test instrumentation only; compare a dedicated account with no concurrent writer.
+    /// Returned values contain hashes rather than private row payloads.
+    /// # Errors
+    /// Returns SQLite errors enumerating the pinned account snapshot.
+    pub fn test_table_fingerprints(
+        &self,
+        allowed_actor_keys: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<[u8; 32]>>, StorageError> {
+        let allowed = allowed_actor_keys.to_vec();
+        self.connection
+            .call(move |db| {
+                let tables = db
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut snapshot = std::collections::BTreeMap::new();
+                for table in tables {
+                    let sql = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
+                    let mut query = db.prepare(&sql)?;
+                    let columns = query.column_count();
+                    let mut rows = query.query([])?;
+                    let mut fingerprints = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        if table == "runtime_actor_state"
+                            && allowed.contains(&row.get::<_, String>("state_kind")?)
+                        {
+                            continue;
+                        }
+                        let mut hasher = blake3::Hasher::new();
+                        for index in 0..columns {
+                            let value = row.get::<_, rusqlite::types::Value>(index)?;
+                            let encoded = format!("{value:?}");
+                            hasher.update(&(encoded.len() as u64).to_be_bytes());
+                            hasher.update(encoded.as_bytes());
+                        }
+                        fingerprints.push(*hasher.finalize().as_bytes());
+                    }
+                    fingerprints.sort_unstable();
+                    snapshot.insert(table, fingerprints);
+                }
+                Ok(snapshot)
+            })
+            .map_err(StorageError::from)
+    }
+}

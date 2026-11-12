@@ -3,10 +3,8 @@
 
 //! Transient pair encryption. Only ratchet metadata persists; Typing never enters W0/W1 or history.
 use super::{
-    CandidateAadBinding, GatewayDirectMessage, GatewayInboxEntry, GatewaySessionAccess, HeadUse,
-    Kind, RamfluxClient, Routing, SdkDmEncryptedEnvelope, SdkError, SealedRouted,
-    associated_data_bound, associated_data_from_outer, decode, invalid,
-    refuse_received_outer_fields, report,
+    CandidateAadBinding, GatewayDirectMessage, GatewaySessionAccess, RamfluxClient,
+    SdkDmEncryptedEnvelope, SdkError, SealedRouted, associated_data_bound, decode, invalid, report,
 };
 use crate::GatewayServerFrame;
 use crate::bindings::{AdapterError, GeneratedErrorCode};
@@ -27,7 +25,6 @@ impl RamfluxClient {
         let envelope = self
             .account_db()?
             .write_transaction(|| self.prepare_typing_delivery_in(engine, message, active))?;
-        self.finish_pair_retirement()?;
         Ok(envelope)
     }
 
@@ -44,8 +41,24 @@ impl RamfluxClient {
             .and_then(|at| u64::try_from(at).ok())
             .ok_or_else(|| invalid("typing deadline overflow"))?;
         let inner = self.encode_typing_inner(message, &source, active, expires)?;
+        self.seal_ephemeral_inner(engine, message, &source, &remote, &inner)
+    }
+
+    pub(super) fn seal_ephemeral_inner(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        inner: &[u8],
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        let expires = message
+            .created_at
+            .checked_add(i64::from(message.ttl))
+            .and_then(|at| u64::try_from(at).ok())
+            .ok_or_else(|| invalid("ephemeral deadline overflow"))?;
         let (mut session, header, bundle) = self
-            .sendable_pair(&source, &remote)?
+            .sendable_pair(source, remote)?
             .ok_or_else(|| typing_unavailable("typing requires an established pair session"))?;
         if header.is_some()
             || !self
@@ -63,8 +76,8 @@ impl RamfluxClient {
             self,
             message,
             &session,
-            &inner,
-            &remote,
+            inner,
+            remote,
             &report::ReportPolicy {
                 local_device_id: &engine.config().device_id,
                 mode: "ephemeral",
@@ -111,7 +124,7 @@ impl RamfluxClient {
                 return Err(typing_unavailable("typing pair session seal budget exhausted"));
             }
             self.account_db()?.persist_actor_state(&seals_key, &(count + 1))?;
-            self.persist_pair(&source, &remote, &bundle, &session)
+            self.persist_pair(source, remote, &bundle, &session)
         })?;
         Ok(envelope)
     }
@@ -230,80 +243,16 @@ impl RamfluxClient {
         ))?)
     }
 
+    #[cfg(test)]
     pub(crate) fn open_typing_delivery(
         &self,
         envelope: &ramflux_protocol::Envelope,
         local: &str,
     ) -> Result<(g::EventIdentity, g::Typing), SdkError> {
-        let entry = GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 0,
-            target_delivery_id: envelope.target_delivery_id.clone(),
-            envelope: envelope.clone(),
-        };
-        self.authenticated_envelope_sender(HeadUse::NewAuthorization, &entry)?;
-        refuse_received_outer_fields(envelope)?;
-        let conversation = self
-            .typing_conversation_before_decrypt(envelope)?
-            .ok_or_else(|| invalid("typing requires an established conversation scope"))?;
-        let packet = decode(envelope)?;
-        report::refuse_payload_outer_mismatch(envelope, &packet)?;
-        if packet.x3dh.is_some() {
-            return Err(invalid("typing cannot bootstrap a receive session"));
+        match self.open_ephemeral_delivery(envelope, local)? {
+            super::EphemeralContent::Typing(identity, typing) => Ok((identity, typing)),
+            _ => Err(invalid("ephemeral content is not known Typing")),
         }
-        let local_device = self.local_device_identity(local)?;
-        let remote = self.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
-        if remote.root_commitment() == local_device.root_commitment() {
-            return Err(invalid("typing cannot target own devices"));
-        }
-        let (mut session, bundle) =
-            self.recv_pair_session(&local_device, &remote, &envelope.envelope_id, &packet)?;
-        report::refuse_direct_candidate_opening(envelope, &session, &Kind::Direct)?;
-        let aad = associated_data_from_outer(envelope, &envelope.source_device_id, local, &bundle)?;
-        let decrypted =
-            zeroize::Zeroizing::new(session.decrypt_with_franking_keys(&packet.ciphertext, &aad)?);
-        let inner = report::opened_inner_plaintext(envelope, &decrypted.plaintext)?;
-        let (identity, content) = Self::decode_generated_inner(&inner)?;
-        if identity.author.as_ref().is_none_or(|author| {
-            author.account_anchor != remote.root_commitment()
-                || author.device_id != remote.device_id()
-        }) || identity.conversation_id != conversation
-            || identity.group_id.is_some()
-            || identity.group_epoch.is_some()
-            || identity.device_sequence != 0
-            || identity.id.len() != 32
-            || identity.conversation_id.is_empty()
-            || !self
-                .accepted_contact_source(remote.root_commitment(), &envelope.source_principal_id)?
-        {
-            return Err(SdkError::InboundRejected("typing source is not authorized".into()));
-        }
-        let route = Routing {
-            kind: Kind::Direct,
-            conversation_id: identity.conversation_id.clone(),
-            group_id: None,
-            message_id: envelope.envelope_id.clone(),
-            group_message_id: None,
-            attachments: false,
-        };
-        self.confirm_routed_context(&route, &entry)?;
-        let Some(g::content::Value::Typing(typing)) = content.value else {
-            return Err(SdkError::InboundRejected("ephemeral content is not known Typing".into()));
-        };
-        let deadline = envelope
-            .created_at
-            .checked_add(i64::from(envelope.ttl))
-            .and_then(|at| u64::try_from(at).ok())
-            .ok_or_else(|| invalid("typing deadline overflow"))?;
-        if typing.expires_at != deadline || envelope.ttl != if typing.active { 5 } else { 1 } {
-            return Err(SdkError::InboundRejected(
-                "typing interval exceeds signed lifetime".into(),
-            ));
-        }
-        self.account_db()?
-            .write_transaction(|| self.persist_pair(&local_device, &remote, &bundle, &session))?;
-        self.finish_pair_retirement()?;
-        Ok((identity, typing))
     }
 }
 

@@ -159,10 +159,19 @@ CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON r
                 // A privacy fence can erase an inserted/updated copy in an earlier AFTER
                 // trigger. Do not publish its original identity-bearing keys afterward.
                 let present = format!("EXISTS(SELECT 1 FROM \"{quoted}\" WHERE rowid=NEW.rowid)");
+                // Private pair crypto state is never a product update. In particular,
+                // Typing may persist only the ratchet/allowance, without an outbox trail.
+                let private_pair = if table == "runtime_actor_state" {
+                    format!(
+                        "{source}.state_kind NOT LIKE 'dm-pair/session/%' AND {source}.state_kind NOT LIKE 'dm-pair/ephemeral-seals/%'"
+                    )
+                } else {
+                    "1".to_owned()
+                };
                 let guard = match operation {
-                    "insert" => format!("WHEN {present}"),
-                    "update" => format!("WHEN {present} AND ({changed})"),
-                    _ => String::new(),
+                    "insert" => format!("WHEN {present} AND ({private_pair})"),
+                    "update" => format!("WHEN {present} AND ({changed}) AND ({private_pair})"),
+                    _ => format!("WHEN {private_pair}"),
                 };
                 let fields = names
                     .iter()
