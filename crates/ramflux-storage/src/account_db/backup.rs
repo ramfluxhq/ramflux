@@ -55,6 +55,31 @@ impl FullTransferCut {
         self.require_unlocked_owner()?;
         Ok(copied)
     }
+    /// Inspect this same pinned read transaction without copying a raw database/key.
+    /// Only account-db transfer owners can use these data-only frozen observations.
+    pub(in crate::account_db) fn inspect_full_profile_cut(
+        &self,
+    ) -> Result<(super::full_transfer::FullTransferSchema, u64, u64), StorageError> {
+        self.reader.require_selected_transfer_source()?;
+        self.require_unlocked_owner()?;
+        let schema = super::full_transfer::inspect_pinned_full_transfer(
+            &self.reader.connection,
+            super::full_transfer::full_transfer_catalog(),
+        )?;
+        let storage_generation = self.reader.connection.query_row(
+            "SELECT max(schema_version) FROM schema_migration",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let erasure_generation = self.reader.connection.query_row(
+            "SELECT generation FROM account_erasure_generation WHERE singleton=1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        self.reader.require_selected_transfer_source()?;
+        self.require_unlocked_owner()?;
+        Ok((schema, storage_generation, erasure_generation))
+    }
     fn require_unlocked_owner(&self) -> Result<(), StorageError> {
         if self.unlocked_owner.upgrade_account_writer().is_none() {
             return Err(StorageError::AuthorizationRejected);

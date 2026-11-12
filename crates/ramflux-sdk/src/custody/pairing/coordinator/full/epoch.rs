@@ -66,6 +66,7 @@ fn start(
                     if signing_cancel.is_cancelled() {
                         return Err(SdkError::PairingCode("Retired"));
                     }
+                    let _local = signing_stop.local_work()?;
                     let signature = signer.sign(request)?;
                     if signing_cancel.is_cancelled() {
                         return Err(SdkError::PairingCode("Retired"));
@@ -133,6 +134,48 @@ fn start(
 }
 impl crate::custody::pairing::PairingActor {
     #[cfg(test)]
+    pub(crate) async fn full_send_manifest_for_test(
+        &mut self,
+        manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+    ) -> Result<String, SdkError> {
+        let relay = self.transport.full_transport().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let ceremony = self.ceremony.as_mut().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let packet = ceremony
+            .full
+            .as_mut()
+            .and_then(|full| full.bootstrap.as_mut())
+            .and_then(|state| state.epoch_ready.as_mut())
+            .ok_or(SdkError::PairingCode("WrongContext"))?;
+        packet.send_manifest(relay.as_ref(), &ceremony.origin, manifest).await
+    }
+    #[cfg(test)]
+    pub(crate) async fn full_poll_manifest_for_test(
+        &mut self,
+        assembler: &mut ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler,
+    ) -> Result<Option<ramflux_protocol::custody::pairing::full_transfer::SourceManifest>, SdkError>
+    {
+        let relay = self.transport.full_transport().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let ceremony = self.ceremony.as_mut().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let packet = ceremony
+            .full
+            .as_mut()
+            .and_then(|full| full.bootstrap.as_mut())
+            .and_then(|state| state.epoch_ready.as_mut())
+            .ok_or(SdkError::PairingCode("WrongContext"))?;
+        packet.poll_manifest(relay.as_ref(), &ceremony.origin, assembler).await
+    }
+    #[cfg(test)]
+    pub(crate) fn full_source_manifest_for_test(
+        &self,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {
+        self.ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .and_then(|full| full.bootstrap.as_ref())
+            .and_then(|state| state.source_manifest.clone())
+            .ok_or(SdkError::PairingCode("WrongContext"))
+    }
+    #[cfg(test)]
     pub(crate) fn full_epoch_ready_for_test(&self) -> bool {
         self.ceremony
             .as_ref()
@@ -179,8 +222,12 @@ impl crate::custody::pairing::PairingActor {
         let operation = c.operation_id.clone();
         let generation = c.generation;
         let cancelled = state.cancel.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let runtime = self.full_runtime.clone();
         let (trust, keys, signer) = tokio::task::spawn_blocking(move || {
-            let signer = participant.prepare_full_proof_signer(&operation, generation, &trust);
+            let signer = (|| {
+                let _local = runtime.local_work()?;
+                participant.prepare_full_proof_signer(&operation, generation, &trust)
+            })();
             (trust, keys, signer)
         })
         .await

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 mod full;
+pub(super) use full::cancel::FullRuntimeCancel;
 mod registry;
 mod workflow;
 pub use registry::{install_actor, remove_actor};
@@ -1134,6 +1135,7 @@ impl PairingActor {
                 },
             )
         });
+        self.full_runtime.drain_local_work();
         // Full owners/caches/readers were cancelled above, before waiting for the DB loan.
         // Preserve candidate and stage metadata even when publication might have escaped.
         let durable_terminal = if let (Some((operation, generation)), Some(participant)) =

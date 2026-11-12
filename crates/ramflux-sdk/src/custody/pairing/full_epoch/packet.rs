@@ -189,6 +189,29 @@ impl FullPacketEpoch {
         }
         result
     }
+    /// Authenticate and assemble one manifest part before exposing a complete object.
+    /// The caller owns the bounded assembler for this one stream/epoch and must still
+    /// apply its OWN signature/catalog/native/parent/application ledger gates. Exact
+    /// encrypted retries do not append twice. Any framing/hash refusal retires the epoch.
+    /// # Errors
+    /// Refuses non-manifest objects, malformed canonical bytes, hash mismatch or scope.
+    pub fn open_manifest_part(
+        &mut self,
+        packet: &EncryptedPacket,
+        assembler: &mut ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler,
+    ) -> Result<Option<ramflux_protocol::custody::pairing::full_transfer::SourceManifest>, SdkError>
+    {
+        let result = (|| {
+            let Some(part) = self.open_packet(packet)? else { return Ok(None) };
+            assembler.push(&part).map_err(|error| wire(&error))
+        })();
+        if result.is_err() {
+            *assembler =
+                ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default();
+            self.retire();
+        }
+        result
+    }
     /// Send a previously sealed exact packet on A2. Relay acceptance only releases the
     /// two-packet ciphertext cache; it never retires immutable cuts or proves application.
     /// # Errors
@@ -264,6 +287,63 @@ impl FullPacketEpoch {
         }
         .await;
         if result.is_err() {
+            self.retire();
+        }
+        result
+    }
+    /// Send the complete canonical signed manifest in bounded encrypted parts, with at
+    /// most one transport-unacknowledged part at a time. This positions the data channel;
+    /// the endpoint must independently admit its local native/chain/phase state first.
+    /// No database or stage-key borrow may be held while awaiting this method.
+    /// # Errors
+    /// Refuses malformed/oversized objects, wrong channel phase or any relay failure.
+    pub async fn send_manifest(
+        &mut self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+        manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+    ) -> Result<String, SdkError> {
+        use ramflux_protocol::custody::pairing::full_transfer::{CHUNK_BYTES, manifest_hash};
+        let result = async {
+            let bytes = Zeroizing::new(manifest.to_wire_bytes().map_err(|error| wire(&error))?);
+            let hash = encode_base64url(manifest_hash(manifest).map_err(|error| wire(&error))?);
+            for (index, part) in bytes.chunks(CHUNK_BYTES as usize).enumerate() {
+                let packet = DataPacket::Manifest {
+                    manifest_hash: hash.clone(),
+                    offset: U64((index as u64) * u64::from(CHUNK_BYTES)),
+                    total: U64(bytes.len() as u64),
+                    bytes: SecretBase64::from_bytes(part),
+                };
+                let encrypted = self.seal_packet(&packet)?;
+                self.send(relay, origin, encrypted).await?;
+            }
+            Ok(hash)
+        }
+        .await;
+        if result.is_err() {
+            self.retire();
+        }
+        result
+    }
+    /// Poll/authenticate one manifest part into this epoch's caller-owned bounded assembler.
+    /// A returned object has passed exact framing/hash checks only, never semantic admission.
+    /// # Errors
+    /// Refuses wrong scope/packet kind, changed assembly operands or malformed manifest bytes.
+    pub async fn poll_manifest(
+        &mut self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+        assembler: &mut ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler,
+    ) -> Result<Option<ramflux_protocol::custody::pairing::full_transfer::SourceManifest>, SdkError>
+    {
+        let result = async {
+            let Some(packet) = self.poll(relay, origin).await? else { return Ok(None) };
+            self.open_manifest_part(&packet, assembler)
+        }
+        .await;
+        if result.is_err() {
+            *assembler =
+                ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default();
             self.retire();
         }
         result

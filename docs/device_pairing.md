@@ -38,3 +38,19 @@ credential and key references.
 
 Peers without the required pairing profile return `UpdateRequired`. Pairing does
 not fall back to phrase recovery, legacy root signing or a weaker relay route.
+
+Full-account primary transfer uses the `full_account_data_v1` profile, committed
+inside the v3 SAS context on both devices. It transfers supported logical account
+data through an encrypted, resumable stream; device secrets remain local. The
+preview refuses an unsupported persisted record with `UnsupportedRecord` before
+issuing an invitation. It never silently skips a record or falls back to the
+older bounded handover payload. This full transfer workflow is still under
+development and is not enabled for ordinary clients.
+
+A durable chunk receipt confirms encrypted staging on the receiving device. It
+does not confirm that data was applied, that a primary change was published, or
+that the recipient can open a session. Those steps require separate verification
+of the merged data, the exact native publication and local installation. After
+a successful primary change, a final catch-up tail remains pending until the
+receiver merges it or the user explicitly abandons it; lease expiry or another
+primary change does not silently mark the tail complete.

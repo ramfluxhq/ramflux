@@ -5,6 +5,7 @@
 mod catalog;
 mod fixed_union;
 mod inventory;
+pub(in crate::account_db) use inventory::inspect as inspect_pinned_full_transfer;
 mod io_cancel;
 pub use io_cancel::FullStageIoCancel;
 mod keys;
@@ -13,6 +14,7 @@ pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
 mod receiver_input;
 mod receiver_projection;
+mod reverse_manifest;
 mod scalar;
 mod scalar_sql;
 mod source_base;

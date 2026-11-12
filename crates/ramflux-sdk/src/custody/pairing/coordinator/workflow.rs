@@ -14,8 +14,16 @@ use ramflux_protocol::custody::pairing::channel::{Channel, ChannelContext, Paylo
 impl PairingActor {
     pub(super) async fn refresh_generation(&mut self) -> Result<(), SdkError> {
         if let Some(participant) = self.participant.clone() {
-            self.actor_generation =
-                self.actor_generation.max(block(move || participant.next_generation()).await?);
+            let runtime = self.full_runtime.clone();
+            self.actor_generation = self.actor_generation.max(
+                block(move || {
+                    let _local = runtime.local_work()?;
+                    let generation = participant.next_generation()?;
+                    runtime.require_live()?;
+                    Ok(generation)
+                })
+                .await?,
+            );
         }
         Ok(())
     }
@@ -25,7 +33,16 @@ impl PairingActor {
         reference: DeviceRef,
     ) -> Result<Option<(String, String)>, SdkError> {
         let Some(participant) = self.participant.clone() else { return Ok(None) };
-        Ok(Some(block(move || participant.public_keys(&reference)).await?))
+        let runtime = self.full_runtime.clone();
+        Ok(Some(
+            block(move || {
+                let _local = runtime.local_work()?;
+                let keys = participant.public_keys(&reference)?;
+                runtime.require_live()?;
+                Ok(keys)
+            })
+            .await?,
+        ))
     }
 
     fn participant_context(&self) -> Result<ParticipantContext, SdkError> {
