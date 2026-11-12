@@ -151,3 +151,83 @@ fn pairing_full_source_binding_refuses_a_signed_root_not_matching_actual_prepara
     );
     Ok(())
 }
+
+#[test]
+fn pairing_full_source_wire_chunks_survive_binding_and_failed_reencode() -> TestResult {
+    use std::io::Write;
+    struct FailAfterChunk {
+        written: usize,
+    }
+    impl Write for FailAfterChunk {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let remaining = (ramflux_protocol::custody::pairing::full_transfer::CHUNK_BYTES
+                as usize)
+                .saturating_sub(self.written);
+            if remaining == 0 {
+                return Err(std::io::Error::other("intentional source sink refusal"));
+            }
+            let accepted = remaining.min(bytes.len());
+            self.written += accepted;
+            Ok(accepted)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (_root, db) = crate::tests::test_db("full-source-wire-bind")?;
+    db.connection.call(|db| {
+        let tx = db.transaction()?;
+        for index in 0..2048 {
+            let value = ramflux_crypto::object_erasure_commitment(
+                "root",
+                &format!("wire-{index}"),
+                "manifest",
+            );
+            tx.execute("INSERT INTO object_identity_replacement VALUES(?1)", [value])?;
+        }
+        tx.commit()
+    })?;
+    let mut owner = db.prepare_full_transfer_source()?;
+    let snapshot = ramflux_protocol::encode_base64url([61; 32]);
+    owner.capture_base_cut(&snapshot)?;
+    let (_, encoded) = owner.encode_fixed_base_source(&snapshot, std::io::sink())?;
+    let encoded = encoded.clone();
+    assert!(encoded.chunk_count > 1);
+    let ready = owner.close_ready()?;
+    let native = base()?;
+    let now = native.envelope().body.issued_at;
+    let (record, manifest) = operands(&native, &snapshot, &encoded)?;
+    let hash = record.base_manifest_hash.clone();
+    let mut stage = db.open_full_source_preparation(&ready)?.bind_record_for_test(
+        record,
+        now + 604_800,
+        &native,
+        &manifest,
+        now,
+    )?;
+    let mut expected = Vec::new();
+    let mut root =
+        ramflux_protocol::custody::pairing::full_transfer::RootHasher::new(encoded.total_bytes)?;
+    for index in 0..encoded.chunk_count {
+        let chunk = stage.read_source_wire_chunk(&hash, index)?;
+        root.push(index, &chunk)?;
+        expected.push(chunk);
+    }
+    assert_eq!(root.finish()?, encoded.chunks_root);
+    assert!(stage.read_source_wire_chunk(&hash, encoded.chunk_count).is_err());
+    assert!(stage.encode_fixed_base_source(&snapshot, FailAfterChunk { written: 0 }).is_err());
+    for (index, bytes) in expected.iter().enumerate() {
+        assert_eq!(
+            &*stage.read_source_wire_chunk(&hash, u64::try_from(index)?)?,
+            bytes.as_slice(),
+            "failed reencode replaced the committed source prefix"
+        );
+    }
+    let io = stage.io_cancel_handle();
+    io.cancel();
+    assert!(matches!(
+        stage.read_source_wire_chunk(&hash, 0),
+        Err(crate::StorageError::PairingField("Cancelled"))
+    ));
+    Ok(())
+}
