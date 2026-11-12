@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS pairing_adoption (
  branch_vault_ref TEXT NOT NULL CHECK(typeof(branch_vault_ref)='text' AND length(branch_vault_ref) BETWEEN 1 AND 128),
  data_vault_ref TEXT NOT NULL CHECK(typeof(data_vault_ref)='text' AND length(data_vault_ref) BETWEEN 1 AND 128),
  primary_vault_ref TEXT CHECK(primary_vault_ref IS NULL OR (typeof(primary_vault_ref)='text' AND length(primary_vault_ref) BETWEEN 1 AND 128)),
+ full_generation_nonce TEXT CHECK(full_generation_nonce IS NULL OR (typeof(full_generation_nonce)='text' AND length(full_generation_nonce)=43)),
+ full_initial_union_root TEXT CHECK(full_initial_union_root IS NULL OR (typeof(full_initial_union_root)='text' AND length(full_initial_union_root)=43)),
+ CHECK((full_generation_nonce IS NULL)=(full_initial_union_root IS NULL)),
  CHECK((local_role='primary' AND primary_vault_ref IS NOT NULL) OR (local_role='secondary' AND primary_vault_ref IS NULL)),
  PRIMARY KEY(account_id)
 ) WITHOUT ROWID;
@@ -144,6 +147,25 @@ pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
     } else {
         db.execute_batch(SCHEMA)?;
     }
+    install_full_adoption_columns(db)?;
     let _ = PHASES;
     Ok(())
+}
+
+fn install_full_adoption_columns(db: &Connection) -> rusqlite::Result<()> {
+    let columns: (bool,bool) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pairing_adoption') WHERE name='full_generation_nonce'),EXISTS(SELECT 1 FROM pragma_table_info('pairing_adoption') WHERE name='full_initial_union_root')",
+        [], |row|Ok((row.get(0)?,row.get(1)?)),
+    )?;
+    if columns == (true, true) {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    if !columns.0 {
+        tx.execute_batch("ALTER TABLE pairing_adoption ADD COLUMN full_generation_nonce TEXT CHECK(full_generation_nonce IS NULL OR (typeof(full_generation_nonce)='text' AND length(full_generation_nonce)=43));")?;
+    }
+    if !columns.1 {
+        tx.execute_batch("ALTER TABLE pairing_adoption ADD COLUMN full_initial_union_root TEXT CHECK((full_initial_union_root IS NULL OR (typeof(full_initial_union_root)='text' AND length(full_initial_union_root)=43)) AND ((full_generation_nonce IS NULL)=(full_initial_union_root IS NULL)));")?;
+    }
+    tx.commit()
 }

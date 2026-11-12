@@ -1687,6 +1687,22 @@ pub(super) const RULE_106: FamilyRule = table_rule!(
             PreferLocal,
             CodecRule::Scalar { cell_type: CellType::Utf8 }
         ),
+        (
+            "full_generation_nonce",
+            Utf8,
+            true,
+            Exclude,
+            PreferLocal,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
+        (
+            "full_initial_union_root",
+            Utf8,
+            true,
+            Exclude,
+            PreferLocal,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
     ]
 );
 pub(super) const RULE_107: FamilyRule = table_rule!(

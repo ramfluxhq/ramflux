@@ -1,5 +1,5 @@
 {
-  "census_hash": "E8_x5EoFfAgDjNaZgyADSWh675H8VFNIpZcUKzO_xbY",
+  "census_hash": "C-eGjT_0Pbpbip3_Xa0qXMe4SqHHgyGSATLZwxR-Z-Q",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -435,7 +435,7 @@
       "id": "sql/outbox_queue"
     },
     {
-      "hash": "2CKJrO77LzR0cL0PqPp6wHcos5HAA3INEEN1Xw5sY9s",
+      "hash": "ltDYkU7V2UPrU5EvmJ-6GRo4kd18sZYBPCkcaZhTmt8",
       "id": "sql/pairing_adoption"
     },
     {

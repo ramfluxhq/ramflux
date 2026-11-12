@@ -112,6 +112,11 @@ pub(crate) fn adoption(row: &Install) -> Result<AdoptionRow, SdkError> {
         branch_vault_ref: row.branch_vault_ref.clone(),
         data_vault_ref: row.data_vault_ref.clone(),
         primary_vault_ref: row.primary_vault_ref.clone(),
+        full_generation_nonce: row.full_transfer.as_ref().map(|full| full.generation_nonce.clone()),
+        full_initial_union_root: row
+            .full_transfer
+            .as_ref()
+            .map(|full| full.initial_union_root.clone()),
     })
 }
 
