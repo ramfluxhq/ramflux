@@ -5,6 +5,7 @@
 use super::{g, validate_friend};
 use crate::client::identity_authority::HeadUse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
 
 fn fingerprint(source: &str, bytes: &[u8]) -> Result<[u8; 32], SdkError> {
     let mut transcript = Vec::new();
@@ -110,6 +111,76 @@ impl RamfluxClient {
             &digest,
         )?;
         Ok(true)
+    }
+}
+
+impl RamfluxClient {
+    /// Metadata-only own controls (6/13/14) replay atomically with their native executor.
+    /// Message/history-bearing controls use their separate owned body register and erase fence.
+    pub(crate) fn apply_generated_metadata_control_once(
+        &self,
+        entry: &GatewayInboxEntry,
+        identity: &g::EventIdentity,
+        exact_inner: &[u8],
+        effect: impl FnOnce() -> Result<(), SdkError>,
+    ) -> Result<bool, SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if source.root_commitment() != self.own_account_anchor()? {
+            return Err(SdkError::InboundRejected(
+                "own metadata control requires same root".into(),
+            ));
+        }
+        self.require_native_operation(
+            &source,
+            crate::client::identity_authority::NativeOperation::Sync,
+        )?;
+        self.require_native_operation(
+            &self.owned_device_identity()?,
+            crate::client::identity_authority::NativeOperation::Sync,
+        )?;
+        let scanned = g::validation::scan_inner(exact_inner)
+            .map_err(|_| SdkError::InboundRejected("native Control Inner malformed".into()))?;
+        let inner = g::Inner::decode(exact_inner)
+            .map_err(|_| SdkError::InboundRejected("native Control identity malformed".into()))?;
+        let control = g::Control::decode(scanned.body)
+            .map_err(|_| SdkError::InboundRejected("own metadata Control missing".into()))?;
+        if !matches!(control.operation, 6 | 13 | 14) {
+            return Err(SdkError::InboundRejected("control is not metadata-only".into()));
+        }
+        let source_epoch = self
+            .account_db()?
+            .client_device_record(&source)?
+            .and_then(|record| record["device_epoch"].as_u64());
+        if scanned.kind != 8
+            || scanned.outcome != g::validation::ScanOutcome::Supported
+            || inner.identity.as_ref() != Some(identity)
+            || g::identity::verify(identity).is_err()
+            || identity.author.as_ref().is_none_or(|author| {
+                author.account_anchor != source.root_commitment()
+                    || author.device_id != source.device_id()
+                    || Some(author.device_epoch) != source_epoch
+            })
+        {
+            return Err(SdkError::InboundRejected(
+                "native Control source identity mismatch".into(),
+            ));
+        }
+
+        let key = format!(
+            "routed/native-control-applied/{}/{}",
+            source.storage_key(),
+            ramflux_protocol::encode_base64url(&identity.id)
+        );
+        let digest = *blake3::hash(exact_inner).as_bytes();
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if let Some(old) = db.load_actor_state::<[u8; 32]>(&key)? {
+                return if old == digest { Ok(false) } else { Err(SdkError::ReplayMismatch) };
+            }
+            effect()?;
+            db.persist_actor_state(&key, &digest)?;
+            Ok(true)
+        })
     }
 }
 

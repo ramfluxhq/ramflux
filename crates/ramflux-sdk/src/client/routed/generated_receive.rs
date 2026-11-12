@@ -399,6 +399,46 @@ impl RamfluxClient {
         Ok(())
     }
 
+    fn project_known_generated_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        identity: &g::EventIdentity,
+        control: &g::Control,
+        bytes: &[u8],
+    ) -> Result<(), SdkError> {
+        crate::client::generated_control::validate_control_native(control)?;
+        if matches!(control.operation, 1 | 2) {
+            self.apply_generated_pair_control(opened, entry, identity, control, bytes)?;
+        } else if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
+            self.receive_generated_own_message_copy(opened, entry, copy)?;
+        } else if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref()
+        {
+            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
+                self.receive_generated_own_contact(contact)
+            })?;
+        } else if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
+            control.payload.as_ref()
+        {
+            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
+                self.receive_generated_contact_tombstone(tombstone)
+            })?;
+        } else if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref()
+        {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
+                self.receive_generated_own_group_consent(&source, consent).map(|_| ())
+            })?;
+        } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
+            self.apply_generated_friend_control(entry, identity, friend, bytes)?;
+        } else {
+            return Err(SdkError::InboundPending(
+                "generated native control executor is not yet activated".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn project_known_generated(
         &self,
         frame: GeneratedCommit<'_>,
@@ -480,21 +520,13 @@ impl RamfluxClient {
                 None
             }
             g::content::Value::Control(control) => {
-                crate::client::generated_control::validate_control_native(&control)?;
-                if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
-                    self.receive_generated_own_message_copy(opened, entry, copy)?;
-                } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
-                    self.apply_generated_friend_control(
-                        entry,
-                        identity.as_ref().ok_or_else(|| invalid("Friend identity missing"))?,
-                        friend,
-                        bytes,
-                    )?;
-                } else {
-                    return Err(SdkError::InboundPending(
-                        "generated native control executor is not yet activated".into(),
-                    ));
-                }
+                self.project_known_generated_control(
+                    opened,
+                    entry,
+                    identity.as_ref().ok_or_else(|| invalid("Control identity missing"))?,
+                    &control,
+                    bytes,
+                )?;
                 None
             }
             _ => return Ok(GeneratedProjection::Native),
@@ -659,12 +691,15 @@ impl RamfluxClient {
         if scanned.kind == 8 {
             let control = g::Control::decode(scanned.body)
                 .map_err(|_| invalid("control authority fields missing"))?;
-            if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
-                self.authorize_generated_friend_control(&source, friend)?;
+            if (1..=16).contains(&control.operation)
+                && crate::client::generated_control::validate_control_operation(&control).is_err()
+            {
+                return Err(SdkError::GeneratedRefused {
+                    code: crate::error::GeneratedRefusalCode::Content,
+                    reason: "known Control operation/payload mismatch".into(),
+                });
             }
-            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
-                self.authorize_generated_own_message_copy(opened, entry, copy)?;
-            }
+
             if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
                 if source.root_commitment() != self.own_account_anchor()? {
                     return Err(SdkError::InboundRejected("own control requires same root".into()));
@@ -674,6 +709,26 @@ impl RamfluxClient {
                     &self.owned_device_identity()?,
                     NativeOperation::Sync,
                 )?;
+            }
+            if matches!(control.operation, 1 | 2) {
+                self.authorize_generated_pair_control(opened, entry)?;
+            }
+            if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
+                self.authorize_generated_friend_control(&source, friend)?;
+            }
+            if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref() {
+                self.authorize_generated_own_contact(contact)?;
+            }
+            if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
+                control.payload.as_ref()
+            {
+                self.authorize_generated_contact_tombstone(tombstone)?;
+            }
+            if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref() {
+                self.authorize_generated_own_group_consent(&source, consent)?;
+            }
+            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
+                self.authorize_generated_own_message_copy(opened, entry, copy)?;
             }
         }
         Ok(())

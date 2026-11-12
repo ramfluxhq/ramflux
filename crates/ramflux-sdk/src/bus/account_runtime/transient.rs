@@ -2,11 +2,21 @@
 // Copyright (c) 2026 Span Brain
 
 //! The account actor consumes the host's single bounded transient inbox directly.
+#[cfg(test)]
+mod tests;
 use super::AccountRuntime;
 use crate::bus::state::LocalBusDaemonState;
 use crate::client::identity_authority::HeadUse;
 use crate::gateway::access::GatewaySessionAccess;
 use crate::{EphemeralConsumer, EphemeralSource, GatewayInboxEntry, GatewayServerFrame};
+
+fn wall_ms() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = crate::time::test_clock::frozen() {
+        return u64::try_from(now).unwrap_or(0).saturating_mul(1000);
+    }
+    crate::ephemeral::session::wall_ms()
+}
 
 #[derive(Default)]
 pub(in crate::bus) struct TransientHost {
@@ -88,7 +98,7 @@ impl AccountRuntime {
                 let _ = account.client.receive_transient_content(
                     &envelope,
                     &account.gateway_config.device_id,
-                    crate::ephemeral::session::wall_ms(),
+                    wall_ms(),
                     tokio::time::Instant::now().into_std(),
                 );
             }
@@ -117,10 +127,7 @@ impl AccountRuntime {
             .accounts
             .get(&self.id)?
             .client
-            .next_transient_deadline(
-                crate::ephemeral::session::wall_ms(),
-                tokio::time::Instant::now().into_std(),
-            )
+            .next_transient_deadline(wall_ms(), tokio::time::Instant::now().into_std())
             .map(tokio::time::Instant::from_std)
     }
 
@@ -130,7 +137,7 @@ impl AccountRuntime {
         };
         let Ok(updates) = account.client.drain_transient_updates(
             &self.id,
-            crate::ephemeral::session::wall_ms(),
+            wall_ms(),
             tokio::time::Instant::now().into_std(),
         ) else {
             return;
