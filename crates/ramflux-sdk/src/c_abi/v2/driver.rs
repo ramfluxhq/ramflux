@@ -8,6 +8,7 @@
 //! the supervisor before its waiter gave up, which is the difference between "no effect"
 //! and "effect unknown".
 
+use super::ceremony::{self, CeremonyJob};
 use super::error::{Effect, V2Error, V2Result};
 use super::host::CoreHost;
 use super::subscription::{SubscribeJob, pump};
@@ -98,6 +99,7 @@ fn wipe(value: &mut serde_json::Value) {
 pub(super) enum Job {
     Execute(ExecuteJob),
     Subscribe(SubscribeJob),
+    Ceremony(CeremonyJob),
     /// Drop every connection before the supervisor is suspended or stopped.
     Disconnect(SyncSender<()>),
     Shutdown,
@@ -189,6 +191,15 @@ fn run(host: &Arc<dyn CoreHost>, mut jobs: mpsc::Receiver<Job>) {
                     // One connection per subscription: its event stream is not shared.
                     let client = host.connect();
                     tokio::task::spawn_local(pump(client, job, generation.subscribe()));
+                }
+                Job::Ceremony(job) => {
+                    // A dedicated connection: ceremony secrets never share the ordinary one.
+                    let client = host.connect_creation();
+                    tokio::task::spawn_local(ceremony::run(
+                        client,
+                        job.steps,
+                        generation.subscribe(),
+                    ));
                 }
                 Job::Disconnect(done) => {
                     connection.borrow_mut().take();

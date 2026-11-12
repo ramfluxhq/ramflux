@@ -98,6 +98,9 @@ impl V2Error {
         let text = error.to_string();
         let code = if text.contains("deadline exceeded") {
             RamfluxErrorCode::Timeout
+        } else if matches!(error, SdkError::LocalBus(_)) {
+            // On this boundary a bare bus error is the carrier: not running, closed, full.
+            RamfluxErrorCode::TransportUnavailable
         } else {
             sdk_error_code(error)
         };
@@ -143,7 +146,8 @@ impl From<super::super::CAbiError> for V2Error {
 
 /// Stable number for a local-bus refusal code.
 ///
-/// OPEN-VALUE: the design fixes the numbers, not this table. An unlisted refusal is
+/// OPEN-VALUE: the design fixes the numbers, not this table. Where major 1 already maps the
+/// same condition (`sdk_error_code`), this table gives the same number. An unlisted refusal is
 /// `Internal` and keeps its text in `bus_code`, so a new refusal never borrows the meaning
 /// of an existing number.
 pub(super) fn refusal_code(code: &str) -> RamfluxErrorCode {
@@ -154,21 +158,24 @@ pub(super) fn refusal_code(code: &str) -> RamfluxErrorCode {
         "ObjectOwnershipUnverified" => RamfluxErrorCode::ObjectOwnershipUnverified,
         "CustodyForkFenced" => RamfluxErrorCode::CustodyForkFenced,
         "SchemaResetRequired" => RamfluxErrorCode::SchemaResetRequired,
-        "AccountSchemaTooNew" => RamfluxErrorCode::UnsupportedVersion,
-        "CapabilityDenied" => RamfluxErrorCode::CapabilityRejected,
-        "authorization_rejected" | "RemoteAppApprovalRequired" | "GrantInvalidated" => {
-            RamfluxErrorCode::PermissionDenied
+        "AccountSchemaTooNew" | "CustodyModeDowngrade" => RamfluxErrorCode::UnsupportedVersion,
+        "CustodyConfirmationFailed" | "OwnDeviceAuthorizationRefreshFailed" => {
+            RamfluxErrorCode::AuthFailed
         }
+        "CapabilityDenied" => RamfluxErrorCode::CapabilityRejected,
+        "authorization_rejected" | "RemoteAppApprovalRequired" | "GrantInvalidated"
+        | "CustodyVaultUnavailable" => RamfluxErrorCode::PermissionDenied,
         "storage_unavailable" | "ManifestUnreadable" => RamfluxErrorCode::StorageFailed,
         "ValidationFailed" | "too_large" | "InvalidOfflineRetention" | "CustodySetupInvalid"
-        | "TaskDeliveryTooLarge" => RamfluxErrorCode::InvalidArgument,
-        "SignatureVerificationFailed" | "AnchorMismatch" | "CustodyVaultUnavailable"
-        | "CustodyRandomUnavailable" => RamfluxErrorCode::CryptoFailed,
-        "ReplayMismatch" => RamfluxErrorCode::ReplayRejected,
-        "NetworkingPending" | "Unavailable" | "NoNodeSelected" | "AccountRestorePending" => {
-            RamfluxErrorCode::TransportUnavailable
+        | "CustodyExpired" | "CustodyAccountConflict" | "TaskDeliveryTooLarge" => {
+            RamfluxErrorCode::InvalidArgument
         }
-        "TaskDeliveryTimeout" => RamfluxErrorCode::Timeout,
+        "SignatureVerificationFailed" | "AnchorMismatch" | "CustodyRandomUnavailable" => {
+            RamfluxErrorCode::CryptoFailed
+        }
+        "ReplayMismatch" => RamfluxErrorCode::ReplayRejected,
+        "NetworkingPending" | "Unavailable" | "NoNodeSelected" | "AccountRestorePending"
+        | "TaskDeliveryTimeout" => RamfluxErrorCode::TransportUnavailable,
         "CallControlReceiptCapacity" | "GroupStateCapacity" => RamfluxErrorCode::RateLimited,
         _ => RamfluxErrorCode::Internal,
     }

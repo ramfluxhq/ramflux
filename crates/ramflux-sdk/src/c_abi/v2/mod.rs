@@ -22,15 +22,19 @@
 //!   deadline. A waiter that gives up after its frame was handed to the supervisor reports
 //!   `effect = "unknown"`: the request may have run. The shim never retries and never mints
 //!   an operation id.
+//! - **Account creation.** A ceremony on its own connection, never an `execute` request:
+//!   begin, show the phrase once, ask three positions, confirm once.
 //! - **Events.** Polling only, on a bounded queue. Overflow ends the subscription with a
 //!   terminal `lagged` record that names the last delivered sequence.
 //!
 //! Major-1 symbols keep their signatures and their backend. Nothing here is advertised by
 //! `ramflux_sdk_abi_version_major`, which stays 1 until the major-1 backend is retired.
 
+mod ceremony;
 mod driver;
 mod error;
 mod exports;
+mod exports_account;
 mod host;
 mod subscription;
 mod types;
@@ -39,9 +43,11 @@ mod types;
 mod tests;
 
 pub use exports::*;
+pub use exports_account::*;
 pub use host::CoreHost;
 pub use types::{
-    RAMFLUX_V2_ABI_MAJOR, RAMFLUX_V2_ABI_MINOR, RamfluxV2Cancel, RamfluxV2Config, RamfluxV2Core,
+    RAMFLUX_V2_ABI_MAJOR, RAMFLUX_V2_ABI_MINOR, RamfluxV2AccountCreation, RamfluxV2Cancel,
+    RamfluxV2Config, RamfluxV2Core, RamfluxV2CreateConfirm, RamfluxV2CreateOptions,
     RamfluxV2Request, RamfluxV2SubscribeOptions, RamfluxV2Subscription, RamfluxV2Version,
 };
 

@@ -3,7 +3,7 @@
 
 //! The one thing C ABI major 2 executes through: an in-process supervisor.
 
-use crate::{HostLifecycle, LocalBusClient, SdkError};
+use crate::{HostLifecycle, LocalBusClient, LocalBusCreationClient, SdkError};
 
 /// A supervisor the shim can drive and connect to. The shim holds no account state of its
 /// own; this trait is the whole of its backend.
@@ -13,12 +13,22 @@ pub trait CoreHost: HostLifecycle + 'static {
     /// # Errors
     /// Returns an error when the supervisor is not running.
     fn connect(&self) -> Result<LocalBusClient, SdkError>;
+
+    /// Open one dedicated connection for an account-creation ceremony.
+    ///
+    /// # Errors
+    /// Returns an error when the supervisor is not running.
+    fn connect_creation(&self) -> Result<LocalBusCreationClient, SdkError>;
 }
 
 #[cfg(unix)]
 impl CoreHost for crate::EmbeddedSupervisor {
     fn connect(&self) -> Result<LocalBusClient, SdkError> {
         crate::EmbeddedSupervisor::connect(self)
+    }
+
+    fn connect_creation(&self) -> Result<LocalBusCreationClient, SdkError> {
+        crate::EmbeddedSupervisor::connect_creation(self)
     }
 }
 

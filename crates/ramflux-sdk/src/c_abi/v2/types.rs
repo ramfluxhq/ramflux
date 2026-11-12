@@ -35,6 +35,41 @@ pub struct RamfluxV2Cancel {
     _private: [u8; 0],
 }
 
+/// Opaque account-creation ceremony handle.
+#[repr(C)]
+pub struct RamfluxV2AccountCreation {
+    _private: [u8; 0],
+}
+
+/// Passed to `ramflux_v2_account_creation_begin`.
+#[repr(C)]
+pub struct RamfluxV2CreateOptions {
+    pub struct_size: u32,
+    /// Reserved, must be zero.
+    pub flags: u32,
+    /// UTF-8 display name of the new account.
+    pub display_name: *const c_uchar,
+    pub display_name_len: usize,
+    /// UTF-8 node id, or null for the default node.
+    pub node_id: *const c_uchar,
+    pub node_id_len: usize,
+}
+
+/// Passed to `ramflux_v2_account_creation_confirm`. Every pointer is borrowed for the call;
+/// the core copies the bytes into erasing buffers and the host erases its own copies.
+#[repr(C)]
+pub struct RamfluxV2CreateConfirm {
+    pub struct_size: u32,
+    /// Reserved, must be zero.
+    pub flags: u32,
+    /// The three words at the challenged positions, in challenge order. UTF-8.
+    pub words: [*const c_uchar; 3],
+    pub word_lens: [usize; 3],
+    /// UTF-8 passphrase of the new account.
+    pub passphrase: *const c_uchar,
+    pub passphrase_len: usize,
+}
+
 /// Filled by `ramflux_v2_abi_version`.
 #[repr(C)]
 pub struct RamfluxV2Version {
@@ -132,6 +167,8 @@ versioned!(RamfluxV2Version);
 versioned!(RamfluxV2Config);
 versioned!(RamfluxV2Request);
 versioned!(RamfluxV2SubscribeOptions);
+versioned!(RamfluxV2CreateOptions);
+versioned!(RamfluxV2CreateConfirm);
 
 /// Size the host declared, after the bounds every versioned struct shares.
 pub(super) fn declared_size<T: Versioned>(pointer: *const T) -> CAbiResult<usize> {

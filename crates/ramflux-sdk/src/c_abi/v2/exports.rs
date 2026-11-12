@@ -107,6 +107,12 @@ impl CoreInner {
         Ok(frame.body)
     }
 
+    /// Queue a job for the shim thread, unless the core is closed.
+    pub(super) fn submit(&self, job: Job) -> V2Result<()> {
+        self.admit()?;
+        self.driver.submit(job)
+    }
+
     fn subscribe(
         &self,
         account_id: Option<String>,
@@ -133,7 +139,10 @@ impl CoreInner {
     }
 }
 
-fn guard(out_error_json: *mut *mut RamfluxBuffer, function: impl FnOnce() -> V2Result<()>) -> i32 {
+pub(super) fn guard(
+    out_error_json: *mut *mut RamfluxBuffer,
+    function: impl FnOnce() -> V2Result<()>,
+) -> i32 {
     clear_optional_out_error(out_error_json);
     match catch_unwind(AssertUnwindSafe(function)) {
         Ok(Ok(())) => RamfluxErrorCode::Ok as i32,
@@ -153,7 +162,7 @@ fn guard(out_error_json: *mut *mut RamfluxBuffer, function: impl FnOnce() -> V2R
 
 /// Borrow a core handle for one call. The clone keeps the core alive for the call even
 /// when another thread closes it; `ramflux_v2_core_free` must not race with any call.
-fn core(handle: *mut RamfluxV2Core) -> V2Result<Arc<CoreInner>> {
+pub(super) fn core(handle: *mut RamfluxV2Core) -> V2Result<Arc<CoreInner>> {
     if handle.is_null() {
         return Err(V2Error::new(RamfluxErrorCode::InvalidArgument, "core handle is null"));
     }

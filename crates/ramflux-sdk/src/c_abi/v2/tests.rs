@@ -63,13 +63,13 @@ fn request(method: &'static str, sdk_api: &'static str) -> RamfluxV2Request {
 
 #[test]
 fn header_declares_every_export() -> TestResult {
-    let source = include_str!("exports.rs");
+    let source = [include_str!("exports.rs"), include_str!("exports_account.rs")].concat();
     let exported: std::collections::BTreeSet<&str> = source
         .lines()
         .filter_map(|line| line.trim().strip_prefix("pub extern \"C\" fn "))
         .filter_map(|rest| rest.split('(').next())
         .collect();
-    assert!(exported.len() >= 18, "export scan found {}", exported.len());
+    assert!(exported.len() >= 24, "export scan found {}", exported.len());
     for symbol in &exported {
         assert!(HEADER.contains(&format!("{symbol}(")), "header lacks {symbol}");
     }
@@ -159,6 +159,49 @@ fn null_and_oversize_inputs_are_refused_without_a_panic() -> TestResult {
     ramflux_v2_subscription_free(std::ptr::null_mut());
     ramflux_v2_cancel_free(std::ptr::null_mut());
     ramflux_v2_buffer_wipe_free(std::ptr::null_mut());
+    ramflux_v2_account_creation_free(std::ptr::null_mut());
+    let mut positions = [0_u8; 3];
+    assert_eq!(
+        ramflux_v2_account_creation_challenge(
+            std::ptr::null_mut(),
+            positions.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ),
+        RamfluxErrorCode::InvalidArgument as i32
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn account_creation_is_refused_on_a_stopped_core_and_clears_its_outputs() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let config = config(root.path());
+    let mut core = std::ptr::null_mut();
+    let mut error = std::ptr::null_mut();
+    assert_eq!(ramflux_v2_core_new(&raw const config, &raw mut core, &raw mut error), 0);
+    let name = "harness";
+    let options = super::types::RamfluxV2CreateOptions {
+        struct_size: size_of_u32::<super::types::RamfluxV2CreateOptions>(),
+        flags: 0,
+        display_name: name.as_ptr(),
+        display_name_len: name.len(),
+        node_id: std::ptr::null(),
+        node_id_len: 0,
+    };
+    let mut creation = std::ptr::dangling_mut::<RamfluxV2AccountCreation>();
+    let mut pending = std::ptr::null_mut();
+    let code = ramflux_v2_account_creation_begin(
+        core,
+        &raw const options,
+        &raw mut creation,
+        &raw mut pending,
+        &raw mut error,
+    );
+    assert_eq!(code, RamfluxErrorCode::TransportUnavailable as i32);
+    assert!(creation.is_null() && pending.is_null());
+    ramflux_buffer_free(error);
+    ramflux_v2_core_free(core);
     Ok(())
 }
 

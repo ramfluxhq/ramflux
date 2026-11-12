@@ -110,6 +110,7 @@ void ramflux_buffer_free(struct RamfluxBuffer *buffer);
 typedef struct RamfluxV2Core RamfluxV2Core;
 typedef struct RamfluxV2Subscription RamfluxV2Subscription;
 typedef struct RamfluxV2Cancel RamfluxV2Cancel;
+typedef struct RamfluxV2AccountCreation RamfluxV2AccountCreation;
 
 typedef struct RamfluxV2Version {
   uint32_t struct_size; /* in: sizeof(RamfluxV2Version) */
@@ -158,6 +159,24 @@ typedef struct RamfluxV2SubscribeOptions {
   size_t body_json_len;
 } RamfluxV2SubscribeOptions;
 
+typedef struct RamfluxV2CreateOptions {
+  uint32_t struct_size;
+  uint32_t flags; /* reserved, 0 */
+  const unsigned char *display_name; /* UTF-8 */
+  size_t display_name_len;
+  const unsigned char *node_id; /* UTF-8 or NULL for the default node */
+  size_t node_id_len;
+} RamfluxV2CreateOptions;
+
+typedef struct RamfluxV2CreateConfirm {
+  uint32_t struct_size;
+  uint32_t flags; /* reserved, 0 */
+  const unsigned char *words[3]; /* the words at the challenged positions, UTF-8 */
+  size_t word_lens[3];
+  const unsigned char *passphrase; /* UTF-8 */
+  size_t passphrase_len;
+} RamfluxV2CreateConfirm;
+
 int32_t ramflux_v2_abi_version(RamfluxV2Version *out_version);
 
 int32_t ramflux_v2_core_new(const RamfluxV2Config *config, RamfluxV2Core **out_core,
@@ -186,6 +205,32 @@ int32_t ramflux_v2_subscription_poll(RamfluxV2Subscription *subscription, uint32
                                      RamfluxBuffer **out_error_json);
 int32_t ramflux_v2_subscription_cancel(RamfluxV2Subscription *subscription);
 void ramflux_v2_subscription_free(RamfluxV2Subscription *subscription);
+
+/*
+ * Account creation is a ceremony on its own connection, not an execute request:
+ *   begin -> show_once (display the phrase, then wipe it) -> challenge (three one-based
+ *   positions) -> confirm (one attempt) -> free. Freeing before a successful confirm
+ *   cancels. The phrase buffer is released with ramflux_v2_buffer_wipe_free. The host
+ *   erases its own copies of the words and the passphrase after confirm returns.
+ */
+int32_t ramflux_v2_account_creation_begin(RamfluxV2Core *core,
+                                          const RamfluxV2CreateOptions *options,
+                                          RamfluxV2AccountCreation **out_creation,
+                                          RamfluxBuffer **out_pending_json,
+                                          RamfluxBuffer **out_error_json);
+int32_t ramflux_v2_account_creation_show_once(RamfluxV2AccountCreation *creation,
+                                              RamfluxBuffer **out_phrase,
+                                              RamfluxBuffer **out_error_json);
+int32_t ramflux_v2_account_creation_challenge(RamfluxV2AccountCreation *creation,
+                                              uint8_t *out_positions,
+                                              RamfluxBuffer **out_error_json);
+int32_t ramflux_v2_account_creation_confirm(RamfluxV2AccountCreation *creation,
+                                            const RamfluxV2CreateConfirm *confirm,
+                                            RamfluxBuffer **out_account_json,
+                                            RamfluxBuffer **out_error_json);
+int32_t ramflux_v2_account_creation_cancel(RamfluxV2AccountCreation *creation,
+                                           RamfluxBuffer **out_error_json);
+void ramflux_v2_account_creation_free(RamfluxV2AccountCreation *creation);
 
 void ramflux_v2_buffer_wipe_free(RamfluxBuffer *buffer);
 
