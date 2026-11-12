@@ -29,7 +29,7 @@ CREATE TABLE chunk(direction INTEGER NOT NULL,manifest_hash TEXT NOT NULL,idx IN
 /// This owner confers no SAS approval, publication authority or endpoint tail admission.
 pub struct FullTransferStage<'db> {
     pub(super) connection: Connection,
-    _lock: fs::File,
+    pub(super) lock: fs::File,
     pub(super) key: FullStageKey<'db>,
     pub(super) db: &'db AccountDb,
     pub(super) directory: PathBuf,
@@ -83,7 +83,7 @@ impl AccountDb {
         self.require_full_stage_unlock()?;
         Ok(FullTransferStage {
             connection,
-            _lock: lock,
+            lock,
             key,
             db: self,
             directory,
@@ -115,6 +115,18 @@ impl AccountDb {
             return Err(context());
         }
         let reference = row.full_stage_reference()?.ok_or_else(context)?;
+        self.open_full_stage_reference(reference, role, now)
+    }
+    // Only account-linked production callers reach this decoder. Unit fixtures can
+    // reopen their encrypted source spool without claiming admission or restored consent.
+    pub(super) fn open_full_stage_reference(
+        &self,
+        reference: FullStageReference,
+        role: PairingRole,
+        now: u64,
+    ) -> Result<FullTransferStage<'_>, StorageError> {
+        self.require_full_stage_unlock()?;
+        reference.validate().map_err(|_| context())?;
         if reference.lease_expires_at.0 <= now {
             return Err(StorageError::PairingField("LeaseExpired"));
         }
@@ -142,12 +154,13 @@ impl AccountDb {
         connection.execute_batch(super::source_receipt::SCHEMA)?;
         connection.execute_batch(super::receiver_input::SCHEMA)?;
         connection.execute_batch(super::receiver_copy::application::SCHEMA)?;
+        connection.execute_batch(super::reverse_application::SCHEMA)?;
         connection.execute_batch(super::union_encoding::SCHEMA)?;
         connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
         let stage = FullTransferStage {
             connection,
-            _lock: lock,
+            lock,
             key,
             db: self,
             directory,
@@ -340,6 +353,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::source_receipt::SCHEMA)?;
         tx.execute_batch(super::receiver_input::SCHEMA)?;
         tx.execute_batch(super::receiver_copy::application::SCHEMA)?;
+        tx.execute_batch(super::reverse_application::SCHEMA)?;
         tx.execute_batch(super::union_encoding::SCHEMA)?;
         tx.execute_batch(super::source_scalar::SCHEMA)?;
         tx.execute_batch(super::native_floor::SCHEMA)?;
@@ -377,7 +391,7 @@ impl<'db> FullTransferStage<'db> {
             initialize_record(&parts.connection, &parts.db.local_account_id, record, expires_at)?;
         let mut stage = Self {
             connection: parts.connection,
-            _lock: parts.lock,
+            lock: parts.lock,
             key: parts.key,
             db: parts.db,
             directory: parts.directory,

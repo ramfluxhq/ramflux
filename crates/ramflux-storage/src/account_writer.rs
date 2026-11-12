@@ -8,7 +8,7 @@ use fs2::FileExt;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 
 /// Retains this process's account writer ownership until the guard is dropped.
 ///
@@ -16,7 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 /// account database files. Ownership is process-local and never serialized.
 #[must_use]
 pub struct AccountWriterLease {
-    _owner: Arc<AccountWriter>,
+    pub(crate) owner: Arc<AccountWriter>,
 }
 
 impl crate::AccountIndex {
@@ -37,7 +37,7 @@ impl crate::AccountIndex {
             return Err(StorageError::AuthorizationRejected);
         }
         std::fs::create_dir_all(self.root().join("accounts").join(account))?;
-        Ok(AccountWriterLease { _owner: AccountWriter::acquire(self.root(), account)? })
+        Ok(AccountWriterLease { owner: AccountWriter::acquire(self.root(), account)? })
     }
 }
 
@@ -48,6 +48,8 @@ pub(crate) struct AccountWriter {
     path: PathBuf,
     // An exclusive owner is never shared with, and refuses, any other in-process holder.
     exclusive: bool,
+    // Every account worker shares this fence across selected database generations.
+    pub(crate) generation: RwLock<u64>,
 }
 
 type Owners = BTreeMap<PathBuf, Weak<AccountWriter>>;
@@ -174,7 +176,12 @@ impl AccountWriter {
                 return Err(lock_io(&path, error));
             }
         }
-        let owner = Arc::new(Self { file: Some(file), path: path.clone(), exclusive });
+        let owner = Arc::new(Self {
+            file: Some(file),
+            path: path.clone(),
+            exclusive,
+            generation: RwLock::new(0),
+        });
         registered.insert(path, Arc::downgrade(&owner));
         Ok(owner)
     }

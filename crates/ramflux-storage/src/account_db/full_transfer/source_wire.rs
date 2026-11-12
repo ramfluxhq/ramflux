@@ -52,7 +52,7 @@ impl SourceContext<'_> {
         } else {
             create_file(&path)?.sync_all()?;
         }
-        let connection = self.key.open_metadata(&path)?;
+        let connection = self.key.open_source_metadata(&path)?;
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let spool = SourceWireSpool {
@@ -61,7 +61,7 @@ impl SourceContext<'_> {
             cut,
             next: 0,
             written: 0,
-            guard: SourceGuard::new(self.db, self.cancelled.clone()),
+            guard: self.guard.clone(),
             committed: false,
         };
         spool.connection.execute(
@@ -153,7 +153,7 @@ impl super::FullTransferStage<'_> {
         .map_err(|_| mismatch())?;
         let path = source.directory.join(FILE);
         drop(open_regular(&path, false)?);
-        let connection = source.key.open_metadata(&path)?;
+        let connection = source.key.open_source_metadata(&path)?;
         let (total, count, root) =
             wire_summary(&connection, &body.snapshot_id, body.snapshot_cut.0)?;
         if total != body.total_bytes.0

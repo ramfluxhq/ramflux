@@ -18,16 +18,24 @@ pub(in crate::account_db::full_transfer) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS receiver_generation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),stage_digest BLOB NOT NULL CHECK(length(stage_digest)=32),manifest_hash TEXT NOT NULL,workspace TEXT NOT NULL,private_key BLOB NOT NULL CHECK(length(private_key)=32),union_root BLOB NOT NULL CHECK(length(union_root)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS receiver_receipt(manifest_hash TEXT PRIMARY KEY,generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),bytes BLOB NOT NULL);";
 
-/// A validated, durably committed data application; no native or primary signing right.
+/// A validated, durably committed endpoint data application; no native or primary signing right.
 /// Not serializable/cloneable: restart must rebase B and revalidate actual prepared bytes.
-pub struct FullReceiverApplication {
-    packet: DataPacket,
-    nonce: [u8; 32],
-    digest: [u8; 32],
-    branch_key: String,
-    expires_at: u64,
+pub struct FullAppliedDataReceipt {
+    pub(in crate::account_db::full_transfer) role: ramflux_crypto::custody::pairing::PairingRole,
+    pub(in crate::account_db::full_transfer) packet: DataPacket,
+    pub(in crate::account_db::full_transfer) nonce: [u8; 32],
+    pub(in crate::account_db::full_transfer) applied_root: [u8; 32],
+    pub(in crate::account_db::full_transfer) digest: [u8; 32],
+    pub(in crate::account_db::full_transfer) branch_key: String,
+    pub(in crate::account_db::full_transfer) expires_at: u64,
 }
-impl FullReceiverApplication {
+impl FullAppliedDataReceipt {
+    /// Original endpoint whose current generation committed this exact application.
+    #[must_use]
+    pub const fn expected_role(&self) -> ramflux_crypto::custody::pairing::PairingRole {
+        self.role
+    }
+
     /// Exact closed input receipt operands; its placeholder signature is not a signed DV.
     #[must_use]
     pub const fn packet(&self) -> &DataPacket {
@@ -74,25 +82,44 @@ impl FullReceiverBaseCopy {
         &mut self,
         stage: &mut FullTransferStage<'_>,
         now: u64,
-    ) -> Result<FullReceiverApplication, StorageError> {
+    ) -> Result<FullAppliedDataReceipt, StorageError> {
         self.verify_materialization(stage)?;
         let record = stage.resume_record()?;
         if now >= record.grant.expires_at || now >= stage.reference().lease_expires_at.0 {
             return Err(StorageError::PairingField("LeaseExpired"));
         }
         let manifest = stage.forward_manifest(&self.hash)?;
-        if manifest.manifest.kind != ManifestKind::Base || manifest.manifest.snapshot_cut.0 != 0 {
+        if !matches!(manifest.manifest.kind, ManifestKind::Base | ManifestKind::Delta)
+            || manifest.manifest.snapshot_cut.0 > 8
+        {
             return Err(wrong());
         }
         let union = self.union.as_ref().ok_or_else(wrong)?;
-        let mut chain = ChainHasher::new(1).map_err(|_| wrong())?;
-        chain
-            .push(
-                0,
-                &super::super::stage::raw32(&self.hash)?,
-                &super::super::stage::raw32(&manifest.manifest.chunks_root)?,
-            )
-            .map_err(|_| wrong())?;
+        let mut chain =
+            ChainHasher::new(manifest.manifest.snapshot_cut.0 + 1).map_err(|_| wrong())?;
+        for cut in 0..=manifest.manifest.snapshot_cut.0 {
+            let (bytes, verified): (Vec<u8>, bool) = stage.connection.query_row(
+                "SELECT bytes,verified FROM manifest WHERE direction=0 AND cut=?1",
+                params![cut],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if cut < manifest.manifest.snapshot_cut.0 && !verified {
+                return Err(wrong());
+            }
+            let member =
+                ramflux_protocol::custody::pairing::full_transfer::SourceManifest::from_wire_bytes(
+                    &bytes,
+                )
+                .map_err(|_| wrong())?;
+            chain
+                .push(
+                    cut,
+                    &ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&member)
+                        .map_err(|_| wrong())?,
+                    &super::super::stage::raw32(&member.manifest.chunks_root)?,
+                )
+                .map_err(|_| wrong())?;
+        }
         for name in ["private.db", "contributions.db"] {
             super::super::stage::open_regular(&self.scratch.path.join(name), false)?.sync_all()?;
         }
@@ -115,7 +142,8 @@ impl FullReceiverBaseCopy {
         self.scratch.retain();
         super::super::stage::sync_stage(&stage.directory)?;
         self.observation.require_current(stage.db)?;
-        Ok(FullReceiverApplication {
+        Ok(FullAppliedDataReceipt {
+            role: ramflux_crypto::custody::pairing::PairingRole::Responder,
             packet: DataPacket::DataVerified {
                 manifest_hash: self.hash.clone(),
                 chunks_root: manifest.manifest.chunks_root,
@@ -126,6 +154,7 @@ impl FullReceiverBaseCopy {
                 signature: encode_base64url([0; 64]),
             },
             nonce,
+            applied_root: root,
             digest,
             branch_key: record.grant.branch_keys.destination,
             expires_at: record.grant.expires_at.min(stage.reference().lease_expires_at.0),
@@ -138,13 +167,16 @@ impl FullReceiverBaseCopy {
     pub fn record_data_verified(
         &self,
         stage: &mut FullTransferStage<'_>,
-        application: &FullReceiverApplication,
+        application: &FullAppliedDataReceipt,
         packet: &DataPacket,
         now: u64,
     ) -> Result<(), StorageError> {
-        if now >= application.expires_at
+        if application.role != ramflux_crypto::custody::pairing::PairingRole::Responder
+            || now >= application.expires_at
             || application.digest != self.stage_digest
             || self.union.as_ref().map(|u| u.generation_nonce) != Some(application.nonce)
+            || self.union.as_ref().map(|u| u.chunks_root) != Some(application.applied_root)
+            || !matches!(application.packet(),DataPacket::DataVerified {manifest_hash,..} if manifest_hash == &self.hash)
         {
             return Err(wrong());
         }

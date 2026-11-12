@@ -63,7 +63,7 @@ impl BackupJobs {
         let root = data_root.join("backup_jobs");
         std::fs::create_dir_all(&root)?;
         crate::bus::daemon::set_owner_only_dir_permissions(&root)?;
-        let generations = super::generation_lock::GenerationLocks::default();
+        let generations = super::generation_lock::GenerationLocks::for_root(data_root)?;
         if super::recovery::recover_with_locks(&root, data_root, &index, &generations).is_err() {
             tracing::warn!("backup cleanup deferred; daemon startup continues");
         }

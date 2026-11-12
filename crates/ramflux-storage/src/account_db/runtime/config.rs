@@ -7,7 +7,7 @@ use super::super::AccountDb;
 use crate::StorageError;
 use crate::database::Connection;
 use crate::encryption::{apply_key, verify_or_install_key_fingerprint};
-use rusqlite::OpenFlags;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -104,7 +104,7 @@ impl AccountDb {
     }
 
     fn open_query_only_connection(&self) -> Result<Connection, StorageError> {
-        let connection = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let connection = Connection::open_account_reader(&self.path)?;
         apply_key(&connection, &self.current_key)?;
         crate::schema_generation::validate_worker(&connection)?;
         verify_or_install_key_fingerprint(&connection, &self.current_key)?;

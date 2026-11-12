@@ -121,8 +121,10 @@ pub(super) fn recover_generations(
                 continue;
             }
             let path = generation.path();
-            if selected.as_deref().and_then(Path::parent) == Some(path.as_path()) {
-                super::reclamation::complete(&path, data_root, index, id)?;
+            if selected.as_deref().and_then(Path::parent) == Some(path.as_path())
+                && !super::reclamation::complete(&path, data_root, index, id)?
+            {
+                continue;
             }
             let marker = path.join(INSTALL_MARKER);
             if !std::fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file()) {
@@ -130,6 +132,7 @@ pub(super) fn recover_generations(
             }
             if selected.as_deref().and_then(Path::parent) == Some(path.as_path()) {
                 std::fs::remove_file(marker)?;
+                std::fs::File::open(&path)?.sync_all()?;
             } else {
                 std::fs::remove_dir_all(path)?;
             }

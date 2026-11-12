@@ -89,10 +89,10 @@ impl PairingActor {
             operation_id: c.operation_id.clone(),
             result: c.full_error,
             role: c.role.as_str().into(),
-            // A committed forward DV still awaits reverse proof and catch-up; no
+            // The completed pre-J3 chain and original-A reverse DV await local preparation; no
             // candidate, publication or installation is implied by completed totals.
             stage: if state.stream.as_ref().is_some_and(|stream| stream.complete.is_some()) {
-                FullStatusStage::AwaitingReverse
+                FullStatusStage::AwaitingPrepare
             } else if state.stream.is_some() {
                 FullStatusStage::Streaming
             } else {

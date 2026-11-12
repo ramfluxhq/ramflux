@@ -4,7 +4,8 @@
 //! Fixed-owner cut diff: indexed encoded-key merge join, no row-sized trees or live reads.
 use super::{
     FamilyRule, FullBaseSourceEncoding, FullScalarSourceCounts, FullTransferStage,
-    full_transfer_catalog, source_base::Rooted, source_scalar::SourceGuard,
+    full_transfer_catalog, source_base::Rooted, source_owner::SourceContext,
+    source_scalar::SourceGuard,
 };
 use crate::{StorageError, database::Connection};
 use ramflux_protocol::custody::pairing::full_transfer::{
@@ -40,10 +41,26 @@ impl FullTransferStage<'_> {
         current_snapshot: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.source_context()?.encode_fixed_delta_source(
+            cut,
+            previous_snapshot,
+            current_snapshot,
+            writer,
+        )
+    }
+}
+impl SourceContext<'_> {
+    pub(super) fn encode_fixed_delta_source<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        previous_snapshot: &str,
+        current_snapshot: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         if !(1..=8).contains(&cut) || previous_snapshot == current_snapshot {
             return Err(StorageError::PairingField("WrongContext"));
         }
-        let mut source = self.source_context()?;
+        let source = self;
         // The compiled preflight walks BOTH actual cuts, not peer-provided family counts.
         // Existing source-family rows are immutable and idempotent for an exact cut/rule.
         let (_, previous) =
@@ -56,7 +73,7 @@ impl FullTransferStage<'_> {
         if previous.source_erasure_generation > current.source_erasure_generation {
             return Err(StorageError::PairingField("ManifestMismatch"));
         }
-        let guard = SourceGuard::new(source.db, source.cancelled.clone());
+        let guard = source.guard.clone();
         let mut total = 0_u64;
         for (family, rule) in current.schema.families.iter_mut().zip(full_transfer_catalog()) {
             family.source_rows = U64(0);

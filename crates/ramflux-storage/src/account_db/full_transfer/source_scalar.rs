@@ -70,6 +70,16 @@ impl SourceGuard {
             cancelled,
         }
     }
+    pub(super) fn schema_generation(&self) -> Result<u64, StorageError> {
+        self.require()?;
+        let worker =
+            self.unlocked.upgrade_account_writer().ok_or(StorageError::AuthorizationRejected)?;
+        let schema =
+            worker
+                .query_row("SELECT max(schema_version) FROM schema_migration", [], |r| r.get(0))?;
+        self.require()?;
+        Ok(schema)
+    }
     pub(super) fn require(&self) -> Result<(), StorageError> {
         if self
             .cancelled
@@ -123,7 +133,7 @@ impl SourceContext<'_> {
             return Err(invalid());
         };
         let spool = self.connection.clone();
-        let guard = SourceGuard::new(self.db, self.cancelled.clone());
+        let guard = self.guard.clone();
         let snapshot = snapshot_id.to_owned();
         self.with_source_cut(cut, snapshot_id, |input| {
             super::inventory::validate_columns(input, table, rule)?;
@@ -155,7 +165,7 @@ impl SourceContext<'_> {
         self.with_source_cut(cut, snapshot_id, |_| Ok(()))?;
         let rule = compiled(family)?;
         let snapshot = snapshot_id.to_owned();
-        let guard = SourceGuard::new(self.db, self.cancelled.clone());
+        let guard = self.guard.clone();
         let result = self
             .connection
             .call(move |db| Ok(write_sorted(db, &snapshot, rule, writer, &guard)))??;

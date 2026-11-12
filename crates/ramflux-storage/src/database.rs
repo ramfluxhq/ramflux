@@ -27,7 +27,14 @@ impl WeakConnection {
     pub(crate) fn upgrade_account_writer(&self) -> Option<Connection> {
         self.inner
             .upgrade()
-            .filter(|inner| inner.account_writer.is_some())
+            .filter(|inner| {
+                inner.account_writer.as_ref().is_some_and(|owner| {
+                    owner
+                        .generation
+                        .read()
+                        .is_ok_and(|selected| *selected == inner.account_generation)
+                })
+            })
             .map(|inner| Connection { inner })
     }
 }
@@ -40,6 +47,8 @@ struct Worker {
     #[cfg(feature = "itest-work-budget")]
     work_probe: Mutex<Option<crate::SqlWorkProbe>>,
     account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+    account_generation: u64,
+    _generation_reader: Option<crate::account_generation::GenerationReadLease>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -84,26 +93,39 @@ impl Connection {
     }
 
     pub(crate) fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self> {
-        Self::open_owned(path.as_ref(), flags, None)
+        Self::open_owned(path.as_ref(), flags, None, None)
     }
 
     pub(crate) fn open_account_writer(
         path: &Path,
         writer: std::sync::Arc<crate::account_writer::AccountWriter>,
     ) -> Result<Self> {
-        Self::open_owned(path, OpenFlags::default(), Some(writer))
+        let lease = crate::account_generation::GenerationReadLease::acquire(path)
+            .map_err(|_| Error::InvalidQuery)?;
+        Self::open_owned(path, OpenFlags::default(), Some(writer), Some(lease))
+    }
+
+    pub(crate) fn open_account_reader(path: &Path) -> Result<Self> {
+        let lease = crate::account_generation::GenerationReadLease::acquire(path)
+            .map_err(|_| Error::InvalidQuery)?;
+        Self::open_owned(path, OpenFlags::SQLITE_OPEN_READ_ONLY, None, Some(lease))
     }
 
     fn open_owned(
         path: &Path,
         flags: OpenFlags,
         writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+        generation_reader: Option<crate::account_generation::GenerationReadLease>,
     ) -> Result<Self> {
+        let account_generation = writer.as_ref().map_or(Ok(0), |owner| {
+            owner.generation.read().map(|epoch| *epoch).map_err(|_| Error::InvalidQuery)
+        })?;
         let path = path.to_path_buf();
         let connection_id = NEXT_CONNECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel::<Job>(64);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker_path = path.clone();
+        let checkpoint_writer = writer.clone();
         let worker = std::thread::Builder::new()
             .name("ramflux-db".to_owned())
             .spawn(move || {
@@ -151,7 +173,17 @@ impl Connection {
                                     }
                                 }
                                 // Each job has delivered its reply before checkpoint I/O starts.
-                                worker_checkpoints.maintain(&db);
+                                if let Some(owner) = &checkpoint_writer {
+                                    // Maintenance can clear a durable privacy marker too.
+                                    // It obeys the same G2 fence and never mutates a retired DB.
+                                    if let Ok(selected) = owner.generation.read()
+                                        && *selected == account_generation
+                                    {
+                                        worker_checkpoints.maintain(&db);
+                                    }
+                                } else {
+                                    worker_checkpoints.maintain(&db);
+                                }
                             }
                         }
                     }
@@ -171,6 +203,8 @@ impl Connection {
                 #[cfg(feature = "itest-work-budget")]
                 work_probe: Mutex::new(None),
                 account_writer: writer,
+                account_generation,
+                _generation_reader: generation_reader,
                 sender: Some(sender),
                 handle: Some(worker),
             }),
@@ -178,6 +212,52 @@ impl Connection {
     }
 
     pub(crate) fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let owner = self.inner.account_writer.clone();
+        let epoch = self.inner.account_generation;
+        self.dispatch(move |db| {
+            // Acquired on the actual worker, covering SQLite lock waits as well as SQL.
+            // A queued old-generation write cannot cross a successful G2 selection.
+            let guard = owner
+                .as_ref()
+                .map(|owner| owner.generation.read())
+                .transpose()
+                .map_err(|_| Error::InvalidQuery)?;
+            if guard.as_ref().is_some_and(|selected| **selected != epoch) {
+                return Err(Error::InvalidQuery);
+            }
+            f(db)
+        })
+    }
+
+    /// Run one bounded local generation switch while excluding every account worker.
+    /// `retire` invalidates ALL existing writer handles, including jobs already queued.
+    /// The caller must resolve an uncertain index commit before choosing `retire`.
+    pub(crate) fn call_generation<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut rusqlite::Connection) -> (Result<T>, bool) + Send + 'static,
+    ) -> Result<T> {
+        let owner = self.inner.account_writer.clone().ok_or(Error::InvalidQuery)?;
+        let epoch = self.inner.account_generation;
+        self.dispatch(move |db| {
+            let mut selected = owner.generation.try_write().map_err(|_| {
+                Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), None)
+            })?;
+            if *selected != epoch || !db.is_autocommit() {
+                return Err(Error::InvalidQuery);
+            }
+            let next = selected.checked_add(1).ok_or(Error::InvalidQuery)?;
+            let (result, retire) = f(db);
+            if retire {
+                *selected = next;
+            }
+            result
+        })
+    }
+
+    fn dispatch<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {

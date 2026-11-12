@@ -5,7 +5,7 @@
 use super::{FullLocalIoScope, SdkError, wrong};
 use crate::custody::pairing::LocalPairingParticipant;
 use ramflux_protocol::custody::pairing::full_transfer::DataPacket;
-use ramflux_storage::{FullReceiverApplication, FullReceiverBaseCopy, FullTransferStage};
+use ramflux_storage::{FullAppliedDataReceipt, FullReceiverBaseCopy, FullTransferStage};
 
 pub(super) enum Action {
     Prepare(Box<FullReceiverBaseCopy>),
@@ -15,16 +15,24 @@ pub(super) enum Action {
         packet: Box<DataPacket>,
     },
     Source(Box<DataPacket>),
+    PrepareReverse,
+    RecordReverse {
+        draft: Box<FullApplicationDraft>,
+        packet: Box<DataPacket>,
+    },
+    ReverseSource(Box<DataPacket>),
 }
 pub(super) enum Applied {
     Prepared { copy: Box<FullReceiverBaseCopy>, draft: Box<FullApplicationDraft> },
     Receiver(Box<FullReceiverBaseCopy>),
     Source,
+    ReversePrepared(Box<FullApplicationDraft>),
+    Reverse,
 }
-/// Opaque proof that the original receiver committed a fully materialized private input.
+/// Opaque proof that the original endpoint durably applied its exact input.
 /// No Debug/serde/clone and no API to request signatures over caller-provided bytes.
 pub struct FullApplicationDraft {
-    proof: FullReceiverApplication,
+    proof: FullAppliedDataReceipt,
     scope: FullLocalIoScope,
 }
 impl FullApplicationDraft {
@@ -35,8 +43,13 @@ impl FullApplicationDraft {
     ) -> Result<DataPacket, SdkError> {
         let _local = self.scope.runtime.local_work()?;
         self.scope.live()?;
-        if self.scope.role != ramflux_crypto::custody::pairing::PairingRole::Responder
-            || self.scope.destination_key != self.proof.expected_branch_key()
+        if self.scope.role != self.proof.expected_role()
+            || match self.scope.role {
+                ramflux_crypto::custody::pairing::PairingRole::Responder => {
+                    &self.scope.destination_key
+                }
+                ramflux_crypto::custody::pairing::PairingRole::Initiator => &self.scope.source_key,
+            } != self.proof.expected_branch_key()
             || participant.account_id != self.scope.account
             || std::fs::canonicalize(&participant.root)? != self.scope.root
             || crate::custody::network_now()? >= self.proof.expires_at()
@@ -55,6 +68,36 @@ pub(super) fn apply(
 ) -> Result<Applied, SdkError> {
     let now = crate::custody::network_now()?;
     match action {
+        Action::PrepareReverse => {
+            if scope.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
+                return Err(wrong());
+            }
+            let proof = stage.apply_empty_reverse(now)?;
+            Ok(Applied::ReversePrepared(Box::new(FullApplicationDraft {
+                proof,
+                scope: scope.clone(),
+            })))
+        }
+        Action::RecordReverse { draft, packet } => {
+            draft.scope.live()?;
+            if scope.role != ramflux_crypto::custody::pairing::PairingRole::Initiator
+                || draft.scope.root != scope.root
+                || draft.scope.operation != scope.operation
+                || draft.scope.generation != scope.generation
+                || draft.scope.digest != scope.digest
+            {
+                return Err(wrong());
+            }
+            stage.record_reverse_application_receipt(&draft.proof, &packet, now)?;
+            Ok(Applied::Reverse)
+        }
+        Action::ReverseSource(packet) => {
+            if scope.role != ramflux_crypto::custody::pairing::PairingRole::Responder {
+                return Err(wrong());
+            }
+            stage.record_reverse_source_receipt(&packet, now)?;
+            Ok(Applied::Reverse)
+        }
         Action::Prepare(mut copy) => {
             if scope.role != ramflux_crypto::custody::pairing::PairingRole::Responder {
                 return Err(wrong());
