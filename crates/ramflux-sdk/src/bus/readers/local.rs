@@ -229,7 +229,17 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
     }
     if let Some(connection) = &view.connection {
-        let snapshot = connection.snapshot();
+        let mut snapshot = connection.snapshot();
+        if let Some(receive) = &mut snapshot.receive
+            && let Some(target) = status["target_delivery_id"].as_str()
+        {
+            let db = client.account_db()?;
+            receive.committed_cursor =
+                crate::bus::push_receiver::apply_w1::read_cursor(db, target)?;
+            let counters = db.receive_status_counters(target)?;
+            receive.ack_intents_pending = counters.ack_intents_pending;
+            receive.held_entries = counters.held_entries;
+        }
         if view.native.is_none() {
             status["networking"] = json!(snapshot.state);
         }

@@ -112,10 +112,10 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
                 &["dm", "read", "--account", &owner.1.id, "--conversation", &conversation],
             )?;
             for id in &ids {
-                let count = ["decrypted_messages", "messages"]
+                let rows =
+                    view["messages"].as_array().ok_or("canonical message projection missing")?;
+                let count = rows
                     .iter()
-                    .filter_map(|key| view[*key].as_array())
-                    .flatten()
                     .filter(|row| {
                         row["message_id"].as_str().or_else(|| row["id"].as_str())
                             == Some(id.as_str())
@@ -123,7 +123,8 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
                     .count();
                 assert_eq!(
                     count, 1,
-                    "same logical message id {id} exactly once in both DB views: {view}"
+                    "logical message id {id} must occur once in account {} canonical projection",
+                    owner.1.id
                 );
             }
         }
@@ -153,9 +154,7 @@ fn two_nodes_have_separate_identities_cas_and_stores() -> e2e::Result<()> {
     }
     for node in [&a, &b] {
         for service in ["ramflux-router", "ramflux-gateway"] {
-            assert!(
-                node.root.join("state").join(service).join(format!("{service}.redb")).is_file()
-            );
+            assert!(node.root.join("state").join(format!("{service}.redb")).is_file());
         }
     }
     Ok(())

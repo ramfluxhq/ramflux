@@ -528,6 +528,8 @@ impl ConnectionHandle {
         let mut snapshot =
             self.shared.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         if let Some(receive) = &mut snapshot.receive {
+            receive.catch_ups_total = self.catch_ups_total();
+            receive.last_catch_up_at = self.last_catch_up_at_ms();
             receive.observations = self.receive_observations().snapshot();
             receive.observations.last_acked_seq =
                 self.receive_observations().acked_for(receive.incarnation.as_deref());
