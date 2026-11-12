@@ -364,7 +364,6 @@ fn write_floor_live(
         },
         &live,
     )?;
-    db.persist_actor_state("pairing/local-sentinel", &"sealed")?;
     Ok(())
 }
 
@@ -479,7 +478,6 @@ fn unlock_existing(
     } else {
         client.unlock_account(request.new.account_id, secret.as_bytes())?;
     }
-    let _ = client.account_db()?.load_actor_state::<String>("pairing/local-sentinel");
     Ok(())
 }
 

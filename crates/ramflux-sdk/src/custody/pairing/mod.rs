@@ -7,7 +7,9 @@ pub(crate) mod admission;
 mod coordinator;
 mod full_bootstrap;
 mod full_epoch;
+mod full_io;
 pub use full_epoch::{FullEpoch, FullPacketEpoch, FullResumeProofSigningRequest};
+pub use full_io::{FullReverseManifestDraft, FullTransferLocalIo};
 pub mod full_generation;
 pub use full_bootstrap::{
     FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest, FullSourceManifestSigningRequest,

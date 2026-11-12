@@ -871,6 +871,222 @@ async fn pairing_full_initial_epoch_uses_a3_with_sas_keys() -> TestResult {
     }
 
     assert!(rig.source.client.account_db()?.pairing_adoption()?.is_none());
+    assert_full_local_io_after_handback(&mut rig, &operation).await?;
     hold.finish().await?;
+    Ok(())
+}
+
+// Actual ordinary-owner loans, not a copied database/key or a permanently parked source slot.
+async fn assert_full_local_io_after_handback(rig: &mut Rig, operation: &str) -> TestResult {
+    use ramflux_crypto::custody::pairing::PairingRole;
+    let source = rig.primary.full_transfer_local_io(rig.source.client.account_db()?)?;
+    let manifest = rig.primary.full_source_manifest_for_test()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+    );
+    assert_eq!(rig.primary.full_send_manifest_for_test(&manifest).await?, hash);
+    let mut assembler =
+        ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default();
+    let received = rig
+        .secondary
+        .full_poll_manifest_for_test(&mut assembler)
+        .await?
+        .ok_or("complete encrypted source manifest")?;
+    assert_eq!(received, manifest, "relay manifest differs from own signed source manifest");
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target DB")?;
+        let target_db = slot.as_ref().ok_or("target DB")?;
+        let target = rig.secondary.full_transfer_local_io(target_db)?;
+        assert!(source.read_source_chunk(target_db, &hash, 0).is_err(), "foreign writer accepted");
+        assert!(
+            target.read_source_chunk(target_db, &hash, 0).is_err(),
+            "receiver used source capability"
+        );
+        assert!(
+            source.retain_manifest(rig.source.client.account_db()?, &manifest).is_err(),
+            "source used receiver capability"
+        );
+        assert_foreign_census_refused(rig, &target, target_db, &manifest)?;
+        assert_eq!(target.retain_manifest(target_db, &manifest)?, None);
+        assert!(target.verify_forward_root(target_db, &hash).is_err(), "incomplete bytes verified");
+        for index in 0..manifest.manifest.chunk_count.0 {
+            let chunk = source.read_source_chunk(rig.source.client.account_db()?, &hash, index)?;
+            assert_eq!(target.retain_chunk(target_db, &hash, index, chunk)?, Some(index));
+        }
+        target.verify_forward_root(target_db, &hash)?;
+        let stage =
+            target_db.open_full_transfer_stage(operation, PairingRole::Responder, rig.now)?;
+        stage.validate_forward_scalar_records(&hash, ramflux_storage::full_transfer_catalog())?;
+        assert!(target_db.pairing_adoption()?.is_none(), "disk root granted adoption");
+    }
+    assert_new_reverse_metadata(rig, &source).await?;
+    // A stale generation refuses without any retained account key or alternate stage open.
+    let db = rig.source.client.account_db()?;
+    let mut row = db
+        .pairing_live_rows()?
+        .into_iter()
+        .find(|row| row.operation_id == operation)
+        .ok_or("source row")?;
+    let generation = row.generation;
+    row.generation += 1;
+    db.put_pairing_live(&row)?;
+    assert!(source.read_source_chunk(db, &hash, 0).is_err(), "stale ceremony generation accepted");
+    row.generation = generation;
+    db.put_pairing_live(&row)?;
+    source.read_source_chunk(db, &hash, 0)?;
+    rig.participant_a.take_client(&mut rig.source.client)?;
+    rig.primary.lock().await?;
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    assert!(
+        source.read_source_chunk(rig.source.client.account_db()?, &hash, 0).is_err(),
+        "cancelled stage capability revived"
+    );
+    Ok(())
+}
+
+fn assert_foreign_census_refused(
+    rig: &Rig,
+    target: &FullTransferLocalIo,
+    target_db: &ramflux_storage::AccountDb,
+    manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+) -> TestResult {
+    let mut foreign_census = manifest.clone();
+    foreign_census.manifest.census_hash = ramflux_protocol::encode_base64url([99; 32]);
+    // Hostile A still has its genuine branch key: signature refusal must not mask
+    // a missing local census check in the receiver's actual staging path.
+    {
+        let native = crate::custody::load_data_account(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id,
+            rig.now,
+        )?;
+        let branch = rig.participant_a.vault.load_branch(
+            native.branch_vault_ref(),
+            &manifest.manifest.account_anchor,
+            &manifest.manifest.source_ref,
+        )?;
+        foreign_census.source_signature = ramflux_protocol::encode_base64url(
+            ed25519_dalek::Signer::sign(
+                &branch.signing.signing_key,
+                &foreign_census.manifest.signing_bytes()?,
+            )
+            .to_bytes(),
+        );
+    }
+    assert!(
+        matches!(
+            target.retain_manifest(target_db, &foreign_census),
+            Err(SdkError::PairingCode("SchemaMismatch"))
+        ),
+        "foreign census reached staging"
+    );
+    Ok(())
+}
+
+async fn assert_new_reverse_metadata(rig: &mut Rig, source: &FullTransferLocalIo) -> TestResult {
+    let (target, draft) = {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target DB")?;
+        let db = slot.as_ref().ok_or("target DB")?;
+        let target = rig.secondary.full_transfer_local_io(db)?;
+        assert!(
+            db.load_actor_state::<String>("pairing/local-sentinel")?.is_none(),
+            "production staging inserted a test-only actor"
+        );
+        let draft = target.prepare_empty_reverse(db)?;
+        (target, draft)
+    };
+    // The actual original B branch signer is used after its short DB loan ended.
+    let reverse = rig.participant_b.sign_empty_reverse_manifest(&draft)?;
+    assert_eq!(reverse.manifest.total_bytes.0, 0);
+    assert_eq!(
+        reverse.manifest.source_ref,
+        rig.primary.full_source_manifest_for_test()?.manifest.destination_ref
+    );
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target DB")?;
+        target.retain_reverse_manifest(slot.as_ref().ok_or("target DB")?, &reverse)?;
+    }
+    let hash = rig.secondary.full_send_manifest_for_test(&reverse).await?;
+    let mut assembler =
+        ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default();
+    let received = rig
+        .primary
+        .full_poll_manifest_for_test(&mut assembler)
+        .await?
+        .ok_or("complete encrypted reverse manifest")?;
+    assert_eq!(received, reverse, "reverse manifest changed on the data relay");
+    source.retain_reverse_manifest(rig.source.client.account_db()?, &received)?;
+    assert_eq!(
+        hash,
+        ramflux_protocol::encode_base64url(
+            ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&received)?
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_sas_base_retains_new_native_floor_before_refusal_and_reopen() -> TestResult {
+    use ramflux_protocol::custody::pairing::{PairingWire, context_v3::TranscriptV3};
+    struct Query(Mutex<CustodyAuthority>);
+    impl PairingAuthorityQuery for Query {
+        fn current_authority(&self, _: &str) -> Result<CustodyAuthority, SdkError> {
+            self.0.lock().map(|head| head.clone()).map_err(|_| SdkError::PairingCode("Busy"))
+        }
+    }
+    let (rig, operation, anchor) = Box::pin(bootstrap_full_rig()).await?;
+    let frozen = {
+        let slot = rig.participant_a.db.lock().map_err(|_| "source DB")?;
+        let stage = slot.as_ref().ok_or("source DB")?.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            rig.now,
+        )?;
+        TranscriptV3::from_wire_bytes(&stage.resume_record()?.transcript)?
+    };
+    let old = rig.node.current_authority(&anchor)?;
+    let mut next = old.clone();
+    let primary = rig.source.vault.primary_for_public_key(
+        &old.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let mut body = old.publication.record.body.clone();
+    body.previous_record_hash = Some(object_hash(&old.publication.record)?);
+    body.device_set_epoch += 1;
+    body.profile.display_name = "New independently verified head".into();
+    next.publication.record = primary.sign_record(body)?;
+    let query = Arc::new(Query(Mutex::new(next.clone())));
+    let owner = LocalPairingParticipant {
+        root: rig.participant_a.root.clone(),
+        account_id: rig.participant_a.account_id.clone(),
+        vault: rig.participant_a.vault.clone(),
+        provider: rig.participant_a.provider.clone(),
+        db: Mutex::new(None),
+        persist: rig.participant_a.persist.clone(),
+        query: query.clone(),
+    };
+    assert!(
+        matches!(
+            owner.full_sas_base(&frozen.initiator.common, &frozen.initiator.device_ref),
+            Err(SdkError::PairingCode("HeadChanged"))
+        ),
+        "changed head admitted old SAS base"
+    );
+    let reopened = crate::custody::load_data_account(&owner.root, &owner.account_id, rig.now)?;
+    assert_eq!(
+        object_hash(reopened.record())?,
+        object_hash(&next.publication.record)?,
+        "refusal discarded the installed native floor"
+    );
+    *query.0.lock().map_err(|_| "native query")? = old;
+    assert!(
+        owner.full_sas_base(&frozen.initiator.common, &frozen.initiator.device_ref).is_err(),
+        "stale native node revived the old SAS base"
+    );
+    assert_eq!(
+        object_hash(
+            crate::custody::load_data_account(&owner.root, &owner.account_id, rig.now)?.record()
+        )?,
+        object_hash(&next.publication.record)?
+    );
     Ok(())
 }

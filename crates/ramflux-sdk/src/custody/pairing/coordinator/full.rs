@@ -300,9 +300,13 @@ impl PairingActor {
         let participant =
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         // Complete source census/typed encoding before any Issue/Create allocation.
-        let source = tokio::task::spawn_blocking(move || participant.prepare_full_source())
-            .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+        let runtime = self.full_runtime.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            let _local = runtime.local_work()?;
+            participant.prepare_full_source()
+        })
+        .await
+        .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
         if let Err(error) = self.full_runtime.require_live() {
             source.1.cancel();
             return Err(error);
@@ -365,7 +369,9 @@ impl PairingActor {
         let keys = self.load_public_keys(self.identity.local_ref.clone()).await?;
         if let Some(participant) = self.participant.clone() {
             let invitation = invite_envelope.clone();
+            let runtime = self.full_runtime.clone();
             tokio::task::spawn_blocking(move || {
+                let _local = runtime.local_work()?;
                 participant.record_invitation(&invitation, generation)
             })
             .await
@@ -411,3 +417,31 @@ impl PairingActor {
 
 #[cfg(test)]
 mod tests;
+
+impl super::PairingActor {
+    /// Obtain local data-only stage access after the durable SAS-bound bootstrap.
+    /// Reopening metadata alone cannot construct this owner or restore SAS approval.
+    /// # Errors
+    /// Refuses retired actors, absent participants or unfinished durable bootstrap.
+    pub fn full_transfer_local_io(
+        &self,
+        db: &ramflux_storage::AccountDb,
+    ) -> Result<crate::custody::pairing::FullTransferLocalIo, SdkError> {
+        let wrong = || SdkError::PairingCode("WrongContext");
+        self.full_runtime.require_live()?;
+        let participant = self.participant.as_ref().ok_or_else(wrong)?;
+        let ceremony = self.ceremony.as_ref().ok_or_else(wrong)?;
+        let state =
+            ceremony.full.as_ref().and_then(|full| full.bootstrap.as_ref()).ok_or_else(wrong)?;
+        let trust = state.trust.as_ref().ok_or_else(wrong)?;
+        let cancelled = state.cancel.clone().ok_or_else(wrong)?;
+        crate::custody::pairing::FullTransferLocalIo::new(
+            participant,
+            db,
+            (ceremony.operation_id.clone(), ceremony.generation),
+            trust,
+            cancelled,
+            self.full_runtime.clone(),
+        )
+    }
+}

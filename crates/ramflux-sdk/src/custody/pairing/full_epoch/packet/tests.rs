@@ -86,3 +86,21 @@ async fn pairing_full_sdk_epoch_expired_lease_retires_existing_packet_keys() -> 
     assert!(a.channel.is_none() && a.token.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn pairing_full_sdk_manifest_framing_failure_retires_authenticated_epoch() -> ResultOf {
+    let (a, b) = super::super::tests::epochs().await?;
+    let (mut a, control) = a.source_control()?;
+    let mut b = b.destination_control(&control)?;
+    a.accept_ready(&b.seal_ready()?)?;
+    let part = a.seal_packet(&manifest(&h(80)))?;
+    let mut assembler =
+        ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default();
+    assert!(
+        b.open_manifest_part(&part, &mut assembler).is_err(),
+        "authenticated invalid manifest reached staging"
+    );
+    assert!(b.channel.is_none() && b.token.is_none(), "manifest refusal retained channel/token");
+    assert!(b.open_manifest_part(&part, &mut assembler).is_err(), "refused epoch revived");
+    Ok(())
+}

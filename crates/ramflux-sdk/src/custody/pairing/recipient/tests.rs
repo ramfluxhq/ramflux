@@ -367,14 +367,22 @@ fn stage_sample(
     account: &str,
 ) -> TestResult<super::StagedRecipient> {
     let invite = invitation("new", 3, None)?;
-    Ok(stage_new(&StageNew {
-        root,
-        account_id: account,
-        invitation: &invite,
-        vault,
-        provider: &Phrase::setup(PHRASE),
-        frontend_generation: 1,
-    })?)
+    let mut client = crate::RamfluxClient::new();
+    let staged = super::stage_new_for_generation(
+        &StageNew {
+            root,
+            account_id: account,
+            invitation: &invite,
+            vault,
+            provider: &Phrase::setup(PHRASE),
+            frontend_generation: 1,
+        },
+        &mut client,
+        1,
+    )?;
+    // The restart proof owns its sentinel; production staging creates no test actor.
+    client.account_db()?.persist_actor_state("pairing/local-sentinel", &"sealed")?;
+    Ok(staged)
 }
 
 fn closed_unlock_leg(root: &Path, account: &str) -> TestResult {

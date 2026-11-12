@@ -36,11 +36,17 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 async fn local<T: std::marker::Send + 'static>(
+    runtime: Arc<super::cancel::FullRuntimeCancel>,
     work: impl FnOnce() -> Result<T, SdkError> + std::marker::Send + 'static,
 ) -> Result<T, SdkError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?
+    tokio::task::spawn_blocking(move || {
+        let _local = runtime.local_work()?;
+        let result = work()?;
+        runtime.require_live()?;
+        Ok(result)
+    })
+    .await
+    .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?
 }
 impl PairingActor {
     fn queue_full_bootstrap(&mut self, frame: FullBootstrapFrame) -> Result<(), SdkError> {
@@ -69,7 +75,7 @@ impl PairingActor {
             Ok((c.role, *channel, context, node, full.prepared.take()))
         })?;
         let now = crate::custody::network_now()?;
-        let (state, prepared, frames) = local(move || {
+        let (state, prepared, frames) = local(self.full_runtime.clone(), move || {
             let node_id = node.envelope().body.node_id.clone();
             let mut owner = FullBootstrap::new(role, channel, context.clone(), node, now)?;
             let mut frames = Vec::new();
@@ -142,7 +148,7 @@ impl PairingActor {
                 state.source_manifest.clone(),
             ))
         })?;
-        let (trust, cancel) = local(move || {
+        let (trust, cancel) = local(self.full_runtime.clone(), move || {
             let source = match (&prepared, &manifest) {
                 (Some(prepared), Some(manifest)) => Some((prepared, manifest)),
                 (None, None) => None,
@@ -199,7 +205,7 @@ impl PairingActor {
                 continue;
             }
             let signer = participant.clone();
-            let (mut owner, reply) = local(move || {
+            let (mut owner, reply) = local(self.full_runtime.clone(), move || {
                 let reply =
                     owner.receive(&frame, now, |request| signer.sign_full_grant(request))?;
                 Ok((owner, reply))

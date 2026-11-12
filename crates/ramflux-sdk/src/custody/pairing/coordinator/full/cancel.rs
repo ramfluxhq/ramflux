@@ -5,17 +5,46 @@
 use crate::SdkError;
 use ramflux_storage::FullStageIoCancel;
 use std::sync::{
-    Mutex,
+    Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Default)]
 pub(crate) struct FullRuntimeCancel {
     stopped: AtomicBool,
+    local_workers: Mutex<usize>,
+    idle: Condvar,
     stage: Mutex<Option<FullStageIoCancel>>,
     job: Mutex<Option<tokio::task::AbortHandle>>,
 }
+/// A synchronous local key/DB use only. Never hold this permit across an await.
+pub(crate) struct FullLocalWork<'a>(&'a FullRuntimeCancel);
+impl Drop for FullLocalWork<'_> {
+    fn drop(&mut self) {
+        let mut workers =
+            self.0.local_workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *workers -= 1;
+        self.0.idle.notify_all();
+    }
+}
 impl FullRuntimeCancel {
+    pub(crate) fn local_work(&self) -> Result<FullLocalWork<'_>, SdkError> {
+        let mut workers =
+            self.local_workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.require_live()?;
+        *workers = workers.checked_add(1).ok_or(SdkError::PairingCode("Busy"))?;
+        Ok(FullLocalWork(self))
+    }
+    /// Local workers do no async/network work while counted. Their key/DB owners must
+    /// drop before a root lock/removal returns, including detached `spawn_blocking` work.
+    pub(crate) fn drain_local_work(&self) {
+        let mut workers =
+            self.local_workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.idle.notify_all();
+        while *workers != 0 {
+            workers = self.idle.wait(workers).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
     pub(crate) fn require_live(&self) -> Result<(), SdkError> {
         if self.stopped.load(Ordering::Acquire) {
             Err(SdkError::PairingCode("Retired"))
@@ -56,6 +85,7 @@ impl FullRuntimeCancel {
         {
             stage.cancel();
         }
+        self.drain_local_work();
     }
 }
 
@@ -75,6 +105,53 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn pairing_full_root_stop_drains_local_key_work_before_return()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let owner = Arc::new(super::FullRuntimeCancel::default());
+        let erased = Arc::new(AtomicBool::new(false));
+        let (entered, started) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let worker_owner = owner.clone();
+        let worker_erased = erased.clone();
+        let worker = std::thread::spawn(move || -> Result<(), &'static str> {
+            let permit = worker_owner.local_work().map_err(|_| "initial local use")?;
+            let key = zeroize::Zeroizing::new([7u8; 32]);
+            entered.send(()).map_err(|_| "entered observer")?;
+            wait.recv().map_err(|_| "release local key use")?;
+            drop(key);
+            worker_erased.store(true, Ordering::Release);
+            drop(permit);
+            Ok(())
+        });
+        started.recv()?;
+        let stop_owner = owner.clone();
+        let stop_erased = erased.clone();
+        let stopper = std::thread::spawn(move || {
+            stop_owner.stop();
+            assert!(
+                stop_erased.load(Ordering::Acquire),
+                "root stop returned while local key owner remained live"
+            );
+        });
+        // The stop fence and its condition-variable notification are production events;
+        // no timer or scheduler sleep establishes the negative admission assertion.
+        let mut workers = owner.local_workers.lock().map_err(|_| "local workers")?;
+        while !owner.stopped.load(Ordering::Acquire) {
+            workers = owner.idle.wait(workers).map_err(|_| "local workers")?;
+        }
+        drop(workers);
+        assert!(matches!(owner.local_work(), Err(SdkError::PairingCode("Retired"))));
+        release.send(())?;
+        worker.join().map_err(|_| "local worker panicked")??;
+        stopper.join().map_err(|_| "root stopper panicked")?;
+        assert!(matches!(owner.local_work(), Err(SdkError::PairingCode("Retired"))));
+        Ok(())
+    }
     #[tokio::test]
     async fn pairing_full_remove_actor_fences_new_work_without_waiting_for_actor_lock()
     -> Result<(), Box<dyn std::error::Error>> {

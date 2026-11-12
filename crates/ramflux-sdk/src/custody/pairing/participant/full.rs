@@ -18,6 +18,39 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 impl LocalPairingParticipant {
+    /// Sign only the opaque new recipient's actual empty reverse-cut draft.
+    /// No database loan is retained by the draft or borrowed during vault signing.
+    /// # Errors
+    /// Refuses locked/retired/foreign local scope or a changed original B branch key.
+    pub fn sign_empty_reverse_manifest(
+        &self,
+        draft: &crate::custody::pairing::FullReverseManifestDraft,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {
+        draft.sign_with(self, |manifest, expected_key| {
+            let vault_ref = self.full_branch_vault_ref(&manifest.source_ref)?;
+            let branch = self.vault.load_branch(
+                &vault_ref,
+                &manifest.account_anchor,
+                &manifest.source_ref,
+            )?;
+            if encode_base64url(branch.signing.signing_key.verifying_key().to_bytes())
+                != expected_key
+            {
+                return Err(wrong());
+            }
+            Ok(encode_base64url(
+                branch
+                    .signing
+                    .signing_key
+                    .sign(
+                        &manifest
+                            .signing_bytes()
+                            .map_err(|error| super::super::transport::wire(&error))?,
+                    )
+                    .to_bytes(),
+            ))
+        })
+    }
     fn full_selected_db(&self, db: &AccountDb, anchor: Option<&str>) -> Result<(), SdkError> {
         if db.local_account_id != self.account_id {
             return Err(wrong());
@@ -33,6 +66,32 @@ impl LocalPairingParticipant {
         }
         Ok(())
     }
+    /// Read native authority through this endpoint's own query, then persist its ordinary
+    /// installed rollback/fork/revocation pins BEFORE testing a particular pairing base.
+    /// The query ends before the existing authority-file lock is acquired. Updating public
+    /// pins preserves local key refs/mode and grants no installation or session admission.
+    pub(crate) fn full_native_head(
+        &self,
+        anchor: &str,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        let authority = self.query.current_authority(anchor)?;
+        let now = custody::network_now()?;
+        let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
+        if verified.envelope().body.account_anchor != anchor {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
+        // A newly staged recipient may have no installed native file yet; its own stage
+        // floor is mandatory instead. Existing native owners retain their normal pins.
+        if custody::account_exists(&self.root, &self.account_id)?
+            && matches!(
+                custody::accept_publication(&self.root, &self.account_id, &authority, now)?,
+                ramflux_crypto::custody::PinOutcome::Fenced(_)
+            )
+        {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
+        Ok(verified)
+    }
     /// Fetch/verify the exact public native base before freezing the v3 SAS context.
     /// No account/vault mutex is held over the existing native query port.
     /// # Errors
@@ -42,9 +101,7 @@ impl LocalPairingParticipant {
         common: &ramflux_protocol::custody::pairing::context_v3::CommonV3,
         source: &DeviceRef,
     ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
-        let authority = self.query.current_authority(&common.account_anchor)?;
-        let verified =
-            ramflux_crypto::custody::verify_publication(&authority, custody::network_now()?)?;
+        let verified = self.full_native_head(&common.account_anchor)?;
         let body = &verified.envelope().body;
         if body.account_anchor != common.account_anchor
             || body.master_certificate.body.master_public_key != common.master_public_key

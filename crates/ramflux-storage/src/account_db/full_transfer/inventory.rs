@@ -57,7 +57,7 @@ impl AccountDb {
         Ok(output)
     }
 }
-pub(super) fn inspect(
+pub(in crate::account_db) fn inspect(
     connection: &Connection,
     rules: &[FamilyRule],
 ) -> Result<FullTransferSchema, StorageError> {
