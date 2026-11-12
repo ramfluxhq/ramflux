@@ -552,6 +552,15 @@ pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     }
     Ok(directory(root, id)?.try_exists()?)
 }
+/// A staging/reservation directory is not an installed native authority. Any existing
+/// artifact, including a dangling symlink, must still pass the ordinary strict loader.
+pub(crate) fn authority_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
+    match fs::symlink_metadata(directory(root, id)?.join("authority.json")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 pub(crate) fn reconcile_incomplete_markers(
     root: &Path,
     _lease: &crate::bus::data_root_lock::DataRootLock,

@@ -1224,8 +1224,8 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
             let slot = rig.participant_b.db.lock().map_err(|_| "target ordinary owner")?;
             rig.secondary.service_full_transfer(slot.as_ref().ok_or("target DB")?)?;
         }
-        rig.primary.sync_relay().await?;
-        rig.secondary.sync_relay().await?;
+        rig.primary.sync_relay().await.map_err(|error| format!("source disk step: {error}"))?;
+        rig.secondary.sync_relay().await.map_err(|error| format!("target disk step: {error}"))?;
         if rig.primary.full_base_disk_complete_for_test()
             && rig.secondary.full_base_disk_complete_for_test()
         {
@@ -1314,6 +1314,7 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
     let target_signal =
         work_signal(&participant_b.root, &participant_b.account_id).ok_or("target pump signal")?;
     let mut complete = false;
+    let mut last = String::new();
     for _ in 0..256 {
         tokio::time::advance(std::time::Duration::from_millis(500)).await;
         source_signal.notified().await;
@@ -1331,22 +1332,24 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
                 slot.as_ref().ok_or("target DB")?,
             )?;
         }
-        let source_done = super::coordinator::settle_actor_data_for_test(
+        let (source_done, source_state) = super::coordinator::settle_actor_data_for_test(
             &participant_a.root,
             &participant_a.account_id,
         )
         .await?;
-        let target_done = super::coordinator::settle_actor_data_for_test(
+        let (target_done, target_state) = super::coordinator::settle_actor_data_for_test(
             &participant_b.root,
             &participant_b.account_id,
         )
         .await?;
+        let state = format!("source: {source_state}; target: {target_state}");
+        last = state;
         if source_done && target_done {
             complete = true;
             break;
         }
     }
-    assert!(complete, "installed relay pumps did not complete the actual disk phase");
+    assert!(complete, "installed relay pumps did not complete the actual disk phase: {last}");
     assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
     {
         let slot = participant_b.db.lock().map_err(|_| "target writer")?;
@@ -1363,5 +1366,49 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
     remove_actor_and_drain(&participant_b.root, &participant_b.account_id).await?;
     assert!(participant_b.db.lock().map_err(|_| "locked target")?.is_none());
     hold.finish().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_new_target_missing_authority_is_scoped_and_corrupt_authority_refuses()
+-> TestResult {
+    let (rig, operation, anchor) = Box::pin(bootstrap_full_rig()).await?;
+    let reference = {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target writer")?;
+        let stage = slot.as_ref().ok_or("target DB")?.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            rig.now,
+        )?;
+        stage.resume_record()?.grant.destination_ref
+    };
+    let owner = &rig.participant_b;
+
+    assert!(owner.full_native_head(&anchor).is_err(), "unscoped missing authority accepted");
+    owner
+        .full_native_stream_head(&anchor, Some((&operation, &reference)))
+        .map_err(|error| format!("exact new-target head: {error}"))?;
+    let foreign = ramflux_protocol::encode_base64url([123; 32]);
+    assert!(
+        owner.full_native_stream_head(&anchor, Some((&foreign, &reference))).is_err(),
+        "foreign pending operation granted native-file exemption"
+    );
+    let mut wrong_ref = reference.clone();
+    wrong_ref.device_id = foreign;
+    assert!(owner.full_native_stream_head(&anchor, Some((&operation, &wrong_ref))).is_err());
+    let authority =
+        owner.root.join("custody_accounts").join(&owner.account_id).join("authority.json");
+    std::fs::OpenOptions::new().write(true).create_new(true).open(&authority)?;
+    let corrupt = owner.full_native_stream_head(&anchor, Some((&operation, &reference)));
+    std::fs::remove_file(&authority)?;
+    assert!(corrupt.is_err(), "new-target scope bypassed an existing corrupt authority artifact");
+    let source = &rig.participant_a;
+    let authority =
+        source.root.join("custody_accounts").join(&source.account_id).join("authority.json");
+    let saved = authority.with_extension("test-held");
+    std::fs::rename(&authority, &saved)?;
+    let missing = source.full_native_stream_head(&anchor, Some((&operation, &reference)));
+    std::fs::rename(&saved, &authority)?;
+    assert!(missing.is_err(), "missing source authority was reinterpreted as new-target staging");
     Ok(())
 }

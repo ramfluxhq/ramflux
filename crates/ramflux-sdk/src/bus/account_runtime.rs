@@ -325,6 +325,22 @@ impl AccountRuntime {
             result = self.publish(&restore) => result.map(|()| true),
         }
     }
+    fn service_pairing_data(&self) {
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && let Err(error) = account.client.account_db().and_then(|db| {
+                crate::custody::pairing::service_full_transfer(
+                    &self.state.config.data_root,
+                    &self.id,
+                    db,
+                )
+            })
+        {
+            tracing::warn!(
+                error_code = local_bus_error_code(&error),
+                "pairing local data step deferred; account remains open"
+            );
+        }
+    }
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_serving(ready).await? {
             return Ok(());
@@ -367,15 +383,7 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(account) = self.state.accounts.get(&self.id)
-                        && let Err(error) = account.client.account_db().and_then(|db| {
-                            crate::custody::pairing::service_full_transfer(
-                                &self.state.config.data_root, &self.id, db,
-                            )
-                        }) {
-                        tracing::warn!(error_code=local_bus_error_code(&error),
-                            "pairing local data step deferred; account remains open");
-                    }
+                    self.service_pairing_data();
                     continue;
                 },
                 outcome = async {

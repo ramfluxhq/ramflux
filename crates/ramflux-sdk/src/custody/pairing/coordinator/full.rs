@@ -83,6 +83,7 @@ impl PairingActor {
         &self,
         common: &CommonV3,
         source: &DeviceRef,
+        new_recipient: bool,
     ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
         let participant =
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
@@ -90,7 +91,13 @@ impl PairingActor {
         let source = source.clone();
         self.full_runtime
             .clone()
-            .run_blocking(move || participant.full_sas_base(&common, &source))
+            .run_blocking(move || {
+                if new_recipient {
+                    participant.full_new_recipient_sas_base(&common, &source)
+                } else {
+                    participant.full_sas_base(&common, &source)
+                }
+            })
             .await
     }
     pub(super) fn start_full_sas(
@@ -224,7 +231,9 @@ impl PairingActor {
             }
             Ok(c.invitation.primary_ref.clone())
         })?;
-        let base = self.load_full_sas_base(&offer.common, &source).await?;
+        let base = self
+            .load_full_sas_base(&offer.common, &source, offer.common.recipient_mode == "new")
+            .await?;
         let node = self.full_node.clone();
         self.with_ceremony_mut(|c| {
             if c.role != PairingRole::Responder || c.common.is_some() || c.full.is_some() {
@@ -371,7 +380,7 @@ impl PairingActor {
         let full_common = CommonV3::from_full_invitation(&invitation, master.clone())
             .map_err(|error| wire(&error))?;
         let common = invitation.project_common(master).map_err(|e| wire(&e))?;
-        let base = self.load_full_sas_base(&full_common, &invitation.primary_ref).await?;
+        let base = self.load_full_sas_base(&full_common, &invitation.primary_ref, false).await?;
         let generation = self.actor_generation;
         let primary_token = Zeroizing::new(std::mem::take(&mut created.primary_token));
         let recipient_token = std::mem::take(&mut created.recipient_token);

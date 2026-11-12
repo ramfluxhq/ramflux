@@ -161,11 +161,23 @@ pub(crate) fn service_full_transfer(
 pub(crate) async fn settle_actor_data_for_test(
     root: &Path,
     account: &str,
-) -> Result<bool, SdkError> {
+) -> Result<(bool, String), SdkError> {
     let entry = find(root, account)?;
     let actor = entry.actor.lock().await;
     actor.settle_full_local_jobs_for_test().await;
-    Ok(actor.full_base_disk_complete_for_test())
+    let complete = actor.full_base_disk_complete_for_test();
+    let ceremony = actor.ceremony.as_ref().ok_or(SdkError::PairingCode("NotFound"))?;
+    Ok((
+        complete,
+        format!(
+            "phase={} result={:?} a3={} packet={} stream={} disk={complete}",
+            ceremony.phase,
+            ceremony.result,
+            actor.full_epoch_in_flight_for_test(),
+            actor.full_epoch_ready_for_test(),
+            actor.full_base_stream_started_for_test()
+        ),
+    ))
 }
 pub(super) fn find(root: &Path, account_id: &str) -> Result<Arc<Entry>, SdkError> {
     let key = key(root, account_id)?;

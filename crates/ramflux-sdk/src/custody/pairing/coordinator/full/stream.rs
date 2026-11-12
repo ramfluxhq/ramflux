@@ -85,8 +85,17 @@ struct FullStreamWork {
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
     anchor: String,
+    new_target: Option<(String, ramflux_protocol::custody::DeviceRef)>,
 }
 impl PairingActor {
+    #[cfg(test)]
+    pub(crate) fn full_base_stream_started_for_test(&self) -> bool {
+        self.ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .and_then(|full| full.bootstrap.as_ref())
+            .is_some_and(|state| state.stream.is_some())
+    }
     #[cfg(test)]
     pub(crate) async fn settle_full_local_jobs_for_test(&self) {
         self.full_runtime.settle_local_jobs().await;
@@ -140,6 +149,12 @@ impl PairingActor {
         if role == PairingRole::Initiator && manifest.is_none() {
             return Err(wrong());
         }
+        let new_target = if role == PairingRole::Responder {
+            let record = state.trust.as_ref().ok_or_else(wrong)?.local_stage_record()?;
+            Some((c.operation_id.clone(), record.grant.destination_ref))
+        } else {
+            None
+        };
         let packet = state.epoch_ready.take().ok_or_else(wrong)?;
         let (io, service) = io.into_port();
         let runtime = self.full_runtime.clone();
@@ -151,6 +166,7 @@ impl PairingActor {
             relay,
             origin: c.origin.clone(),
             anchor,
+            new_target,
         };
         let job = tokio::spawn(async move {
             match role {

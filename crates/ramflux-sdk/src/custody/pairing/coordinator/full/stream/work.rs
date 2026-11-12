@@ -23,13 +23,19 @@ impl FullStreamWork {
         self.runtime.require_live()?;
         let participant = self.participant.clone();
         let anchor = self.anchor.clone();
+        let target = self.new_target.clone();
         // This endpoint's own query persists its installed pins before any base refusal.
         // The local service then persists the additional encrypted job floor BEFORE its
         // grant role/key predicate. Neither query nor writer loan overlaps relay waits.
         let current = self
             .runtime
             .clone()
-            .run_blocking(move || participant.full_native_head(&anchor))
+            .run_blocking(move || {
+                participant.full_native_stream_head(
+                    &anchor,
+                    target.as_ref().map(|(operation, reference)| (operation.as_str(), reference)),
+                )
+            })
             .await?;
         self.io.observe_prepublication_head(current).await?;
         self.runtime.require_live()

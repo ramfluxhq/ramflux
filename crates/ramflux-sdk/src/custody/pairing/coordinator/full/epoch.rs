@@ -49,7 +49,7 @@ impl FullEpochJob {
     }
 }
 struct FullEpochWork {
-    signer: FullProofSigner,
+    signer: Arc<FullProofSigner>,
     cancelled: ramflux_storage::FullStageIoCancel,
     trust: FullResumeTrust,
     keys: FullResumeKeyOwner,
@@ -228,6 +228,7 @@ impl crate::custody::pairing::PairingActor {
             state.trust = Some(finished.trust);
             state.keys = Some(finished.keys);
             state.epoch_ready = Some(finished.packet?);
+            c.result = None;
             self.full_runtime.require_live()?;
             return Ok(true);
         }
@@ -239,26 +240,8 @@ impl crate::custody::pairing::PairingActor {
         }
         let relay =
             self.transport.full_transport().ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        let participant =
-            self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        let trust = state.trust.take().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let operation = c.operation_id.clone();
-        let generation = c.generation;
+        let signer = state.signer.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let cancelled = state.cancel.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let runtime = self.full_runtime.clone();
-        let (trust, signer) = self
-            .full_runtime
-            .clone()
-            .run_blocking(move || {
-                let signer = (|| {
-                    let _local = runtime.local_work()?;
-                    participant.prepare_full_proof_signer(&operation, generation, &trust)
-                })();
-                Ok((trust, signer))
-            })
-            .await?;
-        state.trust = Some(trust);
-        let signer = signer?;
         let trust = state.trust.take().ok_or(SdkError::PairingCode("WrongContext"))?;
         let keys = state.keys.take().ok_or(SdkError::PairingCode("WrongContext"))?;
         state.epoch_job = Some(start(
