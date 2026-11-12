@@ -1,0 +1,164 @@
+name: Platform targets
+
+# Advisory cross-target checks (Android, iOS, wasm32). `cargo check` only: no tests, no
+# artifacts, no release. These jobs are path-filtered, so they must not be configured as
+# required status checks: a pull request that does not touch the listed paths never reports them.
+# The Windows check job lives with the Windows host module and is not duplicated here.
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/platform-targets.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/platform-targets.yml"
+  workflow_dispatch:
+
+# A newer run on a pull-request ref cancels the older one. Runs on main are never cancelled,
+# so every main commit that touches these paths gets its own result.
+concurrency:
+  group: platform-targets-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Crates every client host links, below the SDK.
+  CORE_PACKAGES: -p ramflux-core -p ramflux-protocol -p ramflux-crypto -p ramflux-transport
+
+jobs:
+  android:
+    name: Android check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            clang: aarch64-linux-android
+          - target: armv7-linux-androideabi
+            clang: armv7a-linux-androideabi
+          - target: x86_64-linux-android
+            clang: x86_64-linux-android
+    env:
+      # Minimum Android API level the C toolchain targets.
+      ANDROID_API_LEVEL: "24"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain and target
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+          # A host that cannot install the target fails here; it does not skip.
+          rustup target add --toolchain "$toolchain" "${{ matrix.target }}"
+
+      - name: Point cargo at the NDK toolchain
+        run: |
+          ndk="${ANDROID_NDK_HOME:?the runner image provides no Android NDK}"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          clang="$bin/${{ matrix.clang }}${ANDROID_API_LEVEL}-clang"
+          test -x "$clang" || { echo "::error::missing NDK compiler: $clang"; exit 1; }
+          triple_env="$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')"
+          triple_cc="$(echo "${{ matrix.target }}" | tr '-' '_')"
+          {
+            echo "CC_${triple_cc}=$clang"
+            echo "CXX_${triple_cc}=${clang}++"
+            echo "AR_${triple_cc}=$bin/llvm-ar"
+            echo "CARGO_TARGET_${triple_env}_LINKER=$clang"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: platform-${{ matrix.target }}
+
+      - name: Check core and transport
+        run: cargo check --locked $CORE_PACKAGES --target "${{ matrix.target }}"
+
+      - name: Check SDK
+        run: cargo check --locked -p ramflux-sdk --target "${{ matrix.target }}"
+
+  ios:
+    name: iOS check (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain and target
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" "${{ matrix.target }}"
+          # The C dependencies need the iOS SDK of the selected Xcode.
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: platform-${{ matrix.target }}
+
+      - name: Check core and transport
+        run: cargo check --locked $CORE_PACKAGES --target "${{ matrix.target }}"
+
+      - name: Check SDK
+        run: cargo check --locked -p ramflux-sdk --target "${{ matrix.target }}"
+
+  wasm:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain and target
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" wasm32-unknown-unknown
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: platform-wasm32
+
+      # The browser client links neither the native transport nor the SDK daemon. Only the
+      # platform-neutral crates are checked until the web client crate lands.
+      - name: Check platform-neutral crates
+        run: cargo check --locked -p ramflux-core -p ramflux-protocol --target wasm32-unknown-unknown

@@ -402,6 +402,33 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// Apply the whole network-change policy to this session.
+    ///
+    /// - `Lost`: nothing is sent. Returns `Reconnect`; the caller drops the session and
+    ///   waits for the next `Available` report.
+    /// - `Available` or `Changed`: probes the connection. If it answers, returns `Survived`
+    ///   and no second session is opened. Otherwise this connection is replaced by a new one
+    ///   that resumes from `last_seen_inbox_seq`, and `Reconnected` is returned.
+    ///
+    /// # Errors
+    /// Returns an error when the replacement connection cannot be opened and authenticated.
+    pub async fn on_network_changed(
+        &mut self,
+        kind: crate::NetworkChangeKind,
+        last_seen_inbox_seq: u64,
+    ) -> Result<crate::NetworkChangeOutcome, SdkError> {
+        if matches!(kind, crate::NetworkChangeKind::Lost) {
+            return Ok(crate::NetworkChangeOutcome::Reconnect);
+        }
+        match self.probe_after_network_change().await? {
+            crate::NetworkChangeOutcome::Survived => Ok(crate::NetworkChangeOutcome::Survived),
+            crate::NetworkChangeOutcome::Reconnect | crate::NetworkChangeOutcome::Reconnected => {
+                self.reconnect(last_seen_inbox_seq).await?;
+                Ok(crate::NetworkChangeOutcome::Reconnected)
+            }
+        }
+    }
+
     /// # Errors
     /// Returns an error when the session cannot be probed or reconnected.
     pub async fn ensure_live(&mut self, last_seen_inbox_seq: u64) -> Result<(), SdkError> {

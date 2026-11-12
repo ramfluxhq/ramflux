@@ -74,6 +74,8 @@ pub enum NetworkChangeOutcome {
     Survived,
     /// The connection did not answer in time. Drop it and open a new one with `Resume`.
     Reconnect,
+    /// The connection did not answer and was already replaced by a resumed one.
+    Reconnected,
 }
 
 struct MonitorState {
