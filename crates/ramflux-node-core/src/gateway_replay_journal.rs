@@ -139,7 +139,8 @@ impl GatewayRedbStore {
         }
         let write = self.db.begin_write().map_err(error)?;
         fence(&write, now)?;
-        replay_gc::prune(&write, now, 63, Some(source.root_commitment()))?;
+        // Reserve two expiry candidates for the owner's lease and a renewed incoming identity.
+        replay_gc::prune(&write, now, 62, Some(source.root_commitment()))?;
         {
             let mut entries = write.open_table(REPLAY).map_err(error)?;
             let mut expiry = write.open_table(EXPIRY).map_err(error)?;
@@ -162,7 +163,7 @@ impl GatewayRedbStore {
                 .map_err(error)?
                 .map(|raw| decode_root(raw.value()))
                 .transpose()?;
-            // One additional expiry candidate, keeping the transaction total <=64.
+            // The owner lease consumes one of the two reserved expiry candidates.
             if let Some(old) = root.as_ref().filter(|root| root.latest_expiry < now) {
                 roots.remove(source.root_commitment()).map_err(error)?;
                 root_expiry.remove((old.latest_expiry, source.root_commitment())).map_err(error)?;

@@ -417,3 +417,40 @@ fn unfunded_configuration_refuses_before_any_root_or_fence_write()
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn renewed_identity_and_owner_lease_share_the_sixty_four_gc_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = test_path()?;
+    let store = GatewayRedbStore::open(&path)?;
+    store.configure_replay(config(32, 256), 0)?;
+    // Thirty-one earlier root expiries consume the first half of the cleanup budget.
+    for seed in 1..32 {
+        store.save_auth_replay(&source(seed)?, &request(0, 99), 0)?;
+    }
+    let owner = source(200)?;
+    let mut old: Vec<_> = (0..130).map(|index| request(index, 100)).collect();
+    old.sort_by_cached_key(|request| request.replay_tuple_key(&owner).unwrap_or_default());
+    for row in &old {
+        store.save_auth_replay(&owner, row, 0)?;
+    }
+    let mut renewed = old.last().ok_or("renewal target")?.clone();
+    renewed.created_at = 101;
+    renewed.expires_at = 200;
+    store.save_auth_replay(&owner, &renewed, 101)?;
+    // 31 expired root leases + 31 expired bodies + own lease + incoming renewal =64.
+    // The incoming identity replaces one expired body, without increasing row count.
+    assert_eq!(
+        store.db.begin_read()?.open_table(REPLAY)?.len()?,
+        130,
+        "renewal cleanup exceeded the combined 64-candidate budget"
+    );
+    assert_eq!(root_count(&store)?, 1);
+    assert!(matches!(
+        store.save_auth_replay(&owner, &renewed, 101),
+        Err(NodeCoreError::ReplayGuard(_))
+    ));
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
