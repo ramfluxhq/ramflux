@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Complete base stream only when every actual nonempty family has a compiled owner.
+use super::source_owner::SourceContext;
 use super::{FullTransferSchema, FullTransferStage, full_transfer_catalog};
 use crate::StorageError;
 use ramflux_protocol::custody::pairing::full_transfer::{
@@ -12,6 +13,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 /// Actual immutable-cut encoding operands, before the source signature/native/SAS gates.
 /// No receiver application or `DataVerified` acceptance is implied by these counts/root.
+#[derive(Clone)]
 pub struct FullBaseSourceEncoding {
     pub schema: FullTransferSchema,
     pub total_bytes: u64,
@@ -21,7 +23,7 @@ pub struct FullBaseSourceEncoding {
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
-impl FullTransferStage<'_> {
+impl SourceContext<'_> {
     /// Encode the OWN exact base cut through the implemented fixed-width SQL owners.
     /// The full schema/nonempty-owner preflight precedes every row/output. Unknown actor
     /// or table codecs refuse the complete attempt, never omit records. E/R values
@@ -82,7 +84,7 @@ impl FullTransferStage<'_> {
             output.cache.zeroize();
         }
         let root = output.root.finish().map_err(|_| invalid())?;
-        self.db.require_full_stage_unlock()?;
+        self.require_source_live()?;
         Ok((
             output.writer,
             FullBaseSourceEncoding {
@@ -132,5 +134,19 @@ impl<W: Write> Write for Rooted<W> {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.writer.flush()
+    }
+}
+
+impl FullTransferStage<'_> {
+    /// Encode all supported nonempty source families after complete cut/schema preflight.
+    /// The output remains private; this grants no signature, receipt or native authority.
+    /// # Errors
+    /// Refuses wrong role, unsupported owners, stale cuts/generations or output failures.
+    pub fn encode_fixed_base_source<W: Write + Send + 'static>(
+        &mut self,
+        snapshot_id: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.source_context()?.encode_fixed_base_source(snapshot_id, writer)
     }
 }
