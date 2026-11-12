@@ -16,7 +16,7 @@ const MAX_REASON_BYTES: usize = 256;
 impl RamfluxClient {
     /// Sender rule: the authenticated root owns the received reference and names this account
     /// as the recipient. Checked against the durable object record, never against the payload.
-    pub(in crate::client::routed) fn authorize_generated_object_revoke(
+    pub(in crate::client::routed) fn authorize_received_object_revoke(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
@@ -65,7 +65,7 @@ impl RamfluxClient {
         revoke: &g::ObjectRevokeAccess,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        self.authorize_generated_object_revoke(opened, entry, revoke)?;
+        self.authorize_received_object_revoke(opened, entry, revoke)?;
         let db = self.account_db()?;
         self.apply_generated_peer_control_once(entry, identity, exact_inner, 12, |_| {
             db.set_object_tombstoned_with_revocation(
