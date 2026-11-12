@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 mod bootstrap;
 pub(crate) mod delivery;
+mod draft;
 mod fence;
 mod refresh;
 mod retirement;
