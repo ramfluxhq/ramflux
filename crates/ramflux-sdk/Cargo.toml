@@ -93,6 +93,17 @@ chacha20poly1305 = { version = "=0.10.1" }
 chacha20 = { version = "=0.9.1", features = ["zeroize"] }
 poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 
+[target.'cfg(windows)'.dependencies]
+# Named-pipe carrier: token, SID and security-descriptor calls the standard library does not expose.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }
