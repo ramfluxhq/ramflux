@@ -58,6 +58,7 @@ export class RamfluxWebClient {
   private updatesSinceCredit = 0;
   private pingTimer: ReturnType<typeof setTimeout> | undefined;
   private nextPing = 1;
+  private leading = false;
 
   constructor(private readonly options: ClientOptions) {
     this.presence.onmessage = (event: MessageEvent<Presence>) => this.onPresence(event.data);
@@ -73,9 +74,11 @@ export class RamfluxWebClient {
       { mode: "exclusive", ifAvailable: true },
       (lock) => lock !== null,
     );
-    if (free) {
-      this.startWorker();
-    } else {
+    // Every page queues its own worker for the writer lock with an ordinary request, so a
+    // successor exists when the leader goes away. Until that worker holds the lock and has
+    // opened the store, this page is a follower of the current leader, if there is one.
+    this.startWorker();
+    if (!free) {
       await this.attachAsFollower();
     }
   }
@@ -110,11 +113,28 @@ export class RamfluxWebClient {
     // The worker queues for the lock with an ordinary request; it never steals.
     const worker = new Worker(this.options.workerUrl, { type: "module", name: "ramflux-core" });
     this.worker = worker;
+    worker.onmessage = (event: MessageEvent) => {
+      const data = event.data as { t?: string; bytes?: Uint8Array };
+      if (data.t !== "update" || data.bytes === undefined) {
+        return;
+      }
+      const update = JSON.parse(new TextDecoder().decode(data.bytes)) as { t?: string; action?: string };
+      // The worker leads only once the lock is held and the store is open.
+      if (update.t === "leader_action" && update.action === "OpenGatewaySession" && !this.leading) {
+        this.leading = true;
+        clearTimeout(this.pingTimer);
+        this.port?.close();
+        this.openPort((port) => worker.postMessage({ t: "attach" }, [port]));
+        this.options.onState("leader");
+        this.announce("leader");
+        void this.offerPortsToFollowers();
+      } else if (update.t === "leader_action" && update.action === "ReleaseLock" && this.leading) {
+        this.leading = false;
+        this.failAll("leader handed over");
+        void this.attachAsFollower();
+      }
+    };
     worker.postMessage({ t: "boot", build: this.options.build });
-    this.openPort((port) => worker.postMessage({ t: "attach" }, [port]));
-    this.options.onState("leader");
-    this.announce("leader");
-    void this.offerPortsToFollowers();
   }
 
   private openPort(send: (remote: MessagePort) => void): void {
@@ -153,7 +173,7 @@ export class RamfluxWebClient {
   private async offerPortsToFollowers(): Promise<void> {
     navigator.serviceWorker.addEventListener("message", (event: MessageEvent) => {
       const data = event.data as { t?: string; nonce?: string; client?: string; build?: string };
-      if (event.origin !== location.origin || data.t !== "rendezvous_offer" || this.worker === undefined) {
+      if (event.origin !== location.origin || data.t !== "rendezvous_offer" || this.worker === undefined || !this.leading) {
         return;
       }
       if (data.build !== this.options.build) {
@@ -218,7 +238,7 @@ export class RamfluxWebClient {
     const visible = document.visibilityState === "visible";
     this.worker?.postMessage({ t: "visibility", visible });
     this.port?.postMessage({ t: "visibility", visible });
-    this.announce(this.worker === undefined ? "hello" : "leader");
+    this.announce(this.leading ? "leader" : "hello");
   }
 
   private onPresence(message: Presence): void {

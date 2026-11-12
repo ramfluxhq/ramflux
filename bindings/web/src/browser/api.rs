@@ -25,7 +25,9 @@ use crate::link::{
 use crate::session::{SessionAuthority, SessionAuthorityKey, WebLinkPins};
 use crate::wire::WebOpenFrame;
 use crate::role::WEB_DEVICE_ROLE;
-use crate::store_policy::{StoreAction, classify, durability_claim};
+use crate::store_policy::{
+    NoStoreEngine, StoreAction, StoreEngine, classify, durability_claim, require_cipher,
+};
 
 struct Core {
     build: String,
@@ -61,6 +63,31 @@ impl SessionAuthority for VaultAuthority {
         // custody session, and the socket is closed with 1000.
         Err(crate::WebError::Protocol("gateway Open and Auth signing is not available in the web build"))
     }
+}
+
+/// Open the encrypted store through whichever engine the build links. The database key leaves
+/// the vault only for this call.
+async fn open_store_with(engine: &mut dyn StoreEngine) -> Result<(), crate::WebError> {
+    let vault = BrowserVault::open().await?;
+    let stored = vault
+        .link_pins()
+        .await?
+        .ok_or(crate::WebError::StoreUnavailable("this browser is not linked"))?;
+    let pins: WebLinkPins = serde_json::from_str(&stored)
+        .map_err(|_| crate::WebError::StoreUnavailable("stored link pins are malformed"))?;
+    let secrets = vault.unseal(&pins.device_ref.device_id, &pins.origin).await?;
+    let mut key: [u8; 32] = ramflux_protocol::decode_base64url(&secrets.database_key)
+        .ok()
+        .and_then(|key| key.try_into().ok())
+        .ok_or(crate::WebError::StoreUnavailable("the vault holds a malformed database key"))?;
+    storage::sweep_spool().await?;
+    let probe = engine.open(&key);
+    zeroize::Zeroize::zeroize(&mut key);
+    let opened = probe.and_then(require_cipher);
+    if opened.is_err() {
+        engine.close();
+    }
+    opened
 }
 
 fn random<const N: usize>() -> Result<[u8; N], JsError> {
@@ -418,6 +445,32 @@ impl WebCore {
         let link_code = device.payload.link_code().map_err(|error| js_error(&error))?;
         self.core.borrow_mut().link = LinkState::AwaitingBundle;
         Ok(json!({ "payload": device.payload, "link_code": link_code }).to_string())
+    }
+
+    /// Open the encrypted store after the writer lock was granted, and report the outcome to the
+    /// leader state machine. A store without page-level encryption stays closed, and a failed
+    /// open releases the lock and retries later; it never leads without a store.
+    ///
+    /// OPEN-VALUE OV-W2: no encrypted SQLite engine is linked until the S-STORE spike selects
+    /// one, so this currently always fails closed.
+    ///
+    /// # Errors
+    /// Fails when this context does not hold the lock or the store cannot be opened.
+    pub async fn open_store(&self) -> Result<(), JsError> {
+        if self.core.borrow().leader != LeaderState::OpeningStore {
+            return Err(JsError::new("the writer lock is not held by this context"));
+        }
+        let mut engine = NoStoreEngine;
+        match open_store_with(&mut engine).await {
+            Ok(()) => {
+                apply(&self.core, LeaderEvent::StoreOpened);
+                Ok(())
+            }
+            Err(error) => {
+                apply(&self.core, LeaderEvent::StoreOpenFailed);
+                Err(js_error(&error))
+            }
+        }
     }
 
     /// Open the gateway session of this linked device. Only the context that holds the writer

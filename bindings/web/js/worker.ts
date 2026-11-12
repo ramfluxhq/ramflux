@@ -32,7 +32,9 @@ const pending: MessageEvent[] = [];
 async function boot(build: string): Promise<void> {
   await init();
   core = new WebCore(build);
+  const started = core;
   core.subscribe((update: Uint8Array) => {
+    onLeaderAction(started, update);
     // Leader progress goes to the owning page only. Updates for attached pages travel on
     // their own ports, under credit, from inside the core.
     scope.postMessage({ t: "update", bytes: update }, [update.buffer]);
@@ -40,6 +42,38 @@ async function boot(build: string): Promise<void> {
   core.start();
   for (const event of pending.splice(0)) {
     handle(event);
+  }
+}
+
+const STORE_RETRY_DELAY_MS = 5000;
+
+/** Carry out the host side of the leader state machine. The decisions are the core's. */
+function onLeaderAction(started: WebCore, update: Uint8Array): void {
+  const parsed = JSON.parse(new TextDecoder().decode(update)) as { t?: string; action?: string };
+  if (parsed.t !== "leader_action") {
+    return;
+  }
+  switch (parsed.action) {
+    case "OpenStore":
+      // Reports store_opened or store_open_failed itself. A failure releases the lock.
+      started.open_store().catch(() => undefined);
+      break;
+    case "OpenGatewaySession":
+      started.connect().catch(() => undefined);
+      break;
+    case "StopAdmitting":
+      // Requests are answered synchronously in this build, so nothing is in flight.
+      queueMicrotask(() => started.report("drained"));
+      break;
+    case "CloseStoreAndSocket":
+      queueMicrotask(() => started.report("closed"));
+      break;
+    case "RetryLater":
+      // Queue again with an ordinary request. Never a steal.
+      setTimeout(() => started.start(), STORE_RETRY_DELAY_MS);
+      break;
+    default:
+      break;
   }
 }
 
