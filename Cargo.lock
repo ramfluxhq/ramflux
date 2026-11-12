@@ -3332,6 +3332,7 @@ dependencies = [
  "hmac 0.13.0",
  "hpke",
  "poly1305",
+ "prost",
  "ramflux-core",
  "ramflux-protocol",
  "secrecy",

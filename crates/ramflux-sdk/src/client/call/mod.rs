@@ -323,10 +323,18 @@ impl RamfluxClient {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
+        self.refresh_native_call_control(&c, body)
+    }
+
+    pub(crate) fn refresh_native_call_control(
+        &mut self,
+        c: &CallControl,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
         if let Some((key, next)) = self.voice_transition.take()
             && key == transition_key(body)
         {
-            self.voice_calls.insert(c.call_id, *next);
+            self.voice_calls.insert(c.call_id.clone(), *next);
             return Ok(true);
         }
         // An already committed delivery can be retried after an ACK failure. Its cache refresh

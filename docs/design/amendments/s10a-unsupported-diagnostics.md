@@ -25,3 +25,17 @@ are retired. Upgrade installation resolves the legitimate parked Edit in the
 same writer transaction and publishes the resulting content in force, with the
 original immutable identity and the actual journal cursor. It never publishes
 an original preview that the winning Edit has just retired.
+
+Generated native Controls finish their post-commit cache handling through the
+typed decoder, including Unsupported controls that have no cache effect. They
+never enter the retired application JSON cache parser. A generated Call refresh
+uses the exact Inner's staged native transition after commit.
+
+Friend action 1/3/4/5 requires the authenticated requester root; action 2 requires
+the authenticated target root. The other root is local. Existing link endpoints
+are immutable, and an acceptance requires an existing live local request or an
+already accepted link. Actions call the existing native contact primitives.
+Friend exact-repeat receipts use raw BLAKE3 over LP(domain) || LP(source device
+storage key) || LP(exact Inner), with domain `ramflux.message.friend.applied.v1`;
+the receipt contains no Message content. Other native Control executor work is
+separate and remains required before activation.
