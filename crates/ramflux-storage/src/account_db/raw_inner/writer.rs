@@ -16,6 +16,7 @@ pub enum RawInnerCopyKind {
     OuterInner,
     NestedGroup,
     HistoryContainer,
+    SourceEvidence,
 }
 
 impl RawInnerCopyKind {
@@ -24,6 +25,7 @@ impl RawInnerCopyKind {
             Self::OuterInner => "outer_inner",
             Self::NestedGroup => "nested_group",
             Self::HistoryContainer => "history_container",
+            Self::SourceEvidence => "source_evidence",
         }
     }
 }
@@ -70,7 +72,9 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     validate_id(source_anchor)?;
     validate_id(copy_id)?;
     let max_bytes = match kind {
-        RawInnerCopyKind::HistoryContainer => MAX_HISTORY_CONTAINER_BYTES,
+        RawInnerCopyKind::HistoryContainer | RawInnerCopyKind::SourceEvidence => {
+            MAX_HISTORY_CONTAINER_BYTES
+        }
         RawInnerCopyKind::OuterInner | RawInnerCopyKind::NestedGroup => MAX_INNER_BYTES,
     };
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
@@ -278,6 +282,7 @@ impl AccountDb {
                         "outer_inner" => RawInnerCopyKind::OuterInner,
                         "nested_group" => RawInnerCopyKind::NestedGroup,
                         "history_container" => RawInnerCopyKind::HistoryContainer,
+                        "source_evidence" => RawInnerCopyKind::SourceEvidence,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
                     Ok(RawInnerCopy { copy_id: row.get(0)?, owner_id: row.get(1)?, kind, digest, bytes: row.get(4)? })

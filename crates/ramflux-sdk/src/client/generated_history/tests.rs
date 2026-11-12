@@ -541,3 +541,59 @@ fn edited_history_never_promotes_ephemeral_or_call_wake_evidence_to_message_muta
     }
     Ok(())
 }
+
+#[test]
+fn retained_origin_uses_first_hand_native_proof_and_rejects_body_identity_and_route_forgery()
+-> TestResult {
+    use crate::client::raw_inner_origin::RetainedOrigin;
+    use crate::client::routed::{Kind, Routing};
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "retained-origin", now)?;
+    let original = inner(
+        &a,
+        1,
+        g::content::Value::Message(g::Message { text: "original".into(), ..Default::default() }),
+    )?;
+    let id = original.identity.as_ref().ok_or("identity")?;
+    let proof = RetainedOrigin {
+        evidence: evidence(&a, &original, now)?,
+        reported_inner: Vec::new(),
+        routing: Routing {
+            kind: Kind::Direct,
+            conversation_id: id.conversation_id.clone(),
+            message_id: ramflux_protocol::encode_base64url(&id.id),
+            group_id: None,
+            group_message_id: None,
+            attachments: false,
+        },
+    };
+    let raw = original.encode_to_vec();
+    let verified = proof.verify(id, &raw)?;
+    assert_eq!(verified.author.root, a.author.account_anchor);
+    assert_eq!(verified.author.device.device_id(), a.author.device_id);
+    assert_eq!(verified.outer.encrypted_payload, "");
+    let outer: Value = ramflux_protocol::parse_i_json(&proof.evidence.canonical_sender_envelope)?;
+    assert!(outer.get("encrypted_payload").is_none(), "evidence verifies without ciphertext");
+    let changed = inner(
+        &a,
+        1,
+        g::content::Value::Message(g::Message { text: "forged".into(), ..Default::default() }),
+    )?;
+    assert!(proof.verify(id, &changed.encode_to_vec()).is_err());
+    let mut claimed = id.clone();
+    claimed.device_sequence += 1;
+    assert!(proof.verify(&claimed, &raw).is_err());
+    let mut changed = proof.clone();
+    changed.routing.conversation_id = "other".into();
+    assert!(changed.verify(id, &raw).is_err());
+    let mut changed = proof.clone();
+    changed.evidence.report_opening[0] ^= 1;
+    assert!(changed.verify(id, &raw).is_err());
+    let mut changed = proof.clone();
+    let mut outer = outer;
+    outer["payload_hash"] = json!(ramflux_protocol::encode_base64url([99; 32]));
+    changed.evidence.canonical_sender_envelope = ramflux_protocol::canonical_json_bytes(&outer)?;
+    assert!(changed.verify(id, &raw).is_err());
+    Ok(())
+}
