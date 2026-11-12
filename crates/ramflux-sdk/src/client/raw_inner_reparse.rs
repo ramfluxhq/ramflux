@@ -25,7 +25,7 @@ struct Prepared {
     origin: Option<(ramflux_storage::RawInnerCopy, super::raw_inner_origin::RetainedOrigin)>,
 }
 // Bump when executable reparse policy changes without a descriptor change.
-const REPARSE_POLICY: &str = "original-channel-4";
+const REPARSE_POLICY: &str = "own-message-attestation-5";
 fn decoder_marker() -> String {
     format!(
         "{}/{}/{}",
@@ -50,6 +50,15 @@ impl RamfluxClient {
             let projected = db.write_transaction(|| -> Result<bool, SdkError> {
                 if !db.mark_raw_inner_reparse_attempted(&snapshot, &decoder)? {
                     return Ok(false);
+                }
+                if snapshot.copy.kind == ramflux_storage::RawInnerCopyKind::SourceEvidence
+                    && snapshot.copy.copy_id.starts_with("routed/own-sent-attestation/")
+                {
+                    return match self.reparse_own_sent_attestation(&snapshot) {
+                        Ok(projected) => Ok(projected),
+                        Err(SdkError::Storage(error)) => Err(error.into()),
+                        Err(_) => Ok(false),
+                    };
                 }
                 if matches!(
                     snapshot.copy.kind,

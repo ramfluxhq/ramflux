@@ -309,6 +309,7 @@ impl BackupDatabase {
             // A restored generation starts fresh handshakes, never archived reservations.
             self.archive_group_transfer(&preserved_actor)?;
             let self_sync_floors = self.merge_self_sync_floors()?;
+            self.merge_generated_identity_floors()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
@@ -740,7 +741,7 @@ fn merge_filter(table: &str, native_data_only: bool) -> String {
         "({}){} AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
         base_merge_filter(table, native_data_only),
         if table == "runtime_actor_state" {
-            " AND r.state_kind NOT LIKE 'self-sync/%'"
+            " AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'message-identity/%'"
         } else {
             ""
         },

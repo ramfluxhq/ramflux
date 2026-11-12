@@ -16,7 +16,7 @@ import sys
 p = Path(sys.argv[1]); s = p.read_text()
 old = 'self.authorize_native_group_control_packet(entry, route, packet)?'
 assert s.count(old) == 1
-p.write_text(s.replace(old, '()'))
+p.write_text(s.replace(old, 'let _ = packet'))
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"
