@@ -15,3 +15,13 @@ its Unsupported view in the installing transaction. If channel policy instead
 retires the raw bytes and keeps a non-actionable historical diagnostic, that
 view's handle is empty and its private mapping is removed. Neither form contains
 native execution authority or claims that an erased body remains available.
+
+An Edit targeting an existing Unsupported placeholder waits for its Message
+content just as an Edit targeting absent content does. Early-Edit registers are
+qualified by the original author root as well as target id; an accepted peer in
+another conversation cannot replace that author's register by naming its id.
+When the verified original identity becomes available, foreign pending claims
+are retired. Upgrade installation resolves the legitimate parked Edit in the
+same writer transaction and publishes the resulting content in force, with the
+original immutable identity and the actual journal cursor. It never publishes
+an original preview that the winning Edit has just retired.

@@ -167,7 +167,7 @@ impl RamfluxClient {
         })
     }
 
-    fn generated_message_update(
+    pub(crate) fn generated_message_update(
         &self,
         message: &ramflux_storage::DirectMessageRecord,
         conversation: &str,

@@ -57,6 +57,11 @@ impl RamfluxClient {
         target: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
+        // A known header/placeholder does not mean Message content is available.
+        // Keep the parked edit until its target can actually be edited.
+        if db.message_content(target)?.is_none() {
+            return Ok(());
+        }
         let key = format!("routed/pending-history-edit/{target}");
         let Some(pending) = db.load_actor_state::<Pending>(&key)? else {
             return Ok(());

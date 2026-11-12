@@ -247,6 +247,48 @@ impl RamfluxClient {
         )
     }
 
+    fn park_waiting_generated_edit(
+        &self,
+        context: EditContext<'_>,
+        identity: &ramflux_protocol::message::EventIdentity,
+        edit: &ramflux_protocol::message::Edit,
+        bytes: &[u8],
+    ) -> Result<(), SdkError> {
+        if let Some(item) = context.imported {
+            self.park_generated_history_edit(
+                context.entry,
+                item,
+                identity,
+                edit,
+                context.source.root_commitment(),
+            )
+        } else {
+            self.park_generated_edit(context.entry, identity, edit, bytes)
+        }
+    }
+
+    fn authorize_generated_edit_group(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &ramflux_protocol::message::EventIdentity,
+    ) -> Result<(), SdkError> {
+        if let Some(group) = identity.group_id.as_deref() {
+            self.require_native_operation(
+                source,
+                crate::client::identity_authority::NativeOperation::Group,
+            )?;
+            self.require_generated_group_epoch(
+                group,
+                source,
+                identity
+                    .group_epoch
+                    .ok_or_else(|| SdkError::InboundRejected("Edit group epoch missing".into()))?,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_generated_edit_authorized(
         &self,
         authorization: EditContext<'_>,
@@ -255,7 +297,7 @@ impl RamfluxClient {
         metadata: Option<&ramflux_storage::MessageMetadata>,
     ) -> Result<bool, SdkError> {
         use ramflux_protocol::message as g;
-        let EditContext { entry, source, imported } = authorization;
+        let EditContext { source, imported, .. } = authorization;
         let (identity, content) = Self::decode_generated_inner(exact_inner)?;
         let Some(g::content::Value::Edit(edit)) = content.value else {
             return Err(refused("expected generated Edit"));
@@ -272,27 +314,13 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("edit requires the original author".into()));
         }
-        if let Some(group) = identity.group_id.as_deref() {
-            self.require_native_operation(
-                source,
-                crate::client::identity_authority::NativeOperation::Group,
-            )?;
-            self.require_generated_group_epoch(
-                group,
-                source,
-                identity
-                    .group_epoch
-                    .ok_or_else(|| SdkError::InboundRejected("Edit group epoch missing".into()))?,
-                false,
-            )?;
-        }
+        self.authorize_generated_edit_group(source, &identity)?;
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let db = self.account_db()?;
         db.write_transaction(|| {
             if db.message_is_deleted(&target_id)? { return Ok(false); }
             let Some(row) = self.direct_message_by_id(&target_id)? else {
-                if let Some(item) = imported { self.park_generated_history_edit(entry, item, &identity, &edit, source.root_commitment())?; }
-                else { self.park_generated_edit(entry, &identity, &edit, exact_inner)?; }
+                self.park_waiting_generated_edit(authorization, &identity, &edit, exact_inner)?;
                 return Ok(false);
             };
             let author = if row.is_own {
@@ -315,7 +343,10 @@ impl RamfluxClient {
             let incoming = (edit.revision, identity.id.as_slice());
             let old_pair = applied.as_ref().map(|state| (state.revision, state.event_id.as_slice()));
             if imported.is_some() && old_pair.is_some_and(|pair| incoming <= pair) { return Ok(false); }
-            let stored = db.message_content(&target_id)?.ok_or_else(|| refused("edit target content missing"))?;
+            let Some(stored) = db.message_content(&target_id)? else {
+                self.park_waiting_generated_edit(authorization, &identity, &edit, exact_inner)?;
+                return Ok(false);
+            };
             let original_content = if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
                 nested
             } else { ramflux_protocol::message::exact_content::message_in_force(&stored)

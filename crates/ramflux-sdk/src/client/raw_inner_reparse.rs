@@ -25,7 +25,7 @@ struct Prepared {
     origin: Option<(ramflux_storage::RawInnerCopy, super::raw_inner_origin::RetainedOrigin)>,
 }
 // Bump when executable reparse policy changes without a descriptor change.
-const REPARSE_POLICY: &str = "original-channel-2";
+const REPARSE_POLICY: &str = "original-channel-3";
 fn decoder_marker() -> String {
     format!(
         "{}/{}/{}",
@@ -188,11 +188,22 @@ impl RamfluxClient {
             db.finish_raw_inner_reparse(&copy.copy_id)?;
         }
         self.remove_generated_unsupported_view(&provenance.message)?;
-        let update = g::MessageUpdate {
-            account_id: db.local_account_id.clone(),
-            identity: Some(identity),
-            journal_sequence: 0,
-            state: Some(g::message_update::State::Content(content)),
+        let update = if matches!(content.value, Some(g::content::Value::Message(_))) {
+            self.resolve_generated_pending_edit(&provenance.conversation, &provenance.message)?;
+            self.resolve_generated_pending_history_edit(&provenance.message)?;
+            let row = self.direct_message_by_id(&provenance.message)?.ok_or_else(|| {
+                SdkError::InboundRejected("reparsed Message projection missing".into())
+            })?;
+            // A winning parked Edit may already have retired the original body/opening.
+            // Publish the content in force, never the just-erased original preview.
+            self.generated_message_update(&row, &provenance.conversation, 0)?
+        } else {
+            g::MessageUpdate {
+                account_id: db.local_account_id.clone(),
+                identity: Some(identity),
+                journal_sequence: 0,
+                state: Some(g::message_update::State::Content(content)),
+            }
         };
         let marker = format!(
             "routed/reparse/{}/{}/{}",
