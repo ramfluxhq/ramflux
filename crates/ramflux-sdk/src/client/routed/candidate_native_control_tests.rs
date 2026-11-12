@@ -247,6 +247,18 @@ async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_
     run(&mut b, &again).await?;
     assert_eq!(b.client.pending_guardian_invites()?.len(), 1);
     assert_eq!(b.client.account_db()?.actor_state_keys(APPLIED)?.len(), 1);
+    // The user's decision stores the share through the native accept and erases the pending copy;
+    // a later redelivery of the same event cannot bring the pending share back.
+    let reply = b.client.decide_pending_guardian_invite("invite-good", true)?;
+    assert!(reply.is_some_and(|accept| accept.invite_id == "invite-good"));
+    assert!(b.client.pending_guardian_invites()?.is_empty());
+    assert_eq!(
+        b.client.guardian_recovery_shares_for_owner(&native.inviter_principal_id)?.len(),
+        1
+    );
+    let late = seal_control(&a, &b, "invite-good", &raw)?;
+    run(&mut b, &late).await?;
+    assert!(b.client.pending_guardian_invites()?.is_empty(), "redelivery restored an erased share");
     Ok(())
 }
 

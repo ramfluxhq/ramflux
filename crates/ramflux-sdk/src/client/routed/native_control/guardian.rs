@@ -276,18 +276,53 @@ impl RamfluxClient {
         })
     }
 
-    /// Verified invites waiting for the local user's decision, oldest key first.
+    /// Verified invites waiting for the local user's decision, in key order. An invite past its
+    /// lifetime is erased here together with the share it carries.
     /// # Errors
-    /// Returns a storage error when the account database cannot be read.
+    /// Returns a storage error when the account database cannot be read or written.
     pub fn pending_guardian_invites(&self) -> Result<Vec<SdkGuardianInviteMessage>, SdkError> {
         let db = self.account_db()?;
+        let now = crate::time::now_unix_timestamp();
         let mut invites = Vec::new();
         for key in db.actor_state_keys("recovery/guardian-invite/")? {
-            if let Some(invite) = db.load_actor_state::<SdkGuardianInviteMessage>(&key)? {
-                invites.push(invite);
+            match db.load_actor_state::<SdkGuardianInviteMessage>(&key)? {
+                Some(invite) if invite.expires_at > now => invites.push(invite),
+                Some(_) => db.remove_actor_state(&key)?,
+                None => {}
             }
         }
         Ok(invites)
+    }
+
+    /// The local user's decision on a pending invite. Accepting runs the native
+    /// `accept_guardian_invite` (share stored as accepted, signed accept returned for sending);
+    /// either way the pending copy of the share is erased in the same transaction.
+    /// # Errors
+    /// Returns an error when no pending invite has this id or the native accept refuses it.
+    pub fn decide_pending_guardian_invite(
+        &self,
+        invite_id: &str,
+        accept: bool,
+    ) -> Result<Option<SdkGuardianAcceptMessage>, SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let suffix = format!("/{}", ramflux_protocol::encode_base64url(invite_id.as_bytes()));
+            let mut found = None;
+            for key in db.actor_state_keys("recovery/guardian-invite/")? {
+                if key.ends_with(&suffix)
+                    && let Some(invite) = db.load_actor_state::<SdkGuardianInviteMessage>(&key)?
+                    && invite.invite_id == invite_id
+                {
+                    found = Some((key, invite));
+                    break;
+                }
+            }
+            let (key, invite) =
+                found.ok_or_else(|| authority("no pending guardian invite with this id"))?;
+            let reply = if accept { Some(self.accept_guardian_invite(&invite)?) } else { None };
+            db.remove_actor_state(&key)?;
+            Ok(reply)
+        })
     }
 }
 
