@@ -848,3 +848,116 @@ fn edited_history_bootstrap_rolls_back_projection_and_evidence() -> TestResult {
     assert!(apply_claim(&client, &first)?);
     Ok(())
 }
+
+mod producer_rows {
+    use super::*;
+    use crate::client::generated_control::control_from_payload;
+    use crate::client::raw_inner_origin::RetainedOrigin;
+    use crate::client::routed::{Kind, Routing};
+
+    fn install(
+        client: &RamfluxClient,
+        author: &Sender,
+        sequence: u64,
+        now: u64,
+        text: &str,
+    ) -> TestResult<(String, Vec<u8>)> {
+        let original = inner(
+            author,
+            sequence,
+            g::content::Value::Message(g::Message { text: text.into(), ..Default::default() }),
+        )?;
+        let identity = original.identity.clone().ok_or("identity")?;
+        let id = ramflux_protocol::encode_base64url(&identity.id);
+        let raw = original.encode_to_vec();
+        let origin = RetainedOrigin {
+            evidence: evidence(author, &original, now)?,
+            reported_inner: Vec::new(),
+            routing: Routing {
+                kind: Kind::Direct,
+                conversation_id: identity.conversation_id.clone(),
+                message_id: id.clone(),
+                group_id: None,
+                group_message_id: None,
+                attachments: false,
+            },
+        };
+        let db = client.account_db()?;
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
+                conversation_id: &identity.conversation_id,
+                message_id: &id,
+                sender_id: "original",
+                encrypted_body: &[],
+                metadata: &ramflux_storage::MessageMetadata::default(),
+                created_at: i64::try_from(sequence).unwrap_or(0),
+            })?;
+            db.store_message_content(&identity.conversation_id, &id, &raw)?;
+            client.persist_known_origin(&id, &origin)?;
+            Ok(())
+        })?;
+        Ok((id, raw))
+    }
+
+    #[test]
+    fn history_producer_pages_first_hand_items_in_cursor_order_with_exact_bytes() -> TestResult {
+        let root = Root::new()?;
+        let now = crate::custody::network_now()?;
+        let author = sender(&root, "producer-origin", now)?;
+        let client = empty_import_receiver(&root)?;
+        let (first, first_raw) = install(&client, &author, 1, now, "first")?;
+        let (second, second_raw) = install(&client, &author, 2, now, "second")?;
+        client.send_direct_message("conversation", "legacy-row", "alice", b"no origin")?;
+        let built =
+            client.build_generated_history_page(&[4; 32], 0, &[0; 32], None)?.ok_or("page")?;
+        assert_eq!(built.conversation, "conversation");
+        assert_eq!(built.owners, vec![first.clone(), second.clone()]);
+        assert_eq!(built.skipped, 1, "the evidence-free row is counted, never forwarded");
+        assert_eq!(built.after.message, "legacy-row");
+        let carried =
+            built.page.items.iter().map(|item| item.exact_inner.clone()).collect::<Vec<_>>();
+        assert_eq!(carried, vec![first_raw, second_raw], "stored bytes travel unchanged");
+        for item in &built.page.items {
+            RamfluxClient::verify_history_message_origin(item)?;
+        }
+        let exact = built.page.items.iter().map(g::HistoryItem::encode_to_vec).collect::<Vec<_>>();
+        let exact = exact.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert_eq!(
+            built.page.page_digest,
+            g::history_chain::digest(&[4; 32], 0, &[0; 32], &exact)?.to_vec()
+        );
+        let control = control_from_payload(g::control::Payload::OwnHistory(built.page.clone()))?;
+        assert_eq!(g::history_chain::verify_control(&control.encode_to_vec())?, built.page);
+        let mut tampered = built.page.clone();
+        tampered.items[0].exact_inner[0] ^= 1;
+        let control = control_from_payload(g::control::Payload::OwnHistory(tampered))?;
+        assert!(g::history_chain::verify_control(&control.encode_to_vec()).is_err());
+        assert!(
+            client
+                .build_generated_history_page(
+                    &[4; 32],
+                    1,
+                    &built.page.page_digest,
+                    Some(&built.after)
+                )?
+                .is_none(),
+            "a finished cursor produces no further page"
+        );
+        let resume = producer::Cursor {
+            conversation: "conversation".into(),
+            created_at: 1,
+            message: first.clone(),
+        };
+        let rest = client
+            .build_generated_history_page(&[4; 32], 1, &built.page.page_digest, Some(&resume))?
+            .ok_or("resumed page")?;
+        assert_eq!(rest.owners, vec![second.clone()], "resume is strictly after the cursor");
+        assert_eq!(rest.page.previous_page_digest, built.page.page_digest);
+        client.account_db()?.delete_direct_message("conversation", &first, "local", "erase")?;
+        let after_erase =
+            client.build_generated_history_page(&[4; 32], 0, &[0; 32], None)?.ok_or("page")?;
+        assert_eq!(after_erase.owners, vec![second], "an erased row is never exported");
+        assert_eq!(after_erase.skipped, 2);
+        Ok(())
+    }
+}

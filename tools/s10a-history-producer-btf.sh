@@ -39,4 +39,20 @@ p=Path(sys.argv[1]);s=p.read_text();needle='        self.transfer_id = random_tr
 PY
 expect_failure ramflux-sdk history_chain_restart_keeps_item_cursor_and_starts_at_page_zero
 restore_files
+# 4. Re-export the cursor row after a resume.
+python3 - "${files[0]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();needle='cursor.is_none_or(|cursor| position > cursor)';assert s.count(needle)==1;p.write_text(s.replace(needle,'cursor.is_none_or(|cursor| position >= cursor)'))
+PY
+expect_failure ramflux-sdk history_producer_pages_first_hand_items_in_cursor_order_with_exact_bytes
+restore_files
+# 5. Drop the exact-item digest from the produced page.
+python3 - "${files[0]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();needle='                page_digest: digest.to_vec(),';assert s.count(needle)==1;p.write_text(s.replace(needle,'                page_digest: vec![0; 32],'))
+PY
+expect_failure ramflux-sdk history_producer_pages_first_hand_items_in_cursor_order_with_exact_bytes
+restore_files
 echo HISTORY_PRODUCER_BTF_OK
