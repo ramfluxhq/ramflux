@@ -1030,6 +1030,11 @@ pub fn assert_texts_once_in_order(value: &Value, expected: &[&str]) -> Result<()
     Ok(())
 }
 
+/// Poll one CLI command until `ready` accepts its JSON, within the shared poll budget.
+pub fn wait_json(daemon: &Daemon, args: &[&str], ready: impl Fn(&Value) -> bool) -> Result<Value> {
+    poll_json(daemon, args, POLL_TIMEOUT, ready)
+}
+
 fn poll_json(
     daemon: &Daemon,
     args: &[&str],

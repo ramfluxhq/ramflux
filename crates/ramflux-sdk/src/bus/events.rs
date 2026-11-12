@@ -192,3 +192,62 @@ mod transient_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+
+    fn subscriber(tx: mpsc::Sender<LocalBusFrame>) -> BTreeMap<u64, LocalBusSubscriber> {
+        BTreeMap::from([(
+            1,
+            LocalBusSubscriber {
+                account_id: "a".into(),
+                topics: BTreeSet::from(["state.changed".into()]),
+                outbound: tx,
+            },
+        )])
+    }
+
+    fn durable(sequence: u64) -> LocalBusFrame {
+        let mut frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "account",
+            "state.changed",
+            serde_json::json!({}),
+        );
+        frame.kind = LocalBusFrameKind::Event;
+        frame.frame_id = format!("outbox_{sequence}");
+        frame
+    }
+
+    #[test]
+    fn unified_overflow_ends_with_a_lag_notice_instead_of_a_silent_drop() -> Result<(), SdkError> {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut subscribers = subscriber(tx);
+        broadcast(&mut subscribers, &[durable(1), durable(2), durable(3), durable(4)]);
+        assert!(subscribers.is_empty(), "an overflowing subscriber must resubscribe");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_1");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_2");
+        let notice = rx.try_recv().map_err(|_| closed())?;
+        assert_eq!((notice.sdk_api.as_str(), notice.method.as_str()), ("stream", "stream.lagged"));
+        assert_eq!(notice.body["dropped_frame_id"], "outbox_3");
+        assert_eq!(notice.body["dropped_topic"], "state.changed");
+        assert!(notice.body["last_delivered_seq"].is_null());
+        assert!(rx.try_recv().is_err(), "nothing follows the lag notice");
+        Ok(())
+    }
+
+    #[test]
+    fn dormant_generation_keeps_the_existing_overflow_behaviour() -> Result<(), SdkError> {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut subscribers = subscriber(tx);
+        broadcast(&mut subscribers, &[durable(1), durable(2), durable(3)]);
+        assert!(subscribers.is_empty());
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_1");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_2");
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+}
