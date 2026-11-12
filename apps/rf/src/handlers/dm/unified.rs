@@ -92,6 +92,36 @@ pub(super) async fn print(
     print_json(&bus.request(Some(query.account.clone()), "message", "message.read", body).await?)
 }
 
+/// `rf group read` on the unified path: sync the group through the daemon, then print the
+/// durable read-model page of its conversation. Returns false while the generation is dormant.
+pub(crate) async fn print_group_read(
+    bus: &mut LocalBusClient,
+    account: &str,
+    group: &str,
+    conversation: &str,
+) -> Result<bool, RfError> {
+    if !ramflux_protocol::schema_profile::schema_v1_live() {
+        return Ok(false);
+    }
+    bus.request(
+        Some(account.to_owned()),
+        "group",
+        "group.read",
+        serde_json::json!({ "group_id": group, "conversation_id": conversation, "limit": 100 }),
+    )
+    .await?;
+    let query = Query {
+        account: account.to_owned(),
+        conversation: conversation.to_owned(),
+        limit: None,
+        before: None,
+        after_seq: None,
+        message: None,
+    };
+    print(bus, &query, false).await?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

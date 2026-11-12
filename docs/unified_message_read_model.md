@@ -50,10 +50,18 @@ rf dm list --account A --conversation C [--limit N] [--before '<next_before JSON
 rf dm list --account A --conversation C --after-seq SEQ [--limit N]
 rf dm list --account A --conversation C --message ID
 rf dm read ...    # same flags; first asks the daemon to pull and commit deliveries
+rf group read --account A --group G --conversation C    # sync, then the page shape
 ```
 
-`rf dm list` never contacts the network. `rf dm read` syncs first and then
-prints the same durable response; the sync response itself is not printed.
+`rf dm list` never contacts the network. `rf dm read` and `rf group read` sync
+first and then print the same durable response; the sync response itself is not
+printed.
+
+`message.receive` keeps returning its in-memory delivery page (`entries`,
+`decrypted_messages`). That page is a volatile hint: it is cut at 64 entries and
+is empty after a restart. On the unified path its response also names the
+durable reader (`"durable_reader": "message.read"`) and the journal head
+(`snapshot_sequence`). A client of this contract never renders from that page.
 
 ## MessageView
 
