@@ -1043,4 +1043,4 @@ mod effect_marker_tests;
 mod legacy_effect_marker;
 
 #[path = "candidate_ephemeral_tests.rs"]
-mod candidate_ephemeral;
+pub(super) mod candidate_ephemeral;

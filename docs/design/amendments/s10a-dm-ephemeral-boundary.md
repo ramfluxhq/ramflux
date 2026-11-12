@@ -66,3 +66,21 @@ receipt, ACK or retry state. Retained future Edit/Reaction raw copies and native
 opening evidence share the referenced target's erase fence. Endpoint origin
 retention uses the shared strict v2 signature/evidence transcript; a legacy
 ciphertext-bearing signature is never reinterpreted as body-free origin proof.
+
+The native local `message.submit` Typing branch consumes generated
+`MessageRequest.send.content.typing` before durable operation lookup/reservation
+and response/event capture. `request_id` remains correlation-only. Within an
+unlocked account generation a committed seal's operation id never creates a
+fresh signed lifetime; an identical request returns its remembered transient
+result, and a conflicting body is refused. Reopening the account forgets this
+memory while retaining the persisted pair-incarnation allowance.
+
+Native local `message.focus { conversation_id: string | null }` declares frontend
+focus without writing storage or starting a connection. Switching/clearing focus
+attempts one volatile clear for the old conversation. The account preference
+`share_typing` defaults on and gates sending. Sender state uses the existing
+64-scope/256-KiB transient resource bounds; cadence and rate use the adopted
+4,000-ms and 20-per-60-second limits. A dropped/offline result suppresses that
+target for 60 seconds or until authenticated peer progress; neither event resets
+the pair allowance. Typing never triggers generic command network preparation,
+courier wake, outbox publication, gateway-resume persistence or response capture.

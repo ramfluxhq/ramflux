@@ -11,6 +11,9 @@ pub(super) async fn execute(
     account_id: &str,
     command: &AccountCommand,
 ) -> Result<ActorResponse, SdkError> {
+    if let Some(response) = super::generated_typing::execute(state, account_id, command).await? {
+        return Ok(response);
+    }
     let needs_network = state.accounts.get(account_id).is_some_and(|account| {
         super::method_table::account_requires_network(&command.request, account)
     });

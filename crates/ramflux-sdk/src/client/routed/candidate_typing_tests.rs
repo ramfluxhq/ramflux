@@ -17,14 +17,19 @@ async fn prepared_pair() -> Result<(Fixture, Fixture), SdkError> {
     reply_message.target_delivery_id = a.id.clone();
     let reply = seal(&b, &a, reply_message, b"reply")?;
     apply(&mut a, &reply).await?;
-    for receiver in [&a, &b] {
+    bind_typing_scope(&a, &b)?;
+    Ok((a, b))
+}
+
+fn bind_typing_scope(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
+    for receiver in [a, b] {
         let db = receiver.client.account_db()?;
         let mut thread = db.client_record("conversation", "c")?.ok_or_else(|| invalid("scope"))?;
         thread["participant_roots"] =
             serde_json::json!([a.client.own_account_anchor()?, b.client.own_account_anchor()?]);
         db.persist_client_record("conversation", "c", &thread)?;
     }
-    Ok((a, b))
+    Ok(())
 }
 
 fn typing_envelope(
@@ -177,6 +182,7 @@ async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Resul
     reply_message.target_delivery_id = a.id.clone();
     let reply = seal(&b, &a, reply_message, b"reply")?;
     apply(&mut a, &reply).await?;
+    bind_typing_scope(&a, &b)?;
     let local = a.client.owned_device_identity()?;
     let remote = a.client.device_identity(&b.reference()?)?;
     let (session, _, _) = a

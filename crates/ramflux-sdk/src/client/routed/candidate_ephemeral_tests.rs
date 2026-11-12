@@ -95,7 +95,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
     b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
     Ok(())
 }
-async fn native_pair() -> TestResult<(Native, Native)> {
+pub(crate) async fn native_pair() -> TestResult<(Native, Native)> {
     let mut a = Native::new("ephemeral-source").await?;
     let mut b = Native::new("ephemeral-receiver").await?;
     // Install the fixture's completed current-directory results. These endpoint tests
