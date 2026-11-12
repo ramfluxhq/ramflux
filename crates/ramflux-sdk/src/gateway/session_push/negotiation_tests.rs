@@ -201,7 +201,7 @@ fn id(text: &str) -> IncarnationId {
 
 #[tokio::test]
 async fn capable_negotiation_requires_signed_advertisement_and_echo() {
-    let echo_ok = bytes(&push_frame(vec![PUSH.into()], E));
+    let echo_ok = bytes(&push_frame(vec![PUSH.into(), "gateway.ephemeral.v1".into()], E));
 
     // (p1) on + echo + valid E gives Push(E); the capability is in the signed scope, once, and
     // the device proof verifies.
@@ -209,9 +209,19 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
         connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
     let engine = result.unwrap();
     assert_eq!(engine.mode, SessionMode::Push { incarnation: id(E) });
+    assert!(engine.ephemeral_negotiated, "the runtime must record the ephemeral echo");
     let signed = proof(&sent);
-    assert_eq!(signed.capability_scope, ["gateway.session", PUSH]);
+    assert_eq!(signed.capability_scope, ["gateway.session", PUSH, "gateway.ephemeral.v1"]);
     assert!(verifies(&signed));
+
+    let (push_only, _, _) =
+        connect(config(true, &["gateway.session"]), vec![bytes(&push_frame(vec![PUSH.into()], E))])
+            .await;
+    assert!(push_only.is_ok(), "an old gateway push-only echo must remain usable");
+    if let Ok(engine) = push_only {
+        assert_eq!(engine.mode, SessionMode::Push { incarnation: id(E) });
+        assert!(!engine.ephemeral_negotiated, "missing ephemeral echo stays local unsupported");
+    }
 
     // (p6) reconnect after Push, the gateway sending no echo, renegotiates to Compat.
     let mut engine = engine;
@@ -239,14 +249,21 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
     assert!(verifies(&signed));
 
     // (p5) on + a caller scope that already holds it: it appears exactly once.
-    let (result, sent, _) =
-        connect(config(true, &["gateway.session", PUSH]), vec![echo_ok.clone()]).await;
+    let (result, sent, _) = connect(
+        config(true, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
+        vec![echo_ok.clone()],
+    )
+    .await;
     result.unwrap();
     assert_eq!(count(&proof(&sent).capability_scope, PUSH), 1);
+    assert_eq!(count(&proof(&sent).capability_scope, "gateway.ephemeral.v1"), 1);
 
     // (r1) off + a caller scope that holds it: it is stripped, asserted on the signed proof.
-    let (result, sent, _) =
-        connect(config(false, &["gateway.session", PUSH]), vec![bytes(&legacy_frame())]).await;
+    let (result, sent, _) = connect(
+        config(false, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
+        vec![bytes(&legacy_frame())],
+    )
+    .await;
     result.unwrap();
     let signed = proof(&sent);
     assert_eq!(signed.capability_scope, ["gateway.session"]);

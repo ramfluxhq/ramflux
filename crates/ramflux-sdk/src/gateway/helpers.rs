@@ -83,6 +83,7 @@ pub(crate) fn signed_capability_scope(config: &GatewaySessionConfig) -> Vec<Stri
         .collect();
     if config.session_push_advertise {
         scope.push(ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned());
+        scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned());
     }
     scope
 }

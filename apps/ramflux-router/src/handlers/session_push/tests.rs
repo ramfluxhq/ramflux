@@ -146,7 +146,10 @@ fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
     let capabilities = call(&router, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
     assert_eq!(
         capabilities["capabilities"],
-        json!([ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY])
+        json!([
+            ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY,
+            ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY
+        ])
     );
     let boot = capabilities["router_boot_id"].as_str().ok_or_else(|| anyhow::anyhow!("boot"))?;
     assert!(ramflux_node_core::valid_inbox_incarnation(boot));
