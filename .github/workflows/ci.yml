@@ -348,7 +348,7 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # GitHub-hosted only. itest-memory-vault is compile-gated and used only by this job;
+  # GitHub-hosted CLI jobs. itest-memory-vault is compile-gated and used only for fixtures;
   # production rf default features stay empty. Not a local lane gate.
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
@@ -394,11 +394,8 @@ jobs:
           # Includes b1_same_node_bidirectional_dm_uses_deliver_without_resume and
           # two_nodes_have_separate_identities_cas_and_stores (Demo B).
           python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
-          # Demo B: b7_offline_twenty_dms_three_group_messages_wal,
-          # b7_offline_twenty_dms_three_group_messages_redb_only,
-          # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only,
-          # b7_group_read_before_setup_ack_keeps_catchup_live.
-          python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1
+          # Keep f2 here; the b7_* matrix runs in parallel below.
+          python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
 
@@ -407,6 +404,61 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: junit-cli
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: ignore
+
+  # Independent hosted runner: B7 never consumes the smoke job budget.
+  cli-e2e-b7:
+    name: CLI e2e (Demo B B7, GitHub-hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain and check build prerequisites
+        run: |
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git openssl; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: cli-e2e
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+
+      - name: Build node binaries and run Demo B B7
+        env:
+          RAMFLUX_ITEST_BUILD: "1"
+        run: |
+          cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
+          # Demo B: b7_offline_twenty_dms_three_group_messages_wal,
+          # b7_offline_twenty_dms_three_group_messages_redb_only,
+          # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only,
+          # b7_group_read_before_setup_ack_keeps_catchup_live.
+          python3 -B scripts/ci/run-nextest.py --label e2e_demo_b_b7 -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'test(b7_)'
+
+      - name: Upload B7 JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-cli-b7
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
