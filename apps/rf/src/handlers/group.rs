@@ -143,6 +143,16 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
             )
         }
         GroupAction::Read(read) => {
+            if super::dm::unified::print_group_read(
+                &mut bus,
+                &read.account,
+                &read.group,
+                &read.conversation,
+            )
+            .await?
+            {
+                return Ok(());
+            }
             let request = LocalBusGroupReceiveRequest {
                 group_id: read.group,
                 conversation_id: read.conversation,

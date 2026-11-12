@@ -850,10 +850,15 @@ pub(crate) async fn dispatch_message_receive_request(
             serde_json::json!({"entries":fresh}),
         )
     });
-    Ok(LocalBusDispatchResult {
-        response_body: serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext}),
-        event,
-    })
+    let mut response_body = serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext});
+    if crate::client::target_selection::schema_v1_selected() {
+        // The page above is a volatile delivery hint that a restart or a long backlog truncates.
+        // Unified consumers read committed messages from the durable reader named here.
+        response_body["durable_reader"] = serde_json::json!("message.read");
+        response_body["snapshot_sequence"] =
+            serde_json::json!(account.client.account_db()?.journal_bounds()?.head_seq);
+    }
+    Ok(LocalBusDispatchResult { response_body, event })
 }
 
 fn quarantine_projection_failure(
