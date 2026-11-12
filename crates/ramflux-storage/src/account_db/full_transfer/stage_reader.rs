@@ -42,7 +42,7 @@ impl<'db> FullTransferStage<'db> {
 }
 impl FullForwardReader<'_, '_> {
     fn guard(&mut self) -> io::Result<()> {
-        if self.failed || self.stage.db.require_full_stage_unlock().is_err() {
+        if self.failed || self.stage.require_io().is_err() {
             return self.fail();
         }
         Ok(())
