@@ -18,6 +18,7 @@ use ramflux_protocol::custody::pairing::{
 };
 use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod bootstrap;
+pub(super) mod cancel;
 
 pub(super) struct FullCeremony {
     pub(super) common: CommonV3,
@@ -292,6 +293,21 @@ impl PairingActor {
 }
 
 impl PairingActor {
+    async fn prepare_live_full_source(
+        &self,
+    ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
+        let participant =
+            self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
+        // Complete source census/typed encoding before any Issue/Create allocation.
+        let source = tokio::task::spawn_blocking(move || participant.prepare_full_source())
+            .await
+            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+        if let Err(error) = self.full_runtime.require_live() {
+            source.1.cancel();
+            return Err(error);
+        }
+        Ok(source)
+    }
     /// Explicit full-transfer begin; typed source preflight completes before native Issue.
     /// # Errors
     /// Refuses default-off, non-primary, locked/unsupported source or native/SAS setup errors.
@@ -312,12 +328,7 @@ impl PairingActor {
             return Err(SdkError::PairingCode("Busy"));
         }
         self.refresh_generation().await?;
-        let participant =
-            self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        // Complete source census/typed encoding before any Issue/Create allocation.
-        let source = tokio::task::spawn_blocking(move || participant.prepare_full_source())
-            .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+        let source = self.prepare_live_full_source().await?;
         let spec = begin
             .create_spec(
                 self.identity.local_ref.clone(),

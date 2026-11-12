@@ -93,6 +93,7 @@ pub struct PairingActor {
     transport: Arc<dyn PairingTransport>,
     config: PairingConfig,
     full_node: Option<ramflux_crypto::custody::VerifiedNodeRecord>,
+    full_runtime: Arc<full::cancel::FullRuntimeCancel>,
     actor_generation: u64,
     frontend_generation: u64,
     ceremony: Option<Ceremony>,
@@ -163,6 +164,7 @@ impl PairingActor {
             transport,
             config,
             full_node: None,
+            full_runtime: Arc::new(full::cancel::FullRuntimeCancel::default()),
             actor_generation: 1,
             frontend_generation: 1,
             ceremony: None,
@@ -556,6 +558,7 @@ impl PairingActor {
     }
 
     fn require_open(&self) -> Result<(), SdkError> {
+        self.full_runtime.require_live()?;
         if self.config.enabled { Ok(()) } else { Err(SdkError::PairingCode("NotFound")) }
     }
 
