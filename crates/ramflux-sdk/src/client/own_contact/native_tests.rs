@@ -100,17 +100,25 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     remove_sibling_sync(&own, &mut native, &primary)?;
     assert!(own.client.prepare_self_sync_repair(&own.config)?.is_none());
-    assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 0,
-        "a certified Sync restriction retires an obsolete target without blocking the courier");
+    assert_eq!(
+        own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0,
+        0,
+        "a certified Sync restriction retires an obsolete target without blocking the courier"
+    );
     Ok(())
 }
 
-fn remove_sibling_sync(own: &Fixture, native: &mut ramflux_protocol::custody::CustodyManifest,
-    primary: &ramflux_crypto::custody::SelfSigningKey) -> TestResult {
+fn remove_sibling_sync(
+    own: &Fixture,
+    native: &mut ramflux_protocol::custody::CustodyManifest,
+    primary: &ramflux_crypto::custody::SelfSigningKey,
+) -> TestResult {
     let mut body = native.publication.record.body.clone();
-    body.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&native.publication.record)?);
+    body.previous_record_hash =
+        Some(ramflux_protocol::custody::object_hash(&native.publication.record)?);
     body.device_set_epoch += 1;
-    let entry = body.devices.iter_mut().find(|entry| entry.device_id == "sibling").ok_or("sibling")?;
+    let entry =
+        body.devices.iter_mut().find(|entry| entry.device_id == "sibling").ok_or("sibling")?;
     let mut certificate = entry.branch_certificate.as_ref().ok_or("certificate")?.body.clone();
     certificate.capabilities.retain(|scope| scope != "sync");
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
