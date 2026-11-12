@@ -95,3 +95,25 @@ fn history_page_digest_binds_transfer_page_previous_and_exact_items() -> TestRes
     assert!(g::history_chain::digest(&[1; 32], 0, &[0; 32], &over).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn history_cached_page_is_erased_with_any_carried_owner() -> TestResult {
+    let own = Fixture::new("history-producer-erase").await?;
+    own.client.send_direct_message("c", "first", "alice", b"a")?;
+    own.client.send_direct_message("c", "second", "alice", b"b")?;
+    let db = own.client.account_db()?;
+    let key = super::producer::page_key("sibling");
+    db.write_transaction(|| {
+        db.persist_actor_state(&key, &serde_json::json!({"sealed": "page"}))?;
+        db.bind_message_container_reference("first", &key)?;
+        db.bind_message_container_reference("second", &key)?;
+        Ok::<_, SdkError>(())
+    })?;
+    assert!(db.actor_state_exists(&key)?);
+    db.delete_direct_message("c", "second", "local", "erase-second")?;
+    assert!(
+        !db.actor_state_exists(&key)?,
+        "erasing any carried owner invalidates the whole cached page"
+    );
+    Ok(())
+}
