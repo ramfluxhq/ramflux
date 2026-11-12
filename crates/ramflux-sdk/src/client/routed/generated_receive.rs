@@ -788,7 +788,7 @@ impl RamfluxClient {
                 self.authorize_generated_a2i(opened, entry, event)?;
             }
             Some(g::control::Payload::ObjectRevoke(revoke)) => {
-                self.authorize_generated_object_revoke(opened, entry, revoke)?;
+                self.authorize_received_object_revoke(opened, entry, revoke)?;
             }
             _ => {}
         }

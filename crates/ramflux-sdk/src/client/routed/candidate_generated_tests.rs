@@ -1694,6 +1694,9 @@ mod reparse_edit;
 #[path = "candidate_control_executor_tests.rs"]
 mod control_executor;
 
+#[path = "candidate_native_control_tests.rs"]
+mod native_control;
+
 #[tokio::test(flavor = "current_thread")]
 async fn stale_self_sync_draft_retains_only_content_free_delivery_receipt() -> Result<(), SdkError>
 {
