@@ -834,3 +834,6 @@ OriginalGroupBinding	group_id	1	1
 OriginalGroupBinding	author	2	1
 OriginalGroupBinding	key_epoch	3	1
 OriginalGroupBinding	group_state_hash	4	1
+GroupControlBodySnapshot	snapshot	1	3
+GroupControlBodySnapshot	distribution	2	3
+GroupControlBody	snapshot	5	3

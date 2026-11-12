@@ -61,6 +61,22 @@ impl RamfluxClient {
         {
             return Err(invalid("own sent original identity or kind mismatch"));
         }
+        if scanned.kind == 1
+            && g::Message::decode(scanned.body)
+                .map_err(|_| invalid("own sent Message malformed"))?
+                .sealed_group
+                .is_some()
+        {
+            return Err(invalid("own sent requires plaintext Message"));
+        }
+        if scanned.kind == 3
+            && g::Edit::decode(scanned.body)
+                .map_err(|_| invalid("own sent Edit malformed"))?
+                .replacement
+                .is_some_and(|message| message.sealed_group.is_some())
+        {
+            return Err(invalid("own sent requires plaintext Edit replacement"));
+        }
         let original = self.device_identity_for_root(&author.account_anchor, &author.device_id)?;
         let record = self
             .account_db()?

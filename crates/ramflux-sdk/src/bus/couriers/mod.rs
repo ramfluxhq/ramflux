@@ -21,6 +21,7 @@ pub(crate) mod test_pass;
 pub(crate) mod surface;
 
 pub(crate) mod reset;
+pub(crate) mod self_sync;
 
 #[cfg(test)]
 mod tests;

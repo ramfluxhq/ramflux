@@ -79,12 +79,13 @@ pub(crate) async fn request_entry(
         },
     )?;
     packet.packet.schema = super::ENVELOPE_SCHEMA.into();
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, packet, None)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+        envelope,
     })
 }
 
@@ -489,6 +490,8 @@ async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity()
         .contact_request(&sender.client.own_account_anchor()?, "inbound")?
         .ok_or("native pending request")?;
     assert_eq!(request.state, "pending");
-    assert!(target.client.friend_links()?.is_empty(), "receiving a request never accepts it");
+    let links = target.client.friend_links()?;
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].state, "pending", "receiving a request never accepts it");
     Ok(())
 }

@@ -165,7 +165,7 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
         "surface.send",
         serde_json::to_value(event)?,
     );
-    let error = dispatch_surface_inner(&request, &mut state)
+    let error = Box::pin(dispatch_surface_inner(&request, &mut state))
         .await
         .err()
         .ok_or("surface was authored before its conversation arrived")?;

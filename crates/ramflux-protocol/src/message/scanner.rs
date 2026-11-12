@@ -37,12 +37,7 @@ fn scan_context(
     depth: usize,
     private_body: bool,
 ) -> Result<ScanOutcome, ValidationError> {
-    if depth > MAX_DEPTH {
-        return Err(ValidationError::Limit);
-    }
-    if matches!(descriptor.name(), "Task" | "Surface") && bytes.len() > 30_720 {
-        return Err(ValidationError::Limit);
-    }
+    message_limits(descriptor, bytes, depth)?;
     let mut input = bytes;
     let mut previous = 0;
     let mut counts = BTreeMap::<u32, usize>::new();
@@ -137,6 +132,23 @@ fn scan_context(
     Ok(outcome)
 }
 
+fn message_limits(
+    descriptor: &MessageDescriptor,
+    bytes: &[u8],
+    depth: usize,
+) -> Result<(), ValidationError> {
+    if depth > MAX_DEPTH {
+        return Err(ValidationError::Limit);
+    }
+    if matches!(descriptor.name(), "Task" | "Surface") && bytes.len() > 30_720 {
+        return Err(ValidationError::Limit);
+    }
+    if descriptor.name() == "GroupKeyDistribution" && bytes.len() > 4096 {
+        return Err(ValidationError::Limit);
+    }
+    Ok(())
+}
+
 fn collection_cap(message: &str, field: &str, count: usize) -> Result<(), ValidationError> {
     let maximum = match (message, field) {
         ("Message", "entities") => MAX_ENTITIES,
@@ -201,6 +213,7 @@ fn scan_field(
             let cap = match (schema.parent_message().name(), schema.name()) {
                 ("Thumbnail", "encoded_image") => 16 * 1024,
                 (_, "native_authority_proof") => 8 * 1024,
+                ("NativeGroupSnapshot", "canonical") => crate::group_state::MAX_GROUP_STATE_BYTES,
                 (name, "canonical") if name.starts_with("Native") => 8 * 1024,
                 _ => super::validation::MAX_INNER_BYTES,
             };
@@ -266,4 +279,64 @@ fn json_member_key(mut bytes: &[u8]) -> Result<&str, ValidationError> {
         }
     }
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message as _;
+
+    #[test]
+    fn native_snapshot_leaf_uses_native_cap_without_expanding_other_leaves()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
+        for name in ["NativeGroupSnapshot", "NativeGroupActor"] {
+            let descriptor = pool
+                .all_messages()
+                .find(|value| value.name() == name)
+                .ok_or("native descriptor missing")?;
+            let cap = if name == "NativeGroupSnapshot" {
+                crate::group_state::MAX_GROUP_STATE_BYTES
+            } else {
+                8192
+            };
+            for size in [cap, cap + 1] {
+                let bytes = super::super::NativeGroupSnapshot { canonical: vec![b'x'; size] }
+                    .encode_to_vec();
+                let result = scan(&descriptor, &bytes, 3, 0);
+                if size == cap {
+                    assert_eq!(result?, ScanOutcome::Supported, "{name} at cap");
+                } else {
+                    assert_eq!(result, Err(ValidationError::Limit), "{name} beyond cap");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn group_distribution_is_bounded_before_native_parsing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
+        let descriptor = pool
+            .all_messages()
+            .find(|value| value.name() == "GroupKeyDistribution")
+            .ok_or("distribution descriptor missing")?;
+        for size in [4093, 4094] {
+            // Tag + minimal two-byte length produce exactly cap / cap+1.
+            let bytes = super::super::GroupKeyDistribution {
+                sender_key_seed: vec![1; size],
+                ..Default::default()
+            }
+            .encode_to_vec();
+            assert_eq!(bytes.len(), size + 3);
+            let result = scan(&descriptor, &bytes, 3, 0);
+            if size == 4093 {
+                assert_eq!(result?, ScanOutcome::Supported);
+            } else {
+                assert_eq!(result, Err(ValidationError::Limit));
+            }
+        }
+        Ok(())
+    }
 }

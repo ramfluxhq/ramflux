@@ -15,6 +15,7 @@ mod bootstrap;
 mod controls;
 mod generated;
 mod receive_directory;
+mod snapshot_generated;
 pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
 mod creator_conflicts;
 mod devices;

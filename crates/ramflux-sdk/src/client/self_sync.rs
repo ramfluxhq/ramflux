@@ -13,6 +13,7 @@ use ramflux_protocol::message::{
 use serde::{Deserialize, Serialize};
 
 mod bootstrap;
+pub(crate) mod delivery;
 mod fence;
 mod retirement;
 
@@ -463,8 +464,12 @@ impl RamfluxClient {
                 .and_then(|record| record["device_epoch"].as_u64())
                 .ok_or_else(|| refused("repair target epoch missing"))?
         };
+        let local = self.owned_device_identity()?;
+        let local_epoch = self.self_sync_target_epoch(&local)?;
         let id = ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&(
             scope,
+            local.storage_key(),
+            local_epoch,
             source.storage_key(),
             epoch,
             state.value.revision,
@@ -479,7 +484,7 @@ impl RamfluxClient {
             "conversation_id": state.conversation_id, "scope":scope, "references":state.references,
         });
         self.persist_self_sync_owned_state(&format!("self-sync/repair/{id}"), &serde_json::json!({
-            "conversation_id": state.conversation_id, "scope":scope, "target": source.storage_key(),
+            "conversation_id": state.conversation_id, "scope":scope, "target": source.storage_key(), "target_epoch": epoch,
             "exact_body": state.exact_body, "references": state.references,
             "read_marker_body": state.read_marker_body.as_ref().map(|body| &body.exact_body),
         }), &state.references)?;

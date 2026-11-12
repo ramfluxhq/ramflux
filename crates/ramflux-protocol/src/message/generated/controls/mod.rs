@@ -50,6 +50,9 @@ pub use group_control_body_request_types::*;
 #[path = "group_control_body_result.rs"]
 mod group_control_body_result_types;
 pub use group_control_body_result_types::*;
+#[path = "group_control_body_snapshot.rs"]
+mod group_control_body_snapshot_types;
+pub use group_control_body_snapshot_types::*;
 #[path = "group_control_body_transfer.rs"]
 mod group_control_body_transfer_types;
 pub use group_control_body_transfer_types::*;

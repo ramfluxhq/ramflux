@@ -263,9 +263,9 @@ fn prepare_target(
         )?
     };
     plan.intent.round_devices += 1;
-    let bytes = zeroize::Zeroizing::new(client.shared_group_packet(
+    let bytes = zeroize::Zeroizing::new(client.shared_group_packet_for_recipient(
         &selected,
-        selected.view().effective_role(root, &device.device_id).is_some(),
+        &client.device_identity_for_root(root, &device.device_id)?,
     )?);
     let state = selected.snapshot();
     let envelope = format!(
@@ -281,7 +281,7 @@ fn prepare_target(
     );
     let message = GatewayDirectMessage {
         conversation_id: state.state.conversation_id.clone(),
-        message_id: envelope,
+        message_id: crate::RamfluxClient::shared_group_packet_message_id(&bytes, &envelope)?,
         envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
         source_principal_id: plan.config.principal_id.clone(),
         sender_id: plan.config.device_id.clone(),
