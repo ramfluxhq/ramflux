@@ -89,7 +89,32 @@ impl RamfluxClient {
             .map(|m| &m.identity.root_commitment)
             .collect::<BTreeSet<_>>()
         {
-            if let Some(set) = self.observed_device_set(root)? {
+            if let Some(authority) =
+                self.current_custody_authority(root, crate::custody::network_now()?)?
+            {
+                let now = crate::custody::network_now()?;
+                let names = authority
+                    .envelope()
+                    .body
+                    .devices
+                    .iter()
+                    .filter(|entry| {
+                        let device = ramflux_protocol::custody::DeviceRef {
+                            account_anchor: root.clone(),
+                            device_id: entry.device_id.clone(),
+                            device_epoch: entry.device_epoch,
+                        };
+                        authority.authorize(&device, "group", now).is_ok()
+                            && authority.authorize(&device, "message", now).is_ok()
+                    })
+                    .map(|entry| entry.device_id.clone())
+                    .collect();
+                manifests.insert(root.clone(), names);
+            } else if self.custody_mode_observed(root)? {
+                return Err(SdkError::InboundPending(
+                    "native group roster authority unavailable".into(),
+                ));
+            } else if let Some(set) = self.observed_device_set(root)? {
                 manifests.insert(
                     root.clone(),
                     set.devices
@@ -102,6 +127,20 @@ impl RamfluxClient {
         }
         Ok(select(state.view(), &manifests))
     }
+    pub(super) fn group_roster_epoch(&self, root: &str) -> Result<Option<u64>, SdkError> {
+        if let Some(authority) =
+            self.current_custody_authority(root, crate::custody::network_now()?)?
+        {
+            return Ok(Some(authority.envelope().body.device_set_epoch));
+        }
+        if self.custody_mode_observed(root)? {
+            return Err(SdkError::InboundPending(
+                "native group roster authority unavailable".into(),
+            ));
+        }
+        Ok(self.observed_device_set(root)?.map(|set| set.device_set_epoch))
+    }
+
     pub(crate) fn ensure_shared_group_device(
         &self,
         state: &ramflux_crypto::VerifiedGroupState,

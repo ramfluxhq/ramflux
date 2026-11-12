@@ -400,3 +400,96 @@ fn self_sync_publication_preserves_exact_body_and_independent_read_register() ->
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copies() -> TestResult {
+    let (client, root) =
+        client_with_account("self-sync-repair-lifetime", "principal_sync", "local")?;
+    let a = g::SelfSync {
+        operation: 2,
+        revision: 1,
+        draft: Some(g::Message { text: "draft alpha".into(), ..Default::default() }),
+        ..Default::default()
+    };
+    let b = g::SelfSync {
+        draft: Some(g::Message { text: "draft beta".into(), ..Default::default() }),
+        ..a.clone()
+    };
+    let (loser, winner) = if body_hash(&a.encode_to_vec())? < body_hash(&b.encode_to_vec())? {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let source = client.owned_device_identity()?;
+    let db = client.account_db()?;
+    apply(&client, &loser)?;
+    client.bootstrap_self_sync(&source)?;
+    let old_marker =
+        db.actor_state_keys("self-sync/repair-sent/")?.pop().ok_or("old repair marker")?;
+    let old_repair = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old repair")?;
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ramflux-protocol/src/sender_transcript_vectors.json"
+    ))?;
+    let envelope: ramflux_protocol::Envelope = serde_json::from_value(vectors["envelope"].clone())?;
+    client.persist_self_sync_delivery("c", &loser, &envelope)?;
+    assert!(apply(&client, &winner)?, "equal-revision greater hash must win");
+    assert!(!db.actor_state_exists(&old_marker)?);
+    assert!(
+        !serde_json::to_string(&db.pending_outbox(256)?)?.contains(&old_marker),
+        "erased draft hash must also leave the private outbox keys"
+    );
+    assert!(!db.actor_state_exists(&old_repair)?);
+    assert_eq!(db.actor_state_usage("self-sync/pending/")?.0, 0);
+    assert!(!apply(&client, &loser)?, "equal-revision losing writer is stale");
+    assert_eq!(
+        db.actor_state_usage("self-sync/repair/")?.0,
+        1,
+        "equal-revision stale writer receives the current exact register once"
+    );
+    let key = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("winning repair")?;
+    let repair: serde_json::Value = db.load_actor_state(&key)?.ok_or("repair")?;
+    assert_eq!(
+        serde_json::from_value::<Vec<u8>>(repair["exact_body"].clone())?,
+        winner.encode_to_vec()
+    );
+    apply(&client, &value(3, 2))?;
+    assert_eq!(db.actor_state_usage("self-sync/repair/")?.0, 0);
+    assert_eq!(
+        db.actor_state_usage("self-sync/repair-sent/")?.0,
+        0,
+        "cleared draft cannot leave a plaintext guessing fingerprint"
+    );
+    assert!(!db.actor_state_exists(&key)?);
+    client.bootstrap_self_sync(&source)?;
+    client.erase_self_sync_conversation("c")?;
+    assert_eq!(db.actor_state_usage("self-sync/repair-sent/")?.0, 0);
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> TestResult {
+    let (client, root) =
+        client_with_account("self-sync-repair-read-max", "principal_sync", "local")?;
+    install_read_messages(&client)?;
+    let source = client.owned_device_identity()?;
+    apply(&client, &read("m1", 2))?;
+    client.bootstrap_self_sync(&source)?;
+    let db = client.account_db()?;
+    let old = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old read repair")?;
+    assert!(apply(&client, &read("m2", 1))?);
+    assert!(!db.actor_state_exists(&old)?, "new max read retires an obsolete exact repair body");
+    let next = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("updated read repair")?;
+    let repair: serde_json::Value = db.load_actor_state(&next)?.ok_or("repair")?;
+    assert_eq!(
+        serde_json::from_value::<Vec<u8>>(repair["read_marker_body"].clone())?,
+        read("m2", 1).encode_to_vec()
+    );
+    client.bootstrap_self_sync(&source)?;
+    assert_eq!(db.actor_state_usage("self-sync/repair/")?.0, 1);
+    assert_eq!(client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?.value.revision, 2);
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

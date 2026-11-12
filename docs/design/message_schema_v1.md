@@ -4911,3 +4911,5 @@ See [Unsupported diagnostics](amendments/s10a-unsupported-diagnostics.md) for
 ordered reason labels, opaque local handles and retirement of those handles.
 
 Private revision entropy amendment for activation: [layer 3 / floor 3](message-private-revision-amendment.md).
+
+Native full-state group bootstrap additionally uses the controller-adopted fixed snapshot arm; see [the S10a group snapshot amendment](message_schema_v1_group_snapshot.md) (OV-GROUP-SNAPSHOT-ARM; provisional audit pending).

@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Native own-root history transport, exact-item digest chain and atomic item imports.
+use crate::client::identity_authority::{HeadUse, NativeOperation};
+use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct Transfer {
+    id: Vec<u8>,
+    last_page: u64,
+    last_digest: Vec<u8>,
+    accepted_at: i64,
+    pages: BTreeMap<u64, Vec<u8>>,
+}
+
+fn refused(reason: &str) -> SdkError {
+    SdkError::GeneratedRefused {
+        code: crate::error::GeneratedRefusalCode::Content,
+        reason: reason.into(),
+    }
+}
+
+impl Transfer {
+    // Only a newly accepted page refreshes the inactivity deadline. Retransmits cannot
+    // hold the source's single transfer open forever or switch its active transfer id.
+    fn advance(&mut self, page: &g::HistoryPage, now: i64) -> Result<bool, SdkError> {
+        if now.saturating_sub(self.accepted_at) >= 60 {
+            *self = Self::default();
+        }
+        if self.id.is_empty() {
+            if page.page != 0 || page.previous_page_digest != [0; 32] {
+                return Err(refused("history transfer must start at page zero"));
+            }
+            self.id.clone_from(&page.transfer_id);
+        } else {
+            if self.id != page.transfer_id {
+                return Err(refused("interleaved history transfer"));
+            }
+            if let Some(digest) = self.pages.get(&page.page) {
+                return if digest == &page.page_digest {
+                    Ok(false)
+                } else {
+                    Err(SdkError::ReplayMismatch)
+                };
+            }
+            if self.last_page.checked_add(1) != Some(page.page)
+                || self.last_digest != page.previous_page_digest
+            {
+                return Err(refused("history page chain gap or mismatch"));
+            }
+        }
+        self.last_page = page.page;
+        self.last_digest.clone_from(&page.page_digest);
+        self.accepted_at = now;
+        self.pages.insert(page.page, page.page_digest.clone());
+        Ok(true)
+    }
+}
+
+fn edited(item: &g::HistoryItem) -> Result<bool, SdkError> {
+    let inner = g::Inner::decode(item.exact_inner.as_slice())
+        .map_err(|_| refused("history item Inner malformed"))?;
+    Ok(inner.kind == 3
+        || item.original_metadata_evidence.is_some()
+        || !item.exact_original_identity.is_empty())
+}
+
+impl RamfluxClient {
+    pub(crate) fn authorize_generated_history_page(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        exact_control: &[u8],
+    ) -> Result<g::HistoryPage, SdkError> {
+        let local = self.owned_device_identity()?;
+        if source == &local || source.root_commitment() != local.root_commitment() {
+            return Err(refused("history transport requires an own-root sibling"));
+        }
+        self.require_native_operation(source, NativeOperation::Sync)?;
+        self.require_native_operation(&local, NativeOperation::Sync)?;
+        // Hash the exact wire items before decoding/authorizing any nested item.
+        let page = g::history_chain::verify_control(exact_control)
+            .map_err(|_| refused("history page exact-item digest mismatch"))?;
+        let key = format!("routed/history-transfer/{}", source.storage_key());
+        let mut state = self.account_db()?.load_actor_state::<Transfer>(&key)?.unwrap_or_default();
+        state.advance(&page, crate::time::now_unix_timestamp())?;
+        for item in &page.items {
+            let identity = if edited(item)? {
+                self.verify_generated_edited_history_item(item)?
+            } else {
+                Self::verify_history_message_origin(item)?.0
+            };
+            self.authorize_history_message_scope(&identity)?;
+        }
+        Ok(page)
+    }
+
+    pub(crate) fn receive_generated_history_page(
+        &self,
+        entry: &GatewayInboxEntry,
+        exact_control: &[u8],
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let page = self.authorize_generated_history_page(&source, exact_control)?;
+            let key = format!("routed/history-transfer/{}", source.storage_key());
+            let mut state = db.load_actor_state::<Transfer>(&key)?.unwrap_or_default();
+            if !state.advance(&page, crate::time::now_unix_timestamp())? {
+                return Ok(());
+            }
+            for item in &page.items {
+                if edited(item)? {
+                    self.apply_generated_history_edit(entry, item)?;
+                } else {
+                    self.import_generated_history_message(&source, item)?;
+                }
+            }
+            db.persist_actor_state(&key, &state)?;
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn outgoing_history_requires_a_native_bound_peer_scope()
+    -> crate::client::native_test_support::TestResult {
+        let own =
+            crate::client::native_test_support::Fixture::new("outgoing-history-scope").await?;
+        let peer =
+            crate::client::native_test_support::Fixture::new("outgoing-history-peer").await?;
+        let own_root = own.client.own_account_anchor()?;
+        let peer_root = peer.client.own_account_anchor()?;
+        let conversation = g::dm_scope::derive(&own_root, &peer_root)?;
+        let identity = own.client.allocate_generated_identity(&conversation, 1000, false)?;
+        assert!(
+            own.client.authorize_history_message_scope(&identity).is_err(),
+            "an outgoing history item cannot establish its own peer relationship"
+        );
+        let db = own.client.account_db()?;
+        db.persist_client_record(
+            "conversation",
+            &conversation,
+            &serde_json::json!({
+                "kind":"direct", "group_id":null, "participant_roots":[own_root,peer_root],
+            }),
+        )?;
+        own.client.authorize_history_message_scope(&identity)?;
+        db.persist_client_record(
+            "conversation",
+            &conversation,
+            &serde_json::json!({
+                "kind":"direct", "group_id":null, "participant_roots":[own_root,own_root],
+            }),
+        )?;
+        assert!(own.client.authorize_history_message_scope(&identity).is_err());
+        assert!(
+            own.client.friend_links()?.is_empty(),
+            "history scope checks grant no contact authority"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn history_chain_replays_do_not_refresh_and_gaps_forks_interleaving_refuse()
+    -> Result<(), SdkError> {
+        let mut state = Transfer::default();
+        let mut first = g::HistoryPage {
+            transfer_id: vec![1; 32],
+            previous_page_digest: vec![0; 32],
+            page_digest: vec![2; 32],
+            ..Default::default()
+        };
+        assert!(state.advance(&first, 100)?);
+        assert!(!state.advance(&first, 120)?);
+        assert_eq!(state.accepted_at, 100);
+        first.page_digest[0] ^= 1;
+        assert!(matches!(state.advance(&first, 121), Err(SdkError::ReplayMismatch)));
+        first.page_digest[0] ^= 1;
+        let mut second = g::HistoryPage {
+            page: 1,
+            previous_page_digest: first.page_digest.clone(),
+            page_digest: vec![3; 32],
+            ..first.clone()
+        };
+        second.transfer_id[0] ^= 1;
+        assert!(state.advance(&second, 122).is_err());
+        second.transfer_id[0] ^= 1;
+        second.page = 2;
+        assert!(state.advance(&second, 123).is_err());
+        second.page = 1;
+        second.previous_page_digest[0] ^= 1;
+        assert!(state.advance(&second, 124).is_err());
+        second.previous_page_digest[0] ^= 1;
+        assert!(state.advance(&second, 125)?);
+        assert!(!state.advance(&first, 130)?, "an earlier exact replay settles");
+        assert_eq!(state.accepted_at, 125);
+        assert!(
+            state.advance(&second, 185).is_err(),
+            "expired transfer cannot restart at page one"
+        );
+        first.transfer_id[0] ^= 1;
+        assert!(state.advance(&first, 185)?);
+        Ok(())
+    }
+}

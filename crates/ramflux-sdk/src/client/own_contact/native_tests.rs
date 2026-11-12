@@ -17,6 +17,11 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     )?;
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
+    let value = own.client.change_self_sync(
+        "native-bootstrap-thread",
+        ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
+    )?;
+    assert_eq!(value.revision, 1);
     let mut native = own.manifest.custody.as_ref().ok_or("native")?.clone();
     let primary = own.vault.primary_for_public_key(
         &native.publication.record.body.master_certificate.body.self_signing_public_key,
@@ -50,9 +55,24 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     own.client.device_branch = None;
     assert_eq!(crate::bus::own_device_copy::copy_id(&own.client, "public-id")?, before);
     assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
+    assert_eq!(
+        own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0,
+        1,
+        "native enrollment queues accepted SelfSync even before sibling prekey refresh"
+    );
     assert_eq!(own.client.stage_contact_backfill_batch()?, 1);
     assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
+    assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 1);
+    assert_eq!(
+        own.client
+            .self_sync_state("native-bootstrap-thread", &value)?
+            .ok_or("state")?
+            .value
+            .revision,
+        1,
+        "bootstrap never increments the accepted revision"
+    );
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
     Ok(())

@@ -22,6 +22,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Option<Envelope<ContactConsentV2>>,
     struct Schema {
         schema: String,
     }
+    if let Some(consent) = super::generated::decode(bytes)? {
+        return Ok(Some(consent));
+    }
     if !serde_json::from_slice::<Header>(bytes)
         .is_ok_and(|header| header.body.schema == ramflux_protocol::domain::CONTACT_REQUEST_V2)
     {

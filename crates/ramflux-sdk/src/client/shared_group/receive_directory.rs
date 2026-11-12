@@ -72,9 +72,8 @@ impl RamfluxClient {
         }
         self.contact_route_gate(entry, route, body)?;
         self.confirm_routed_context(route, entry)?;
-        if let Ok(packet) = ramflux_protocol::parse_i_json::<super::GroupControlPacket>(body)
-            && packet.schema == super::controls::CONTROL_SCHEMA
-        {
+        if let Some(decoded) = super::generated::decode(body)? {
+            let packet = decoded.packet;
             if body.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES
                 || route.group_id.as_deref() != Some(packet.group())
             {

@@ -75,14 +75,14 @@ impl RamfluxClient {
                     continue;
                 }
                 self.remember_self_sync_revision(conversation, &key, state.value.revision)?;
-                db.remove_actor_state(&key)?;
+                db.retire_self_sync_actor(&key)?;
             }
-            for prefix in ["self-sync/pending/", "self-sync/repair/"] {
+            for prefix in ["self-sync/pending/", "self-sync/repair/", "self-sync/repair-sent/"] {
                 for key in db.actor_state_keys(prefix)? {
                     if db.load_actor_state::<serde_json::Value>(&key)?.is_some_and(|value| {
                         value["conversation_id"].as_str() == Some(conversation)
                     }) {
-                        db.remove_actor_state(&key)?;
+                        db.retire_self_sync_actor(&key)?;
                     }
                 }
             }

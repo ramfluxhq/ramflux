@@ -503,7 +503,7 @@ fn recipient(
         format!("contact_{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
     let message = GatewayDirectMessage {
         conversation_id: conversation(&plan.intent.requester_root, &plan.intent.target_root)?,
-        message_id: id.clone(),
+        message_id: super::super::generated::message_id(&body, &id)?,
         envelope_id: id,
         source_principal_id: plan.config.principal_id.clone(),
         sender_id: plan.config.device_id.clone(),

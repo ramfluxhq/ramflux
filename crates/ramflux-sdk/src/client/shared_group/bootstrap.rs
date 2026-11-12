@@ -111,13 +111,11 @@ impl RamfluxClient {
         }
         ramflux_protocol::message::dm_scope::validate_group(&opened.routing.conversation_id)
             .map_err(|_| invalid("reserved DM conversation namespace"))?;
-        if serde_json::from_slice::<PacketHeader<'_>>(body)
-            .is_ok_and(|header| header.schema == Some(super::controls::CONTROL_SCHEMA))
-        {
+        if let Some(decoded) = super::generated::decode(body)? {
+            let packet = decoded.packet;
             if body.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES {
                 return Err(invalid("group control byte budget exceeded"));
             }
-            let packet: super::GroupControlPacket = ramflux_protocol::parse_i_json(body)?;
             if directory.is_some() {
                 self.prepare_group_control_with_directory(
                     engine,
@@ -130,7 +128,7 @@ impl RamfluxClient {
             } else {
                 self.prepare_group_control(engine, entry, &opened.routing, &packet).await?;
             }
-            return Ok(Some(PreparedSharedGroup::Control(packet)));
+            return Ok(decoded.supported.then_some(PreparedSharedGroup::Control(packet)));
         }
         let Some(state) = decode_packet(body)? else { return Ok(None) };
         if opened.routing.group_id.as_deref() != Some(state.view().group_id.as_str())
@@ -218,6 +216,17 @@ impl RamfluxClient {
             })
             .transpose()?;
         Ok(PreparedSharedGroup::Snapshot(SnapshotPrepared { state, distribution }))
+    }
+    pub(crate) fn authorize_prepared_shared_group(
+        &self,
+        prepared: &PreparedSharedGroup,
+        entry: &GatewayInboxEntry,
+        route: &crate::client::routed::Routing,
+    ) -> Result<(), SdkError> {
+        if let PreparedSharedGroup::Control(packet) = prepared {
+            self.authorize_native_group_control_packet(entry, route, packet)?;
+        }
+        Ok(())
     }
     pub(crate) fn apply_prepared_shared_group(
         &self,

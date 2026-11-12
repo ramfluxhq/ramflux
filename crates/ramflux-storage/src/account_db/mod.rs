@@ -76,6 +76,7 @@ pub mod recovery;
 mod replay_markers;
 pub mod runtime;
 pub(crate) mod safety_verification;
+mod self_sync_retirement;
 mod shared_group_delivery;
 mod shared_group_floor_index;
 mod shared_group_heads;
