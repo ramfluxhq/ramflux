@@ -11,6 +11,7 @@ mod scalar;
 mod scalar_sql;
 mod source_base;
 mod source_cut;
+mod source_delta;
 mod source_owner;
 mod source_preparation;
 mod source_receipt;
@@ -56,3 +57,6 @@ mod source_base_tests;
 
 #[cfg(test)]
 mod source_preparation_tests;
+
+#[cfg(test)]
+mod source_delta_tests;

@@ -39,11 +39,19 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.encode_fixed_cut_source(0, snapshot_id, writer)
+    }
+    pub(super) fn encode_fixed_cut_source<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        snapshot_id: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         let rules = full_transfer_catalog();
-        let mut schema = self.source_cut_schema(0, snapshot_id, rules)?;
+        let mut schema = self.source_cut_schema(cut, snapshot_id, rules)?;
         schema.require_typed_owners(rules)?;
         let (storage_generation, source_erasure_generation) =
-            self.with_source_cut(0, snapshot_id, |input| {
+            self.with_source_cut(cut, snapshot_id, |input| {
                 Ok((
                     input.query_row(
                         "SELECT max(schema_version) FROM schema_migration",
@@ -65,7 +73,7 @@ impl SourceContext<'_> {
         let mut total = 0_u64;
         for family in &mut schema.families {
             if family.disposition == Disposition::Transfer && family.source_rows.0 > 0 {
-                let counts = self.stage_source_fixed_base_family(snapshot_id, &family.id)?;
+                let counts = self.stage_source_fixed_family(cut, snapshot_id, &family.id)?;
                 if counts.records != family.source_rows.0 {
                     return Err(invalid());
                 }
@@ -74,17 +82,11 @@ impl SourceContext<'_> {
                 total = total.checked_add(counts.encoded_bytes).ok_or_else(invalid)?;
             }
         }
-        let mut output = Rooted {
-            writer,
-            root: RootHasher::new(total).map_err(|_| invalid())?,
-            cache: Zeroizing::new(Vec::with_capacity(CHUNK_BYTES as usize)),
-            index: 0,
-            written: 0,
-        };
+        let mut output = Rooted::new(writer, total)?;
         for family in &schema.families {
             if family.portable_records.0 > 0 {
                 let (next, counts) =
-                    self.write_source_fixed_base_family(snapshot_id, &family.id, output)?;
+                    self.write_source_fixed_family(cut, snapshot_id, &family.id, output)?;
                 if counts.records != family.portable_records.0
                     || counts.encoded_bytes != family.encoded_bytes.0
                 {
@@ -93,17 +95,10 @@ impl SourceContext<'_> {
                 output = next;
             }
         }
-        if output.written != total {
-            return Err(invalid());
-        }
-        if !output.cache.is_empty() {
-            output.root.push(output.index, &output.cache).map_err(|_| invalid())?;
-            output.cache.zeroize();
-        }
-        let root = output.root.finish().map_err(|_| invalid())?;
+        let (writer, root) = output.finish(total)?;
         self.require_source_live()?;
         Ok((
-            output.writer,
+            writer,
             FullBaseSourceEncoding {
                 schema,
                 storage_generation,
@@ -115,12 +110,33 @@ impl SourceContext<'_> {
         ))
     }
 }
-struct Rooted<W> {
+pub(super) struct Rooted<W> {
     writer: W,
     root: RootHasher,
     cache: Zeroizing<Vec<u8>>,
     index: u64,
     written: u64,
+}
+impl<W> Rooted<W> {
+    pub(super) fn new(writer: W, total: u64) -> Result<Self, StorageError> {
+        Ok(Self {
+            writer,
+            root: RootHasher::new(total).map_err(|_| invalid())?,
+            cache: Zeroizing::new(Vec::with_capacity(CHUNK_BYTES as usize)),
+            index: 0,
+            written: 0,
+        })
+    }
+    pub(super) fn finish(mut self, total: u64) -> Result<(W, [u8; 32]), StorageError> {
+        if self.written != total {
+            return Err(invalid());
+        }
+        if !self.cache.is_empty() {
+            self.root.push(self.index, &self.cache).map_err(|_| invalid())?;
+            self.cache.zeroize();
+        }
+        Ok((self.writer, self.root.finish().map_err(|_| invalid())?))
+    }
 }
 impl<W: Write> Write for Rooted<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
