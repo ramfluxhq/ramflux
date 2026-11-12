@@ -213,6 +213,12 @@ impl crate::custody::pairing::PairingActor {
         let Some(state) = c.full.as_mut().and_then(|full| full.bootstrap.as_mut()) else {
             return Ok(false);
         };
+        if let Some(stream) = &mut state.stream {
+            if let Some(packet) = stream.advance().await? {
+                state.epoch_ready = Some(packet);
+            }
+            return Ok(true);
+        }
         if state.epoch_ready.is_some() {
             return Ok(true);
         }

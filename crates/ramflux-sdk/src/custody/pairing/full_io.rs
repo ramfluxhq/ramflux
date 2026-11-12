@@ -106,6 +106,7 @@ struct FullLocalIoRequest {
     action: FullLocalAction,
 }
 enum FullLocalAction {
+    ObservePrepublication(Box<ramflux_crypto::custody::VerifiedRecord>),
     ReadSourceChunk { hash: String, index: u64 },
     PrepareEmptyReverse,
     RetainReverseManifest { manifest: Box<SourceManifest> },
@@ -115,6 +116,7 @@ enum FullLocalAction {
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
+    NativeObserved,
     SourceChunk(Zeroizing<Vec<u8>>),
     UnsignedReverse(Box<Manifest>),
     ReverseManifestRetained,
@@ -146,6 +148,17 @@ impl FullLocalIoRequest {
             return Err(wrong());
         }
         let result = match self.action {
+            FullLocalAction::ObservePrepublication(current) => {
+                // Retain rollback/revocation/fork observations even when the current
+                // native role/key predicate refuses further data work.
+                stage.observe_full_native_head(&current)?;
+                ramflux_crypto::custody::pairing::verify_full_prepublication_authority(
+                    &stage.resume_record()?.grant,
+                    &current,
+                    custody::network_now()?,
+                )?;
+                FullLocalResult::NativeObserved
+            }
             FullLocalAction::PrepareEmptyReverse => {
                 if self.scope.role != PairingRole::Responder {
                     return Err(wrong());

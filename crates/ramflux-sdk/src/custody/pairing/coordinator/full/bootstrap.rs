@@ -23,6 +23,7 @@ pub(super) struct BootstrapState {
     pub(super) cancel: Option<FullStageIoCancel>,
     pub(super) epoch_job: Option<super::epoch::FullEpochJob>,
     pub(super) epoch_ready: Option<crate::custody::pairing::FullPacketEpoch>,
+    pub(super) stream: Option<super::stream::FullStreamState>,
 }
 impl Drop for BootstrapState {
     fn drop(&mut self) {
@@ -115,6 +116,7 @@ impl PairingActor {
                     cancel: None,
                     epoch_job: None,
                     epoch_ready: None,
+                    stream: None,
                 },
                 prepared,
                 frames,

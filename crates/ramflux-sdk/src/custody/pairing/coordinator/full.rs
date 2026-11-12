@@ -20,6 +20,7 @@ use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod bootstrap;
 pub(super) mod cancel;
 mod epoch;
+mod stream;
 
 pub(super) struct FullCeremony {
     pub(super) common: CommonV3,
@@ -35,6 +36,9 @@ pub(super) struct FullCeremony {
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
         self.bootstrap.as_mut().and_then(|state| state.epoch_job.take())
+    }
+    pub(super) fn take_stream_job(&mut self) -> Option<stream::FullStreamJob> {
+        self.bootstrap.as_mut().and_then(|state| state.stream.as_mut()).and_then(|s| s.job.take())
     }
 
     fn new(

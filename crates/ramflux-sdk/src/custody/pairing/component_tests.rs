@@ -808,6 +808,14 @@ struct ClockHold {
     release: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
+struct InstalledPairingGuard(Vec<(std::path::PathBuf, String)>);
+impl Drop for InstalledPairingGuard {
+    fn drop(&mut self) {
+        for (root, account) in &self.0 {
+            let _ = remove_actor(root, account);
+        }
+    }
+}
 impl ClockHold {
     fn new() -> Self {
         let (release, wait) = std::sync::mpsc::channel();
@@ -1190,5 +1198,170 @@ async fn pairing_full_private_io_port_uses_short_original_writer_loans() -> Test
         ));
     }
     assert!(service.receive().await.is_none(), "cancelled worker retained a sender");
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services() -> TestResult {
+    let hold = ClockHold::new();
+    let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+    rig.primary.sync_relay().await?;
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    for _ in 0..16 {
+        rig.primary.sync_relay().await?;
+        rig.secondary.sync_relay().await?;
+        tokio::task::yield_now().await;
+        if rig.primary.full_epoch_ready_for_test() && rig.secondary.full_epoch_ready_for_test() {
+            break;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(rig.primary.full_epoch_ready_for_test() && rig.secondary.full_epoch_ready_for_test());
+    let mut complete = false;
+    for _ in 0..256 {
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        {
+            let slot = rig.participant_b.db.lock().map_err(|_| "target ordinary owner")?;
+            rig.secondary.service_full_transfer(slot.as_ref().ok_or("target DB")?)?;
+        }
+        rig.primary.sync_relay().await?;
+        rig.secondary.sync_relay().await?;
+        if rig.primary.full_base_disk_complete_for_test()
+            && rig.secondary.full_base_disk_complete_for_test()
+        {
+            complete = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+        // Native/vault workers are real blocking work, not protocol timers. Join their
+        // actual completion before advancing the paused relay clock again.
+        rig.primary.settle_full_local_jobs_for_test().await;
+        rig.secondary.settle_full_local_jobs_for_test().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(complete, "owned stream did not finish its actual disk-only phase");
+    {
+        let stage = rig.source.client.account_db()?.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            rig.now,
+        )?;
+        assert!(
+            stage.source_last_data_verified()?.is_none(),
+            "disk receipt retired an unverified cut"
+        );
+    }
+    let manifest = rig.primary.full_source_manifest_for_test()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+    );
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target owner")?;
+        let db = slot.as_ref().ok_or("target DB")?;
+        let stage = db.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            rig.now,
+        )?;
+        stage.validate_forward_scalar_records(&hash, ramflux_storage::full_transfer_catalog())?;
+        assert!(db.pairing_adoption()?.is_none() && db.pairing_head()?.is_none());
+        let row = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|r| r.operation_id == operation)
+            .ok_or("data-only live row")?;
+        assert_eq!(row.phase, "mutually_confirmed", "disk receipts granted authority");
+    }
+    assert!(rig.participant_a.db.lock().map_err(|_| "source handback")?.is_none());
+    rig.primary.lock().await?;
+    rig.secondary.lock().await?;
+    hold.finish().await?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase() -> TestResult {
+    let hold = ClockHold::new();
+    let (
+        Rig {
+            primary,
+            secondary,
+            mut source,
+            participant_a,
+            participant_b,
+            now,
+            _clock,
+            _node_root,
+            recipient_root: _recipient_root,
+            ..
+        },
+        operation,
+        _,
+    ) = Box::pin(bootstrap_full_rig()).await?;
+    let manifest = primary.full_source_manifest_for_test()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+    );
+    participant_a.return_client(&mut source.client)?;
+    install_actor(&participant_a.root, participant_a.account_id.clone(), primary)?;
+    let mut installed =
+        InstalledPairingGuard(vec![(participant_a.root.clone(), participant_a.account_id.clone())]);
+    install_actor(&participant_b.root, participant_b.account_id.clone(), secondary)?;
+    installed.0.push((participant_b.root.clone(), participant_b.account_id.clone()));
+    let source_signal =
+        work_signal(&participant_a.root, &participant_a.account_id).ok_or("source pump signal")?;
+    let target_signal =
+        work_signal(&participant_b.root, &participant_b.account_id).ok_or("target pump signal")?;
+    let mut complete = false;
+    for _ in 0..256 {
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        source_signal.notified().await;
+        target_signal.notified().await;
+        service_full_transfer(
+            &participant_a.root,
+            &participant_a.account_id,
+            source.client.account_db()?,
+        )?;
+        {
+            let slot = participant_b.db.lock().map_err(|_| "target writer")?;
+            service_full_transfer(
+                &participant_b.root,
+                &participant_b.account_id,
+                slot.as_ref().ok_or("target DB")?,
+            )?;
+        }
+        let source_done = super::coordinator::settle_actor_data_for_test(
+            &participant_a.root,
+            &participant_a.account_id,
+        )
+        .await?;
+        let target_done = super::coordinator::settle_actor_data_for_test(
+            &participant_b.root,
+            &participant_b.account_id,
+        )
+        .await?;
+        if source_done && target_done {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "installed relay pumps did not complete the actual disk phase");
+    assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
+    {
+        let slot = participant_b.db.lock().map_err(|_| "target writer")?;
+        let db = slot.as_ref().ok_or("target DB")?;
+        let stage = db.open_full_transfer_stage(
+            &operation,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            now,
+        )?;
+        stage.validate_forward_scalar_records(&hash, ramflux_storage::full_transfer_catalog())?;
+        assert!(db.pairing_head()?.is_none() && db.pairing_adoption()?.is_none());
+    }
+    remove_actor_and_drain(&participant_a.root, &participant_a.account_id).await?;
+    remove_actor_and_drain(&participant_b.root, &participant_b.account_id).await?;
+    assert!(participant_b.db.lock().map_err(|_| "locked target")?.is_none());
+    hold.finish().await?;
     Ok(())
 }

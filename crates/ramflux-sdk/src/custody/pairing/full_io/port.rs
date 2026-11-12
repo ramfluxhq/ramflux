@@ -42,6 +42,10 @@ impl Drop for FullLocalIoService {
     }
 }
 impl FullLocalIoService {
+    /// Take one queued request without borrowing a database or blocking its owner.
+    pub fn try_receive(&mut self) -> Option<FullLocalIoLoan> {
+        self.0.try_recv().ok().map(FullLocalIoLoan)
+    }
     /// Wait without borrowing a database, then acquire the ordinary owner's short loan
     /// solely for `apply`. A closed worker has no remaining requests.
     pub async fn receive(&mut self) -> Option<FullLocalIoLoan> {
@@ -63,6 +67,22 @@ impl FullLocalIoLoan {
     }
 }
 impl FullLocalIoPort {
+    /// Retain this endpoint's independently fetched native head before applying its
+    /// pre-publication role/key gate. This does not grant publication or tail admission.
+    /// The stream owner must fetch through its own native query, never a peer/relay hint.
+    /// # Errors
+    /// Refuses rollback/forks/revocations, changed grant roles/keys or expired scope.
+    pub async fn observe_prepublication_head(
+        &mut self,
+        current: ramflux_crypto::custody::VerifiedRecord,
+    ) -> Result<(), SdkError> {
+        let FullLocalResult::NativeObserved =
+            self.request(FullLocalAction::ObservePrepublication(Box::new(current))).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(())
+    }
     async fn request(&mut self, action: FullLocalAction) -> Result<FullLocalResult, SdkError> {
         self.scope.live()?;
         let (reply, response) = oneshot::channel();

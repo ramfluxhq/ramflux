@@ -304,7 +304,10 @@ impl AccountRuntime {
             .ok()
     }
 
-    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+    async fn initialize_serving(
+        &mut self,
+        ready: std::sync::mpsc::SyncSender<()>,
+    ) -> Result<bool, SdkError> {
         self.initialize_readers()?;
         self.start_connection()?;
         self.start_courier();
@@ -318,8 +321,13 @@ impl AccountRuntime {
         );
         let mut shutdown = self.shutdown.clone();
         tokio::select! {
-            _ = shutdown.changed() => return Ok(()),
-            result = self.publish(&restore) => result?,
+            _ = shutdown.changed() => Ok(false),
+            result = self.publish(&restore) => result.map(|()| true),
+        }
+    }
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        if !self.initialize_serving(ready).await? {
+            return Ok(());
         }
         let mut schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
@@ -337,6 +345,8 @@ impl AccountRuntime {
             }
             self.reap_upload_jobs();
             self.reap_fetch_jobs();
+            let pairing =
+                crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => break,
@@ -351,6 +361,23 @@ impl AccountRuntime {
                     continue;
                 },
                 command = self.receiver.recv() => command,
+                () = async {
+                    match pairing {
+                        Some(signal) => signal.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(account) = self.state.accounts.get(&self.id)
+                        && let Err(error) = account.client.account_db().and_then(|db| {
+                            crate::custody::pairing::service_full_transfer(
+                                &self.state.config.data_root, &self.id, db,
+                            )
+                        }) {
+                        tracing::warn!(error_code=local_bus_error_code(&error),
+                            "pairing local data step deferred; account remains open");
+                    }
+                    continue;
+                },
                 outcome = async {
                     match self.courier.as_mut() {
                         Some(courier) => courier.recv().await,
