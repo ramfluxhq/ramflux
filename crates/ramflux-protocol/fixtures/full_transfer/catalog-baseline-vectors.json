@@ -1,7 +1,15 @@
 {
-  "census_hash": "SXH_VDwhfjwgzOie-lfi4xiBjdeOtkrjqipx5FMJR1c",
+  "census_hash": "E8_x5EoFfAgDjNaZgyADSWh675H8VFNIpZcUKzO_xbY",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
+    {
+      "hash": "cnYJn-acIjp7Vb-NLW7ugybcPDsPcZE2a_B5OF6FgwQ",
+      "id": "actor/group-message/upgrade-start"
+    },
+    {
+      "hash": "q6HM8YAKXD0r02_CO96C1bkTJjlyApKGgD7kgILy0TY",
+      "id": "actor/identity/safety-verification-migration/v1"
+    },
     {
       "hash": "RXDkB0iWmVQ6afN3ijbjqzdpogqcpDSvBWBJ5jf01u0",
       "id": "sql/a2ui_surface_cache"
@@ -19,7 +27,7 @@
       "id": "sql/account_mac_bundle/local"
     },
     {
-      "hash": "54lRu_Lpo7m1XOOiyICl9KKqgnE8xcgnLWhgN9cBbBQ",
+      "hash": "D6r2tXtes1g3S7h4zIEUg_jCrwCy2II5KhL8PeD3_sk",
       "id": "sql/account_mac_bundle/portable"
     },
     {
@@ -315,7 +323,7 @@
       "id": "sql/object_erasure_fence"
     },
     {
-      "hash": "kWUwC9-BspmhyjcOqJkjxvxCJ6fanchD26ajrntg3WY",
+      "hash": "D3VsjieIaKiVCKgmebVPDTJ2IUgKPYuKJnjTygYnTyQ",
       "id": "sql/object_erasure_lookup"
     },
     {
@@ -359,7 +367,7 @@
       "id": "sql/object_payload_actor"
     },
     {
-      "hash": "D_34bZHaZdBAIS4ryqj5vegPYpSGa0Xw7_yZ0AS_SHY",
+      "hash": "8hghPH1VPN2nTqxHfDlS60bkshmvP6-7a00u_tyNtIY",
       "id": "sql/object_payload_dependency"
     },
     {
@@ -559,7 +567,7 @@
       "id": "sql/runtime_inbox_policy"
     },
     {
-      "hash": "XXy1L-AChe9Bs_33Iba7fIhhf6TY46pWyDTQjdQjdpo",
+      "hash": "gUpy3Fl8qjaNRySN7Qy3sz20-Wl7DaQ1olhw6aMfn88",
       "id": "sql/runtime_inbox_recovery"
     },
     {

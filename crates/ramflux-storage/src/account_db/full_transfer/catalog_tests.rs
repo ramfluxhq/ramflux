@@ -213,7 +213,7 @@ fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_
         rusqlite::params!["full-transfer-unimplemented-owner", "{}"],
     )?;
     let rules = full_transfer_catalog();
-    assert_eq!(rules.len(), 159);
+    assert_eq!(rules.len(), 161);
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
         Err(error) => {
@@ -302,5 +302,68 @@ fn pairing_full_baseline_catalog_rule_and_census_hashes_match_independent_vector
         encode_base64url(full_census_hash(rules)?),
         vectors["census_hash"].as_str().ok_or("census")?
     );
+    Ok(())
+}
+
+#[test]
+fn pairing_full_local_migration_actor_checks_exact_kind_and_boolean_bytes() -> TestResult {
+    let (_root, db) = crate::tests::test_db("full-local-migration-actor")?;
+    let kind = crate::account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
+    db.connection.execute(
+        "INSERT OR REPLACE INTO runtime_actor_state VALUES(?1,?2)",
+        rusqlite::params![kind, b"true".as_slice()],
+    )?;
+    for invalid in [b"{}".as_slice(), b"true ", b"false ", b"\"true\""] {
+        db.connection.execute(
+            "UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind=?2",
+            rusqlite::params![invalid, kind],
+        )?;
+        assert!(matches!(
+            db.inspect_full_transfer_schema(full_transfer_catalog()),
+            Err(crate::StorageError::PairingField("UnsupportedRecord"))
+        ));
+    }
+    db.connection.execute(
+        "UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind=?2",
+        rusqlite::params![b"true".as_slice(), kind],
+    )?;
+    let schema = db.inspect_full_transfer_schema(full_transfer_catalog())?;
+    schema.require_typed_owners(full_transfer_catalog())?;
+    db.connection.execute(
+        "INSERT INTO runtime_actor_state VALUES(?1,?2)",
+        rusqlite::params![format!("{kind}/unknown"), b"true".as_slice()],
+    )?;
+    let schema = db.inspect_full_transfer_schema(full_transfer_catalog())?;
+    assert!(matches!(
+        schema.require_typed_owners(full_transfer_catalog()),
+        Err(crate::StorageError::PairingField("UnsupportedRecord"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn pairing_full_local_group_upgrade_marker_is_exact_canonical_integer_metadata() -> TestResult {
+    let (_root, db) = crate::tests::test_db("full-local-group-upgrade")?;
+    for invalid in
+        [b"{}".as_slice(), b"null", b"01", b"1.0", b"1e1", b"\"1\"", b"9223372036854775808"]
+    {
+        db.connection.execute("UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind='group-message/upgrade-start'",rusqlite::params![invalid])?;
+        assert!(matches!(
+            db.inspect_full_transfer_schema(full_transfer_catalog()),
+            Err(crate::StorageError::PairingField("UnsupportedRecord"))
+        ));
+    }
+    db.connection.execute("UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind='group-message/upgrade-start'",rusqlite::params![b"100".as_slice()])?;
+    db.inspect_full_transfer_schema(full_transfer_catalog())?
+        .require_typed_owners(full_transfer_catalog())?;
+    db.connection.execute(
+        "INSERT INTO runtime_actor_state VALUES('group-message/upgrade-start/unknown',?1)",
+        rusqlite::params![b"100".as_slice()],
+    )?;
+    assert!(matches!(
+        db.inspect_full_transfer_schema(full_transfer_catalog())?
+            .require_typed_owners(full_transfer_catalog()),
+        Err(crate::StorageError::PairingField("UnsupportedRecord"))
+    ));
     Ok(())
 }

@@ -675,10 +675,7 @@ pub(super) const RULE_89: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "object_payload_dependency",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "child_commitment",
@@ -686,7 +683,7 @@ pub(super) const RULE_89: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
     ]
 );

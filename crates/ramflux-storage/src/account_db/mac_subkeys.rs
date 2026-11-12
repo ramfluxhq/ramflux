@@ -104,7 +104,7 @@ fn keyed_hash(key: &[u8; 32], chunks: &[&[u8]]) -> Zeroizing<[u8; 32]> {
     output
 }
 
-fn bundle_id(keys: &[u8]) -> String {
+pub(super) fn bundle_id(keys: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"ramflux.account-mac-bundle.v1");
     hash.update(keys);

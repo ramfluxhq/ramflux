@@ -96,10 +96,20 @@ pub(super) fn inspect(
                 // Identifier comes only from the validated compiled declaration. No peer SQL,
                 // names, filters or rowid are interpreted here.
                 let sql = format!("SELECT count(*) FROM \"{table}\"");
-                family.source_rows = U64(connection.query_row(&sql, [], |row| row.get(0))?);
+                family.source_rows = U64(if table == "runtime_actor_state" {
+                    super::catalog::local_actor::unprojected_rows(connection, rules)?
+                } else {
+                    connection.query_row(&sql, [], |row| row.get(0))?
+                });
             }
             FamilySelector::Table(_) => {} // An absent optional/history family has zero rows.
-            FamilySelector::ActorPrefix(_) => return Err(unsupported()), // Owning typed projector required.
+            FamilySelector::ActorPrefix(_) => {
+                family.source_rows = U64(super::catalog::local_actor::rows(
+                    connection,
+                    rule,
+                    actual.contains("runtime_actor_state"),
+                )?);
+            }
         }
         families.push(family);
     }
@@ -144,10 +154,16 @@ pub(super) fn validate_columns(
             "BLOB" => CellType::Bytes,
             _ => return Err(schema()),
         };
-        if let CodecRule::Scalar { cell_type }
-        | CodecRule::RequiresOwner { cell_type, .. }
-        | CodecRule::Generated { cell_type, .. } = field.codec
-        {
+        let declared_type = match field.codec {
+            CodecRule::Scalar { cell_type }
+            | CodecRule::RequiresOwner { cell_type, .. }
+            | CodecRule::Generated { cell_type, .. } => Some(cell_type),
+            CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
+            CodecRule::SqlBase64 { .. } => Some(CellType::Utf8),
+            CodecRule::SqlI64 { .. } => Some(CellType::I64),
+            _ => None,
+        };
+        if let Some(cell_type) = declared_type {
             if physical != cell_type {
                 return Err(schema());
             }

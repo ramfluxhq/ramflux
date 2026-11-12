@@ -886,7 +886,7 @@ pub(super) const RULE_139: FamilyRule = table_rule!(
             true,
             Exclude,
             PreferLocal,
-            CodecRule::RequiresOwner { owner: "runtime_inbox_recovery", cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "1", max: "1", nullable: false }
         ),
         (
             "revision",
@@ -894,7 +894,7 @@ pub(super) const RULE_139: FamilyRule = table_rule!(
             false,
             Exclude,
             PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

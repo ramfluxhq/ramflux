@@ -24,15 +24,19 @@ CREATE TABLE IF NOT EXISTS source_scalar_row(snapshot_id TEXT NOT NULL,family TE
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
-fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError> {
+pub(super) fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError> {
     let rule = full_transfer_catalog().iter().find(|rule| rule.id == family).ok_or_else(invalid)?;
     rule.require_typed_codec()?;
     if rule.disposition != Disposition::Transfer
         || rule.codec.iter().any(|field| {
-            !matches!(
-                field.codec,
-                CodecRule::SqlBytes { .. } | CodecRule::SqlBase64 { .. } | CodecRule::SqlI64 { .. }
-            )
+            field.disposition == Disposition::Transfer
+                && !matches!(
+                    field.codec,
+                    CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlBytes { .. }
+                        | CodecRule::SqlBase64 { .. }
+                        | CodecRule::SqlI64 { .. }
+                )
         })
     {
         return Err(invalid());

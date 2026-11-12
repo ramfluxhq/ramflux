@@ -9,7 +9,7 @@ use ramflux_protocol::custody::pairing::full_transfer::{
 use std::sync::{Arc, atomic::AtomicBool};
 use zeroize::Zeroizing;
 #[derive(Default)]
-struct Sink(Zeroizing<Vec<u8>>);
+pub(super) struct Sink(pub(super) Zeroizing<Vec<u8>>);
 impl std::io::Write for Sink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.extend_from_slice(bytes);
@@ -151,5 +151,43 @@ fn pairing_full_fixed_source_spool_rechecks_generation_before_each_output_row() 
         1,
         "stale source emitted a second row after generation replacement"
     );
+    Ok(())
+}
+
+#[test]
+fn pairing_full_fixed_source_spool_encodes_lookup_and_dependency_families() -> TestResult {
+    let (root, db) = crate::tests::test_db("full-source-erasure-links")?;
+    let lookup = ramflux_crypto::object_erasure_lookup("root", "wire");
+    let commitment = ramflux_crypto::object_erasure_commitment("root", "wire", "manifest");
+    db.connection.execute(
+        "INSERT INTO object_erasure_lookup(lookup,commitment) VALUES(?1,?2)",
+        rusqlite::params![lookup, commitment],
+    )?;
+    db.connection.execute(
+        "INSERT INTO object_payload_dependency(parent_commitment,child_commitment) VALUES(?1,?2)",
+        rusqlite::params![commitment, lookup],
+    )?;
+    let (mut record, manifest, _) = fixture()?;
+    record.role = PairingRole::Initiator;
+    let private = root.join("erasure-links-cut.db");
+    let snapshot = db
+        .pin_full_transfer_cut()?
+        .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
+    let mut stage = db.create_full_stage_for_test(record, 604_900)?;
+    let snapshot_id = &manifest.manifest.snapshot_id;
+    stage.adopt_source_cut(0, snapshot_id, &private, snapshot)?;
+    for family in ["sql/object_erasure_lookup", "sql/object_payload_dependency"] {
+        let counts = stage.stage_source_fixed_base_family(snapshot_id, family)?;
+        assert_eq!(counts.records, 1);
+        let (output, written) =
+            stage.write_source_fixed_base_family(snapshot_id, family, Sink::default())?;
+        assert_eq!(counts, written);
+        let mut input = output.0.as_slice();
+        let header = read_record_header(&mut input)?.ok_or("header")?;
+        assert_eq!(header.family, family);
+        let rule = full_transfer_catalog().iter().find(|rule| rule.id == family).ok_or("rule")?;
+        copy_full_scalar_record(rule, &header, &mut input, &mut std::io::sink())?;
+        assert_eq!(input, b"");
+    }
     Ok(())
 }

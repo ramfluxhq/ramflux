@@ -2557,7 +2557,7 @@ pub(super) const RULE_78: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "object_erasure_lookup", cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "commitment",
@@ -2565,7 +2565,7 @@ pub(super) const RULE_78: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
     ]
 );
