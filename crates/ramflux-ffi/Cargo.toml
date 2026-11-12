@@ -1,0 +1,51 @@
+[package]
+name = "ramflux-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI projection of the ramflux core API for Swift and Kotlin hosts"
+
+[lib]
+name = "ramflux_ffi"
+# staticlib feeds the Apple XCFramework, cdylib feeds the Android AAR, lib feeds Rust tests and
+# the bindings generator.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+default = []
+# Links the full SDK and adapts its in-process supervisor to `CorePort`. Phone apps enable it.
+# It is off by default so that adding this crate changes nothing for desktop builds.
+embedded = ["dep:ramflux-sdk"]
+# Builds the bindings generator binary. Never enabled in a shipped library.
+bindgen-cli = ["uniffi/cli"]
+
+[dependencies]
+# Pinned exactly: generated Swift and Kotlin must match the scaffolding version.
+uniffi = { version = "=0.31.2" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+ramflux-protocol = { workspace = true }
+ramflux-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+# `unsafe_code` is not denied here: the UniFFI scaffolding macros expand to `extern "C"` items in
+# this crate. No hand-written module in this crate contains `unsafe`.
+[lints.clippy]
+all = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
