@@ -130,7 +130,10 @@ mod tests {
         );
         source.persist_actor_state(&clock, &(u64::MAX - 1))?;
         target.persist_actor_state(&clock, &u64::MAX)?;
-        let newer_clock = format!("{CLOCK}{}", ramflux_protocol::qualified_device_id(&author.account_anchor, "tablet")?);
+        let newer_clock = format!(
+            "{CLOCK}{}",
+            ramflux_protocol::qualified_device_id(&author.account_anchor, "tablet")?
+        );
         source.persist_actor_state(&newer_clock, &u64::MAX)?;
         target.persist_actor_state(&newer_clock, &(u64::MAX - 2))?;
         let incoming = source_root.join("incoming.db");
