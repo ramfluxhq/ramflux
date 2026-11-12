@@ -10,8 +10,11 @@ mod e2e;
 use e2e::{
     boot_stack, configure_node, crash_daemon, create_account, dm_send, dump_logs,
     exchange_contacts, mesh_cursor, message_texts, rf_json, start_daemon, start_daemon_at, unique,
-    unlock_account, wait_dm_texts, wait_node_observed_ack, wait_node_pending,
+    unlock_account_with_timeout, wait_dm_texts, wait_dm_texts_with_timeout, wait_node_observed_ack,
+    wait_node_pending,
 };
+
+use std::time::Duration;
 
 #[ignore = "real-process CLI e2e: run explicitly on QA and in the CLI e2e CI job"]
 #[test]
@@ -55,15 +58,20 @@ fn e2e_push_restart() -> e2e::Result<()> {
     wait_node_pending(&stack, &bob, &ids[3..])?;
     eprintln!("push/restart: restart and unlock recipient");
     let bob_d = start_daemon_at(socket, root)?;
-    unlock_account(&bob_d, &bob)?;
-    let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies).map_err(|error| {
-        format!(
-            "{error}; node_cursor={:?}; recipient_status={:?}; logs={}",
-            mesh_cursor(&stack, &bob.target_delivery_id),
-            rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id]),
-            dump_logs(&stack, &[&alice_d, &bob_d])
-        )
-    })?;
+    eprintln!("push/restart: recipient daemon ready; unlock and await networking");
+    unlock_account_with_timeout(&bob_d, &bob, Duration::from_secs(10))
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
+    eprintln!("push/restart: recipient networking live; await resumed messages");
+    let received =
+        wait_dm_texts_with_timeout(&bob_d, &bob, &conversation, &bodies, Duration::from_secs(15))
+            .map_err(|error| {
+            format!(
+                "{error}; node_cursor={:?}; recipient_status={:?}; logs={}",
+                mesh_cursor(&stack, &bob.target_delivery_id),
+                rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id]),
+                dump_logs(&stack, &[&alice_d, &bob_d])
+            )
+        })?;
     assert_eq!(message_texts(&received), bodies, "restart must contain exactly the full sent set");
     eprintln!("push/restart: full received set verified; await all ACKs");
     for id in &ids {

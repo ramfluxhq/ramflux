@@ -435,6 +435,14 @@ pub fn create_account(daemon: &Daemon, display_name: &str) -> Result<Account> {
 }
 
 pub fn unlock_account(daemon: &Daemon, account: &Account) -> Result<Value> {
+    unlock_account_with_timeout(daemon, account, POLL_TIMEOUT)
+}
+
+pub fn unlock_account_with_timeout(
+    daemon: &Daemon,
+    account: &Account,
+    budget: Duration,
+) -> Result<Value> {
     let unlocked = rf_json_env(
         &daemon.socket,
         &[
@@ -447,7 +455,7 @@ pub fn unlock_account(daemon: &Daemon, account: &Account) -> Result<Value> {
         ],
         &[("RAMFLUX_ACCOUNT_PASSPHRASE", PASSPHRASE)],
     )?;
-    wait_networking_live(daemon, &account.id)?;
+    wait_networking_live_with_timeout(daemon, &account.id, budget)?;
     Ok(unlocked)
 }
 
@@ -526,10 +534,20 @@ pub fn wait_dm_texts(
     conversation: &str,
     expected: &[&str],
 ) -> Result<Value> {
+    wait_dm_texts_with_timeout(daemon, account, conversation, expected, POLL_TIMEOUT)
+}
+
+pub fn wait_dm_texts_with_timeout(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    expected: &[&str],
+    budget: Duration,
+) -> Result<Value> {
     poll_json(
         daemon,
         &["dm", "read", "--account", &account.id, "--conversation", conversation],
-        POLL_TIMEOUT,
+        budget,
         |value| contains_all_texts(value, expected),
     )
     .map_err(|error| {
@@ -1035,7 +1053,15 @@ fn poll_json(
 }
 
 fn wait_networking_live(daemon: &Daemon, account_id: &str) -> Result<()> {
-    let deadline = Instant::now() + POLL_TIMEOUT;
+    wait_networking_live_with_timeout(daemon, account_id, POLL_TIMEOUT)
+}
+
+fn wait_networking_live_with_timeout(
+    daemon: &Daemon,
+    account_id: &str,
+    budget: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + budget;
     loop {
         let status =
             rf_json(daemon.socket.as_path(), &["account", "status", "--account", account_id])?;
