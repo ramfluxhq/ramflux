@@ -470,6 +470,7 @@ impl RamfluxClient {
         if !crate::client::target_selection::schema_v1_selected() {
             return Ok(0);
         }
+        self.review_parked_generated_edits_after_restore()?;
         let decoder = decoder_marker();
         let key = "message/reparse/decoder";
         if self.account_db()?.load_actor_state::<String>(key)?.as_deref() == Some(decoder.as_str())
