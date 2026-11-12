@@ -151,6 +151,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_udp_dropped_tcp_tls_wins_and_is_remembered_for_that_network_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{NetworkChangeKind, NetworkKey};
+        use ramflux_transport::GatewaySessionFrameSink;
+        use tokio::io::AsyncReadExt;
+
+        let dir = tempfile::tempdir()?;
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let tls = ramflux_transport::MeshTlsConfig {
+            ca_cert: dir.path().join("ca.pem"),
+            service_cert: dir.path().join("server.pem"),
+            service_key: dir.path().join("server.key"),
+        };
+        std::fs::write(&tls.ca_cert, generated.cert.pem())?;
+        std::fs::write(&tls.service_cert, generated.cert.pem())?;
+        std::fs::write(&tls.service_key, generated.signing_key.serialize_pem())?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+            ramflux_transport::tcp_gateway_server_config(&tls)?,
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let tcp_addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let mut stream = acceptor.accept(socket).await?;
+            // Hold the session until the client drops it.
+            let mut byte = [0_u8; 1];
+            let _ = stream.read(&mut byte).await;
+            Ok::<(), std::io::Error>(())
+        });
+        // A bound UDP socket that never answers: QUIC to it is silently dropped.
+        let blackhole = std::net::UdpSocket::bind("127.0.0.1:0")?;
+
+        let mut config = GatewaySessionConfig::auto(GatewayQuicEndpointConfig {
+            bind_addr: "0.0.0.0:0".parse()?,
+            gateway_addr: blackhole.local_addr()?,
+            server_name: "localhost".to_owned(),
+            ca_cert: tls.ca_cert.clone(),
+            principal_id: "principal_test".to_owned(),
+            device_id: "device_test".to_owned(),
+            target_delivery_id: "target_test".to_owned(),
+            prekey_http_url: None,
+        })
+        .with_tcp_gateway_addr(tcp_addr)
+        .with_connection_race(ConnectionRace::Raced);
+        config.timeout = Duration::from_secs(5);
+        let office = NetworkKey::from_host_label(b"wifi:office");
+        config.network_monitor.on_network_changed(NetworkChangeKind::Available(office));
+
+        let started = Instant::now();
+        let (_transport, stream, kind) = open_auto_raced(&config).await?;
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        assert_eq!(kind, GatewaySessionTransportKind::TcpTls);
+        // The binding material comes from the winning connection itself.
+        assert!(stream.custody_exporter(&[9; 32]).is_ok());
+        assert_eq!(config.network_monitor.remembered_carrier_label(), Some("tcp_tls"));
+        let (_, plan) = config.network_monitor.auto_plan(false, Instant::now());
+        assert!(!plan.contains(CarrierKind::Quic));
+
+        // A different network has no memory and races QUIC again.
+        let cell = NetworkKey::from_host_label(b"cell:1");
+        config.network_monitor.on_network_changed(NetworkChangeKind::Changed(cell));
+        assert_eq!(config.network_monitor.remembered_carrier_label(), None);
+        let (_, plan) = config.network_monitor.auto_plan(false, Instant::now());
+        assert!(plan.contains(CarrierKind::Quic));
+
+        drop(stream);
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_race_forgets_the_remembered_carrier() {
         let config = unreachable_auto_config();
         let network = config.network_monitor.current_network();
