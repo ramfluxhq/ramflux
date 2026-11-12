@@ -20,7 +20,15 @@ pub(super) enum BackupMergeMode<'a> {
 pub struct BackupMergeReport {
     pub restored: BackupCounts,
     pub kept_newer: BackupCounts,
+    pub refused_items: Vec<BackupItemRefusal>,
 }
+/// One logical incoming item and all its dependent revisions were refused.
+#[derive(Debug)]
+pub struct BackupItemRefusal {
+    pub message_id: String,
+    pub code: ramflux_protocol::message::original_header::EvidenceError,
+}
+
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -309,16 +317,14 @@ impl BackupDatabase {
             let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
             self.archive_group_transfer(&preserved_actor)?;
-            let self_sync_floors = self.merge_self_sync_floors()?;
-            self.merge_generated_identity_floors()?;
-            // Losing Edit revisions are fenced before any incoming row is archived or merged.
-            self.merge_edit_registers()?;
+            let refused_items = self.merge_original_header_agreement()?;
+            let self_sync_floors = self.merge_message_register_floors()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
-            let mut report = BackupMergeReport::default();
+            let mut report = BackupMergeReport { refused_items, ..Default::default() };
             for table in tables {
                 progress()?;
                 if table == "object_index" {
@@ -412,6 +418,16 @@ impl BackupDatabase {
         self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'group-transfer/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';"))?;
         Ok(())
     }
+    fn merge_message_register_floors(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u64>, StorageError> {
+        let floors = self.merge_self_sync_floors()?;
+        self.merge_generated_identity_floors()?;
+        // Losing Edit revisions are fenced before any incoming row is archived or merged.
+        self.merge_edit_registers()?;
+        Ok(floors)
+    }
+
     fn begin_merge_inputs(
         &self,
         candidate: bool,

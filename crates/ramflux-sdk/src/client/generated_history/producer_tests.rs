@@ -7,7 +7,7 @@ use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 
 #[tokio::test]
-async fn history_chain_restart_keeps_item_cursor_and_starts_at_page_zero() -> TestResult {
+async fn history_chain_restart_reexports_prefix_and_starts_at_page_zero() -> TestResult {
     let own = Fixture::new("history-producer-restart").await?;
     let mut row = Outgoing::new(&own.client.owned_device_identity()?, 1)?;
     let first = row.transfer_id.clone();
@@ -22,7 +22,7 @@ async fn history_chain_restart_keeps_item_cursor_and_starts_at_page_zero() -> Te
     row.restart_chain()?;
     assert_eq!((row.next_page, row.last_digest.clone()), (0, vec![0; 32]));
     assert_ne!(row.transfer_id, first, "a restarted chain never reuses its transfer id");
-    assert_eq!(row.cursor.as_ref().map(|cursor| cursor.message.as_str()), Some("m"));
+    assert!(row.cursor.is_none(), "gateway acceptance never proves an imported prefix");
     assert!(row.in_flight.is_none());
     Ok(())
 }
@@ -31,6 +31,11 @@ async fn history_chain_restart_keeps_item_cursor_and_starts_at_page_zero() -> Te
 async fn history_staging_refuses_the_local_device_and_a_foreign_root() -> TestResult {
     let own = Fixture::new("history-producer-own").await?;
     let peer = Fixture::new("history-producer-peer").await?;
+    assert_eq!(
+        own.client.history_target_epoch(&peer.client.owned_device_identity()?)?,
+        None,
+        "a foreign root is excluded before any history target lookup"
+    );
     assert!(
         own.client.stage_generated_history_transfer(&own.client.owned_device_identity()?).is_err(),
         "a device never transfers history to itself"
@@ -54,15 +59,16 @@ async fn history_producer_finishes_an_empty_store_without_a_page() -> TestResult
 #[tokio::test]
 async fn history_producer_skips_rows_without_first_hand_evidence() -> TestResult {
     let own = Fixture::new("history-producer-skip").await?;
-    own.client.send_direct_message("legacy", "old-history", "alice", b"no retained origin")?;
+    let id = ramflux_protocol::encode_base64url([7; 32]);
+    own.client.send_direct_message("legacy", &id, "alice", b"no retained origin")?;
     let built = own
         .client
         .build_generated_history_page(&[1; 32], 0, &[0; 32], None)?
         .ok_or("the skipped row must still advance the cursor")?;
     assert!(built.page.items.is_empty(), "a row without origin evidence is never forwarded");
-    assert!(built.owners.is_empty());
+    assert_eq!(built.owners.len(), 0);
     assert_eq!(built.skipped, 1);
-    assert_eq!(built.after.message, "old-history");
+    assert_eq!(built.after.message, id);
     assert!(
         own.client
             .build_generated_history_page(&[1; 32], 0, &[0; 32], Some(&built.after))?

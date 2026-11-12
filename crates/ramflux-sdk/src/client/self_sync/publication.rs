@@ -11,6 +11,7 @@ impl RamfluxClient {
         conversation: &str,
         value: &g::SelfSync,
     ) -> Result<Vec<u8>, SdkError> {
+        Self::require_self_sync_floor_bootstrap()?;
         self.require_backup_outbound_ready()?;
         let source = self.owned_device_identity()?;
         self.authorize_self_sync(&source, conversation)?;

@@ -8,8 +8,8 @@ use serde_json::json;
 use std::path::PathBuf;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn pair(revision: u64, event: u8) -> Option<EditPair> {
-    Some(EditPair { revision, event_id: vec![event; 16] })
+fn pair(revision: u64, event: u8) -> EditPair {
+    EditPair { revision, event_id: vec![event; 16] }
 }
 
 fn copy(name: &str) -> RetainedCopy {
@@ -19,7 +19,7 @@ fn copy(name: &str) -> RetainedCopy {
 /// Every state over four register values and all subsets of two openings, plus erasure.
 fn universe() -> Vec<RestoreMessage> {
     let mut states = vec![RestoreMessage::Erased];
-    for edit in [None, pair(1, 1), pair(1, 2), pair(2, 0)] {
+    for edit in [None, Some(pair(1, 1)), Some(pair(1, 2)), Some(pair(2, 0))] {
         for mask in 0_u8..4 {
             let mut openings = BTreeSet::new();
             if mask & 1 != 0 {
@@ -85,11 +85,23 @@ fn edit_restore_winner_is_greatest_revision_then_raw_event_id() {
         openings: BTreeSet::from([copy(name)]),
     };
     // An equal revision is decided by the raw event id, never by which copy is local.
-    assert_eq!(merge(&live(pair(2, 1), "low"), &live(pair(2, 9), "high")), live(pair(2, 9), "high"));
-    assert_eq!(merge(&live(pair(2, 9), "high"), &live(pair(2, 1), "low")), live(pair(2, 9), "high"));
+    assert_eq!(
+        merge(&live(Some(pair(2, 1)), "low"), &live(Some(pair(2, 9)), "high")),
+        live(Some(pair(2, 9)), "high")
+    );
+    assert_eq!(
+        merge(&live(Some(pair(2, 9)), "high"), &live(Some(pair(2, 1)), "low")),
+        live(Some(pair(2, 9)), "high")
+    );
     // A greater revision beats any event id; an Edit beats the unedited original.
-    assert_eq!(merge(&live(pair(3, 0), "new"), &live(pair(2, 255), "old")), live(pair(3, 0), "new"));
-    assert_eq!(merge(&live(None, "original"), &live(pair(1, 0), "edit")), live(pair(1, 0), "edit"));
+    assert_eq!(
+        merge(&live(Some(pair(3, 0)), "new"), &live(Some(pair(2, 255)), "old")),
+        live(Some(pair(3, 0)), "new")
+    );
+    assert_eq!(
+        merge(&live(None, "original"), &live(Some(pair(1, 0)), "edit")),
+        live(Some(pair(1, 0)), "edit")
+    );
     // A shorter raw id that is a prefix orders below the longer one, exactly as byte slices do.
     let short = Some(EditPair { revision: 4, event_id: vec![7] });
     let long = Some(EditPair { revision: 4, event_id: vec![7, 0] });
@@ -103,12 +115,12 @@ fn edit_restore_unions_openings_only_for_the_same_winner() {
         openings: names.iter().map(|name| copy(name)).collect(),
     };
     assert_eq!(
-        merge(&live(pair(5, 5), &["phone"]), &live(pair(5, 5), &["tablet"])),
-        live(pair(5, 5), &["phone", "tablet"])
+        merge(&live(Some(pair(5, 5)), &["phone"]), &live(Some(pair(5, 5)), &["tablet"])),
+        live(Some(pair(5, 5)), &["phone", "tablet"])
     );
     assert_eq!(
-        merge(&live(pair(5, 5), &["phone"]), &live(pair(4, 9), &["stale"])),
-        live(pair(5, 5), &["phone"]),
+        merge(&live(Some(pair(5, 5)), &["phone"]), &live(Some(pair(4, 9)), &["stale"])),
+        live(Some(pair(5, 5)), &["phone"]),
         "an opening of a losing revision must not survive"
     );
     assert_eq!(
@@ -122,7 +134,12 @@ struct Side {
     db: AccountDb,
 }
 
-fn edited_copy(name: &str, body: &[u8], revision: u64, event: u8) -> Result<Side, Box<dyn std::error::Error>> {
+fn edited_copy(
+    name: &str,
+    body: &[u8],
+    revision: u64,
+    event: u8,
+) -> Result<Side, Box<dyn std::error::Error>> {
     let (root, db) = crate::tests::test_db(name)?;
     db.send_direct_message("conversation", "target", "peer", b"original body")?;
     db.replace_generated_message_content(
@@ -233,7 +250,7 @@ fn restored_equal_revision_edit_takes_greater_event_id_in_both_directions() -> T
         let low = edited_copy("edit-restore-low", b"losing-edit-body-canary", 2, 1)?;
         let high = edited_copy("edit-restore-high", b"winning-edit-body", 2, 9)?;
         let merged = if incoming_wins { restore(&low, &high)? } else { restore(&high, &low)? };
-        assert_eq!(register(&merged)?, pair(2, 9), "incoming_wins={incoming_wins}");
+        assert_eq!(register(&merged)?, Some(pair(2, 9)), "incoming_wins={incoming_wins}");
         assert_eq!(body(&merged)?.as_deref(), Some(b"winning-edit-body".as_slice()));
         let raw: Vec<u8> = merged.db.query_row(
             "SELECT raw_bytes FROM raw_inner_copy WHERE copy_id='history/current-edit/target'",
@@ -257,7 +274,7 @@ fn restored_older_edit_never_replaces_local_winner_or_revives_its_openings() -> 
         &json!({"opening":"stale-edit-body-canary"}),
     )?;
     let merged = restore(&local, &archive)?;
-    assert_eq!(register(&merged)?, pair(7, 0));
+    assert_eq!(register(&merged)?, Some(pair(7, 0)));
     assert_eq!(body(&merged)?.as_deref(), Some(b"current-edit-body".as_slice()));
     absent_everywhere(&merged, b"stale-edit-body-canary")?;
     finish(merged, [local, archive])
@@ -275,7 +292,7 @@ fn restored_edit_retires_unedited_local_original_and_its_evidence() -> TestResul
     let local = Side { root, db };
     let archive = edited_copy("edit-restore-edited", b"edited-body", 1, 3)?;
     let merged = restore(&local, &archive)?;
-    assert_eq!(register(&merged)?, pair(1, 3));
+    assert_eq!(register(&merged)?, Some(pair(1, 3)));
     assert_eq!(body(&merged)?.as_deref(), Some(b"edited-body".as_slice()));
     let retired: Vec<u8> = merged.db.query_row(
         "SELECT state_json FROM runtime_actor_state WHERE state_kind='routed/report-opening-retired/target'",
@@ -325,7 +342,7 @@ fn restored_same_winner_unions_distinct_openings_and_keeps_one_named_copy() -> T
         &json!({"device":"tablet"}),
     )?;
     let merged = restore(&local, &archive)?;
-    assert_eq!(register(&merged)?, pair(4, 4));
+    assert_eq!(register(&merged)?, Some(pair(4, 4)));
     let openings: i64 = merged.db.query_row(
         "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'routed/own-sent-attestation/target/%'",
         [],
@@ -426,7 +443,10 @@ fn own_sent_attestation_copy_restores_and_stays_fenced_by_deletion() -> TestResu
 
 #[test]
 fn restore_keeps_greatest_parked_edit_and_marks_review() -> TestResult {
-    let parked = |name: &str, event: u8, bytes: &[u8]| -> Result<Side, Box<dyn std::error::Error>> {
+    let parked = |name: &str,
+                  event: u8,
+                  bytes: &[u8]|
+     -> Result<Side, Box<dyn std::error::Error>> {
         let (root, db) = crate::tests::test_db(name)?;
         let copy_id = format!("early-edit/target/{event}");
         db.write_transaction(|| {
@@ -455,7 +475,7 @@ fn restore_keeps_greatest_parked_edit_and_marks_review() -> TestResult {
             |row| row.get(0),
         )?;
         let stored: EditPair = serde_json::from_slice(&stored)?;
-        assert_eq!(Some(stored), pair(3, 9), "incoming_wins={incoming_wins}");
+        assert_eq!(Some(stored), Some(pair(3, 9)), "incoming_wins={incoming_wins}");
         absent_everywhere(&merged, b"parked-losing-edit-canary")?;
         let review: Vec<u8> = merged.db.query_row(
             "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",

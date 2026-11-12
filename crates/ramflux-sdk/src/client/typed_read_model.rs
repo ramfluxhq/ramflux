@@ -201,6 +201,17 @@ impl RamfluxClient {
         before_order_key: Option<&g::EventIdentity>,
         limit: u32,
     ) -> Result<MessageViewPage, SdkError> {
+        self.account_db()?.read_snapshot(|| {
+            self.generated_message_view_page_in(conversation, before_order_key, limit)
+        })
+    }
+
+    fn generated_message_view_page_in(
+        &self,
+        conversation: &str,
+        before_order_key: Option<&g::EventIdentity>,
+        limit: u32,
+    ) -> Result<MessageViewPage, SdkError> {
         let page = self.generated_message_page(conversation, before_order_key, limit)?;
         let mut identities = Vec::with_capacity(page.messages.len());
         let mut messages = Vec::with_capacity(page.messages.len());
@@ -242,6 +253,17 @@ impl RamfluxClient {
         after_sequence: u64,
         limit: u32,
     ) -> Result<MessageChanges, SdkError> {
+        self.account_db()?.read_snapshot(|| {
+            self.generated_message_changes_in(conversation, after_sequence, limit)
+        })
+    }
+
+    fn generated_message_changes_in(
+        &self,
+        conversation: &str,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<MessageChanges, SdkError> {
         check_limit(limit)?;
         if after_sequence != 0
             && let Err(refusal) = self.generated_cursor_status(after_sequence)?
@@ -266,10 +288,7 @@ impl RamfluxClient {
             // Rows sharing one sequence travel together so the cursor never splits a commit.
             let mut cut = total.min(limit as usize);
             while cut > 0
-                && rows
-                    .get(cut)
-                    .zip(rows.get(cut - 1))
-                    .is_some_and(|(next, last)| next.0 == last.0)
+                && rows.get(cut).zip(rows.get(cut - 1)).is_some_and(|(next, last)| next.0 == last.0)
             {
                 cut += 1;
             }
@@ -328,6 +347,15 @@ impl RamfluxClient {
     /// # Errors
     /// Returns `invalid_argument`, `target_not_found`, or storage/codec errors.
     pub fn generated_message_detail(
+        &self,
+        conversation: &str,
+        message_id: &str,
+    ) -> Result<MessageDetail, SdkError> {
+        self.account_db()?
+            .read_snapshot(|| self.generated_message_detail_in(conversation, message_id))
+    }
+
+    fn generated_message_detail_in(
         &self,
         conversation: &str,
         message_id: &str,
@@ -447,8 +475,10 @@ impl RamfluxClient {
                     let count = tokens.entry(reaction.token).or_default();
                     *count = count.saturating_add(1);
                 }
-                view.reactions =
-                    tokens.into_iter().map(|(token, count)| ReactionView { token, count }).collect();
+                view.reactions = tokens
+                    .into_iter()
+                    .map(|(token, count)| ReactionView { token, count })
+                    .collect();
                 view.receipts.clone_from(&message.receipts);
             }
             None => {
@@ -506,9 +536,10 @@ mod tests {
             };
             let media = stripped.media.first().ok_or(SdkError::PayloadTooLarge)?;
             assert_eq!((stripped.text.as_str(), media.object_id.as_str()), ("caption", "object"));
-            assert!(media.key_slots.is_empty());
+            assert_eq!(media.key_slots.len(), 0);
             let manifest = media.large_manifest.as_ref().ok_or(SdkError::PayloadTooLarge)?;
-            assert!(manifest.key_slots.is_empty() && manifest.read_capability.is_empty());
+            assert_eq!(manifest.key_slots.len(), 0);
+            assert_eq!(manifest.read_capability.len(), 0);
             assert_eq!(manifest.relay_origin, "relay");
         }
         Ok(())
@@ -521,11 +552,8 @@ mod tests {
             (g::DeleteScope::Everyone as i32, "everyone"),
             (9_999, "unspecified"),
         ] {
-            let view = erasure_view(&g::Delete {
-                scope,
-                tombstone_id: vec![1; 32],
-                ..Default::default()
-            });
+            let view =
+                erasure_view(&g::Delete { scope, tombstone_id: vec![1; 32], ..Default::default() });
             assert_eq!(view.scope, name);
             assert_eq!(view.tombstone_id.len(), 43);
         }

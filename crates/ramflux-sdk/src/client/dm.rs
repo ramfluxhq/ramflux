@@ -160,6 +160,9 @@ impl RamfluxClient {
                     )?;
                     if copy_plain {
                         own_copy = self.queue_own_sent_dm(&message, &content, kind);
+                        if crate::client::target_selection::schema_v1_selected() {
+                            self.clear_self_sync_draft_after_send(&message.conversation_id)?;
+                        }
                     }
                     Ok::<_, SdkError>(())
                 })?;

@@ -176,31 +176,8 @@ impl RamfluxClient {
             }
             return Ok(None);
         }
-        if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
-            if event.source_device_id != entry.envelope.source_device_id
-                || event.target_device_id != opened.local_device.device_id()
-            {
-                return Err(invalid("control event device binding mismatch"));
-            }
-            let source = self.bind_received_a2i_event(&mut event, entry)?;
-            if let Some(old) = self
-                .account_db()?
-                .load_actor_state::<A2iControlEvent>(&a2i_key(&source, &event.event_id)?)?
-            {
-                event.acknowledged = old.acknowledged;
-                if event != old {
-                    return Err(invalid(
-                        "control event id reused by another authenticated delivery",
-                    ));
-                }
-            }
-            self.account_db()?.persist_actor_state(
-                &self
-                    .authenticated_committed_key(HeadUse::NewAuthorization, entry)?
-                    .replace("routed/committed/", "routed/control/"),
-                &event,
-            )?;
-            self.account_db()?.persist_actor_state(&a2i_key(&source, &event.event_id)?, &event)?;
+        if serde_json::from_slice::<A2iControlEvent>(body).is_ok() {
+            Self::require_a2i_binding_authority()?;
         } else {
             self.project_pair_or_contact_control(opened, entry, body)?;
         }

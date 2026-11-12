@@ -142,26 +142,7 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                 &request_body(&mut bus, Some(send.account), "group", "group.send", request).await?,
             )
         }
-        GroupAction::Read(read) => {
-            if super::dm::unified::print_group_read(
-                &mut bus,
-                &read.account,
-                &read.group,
-                &read.conversation,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            let request = LocalBusGroupReceiveRequest {
-                group_id: read.group,
-                conversation_id: read.conversation,
-                limit: 100,
-            };
-            print_json(&with_message_plaintext(
-                request_body(&mut bus, Some(read.account), "group", "group.read", request).await?,
-            ))
-        }
+        GroupAction::Read(read) => handle_group_read(&mut bus, read).await,
         GroupAction::List(selector) => print_json(
             &bus.request(Some(selector.account), "group", "group.list", serde_json::json!({}))
                 .await?,
@@ -180,6 +161,22 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         GroupAction::Member(member) => handle_group_member(&mut bus, member).await,
         GroupAction::Role(role) => handle_group_role(&mut bus, role).await,
     }
+}
+
+async fn handle_group_read(bus: &mut LocalBusClient, read: GroupRead) -> Result<(), RfError> {
+    if super::dm::unified::print_group_read(bus, &read.account, &read.group, &read.conversation)
+        .await?
+    {
+        return Ok(());
+    }
+    let request = LocalBusGroupReceiveRequest {
+        group_id: read.group,
+        conversation_id: read.conversation,
+        limit: 100,
+    };
+    print_json(&with_message_plaintext(
+        request_body(bus, Some(read.account), "group", "group.read", request).await?,
+    ))
 }
 
 async fn handle_group_rename(bus: &mut LocalBusClient, rename: GroupRename) -> Result<(), RfError> {

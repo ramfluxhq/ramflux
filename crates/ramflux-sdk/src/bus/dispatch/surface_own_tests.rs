@@ -116,10 +116,7 @@ async fn sibling_fixture_with_peer(
     Ok((sibling, config, receiver, directory, peer.peers.remove(0)))
 }
 fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEntry {
-    // The node changes the outer routing identity, retaining the immutable signed inner body.
-    let mut envelope = envelope;
-    envelope.envelope_id = format!("node-own-copy-{sequence}");
-    envelope.target_delivery_id = "sibling".into();
+    // Inbox sequence and destination are node metadata; the sender's signed envelope stays exact.
     GatewayInboxEntry {
         forwarded: false,
         inbox_seq: sequence,

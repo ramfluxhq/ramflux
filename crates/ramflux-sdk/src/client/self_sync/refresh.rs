@@ -58,8 +58,11 @@ impl RamfluxClient {
         if stored.as_ref() == Some(&current) {
             return Ok(Some(current));
         }
-        if stored.as_ref().is_some_and(|stored| current.device_set_epoch < stored.device_set_epoch)
-        {
+        if stored.as_ref().is_some_and(|stored| {
+            current.device_set_epoch < stored.device_set_epoch
+                || (current.device_set_epoch == stored.device_set_epoch
+                    && current.head != stored.head)
+        }) {
             return Err(parked("roster is behind the refresh barrier"));
         }
         let reincarnated =

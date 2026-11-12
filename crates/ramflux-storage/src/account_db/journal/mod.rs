@@ -152,6 +152,17 @@ impl AccountDb {
         Ok(self.connection.query_row("SELECT head_seq,coalesce((SELECT min(seq) FROM runtime_journal),head_seq),pruned_through FROM runtime_journal_bounds WHERE singleton=1",[],|row|Ok(JournalBounds{head_seq:row.get(0)?,floor_seq:row.get(1)?,pruned_through:row.get(2)?}))?)
     }
 
+    /// Whether a logical source already has a retained committed journal event.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn journal_source_exists(&self, source: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_journal WHERE source_key=?1)",
+            params![source],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Reads a bounded ordered replay page. Callers validate cursor bounds in the same snapshot.
     ///
     /// # Errors

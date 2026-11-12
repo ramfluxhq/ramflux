@@ -5,10 +5,10 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
-#[path = "dm/wait.rs"]
-mod wait;
 #[path = "dm/unified.rs"]
 pub(crate) mod unified;
+#[path = "dm/wait.rs"]
+mod wait;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;

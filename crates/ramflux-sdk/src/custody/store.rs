@@ -19,6 +19,8 @@ mod publication;
 #[cfg(test)]
 mod race_hooks;
 mod recovery;
+#[cfg(test)]
+pub(crate) mod sibling_fixture;
 pub(crate) use publication::{accept_publication, pending_head_fence_blocks};
 pub use recovery::RecoveryCeremony;
 pub(crate) use recovery::{finish_recovery, pending_restore};

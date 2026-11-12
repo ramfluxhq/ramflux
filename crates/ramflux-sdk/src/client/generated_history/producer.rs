@@ -18,8 +18,8 @@ pub(crate) const MAX_PAGE_ITEMS: usize = 32;
 /// Local soft budget for exact item bytes, below the Inner wire bound, leaving room for the
 /// page header, Control framing and the event identity.
 pub(crate) const MAX_PAGE_ITEM_BYTES: usize = g::validation::MAX_INNER_BYTES - 16 * 1024;
-/// A receiver forgets an idle transfer after 60 seconds and then only admits page zero.
-/// The producer restarts its chain (never its item cursor) after twice that window.
+/// Idle permits a fresh authenticated page zero after 60 seconds. A producer restart
+/// reexports the prefix because gateway acceptance does not prove receiver import.
 pub(super) const RESTART_AFTER_IDLE_SECS: i64 = 120;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -112,10 +112,14 @@ impl Outgoing {
         })
     }
 
-    /// Restart the digest chain at page zero while keeping the durable item cursor.
+    /// Restart the chain and export prefix; gateway acceptance does not prove import.
     pub(super) fn restart_chain(&mut self) -> Result<(), SdkError> {
         self.transfer_id = random_transfer_id()?;
         self.next_page = 0;
+        self.cursor = None;
+        self.exported = 0;
+        self.skipped = 0;
+        self.done = false;
         self.last_digest = vec![0; 32];
         self.in_flight = None;
         Ok(())
@@ -127,6 +131,75 @@ impl Outgoing {
 }
 
 impl RamfluxClient {
+    /// Stage received history once for each certified own-device incarnation after
+    /// its directory material is available. A completed transfer is not restarted
+    /// by every background backfill pass.
+    pub(crate) fn stage_native_history_bootstrap(&self) -> Result<(), SdkError> {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Ok(());
+        }
+        let local = self.owned_device_identity()?;
+        let now = crate::custody::network_now()?;
+        let Some(authority) = self.current_custody_authority(local.root_commitment(), now)? else {
+            return Ok(());
+        };
+        let local_epoch = authority
+            .envelope()
+            .body
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == local.device_id())
+            .ok_or_else(|| refused("history bootstrap local authority missing"))?
+            .device_epoch;
+        if authority
+            .authorize(
+                &ramflux_protocol::custody::DeviceRef {
+                    account_anchor: local.root_commitment().into(),
+                    device_id: local.device_id().into(),
+                    device_epoch: local_epoch,
+                },
+                "sync",
+                now,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        match self.require_native_operation(&local, NativeOperation::Sync) {
+            Ok(()) => {}
+            Err(SdkError::FreshHeadRequired { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            for entry in &authority.envelope().body.devices {
+                if entry.device_id == local.device_id() {
+                    continue;
+                }
+                let target =
+                    RootQualifiedDeviceRef::from_custody_record(&authority, &entry.device_id)?;
+                if db.client_device_record(&target)?.is_none()
+                    || self.history_target_epoch(&target)?.is_none()
+                {
+                    continue;
+                }
+                let marker = format!(
+                    "history-out/bootstrap/{}/{}/{}/{}",
+                    local.storage_key(),
+                    local_epoch,
+                    target.storage_key(),
+                    entry.device_epoch
+                );
+                if db.load_actor_state::<bool>(&marker)?.unwrap_or(false) {
+                    continue;
+                }
+                self.stage_generated_history_transfer(&target)?;
+                db.persist_actor_state(&marker, &true)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Current sync epoch of an own-root sibling, or `None` when it is not admitted.
     pub(super) fn history_target_epoch(
         &self,

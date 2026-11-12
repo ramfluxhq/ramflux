@@ -16,7 +16,7 @@ import sys
 p = Path(sys.argv[1]); s = p.read_text()
 old = '''state.value.operation != 2'''
 assert s.count(old) == 1
-p.write_text(s.replace(old, '''false'''))
+p.write_text(s.replace(old, '''{ let _ = &state; false }'''))
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"

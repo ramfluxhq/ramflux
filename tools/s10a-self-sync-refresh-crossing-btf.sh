@@ -16,7 +16,7 @@ import sys
 p = Path(sys.argv[1]); s = p.read_text()
 old = '''(courier && !row["envelope"].is_null())'''
 assert s.count(old) == 1
-p.write_text(s.replace(old, '''(courier && false)'''))
+p.write_text(s.replace(old, '''(courier && { let _ = &row; false })'''))
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then
     cat "$log_file"

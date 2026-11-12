@@ -25,7 +25,10 @@ fn collect(dir: &Path, found: &mut Vec<(String, String)>) -> std::io::Result<()>
             || name.contains("/runtime_tests/")
             || name.ends_with("/testing.rs");
         // The selector definition itself is deleted by the removal, not scanned as a caller.
-        if !name.ends_with(".rs") || test_file || name.ends_with("client/target_selection.rs") {
+        if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+            || test_file
+            || name.ends_with("client/target_selection.rs")
+        {
             continue;
         }
         found.push((name, std::fs::read_to_string(&path)?));

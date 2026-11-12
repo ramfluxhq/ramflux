@@ -404,6 +404,7 @@ impl RamfluxClient {
     ) -> Result<ramflux_protocol::Envelope, SdkError> {
         use crate::client::identity_authority::NativeOperation;
         use ramflux_protocol::message as g;
+        Self::require_self_sync_floor_bootstrap()?;
         let recipient = Self::qualified_recipient(message)?;
         let remote = self.device_identity(&recipient)?;
         let local = self.owned_device_identity()?;
@@ -458,23 +459,28 @@ impl RamfluxClient {
         }
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
-        self.bind_outgoing_delivery(
-            &self.local_device_identity(&engine.config().device_id)?,
-            message,
-            &route.kind,
-        )?;
-        self.seal_routed_with_route(
-            message,
-            body,
-            route,
-            SealPair {
-                local: &engine.config().device_id,
-                remote: &recipient,
-                session: &mut session,
-                header,
-                bundle,
-            },
-        )
+        self.account_db()?.write_transaction(|| {
+            if route.kind == Kind::Direct {
+                self.capture_own_authored_direct(message, body)?;
+            }
+            self.bind_outgoing_delivery(
+                &self.local_device_identity(&engine.config().device_id)?,
+                message,
+                &route.kind,
+            )?;
+            self.seal_routed_with_route(
+                message,
+                body,
+                route,
+                SealPair {
+                    local: &engine.config().device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
+            )
+        })
     }
 
     pub(crate) fn seal_routed_federated_as(
@@ -511,6 +517,17 @@ impl RamfluxClient {
     }
 
     fn seal_routed_with_route(
+        &self,
+        message: &GatewayDirectMessage,
+        body: &[u8],
+        route: Route,
+        pair: SealPair<'_>,
+    ) -> Result<SealedRouted, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.seal_routed_with_route_in(message, body, route, pair))
+    }
+
+    fn seal_routed_with_route_in(
         &self,
         message: &GatewayDirectMessage,
         body: &[u8],

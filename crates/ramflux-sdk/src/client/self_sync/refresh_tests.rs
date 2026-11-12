@@ -49,8 +49,7 @@ async fn self_sync_refresh_barrier_parks_apply_and_emit_under_older_roster() -> 
     let source = own.client.owned_device_identity()?;
     let update = g::SelfSync { operation: 7, revision: 2, ..Default::default() };
     let db = own.client.account_db()?;
-    let applied =
-        db.write_transaction(|| own.client.apply_self_sync_in(&source, THREAD, &update));
+    let applied = db.write_transaction(|| own.client.apply_self_sync_in(&source, THREAD, &update));
     assert!(
         matches!(applied, Err(SdkError::InboundPending(_))),
         "an update is parked, not settled, while the roster is behind the barrier"
@@ -74,7 +73,10 @@ async fn self_sync_refresh_crossing_retires_envelopes_sealed_for_previous_roster
     mute(&own.client)?;
     queue_rows(&own.client, "sealed", true)?;
     queue_rows(&own.client, "submitted", false)?;
-    own.client.force_self_sync_refresh_barrier(|_, head, _| *head = "previous-head".into())?;
+    own.client.force_self_sync_refresh_barrier(|epoch, head, _| {
+        *epoch = epoch.saturating_sub(1);
+        *head = "previous-head".into();
+    })?;
     assert!(own.client.enter_self_sync_refresh()?.is_some());
     let db = own.client.account_db()?;
     assert!(!db.actor_state_exists("self-sync/pending/sealed/register")?);
@@ -118,7 +120,7 @@ async fn self_sync_restored_incarnation_rebuilds_queues_without_retired_targets(
 
 #[tokio::test]
 async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> TestResult {
-    let own = Fixture::new("self-sync-refresh-stale-body").await?;
+    let own = Fixture::new("self-sync-refresh-obsolete-body").await?;
     let value = mute(&own.client)?;
     let local = own.client.owned_device_identity()?;
     let state = own.client.self_sync_state(THREAD, &value)?.ok_or("state")?;
@@ -128,9 +130,9 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
         .actor_state_keys("self-sync/state/")?
         .pop()
         .ok_or("register scope")?;
-    // A restore merge replaced the register below the SDK; the queued body is now stale.
-    let stale = g::SelfSync { operation: 7, revision: 1, ..Default::default() }.encode_to_vec();
-    assert_ne!(stale, state.exact_body);
+    // A restore merge replaced the register below the SDK; the queued body is now obsolete.
+    let obsolete = g::SelfSync { operation: 7, revision: 1, ..Default::default() }.encode_to_vec();
+    assert_ne!(obsolete, state.exact_body);
     let db = own.client.account_db()?;
     let row = |body: &[u8]| -> Result<serde_json::Value, SdkError> {
         Ok(json!({
@@ -141,15 +143,15 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
         }))
     };
     db.write_transaction(|| {
-        db.persist_actor_state("self-sync/repair/stale", &row(&stale)?)?;
+        db.persist_actor_state("self-sync/repair/obsolete", &row(&obsolete)?)?;
         Ok::<(), SdkError>(())
     })?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(
         own.client.prepare_self_sync_repair(&own.config)?.is_none(),
-        "a stale body is neither sent nor allowed to block the courier"
+        "a obsolete body is neither sent nor allowed to block the courier"
     );
-    assert!(!db.actor_state_exists("self-sync/repair/stale")?);
+    assert!(!db.actor_state_exists("self-sync/repair/obsolete")?);
     // Control: the committed body for the same target is planned.
     db.write_transaction(|| {
         db.persist_actor_state("self-sync/repair/current", &row(&state.exact_body)?)?;
@@ -159,7 +161,7 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
     let _planned = own.client.prepare_self_sync_repair(&own.config);
     assert!(
         db.actor_state_exists("self-sync/repair/current")?,
-        "the committed register body is never retired as stale"
+        "the committed register body is never retired as obsolete"
     );
     Ok(())
 }
@@ -249,5 +251,17 @@ async fn self_sync_courier_never_forwards_register_with_unauthenticated_referenc
         !db.actor_state_exists("self-sync/repair/unauthentic")?,
         "a register naming a target under the wrong author root is retired, not forwarded"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn self_sync_same_epoch_head_disagreement_is_not_a_refresh() -> TestResult {
+    let own = Fixture::new("self-sync-refresh-fork").await?;
+    mute(&own.client)?;
+    queue_rows(&own.client, "fork-held", true)?;
+    own.client.force_self_sync_refresh_barrier(|_, head, _| *head = "another-same-epoch-head".into())?;
+    assert!(matches!(own.client.enter_self_sync_refresh(), Err(SdkError::InboundPending(_))));
+    assert!(matches!(mute(&own.client), Err(SdkError::InboundPending(_))));
+    assert!(own.client.account_db()?.actor_state_exists("self-sync/pending/fork-held/register")?);
     Ok(())
 }

@@ -7,7 +7,8 @@
 //! to an invite this account issued.
 use super::{authority, content, generated_signed, native_signed};
 use crate::client::recovery::{
-    SdkGuardianAcceptMessage, SdkGuardianInviteMessage, SdkGuardianRecoveryShare,
+    SdkGuardianAcceptMessage, SdkGuardianInviteHandle, SdkGuardianInviteMessage,
+    SdkGuardianRecoveryShare, SdkPendingGuardianInvite,
 };
 use crate::client::routed::{Kind, Opened};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
@@ -26,6 +27,18 @@ pub(super) struct IssuedGuardianInvite {
     pub expires_at: i64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct PendingGuardianInvite {
+    source: String,
+    invite: SdkGuardianInviteMessage,
+}
+
+fn invite_fingerprint(invite: &SdkGuardianInviteMessage) -> Result<String, SdkError> {
+    Ok(ramflux_protocol::encode_base64url(
+        blake3::hash(&ramflux_protocol::canonical_json_bytes(invite)?).as_bytes(),
+    ))
+}
+
 fn id_key(prefix: &str, id: &str) -> String {
     format!("{prefix}/{}", ramflux_protocol::encode_base64url(id.as_bytes()))
 }
@@ -35,7 +48,11 @@ pub(super) fn issued_key(invite_id: &str) -> String {
 }
 
 pub(super) fn pending_key(source: &RootQualifiedDeviceRef, invite_id: &str) -> String {
-    id_key(&format!("recovery/guardian-invite/{}", source.storage_key()), invite_id)
+    pending_storage_key(source.storage_key(), invite_id)
+}
+
+fn pending_storage_key(source: &str, invite_id: &str) -> String {
+    id_key(&format!("recovery/guardian-invite/{source}"), invite_id)
 }
 
 pub(super) fn accept_key(invite_id: &str) -> String {
@@ -172,12 +189,14 @@ impl RamfluxClient {
             return Err(authority("recovery control requires a direct control route"));
         }
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if source != opened.remote_device || source.root_commitment() == self.own_account_anchor()?
+        if source != opened.remote_device
+            || source.root_commitment() == self.own_account_anchor()?
         {
             return Err(authority("recovery control requires the pair peer of another root"));
         }
         self.require_accepted_contact(source.root_commitment())?;
         let (principal, key) = self.pinned_peer(&source)?;
+        let peer_record = self.trusted_device(HeadUse::NewAuthorization, &source)?;
         let local = self.local_principal_id()?;
         let now = crate::time::now_unix_timestamp();
         match body.payload.as_ref() {
@@ -185,6 +204,8 @@ impl RamfluxClient {
                 let native = invite_to_native(invite)?;
                 if native.inviter_principal_id != principal
                     || native.inviter_device_id != source.device_id()
+                    || peer_record["device_epoch"].as_u64() != Some(native.inviter_device_epoch)
+                    || native.signed.signing_key_id != source.device_id()
                     || native.inviter_device_public_key_base64url != key
                     || native.guardian_principal_id != local
                     || native.guardian_principal_id == native.inviter_principal_id
@@ -212,6 +233,8 @@ impl RamfluxClient {
                 let native = accept_to_native(accept)?;
                 if native.guardian_principal_id != principal
                     || native.guardian_device_id != source.device_id()
+                    || peer_record["device_epoch"].as_u64() != Some(native.guardian_device_epoch)
+                    || native.signed.signing_key_id != source.device_id()
                     || native.guardian_device_public_key_base64url != key
                     || native.owner_principal_id != local
                     || native.accept_id != format!("guardian_accept:{}", native.invite_id)
@@ -253,13 +276,19 @@ impl RamfluxClient {
             match &verified {
                 VerifiedRecovery::Invite(invite) => {
                     let key = pending_key(source, &invite.invite_id);
-                    if let Some(old) = db.load_actor_state::<SdkGuardianInviteMessage>(&key)? {
-                        if old != **invite {
+                    if let Some(old) = db.load_actor_state::<PendingGuardianInvite>(&key)? {
+                        if old.source != source.storage_key() || old.invite != **invite {
                             return Err(authority("guardian invite id reused"));
                         }
                         return Ok(());
                     }
-                    db.persist_actor_state(&key, &**invite)?;
+                    db.persist_actor_state(
+                        &key,
+                        &PendingGuardianInvite {
+                            source: source.storage_key().into(),
+                            invite: *invite.clone(),
+                        },
+                    )?;
                 }
                 VerifiedRecovery::Accept(accept) => {
                     let key = accept_key(&accept.invite_id);
@@ -280,13 +309,23 @@ impl RamfluxClient {
     /// lifetime is erased here together with the share it carries.
     /// # Errors
     /// Returns a storage error when the account database cannot be read or written.
-    pub fn pending_guardian_invites(&self) -> Result<Vec<SdkGuardianInviteMessage>, SdkError> {
+    pub fn pending_guardian_invites(&self) -> Result<Vec<SdkPendingGuardianInvite>, SdkError> {
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         let mut invites = Vec::new();
         for key in db.actor_state_keys("recovery/guardian-invite/")? {
-            match db.load_actor_state::<SdkGuardianInviteMessage>(&key)? {
-                Some(invite) if invite.expires_at > now => invites.push(invite),
+            match db.load_actor_state::<PendingGuardianInvite>(&key)? {
+                Some(row) if row.invite.expires_at > now => {
+                    let handle = SdkGuardianInviteHandle {
+                        source: row.source,
+                        invite_id: row.invite.invite_id.clone(),
+                        fingerprint: invite_fingerprint(&row.invite)?,
+                    };
+                    if pending_storage_key(&handle.source, &handle.invite_id) != key {
+                        return Err(authority("pending guardian source/key mismatch"));
+                    }
+                    invites.push(SdkPendingGuardianInvite { handle, invite: row.invite });
+                }
                 Some(_) => db.remove_actor_state(&key)?,
                 None => {}
             }
@@ -301,28 +340,56 @@ impl RamfluxClient {
     /// Returns an error when no pending invite has this id or the native accept refuses it.
     pub fn decide_pending_guardian_invite(
         &self,
-        invite_id: &str,
+        handle: &SdkGuardianInviteHandle,
         accept: bool,
     ) -> Result<Option<SdkGuardianAcceptMessage>, SdkError> {
         let db = self.account_db()?;
         db.write_transaction(|| {
-            let suffix = format!("/{}", ramflux_protocol::encode_base64url(invite_id.as_bytes()));
-            let mut found = None;
-            for key in db.actor_state_keys("recovery/guardian-invite/")? {
-                if key.ends_with(&suffix)
-                    && let Some(invite) = db.load_actor_state::<SdkGuardianInviteMessage>(&key)?
-                    && invite.invite_id == invite_id
-                {
-                    found = Some((key, invite));
-                    break;
-                }
+            let key = pending_storage_key(&handle.source, &handle.invite_id);
+            let row = db
+                .load_actor_state::<PendingGuardianInvite>(&key)?
+                .ok_or_else(|| authority("no pending guardian invite for this source and id"))?;
+            let invite = row.invite;
+            if row.source != handle.source
+                || invite.invite_id != handle.invite_id
+                || invite_fingerprint(&invite)? != handle.fingerprint
+            {
+                return Err(authority("pending guardian invite changed after selection"));
             }
-            let (key, invite) =
-                found.ok_or_else(|| authority("no pending guardian invite with this id"))?;
+            if accept {
+                self.revalidate_pending_guardian_invite(handle, &invite)?;
+            }
             let reply = if accept { Some(self.accept_guardian_invite(&invite)?) } else { None };
             db.remove_actor_state(&key)?;
             Ok(reply)
         })
+    }
+
+    fn revalidate_pending_guardian_invite(
+        &self,
+        handle: &SdkGuardianInviteHandle,
+        invite: &SdkGuardianInviteMessage,
+    ) -> Result<(), SdkError> {
+        let source = self.device_identity(&handle.source)?;
+        self.require_accepted_contact(source.root_commitment())?;
+        let (principal, signing_key) = self.pinned_peer(&source)?;
+        let current = self.trusted_device(
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            &source,
+        )?;
+        if principal != invite.inviter_principal_id
+            || source.device_id() != invite.inviter_device_id
+            || signing_key != invite.inviter_device_public_key_base64url
+            || invite.guardian_principal_id != self.local_principal_id()?
+            || current["device_epoch"].as_u64() != Some(invite.inviter_device_epoch)
+            || invite.signed.signing_key_id != source.device_id()
+            || invite.expires_at <= crate::time::now_unix_timestamp()
+        {
+            return Err(authority("pending guardian authority expired or changed"));
+        }
+        ramflux_protocol::verify_signed_fields(invite, &invite.signed, &signing_key)
+            .map_err(|_| authority("pending guardian signature invalid"))?;
+        Ok(())
     }
 }
 
@@ -383,7 +450,9 @@ mod tests {
     #[test]
     fn guardian_keys_never_split_on_separator_bytes_in_ids() {
         assert_ne!(issued_key("a/b"), issued_key("a"));
-        assert!(!issued_key("a/b").trim_start_matches("recovery/guardian-invite-issued/").contains('/'));
+        assert!(
+            !issued_key("a/b").trim_start_matches("recovery/guardian-invite-issued/").contains('/')
+        );
         assert_ne!(accept_key("x"), issued_key("x"));
     }
 }

@@ -16,6 +16,17 @@ struct Transfer {
     last_digest: Vec<u8>,
     accepted_at: i64,
     pages: BTreeMap<u64, Vec<u8>>,
+    #[serde(default)]
+    retired: Vec<Retired>,
+}
+
+// The wire TTL is u32 seconds. Keep every retired id for that entire maximum
+// lifetime; refuse a replacement at capacity instead of weakening its replay fence.
+const RETIRED_CAPACITY: usize = 256;
+#[derive(Clone, Deserialize, Serialize)]
+struct Retired {
+    id: Vec<u8>,
+    until: i64,
 }
 
 fn refused(reason: &str) -> SdkError {
@@ -29,8 +40,26 @@ impl Transfer {
     // Only a newly accepted page refreshes the inactivity deadline. Retransmits cannot
     // hold the source's single transfer open forever or switch its active transfer id.
     fn advance(&mut self, page: &g::HistoryPage, now: i64) -> Result<bool, SdkError> {
-        if now.saturating_sub(self.accepted_at) >= 60 {
-            *self = Self::default();
+        self.retired.retain(|row| row.until > now);
+        if self.retired.iter().any(|row| row.id == page.transfer_id) {
+            return Err(refused("retired history transfer"));
+        }
+        if !self.id.is_empty() && self.id != page.transfer_id {
+            if now.saturating_sub(self.accepted_at) < 60
+                || page.page != 0
+                || page.previous_page_digest != [0; 32]
+            {
+                return Err(refused("interleaved history transfer"));
+            }
+            if self.retired.len() >= RETIRED_CAPACITY {
+                return Err(refused("history retired-transfer capacity"));
+            }
+            self.retired.push(Retired {
+                id: self.id.clone(),
+                until: now.saturating_add(i64::from(u32::MAX)),
+            });
+            self.id.clear();
+            self.pages.clear();
         }
         if self.id.is_empty() {
             if page.page != 0 || page.previous_page_digest != [0; 32] {
@@ -169,6 +198,33 @@ mod tests {
     }
 
     #[test]
+    fn history_retired_transfer_fences_refuse_at_capacity_without_eviction() -> Result<(), SdkError>
+    {
+        let first = g::HistoryPage {
+            transfer_id: vec![1; 32],
+            previous_page_digest: vec![0; 32],
+            page_digest: vec![2; 32],
+            ..Default::default()
+        };
+        let mut state = Transfer::default();
+        assert!(state.advance(&first, 100)?);
+        state.retired = (0..RETIRED_CAPACITY)
+            .map(|index| Retired { id: index.to_be_bytes().to_vec(), until: 1_000 })
+            .collect();
+        let replacement = g::HistoryPage { transfer_id: vec![3; 32], ..first.clone() };
+        assert!(state.advance(&replacement, 160).is_err());
+        assert_eq!(state.id, first.transfer_id);
+        assert_eq!(state.retired.len(), RETIRED_CAPACITY);
+        assert!(state.advance(&replacement, 1_000)?);
+        assert!(
+            state.advance(&first, 1_060).is_err(),
+            "a retired id never replaces the current chain"
+        );
+        assert_eq!(state.retired.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn history_chain_replays_do_not_refresh_and_gaps_forks_interleaving_refuse()
     -> Result<(), SdkError> {
         let mut state = Transfer::default();
@@ -202,12 +258,17 @@ mod tests {
         assert!(state.advance(&second, 125)?);
         assert!(!state.advance(&first, 130)?, "an earlier exact replay settles");
         assert_eq!(state.accepted_at, 125);
-        assert!(
-            state.advance(&second, 185).is_err(),
-            "expired transfer cannot restart at page one"
-        );
+        assert!(!state.advance(&second, 185)?, "idle exact replay still settles");
+        let third = g::HistoryPage {
+            page: 2,
+            previous_page_digest: second.page_digest.clone(),
+            page_digest: vec![4; 32],
+            ..second.clone()
+        };
+        assert!(state.advance(&third, 186)?, "delayed continuation retains the active chain");
         first.transfer_id[0] ^= 1;
-        assert!(state.advance(&first, 185)?);
+        assert!(state.advance(&first, 246)?);
+        assert!(state.advance(&second, 247).is_err(), "retired id cannot replace the new chain");
         Ok(())
     }
 }

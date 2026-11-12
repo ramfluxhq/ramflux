@@ -47,9 +47,7 @@ pub(super) fn request_body(query: &Query) -> Result<serde_json::Value, RfError> 
     }
     if let Some(message) = query.message.as_deref() {
         if query.before.is_some() || query.after_seq.is_some() {
-            return Err(RfError::Message(
-                "--message excludes --before and --after-seq".to_owned(),
-            ));
+            return Err(RfError::Message("--message excludes --before and --after-seq".to_owned()));
         }
         body["message_id"] = serde_json::json!(message);
         return Ok(body);

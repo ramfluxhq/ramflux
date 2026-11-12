@@ -11,8 +11,8 @@ mod e2e;
 
 use e2e::{
     Account, Daemon, boot_stack, configure_node, crash_daemon, create_account, dm_send, dump_logs,
-    exchange_contacts, rf_json, start_daemon, start_daemon_at, unique,
-    unlock_account_with_timeout, wait_json,
+    exchange_contacts, rf_json, start_daemon, start_daemon_at, unique, unlock_account_with_timeout,
+    wait_json,
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -42,7 +42,12 @@ fn row_with_text<'a>(value: &'a Value, key: &str, text: &str) -> Option<&'a Valu
     rows(value, key).iter().find(|row| row.get("text").and_then(Value::as_str) == Some(text))
 }
 
-fn changes(daemon: &Daemon, account: &Account, conversation: &str, after: u64) -> e2e::Result<Value> {
+fn changes(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    after: u64,
+) -> e2e::Result<Value> {
     rf_json(
         &daemon.socket,
         &[
@@ -74,7 +79,16 @@ fn wait_synced(
 ) -> e2e::Result<Value> {
     wait_json(
         daemon,
-        &["dm", "read", "--account", &account.id, "--conversation", conversation, "--after-seq", "0"],
+        &[
+            "dm",
+            "read",
+            "--account",
+            &account.id,
+            "--conversation",
+            conversation,
+            "--after-seq",
+            "0",
+        ],
         |value| {
             let got = texts(value, "changes");
             expected.iter().all(|text| got.contains(text))
@@ -141,7 +155,10 @@ fn unified_messages_survive_a_crash_and_a_backlog_beyond_the_delivery_page() -> 
     assert!(page.get("gateway_entries").is_none() && page.get("decrypted_messages").is_none());
     let newest = rows(&page, "messages").first().ok_or("page empty")?;
     assert_eq!(newest["text"], bodies[bodies.len() - 1].as_str());
-    assert_eq!((newest["state"].as_str(), newest["kind"].as_str()), (Some("content"), Some("message")));
+    assert_eq!(
+        (newest["state"].as_str(), newest["kind"].as_str()),
+        (Some("content"), Some("message"))
+    );
     let id = newest["id"].as_str().ok_or("id missing")?;
     let single = detail(&bob_d, &bob, &conversation, id)?;
     assert_eq!(single["message"]["text"], newest["text"]);

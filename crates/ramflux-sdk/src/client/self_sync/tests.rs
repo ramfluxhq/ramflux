@@ -214,7 +214,7 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
 }
 
 #[test]
-fn self_sync_bootstrap_preserves_read_max_beyond_winning_revision() -> TestResult {
+fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestResult {
     let mut states = Vec::new();
     for order in [[read("m2", 1), read("m1", 2)], [read("m1", 2), read("m2", 1)]] {
         let (client, root) =
@@ -231,7 +231,8 @@ fn self_sync_bootstrap_preserves_read_max_beyond_winning_revision() -> TestResul
             read("m2", 1).encode_to_vec()
         );
         let own = client.owned_device_identity()?;
-        client.bootstrap_self_sync(&own)?;
+        assert!(matches!(client.bootstrap_self_sync(&own), Err(SdkError::InboundPending(_))));
+        queue_local_repair(&client, &state.value)?;
         let repair_keys = client.account_db()?.actor_state_keys("self-sync/repair/")?;
         assert_eq!(repair_keys.len(), 1);
         let repair: serde_json::Value =
@@ -321,81 +322,42 @@ fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() 
 }
 
 #[test]
-fn self_sync_publication_allocates_once_across_fanout_and_restart() -> TestResult {
-    let (mut client, root) =
-        client_with_account("self-sync-publication", "principal_sync", "local")?;
+fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
+    let (mut client, root) = client_with_account("self-sync-publication", "principal_sync", "local")?;
     let update = client.change_self_sync("c", value(7, 0))?;
-    let first = client
-        .account_db()?
-        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
-    let first_inner = g::Inner::decode(first.as_slice())?;
-    let first_identity = first_inner.identity.ok_or("first identity")?;
-    assert_ne!(first_identity.device_sequence & (1 << 63), 0);
-    let fanout = client
-        .account_db()?
-        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
-    assert_eq!(first, fanout);
-    client.active_account_db = None;
-    client.unlock_account("acct", b"own-device-sync-test")?;
-    assert_eq!(
-        first,
-        client
-            .account_db()?
-            .write_transaction(|| client.self_sync_publication_inner("c", &update))?
-    );
-    let mut muted = value(6, 0);
-    muted.mute = true;
-    let changed = client.change_self_sync("c", muted)?;
-    assert!(
-        client
-            .account_db()?
-            .write_transaction(|| client.self_sync_publication_inner("c", &update))
-            .is_err()
-    );
-    let next = client
-        .account_db()?
-        .write_transaction(|| client.self_sync_publication_inner("c", &changed))?;
-    assert_eq!(
-        g::Inner::decode(next.as_slice())?.identity.ok_or("next identity")?.device_sequence,
-        first_identity.device_sequence + 1
-    );
+    for restart in [false, true] {
+        if restart {
+            client.active_account_db = None;
+            client.unlock_account("acct", b"own-device-sync-test")?;
+        }
+        for _ in 0..2 {
+            assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)), Err(SdkError::InboundPending(_))));
+        }
+        assert_eq!(client.account_db()?.actor_state_keys("message-identity/counter/")?.len(), 0);
+        assert!(client.self_sync_state("c", &update)?.ok_or("state")?.publication_identity.is_none());
+    }
     drop(client);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
-fn self_sync_publication_preserves_exact_body_and_independent_read_register() -> TestResult {
-    let (client, root) =
-        client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
+fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publication_defers() -> TestResult {
+    let (client, root) = client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
     let source = client.owned_device_identity()?;
     let update = value(7, 9);
     let exact = update.encode_to_vec();
-    assert_eq!(self_sync::decode_stored_body(&exact)?, update);
-    client
-        .account_db()?
-        .write_transaction(|| client.apply_self_sync_exact(&source, "c", &update, &exact))?;
-    let bytes = client
-        .account_db()?
-        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
-    assert_eq!(g::Inner::decode(bytes.as_slice())?.body, exact);
+    client.account_db()?.write_transaction(|| client.apply_self_sync_exact(&source, "c", &update, &exact))?;
+    assert_eq!(client.self_sync_state("c", &update)?.ok_or("exact state")?.exact_body, exact);
+    assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)), Err(SdkError::InboundPending(_))));
     install_read_messages(&client)?;
     apply(&client, &read("m1", 20))?;
     let greater_read = read("m2", 5);
     apply(&client, &greater_read)?;
-    let first = client
-        .account_db()?
-        .write_transaction(|| client.self_sync_publication_inner("c", &greater_read))?;
-    assert_eq!(
-        first,
-        client
-            .account_db()?
-            .write_transaction(|| client.self_sync_publication_inner("c", &greater_read))?
-    );
-    assert_eq!(
-        g::SelfSync::decode(g::Inner::decode(first.as_slice())?.body.as_slice())?,
-        greater_read
-    );
+    let state = client.self_sync_state("c", &greater_read)?.ok_or("read state")?;
+    assert_eq!(state.read_marker_body.ok_or("read body")?.exact_body, greater_read.encode_to_vec());
+    assert_eq!(state.value.revision, 20);
+    assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &greater_read)), Err(SdkError::InboundPending(_))));
     drop(client);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -420,10 +382,9 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
     } else {
         (b, a)
     };
-    let source = client.owned_device_identity()?;
     let db = client.account_db()?;
     apply(&client, &loser)?;
-    client.bootstrap_self_sync(&source)?;
+    queue_local_repair(&client, &loser)?;
     let old_marker =
         db.actor_state_keys("self-sync/repair-sent/")?.pop().ok_or("old repair marker")?;
     let old_repair = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old repair")?;
@@ -460,7 +421,7 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
         "cleared draft cannot leave a plaintext guessing fingerprint"
     );
     assert!(!db.actor_state_exists(&key)?);
-    client.bootstrap_self_sync(&source)?;
+    queue_local_repair(&client, &value(3, 2))?;
     client.erase_self_sync_conversation("c")?;
     assert_eq!(db.actor_state_usage("self-sync/repair-sent/")?.0, 0);
     drop(client);
@@ -473,9 +434,8 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
     let (client, root) =
         client_with_account("self-sync-repair-read-max", "principal_sync", "local")?;
     install_read_messages(&client)?;
-    let source = client.owned_device_identity()?;
     apply(&client, &read("m1", 2))?;
-    client.bootstrap_self_sync(&source)?;
+    queue_local_repair(&client, &read("m1", 2))?;
     let db = client.account_db()?;
     let old = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old read repair")?;
     assert!(apply(&client, &read("m2", 1))?);
@@ -486,7 +446,7 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
         serde_json::from_value::<Vec<u8>>(repair["read_marker_body"].clone())?,
         read("m2", 1).encode_to_vec()
     );
-    client.bootstrap_self_sync(&source)?;
+    queue_local_repair(&client, &read("m1", 2))?;
     assert_eq!(db.actor_state_usage("self-sync/repair/")?.0, 1);
     assert_eq!(client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?.value.revision, 2);
     drop(client);
@@ -521,4 +481,11 @@ fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> 
     drop(client);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn queue_local_repair(client: &RamfluxClient, value: &g::SelfSync) -> Result<(), SdkError> {
+    let source = client.owned_device_identity()?;
+    let scope = key(source.root_commitment(), "c", value)?;
+    let state = client.self_sync_state("c", value)?.ok_or_else(|| refused("local test register missing"))?;
+    client.account_db()?.write_transaction(|| client.queue_self_sync_repair(&source, &scope, &state))
 }

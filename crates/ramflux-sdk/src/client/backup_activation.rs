@@ -31,6 +31,7 @@ impl RamfluxClient {
             &self.owned_device_identity()?,
         )?;
         db.write_transaction(||->Result<(),SdkError>{
+            self.mark_self_sync_restore_refresh()?;
             db.persist_actor_state("backup/reestablishing",&false)?;
             db.append_journal("backup:secure-sessions-ready","account.secure_sessions.changed",&serde_json::json!({"local_account_id":db.local_account_id,"secure_sessions":"ready"}),crate::prelude::now_unix_timestamp(),None)?;Ok(())
         })

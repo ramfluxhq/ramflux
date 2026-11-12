@@ -18,9 +18,29 @@ fn view<'a>(
     views.iter().find(|view| view.id == id).ok_or_else(|| invalid("view missing"))
 }
 
+fn assert_detail_and_missing_ids(
+    client: &RamfluxClient,
+    target_id: &str,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let detail = client.generated_message_detail("c", target_id)?;
+    assert_eq!(detail.message.text.as_deref(), Some("edited one"));
+    assert_eq!(detail.message.journal_sequence, sequence);
+    let missing = ramflux_protocol::encode_base64url([9_u8; 32]);
+    for (id, code) in [
+        (missing.as_str(), crate::bindings::GeneratedErrorCode::TargetNotFound),
+        ("short", crate::bindings::GeneratedErrorCode::InvalidArgument),
+    ] {
+        let error = client.generated_message_detail("c", id).err().ok_or_else(|| invalid("id"))?;
+        assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code, code as i32);
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn read_model_serves_page_changes_and_detail_from_the_durable_store()
--> Result<(), SdkError> {
+async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> Result<(), SdkError>
+{
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(211, 213)?;
     commit_content(&a, &mut b, "target", text("first body zq")).await?;
@@ -78,23 +98,16 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store()
     let encoded = serde_json::to_string(&page)?;
     assert!(!encoded.contains("first body zq"), "replaced body leaked into the read model");
 
-    let detail = b.client.generated_message_detail("c", &target_id)?;
-    assert_eq!(detail.message.text.as_deref(), Some("edited one"));
-    assert_eq!(detail.message.journal_sequence, edited.journal_sequence);
-    let missing = ramflux_protocol::encode_base64url([9_u8; 32]);
-    for (id, code) in [
-        (missing.as_str(), crate::bindings::GeneratedErrorCode::TargetNotFound),
-        ("short", crate::bindings::GeneratedErrorCode::InvalidArgument),
-    ] {
-        let error = b.client.generated_message_detail("c", id).err().ok_or_else(|| invalid("id"))?;
-        assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code, code as i32);
-    }
+    assert_detail_and_missing_ids(&b.client, &target_id, edited.journal_sequence)?;
 
     let snapshot = b.client.generated_message_changes("c", 0, 100)?;
     assert_eq!(snapshot.changes.len(), 2);
     assert!(!snapshot.more);
     assert!(
-        snapshot.changes.windows(2).all(|pair| pair[0].journal_sequence <= pair[1].journal_sequence)
+        snapshot
+            .changes
+            .windows(2)
+            .all(|pair| pair[0].journal_sequence <= pair[1].journal_sequence)
     );
     assert_eq!(snapshot.next_after, snapshot.snapshot_sequence);
     let idle = b.client.generated_message_changes("c", snapshot.next_after, 100)?;
@@ -125,15 +138,7 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store()
     assert!(!encoded.contains("edited one") && !encoded.contains("👍"));
     assert!(erased.next_after > snapshot.next_after);
 
-    let future = b.client.generated_message_changes("c", erased.snapshot_sequence + 1_000, 100);
-    let error = future.err().ok_or_else(|| invalid("future cursor accepted"))?;
-    assert_eq!(
-        crate::bindings::AdapterError::from_sdk(&error).code,
-        crate::bindings::GeneratedErrorCode::ResyncRequired as i32
-    );
-    for limit in [0, 101] {
-        assert!(b.client.generated_message_changes("c", 0, limit).is_err());
-    }
+    assert_cursor_bounds(&b.client, erased.snapshot_sequence)?;
     Ok(())
 }
 
@@ -208,7 +213,20 @@ async fn tampered_committed_binding_is_refused_and_never_served() -> Result<(), 
         let served = b.client.generated_message_changes("c", 0, 100)?;
         assert_eq!(served.changes.len(), 1, "tampered {name} reached the read model");
         assert!(!serde_json::to_string(&served)?.contains("must never be served"));
-        assert!(b.client.generated_message_view_page("c", None, 100)?.messages.len() == 1);
+        assert_eq!(b.client.generated_message_view_page("c", None, 100)?.messages.len(), 1);
+    }
+    Ok(())
+}
+
+fn assert_cursor_bounds(client: &RamfluxClient, sequence: u64) -> Result<(), SdkError> {
+    let future = client.generated_message_changes("c", sequence + 1_000, 100);
+    let error = future.err().ok_or_else(|| invalid("future cursor accepted"))?;
+    assert_eq!(
+        crate::bindings::AdapterError::from_sdk(&error).code,
+        crate::bindings::GeneratedErrorCode::ResyncRequired as i32
+    );
+    for limit in [0, 101] {
+        assert!(client.generated_message_changes("c", 0, limit).is_err());
     }
     Ok(())
 }

@@ -203,6 +203,7 @@ impl RamfluxClient {
         event: &ramflux_protocol::A2iControlEvent,
         target_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        Self::require_a2i_binding_authority()?;
         if event.source_device_id != self.owned_device_identity()?.device_id() {
             return Err(content("a2i producer must be its source device"));
         }

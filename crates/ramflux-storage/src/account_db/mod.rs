@@ -30,6 +30,7 @@ mod backup_object_erasure;
 #[cfg(test)]
 mod backup_object_erasure_tests;
 mod backup_object_metadata;
+mod backup_original_header;
 mod backup_retirement;
 mod backup_selector_admission;
 mod backup_self_sync;
