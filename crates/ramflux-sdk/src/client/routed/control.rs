@@ -15,6 +15,64 @@ fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
 }
 
 impl RamfluxClient {
+    pub(super) fn authorize_generated_pair_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if source != opened.remote_device
+            || opened.routing.group_id.is_some()
+            || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+        {
+            return Err(invalid(
+                "pair reset requires the authenticated pair peer on a direct control route",
+            ));
+        }
+        if self.friend_rejection_reason(source.root_commitment())?.is_some() {
+            return Err(invalid("pair recovery forbidden for removed or blocked contact"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_generated_pair_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        identity: &ramflux_protocol::message::EventIdentity,
+        control: &ramflux_protocol::message::Control,
+        exact_inner: &[u8],
+    ) -> Result<(), SdkError> {
+        use ramflux_protocol::message::control::Payload;
+        self.authorize_generated_pair_control(opened, entry)?;
+        let key = format!(
+            "routed/pair-control-applied/{}/{}",
+            opened.remote_device.storage_key(),
+            ramflux_protocol::encode_base64url(&identity.id)
+        );
+        let digest = *blake3::hash(exact_inner).as_bytes();
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if let Some(old) = db.load_actor_state::<[u8; 32]>(&key)? {
+                return if old == digest { Ok(()) } else { Err(SdkError::ReplayMismatch) };
+            }
+            match control.payload.as_ref() {
+                Some(Payload::Reset(reset)) => {
+                    self.abandon_unconfirmed_candidate(&opened.local_device,
+                        &opened.remote_device, reset.rejected_bootstrap_floor)?;
+                },
+                Some(Payload::ResetAck(_)) => {},
+                _ => return Err(invalid("pair reset payload mismatch")),
+            }
+            db.append_journal(&format!("pair-reset:{}", ramflux_protocol::encode_base64url(&identity.id)),
+                "session.reset", &serde_json::json!({
+                    "device_id": opened.remote_device.storage_key(), "reason":"authenticated_reset_request",
+                }), super::now_unix_timestamp(), None)?;
+            db.persist_actor_state(&key, &digest)?;
+            Ok(())
+        })
+    }
+
     fn project_generated_own_message_copy(
         &self,
         opened: &Opened,

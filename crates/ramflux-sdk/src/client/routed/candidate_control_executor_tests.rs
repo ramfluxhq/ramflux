@@ -10,8 +10,23 @@ fn friend_entry(
     friend: g::FriendControl,
     unknown: bool,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    let mut body = g::Control { operation: 16, payload: Some(g::control::Payload::Friend(friend)) }
-        .encode_to_vec();
+    control_entry(
+        a,
+        b,
+        id,
+        &g::Control { operation: 16, payload: Some(g::control::Payload::Friend(friend)) },
+        unknown,
+    )
+}
+
+fn control_entry(
+    a: &Fixture,
+    b: &Fixture,
+    id: &str,
+    control: &g::Control,
+    unknown: bool,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let mut body = control.encode_to_vec();
     if unknown {
         body.extend_from_slice(&[0xf8, 0x07, 1]);
     }
@@ -165,6 +180,98 @@ async fn generated_unknown_control_retention_never_parses_legacy_cache_json() ->
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 1);
     assert_eq!(
         b.client.account_db()?.actor_state_keys("routed/friend-applied/")?,
+        Vec::<String>::new()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_pair_reset_and_ack_reach_native_executor_with_exact_replay()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    for operation in [1, 2] {
+        let (a, mut b) = pair(161, 163)?;
+        let payload = if operation == 1 {
+            g::control::Payload::Reset(g::PairReset { rejected_bootstrap_floor: 3 })
+        } else {
+            g::control::Payload::ResetAck(g::PairResetAck { rejected_bootstrap_floor: 3 })
+        };
+        let control = g::Control { operation, payload: Some(payload) };
+        let entry = control_entry(&a, &b, "typed-pair-control", &control, false)?;
+        apply(&mut b, &entry).await?;
+        let count = b
+            .client
+            .account_db()?
+            .journal_after(0, 256)?
+            .iter()
+            .filter(|event| event.topic == "session.reset")
+            .count();
+        assert_eq!(count, 1, "typed pair control did not invoke its native executor");
+        let repeat = control_entry(&a, &b, "typed-pair-control", &control, false)?;
+        apply(&mut b, &repeat).await?;
+        assert_eq!(
+            b.client.account_db()?.actor_state_keys("routed/pair-control-applied/")?.len(),
+            1
+        );
+        assert_eq!(
+            b.client
+                .account_db()?
+                .journal_after(0, 256)?
+                .iter()
+                .filter(|event| event.topic == "session.reset")
+                .count(),
+            1
+        );
+        let changed = g::Control {
+            operation,
+            payload: Some(if operation == 1 {
+                g::control::Payload::Reset(g::PairReset { rejected_bootstrap_floor: 4 })
+            } else {
+                g::control::Payload::ResetAck(g::PairResetAck { rejected_bootstrap_floor: 4 })
+            }),
+        };
+        let conflict = control_entry(&a, &b, "typed-pair-control", &changed, false)?;
+        assert!(matches!(apply(&mut b, &conflict).await, Err(SdkError::ReplayMismatch)));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn known_control_payload_mismatch_is_refused_before_unsupported_retention()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(165, 167)?;
+    let malformed = g::Control {
+        operation: 1,
+        payload: Some(g::control::Payload::ResetAck(g::PairResetAck {
+            rejected_bootstrap_floor: 0,
+        })),
+    };
+    let entry = control_entry(&a, &b, "known-control-shape", &malformed, true)?;
+    assert!(
+        matches!(apply(&mut b, &entry).await, Err(SdkError::GeneratedRefused { .. })),
+        "unknown unrelated fields hid a known operation/payload mismatch"
+    );
+    assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
+    assert_eq!(
+        b.client.account_db()?.actor_state_keys("routed/pair-control-applied/")?,
+        Vec::<String>::new()
+    );
+    // Refusal rolls back the receive ratchet; use an independent established pair for the future operation.
+    let (a, mut b) = pair(169, 171)?;
+    let future = g::Control {
+        operation: 17,
+        payload: Some(g::control::Payload::Reset(g::PairReset { rejected_bootstrap_floor: 0 })),
+    };
+    let entry = control_entry(&a, &b, "future-control-operation", &future, false)?;
+    apply(&mut b, &entry).await?;
+    assert_eq!(
+        b.client.account_db()?.unsupported_raw_quota(None)?.owners,
+        1,
+        "a future operation must retain its bounded authenticated diagnostic"
+    );
+    assert_eq!(
+        b.client.account_db()?.actor_state_keys("routed/pair-control-applied/")?,
         Vec::<String>::new()
     );
     Ok(())

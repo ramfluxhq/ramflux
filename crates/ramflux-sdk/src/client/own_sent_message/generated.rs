@@ -114,6 +114,19 @@ impl RamfluxClient {
         let identity = self.authorize_generated_own_sent(source, conversation, sent)?;
         let scanned = g::validation::scan_inner(&sent.exact_inner)
             .map_err(|_| invalid("own sent Inner malformed"))?;
+        // Check the content-free fence after source/original authorization, before an
+        // unsupported old Message can be parked with its erased body and nonce.
+        if scanned.kind == 1
+            && self
+                .account_db()?
+                .load_actor_state::<bool>(&format!(
+                    "routed/report-opening-retired/{}",
+                    sent.message_id
+                ))?
+                .unwrap_or(false)
+        {
+            return Ok(true);
+        }
         if scanned.outcome != g::validation::ScanOutcome::Supported {
             return Err(SdkError::InboundPending(
                 "own sent unsupported attestation retention pending".into(),
@@ -495,6 +508,78 @@ mod tests {
             &sent
         )?);
         assert_eq!(own.client.direct_message_by_id(&sent.message_id)?.ok_or("row")?.created_at, 42);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn own_sent_retired_unsupported_original_is_settled_without_retention() -> TestResult {
+        let (own, mut sent) = fixture().await?;
+        let source = own.client.owned_device_identity()?;
+        own.client.receive_generated_own_sent(&entry()?, &source, 42, &sent)?;
+        let conversation = sent.context.as_ref().ok_or("context")?.conversation_id.clone();
+        let target = g::MessageRef {
+            id: ramflux_protocol::decode_base64url(&sent.message_id)?,
+            conversation_id: conversation.clone(),
+            author_anchor: source.root_commitment().into(),
+        };
+        let digest =
+            crate::client::message_mutations::previous_content_digest(&target, &sent.exact_inner)?;
+        let identity = own.client.allocate_generated_identity(&conversation, 1001, false)?;
+        let mut edit = sent.clone();
+        edit.message_id = ramflux_protocol::encode_base64url(&identity.id);
+        edit.exact_inner = RamfluxClient::encode_generated_inner(
+            identity,
+            &g::Content {
+                value: Some(g::content::Value::Edit(g::Edit {
+                    target: Some(target),
+                    revision: 1,
+                    previous_content_digest: digest.to_vec(),
+                    replacement: Some(g::Message {
+                        text: "current replacement".into(),
+                        ..Default::default()
+                    }),
+                })),
+            },
+        )?;
+        own.client.receive_generated_own_sent(&entry()?, &source, 43, &edit)?;
+        let db = own.client.account_db()?;
+        let current = db.message_content(&sent.message_id)?.ok_or("replacement")?;
+        assert!(
+            db.load_actor_state::<bool>(&format!(
+                "routed/report-opening-retired/{}",
+                sent.message_id
+            ))?
+            .unwrap_or(false)
+        );
+        let mut inner = g::Inner::decode(sent.exact_inner.as_slice())?;
+        inner.body.extend_from_slice(&[0xf8, 0x07, 1]);
+        sent.exact_inner = inner.encode_to_vec();
+        assert_ne!(
+            g::validation::scan_inner(&sent.exact_inner)?.outcome,
+            g::validation::ScanOutcome::Supported
+        );
+        assert!(
+            own.client.receive_generated_own_sent(&entry()?, &source, 44, &sent)?,
+            "an authorized retired original must settle before unsupported retention"
+        );
+        assert_eq!(db.message_content(&sent.message_id)?, Some(current));
+        assert_eq!(db.unsupported_raw_quota(None)?.owners, 0);
+        let mut forged = sent.clone();
+        let mut inner = g::Inner::decode(forged.exact_inner.as_slice())?;
+        let identity = inner.identity.as_mut().ok_or("identity")?;
+        identity.author.as_mut().ok_or("author")?.device_epoch += 1;
+        identity.id = g::identity::derive(
+            identity.author.as_ref().ok_or("author")?,
+            &conversation,
+            identity.device_sequence,
+        )?
+        .to_vec();
+        forged.message_id = ramflux_protocol::encode_base64url(&identity.id);
+        forged.exact_inner = inner.encode_to_vec();
+        assert!(
+            own.client.receive_generated_own_sent(&entry()?, &source, 45, &forged).is_err(),
+            "retirement never bypasses original device authority"
+        );
         Ok(())
     }
 
