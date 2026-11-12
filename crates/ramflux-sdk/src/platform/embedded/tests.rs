@@ -14,6 +14,19 @@ fn supervisor(root: &Root) -> EmbeddedSupervisor {
     EmbeddedSupervisor::new(EmbeddedConfig::new(HostPaths { data_root: root.0.clone() }))
 }
 
+fn pending_wal_bytes(directory: &std::path::Path) -> std::io::Result<u64> {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            bytes += pending_wal_bytes(&entry.path())?;
+        } else if entry.file_name().to_string_lossy().ends_with("-wal") {
+            bytes += entry.metadata()?.len();
+        }
+    }
+    Ok(bytes)
+}
+
 fn lock_is_held(root: &Root) -> bool {
     matches!(DataRootLock::acquire(&root.0), Err(SdkError::DataRootInUse))
 }
@@ -59,6 +72,8 @@ fn suspend_leaves_no_open_descriptor_under_the_data_root() -> TestResult {
     if let Some(open) = open_descriptors_under(&root.0) {
         assert_eq!(open, 0, "a store or lock descriptor survived suspension");
     }
+    // The WAL is checkpointed before the lock is released: no write-ahead data is left.
+    assert_eq!(pending_wal_bytes(&root.0)?, 0, "a WAL still held frames at suspension");
     host.stop()?;
     Ok(())
 }
