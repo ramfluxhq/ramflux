@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Watch only: never skips tests or forgives persistent failures.
+[[test]]
+package = "ramflux-sdk"
+name = "bus::account_runtime::tests::lifecycle_fence::lifecycle_fence"
+owner = "sdk"
+expires = "2026-11-26"
+evidence = "https://github.com/ramfluxhq/ramflux/actions/runs/43036370916"

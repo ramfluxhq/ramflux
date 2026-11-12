@@ -45,6 +45,31 @@ jobs:
       - name: Independent pairing codec vectors
         run: python3 -B scripts/check-pairing-oracle.py --check
 
+      - name: Envelope TTL inventory
+        run: python3 -B scripts/check-content-ttl.py
+
+      - name: Production feature guard self-tests
+        run: python3 -B scripts/test_production_features.py
+
+      - name: CI verification tooling self-tests
+        run: |
+          python3 -B scripts/ci/report-flakes.py --self-test
+          python3 -B scripts/ci/report-mutants.py --self-test
+          python3 -B scripts/ci/run-nextest.py --self-test
+          python3 -B scripts/ci/test-timing.py --self-test
+
+  test-timing:
+    name: Test timing guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Reject new or expired test timing sites
+        run: python3 -B scripts/ci/test-timing.py --check
+
   compose-preflight:
     name: Compose input preflight
     runs-on: ubuntu-24.04
@@ -354,15 +379,28 @@ jobs:
           prefix-key: v0-rust-${{ runner.environment }}
           shared-key: cli-e2e
 
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+
       - name: Build node binaries and run rf CLI e2e
         env:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
-          cargo test -p ramflux-rf --test e2e_harness -- --test-threads=1
-          cargo test -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm -- --ignored --test-threads=1
-          cargo test -p ramflux-rf --features itest-memory-vault --test e2e_resume -- --ignored --test-threads=1
-          cargo test -p ramflux-rf --features itest-memory-vault --test e2e_group -- --ignored --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_harness -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
+
+      - name: Upload CLI JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-cli
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: ignore
 
   linux-vault-platform:
     name: Linux vault platform fixture
@@ -422,12 +460,12 @@ jobs:
         run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
       - name: Private user, D-Bus and actual systemd credential smoke
         timeout-minutes: 15
-        run: sudo --preserve-env=PATH bash scripts/linux-vault-ci.sh rest.tar.zst
+        run: sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY bash scripts/linux-vault-ci.sh rest.tar.zst
       - name: Real systemd init crash and owned-pipe cleanup proofs
         timeout-minutes: 8
         run: |
           NEXTEST=$(command -v cargo-nextest)
-          sudo --preserve-env=PATH "$NEXTEST" nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
+          sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY python3 -B scripts/ci/run-nextest.py --label vault-init -- "$NEXTEST" nextest run --profile ci --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
 
 
       - name: Real local Secret Service initialization and cleanup proofs
@@ -506,7 +544,7 @@ jobs:
           name: archive-sdk
       - name: Run shard
         run: |
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/2
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label shard -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/2
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -582,7 +620,7 @@ jobs:
           name: archive-rest
       - name: Run shard
         run: |
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci --partition hash:${{ matrix.shard }}/2
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label shard -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci --partition hash:${{ matrix.shard }}/2
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -648,23 +686,13 @@ jobs:
       - name: Test (memory vault)
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
-
-      - name: Keep JUnit (memory vault)
-        if: always()
-        run: |
-          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-memory-vault.xml; fi
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label memory-vault -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
       - name: Test (production absence)
         if: ${{ !cancelled() }}
         run: |
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
-          RAMFLUX_PRODUCTION_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
-
-      - name: Keep JUnit (production absence)
-        if: always()
-        run: |
-          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-production-absence.xml; fi
+          RAMFLUX_PRODUCTION_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label production-absence -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -730,23 +758,13 @@ jobs:
       - name: Test (legacy accounts)
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-
-      - name: Keep JUnit (legacy accounts)
-        if: always()
-        run: |
-          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-legacy-accounts.xml; fi
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label legacy-accounts -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
       - name: Test (gateway local-mint)
         if: ${{ !cancelled() }}
         run: |
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
-
-      - name: Keep JUnit (gateway local-mint)
-        if: always()
-        run: |
-          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint.xml; fi
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label local-mint -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
       - name: Build same-tree router for the session push real-router gate
         if: ${{ !cancelled() }}
@@ -759,12 +777,7 @@ jobs:
       - name: Session push real-router gate (explicit, ignored by default)
         if: ${{ !cancelled() }}
         run: |
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
-
-      - name: Keep JUnit (real-router gate)
-        if: always()
-        run: |
-          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint-gate.xml; fi
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label local-mint-gate -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -783,18 +796,34 @@ jobs:
 
   mutants:
     name: Mutants (advisory, diff only)
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Rust diff
+        id: diff
+        env:
+          MUTANTS_BASE: ${{ github.event.pull_request.base.sha || inputs.mutants_base }}
+        run: |
+          echo "MUTANTS_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+          if [ -z "$MUTANTS_BASE" ]; then echo "::error::mutants_base is empty"; exit 1; fi
+          if ! base=$(git rev-parse --verify --quiet --end-of-options "$MUTANTS_BASE^{commit}"); then
+            echo "::error::mutants_base is not a commit: $MUTANTS_BASE"; exit 1
+          fi
+          git diff --no-ext-diff --no-textconv "$base...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
+          if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
       - name: Install pinned Rust toolchain and check build prerequisites
+        if: steps.diff.outputs.has == 'true'
+        timeout-minutes: 2
         run: |
           missing=0
           for tool in cc c++ make cmake pkg-config perl python3 git; do
@@ -807,19 +836,9 @@ jobs:
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
 
-      - name: Rust diff
-        id: diff
-        env:
-          MUTANTS_BASE: ${{ inputs.mutants_base }}
-        run: |
-          if [ -z "$MUTANTS_BASE" ]; then echo "::error::mutants_base is empty"; exit 1; fi
-          if ! git rev-parse --verify --quiet "$MUTANTS_BASE^{commit}" >/dev/null; then
-            echo "::error::mutants_base is not a commit: $MUTANTS_BASE"; exit 1
-          fi
-          git diff "$MUTANTS_BASE...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
-          if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
-
       - name: Cache
+        if: steps.diff.outputs.has == 'true'
+        timeout-minutes: 2
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -827,24 +846,33 @@ jobs:
           shared-key: mutants
 
       - name: Install nextest and cargo-mutants
+        if: steps.diff.outputs.has == 'true'
+        timeout-minutes: 2
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
           tool: nextest@0.9.150,cargo-mutants@27.1.0
 
       - name: cargo mutants --in-diff
+        id: mutation
         if: steps.diff.outputs.has == 'true'
+        continue-on-error: true
         run: |
-          # The shards already ran the baseline suite, so it is skipped here. A failure stays
-          # visible as a failed (advisory) job; only the 8 minute time box itself is tolerated.
-          if [ "${{ runner.environment }}" != github-hosted ]; then
-            test_host="$(rustc -vV | sed -n 's/^host: //p')"
-            runner_key="CARGO_TARGET_$(printf '%s' "$test_host" | tr '[:lower:]-' '[:upper:]_')_RUNNER"
-            export "$runner_key=bash $GITHUB_WORKSPACE/scripts/ci/private-netns.sh"
+          # Reserve two minutes of the job for summary/artifact publication.
+          budget=$((480 - $(date +%s) + MUTANTS_STARTED_AT))
+          rc=124
+          if [ "$budget" -gt 0 ]; then
+            rc=0
+            timeout --kill-after=10s "$budget" cargo mutants --in-diff pr.diff --test-tool nextest --baseline=skip --timeout 120 --no-shuffle || rc=$?
           fi
-          rc=0
-          timeout 480 cargo mutants --in-diff pr.diff --test-tool nextest --baseline=skip --timeout 120 --no-shuffle || rc=$?
-          if [ "$rc" -eq 124 ]; then echo "time box reached"; exit 0; fi
+          echo "status=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
+
+      - name: Summarize mutants
+        if: always()
+        env:
+          MUTATION_STATUS: ${{ steps.mutation.outputs.status || 'not-run' }}
+          MUTATION_DIFF: ${{ steps.diff.outputs.has || 'unknown' }}
+        run: python3 -B scripts/ci/report-mutants.py --status "$MUTATION_STATUS" --has-diff "$MUTATION_DIFF" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload mutants report
         if: always() && steps.diff.outputs.has == 'true'
@@ -892,20 +920,22 @@ jobs:
       - name: Migration release gate regressions
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
-          RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/shutdown/junit.xml --label graceful-shutdown -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
 
       - name: Upload JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: junit-graceful-shutdown
-          path: target/nextest/shutdown/junit.xml
+          path: |
+            target/nextest/shutdown/junit-*.xml
+            target/nextest/ci/junit-migration-refusals.xml
           if-no-files-found: ignore
 
   quic-dependencies:

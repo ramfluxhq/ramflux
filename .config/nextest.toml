@@ -7,6 +7,15 @@ fail-fast = false
 [profile.ci]
 inherits = "default"
 fail-fast = false
+retries = 1
+final-status-level = "flaky"
+
+[test-groups.heavy]
+max-threads = 1
+
+[[profile.ci.overrides]]
+filter = 'binary(graceful_shutdown) | binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group) | test(receive_resync_recovers_)'
+test-group = "heavy"
 
 [profile.ci.junit]
 path = "junit.xml"

@@ -189,12 +189,14 @@ PY
     [ "$ancestor" != / ] || break
     ancestor="$(dirname "$ancestor")"
   done
-  RF_LINUX_VAULT_FIXTURE_ROOT="$fixture" run_bounded 300 'systemd credential archive test' "$nextest" nextest run --archive-file "$archive" --workspace-remap . \
+  RF_LINUX_VAULT_FIXTURE_ROOT="$fixture" run_bounded 300 'systemd credential archive test' \
+    python3 -B "$checkout/scripts/ci/run-nextest.py" --junit "$workspace/target/nextest/ci/junit.xml" --label vault-systemd -- \
+    "$nextest" nextest run --profile ci --archive-file "$archive" --workspace-remap . \
     --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail \
     -E 'binary(linux_vault_platform) & test(linux_vault_systemd_credential_roundtrip_and_mode_refusal)'
   # Only disposable archive output is transferred, never a shared build target.
   chown -R "$fixture_user:$fixture_group" "$workspace/target"
-  test_command=("$nextest" nextest run --archive-file "$archive" --workspace-remap .
+  test_command=("$nextest" nextest run --profile ci --archive-file "$archive" --workspace-remap .
     --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E "$filter")
 fi
 cat > "$fixture/bus.conf" <<BUS
@@ -207,7 +209,11 @@ cat > "$fixture/bus.conf" <<BUS
 BUS
 chmod 0644 "$fixture/bus.conf"
 # SDK tests never mutate global environment; only this child gets private paths.
-run_bounded 480 'private-user D-Bus session and vault fixture tests' runuser -u "$fixture_user" -- env -i PATH="/usr/bin:/bin" \
+report_command=()
+if [ -z "$test_binary" ]; then
+  report_command=(python3 -B "$checkout/scripts/ci/run-nextest.py" --junit "$workspace/target/nextest/ci/junit.xml" --label vault-platform --)
+fi
+run_bounded 480 'private-user D-Bus session and vault fixture tests' "${report_command[@]}" runuser -u "$fixture_user" -- env -i PATH="/usr/bin:/bin" \
   HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data" \
   XDG_STATE_HOME="$fixture/state" XDG_RUNTIME_DIR="$fixture/runtime" TMPDIR="$fixture/tmp" \
   RF_LINUX_VAULT_FIXTURE_ROOT="$fixture" "${fixture_env[@]}" \
