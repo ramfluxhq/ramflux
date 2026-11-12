@@ -6,6 +6,8 @@ use super::{
     Common, DataSelection, DeviceRef, PairingWire, Result, RoleContext, budget, bytes, require,
 };
 use serde::{Deserialize, Serialize};
+mod framing;
+pub use framing::{ContextOfferV3, RevealV3};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

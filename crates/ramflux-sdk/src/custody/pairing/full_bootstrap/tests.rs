@@ -229,3 +229,20 @@ fn pairing_full_bootstrap_rebuilds_grant_before_signer_and_enforces_original_exp
 }
 
 mod source;
+
+/// Locally confirmed, bootstrap-verified data trusts for sibling SDK epoch-driver tests.
+pub(in crate::custody::pairing) async fn epoch_trusts() -> Result<(FullResumeTrust, FullResumeTrust)>
+{
+    let f = fixture()?;
+    let mut a =
+        FullBootstrap::new(PairingRole::Initiator, f.a, f.context.clone(), f.node.clone(), f.now)?;
+    let mut b = FullBootstrap::new(PairingRole::Responder, f.b, f.context, f.node, f.now)?;
+    let native = Native { calls: Arc::new(AtomicUsize::new(0)), now: f.now };
+    let [start, offer] = a.begin_source(f.start, &f.grant, f.now, sign)?;
+    b.receive(&start, f.now, sign)?;
+    let signed = b.receive(&offer, f.now, sign)?.ok_or("grant signature")?;
+    a.receive(&signed, f.now, sign)?;
+    let (frame, _, at) = a.issue_source_lease(&native, f.now).await?;
+    let (_, bt) = b.accept_destination_lease(&frame, f.now)?;
+    Ok((at, bt))
+}
