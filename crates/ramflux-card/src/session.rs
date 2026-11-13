@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::{CardError, CardRuntime, CardSpec, Mutation, MutationBatch, SignedPackage, Tree};
+use crate::{
+    CardError, CardRuntime, CardSpec, Component, FieldKind, Mutation, MutationBatch, Scalar,
+    SignedPackage, Tree,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -20,6 +23,9 @@ pub struct EventToken {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventKind {
     Text { value: String },
+    Number { value: i64 },
+    Select { value: String },
+    Toggle { value: bool },
     Submit,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -32,13 +38,16 @@ pub struct Event {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum EventResult {
     StaleDropped,
+    Validation {
+        batch: MutationBatch,
+    },
     Edited {
         batch: MutationBatch,
     },
     /// Declarative intent only. The host SDK must authorize and send it.
     Submit {
         action: String,
-        fields: BTreeMap<String, String>,
+        fields: BTreeMap<String, Scalar>,
         batch: MutationBatch,
     },
 }
@@ -68,7 +77,8 @@ impl CardSession {
         let budget = crate::budget::Budget::new();
         let mut vm = CardRuntime::with_budget(&package, spec.clone(), std::rc::Rc::clone(&budget))?;
         let tree = vm.render(&spec)?;
-        let batch = tree.diff(None, 0, 1);
+        let mut batch = tree.diff(None, 0, 1);
+        batch.host_slots = spec.slots();
         Ok((
             Self {
                 id,
@@ -114,7 +124,8 @@ impl CardSession {
                 return Err(error);
             }
         };
-        let batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
+        let mut batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
+        batch.host_slots = spec.slots();
         self.version = next;
         self.mounted_version = next;
         self.spec = spec;
@@ -128,8 +139,8 @@ impl CardSession {
         if self.queue.len() >= MAX_QUEUED_EVENTS {
             return Err(CardError::Limit("event queue"));
         }
-        if event.token.key.len() > 80
-            || matches!(&event.event, EventKind::Text { value } if value.len() > 4096)
+        if event.token.key.len() > 160
+            || matches!(&event.event, EventKind::Text { value } | EventKind::Select { value } if value.len() > 4096)
         {
             return Err(CardError::Limit("event"));
         }
@@ -149,41 +160,97 @@ impl CardSession {
         if self.vm.is_none() {
             return Err(CardError::Inactive);
         }
-        let form = self
+        let (form, field) = self
             .spec
             .components
             .iter()
-            .find(|form| match &event.event {
-                EventKind::Text { .. } => event.token.key == format!("{}:field", form.id),
-                EventKind::Submit => event.token.key == format!("{}:submit", form.id),
+            .filter_map(|c| if let Component::Form(form) = c { Some(form) } else { None })
+            .find_map(|form| {
+                if matches!(event.event, EventKind::Submit)
+                    && event.token.key == format!("{}:submit", form.id)
+                {
+                    return Some((form.clone(), None));
+                }
+                form.normalized_fields()
+                    .into_iter()
+                    .find(|f| event.token.key == format!("{}:{}", form.id, f.id))
+                    .map(|f| (form.clone(), Some(f)))
             })
-            .ok_or(CardError::Invalid("event control"))?
-            .clone();
-        let binding = form.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
-        match event.event {
-            EventKind::Text { value } => {
-                let mut spec = self.spec.clone();
-                spec.model.insert(binding.to_owned(), value);
-                Ok(Some(EventResult::Edited { batch: self.update(spec)? }))
+            .ok_or(CardError::Invalid("event control"))?;
+        if form.disabled || field.as_ref().is_some_and(|f| f.disabled) {
+            return Err(CardError::Invalid("disabled control"));
+        }
+        if matches!(event.event, EventKind::Submit) {
+            if field.is_some() {
+                return Err(CardError::Invalid("submit control"));
             }
-            EventKind::Submit => {
-                let value =
-                    self.spec.model.get(binding).ok_or(CardError::Invalid("field"))?.clone();
-                let next = self.next_version()?;
-                let batch = MutationBatch {
-                    previous_version: self.mounted_version,
-                    version: next,
-                    mutations: Vec::new(),
-                };
-                self.version = next;
-                self.mounted_version = next; // one-use shown-tree submit, without SDK effects
-                Ok(Some(EventResult::Submit {
-                    action: form.submit,
-                    fields: BTreeMap::from([(binding.to_owned(), value)]),
-                    batch,
-                }))
+            let mut errors = BTreeMap::new();
+            let mut fields = BTreeMap::new();
+            for f in form.normalized_fields().into_iter().filter(|f| !f.disabled) {
+                let binding = f.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
+                let value = self.spec.model.get(binding).ok_or(CardError::Invalid("field"))?;
+                let missing = f.required
+                    && match value {
+                        Scalar::Text(v) => v.trim().is_empty(),
+                        Scalar::Toggle(v) => !*v,
+                        Scalar::Number(_) => false,
+                    };
+                if missing {
+                    errors.insert(f.id.clone(), "Required".to_owned());
+                } else if let Some(error) = &f.error {
+                    errors.insert(f.id.clone(), error.clone());
+                }
+                fields.insert(binding.to_owned(), value.clone());
+            }
+            if !errors.is_empty() {
+                let mut spec = self.spec.clone();
+                for c in &mut spec.components {
+                    if let Component::Form(candidate) = c {
+                        if candidate.id == form.id {
+                            for f in &mut candidate.fields {
+                                if let Some(error) = errors.get(&f.id) {
+                                    f.error = Some(error.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(Some(EventResult::Validation { batch: self.update(spec)? }));
+            }
+            let next = self.next_version()?;
+            let batch = MutationBatch {
+                previous_version: self.mounted_version,
+                version: next,
+                mutations: Vec::new(),
+                host_slots: self.spec.slots(),
+            };
+            self.version = next;
+            self.mounted_version = next;
+            return Ok(Some(EventResult::Submit { action: form.submit, fields, batch }));
+        }
+        let field = field.ok_or(CardError::Invalid("field control"))?;
+        let value = match (event.event, field.kind) {
+            (EventKind::Text { value }, FieldKind::Input)
+            | (EventKind::Select { value }, FieldKind::Select) => Scalar::Text(value),
+            (EventKind::Number { value }, FieldKind::Number) => Scalar::Number(value),
+            (EventKind::Toggle { value }, FieldKind::Toggle) => Scalar::Toggle(value),
+            _ => return Err(CardError::Invalid("event value type")),
+        };
+        let binding = field.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
+        let mut spec = self.spec.clone();
+        spec.model.insert(binding.into(), value);
+        for c in &mut spec.components {
+            if let Component::Form(candidate) = c {
+                if candidate.id == form.id {
+                    for f in &mut candidate.fields {
+                        if f.id == field.id {
+                            f.error = None;
+                        }
+                    }
+                }
             }
         }
+        Ok(Some(EventResult::Edited { batch: self.update(spec)? }))
     }
     /// Release the interpreter and remove the mounted tree. Repeated suspension is safe.
     /// # Errors
@@ -197,8 +264,12 @@ impl CardSession {
         self.vm.take();
         self.tree.take();
         self.queue.clear();
-        let batch =
-            MutationBatch { previous_version: self.mounted_version, version: next, mutations };
+        let batch = MutationBatch {
+            previous_version: self.mounted_version,
+            version: next,
+            mutations,
+            host_slots: Vec::new(),
+        };
         self.version = next;
         self.mounted_version = next;
         Ok(batch)
@@ -217,7 +288,8 @@ impl CardSession {
             std::rc::Rc::clone(&self.budget),
         )?;
         let tree = vm.render(&self.spec)?;
-        let batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
+        let mut batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
+        batch.host_slots = self.spec.slots();
         self.vm = Some(vm);
         self.tree = Some(tree);
         self.version = next;
@@ -243,12 +315,21 @@ mod tests {
             event: kind,
         }
     }
+    fn without_style(mut batch: MutationBatch) -> MutationBatch {
+        for mutation in &mut batch.mutations {
+            if let Mutation::Upsert { node, .. } = mutation {
+                node.attrs.style = None;
+            }
+        }
+        batch
+    }
     #[test]
     fn form_fixture_tree_mutations_and_stale_events() {
         let _guard = guard();
         let (mut session, batch) =
             CardSession::open(fixture(), library()).expect("test: open form");
-        let tree = serde_json::to_value(session.tree()).expect("test: snapshot");
+        let tree =
+            serde_json::to_value(session.tree().map(Tree::without_style)).expect("test: snapshot");
         assert_eq!(
             tree,
             serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.tree.json"))
@@ -256,7 +337,7 @@ mod tests {
             "real bytecode must render the semantic fixture"
         );
         assert_eq!(
-            serde_json::to_value(batch).expect("test: mutations"),
+            serde_json::to_value(without_style(batch)).expect("test: mutations"),
             serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.mount.json"))
                 .expect("test: expected mutations"),
             "initial keyed mount must match snapshot"
@@ -269,7 +350,7 @@ mod tests {
             panic!("test: expected edit batch");
         };
         assert_eq!(
-            serde_json::to_value(batch).expect("test: edit mutations"),
+            serde_json::to_value(without_style(batch)).expect("test: edit mutations"),
             serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.edit.json"))
                 .expect("test: expected edit"),
             "text edit must update only its keyed field"
@@ -292,7 +373,7 @@ mod tests {
         };
         assert_eq!(
             fields,
-            BTreeMap::from([("name".into(), "Grace".into())]),
+            BTreeMap::from([("name".into(), Scalar::Text("Grace".into()))]),
             "submit must include current owned fields only"
         );
         assert_eq!(action, "save", "action must come from validated card");

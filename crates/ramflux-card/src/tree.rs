@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::{CardError, CardSpec, spec::preflight};
+use crate::{CardError, CardSpec, ChartKind, Choice, HostSecuritySlot, Series, spec::preflight};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +14,15 @@ pub enum NodeKind {
     Form,
     TextField,
     Submit,
+    Number,
+    Select,
+    Toggle,
+    Text,
+    Task,
+    Progress,
+    Chart,
+    Table,
+    ApprovalInfo,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +33,63 @@ pub struct Node {
     pub value: String,
     pub action: Option<String>,
     pub children: Vec<Node>,
+    #[serde(default, skip_serializing_if = "Attrs::is_empty")]
+    pub attrs: Attrs,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Style {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding: Option<u8>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plot {
+    pub kind: ChartKind,
+    pub unit: String,
+    pub scale: u32,
+    pub series: Vec<Series>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Attrs {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<Choice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot: Option<Plot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<Style>,
+}
+impl Attrs {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,54 +108,35 @@ pub struct MutationBatch {
     pub previous_version: u64,
     pub version: u64,
     pub mutations: Vec<Mutation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_slots: Vec<HostSecuritySlot>,
 }
 
 impl Tree {
     pub(crate) fn parse(bytes: &[u8], spec: &CardSpec) -> Result<Self, CardError> {
         preflight(bytes, MAX_TREE)?;
         let tree: Self = serde_json::from_slice(bytes)?;
-        let mut keys = BTreeSet::new();
-        validate_node(&tree.root, 1, &mut keys)?;
-        let root = &tree.root;
-        if root.key != "root"
-            || root.kind != NodeKind::Column
-            || !root.text.is_empty()
-            || !root.value.is_empty()
-            || root.action.is_some()
-            || root.children.len() != spec.components.len()
-        {
-            return Err(CardError::Invalid("root structure"));
-        }
-        for (node, form) in root.children.iter().zip(&spec.components) {
-            let value = spec
-                .model
-                .get(form.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?)
-                .ok_or(CardError::Invalid("binding"))?;
-            let [field, submit] = node.children.as_slice() else {
-                return Err(CardError::Invalid("form controls"));
-            };
-            if node.key != form.id
-                || node.kind != NodeKind::Form
-                || node.text != form.title
-                || !node.value.is_empty()
-                || node.action.is_some()
-                || field.key != format!("{}:field", form.id)
-                || field.kind != NodeKind::TextField
-                || field.text != form.label
-                || field.value != *value
-                || field.action.is_some()
-                || !field.children.is_empty()
-                || submit.key != format!("{}:submit", form.id)
-                || submit.kind != NodeKind::Submit
-                || submit.text != form.submit
-                || !submit.value.is_empty()
-                || submit.action.as_ref() != Some(&form.submit)
-                || !submit.children.is_empty()
-            {
-                return Err(CardError::Invalid("form semantics"));
-            }
+        tree.check_limits()?;
+        if tree.without_style() != crate::projection::expected(spec)? {
+            return Err(CardError::Invalid("component semantics"));
         }
         Ok(tree)
+    }
+    pub(crate) fn check_limits(&self) -> Result<(), CardError> {
+        let mut keys = BTreeSet::new();
+        let mut expanded = 0;
+        validate_node(&self.root, 1, &mut keys, &mut expanded)
+    }
+    pub(crate) fn without_style(&self) -> Self {
+        fn strip(node: &mut Node) {
+            node.attrs.style = None;
+            for child in &mut node.children {
+                strip(child);
+            }
+        }
+        let mut tree = self.clone();
+        strip(&mut tree.root);
+        tree
     }
     pub(crate) fn diff(
         &self,
@@ -124,22 +171,49 @@ impl Tree {
                 });
             }
         }
-        MutationBatch { previous_version, version, mutations }
+        MutationBatch { previous_version, version, mutations, host_slots: Vec::new() }
     }
 }
-fn validate_node(node: &Node, depth: usize, keys: &mut BTreeSet<String>) -> Result<(), CardError> {
-    if depth > MAX_NODE_DEPTH || keys.len() >= MAX_EXPANDED_NODES {
+fn validate_node(
+    node: &Node,
+    depth: usize,
+    keys: &mut BTreeSet<String>,
+    expanded: &mut usize,
+) -> Result<(), CardError> {
+    *expanded = expanded.saturating_add(
+        1 + node.attrs.options.len()
+            + node.attrs.rows.iter().map(|r| 1 + r.len()).sum::<usize>()
+            + node
+                .attrs
+                .plot
+                .as_ref()
+                .map_or(0, |p| p.series.iter().map(|s| s.points.len()).sum::<usize>()),
+    );
+    if depth > MAX_NODE_DEPTH || *expanded > MAX_EXPANDED_NODES {
         return Err(CardError::Limit("expanded nodes or depth"));
     }
-    if node.key.len() > 80
-        || node.text.len() > 256
+    if node.key.len() > 160
+        || node.text.len() > 1024
         || node.value.len() > 4096
         || !keys.insert(node.key.clone())
     {
         return Err(CardError::Invalid("tree key or text"));
     }
+    if let Some(style) = &node.attrs.style {
+        for color in [&style.color, &style.background, &style.border].into_iter().flatten() {
+            if !(color.len() == 7 || color.len() == 9)
+                || !color.starts_with('#')
+                || !color.bytes().skip(1).all(|v| v.is_ascii_hexdigit())
+            {
+                return Err(CardError::Invalid("semantic color"));
+            }
+        }
+        if style.gap.is_some_and(|v| v > 64) || style.padding.is_some_and(|v| v > 64) {
+            return Err(CardError::Invalid("semantic geometry"));
+        }
+    }
     for child in &node.children {
-        validate_node(child, depth + 1, keys)?;
+        validate_node(child, depth + 1, keys, expanded)?;
     }
     Ok(())
 }
