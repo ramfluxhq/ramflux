@@ -17,6 +17,7 @@ self.addEventListener("message", async (event: MessageEvent) => {
     port.onmessage = (request: MessageEvent) => {
       const {seq, op, json} = request.data ?? {};
       if (!Number.isSafeInteger(seq) || seq < 0) return;
+      let terminal=false;
       try {
         let response: string;
         switch (op) {
@@ -28,9 +29,9 @@ self.addEventListener("message", async (event: MessageEvent) => {
           case "dispose": runtime.dispose(); port.postMessage({seq, disposed:true}); port.close(); return;
           default: throw Error("unknown card operation");
         }
-        if (response.length > 131072) throw Error("output bound");
+        if (response.length > 131072) {terminal=true;runtime.dispose();throw Error("output bound");}
         port.postMessage({seq, json:response});
-      } catch { port.postMessage({seq, error:"Card content unavailable"}); }
+      } catch(error) { port.postMessage({seq, error:"Card content unavailable",terminal:terminal || error instanceof WebAssembly.RuntimeError}); }
     };
     port.start(); port.postMessage({ready:true});
   } catch { port.postMessage({error:"Card runtime unavailable"}); port.close(); }
