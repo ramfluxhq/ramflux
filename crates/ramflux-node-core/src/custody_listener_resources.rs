@@ -48,7 +48,11 @@ pub fn custody_listener_resources(
     }
     #[cfg(not(unix))]
     {
-        let _ = (settings, listeners);
+        let _ = settings;
+        // Router startup checks a zero-listener reservation before custody is configured.
+        if listeners == 0 {
+            return Ok(());
+        }
         Err(NodeCoreError::InvalidConfiguration(
             "custody listeners require RLIMIT_NOFILE support".into(),
         ))
