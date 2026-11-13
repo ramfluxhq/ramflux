@@ -14,15 +14,12 @@ use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, INVALID_HANDLE_VALUE, SetLastError,
 };
-use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
-use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
-};
+use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{
@@ -44,14 +41,17 @@ pub(crate) fn current_user() -> io::Result<Sid> {
 }
 
 /// Descriptor whose owner is the current user and whose protected access list holds only that
-/// user. A directory's entry is inherited by the files and directories created inside it.
+/// user. `GA` is `GENERIC_ALL`: the access check maps it to read, write, and the standard
+/// rights, including the rights a later open of the same object requests. A directory has one
+/// entry for itself and one inherit-only entry, so a file created inside it receives the same
+/// list without the directory's own entry being inherit-only.
 fn owner_descriptor(directory: bool) -> io::Result<(SecurityDescriptor, Sid)> {
     let user = current_user()?;
     let sid = user.to_sddl_string()?;
     let sddl = if directory {
-        format!("O:{sid}D:P(A;OICI;FA;;;{sid})")
+        format!("O:{sid}D:P(A;;GA;;;{sid})(A;OICIIO;GA;;;{sid})")
     } else {
-        format!("O:{sid}D:P(A;;FA;;;{sid})")
+        format!("O:{sid}D:P(A;;GA;;;{sid})")
     };
     Ok((SecurityDescriptor::from_sddl(&sddl)?, user))
 }
@@ -108,7 +108,7 @@ pub(crate) fn open_owner_only(
         SetLastError(0);
         let handle = CreateFileW(
             wide.as_ptr(),
-            access | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            access | READ_CONTROL | WRITE_DAC,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &raw const attributes,
             disposition,
@@ -120,9 +120,11 @@ pub(crate) fn open_owner_only(
         }
         let existed = GetLastError() == ERROR_ALREADY_EXISTS;
         let owned = File::from_raw_handle(handle);
+        // The create grants this handle its access directly. A later open checks the list
+        // stored on the file, so write that list again after the owner change.
         if !existed
             && let Err(error) =
-                super::set_handle_owner(owned.as_raw_handle(), SE_FILE_OBJECT, &user)
+                super::assign_user(owned.as_raw_handle(), SE_FILE_OBJECT, &user, &descriptor)
         {
             drop(owned);
             let _ = std::fs::remove_file(path);
@@ -139,49 +141,8 @@ pub(crate) fn open_owner_only(
     Ok(file)
 }
 
-fn access_list(descriptor: &SecurityDescriptor) -> io::Result<*mut ACL> {
-    let mut present = 0;
-    let mut defaulted = 0;
-    let mut list: *mut ACL = std::ptr::null_mut();
-    // SAFETY: `descriptor` owns a valid self-relative descriptor; the returned pointer points
-    // into it and is used only while `descriptor` is alive.
-    let ok = unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor.raw,
-            &raw mut present,
-            &raw mut list,
-            &raw mut defaulted,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if present == 0 || list.is_null() {
-        // A missing list would grant everyone full access. Never apply it.
-        return Err(io::Error::other("descriptor has no access list"));
-    }
-    Ok(list)
-}
-
 fn reset_access_list(file: &File, descriptor: &SecurityDescriptor) -> io::Result<()> {
-    let list = access_list(descriptor)?;
-    // SAFETY: `file` is open with WRITE_DAC; `list` points into `descriptor`, alive here.
-    let status = unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            list,
-            std::ptr::null(),
-        )
-    };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(i32::try_from(status).map_err(io::Error::other)?))
-    }
+    super::set_handle_dacl(file.as_raw_handle(), SE_FILE_OBJECT, descriptor)
 }
 
 /// Replace the access list of an existing file or directory with the owner-only one. The path
@@ -228,9 +189,11 @@ pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
         if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let directory = open_for_facts(path, READ_CONTROL | WRITE_OWNER)?;
+        // `READ_CONTROL | WRITE_DAC` is what the owner can open even when the stored list
+        // does not yet grant `WRITE_OWNER`. The owner and the list are both written below.
+        let directory = open_for_facts(path, READ_CONTROL | WRITE_DAC)?;
         if let Err(error) =
-            super::set_handle_owner(directory.as_raw_handle(), SE_FILE_OBJECT, &user)
+            super::assign_user(directory.as_raw_handle(), SE_FILE_OBJECT, &user, &descriptor)
         {
             drop(directory);
             let _ = std::fs::remove_dir(path);

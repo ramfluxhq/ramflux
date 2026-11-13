@@ -17,24 +17,25 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode};
 use windows_sys::Win32::Foundation::{
-    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_ALL_ASSIGNED, ERROR_PIPE_CONNECTED, GENERIC_WRITE,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree, SetLastError,
+    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_ALL_ASSIGNED, ERROR_PIPE_CONNECTED, GENERIC_READ,
+    GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree, SetLastError,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, CopySid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
-    GetTokenInformation, IsValidSid, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SE_PRIVILEGE_ENABLED,
-    SE_RESTORE_NAME, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_INFORMATION_CLASS,
-    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel,
-    TokenIsAppContainer, TokenUser,
+    ACL, AdjustTokenPrivileges, CopySid, DACL_SECURITY_INFORMATION, GetLengthSid,
+    GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    IsValidSid, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES,
+    TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
+    TokenIntegrityLevel, TokenIsAppContainer, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
-    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, WRITE_OWNER,
+    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
@@ -454,6 +455,74 @@ pub(super) fn set_handle_owner(
     if status == 0 { Ok(()) } else { Err(os_error(status)) }
 }
 
+/// Make `owner` the owner and replace the access list with `descriptor`'s list.
+///
+/// Setting the owner does not keep the list the creator just wrote. A later open checks that
+/// stored list, so both writes happen together while the restore privilege is held.
+///
+/// # Errors
+/// Returns the OS error when either write fails.
+pub(super) fn assign_user(
+    handle: RawHandle,
+    kind: SE_OBJECT_TYPE,
+    owner: &Sid,
+    descriptor: &SecurityDescriptor,
+) -> io::Result<()> {
+    set_handle_owner(handle, kind, owner)?;
+    set_handle_dacl(handle, kind, descriptor)
+}
+
+/// Replace the protected access list. The handle must be open with `WRITE_DAC`, or the restore
+/// privilege must stand in for it.
+///
+/// # Errors
+/// Returns the OS error when the descriptor has no list or the list cannot be written.
+pub(super) fn set_handle_dacl(
+    handle: RawHandle,
+    kind: SE_OBJECT_TYPE,
+    descriptor: &SecurityDescriptor,
+) -> io::Result<()> {
+    let list = dacl_of(descriptor)?;
+    // SAFETY: `handle` is open with WRITE_DAC or the restore privilege is enabled. `list`
+    // points into `descriptor`, which the caller keeps alive through this call.
+    let status = unsafe {
+        SetSecurityInfo(
+            handle,
+            kind,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            list,
+            std::ptr::null(),
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(os_error(status)) }
+}
+
+fn dacl_of(descriptor: &SecurityDescriptor) -> io::Result<*mut ACL> {
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut list: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `descriptor.raw` is a system security descriptor owned by `descriptor`. The
+    // returned list pointer addresses that block and is used only while `descriptor` is alive.
+    let ok = unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor.raw,
+            &raw mut present,
+            &raw mut list,
+            &raw mut defaulted,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if present == 0 || list.is_null() {
+        // A missing list would grant everyone full access. Never apply it.
+        return Err(io::Error::other("descriptor has no access list"));
+    }
+    Ok(list)
+}
+
 /// Wait until a client connects to `pipe`, or until the wait is cancelled.
 ///
 /// `ERROR_PIPE_CONNECTED` and `ERROR_NO_DATA` are a finished connect: the client is already
@@ -465,7 +534,10 @@ pub(super) fn set_handle_owner(
 pub(super) async fn connect_server(pipe: &ListeningPipe) -> io::Result<()> {
     let event = manual_event()?;
     let mut overlapped = OVERLAPPED::default();
-    overlapped.hEvent = event.as_raw_handle();
+    // The low bit asks the kernel to signal this event even when the pipe handle is attached
+    // to a completion port. The wait below uses the event handle with that bit clear.
+    let event_bits = event.as_raw_handle() as usize;
+    overlapped.hEvent = (event_bits | 1) as HANDLE;
     let operation = Arc::new(ConnectOperation { event, overlapped: UnsafeCell::new(overlapped) });
     // The kernel writes this overlapped until the wait below drops `operation`. No Rust
     // reference reads those fields. `UnsafeCell::get` is the pointer `ConnectNamedPipe` stores.
@@ -602,7 +674,11 @@ pub(super) fn create_instance(
 ) -> io::Result<ListeningPipe> {
     let wide = wide(name);
     let attributes = descriptor.attributes()?;
-    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_OWNER;
+    // `WRITE_OWNER` is the same bit as `FILE_FLAG_FIRST_PIPE_INSTANCE`. Requesting it on every
+    // instance would make the second instance look like a first instance and fail once the name
+    // exists. `WRITE_DAC` is a different bit and is what the access-list write below needs.
+    // The owner is set with the restore privilege, which does not need `WRITE_OWNER` on the handle.
+    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_DAC;
     if first {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
@@ -624,7 +700,7 @@ pub(super) fn create_instance(
             return Err(io::Error::last_os_error());
         }
         let owned = OwnedHandle::from_raw_handle(handle);
-        set_handle_owner(owned.as_raw_handle(), SE_KERNEL_OBJECT, owner)?;
+        assign_user(owned.as_raw_handle(), SE_KERNEL_OBJECT, owner, descriptor)?;
         Ok(ListeningPipe { handle: owned })
     })
 }
@@ -721,7 +797,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
     assigning_owner(|| unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
-            GENERIC_WRITE | WRITE_OWNER,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
             0,
             &raw const attributes,
             CREATE_NEW,
@@ -732,7 +808,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
             return Err(io::Error::last_os_error());
         }
         let owned = OwnedHandle::from_raw_handle(handle);
-        if let Err(error) = set_handle_owner(owned.as_raw_handle(), SE_FILE_OBJECT, &owner) {
+        if let Err(error) = assign_user(owned.as_raw_handle(), SE_FILE_OBJECT, &owner, descriptor) {
             drop(owned);
             let _ = std::fs::remove_file(path);
             return Err(error);
