@@ -15,8 +15,13 @@ use std::ptr;
 use super::proc::{self, ProcessGroup};
 
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
+/// `ProcThreadAttributeValue(ProcThreadAttributeHandleList, FALSE, TRUE, FALSE)`.
+const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+/// Pseudoconsole, then the inherited stdout handle.
+const ATTRIBUTE_COUNT: u32 = 2;
 
 unsafe extern "system" {
     fn CreatePipe(
@@ -129,14 +134,18 @@ struct AttributeList {
     memory: *mut u8,
     layout: std::alloc::Layout,
     ready: bool,
+    /// Lives as long as the list. `CreateProcessW` reads this address from the
+    /// handle-list attribute, so it must not be a temporary.
+    handles: [*mut core::ffi::c_void; 1],
 }
 
 impl AttributeList {
     fn new() -> io::Result<Self> {
         let mut bytes = 0_usize;
         // SAFETY: a null list with a writable size asks only for the required byte count.
-        let ok =
-            unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &raw mut bytes) };
+        let ok = unsafe {
+            InitializeProcThreadAttributeList(ptr::null_mut(), ATTRIBUTE_COUNT, 0, &raw mut bytes)
+        };
         if ok != 0 {
             return Err(io::Error::other("attribute list size query succeeded unexpectedly"));
         }
@@ -151,10 +160,16 @@ impl AttributeList {
         if memory.is_null() {
             return Err(io::Error::other("attribute list allocation failed"));
         }
-        let mut list = Self { memory, layout, ready: false };
+        let mut list = Self { memory, layout, ready: false, handles: [ptr::null_mut()] };
         // SAFETY: `memory` is the aligned block of `bytes` and outlives the call.
-        let ok =
-            unsafe { InitializeProcThreadAttributeList(list.memory.cast(), 1, 0, &raw mut bytes) };
+        let ok = unsafe {
+            InitializeProcThreadAttributeList(
+                list.memory.cast(),
+                ATTRIBUTE_COUNT,
+                0,
+                &raw mut bytes,
+            )
+        };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -176,6 +191,24 @@ impl AttributeList {
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
                 console.0,
                 std::mem::size_of::<*mut core::ffi::c_void>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    fn set_stdout(&mut self, stdout: *mut core::ffi::c_void) -> io::Result<()> {
+        self.handles[0] = stdout;
+        // SAFETY: the list was initialized for two attributes. `self.handles` is one
+        // inheritable pipe write end and stays inside `self` until after `CreateProcessW`.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.memory.cast(),
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                self.handles.as_mut_ptr().cast(),
+                std::mem::size_of_val(&self.handles),
                 ptr::null_mut(),
                 ptr::null_mut(),
             )
@@ -237,28 +270,38 @@ pub(super) fn spawn(rf: &Path, socket: &Path, display_name: &str) -> io::Result<
         return Err(io::Error::other(format!("CreatePseudoConsole {hr:#010x}")));
     }
     let console = PseudoConsole(console_handle);
+    // Conhost has its own copy of the console input. The child must not inherit it.
     drop(input_read);
-    drop(output_write);
     let mut attributes = AttributeList::new()?;
     attributes.set_console(&console)?;
+    // Prompts already reach this pipe through the console. `print_json` writes the
+    // process stdout, which otherwise stays the parent's pipe, so the harness never
+    // sees `account_id`. Stdout and stderr are this same write end.
+    attributes.set_stdout(output_write.as_raw_handle())?;
     // SAFETY: zero is the documented initial value of STARTUPINFOEXW before `cb` and the
     // attribute list are filled in.
     let mut extended: StartupInfoExW = unsafe { std::mem::zeroed() };
     extended.startup.cb = u32::try_from(std::mem::size_of::<StartupInfoExW>())
         .map_err(|_| io::Error::other("startup info size"))?;
+    extended.startup.flags = STARTF_USESTDHANDLES;
+    // The ceremony reads `CONIN$`, not the process stdin.
+    extended.startup.stdin = ptr::without_provenance_mut(usize::MAX);
+    extended.startup.stdout = output_write.as_raw_handle();
+    extended.startup.stderr = output_write.as_raw_handle();
     extended.attribute_list = attributes.memory.cast();
     // SAFETY: zero is a valid PROCESS_INFORMATION before CreateProcessW writes it.
     let mut info: ProcessInformation = unsafe { std::mem::zeroed() };
     // SAFETY: `application` and `command_line` are NUL-terminated and mutable for the command
     // line. `extended` begins with STARTUPINFOW whose `cb` is the size of the extended struct.
-    // Handles are not inherited; the pseudoconsole arrives through the attribute list.
+    // Inheritance is limited to the handle list. `output_write` stays open through the call
+    // so the child can inherit it. The pseudoconsole arrives through the attribute list.
     let ok = unsafe {
         CreateProcessW(
             application.as_ptr(),
             command_line.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
-            0,
+            1,
             EXTENDED_STARTUPINFO_PRESENT,
             ptr::null_mut(),
             ptr::null_mut(),
@@ -272,6 +315,9 @@ pub(super) fn spawn(rf: &Path, socket: &Path, display_name: &str) -> io::Result<
     // SAFETY: `info.thread` is an owned thread handle. Closing it does not end the process.
     unsafe { CloseHandle(info.thread) };
     drop(attributes);
+    // The child and conhost now hold the write end. Dropping this copy lets the
+    // reader observe EOF after both of them close it.
+    drop(output_write);
     Ok(Spawned {
         group: ProcessGroup::from_process(info.process_id, proc::owned_process(info.process)),
         stdin: input_write,
