@@ -11,7 +11,9 @@ use ramflux_protocol::{custody::DeviceRef, encode_base64url};
 use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, PreparedFullSource};
 
 mod candidate;
+mod data_resume;
 pub use candidate::FullPreparedTransferCandidate;
+pub(crate) use data_resume::FullDataResume;
 mod destination_preservation;
 mod preservation;
 pub(in crate::custody::pairing) use destination_preservation::FullDestinationReady;

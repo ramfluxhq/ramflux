@@ -16,6 +16,21 @@ fn mismatch() -> StorageError {
     StorageError::PairingField("ManifestMismatch")
 }
 impl FullTransferStage<'_> {
+    /// Reuse the exact once-only reverse metadata after data-only reconnect.
+    /// # Errors
+    /// Refuses corrupt original signatures, foreign context or stale local unlock.
+    pub fn retained_reverse_manifest(&self) -> Result<Option<SourceManifest>, StorageError> {
+        self.require_io()?;
+        let hash: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT manifest_hash FROM manifest WHERE direction=1 AND cut=0",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        hash.map(|hash| self.reverse_manifest(&hash)).transpose()
+    }
     /// Prepare the new recipient's empty reverse manifest from its OWN consistent cut,
     /// only after the forward base was retained. No raw snapshot file/key is returned.
     /// Every actual nonempty owner must be declared, and no restrictive family may be

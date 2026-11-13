@@ -540,6 +540,7 @@ impl LocalPairingParticipant {
 }
 
 mod full;
+pub(crate) use full::FullDataResume;
 pub(in crate::custody::pairing) use full::FullDestinationReady;
 pub(crate) use full::FullProofSigner;
 pub use full::{

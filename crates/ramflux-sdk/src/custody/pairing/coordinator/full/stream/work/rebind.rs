@@ -35,7 +35,7 @@ impl FullStreamWork {
         self.flush_rebind().await?;
         self.runtime.require_live()
     }
-    async fn flush_rebind(&mut self) -> Result<(), SdkError> {
+    pub(super) async fn flush_rebind(&mut self) -> Result<(), SdkError> {
         if self.forward_started
             && let Some(packet) = self.pending_rebind.take()
         {

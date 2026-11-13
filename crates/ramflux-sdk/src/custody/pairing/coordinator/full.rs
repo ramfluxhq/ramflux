@@ -27,6 +27,7 @@ mod epoch;
 mod installation;
 mod management;
 mod publication;
+mod restore;
 mod source_observation;
 mod status;
 mod stream;

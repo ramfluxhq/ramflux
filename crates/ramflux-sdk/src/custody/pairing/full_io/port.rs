@@ -74,6 +74,36 @@ impl FullLocalIoLoan {
     }
 }
 impl FullLocalIoPort {
+    pub(crate) async fn retain_replayed_application(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+    ) -> Result<Box<ramflux_storage::FullReceiverBaseCopy>, SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::Receiver(copy)) = self
+            .request(FullLocalAction::Semantic(super::application::Action::RetainReplay(copy)))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(copy)
+    }
+    pub(crate) async fn pin_original_receiver_base(
+        &mut self,
+    ) -> Result<Box<ramflux_storage::FullPinnedReceiverBase>, SdkError> {
+        let hash = self.scope.base_manifest_hash.clone();
+        self.pin_receiver_base(&hash).await
+    }
+    pub(crate) async fn receiver_replay_work(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+        hash: &str,
+    ) -> Result<Box<ramflux_storage::FullReceiverReplayWork>, SdkError> {
+        let FullLocalResult::ReceiverReplay(work) =
+            self.request(FullLocalAction::ReceiverReplay { copy, hash: hash.into() }).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(work)
+    }
     /// Pin the current source view and release its DB loan before bulk copying/encoding.
     /// # Errors
     /// Refuses wrong phase/scope, missing DV, a final cut, lock or cancellation.

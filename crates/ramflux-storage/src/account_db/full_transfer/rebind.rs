@@ -66,17 +66,16 @@ impl FullTransferStage<'_> {
                 row.get(0)
             })
             .optional()?;
-        match epoch {
-            Some(epoch) => Ok(epoch),
-            None => {
-                let record = self.resume_record()?;
-                let context =
-                    ramflux_protocol::custody::pairing::context_v3::TranscriptV3::from_wire_bytes(
-                        &record.transcript,
-                    )
-                    .map_err(|_| changed())?;
-                Ok(context.initiator.common.device_set_epoch)
-            }
+        if let Some(epoch) = epoch {
+            Ok(epoch)
+        } else {
+            let record = self.resume_record()?;
+            let context =
+                ramflux_protocol::custody::pairing::context_v3::TranscriptV3::from_wire_bytes(
+                    &record.transcript,
+                )
+                .map_err(|_| changed())?;
+            Ok(context.initiator.common.device_set_epoch)
         }
     }
     /// Prepare one data-only Rebind after this endpoint independently obtains native authority.

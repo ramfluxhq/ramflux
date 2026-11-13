@@ -89,6 +89,22 @@ impl FullConfirmedChannel {
         channel.idle_last_verified = Some(last_verified);
         Ok(channel)
     }
+    /// Bind optional reconnect Idle to this endpoint's own saved forward DV hash.
+    /// Call before its first forward position, including after Ready authentication.
+    /// # Errors
+    /// Refuses an initial/started epoch, malformed hash or a changed saved binding.
+    pub fn expect_idle_position(&mut self, last_verified: String) -> Result<(), CryptoError> {
+        self.cipher.live()?;
+        DataPacket::Idle { last_verified: last_verified.clone() }.validate()?;
+        if self.initial_epoch
+            || self.forward_position != ForwardPosition::Awaiting
+            || self.idle_last_verified.as_ref().is_some_and(|old| old != &last_verified)
+        {
+            return Err(CryptoError::Pairing("WrongContext"));
+        }
+        self.idle_last_verified = Some(last_verified);
+        Ok(())
+    }
     /// The trusted coordinator calls this ONLY after reading its durable forward `DataVerified`
     /// and applied reverse proof. `transfer_ready_held` means its exact saved, verified full
     /// preservation control is present. This opens a data transport gate, never authority;

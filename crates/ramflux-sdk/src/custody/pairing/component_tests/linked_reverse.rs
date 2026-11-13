@@ -408,7 +408,8 @@ mod tests {
                 "test: endpoint did not retain exact own-native Rebind"
             );
             let record = stage.resume_record()?;
-            let manifest = stage.forward_manifest(&record.base_manifest_hash)?;
+            let manifest =
+                stage.current_forward_manifest()?.ok_or("test: retained current manifest")?;
             assert_eq!(
                 manifest.manifest.base_record_hash, record.base_record_hash,
                 "test: Rebind rewrote historical provenance"

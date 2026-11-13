@@ -22,6 +22,7 @@ pub(crate) struct FullCandidateDraft {
     reservation: String,
     guard: FullLocalUnlockGuard,
     publication: ramflux_protocol::custody::Publication,
+    previous: Box<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>>,
     primary: SelfSigningKey,
 }
 impl LocalPairingParticipant {
@@ -123,6 +124,7 @@ impl FullCandidateWork {
             frontend_generation: self.frontend_generation,
             reservation: stored.reservation_id,
             guard: self.guard,
+            previous: Box::new(current.envelope().clone()),
             publication,
             primary,
         })
@@ -164,6 +166,7 @@ impl FullCandidateDraft {
             custody::network_now()?,
         )?;
         Ok(FullPreparedTransferCandidate {
+            previous: self.previous,
             publication: self.publication,
             install,
             duplex: self.scope.duplex,

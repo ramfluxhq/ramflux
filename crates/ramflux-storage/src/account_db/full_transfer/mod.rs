@@ -17,6 +17,8 @@ mod native_floor;
 mod preservation;
 mod read_work;
 mod rebind;
+mod resume_position;
+pub use resume_position::FullForwardResumePosition;
 mod receiver_contributions;
 mod receiver_copy;
 mod receiver_read;

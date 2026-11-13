@@ -19,6 +19,15 @@ impl FullLocalIoPort {
         };
         Ok(result)
     }
+    pub(crate) async fn retained_reverse_manifest(
+        &mut self,
+    ) -> Result<Option<ramflux_protocol::custody::pairing::full_transfer::SourceManifest>, SdkError>
+    {
+        let Applied::Current(manifest) = self.reverse_request(Action::Current).await? else {
+            return Err(wrong());
+        };
+        Ok(*manifest)
+    }
     /// Pin original B once and release its actual writer before bulk encoding.
     /// # Errors
     /// Refuses another role, a lost frozen cut or changed local scope.

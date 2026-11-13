@@ -30,6 +30,7 @@ struct Input {
 pub struct FullReceiverReplayWork {
     input: Input,
     copy: FullReceiverBaseCopy,
+    through_hash: String,
 }
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
@@ -44,28 +45,55 @@ impl FullTransferStage<'_> {
         copy: FullReceiverBaseCopy,
         now: u64,
     ) -> Result<FullReceiverReplayWork, StorageError> {
-        self.require_io()?;
-        super::super::receiver_copy::rebase::require_before_selection(&self)?;
         self.verified_duplex(now)?;
-        copy.target_observation().require_current(self.db)?;
-        let record = self.resume_record()?;
-        if record.role != ramflux_crypto::custody::pairing::PairingRole::Responder {
-            return Err(wrong());
-        }
-        let last: u64 = self.connection.query_row(
-            "SELECT max(cut) FROM manifest WHERE direction=0",
+        let hash: String = self.connection.query_row(
+            "SELECT manifest_hash FROM manifest WHERE direction=0 ORDER BY cut DESC LIMIT 1",
             [],
             |row| row.get(0),
         )?;
-        if last == 0 || last > 8 {
+        if !self.forward_manifest(&hash)?.manifest.is_last_prepublication_delta() {
+            return Err(wrong());
+        }
+        self.into_receiver_replay_through(copy, &hash, now)
+    }
+    /// Reconstruct private B through one completely received retained base/delta.
+    /// Earlier cuts must already be verified; the current cut still requires actual DV.
+    /// Release the ordinary writer loan before `replay`.
+    /// # Errors
+    /// Refuses a selected/foreign stage, changed B, incomplete chain, expiry or a tail.
+    pub fn into_receiver_replay_through(
+        self,
+        copy: FullReceiverBaseCopy,
+        hash: &str,
+        now: u64,
+    ) -> Result<FullReceiverReplayWork, StorageError> {
+        self.require_io()?;
+        super::super::receiver_copy::rebase::require_before_selection(&self)?;
+        copy.target_observation().require_current(self.db)?;
+        let record = self.resume_record()?;
+        if record.role != ramflux_crypto::custody::pairing::PairingRole::Responder
+            || now >= record.grant.expires_at
+            || now >= self.reference().lease_expires_at.0
+        {
+            return Err(wrong());
+        }
+        let current = self.forward_manifest(hash)?;
+        let last = current.manifest.snapshot_cut.0;
+        if last > 8
+            || !matches!(
+                current.manifest.kind,
+                ramflux_protocol::custody::pairing::full_transfer::ManifestKind::Base
+                    | ramflux_protocol::custody::pairing::full_transfer::ManifestKind::Delta
+            )
+        {
             return Err(wrong());
         }
         let guard = SourceGuard::new(self.db, Some(self.source_cancelled.clone()));
         let mut manifests = Vec::new();
         for cut in 0..=last {
             let hash: String = self.connection.query_row(
-                "SELECT manifest_hash FROM manifest WHERE direction=0 AND cut=?1 AND verified=1",
-                rusqlite::params![cut],
+                "SELECT manifest_hash FROM manifest WHERE direction=0 AND cut=?1 AND (verified=1 OR cut=?2)",
+                rusqlite::params![cut,last],
                 |row| row.get(0),
             )?;
             let manifest = self.forward_manifest(&hash)?;
@@ -75,6 +103,9 @@ impl FullTransferStage<'_> {
                 guard.clone(),
             )?;
             manifests.push(RetainedCut { hash, manifest, key: Arc::new(key) });
+        }
+        if manifests.last().is_none_or(|item| item.hash != hash) {
+            return Err(wrong());
         }
         guard.require()?;
         Ok(FullReceiverReplayWork {
@@ -87,6 +118,7 @@ impl FullTransferStage<'_> {
                 manifests,
             },
             copy,
+            through_hash: hash.into(),
         })
     }
 }
@@ -97,7 +129,11 @@ impl FullReceiverReplayWork {
     pub fn replay(mut self) -> Result<FullReceiverBaseCopy, StorageError> {
         self.input.require_io()?;
         let hashes = self.input.manifests.iter().map(|item| item.hash.clone()).collect::<Vec<_>>();
-        self.copy.project_chain_input(&self.input, &hashes)?;
+        if self.copy.projected_input().is_some() {
+            self.copy.project_delta_input(&self.input, &self.through_hash)?;
+        } else {
+            self.copy.project_prefix_input(&self.input, &hashes)?;
+        }
         self.input.require_io()?;
         Ok(self.copy)
     }

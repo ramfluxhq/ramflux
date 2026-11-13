@@ -29,11 +29,17 @@ mod frontend;
 
 /// Frozen candidate and B-local owners. No source preservation or publication approval.
 pub struct FullPreparedTransferCandidate {
+    previous: Box<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>>,
     publication: Publication,
     install: Install,
     duplex: FullDuplexReceipt,
 }
 impl FullPreparedTransferCandidate {
+    pub(crate) fn previous(
+        &self,
+    ) -> &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet> {
+        &self.previous
+    }
     #[must_use]
     pub const fn publication(&self) -> &Publication {
         &self.publication

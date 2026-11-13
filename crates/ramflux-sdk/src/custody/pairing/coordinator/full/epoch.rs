@@ -227,7 +227,11 @@ impl crate::custody::pairing::PairingActor {
             let finished = job.finish().await?;
             state.trust = Some(finished.trust);
             state.keys = Some(finished.keys);
-            state.epoch_ready = Some(finished.packet?);
+            let mut packet = finished.packet?;
+            if let Some(manifest) = &state.idle_manifest {
+                packet.expect_idle_position(manifest)?;
+            }
+            state.epoch_ready = Some(packet);
             c.result = None;
             c.full_error = None;
             self.full_runtime.require_live()?;
