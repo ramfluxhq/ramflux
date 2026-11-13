@@ -215,7 +215,7 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_sibling_answers_require_their_own_start_permission() -> TestResult {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(async {
         let mut alice = Fixture::new("call-sibling-alice").await?;
         let mut bob = Fixture::new("call-sibling-bob").await?;
         let mut secondary = bob.enroll_sibling("call-sibling-secondary", "secondary").await?;
@@ -252,7 +252,11 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let second_start = starts.get(1).ok_or("test: second Start")?;
         caller.pending.clear();
         caller.apply_media_for(first.clone(),first_start,true,false)?;
-        caller.apply_media_for(second.clone(),second_start,false,false)?;
+        // Persisted before submit; this target's matching decision was lost.
+        alice.client.account_db()?.persist_actor_state(
+            &format!("voice/intent/{}/{}/start", caller.row.call_id, second.device_id),
+            &json!({"envelope_id":second_start.body.source_event_id,"signed":second_start}),
+        )?;
         let mut both_confirmed = caller.clone();
         both_confirmed.apply_media_for(second.clone(),second_start,true,false)?;
         let recipient = secondary.client.voice_calls.get_mut(&caller.row.call_id).ok_or("test: incoming call")?;
@@ -287,5 +291,5 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         both_confirmed.bind_gateway_generation(Some("fresh-authenticated-generation"))?;
         assert!(both_confirmed.media_held, "reconnect retained a peer's old media permission");
         Ok(())
-    }).await?
+    })).await?
 }
