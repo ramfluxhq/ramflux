@@ -1662,11 +1662,12 @@ pub(crate) async fn commit_owner_resolution(
         return Ok(true);
     }
     let (owned_runtime, owned_submit) = (runtime.clone(), submit.clone());
-    let completion = crate::durable_work::run(context, move |context| {
-        crate::call_intent::complete_resolution(context, &owned_runtime, &owned_submit)
-            .map_err(anyhow::Error::from)
-    })
-    .await;
+    let completion =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            crate::call_intent::complete_resolution(context, &owned_runtime, &owned_submit)
+                .map_err(anyhow::Error::from)
+        })
+        .await;
     let completion = match completion {
         Ok(completion) => completion,
         Err(error) => {
@@ -1778,20 +1779,21 @@ async fn persist_accepted_intent(
     );
     let request_expires_at = u64::try_from(submit.signed_request.expires_at)
         .map_err(|_| anyhow::anyhow!("call request expiry rejected"))?;
-    let admitted = crate::durable_work::run(context, move |context| {
-        Ok(context.store.admit_verified_call_intent_with_expiry(
-            &ramflux_node_core::CallIntentAdmission {
-                signed: &owned_intent,
-                start_digest: &owned_digest,
-                envelope_id: &owned_envelope,
-                source_identity: source.storage_key(),
-                source_epoch: epoch,
-                encrypted_invite: &ciphertext,
-            },
-            request_expires_at,
-        )?)
-    })
-    .await;
+    let admitted =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            Ok(context.store.admit_verified_call_intent_with_expiry(
+                &ramflux_node_core::CallIntentAdmission {
+                    signed: &owned_intent,
+                    start_digest: &owned_digest,
+                    envelope_id: &owned_envelope,
+                    source_identity: source.storage_key(),
+                    source_epoch: epoch,
+                    encrypted_invite: &ciphertext,
+                },
+                request_expires_at,
+            )?)
+        })
+        .await;
     match admitted {
         Ok(ramflux_node_core::CallIntentEffect::Cancelled { wake_id: Some(wake_id) }) => {
             dispatch_cancel_wake(
