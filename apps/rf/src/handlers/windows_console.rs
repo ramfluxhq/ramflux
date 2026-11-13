@@ -22,7 +22,9 @@ unsafe extern "system" {
 }
 
 pub(crate) fn open_input() -> io::Result<File> {
-    File::options().read(true).open(r"\\.\CONIN$")
+    // `SetConsoleMode` needs write access. A read-only `CONIN$` handle still reports
+    // that it is a console, then refuses the mode change.
+    File::options().read(true).write(true).open(r"\\.\CONIN$")
 }
 
 pub(crate) fn open_output() -> io::Result<File> {
