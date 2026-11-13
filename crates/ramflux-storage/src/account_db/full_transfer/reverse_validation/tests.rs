@@ -19,15 +19,23 @@ fn open(root: &std::path::Path, anchor: &str) -> ResultOf<AccountDb> {
     Ok(AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"reverse-work-secret"))?)
 }
 fn staged(false_counts: bool) -> ResultOf<Staged> {
+    staged_with_vetoes(false_counts, 1)
+}
+pub(in crate::account_db::full_transfer) fn staged_with_vetoes(
+    false_counts: bool,
+    vetoes: u8,
+) -> ResultOf<Staged> {
     let (initial, _, _) = super::super::stage_tests::fixture()?;
     let root = tempfile::tempdir()?;
     let b_root = tempfile::tempdir()?;
     let db = open(root.path(), &initial.grant.source_ref.account_anchor)?;
     let b = open(b_root.path(), &initial.grant.destination_ref.account_anchor)?;
-    b.connection.execute(
-        "INSERT INTO object_erasure_fence VALUES(?1)",
-        rusqlite::params![ramflux_protocol::encode_base64url([7; 32])],
-    )?;
+    for value in 0..vetoes {
+        b.connection.execute(
+            "INSERT INTO object_erasure_fence VALUES(?1)",
+            rusqlite::params![ramflux_protocol::encode_base64url([value; 32])],
+        )?;
+    }
     b.connection
         .execute("UPDATE account_erasure_generation SET generation=9 WHERE singleton=1", [])?;
     let (mut record, forward, _) = super::super::receiver_projection::tests::input(&db)?;

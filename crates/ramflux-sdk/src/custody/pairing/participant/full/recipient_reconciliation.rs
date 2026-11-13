@@ -110,6 +110,13 @@ impl LocalPairingParticipant {
     ) -> Result<FullRecipientPublicationQuery, SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.full_recipient_publication_query_with_db(db, operation)
+    }
+    pub(crate) fn full_recipient_publication_query_with_db(
+        &self,
+        db: &AccountDb,
+        operation: &str,
+    ) -> Result<FullRecipientPublicationQuery, SdkError> {
         self.full_selected_db(db, None)?;
         let head = db.pairing_head()?.ok_or_else(wrong)?;
         let live = db

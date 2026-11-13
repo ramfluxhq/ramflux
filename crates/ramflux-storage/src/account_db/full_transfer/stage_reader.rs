@@ -43,6 +43,22 @@ impl<'db> FullTransferStage<'db> {
     }
 }
 impl<'db> FullTransferStage<'db> {
+    pub(super) fn validated_reverse_reader(
+        &self,
+        hash: &str,
+    ) -> Result<FullForwardReader<'_, 'db>, StorageError> {
+        self.require_validated_reverse_input(hash)?;
+        Ok(FullForwardReader {
+            stage: self,
+            manifest: self.reverse_manifest(hash)?,
+            hash: hash.into(),
+            direction: 1,
+            position: 0,
+            cached_index: None,
+            cache: Zeroizing::new(Vec::new()),
+            failed: false,
+        })
+    }
     /// Read the independently authenticated reverse stream with one bounded plaintext chunk.
     /// This verifies bytes/root only; actual A union commit must precede any signed DV.
     /// # Errors

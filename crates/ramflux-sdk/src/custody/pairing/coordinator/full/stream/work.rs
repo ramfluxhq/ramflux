@@ -12,6 +12,7 @@ use ramflux_protocol::{
 };
 use tokio::time::Duration;
 mod catchup;
+mod reverse;
 
 fn mismatch() -> SdkError {
     SdkError::PairingCode("ManifestMismatch")
@@ -91,9 +92,7 @@ impl FullStreamWork {
         let reverse = self.receive_manifest().await?;
         self.fresh().await?;
         self.io.retain_reverse_manifest(&reverse).await?;
-        if reverse.manifest.chunk_count.0 != 0 || reverse.manifest.total_bytes.0 != 0 {
-            return Err(SdkError::PairingCode("UnsupportedRecord"));
-        }
+        self.receive_and_apply_reverse(&reverse).await?;
         let draft = self.io.prepare_reverse_data_verified().await?;
         let participant = self.participant.clone();
         let (draft, verified) = self
@@ -126,16 +125,11 @@ impl FullStreamWork {
         let mut manifest = self.receive_manifest().await?;
         self.fresh().await?;
         let mut prefix = self.io.retain_manifest(&manifest).await?;
-        let draft = self.io.prepare_empty_reverse().await?;
-        let participant = self.participant.clone();
-        let reverse = self
-            .runtime
-            .clone()
-            .run_blocking(move || participant.sign_empty_reverse_manifest(&draft))
-            .await?;
+        let reverse = self.prepare_own_reverse().await?;
         self.io.retain_reverse_manifest(&reverse).await?;
         self.fresh().await?;
         self.packet.send_manifest(self.relay.as_ref(), &self.origin, &reverse).await?;
+        self.send_reverse_input(&reverse).await?;
         let mut receiver = None;
         loop {
             self.receive_forward_input(&manifest, prefix).await?;

@@ -23,6 +23,7 @@ pub(super) mod cancel;
 mod candidate_assembly;
 mod completion;
 mod epoch;
+mod installation;
 mod management;
 mod publication;
 mod source_observation;

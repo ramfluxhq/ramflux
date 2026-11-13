@@ -28,6 +28,9 @@ mod receiver_scratch;
 mod reverse_application;
 mod reverse_chunks;
 mod reverse_manifest;
+mod reverse_source;
+pub use reverse_source::{FullReverseSourceDraft, FullReverseSourceWork};
+mod reverse_merge;
 mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
 mod scalar;
@@ -102,3 +105,6 @@ mod source_preparation_tests;
 
 #[cfg(test)]
 mod source_delta_tests;
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+mod test_support;

@@ -1438,7 +1438,7 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         tokio::time::advance(std::time::Duration::from_millis(500)).await;
         source_signal.notified().await;
         target_signal.notified().await;
-        service_frontend(&participant_a.root, &participant_a.account_id, &source.client)?;
+        service_frontend(&participant_a.root, &participant_a.account_id, &mut source.client)?;
         let (source_done, source_state) = super::coordinator::settle_actor_data_for_test(
             &participant_a.root,
             &participant_a.account_id,
@@ -1750,3 +1750,4 @@ async fn settle_stream_work(rig: &Rig) {
 
 mod attended_join;
 mod frontend_writer;
+mod linked_reverse;

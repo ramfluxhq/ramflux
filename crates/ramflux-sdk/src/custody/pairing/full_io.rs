@@ -15,6 +15,7 @@ use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
 mod application;
+mod reverse;
 mod source_delta;
 pub use application::FullApplicationDraft;
 pub use source_delta::FullDeltaManifestDraft;
@@ -114,6 +115,7 @@ struct FullLocalIoRequest {
     action: FullLocalAction,
 }
 enum FullLocalAction {
+    Reverse(reverse::Action),
     VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Action),
     SourceDelta(source_delta::Action),
@@ -130,6 +132,7 @@ enum FullLocalAction {
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
+    Reverse(reverse::Applied),
     Duplex(ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Applied),
     SourceDelta(source_delta::Applied),
@@ -154,6 +157,7 @@ impl FullLocalIoRequest {
         if matches!(
             &self.action,
             FullLocalAction::PrepareEmptyReverse
+                | FullLocalAction::Reverse(_)
                 | FullLocalAction::SourceDelta(_)
                 | FullLocalAction::ProjectReceiverDelta { .. }
                 | FullLocalAction::Semantic(
@@ -189,6 +193,9 @@ fn apply_action(
     mut stage: FullTransferStage<'_>,
 ) -> Result<FullLocalResult, SdkError> {
     Ok(match action {
+        FullLocalAction::Reverse(action) => {
+            FullLocalResult::Reverse(reverse::apply(action, scope, stage)?)
+        }
         FullLocalAction::VerifyDuplex(copy) => {
             if (scope.role == PairingRole::Responder) != copy.is_some() {
                 return Err(wrong());

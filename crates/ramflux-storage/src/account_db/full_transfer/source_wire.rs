@@ -151,9 +151,59 @@ impl super::FullTransferStage<'_> {
             &record.grant.branch_keys.source,
         )
         .map_err(|_| mismatch())?;
-        let path = source.directory.join(FILE);
+        source.read_wire_chunk(body, index)
+    }
+    /// Read one exact original-B signed reverse chunk from its own immutable wire spool.
+    /// # Errors
+    /// Refuses wrong original signer/orientation, nonlocal prepared metadata or incomplete bytes.
+    pub fn read_reverse_source_wire_chunk(
+        &self,
+        hash: &str,
+        index: u64,
+    ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+        use ramflux_protocol::custody::pairing::full_transfer::{ManifestKind, manifest_hash};
+        let source = self.reverse_source_context()?;
+        let manifest = self.reverse_manifest(hash)?;
+        let record = self.resume_record()?;
+        let body = &manifest.manifest;
+        if body.kind != ManifestKind::Base
+            || body.snapshot_cut.0 != 0
+            || body.transfer_id != record.transfer_id
+            || body.source_ref != record.grant.destination_ref
+            || body.destination_ref != record.grant.source_ref
+            || body.base_record_hash != record.base_record_hash
+            || ramflux_protocol::encode_base64url(manifest_hash(&manifest).map_err(|_| mismatch())?)
+                != hash
+        {
+            return Err(mismatch());
+        }
+        ramflux_crypto::verify_canonical_signature(
+            &body.signing_bytes().map_err(|_| mismatch())?,
+            &manifest.source_signature,
+            &record.grant.branch_keys.destination,
+        )
+        .map_err(|_| mismatch())?;
+        let expected = Zeroizing::new(ramflux_protocol::canonical_json_bytes(body)?);
+        let ready: Vec<u8> = self.connection.query_row(
+            "SELECT manifest FROM reverse_source_ready WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if expected.as_slice() != ready.as_slice() {
+            return Err(mismatch());
+        }
+        source.read_wire_chunk(body, index)
+    }
+}
+impl SourceContext<'_> {
+    fn read_wire_chunk(
+        &self,
+        body: &ramflux_protocol::custody::pairing::full_transfer::Manifest,
+        index: u64,
+    ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+        let path = self.directory.join(FILE);
         drop(open_regular(&path, false)?);
-        let connection = source.key.open_source_metadata(&path)?;
+        let connection = self.key.open_source_metadata(&path)?;
         let (total, count, root) =
             wire_summary(&connection, &body.snapshot_id, body.snapshot_cut.0)?;
         if total != body.total_bytes.0
@@ -186,7 +236,7 @@ impl super::FullTransferStage<'_> {
             rusqlite::Error::InvalidQuery | rusqlite::Error::QueryReturnedNoRows => mismatch(),
             other => other.into(),
         })?;
-        source.require_source_live()?;
+        self.require_source_live()?;
         Ok(value)
     }
 }

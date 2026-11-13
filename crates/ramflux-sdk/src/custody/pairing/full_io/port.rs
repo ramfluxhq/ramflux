@@ -17,7 +17,7 @@ struct Envelope {
 /// A memory-only worker port. It owns no DB, stage key, signer or publication right.
 /// Exclusive mutable calls permit only one outstanding request and one bounded reply.
 pub struct FullLocalIoPort {
-    scope: FullLocalIoScope,
+    pub(super) scope: FullLocalIoScope,
     sender: mpsc::Sender<Envelope>,
 }
 /// Held by the ordinary account owner. Drop closes queued work and erases its bytes.
@@ -296,7 +296,10 @@ impl FullLocalIoPort {
         };
         Ok((proof, copy))
     }
-    async fn request(&mut self, action: FullLocalAction) -> Result<FullLocalResult, SdkError> {
+    pub(super) async fn request(
+        &mut self,
+        action: FullLocalAction,
+    ) -> Result<FullLocalResult, SdkError> {
         self.scope.live()?;
         let (reply, response) = oneshot::channel();
         self.sender

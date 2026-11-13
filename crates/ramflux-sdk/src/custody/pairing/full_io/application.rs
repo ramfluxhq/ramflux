@@ -72,7 +72,7 @@ pub(super) fn apply(
             if scope.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
                 return Err(wrong());
             }
-            let proof = stage.apply_empty_reverse(now)?;
+            let proof = stage.prepare_applied_reverse_receipt(now)?;
             Ok(Applied::ReversePrepared(Box::new(FullApplicationDraft {
                 proof,
                 scope: scope.clone(),

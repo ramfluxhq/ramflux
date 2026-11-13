@@ -47,9 +47,30 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.encode_selected_cut_source(cut, snapshot_id, writer, false)
+    }
+    pub(super) fn encode_fixed_reverse_source<W: Write + Send + 'static>(
+        &mut self,
+        snapshot_id: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.encode_selected_cut_source(0, snapshot_id, writer, true)
+    }
+    fn encode_selected_cut_source<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        snapshot_id: &str,
+        writer: W,
+        restrictive_only: bool,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         let rules = full_transfer_catalog();
         let mut schema = self.source_cut_schema(cut, snapshot_id, rules)?;
         schema.require_typed_owners(rules)?;
+        // Reverse metadata retains the full census, while only compiled restrictive
+        // owners enter its byte stream. Unknown actual owners still refuse preflight.
+        if restrictive_only {
+            schema.families.retain(|family| family.restrictive);
+        }
         let (storage_generation, source_erasure_generation) =
             self.with_source_cut(cut, snapshot_id, |input| {
                 Ok((

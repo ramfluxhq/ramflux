@@ -76,15 +76,7 @@ impl FullStreamWork {
             self.io.verify_forward_root(&hash).await?;
         }
         self.note_durable(manifest, next)?;
-        if manifest.manifest.kind
-            == ramflux_protocol::custody::pairing::full_transfer::ManifestKind::Base
-        {
-            let verified_reverse = self.receive().await?;
-            self.fresh().await?;
-            self.io.record_reverse_source_data_verified(verified_reverse).await?;
-        }
-        // First consume/acknowledge A's reverse DV. Sending credit earlier can
-        // fill both outbound slots, leaving neither peer room for the ACK poll.
+        // The exact original-A reverse DV was already consumed by send_reverse_input.
         self.receipt(&hash, prefix).await?;
         while next < chunks {
             let DataPacket::Chunk { manifest_hash, index, length, digest, bytes } =

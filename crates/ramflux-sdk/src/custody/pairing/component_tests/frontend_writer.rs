@@ -204,7 +204,7 @@ mod tests {
                     result = &mut begin => break result,
                     () = signal.notified() => {
                         crate::custody::pairing::service_frontend(
-                            &participant.root, &participant.account_id, &source.client,
+                            &participant.root, &participant.account_id, &mut source.client,
                         )?;
                     }
                 }

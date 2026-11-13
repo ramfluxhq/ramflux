@@ -26,9 +26,6 @@ impl FullTransferStage<'_> {
         self.require_io()?;
         let record = self.resume_record()?;
         let context = TranscriptV3::from_wire_bytes(&record.transcript).map_err(|_| wrong())?;
-        if context.initiator.common.recipient_mode != "new" {
-            return Err(StorageError::PairingField("UnsupportedRecord"));
-        }
         let bytes: Vec<u8> = self.connection.query_row(
             "SELECT bytes FROM manifest WHERE direction=1 AND cut=0",
             [],
@@ -36,8 +33,8 @@ impl FullTransferStage<'_> {
         )?;
         let reverse = SourceManifest::from_wire_bytes(&bytes).map_err(|_| wrong())?;
         let body = &reverse.manifest;
-        if body.total_bytes.0 != 0
-            || body.chunk_count.0 != 0
+        if (context.initiator.common.recipient_mode == "new"
+            && (body.total_bytes.0 != 0 || body.chunk_count.0 != 0))
             || body.source_ref != record.grant.destination_ref
             || body.destination_ref != record.grant.source_ref
         {
@@ -55,11 +52,12 @@ impl FullTransferStage<'_> {
         )
         .map_err(|_| wrong())?;
         let root = super::stage::raw32(&body.chunks_root)?;
-        if ramflux_protocol::custody::pairing::full_transfer::RootHasher::new(0)
-            .map_err(|_| wrong())?
-            .finish()
-            .map_err(|_| wrong())?
-            != root
+        if body.total_bytes.0 == 0
+            && ramflux_protocol::custody::pairing::full_transfer::RootHasher::new(0)
+                .map_err(|_| wrong())?
+                .finish()
+                .map_err(|_| wrong())?
+                != root
         {
             return Err(wrong());
         }
@@ -102,6 +100,10 @@ impl FullTransferStage<'_> {
             return Err(wrong());
         }
         let proof = self.reverse_receipt(now)?;
+        if !matches!(proof.packet(), DataPacket::DataVerified { total_bytes, .. } if total_bytes.0 == 0)
+        {
+            return Err(wrong());
+        }
         self.db.require_selected_transfer_source()?;
         self.db.connection.call(|raw| {
             let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -116,6 +118,35 @@ impl FullTransferStage<'_> {
             tx.commit()
         })?;
         self.db.require_selected_transfer_source()?;
+        self.retain_reverse_application(&proof)?;
+        Ok(proof)
+    }
+    /// Construct an original-A application receipt only after every actual linked reverse
+    /// commit completed for this exact stage and current generation. No peer flag is used.
+    /// # Errors
+    /// Refuses incomplete application, another role/path/unlock, expiry or metadata failure.
+    pub fn prepare_applied_reverse_receipt(
+        &mut self,
+        now: u64,
+    ) -> Result<FullAppliedDataReceipt, StorageError> {
+        if self.resume_record()?.role != PairingRole::Initiator {
+            return Err(wrong());
+        }
+        let proof = self.reverse_receipt(now)?;
+        let DataPacket::DataVerified { manifest_hash, total_bytes, .. } = proof.packet() else {
+            return Err(wrong());
+        };
+        if total_bytes.0 == 0 {
+            return self.apply_empty_reverse(now);
+        }
+        self.require_reverse_merge_complete(manifest_hash)?;
+        self.retain_reverse_application(&proof)?;
+        Ok(proof)
+    }
+    fn retain_reverse_application(
+        &self,
+        proof: &FullAppliedDataReceipt,
+    ) -> Result<(), StorageError> {
         let selected = self.db.account_index.account(&self.db.local_account_id)?;
         let DataPacket::DataVerified { manifest_hash, .. } = proof.packet() else {
             return Err(wrong());
@@ -123,7 +154,7 @@ impl FullTransferStage<'_> {
         self.connection.execute("INSERT INTO reverse_application(manifest_hash,stage_digest,db_path,object_path) VALUES(?1,?2,?3,?4) ON CONFLICT(manifest_hash) DO UPDATE SET stage_digest=excluded.stage_digest,db_path=excluded.db_path,object_path=excluded.object_path", params![manifest_hash,proof.digest.as_slice(),selected.db_relative_path,selected.object_dir_relative_path])?;
         super::stage::sync_stage(&self.directory)?;
         self.require_io()?;
-        Ok(proof)
+        Ok(())
     }
     /// Persist A's exact signed application receipt before it is sent to B.
     /// # Errors
