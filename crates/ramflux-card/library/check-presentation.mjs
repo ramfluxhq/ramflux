@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import {readFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
 import {parse} from 'acorn';
 import {fullAncestor} from 'acorn-walk';
 import assert from 'node:assert/strict';
@@ -15,8 +16,8 @@ function check(code){fullAncestor(parse(code,{ecmaVersion:2022,sourceType:'modul
  if(/\b[A-Za-z]+ [A-Za-z]+\b/.test(node.value)||visibleAssignment||visibleProperty)throw Error('hard-coded UI text: '+node.value);
 })}
 for(const code of ['const label="Save changes"','element.textContent="Submit"','const props={label:"Submit"}'])assert.throws(()=>check(code),/hard-coded/);
-for(const file of ['../web/adapter.ts','../web/preview.ts','form.tsx']){const result=await build({entryPoints:[new URL(file,import.meta.url).pathname],bundle:false,write:false,format:'esm'});check(result.outputFiles[0].text)}
-const generated=await build({entryPoints:[new URL('../../../src/generated/rf-tokens.ts',import.meta.url).pathname],bundle:true,write:false,format:'esm'});
+for(const file of ['../web/adapter.ts','../web/preview.ts','form.tsx']){const result=await build({entryPoints:[fileURLToPath(new URL(file,import.meta.url))],bundle:false,write:false,format:'esm'});check(result.outputFiles[0].text)}
+const generated=await build({entryPoints:[fileURLToPath(new URL('../../../src/generated/rf-tokens.ts',import.meta.url))],bundle:true,write:false,format:'esm'});
 const tokens=await import('data:text/javascript;base64,'+Buffer.from(generated.outputFiles[0].text).toString('base64'));
 for(const name of ['light','dark'])assert.deepEqual(JSON.parse(await readFile(new URL('../themes/'+name+'.json',import.meta.url))),tokens[name],name+' tokens must match the generated source');
 console.log('PRESENTATION_LINT_OK');
