@@ -31,6 +31,7 @@ export class CardView {
   private disposed=false;
   private released=false;
   private readonly ready:Promise<void>;
+  private rejectReady:(reason:Error)=>void=()=>{};
   constructor(private readonly root:HTMLElement, workerURL:URL,
     private readonly intent:(action:string,fields:unknown)=>void,
     private readonly hostSlots:(slots:readonly HostSlot[])=>void,
@@ -39,6 +40,7 @@ export class CardView {
     this.worker=createWorker(workerURL);this.root.inert=false;
     const channel=new MessageChannel();this.port=channel.port1;
     this.ready=new Promise((resolve,reject)=>{
+      this.rejectReady=reject;
       this.port.onmessage=event=>{
         if(event.data?.ready){resolve();return}
         if(event.data?.seq===undefined){const error=Error("Card runtime unavailable");reject(error);this.abort(error);return}
@@ -46,6 +48,7 @@ export class CardView {
       };
       this.worker.onerror=()=>{const error=Error("Card runtime unavailable");reject(error);this.abort(error)};
     });
+    void this.ready.catch(()=>undefined);
     this.worker.postMessage({port:channel.port2},[channel.port2]);this.port.start();
   }
   open(selectedJSON:string):Promise<Reply|null>{return this.request("open",selectedJSON)}
@@ -61,6 +64,7 @@ export class CardView {
     if(this.released)return;this.released=true;this.worker.terminate();workers--;
   }
   private abort(error:Error,notify=true):void {
+    this.rejectReady(error);
     for(const pending of this.pending.values())pending.reject(error);this.pending.clear();
     if(notify){this.port.close();this.releaseWorker();this.root.inert=true;this.hostSlots([]);this.failure(error.message)}
   }
@@ -75,9 +79,9 @@ export class CardView {
     catch(error){this.pending.get(seq)?.reject(error instanceof Error?error:Error("Card runtime unavailable"));this.pending.delete(seq)}
     return response;
   }
-  private receive(message:{seq:number;json?:string;error?:string;disposed?:boolean}):void {
+  private receive(message:{seq:number;json?:string;error?:string;terminal?:boolean;disposed?:boolean}):void {
     const pending=this.pending.get(message.seq);if(!pending)return;this.pending.delete(message.seq);
-    if(message.error){pending.reject(Error(message.error));return}
+    if(message.error){const failure=Error(message.error);pending.reject(failure);if(message.terminal)this.abort(failure);return}
     try {
       if(message.disposed){pending.resolve(null);return}
       if(typeof message.json!=="string"||message.json.length>131072)throw Error("Card output unavailable");
