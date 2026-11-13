@@ -461,14 +461,41 @@ where
     if len > MAX_LOCAL_BUS_FRAME_BYTES {
         return Err(SdkError::LocalBus(format!("local bus frame too large: {len}")));
     }
+    if len == 0 {
+        return Err(SdkError::LocalBus("empty local bus frame".into()));
+    }
+    let mut discriminator = [0_u8; 1];
+    reader.read_exact(&mut discriminator).await?;
+    if discriminator[0] == 0xC1 {
+        // Binary private replies require their connection-owned pending slot.
+        // This generic reader never allocates or forwards their secret payload to JSON.
+        return Err(SdkError::PairingField("credential_channel"));
+    }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
-    reader.read_exact(&mut body).await?;
+    body[0] = discriminator[0];
+    reader.read_exact(&mut body[1..]).await?;
     Ok(ramflux_protocol::parse_i_json_secret(&body)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pairing_generic_bus_reader_refuses_private_discriminator_before_secret_payload()
+    -> Result<(), SdkError> {
+        let secret = crate::custody::pairing::CredentialOutcome::Provided {
+            passphrase: crate::custody::pairing::SecretUtf8::from_bytes(b"private-json-canary")?,
+            confirmation: None,
+        };
+        let frame =
+            crate::custody::pairing::private_credential::encode_reply(1, "unlock", &secret)?;
+        let mut reader = frame.as_slice();
+        let result = read_local_bus_frame(&mut reader).await;
+        assert_eq!(reader.len(), frame.len() - 5, "generic JSON reader consumed private payload");
+        assert!(matches!(result, Err(SdkError::PairingField("credential_channel"))));
+        Ok(())
+    }
 
     fn test_frame(body: serde_json::Value) -> LocalBusFrame {
         LocalBusFrame {

@@ -18,6 +18,9 @@ impl NodeHeadPersist for NativePairingPublication {
     fn persist_head(&self, publication: &Publication, _now: u64) -> Result<String, SdkError> {
         self.runtime.block_on(self.native.publish(publication.clone()))
     }
+    fn close_ceremony(&self) {
+        self.native.close();
+    }
 }
 
 /// The existing root-free native manifest read; never registers or opens an ordinary session.

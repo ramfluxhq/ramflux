@@ -13,11 +13,22 @@ use ramflux_protocol::{
 };
 use ramflux_storage::HeadRow;
 use std::path::Path;
+mod cleanup;
 /// Local key cleanup never rolls back the published role or waits for the tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullSourceRetirementOutcome {
     Complete,
     CleanupPending,
+}
+/// Retry an independent positive old-key cleanup receipt on unlock/hourly/status work.
+/// No approval, publisher or original actor is reconstructed; current native fields stay unchanged.
+/// # Errors
+/// Refuses another selected writer, incomplete role installation or missing old-owner proof.
+pub fn retry_full_source_cleanup(
+    local: &Installation<'_>,
+    operation: &str,
+) -> Result<FullSourceRetirementOutcome, SdkError> {
+    cleanup::retry(local, operation)
 }
 fn wrong() -> SdkError {
     SdkError::PairingCode("PublicationPending")
@@ -43,10 +54,11 @@ pub(super) fn install(
     }
     let _authority = super::super::super::activate::authority_lock(root, &head.account_id)?;
     let account = custody::load_data_account(root, &head.account_id, local.now)?;
-    if object_hash(account.record())? != head.candidate_hash
-        || account.local_device_id()? != source.device_id
-    {
+    if account.local_device_id()? != source.device_id {
         return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    if object_hash(account.record())? != head.candidate_hash {
+        return cleanup::after_refresh(root, head, local, &source, &account);
     }
     let owner = local.db.full_source_retirement_owner(
         &head.operation_id,
@@ -56,13 +68,11 @@ pub(super) fn install(
     if !account.primary_vault_ref().is_empty() && account.primary_vault_ref() != owner.reference() {
         return Err(wrong());
     }
-    let mut pending = pending_install(head, source, &account, owner.reference());
+    let pending = pending_install(head, source, &account, owner.reference());
     pending.validate()?;
-    if let Some(saved) = install_store::read_pending(root, &head.account_id, &head.operation_id)? {
-        if saved != pending {
-            return Err(wrong());
-        }
-        pending = saved;
+    let saved = install_store::read_pending(root, &head.account_id, &head.operation_id)?;
+    if saved.as_ref().is_some_and(|row| row != &pending) {
+        return Err(wrong());
     }
     let mut installed = pending.clone();
     installed.state = "installed".into();
@@ -71,6 +81,9 @@ pub(super) fn install(
     let adoption = super::super::super::full_generation::preserved_refresh_adoption(
         root, local.db, &installed,
     )?;
+    if saved.is_none() && cleanup::already_complete(local, &installed, &adoption, &account)? {
+        return Ok(FullSourceRetirementOutcome::Complete);
+    }
     custody::verify_pairing_local(&installed, authority, local.vault, local.now)?;
     // Positive reference survives BEFORE authority fields stop naming the old key.
     install_store::write_pending(root, &pending)?;

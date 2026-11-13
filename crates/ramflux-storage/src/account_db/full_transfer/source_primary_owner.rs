@@ -117,9 +117,12 @@ impl crate::AccountDb {
             }
         } else {
             let adoption = self.pairing_adoption()?.ok_or_else(wrong)?;
-            if adoption.operation_id != operation
-                || adoption.record_hash != hash
+            let reference = live.full_stage_reference()?.ok_or_else(wrong)?;
+            let retained: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND record_hash=?4)",rusqlite::params![self.local_account_id,operation,reference.stage_id,hash],|row|row.get(0))?;
+            if adoption.account_id != self.local_account_id
                 || adoption.local_role != "secondary"
+                || adoption.primary_vault_ref.is_some()
+                || !retained
             {
                 return Err(wrong());
             }
@@ -132,6 +135,14 @@ impl crate::AccountDb {
         )?;
         if stage.source_published_candidate_hash()? != hash {
             return Err(wrong());
+        }
+        if self.pairing_head()?.is_none() {
+            let adoption = self.pairing_adoption()?.ok_or_else(wrong)?;
+            if adoption.local_ref
+                != ramflux_protocol::canonical_json_bytes(&stage.resume_record()?.grant.source_ref)?
+            {
+                return Err(wrong());
+            }
         }
         let owner = stage.source_primary_owner()?.ok_or_else(wrong)?;
         let bytes:Vec<u8>=stage.connection.query_row("SELECT base_record FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288",[],|row|row.get(0))?;

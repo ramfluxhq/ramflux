@@ -25,11 +25,12 @@ pub use participant::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
     FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
     FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
-    LocalPairingParticipant, ParticipantContext,
+    LocalPairingParticipant, ParticipantContext, retry_full_source_cleanup,
 };
 pub mod install_gate;
 pub mod install_store;
 pub(crate) mod local_credential;
+pub mod private_credential;
 pub(crate) mod publication;
 pub(crate) mod recipient;
 pub mod transfer_payload;

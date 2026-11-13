@@ -26,6 +26,7 @@ struct Prepared {
 }
 
 struct Published {
+    source_cleanup: Option<crate::custody::pairing::FullSourcePublished>,
     authority: CustodyAuthority,
     install: Install,
     head: HeadRow,
@@ -194,6 +195,13 @@ async fn publication(
     rig: &mut Rig,
     operation: &str,
 ) -> Result<Published, Box<dyn std::error::Error>> {
+    publication_with_cleanup(rig, operation, false).await
+}
+async fn publication_with_cleanup(
+    rig: &mut Rig,
+    operation: &str,
+    deferred_cleanup: bool,
+) -> Result<Published, Box<dyn std::error::Error>> {
     let Prepared { publication: _, install, head, source_submission } =
         prepare_candidate(rig, operation).await?;
     let before = rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire);
@@ -221,8 +229,13 @@ async fn publication(
     );
     let authority = rig.participant_b.query.current_authority(&install.account_anchor)?;
     assert_eq!(canonical_json_bytes(published.authority())?, canonical_json_bytes(&authority)?);
-    source_tail::acknowledge(rig, &published)?;
-    Ok(Published { authority, install, head })
+    source_tail::acknowledge(rig, &published, deferred_cleanup)?;
+    Ok(Published {
+        source_cleanup: deferred_cleanup.then_some(published),
+        authority,
+        install,
+        head,
+    })
 }
 async fn prove_source_preservation(
     rig: &mut Rig,

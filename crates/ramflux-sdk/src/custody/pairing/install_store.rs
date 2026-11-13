@@ -338,7 +338,7 @@ pub(crate) fn pending_blocks_network(pending: &[Install], installed: Option<&Ins
         return true;
     };
     if installed.state != "installed"
-        || installed.install_purpose != "transfer_source"
+        || !matches!(installed.install_purpose.as_str(), "transfer_source" | "authority_refresh")
         || installed.primary_vault_ref.is_some()
     {
         return true;
@@ -348,9 +348,10 @@ pub(crate) fn pending_blocks_network(pending: &[Install], installed: Option<&Ins
             || row.install_purpose != "transfer_source"
             || row.account_id != installed.account_id
             || row.account_anchor != installed.account_anchor
-            || row.operation_id != installed.operation_id
-            || row.record_hash != installed.record_hash
-            || row.prior_record_hash != installed.prior_record_hash
+            || (installed.install_purpose == "transfer_source"
+                && (row.operation_id != installed.operation_id
+                    || row.record_hash != installed.record_hash
+                    || row.prior_record_hash != installed.prior_record_hash))
             || row.recipient_ref != installed.recipient_ref
             || row.recipient_mode != installed.recipient_mode
             || row.branch_vault_ref != installed.branch_vault_ref

@@ -5,7 +5,11 @@
 use super::{CustodyAuthority, Rig, encode_base64url};
 use crate::custody::pairing::{FullSourcePublished, FullSourceRetirementOutcome, Installation};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-pub(super) fn acknowledge(rig: &mut Rig, published: &FullSourcePublished) -> TestResult {
+pub(super) fn acknowledge(
+    rig: &mut Rig,
+    published: &FullSourcePublished,
+    deferred_cleanup: bool,
+) -> TestResult {
     let authority: CustodyAuthority = published.authority().clone();
     let later = rig.now + 301; // Approval expired after native publication; the lease is still live.
     ramflux_crypto::custody::verify_publication(&authority, later)?;
@@ -52,24 +56,19 @@ pub(super) fn acknowledge(rig: &mut Rig, published: &FullSourcePublished) -> Tes
     let work = {
         let slot = rig.participant_a.db.lock().map_err(|_| "source cleanup retry")?;
         let db = slot.as_ref().ok_or("source cleanup writer")?;
-        assert_eq!(
-            published.retire_source(&Installation {
-                root: &rig.participant_a.root,
-                db,
-                vault: rig.participant_a.vault.as_ref(),
-                now: later
-            })?,
-            FullSourceRetirementOutcome::Complete
-        );
+        if !deferred_cleanup {
+            complete_and_replay_retirement(rig, published, db, later)?;
+        }
         let stage = db.open_full_transfer_stage(
             &operation,
             ramflux_crypto::custody::pairing::PairingRole::Initiator,
             later,
         )?;
         let owner = stage.source_primary_owner()?.ok_or("source old owner")?;
-        assert!(
-            rig.participant_a.vault.load_primary(owner.reference()).is_err(),
-            "retired source management key survived"
+        assert_eq!(
+            rig.participant_a.vault.load_primary(owner.reference()).is_ok(),
+            deferred_cleanup,
+            "source cleanup changed an unexpected owner"
         );
         cut.into_private_work(stage)?
     };
@@ -94,6 +93,35 @@ pub(super) fn acknowledge(rig: &mut Rig, published: &FullSourcePublished) -> Tes
         reopened.finish_source_tail_capture()?; // Reopen the keyed cut; never recapture.
     }
     rig.participant_a.return_client(&mut rig.source.client)?;
+    Ok(())
+}
+
+fn complete_and_replay_retirement(
+    rig: &Rig,
+    published: &FullSourcePublished,
+    db: &ramflux_storage::AccountDb,
+    later: u64,
+) -> TestResult {
+    assert_eq!(
+        published.retire_source(&Installation {
+            root: &rig.participant_a.root,
+            db,
+            vault: rig.participant_a.vault.as_ref(),
+            now: later,
+        })?,
+        FullSourceRetirementOutcome::Complete
+    );
+    // Completed local retirement cannot recreate a cleanup task or touch any provider item.
+    let unavailable = DeleteUnavailable(rig.participant_a.vault.as_ref());
+    assert_eq!(
+        published.retire_source(&Installation {
+            root: &rig.participant_a.root,
+            db,
+            vault: &unavailable,
+            now: later,
+        })?,
+        FullSourceRetirementOutcome::Complete
+    );
     Ok(())
 }
 
@@ -132,7 +160,7 @@ fn retire_with_deferred_cleanup(
     Ok(())
 }
 
-struct DeleteUnavailable<'a>(&'a dyn crate::custody::PrimaryVault);
+pub(super) struct DeleteUnavailable<'a>(pub(super) &'a dyn crate::custody::PrimaryVault);
 impl crate::custody::PrimaryVault for DeleteUnavailable<'_> {
     fn preflight(&self) -> Result<(), crate::SdkError> {
         self.0.preflight()

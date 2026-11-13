@@ -156,7 +156,8 @@ pub fn refresh_authority(
     }) {
         row.clone()
     } else {
-        if !pending.is_empty() {
+        let installed = install_store::read_installed(root, account_id)?;
+        if install_store::pending_blocks_network(&pending, installed.as_ref()) {
             return Err(SdkError::PairingCode("PublicationPending"));
         }
         let row = Install {

@@ -56,6 +56,9 @@ pub trait NodeHeadPersist: Send + Sync {
     /// # Errors
     /// Returns a pairing or local-bus error when the node refuses the candidate.
     fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError>;
+    /// Close only the ceremony proof connection after local role handback.
+    /// Ordinary branch sessions have an independent owner and remain available.
+    fn close_ceremony(&self) {}
 }
 
 /// Outcome of a published head.

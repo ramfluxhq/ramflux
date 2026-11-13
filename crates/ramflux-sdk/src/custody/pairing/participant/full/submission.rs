@@ -108,12 +108,14 @@ impl FullSourcePublished {
         self.submission.runtime.require_live()?;
         self.submission.unlock.require_unlocked()?;
         let _local = self.submission.runtime.local_work()?;
-        super::retirement::install(
+        let outcome = super::retirement::install(
             &self.submission.root,
             &self.submission.head,
             &self.authority,
             local,
-        )
+        );
+        self.submission.persist.close_ceremony();
+        outcome
     }
 
     /// Commit local J6 and its one immutable tail read view under the account writer fence.
