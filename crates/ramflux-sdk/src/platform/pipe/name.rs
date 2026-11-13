@@ -26,8 +26,11 @@ pub(super) fn pipe_sddl(user_sid: &str) -> String {
 }
 
 /// Name-file descriptor: owner is the user and the protected DACL holds only that user.
+/// `GA` is `GENERIC_ALL`, which the file access check maps onto read, write, and the
+/// standard rights. `FA` (`FILE_ALL_ACCESS`) does not survive that mapping, so the creator
+/// could not open the file it had just created.
 pub(super) fn name_file_sddl(user_sid: &str) -> String {
-    format!("O:{user_sid}D:P(A;;FA;;;{user_sid})")
+    format!("O:{user_sid}D:P(A;;GA;;;{user_sid})")
 }
 
 /// # Errors
