@@ -220,6 +220,9 @@ impl State {
         Ok(())
     }
     pub(super) fn poll(&self) -> CAbiResult<Vec<u8>> {
+        if let Some(account) = self.event_account.lock().map_err(|_| internal())?.clone() {
+            self.start_events(account);
+        }
         self.events
             .lock()
             .map_err(|_| internal())?

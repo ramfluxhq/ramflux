@@ -9,6 +9,7 @@ pub(super) struct EventReader {
     account: String,
     stop: tokio::sync::watch::Sender<bool>,
     join: std::thread::JoinHandle<()>,
+    retry_at: std::time::Instant,
 }
 impl EventReader {
     pub(super) fn stop_and_join(self) {
@@ -30,10 +31,10 @@ impl State {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        if slot
-            .as_ref()
-            .is_some_and(|reader| reader.account == account && !reader.join.is_finished())
-        {
+        if slot.as_ref().is_some_and(|reader| {
+            reader.account == account
+                && (!reader.join.is_finished() || std::time::Instant::now() < reader.retry_at)
+        }) {
             return;
         }
         if let Some(reader) = slot.take() {
@@ -55,7 +56,15 @@ impl State {
             };
             runtime.block_on(reader.run(socket, account));
         }) {
-            Ok(join) => *slot = Some(EventReader { account: event_account, stop, join }),
+            Ok(join) => {
+                let now = std::time::Instant::now();
+                *slot = Some(EventReader {
+                    account: event_account,
+                    stop,
+                    join,
+                    retry_at: now.checked_add(std::time::Duration::from_secs(10)).unwrap_or(now),
+                });
+            }
             Err(error) => {
                 tracing::warn!(error_kind = ?error.kind(), "pairing event reader unavailable")
             }
