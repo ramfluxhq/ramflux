@@ -43,6 +43,22 @@ impl<'db> FullTransferStage<'db> {
     }
 }
 impl<'db> FullTransferStage<'db> {
+    pub(super) fn validated_tail_reader(
+        &self,
+        hash: &str,
+    ) -> Result<FullForwardReader<'_, 'db>, StorageError> {
+        self.require_validated_tail_input(hash)?;
+        Ok(FullForwardReader {
+            stage: self,
+            manifest: self.forward_manifest(hash)?,
+            hash: hash.into(),
+            direction: 0,
+            position: 0,
+            cached_index: None,
+            cache: Zeroizing::new(Vec::new()),
+            failed: false,
+        })
+    }
     pub(super) fn validated_reverse_reader(
         &self,
         hash: &str,

@@ -81,6 +81,9 @@ impl PairingActor {
                     &current,
                     now,
                 )?;
+                if scope.merged {
+                    return Ok(None);
+                }
                 Ok(installed_authority_result(&scope.grant, &current, now, scope.lease_expires_at))
             })
             .await?;
@@ -92,6 +95,7 @@ impl PairingActor {
             scope.bytes_total,
             scope.cut,
             result,
+            scope.merged,
         );
         status.validate().map_err(|error| super::wire(&error))?;
         self.recovered_installation = Some(RecoveredInstallation { install, status });
@@ -109,6 +113,7 @@ pub(super) fn installed_progress(
     total: u64,
     cut: u64,
     result: Option<FullError>,
+    merged: bool,
 ) -> FullStatus {
     FullStatus {
         attachment_absent: U64(0),
@@ -121,7 +126,7 @@ pub(super) fn installed_progress(
         result,
         role: "responder".into(),
         stage: FullStatusStage::Installed,
-        tail_status: FullTailStatus::Pending,
+        tail_status: if merged { FullTailStatus::Merged } else { FullTailStatus::Pending },
     }
 }
 

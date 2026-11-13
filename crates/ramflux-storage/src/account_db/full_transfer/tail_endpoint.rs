@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 /// One short original-endpoint loan. No stage/key getter, publication or signing authority.
 /// Drop it before any network wait and independently refresh native authority next time.
 pub struct FullTailEndpoint<'a> {
+    pub(super) operation: String,
     pub(super) stage: FullTransferStage<'a>,
     current: &'a VerifiedRecord,
     admitted_at: u64,
@@ -80,7 +81,8 @@ impl AccountDb {
         })? {
             return Err(StorageError::PairingField("Cancelled"));
         }
-        let mut endpoint = FullTailEndpoint { stage, current, admitted_at: now };
+        let mut endpoint =
+            FullTailEndpoint { operation: operation.into(), stage, current, admitted_at: now };
         endpoint.stage.observe_full_native_head(current)?;
         endpoint.require_live(now)?;
         Ok(endpoint)
@@ -89,6 +91,18 @@ impl AccountDb {
 impl FullTailEndpoint<'_> {
     pub(super) fn require_live(&self, now: u64) -> Result<(), StorageError> {
         self.stage.require_io()?;
+        self.stage.require_full_native_floor(self.current)?;
+        let record = self.stage.resume_record()?;
+        let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
+        let (role, reference) = match record.role {
+            PairingRole::Initiator => ("secondary", &record.grant.source_ref),
+            PairingRole::Responder => ("primary", &record.grant.destination_ref),
+        };
+        if adoption.local_role != role
+            || adoption.local_ref != ramflux_protocol::canonical_json_bytes(reference)?
+        {
+            return Err(StorageError::PairingField("HeadChanged"));
+        }
         if now < self.admitted_at {
             return Err(wrong());
         }

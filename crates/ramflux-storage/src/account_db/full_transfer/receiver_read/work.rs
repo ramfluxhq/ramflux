@@ -11,6 +11,7 @@ use crate::account_db::full_transfer::{
     keys::FullChunkReadKey,
     read_work::{Inputs, Reader},
 };
+use ramflux_protocol::custody::pairing::full_transfer::ManifestKind;
 use std::sync::Arc;
 struct RetainedCut {
     hash: String,
@@ -103,7 +104,6 @@ impl FullTransferStage<'_> {
         }
         let current = self.forward_manifest(hash)?;
         let last = current.manifest.snapshot_cut.0;
-        use ramflux_protocol::custody::pairing::full_transfer::ManifestKind;
         if last > if tail { 9 } else { 8 }
             || if tail {
                 current.manifest.kind != ManifestKind::Tail
