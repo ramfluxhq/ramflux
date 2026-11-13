@@ -162,15 +162,19 @@ impl AttributeList {
         Ok(list)
     }
 
-    fn set_console(&mut self, console: &mut PseudoConsole) -> io::Result<()> {
-        // SAFETY: `self.memory` is an initialized attribute list. `console` is a live
-        // pseudoconsole and the pointed-to handle stays alive for `CreateProcessW`.
+    fn set_console(&mut self, console: &PseudoConsole) -> io::Result<()> {
+        // The console host reads one pointer at `lpValue` and treats it as the
+        // pseudoconsole. Passing the address of the field attaches the wrong object,
+        // so the child has no console and `CONOUT$` never reaches this pipe.
+        // SAFETY: `self.memory` is an initialized attribute list. `console.0` is the
+        // live pseudoconsole from `CreatePseudoConsole` and stays open through
+        // `CreateProcessW`.
         let ok = unsafe {
             UpdateProcThreadAttribute(
                 self.memory.cast(),
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                (&raw mut console.0).cast::<core::ffi::c_void>(),
+                console.0,
                 std::mem::size_of::<*mut core::ffi::c_void>(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -236,7 +240,7 @@ pub(super) fn spawn(rf: &Path, socket: &Path, display_name: &str) -> io::Result<
     drop(input_read);
     drop(output_write);
     let mut attributes = AttributeList::new()?;
-    attributes.set_console(&mut console)?;
+    attributes.set_console(&console)?;
     // SAFETY: zero is the documented initial value of STARTUPINFOEXW before `cb` and the
     // attribute list are filled in.
     let mut extended: StartupInfoExW = unsafe { std::mem::zeroed() };
