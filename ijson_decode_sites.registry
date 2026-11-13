@@ -411,6 +411,7 @@ crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | dispatch_bot_bus_request | 2 |
 crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | dispatch_bot_bus_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | hydrate_local_bot_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | hydrate_local_bot_records | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/call_lease_outcome.rs | apply | 1 | E | excluded=test-support call-state fixture; strict wire decode before response adapter, not production ingress
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | contact_safety_request | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

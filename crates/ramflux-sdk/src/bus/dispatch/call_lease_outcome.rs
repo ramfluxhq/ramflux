@@ -102,7 +102,7 @@ impl VoiceAdmissionProbe {
     pub fn apply(&mut self, frame: &[u8], now: i64) -> Result<(), SdkError> {
         apply_result(
             &mut self.0,
-            crate::gateway::engine::decode_voice_reply(serde_json::from_slice(frame)?),
+            crate::gateway::engine::decode_voice_reply(ramflux_protocol::parse_i_json(frame)?),
             None,
             now,
         )
