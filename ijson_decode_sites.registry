@@ -234,16 +234,12 @@ crates/ramflux-node-core/src/home_migration_store/drain.rs | read_drain | 1 | E 
 crates/ramflux-node-core/src/http_support.rs | parse_json_response | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-node-core/src/node_secret.rs | open | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify.rs | deserialize_notify_bounded_snapshot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/notify.rs | deserialize_notify_hot_value | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/notify.rs | deserialize_notify_queue_entry | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | ledger_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/notify.rs | load_bounded_state_with_incremental_flag | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | load_notify_credential | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | load_state_with_incremental_flag | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | parse_raw_wake_entry | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | signed_wake_from_raw | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/notify/retention.rs | sweep_retention | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify/route_authority.rs | load_marks | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify/route_authority.rs | open_binding | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify/route_authority.rs | same_registered_owner | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here

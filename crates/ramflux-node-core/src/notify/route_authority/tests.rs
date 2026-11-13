@@ -14,10 +14,14 @@ enum Cleanup {
     Ownerless,
     Orphan,
     Expired,
+    Fence,
 }
 
 fn interrupt_registration(store: &NotifyRedbStore, target: &str, cleanup: Cleanup) -> TestResult {
     let tx = store.db.begin_write()?;
+    if matches!(cleanup, Cleanup::Fence) {
+        tx.open_table(FENCES)?.insert(target, (99, crate::now_unix_seconds()))?;
+    }
     let mut rows = Vec::new();
     for (key, definition) in
         [("routes", NOTIFY_ROUTE_TABLE), ("owner", OWNERS), ("marks", HIGH_WATER)]
@@ -44,6 +48,9 @@ fn interrupt_registration(store: &NotifyRedbStore, target: &str, cleanup: Cleanu
         }
         Cleanup::Orphan => {
             tx.open_table(NOTIFY_ROUTE_TABLE)?.remove(target)?;
+        }
+        Cleanup::Fence => {
+            tx.open_table(FENCES)?.insert(target, (99, 1))?;
         }
         Cleanup::Expired => {
             let mut table = tx.open_table(NOTIFY_ROUTE_TABLE)?;
@@ -81,7 +88,7 @@ fn interrupt_registration(store: &NotifyRedbStore, target: &str, cleanup: Cleanu
 
 #[test]
 fn cleanup_resumes_registration_before_testing_owner_route_or_expiry() -> TestResult {
-    for cleanup in [Cleanup::Ownerless, Cleanup::Orphan, Cleanup::Expired] {
+    for cleanup in [Cleanup::Ownerless, Cleanup::Orphan, Cleanup::Expired, Cleanup::Fence] {
         let temp = tempfile::TempDir::new()?;
         let scenario = NativeScenario::new(temp.path())?;
         let (_, target, prepared) = scenario.prepared()?;
@@ -89,6 +96,17 @@ fn cleanup_resumes_registration_before_testing_owner_route_or_expiry() -> TestRe
         match cleanup {
             Cleanup::Ownerless => scenario.notify.reject_ownerless_routes()?,
             Cleanup::Orphan => scenario.notify.prune_route_owners()?,
+            Cleanup::Fence => {
+                assert_eq!(
+                    scenario.notify.prune_route_fences(crate::now_unix_seconds())?,
+                    0,
+                    "fence cleanup deleted a fresh fence restored by pending registration"
+                );
+                assert!(
+                    scenario.notify.route_fence_for_test(&target.target)?.is_some(),
+                    "recovered fence did not survive cleanup"
+                );
+            }
             Cleanup::Expired => assert_eq!(
                 scenario.notify.prune_expired_routes(crate::now_unix_seconds())?,
                 0,

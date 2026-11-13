@@ -774,7 +774,7 @@ impl NotifyRedbStore {
         Self::open_with_wal_root(path, Some(wal_root.as_ref()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open_with_wal_shard_count(
         path: impl AsRef<Path>,
         wal_root: impl AsRef<Path>,
@@ -788,7 +788,7 @@ impl NotifyRedbStore {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         Self::open_with_wal_root(path, None)
     }

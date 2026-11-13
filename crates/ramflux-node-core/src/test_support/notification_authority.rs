@@ -313,7 +313,12 @@ impl NativeScenario {
         };
         let gateway = Arc::new(GatewayRedbStore::open(path.join("gateway.redb"))?);
         let mut notify = if wal {
-            NotifyRedbStore::open_with_wal(path.join("notify.redb"), path.join("notify.wal"))?
+            const WAL_SHARDS: usize = 2;
+            NotifyRedbStore::open_with_wal_shard_count(
+                path.join("notify.redb"),
+                path.join("notify.wal"),
+                WAL_SHARDS,
+            )?
         } else {
             NotifyRedbStore::open_without_wal(path.join("notify.redb"))?
         };
