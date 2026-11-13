@@ -18,6 +18,65 @@ use ramflux_protocol::custody::pairing::{
 use ramflux_protocol::custody::{DeviceRef, object_hash};
 use std::sync::{Arc, Mutex};
 
+mod staged_resume;
+#[cfg(test)]
+pub(crate) use staged_resume::unlock_for_test;
+
+pub(super) struct StagedResume {
+    config: crate::LocalBusConfig,
+    nodes: crate::node::NodeStore,
+    account: String,
+    request: StatusRequest,
+    owner: staged_resume::Owner,
+}
+impl StagedResume {
+    fn new(
+        state: &LocalBusDaemonState,
+        account: &str,
+        request: StatusRequest,
+    ) -> Result<Self, SdkError> {
+        Ok(Self {
+            config: state.config.clone(),
+            nodes: state.nodes.clone(),
+            account: account.into(),
+            request,
+            owner: staged_resume::Owner::new(&state.config.data_root, account)?,
+        })
+    }
+    pub(super) async fn install(&self) -> Result<(), SdkError> {
+        staged_resume::install(
+            self.config.clone(),
+            self.nodes.clone(),
+            &self.account,
+            &self.request,
+            &self.owner,
+        )
+        .await
+    }
+    pub(super) async fn drain(&self, cancel: bool) {
+        self.owner.drain(cancel).await;
+    }
+}
+pub(super) fn capture_staged_resume(
+    state: &LocalBusDaemonState,
+    account: &str,
+    request: &LocalBusFrame,
+) -> Result<Option<StagedResume>, SdkError> {
+    if request.method != "device.transfer.status"
+        || state.accounts.contains_key(account)
+        || work_signal(&state.config.data_root, account).is_some()
+    {
+        return Ok(None);
+    }
+    let status: StatusRequest = serde_json::from_value(request.body.clone())?;
+    if !state.config.pairing.as_ref().is_some_and(|config| config.enabled)
+        || !staged_resume::has_pending(&state.config.data_root, account, &status)?
+    {
+        return Err(SdkError::PairingCode("NotFound"));
+    }
+    Ok(Some(StagedResume::new(state, account, status)?))
+}
+
 pub(super) async fn ensure_actor(
     state: &LocalBusDaemonState,
     account_id: &str,
@@ -46,7 +105,14 @@ pub(super) async fn ensure_actor(
         "device.transfer.status" => {
             let status: StatusRequest = serde_json::from_value(request.body.clone())?;
             status.validate().map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-            return install_source(state, account_id, None, Some(&status)).await;
+            return if state.accounts.contains_key(account_id) {
+                install_source(state, account_id, None, Some(&status)).await
+            } else {
+                let captured = StagedResume::new(state, account_id, status)?;
+                let result = captured.install().await;
+                captured.drain(result.is_err()).await;
+                result
+            };
         }
         _ => return Ok(()),
     }
@@ -237,6 +303,14 @@ pub(super) fn creates_recipient(
     config: &crate::LocalBusConfig,
     request: &LocalBusFrame,
 ) -> Result<bool, SdkError> {
+    if request.method == "device.transfer.status" {
+        if !config.pairing.as_ref().is_some_and(|config| config.enabled) {
+            return Err(SdkError::PairingCode("NotFound"));
+        }
+        let status: StatusRequest = serde_json::from_value(request.body.clone())?;
+        let account = request.account_id.as_deref().ok_or(SdkError::PairingCode("InvalidInput"))?;
+        return staged_resume::has_pending(&config.data_root, account, &status);
+    }
     if !matches!(request.method.as_str(), "device.pair.join" | "device.transfer.join") {
         return Ok(false);
     }
