@@ -5,20 +5,22 @@
 use super::{AdapterError, GeneratedErrorCode};
 use crate::{LocalBusFrame, LocalBusFrameKind, SdkError};
 use prost::Message as _;
-use ramflux_protocol::message as g;
+use ramflux_protocol::message::{
+    MessageUpdate, TRANSIENT_TOPIC, content::Value, message_update::State,
+};
 
 /// Encode a Typing update as a lossy `message.transient` event with sequence zero.
 /// It has no RPC correlation, durable operation key, cursor or replay source.
 /// # Errors
 /// Refuses non-Typing state, nonzero sequence, malformed transient identity or frame overflow.
-pub fn transient_message_frame(update: &g::MessageUpdate) -> Result<LocalBusFrame, SdkError> {
+pub fn transient_message_frame(update: &MessageUpdate) -> Result<LocalBusFrame, SdkError> {
     let invalid = || {
         AdapterError::new(GeneratedErrorCode::InvalidArgument, "invalid transient Typing update")
     };
-    let Some(g::message_update::State::Content(content)) = update.state.as_ref() else {
+    let Some(State::Content(content)) = update.state.as_ref() else {
         return Err(invalid().into());
     };
-    let Some(g::content::Value::Typing(typing)) = content.value.as_ref() else {
+    let Some(Value::Typing(typing)) = content.value.as_ref() else {
         return Err(invalid().into());
     };
     let identity = update.identity.as_ref().ok_or_else(invalid)?;
@@ -44,7 +46,7 @@ pub fn transient_message_frame(update: &g::MessageUpdate) -> Result<LocalBusFram
         "",
         Some(update.account_id.clone()),
         "message",
-        g::TRANSIENT_TOPIC,
+        TRANSIENT_TOPIC,
         body,
     );
     frame.kind = LocalBusFrameKind::Event;

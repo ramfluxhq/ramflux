@@ -31,6 +31,34 @@ use std::path::{Path, PathBuf};
 /// `std::path`, `tokio::fs/io/net/process`, `redb`, `rusqlite`, ...) must never appear here; the
 /// `allow_list_excludes_persistence_prefixes` test enforces it.
 const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
+    ("crate::bindings::AdapterError", "value-only adapter error (no storage)"),
+    ("crate::bindings::GeneratedErrorCode", "value-only adapter refusal enum (no storage)"),
+    (
+        "crate::bindings::encode_message_update",
+        "in-memory validated public ProtoJSON projection (no storage)",
+    ),
+    ("crate::LocalBusFrame", "local frame value and pure constructor (no storage)"),
+    ("crate::LocalBusFrameKind", "local frame kind enum (no storage)"),
+    ("crate::bus::io::MAX_LOCAL_BUS_FRAME_BYTES", "compile-time frame byte cap only (no storage)"),
+    ("prost::Message", "in-memory protobuf codec trait (no storage)"),
+    ("ramflux_protocol::message::MessageUpdate", "generated update value (no storage)"),
+    (
+        "ramflux_protocol::message::message_update::State",
+        "generated update state enum (no storage)",
+    ),
+    ("ramflux_protocol::message::content::Value", "generated content value enum (no storage)"),
+    ("ramflux_protocol::message::TRANSIENT_TOPIC", "static local event topic (no storage)"),
+    ("ramflux_protocol::encode_base64url", "in-memory base64url encoder (no storage)"),
+    ("ramflux_protocol::canonical_json_bytes", "in-memory canonical JSON encoder (no storage)"),
+    ("ramflux_protocol::ProtocolError", "pure wire error enum (no storage)"),
+    (
+        "ramflux_protocol::verify_envelope_sender_signature",
+        "pure v2 envelope signature and ciphertext binding verification",
+    ),
+    ("crate::schema_profile::schema_v1_live", "pure storage-generation predicate (no I/O)"),
+    ("crate::message::outer::refuse_live_bridge", "pure named-field bridge refusal (no I/O)"),
+    ("crate::message::outer::parse_live_named_delivery_mode", "pure envelope mode parser (no I/O)"),
+    ("crate::message::outer::NamedDeliveryMode", "delivery-mode enum (type only)"),
     ("crate::ephemeral::capability", "this module family's capability state (same crate)"),
     ("crate::ephemeral::RouteDecision", "transient gateway route outcome"),
     ("crate::ephemeral_forward", "transient gateway admission and forward codec"),
@@ -157,6 +185,204 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("blake3::Hasher", "in-memory digest hasher (no I/O)"),
     ("blake3::hash", "in-memory digest of one payload (no I/O)"),
     ("serde_json::from_slice", "JSON decode from memory (no I/O)"),
+];
+
+// S6c ends at authenticated ciphertext handoff. The separately audited S10a
+// endpoint boundary permits only pair-state persistence and bounded unknown raw
+// retention. Keep its host/client capabilities confined to these exact files:
+// neither may be imported by the storage-free transport. Calls through those
+// capabilities are closed by an additional call-name allow-list below.
+const S10A_HOST_REL: &str = "crates/ramflux-sdk/src/bus/account_runtime/transient.rs";
+const S10A_HOST_IMPORTS: &[(&str, &str)] = &[
+    ("crate::bus::account_runtime::AccountRuntime", "audited S10a endpoint boundary only"),
+    ("crate::bus::state::LocalBusDaemonState", "audited S10a endpoint boundary only"),
+    ("crate::client::identity_authority::HeadUse", "audited S10a endpoint boundary only"),
+    ("crate::gateway::access::GatewaySessionAccess", "audited S10a endpoint boundary only"),
+    ("crate::EphemeralConsumer", "audited S10a endpoint boundary only"),
+    ("crate::EphemeralSource", "audited S10a endpoint boundary only"),
+    ("crate::GatewayInboxEntry", "audited S10a endpoint boundary only"),
+    ("crate::GatewayServerFrame", "audited S10a endpoint boundary only"),
+    ("std::future::pending", "audited S10a endpoint boundary only"),
+    (
+        "crate::bus::connection_manager::SessionClient::generation",
+        "audited S10a endpoint boundary only",
+    ),
+    ("crate::client::target_selection::schema_v1_selected", "audited S10a endpoint boundary only"),
+    ("crate::bus::connection_manager::NetworkingState", "audited S10a endpoint boundary only"),
+    ("crate::bus::events::EventBatch", "audited S10a endpoint boundary only"),
+    ("tokio::sync::oneshot::channel", "audited S10a endpoint boundary only"),
+];
+const S10A_HOST_CALLS: &[&str] = &[
+    "Ok",
+    "Some",
+    "and_then",
+    "apply_transient_frame",
+    "as_mut",
+    "as_ref",
+    "as_str",
+    "authenticated_device_identity",
+    "authenticated_sender_record",
+    "capacity",
+    "cfg",
+    "channel",
+    "clear_transient_host",
+    "clear_transient_indicators",
+    "clone",
+    "collect",
+    "complete",
+    "derive",
+    "drain_transient_updates",
+    "encode_message_update",
+    "ephemeral_negotiated",
+    "filter_map",
+    "flatten",
+    "frozen",
+    "generation",
+    "get",
+    "if",
+    "into",
+    "into_iter",
+    "into_std",
+    "is_empty",
+    "is_some_and",
+    "let",
+    "live_session_client",
+    "map",
+    "next",
+    "next_transient_deadline",
+    "now",
+    "ok",
+    "parse_i_json",
+    "pending",
+    "pub",
+    "publish_transient_updates",
+    "receive_transient_content",
+    "refresh_transient_host",
+    "request",
+    "reset_transient_content",
+    "saturating_mul",
+    "schema_v1_selected",
+    "send",
+    "snapshot",
+    "take_ephemeral_consumer",
+    "transient_deadline",
+    "try_from",
+    "try_reserve",
+    "unwrap_or",
+    "wall_ms",
+];
+
+const S10A_CONTENT_REL: &str = "crates/ramflux-sdk/src/client/routed/ephemeral_content.rs";
+const S10A_CONTENT_IMPORTS: &[(&str, &str)] = &[
+    ("crate::client::routed::GatewayInboxEntry", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::HeadUse", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::Kind", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::Opened", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::RamfluxClient", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::Routing", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::SdkError", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::associated_data_from_outer", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::decode", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::invalid", "audited S10a endpoint boundary only"),
+    ("crate::client::routed::refuse_received_outer_fields", "audited S10a endpoint boundary only"),
+    (
+        "crate::client::routed::report::refuse_payload_outer_mismatch",
+        "audited S10a endpoint boundary only",
+    ),
+    (
+        "crate::client::routed::report::refuse_direct_candidate_opening",
+        "audited S10a endpoint boundary only",
+    ),
+    (
+        "crate::client::routed::report::opened_inner_plaintext",
+        "audited S10a endpoint boundary only",
+    ),
+    ("crate::client::routed::generated_receive::Provenance", "audited S10a endpoint boundary only"),
+    ("ramflux_protocol::message", "audited S10a endpoint boundary only"),
+    ("ramflux_protocol::Envelope", "audited S10a endpoint boundary only"),
+    ("zeroize::Zeroizing", "audited S10a endpoint boundary only"),
+    ("serde_json::to_string", "audited S10a endpoint boundary only"),
+    ("ramflux_storage::RawInnerCopyWrite", "audited S10a endpoint boundary only"),
+    ("ramflux_storage::RawInnerCopyKind", "audited S10a endpoint boundary only"),
+];
+const S10A_CONTENT_CALLS: &[&str] = &[
+    "Err",
+    "Ok",
+    "Some",
+    "Typing",
+    "account_anchor",
+    "account_db",
+    "admit_ephemeral_inner",
+    "and_then",
+    "as_deref",
+    "as_ref",
+    "as_slice",
+    "as_u64",
+    "associated_data_from_outer",
+    "authenticated_device_identity",
+    "authenticated_envelope_sender",
+    "bind_raw_inner_copy",
+    "borrow_mut",
+    "capture_retained_origin",
+    "check_ephemeral_identity",
+    "checked_add",
+    "client_device_record",
+    "clone",
+    "confirm_routed_context",
+    "conversation_id",
+    "copy_id",
+    "decode",
+    "decode_generated_inner",
+    "decrypt_with_franking_keys",
+    "device_id",
+    "device_sequence",
+    "encode_base64url",
+    "expires_at",
+    "format",
+    "friend_link_peer_is_accepted",
+    "from",
+    "if",
+    "into",
+    "invalid",
+    "is_err",
+    "is_none_or",
+    "is_some",
+    "is_some_and",
+    "kind",
+    "len",
+    "let",
+    "local_device_identity",
+    "map_err",
+    "map_or_else",
+    "new",
+    "ok",
+    "ok_or_else",
+    "open_ephemeral_delivery",
+    "open_ephemeral_inner",
+    "opened_inner_plaintext",
+    "persist_pair",
+    "privacy_erasure_generation",
+    "pub",
+    "put_unsupported_raw_copy",
+    "raw_reparse_scope_allowed",
+    "received",
+    "recv_pair_session",
+    "refuse_direct_candidate_opening",
+    "refuse_payload_outer_mismatch",
+    "refuse_received_outer_fields",
+    "retain_ephemeral_unknown",
+    "retain_raw_origin_copy",
+    "root_commitment",
+    "scan_inner",
+    "storage_key",
+    "to_owned",
+    "to_string",
+    "to_vec",
+    "try_from",
+    "ttl",
+    "typing_conversation_before_decrypt",
+    "verify",
+    "write_transaction",
 ];
 
 /// Primitive type names. Their associated functions (`i64::try_from`) cannot
@@ -974,7 +1200,13 @@ fn check_allow_list_with(
             }
         }
     }
+    let imports = use_bodies(text);
     for (token, at) in path_expressions(text) {
+        if imports.iter().any(|(start, body)| *start <= at && at < start + body.len())
+            || text[..at].ends_with("pub(in ")
+        {
+            continue;
+        }
         let module = module_at(file_module, &spans, at);
         let path = normalise_target(&module, &token, modules).map_err(|reason| {
             format!("import {token} not on the ephemeral allow-list in {label}: {reason}")
@@ -995,8 +1227,49 @@ fn scan_file(
     modules: &BTreeSet<String>,
 ) -> Result<Vec<&'static str>, String> {
     let collapsed = normalised_items(src);
-    check_allow_list(&collapsed, label, file_module, modules)?;
-    Ok(forbidden_hits(&expand_detection_text(&collapsed)))
+    let boundary = match label {
+        S10A_HOST_REL => Some((S10A_HOST_IMPORTS, S10A_HOST_CALLS)),
+        S10A_CONTENT_REL => Some((S10A_CONTENT_IMPORTS, S10A_CONTENT_CALLS)),
+        _ => None,
+    };
+    if let Some((imports, methods)) = boundary {
+        let mut allowed = ALLOWED_IMPORT_PREFIXES.to_vec();
+        allowed.extend_from_slice(imports);
+        check_allow_list_with(&collapsed, label, file_module, modules, &allowed)?;
+        check_boundary_calls(&collapsed, label, methods)?;
+        let mut hits = forbidden_hits(&expand_detection_text(&collapsed));
+        // Only this authenticated endpoint owns the atomic ratchet/raw transaction.
+        // Other durable APIs and every transport module retain the original ban.
+        if label == S10A_CONTENT_REL {
+            hits.retain(|symbol| *symbol != "write_transaction");
+        }
+        Ok(hits)
+    } else {
+        check_allow_list(&collapsed, label, file_module, modules)?;
+        Ok(forbidden_hits(&expand_detection_text(&collapsed)))
+    }
+}
+
+// Restrict calls on the broad account/host references as well as imported paths.
+// Whitespace and turbofish do not provide an escape from this check.
+fn check_boundary_calls(text: &str, label: &str, allowed: &[&str]) -> Result<(), String> {
+    for (at, ch) in text.char_indices() {
+        if !(ch.is_ascii_alphabetic() || ch == '_')
+            || text[..at].chars().next_back().is_some_and(is_ident_char)
+        {
+            continue;
+        }
+        let tail = &text[at..];
+        let len = tail.find(|ch: char| !is_ident_char(ch)).unwrap_or(tail.len());
+        let name = &tail[..len];
+        let rest = tail[len..].trim_start();
+        if (rest.starts_with('(') || rest.starts_with("::<") || rest.starts_with('!'))
+            && !allowed.contains(&name)
+        {
+            return Err(format!("call {name} outside the S10a boundary in {label}"));
+        }
+    }
+    Ok(())
 }
 
 /// Layer 2 alone, for the normaliser and planted-spelling rows.
@@ -1092,11 +1365,19 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
         let label = rel_path(&root, path);
         let file_module = module_path_of(&src_dir, path)?;
         let source = std::fs::read_to_string(path)?;
-        for symbol in scan_file(&source, &label, &file_module, modules).map_err(io::Error::other)? {
-            violations.push_str(&label);
-            violations.push_str(": ");
-            violations.push_str(symbol);
-            violations.push('\n');
+        match scan_file(&source, &label, &file_module, modules) {
+            Ok(symbols) => {
+                for symbol in symbols {
+                    violations.push_str(&label);
+                    violations.push_str(": ");
+                    violations.push_str(symbol);
+                    violations.push('\n');
+                }
+            }
+            Err(error) => {
+                violations.push_str(&error);
+                violations.push('\n');
+            }
         }
     }
     if !violations.is_empty() {
@@ -1641,5 +1922,59 @@ fn real_ephemeral_module_with_fs_import_is_refused() -> TestResult {
         err,
         "import std::fs::write not on the ephemeral allow-list in crates/ramflux-protocol/src/ephemeral.rs"
     );
+    Ok(())
+}
+
+#[test]
+fn whole_outer_codec_module_remains_outside_the_ephemeral_allow_list() -> TestResult {
+    expect_refusal(
+        "use crate::message::outer;",
+        "import crate::message::outer not on the ephemeral allow-list in src/ephemeral.rs",
+    )
+}
+
+#[test]
+fn endpoint_account_capabilities_remain_forbidden_in_transport() {
+    for path in ["crate::client::routed::RamfluxClient", "crate::bus::state::LocalBusDaemonState"] {
+        let src = format!("use {path};");
+        assert!(scan_fixture(&src).is_err(), "transport admitted {path}");
+    }
+}
+
+#[test]
+fn endpoint_boundary_refuses_unrelated_durable_calls_and_aliases() -> TestResult {
+    let root = workspace_root()?;
+    let sdk = root.join("crates/ramflux-sdk/src");
+    let modules = load_crate_modules(&sdk)?;
+    for rel in [S10A_HOST_REL, S10A_CONTENT_REL] {
+        let path = root.join(rel);
+        let module = module_path_of(&sdk, &path)?;
+        let source = std::fs::read_to_string(&path)?;
+        for planted in [
+            "fn planted() { client.put_runtime_operation(); }",
+            "fn planted() { RamfluxClient::put_runtime_operation(client); }",
+            "type Hidden = RamfluxClient; fn planted() { Hidden::put_runtime_operation(client); }",
+            "fn planted() { include!(\"hidden.rs\"); }",
+            "fn planted() { client . put_runtime_operation :: <u8> (); }",
+            "fn planted() { client.append_journal(); }",
+            "use std::fs as hidden; fn planted() { hidden::write(); }",
+            "use ramflux_storage::AccountDb as Hidden;",
+        ] {
+            let mutated = format!("{source}\n{planted}");
+            assert!(
+                scan_file(&mutated, rel, &module, &modules).is_err(),
+                "endpoint boundary admitted {planted} in {rel}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn grouped_imports_validate_leaves_and_visibility_is_not_a_capability() -> TestResult {
+    let source = "use ramflux_protocol::message::{MessageUpdate, content::Value}; pub(in crate::bus) struct Narrow;";
+    assert_eq!(scan_fixture(source)?, [] as [&str; 0]);
+    assert!(scan_fixture("use ramflux_protocol::message::{MessageUpdate, outer};").is_err());
+    assert!(scan_fixture("fn bad() { ramflux_protocol::message::outer::decode(); }").is_err());
     Ok(())
 }

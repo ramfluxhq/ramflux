@@ -50,18 +50,27 @@ fn tampered_delivery_mode_fails_node_entry_signature() -> Result<(), Box<dyn std
     let nonce = 901;
     let router = registered_router(nonce)?;
     let signed = signed_candidate("bind-mode", nonce)?;
-    router.authenticated_envelope_source_from(
+    let source = router.authenticated_envelope_source_from(
         &signed,
         None,
         crate::RouterEnvelopeOrigin::Gateway,
     )?;
+    let authority = router
+        .mvp1_device_auth_key_checked(source.storage_key())?
+        .ok_or("registered source authority missing")?;
     let mut flipped = signed;
     flipped.delivery_mode = Some("ephemeral".into());
-    authority_mismatch(router.authenticated_envelope_source_from(
-        &flipped,
-        None,
-        crate::RouterEnvelopeOrigin::Gateway,
-    ))
+    authority_mismatch(authority.verify_envelope_source(&flipped))?;
+    // The durable entry rejects ephemeral mode before reaching the signature verifier.
+    assert!(matches!(
+        router.authenticated_envelope_source_from(
+            &flipped,
+            None,
+            crate::RouterEnvelopeOrigin::Gateway,
+        ),
+        Err(NodeCoreError::DeliveryModeRefused)
+    ));
+    Ok(())
 }
 
 #[test]

@@ -144,13 +144,12 @@ impl EphemeralSubmitResult {
 #[must_use]
 pub fn classify_delivery_mode(envelope: &Envelope) -> DeliveryMode {
     if crate::schema_profile::schema_v1_live() {
-        use crate::message::outer::{self, NamedDeliveryMode};
-        if outer::refuse_live_bridge(envelope).is_err() {
+        if crate::message::outer::refuse_live_bridge(envelope).is_err() {
             return DeliveryMode::Invalid;
         }
-        return match outer::parse_live_named_delivery_mode(envelope) {
-            Ok(NamedDeliveryMode::Durable) => DeliveryMode::Durable,
-            Ok(NamedDeliveryMode::Ephemeral) => DeliveryMode::Ephemeral,
+        return match crate::message::outer::parse_live_named_delivery_mode(envelope) {
+            Ok(crate::message::outer::NamedDeliveryMode::Durable) => DeliveryMode::Durable,
+            Ok(crate::message::outer::NamedDeliveryMode::Ephemeral) => DeliveryMode::Ephemeral,
             Err(_) => DeliveryMode::Invalid,
         };
     }
