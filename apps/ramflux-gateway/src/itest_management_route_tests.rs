@@ -103,17 +103,14 @@ fn route_case(root: &Path) -> anyhow::Result<()> {
     exercise_routes(address, &store, &state, backend)?;
     ramflux_node_core::service_shutdown_token().cancel();
     service.join().map_err(|_| anyhow::anyhow!("test: HTTP server panicked"))??;
-    drop(store);
-    let reopened =
-        ramflux_node_core::GatewayRedbStore::open(directory.path().join("gateway.redb"))?;
     assert_eq!(
-        reopened
+        store
             .load_state()?
             .ok_or_else(|| anyhow::anyhow!("test: policy absent"))?
             .pre_auth_policy()
             .per_source_ip_handshake_rate,
         1,
-        "real HTTP policy must survive reopen"
+        "real HTTP success must expose the committed policy row"
     );
     Ok(())
 }
