@@ -177,7 +177,7 @@ async fn group_origin_signed_wrapper_rejects_altered_plaintext_and_missing_evide
                 }
                 .encode_to_vec();
             }
-            _ => unreachable!(),
+            _ => return Err(format!("test: unknown group opening tamper case {change}").into()),
         }
         assert!(
             modified.verify(identity, &inner.encode_to_vec()).is_err(),

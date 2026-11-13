@@ -108,7 +108,7 @@ fn group_opening_recomputes_commitment_for_exact_message_header_ciphertext_and_a
                 }
                 .encode_to_vec();
             }
-            _ => unreachable!(),
+            _ => return Err(format!("test: unknown group opening tamper case {change}").into()),
         }
         assert!(
             verify_group_message_opening(&mut key, &plain, &modified).is_err(),

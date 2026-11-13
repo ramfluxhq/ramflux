@@ -72,14 +72,15 @@ async fn reaction_restore_preserves_signed_winner_and_replay_body() -> TestResul
     let mut own = Fixture::new("reaction-restore").await?;
     let peer = Fixture::new("reaction-restore-peer").await?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (original, _, conversation) = history::receive_first_hand(&mut own, &peer).await?;
+    let (original, _, conversation) =
+        Box::pin(history::receive_first_hand(&mut own, &peer)).await?;
     let target = g::MessageRef {
         id: original.id,
         conversation_id: conversation.clone(),
         author_anchor: peer.client.own_account_anchor()?,
     };
     let message = ramflux_protocol::encode_base64url(&target.id);
-    let add = receive_reaction(&mut own, &peer, &target, false, 100).await?;
+    let add = Box::pin(receive_reaction(&mut own, &peer, &target, false, 100)).await?;
     assert_eq!(
         own.client.generated_visible_reactions(&message)?.len(),
         1,
@@ -87,7 +88,7 @@ async fn reaction_restore_preserves_signed_winner_and_replay_body() -> TestResul
     );
     let old_path = own.root.0.join("reaction-add.db");
     let old = own.client.account_db()?.write_backup_snapshot(&old_path)?;
-    let remove = receive_reaction(&mut own, &peer, &target, true, 200).await?;
+    let remove = Box::pin(receive_reaction(&mut own, &peer, &target, true, 200)).await?;
     assert!(
         own.client.generated_visible_reactions(&message)?.is_empty(),
         "the real pair receive must project the newer removal before snapshot"

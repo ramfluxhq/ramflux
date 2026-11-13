@@ -66,20 +66,15 @@ fn map_cabi_error(error: CAbiError) -> AdapterError {
 }
 
 // Generated entrypoints use the generated error namespace, without renumbering legacy APIs.
-// Expected failures return AdapterError. Catching an unwind is only FFI defence in depth;
-// no caller or test relies on recovery, and release builds abort on a panic.
+// Failures return AdapterError directly; release builds abort on a panic.
 fn generated_ffi_result(
     out_error_json: *mut *mut RamfluxBuffer,
     function: impl FnOnce() -> Result<(), AdapterError>,
 ) -> i32 {
     super::clear_optional_out_error(out_error_json);
-    let error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(function)) {
-        Ok(Ok(())) => return 0,
-        Ok(Err(error)) => error,
-        Err(_) => AdapterError::new(
-            GeneratedErrorCode::Internal,
-            "panic crossed generated C ABI boundary",
-        ),
+    let error = match function() {
+        Ok(()) => return 0,
+        Err(error) => error,
     };
     if !out_error_json.is_null() {
         let _ignored = write_json_buffer(out_error_json, &error);
@@ -121,7 +116,8 @@ mod tests {
             });
             assert_eq!(actual, i32::try_from(index + 1)?);
             assert!(!error_json.is_null());
-            // The allocated output buffer remains owned by this test until it is freed below.
+            // SAFETY: this non-null output buffer is allocated by the ABI and owned by this test
+            // until ramflux_buffer_free below; its length describes that allocation.
             let bytes = unsafe { std::slice::from_raw_parts((*error_json).ptr, (*error_json).len) };
             let decoded = serde_json::from_slice::<Value>(bytes);
             super::super::ramflux_buffer_free(error_json);
@@ -141,6 +137,7 @@ mod tests {
         );
         assert!(request_json.is_null());
         assert!(!error_json.is_null());
+        // SAFETY: this checked non-null buffer is owned by the test until it is freed below.
         let bytes = unsafe { std::slice::from_raw_parts((*error_json).ptr, (*error_json).len) };
         let decoded = serde_json::from_slice::<Value>(bytes);
         super::super::ramflux_buffer_free(error_json);
