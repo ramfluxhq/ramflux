@@ -4,7 +4,7 @@
 import init, { CardWorker } from "./pkg/ramflux_card.js";
 // @ts-ignore Generated only by build-web.mjs from app-pinned release and host policy.
 import release from "./release.js";
-const ready = init();
+const ready = init({module_or_path:new URL("./pkg/ramflux_card_bg.wasm",import.meta.url)});
 let connected = false;
 self.addEventListener("message", async (event: MessageEvent) => {
   if (connected || !(event.data?.port instanceof MessagePort)) return;

@@ -139,7 +139,9 @@ Feature `web` exposes the same Rust validation/session/runtime through wasm-bind
 0.2.126. `web/worker.ts` runs it in a dedicated Worker and accepts one private
 MessagePort. Only selected card JSON, versioned events and mutation results cross
 that port. The Worker has public release material and no SDK, private signing key,
-account keys or storage. The application must keep the worker URL app-owned and
+account keys or storage. Trusted glue supplies the pinned C shim's sole clock
+import from worker performance time; that function is not a QuickJS global.
+The application must keep the worker URL app-owned and
 apply its existing CSP; browser hosting trust is unchanged.
 
 `web/adapter.ts` maps fixed semantic controls to DOM elements using `textContent`,
