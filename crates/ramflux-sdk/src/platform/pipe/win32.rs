@@ -6,7 +6,7 @@
 //! `unsafe` block of the carrier lives in this file.
 #![allow(unsafe_code)]
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
@@ -49,7 +49,7 @@ use windows_sys::Win32::System::Threading::{
 
 #[cfg(test)]
 thread_local! {
-    static LAST_CALL: Cell<&'static str> = const { Cell::new("") };
+    static LAST_CALL: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
 }
 
 /// Remember the Win32 call that is about to run, so a test can name the one that failed.
