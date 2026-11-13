@@ -229,7 +229,11 @@ impl GatewaySessionEngine {
 
     /// Reads one complete frame, retaining partial transport bytes if this future is cancelled.
     pub(crate) async fn idle_read(&mut self) -> Result<(), SdkError> {
-        let bytes = self.stream.recv_idle_frame().await?;
+        let bytes = if self.config.custody.is_some() {
+            self.stream.recv_idle_custody_frame().await?
+        } else {
+            self.stream.recv_idle_frame().await?
+        };
         self.last_frame_bytes = bytes.len();
         self.note_complete_frame();
         if let Some(Step::Legacy(frame)) = self.route_bytes(&bytes, false, Wait::Legacy)? {
@@ -352,7 +356,11 @@ impl GatewaySessionEngine {
     ) -> Result<Step, SdkError> {
         loop {
             let result = super::engine::frame_timeout(self.frame_timeout, operation, async {
-                self.stream.recv_frame().await.map_err(SdkError::from)
+                if self.config.custody.is_some() {
+                    self.stream.recv_custody_frame().await.map_err(SdkError::from)
+                } else {
+                    self.stream.recv_frame().await.map_err(SdkError::from)
+                }
             })
             .await;
             let bytes = match result {
@@ -385,6 +393,12 @@ impl GatewaySessionEngine {
         wait: Wait,
     ) -> Result<Option<Step>, SdkError> {
         use super::session_push::{CapableServerFrame, RouteError, Routed, route};
+        if let Some(frame) = super::reach::decode_reply(bytes)? {
+            return Ok(Some(Step::Legacy(Box::new(frame))));
+        }
+        if bytes.len() > ramflux_transport::MAX_GATEWAY_FRAME_BYTES {
+            return Err(self.retire("ordinary frame exceeds gateway budget"));
+        }
         match route(bytes, &self.mode) {
             Ok(Routed::Legacy(frame)) => {
                 if let GatewayServerFrame::Ephemeral { expires_at_ms, .. } = &*frame {

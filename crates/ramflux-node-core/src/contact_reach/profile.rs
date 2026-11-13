@@ -8,10 +8,13 @@ use super::{
 };
 use crate::RouterRedbStore;
 use ramflux_protocol::{
-    contact_reach::{directory::*, *},
+    contact_reach::{
+        Applied, OPERATION_HASH_DOMAIN, Operation, OperationResult, Reason,
+        directory::{PROFILE_HASH_DOMAIN, Profile},
+    },
     custody::{self, Envelope as Signed},
 };
-use redb::{ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const PROFILES: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach_profile_v1");

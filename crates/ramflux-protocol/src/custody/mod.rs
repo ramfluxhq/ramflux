@@ -120,6 +120,7 @@ pub fn decode<T: for<'de> Deserialize<'de> + Serialize>(
         return Err(invalid("custody wire byte budget exceeded"));
     }
     let mut depth = 0_u32;
+    let mut maximum_depth = 0_u32;
     let mut quoted = false;
     let mut escaped = false;
     for &byte in bytes {
@@ -136,8 +137,9 @@ pub fn decode<T: for<'de> Deserialize<'de> + Serialize>(
                 b'"' => quoted = true,
                 b'{' | b'[' => {
                     depth += 1;
-                    if depth > 16 {
-                        return Err(invalid("custody wire nesting exceeds 16"));
+                    maximum_depth = maximum_depth.max(depth);
+                    if depth > 32 {
+                        return Err(invalid("custody wire nesting exceeds 32"));
                     }
                 }
                 b'}' | b']' => depth = depth.saturating_sub(1),
@@ -146,12 +148,45 @@ pub fn decode<T: for<'de> Deserialize<'de> + Serialize>(
         }
     }
     let raw: Value = crate::parse_i_json(bytes)?;
+    if maximum_depth > 16 && !reach_frame(&raw) {
+        return Err(invalid("custody wire nesting exceeds 16"));
+    }
     let typed: T = serde_json::from_value(raw.clone())?;
     // Round-tripping catches absent nullable fields which serde normally fills with None.
     if serde_json::to_value(&typed)? != raw {
         return Err(invalid("custody wire fields must be explicit and exact"));
     }
     Ok(typed)
+}
+
+fn reach_frame(raw: &Value) -> bool {
+    fn exact<T: Serialize>(typed: &T, raw: &Value) -> bool {
+        serde_json::to_value(typed).is_ok_and(|value| &value == raw)
+    }
+    if let Ok(
+        frame @ CustodyClientFrame::Request {
+            action: CustodySessionAction::ContactForeign { .. },
+            ..
+        },
+    ) = serde_json::from_value::<CustodyClientFrame>(raw.clone())
+    {
+        return exact(&frame, raw);
+    }
+    if let Ok(frame @ CustodyServerFrame::ContactForeignResult { .. }) =
+        serde_json::from_value::<CustodyServerFrame>(raw.clone())
+    {
+        return exact(&frame, raw);
+    }
+    if let Ok(
+        frame @ CustodyMeshRequest::Request {
+            action: CustodySessionAction::ContactForeign { .. },
+            ..
+        },
+    ) = serde_json::from_value::<CustodyMeshRequest>(raw.clone())
+    {
+        return exact(&frame, raw);
+    }
+    false
 }
 impl Envelope<DeviceSet> {
     /// Decode a bounded complete record, preserving original duplicate-key evidence.

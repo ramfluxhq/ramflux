@@ -21,6 +21,8 @@ fn declaration_signer(
     let record = authority.envelope();
     let cert = &record.body.master_certificate;
     if body.principal_id != record.body.principal_id
+        || cert.body.custody_kind == ramflux_protocol::custody::CustodyKind::ExternalHuman
+            && !ramflux_protocol::contact_reach::enabled()
         || body.account_anchor != record.body.account_anchor
         || body.home_node != node
         || body.created_at > now.saturating_add(SKEW_SECONDS)

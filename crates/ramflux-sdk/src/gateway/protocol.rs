@@ -547,6 +547,7 @@ pub enum GatewayClientFrame {
     Nack { nack: ramflux_protocol::Nack },
     Heartbeat { now: u64 },
     Close { reason: String },
+    ContactForeign { request: Box<ramflux_protocol::contact_reach::Request> },
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -645,6 +646,9 @@ pub enum GatewayServerFrame {
         state: ramflux_protocol::CallResolutionState,
         media_allowed: bool,
         wake_resolved: bool,
+    },
+    ContactForeignResult {
+        response: Box<ramflux_protocol::contact_reach::Response>,
     },
 }
 

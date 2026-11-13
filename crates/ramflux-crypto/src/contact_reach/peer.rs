@@ -15,6 +15,7 @@ pub struct VerifiedPeer {
     node: String,
     node_key: String,
     snapshot_hash: String,
+    expires_at: u64,
     authority: VerifiedRecord,
     home: crate::home_migration::VerifiedHome,
 }
@@ -34,6 +35,10 @@ impl VerifiedPeer {
     #[must_use]
     pub fn snapshot_hash(&self) -> &str {
         &self.snapshot_hash
+    }
+    #[must_use]
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
     }
     #[must_use]
     pub fn authority(&self) -> &VerifiedRecord {
@@ -57,6 +62,7 @@ pub fn verify_peer_reply(
     base: Option<&ramflux_protocol::home_migration::RecordEvidence>,
     now: u64,
 ) -> Result<VerifiedPeer, CryptoError> {
+    query.validate()?;
     if ramflux_protocol::canonical_json_bytes(reply)?.len() > wire::MAX_REPLY_BYTES {
         return Err(reject("peer reply byte budget"));
     }
@@ -76,33 +82,7 @@ pub fn verify_peer_reply(
     }
     wire::check_submission_time(b.issued_at, b.expires_at, now)?;
     verify(wire::SNAPSHOT_DOMAIN, &reply.snapshot, authenticated_node_key)?;
-    ramflux_protocol::verify_client_discovery_record(&p.discovery.client, now)?;
-    let client = &p.discovery.client;
-    if client.node_id != b.source_node
-        || client.node_public_key != authenticated_node_key
-        || !client.client_capabilities.iter().any(|c| c == wire::CAPABILITY)
-    {
-        return Err(reject("peer client discovery mismatch"));
-    }
-    let server = &p.discovery.server;
-    let server_key = server.get("node_public_key").and_then(serde_json::Value::as_str);
-    let server_id = server.get("node_id").and_then(serde_json::Value::as_str);
-    let signature = server
-        .get("signature")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| reject("server discovery signature missing"))?;
-    if server_key != Some(authenticated_node_key)
-        || server_id != Some(b.source_node.as_str())
-        || server.get("node_ca_cert_pem").and_then(serde_json::Value::as_str)
-            != Some(client.node_ca_cert_pem.as_str())
-    {
-        return Err(reject("peer server discovery mismatch"));
-    }
-    crate::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(server)?,
-        signature,
-        authenticated_node_key,
-    )?;
+    verify_discovery(p, &b.source_node, authenticated_node_key, now)?;
     let manifest_value =
         p.manifest.get("custody").ok_or_else(|| reject("native peer authority required"))?;
     let manifest: CustodyManifest =
@@ -161,9 +141,46 @@ pub fn verify_peer_reply(
         node: b.source_node.clone(),
         node_key: authenticated_node_key.into(),
         snapshot_hash: object_hash(&reply.snapshot)?,
+        expires_at: b.expires_at,
         authority,
         home,
     })
+}
+
+fn verify_discovery(
+    p: &wire::SnapshotPayload,
+    source_node: &str,
+    authenticated_node_key: &str,
+    now: u64,
+) -> Result<(), CryptoError> {
+    ramflux_protocol::verify_client_discovery_record(&p.discovery.client, now)?;
+    let client = &p.discovery.client;
+    if client.node_id != source_node
+        || client.node_public_key != authenticated_node_key
+        || !client.client_capabilities.iter().any(|c| c == wire::CAPABILITY)
+    {
+        return Err(reject("peer client discovery mismatch"));
+    }
+    let server = &p.discovery.server;
+    let server_key = server.get("node_public_key").and_then(serde_json::Value::as_str);
+    let server_id = server.get("node_id").and_then(serde_json::Value::as_str);
+    let signature = server
+        .get("signature")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| reject("server discovery signature missing"))?;
+    if server_key != Some(authenticated_node_key)
+        || server_id != Some(source_node)
+        || server.get("node_ca_cert_pem").and_then(serde_json::Value::as_str)
+            != Some(client.node_ca_cert_pem.as_str())
+    {
+        return Err(reject("peer server discovery mismatch"));
+    }
+    crate::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(server)?,
+        signature,
+        authenticated_node_key,
+    )?;
+    Ok(())
 }
 
 /// Recompute cryptographic notice facts before a primary-signed admission is applied.

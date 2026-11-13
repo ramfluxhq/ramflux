@@ -110,6 +110,8 @@ pub(crate) use layer_declaration::candidate as sign_layer_declaration;
 mod network;
 mod node_pins;
 mod reach;
+mod reach_commands;
+pub use reach_commands::{ReachAllow, ReachCommandContext, ReachConversationAction};
 pub(crate) mod retry;
 pub use network::{CustodyConnection, CustodyNetworkConfig};
 pub(crate) use node_pins::verify_authority as verify_public_authority;

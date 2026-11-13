@@ -10,11 +10,30 @@ use aes_gcm::{
 };
 use ed25519_dalek::Signer;
 use ramflux_protocol::{
-    contact_reach::*,
+    contact_reach::{
+        MAX_STATE_BYTES, OperationResult, Reason, STATE_DOMAIN, STATE_PAGES_DOMAIN, StateManifest,
+        StatePage, decode, state_hash,
+    },
     custody::{self, Envelope as Signed},
 };
 use std::{collections::BTreeMap, sync::Mutex};
 
+#[derive(Clone, Copy)]
+pub(super) struct SnapshotRead<'a> {
+    pub owner: ReachOwner<'a>,
+    pub session: &'a str,
+    pub known: u64,
+    pub id: Option<&'a str>,
+    pub page: u64,
+    pub now: u64,
+}
+struct LeaseContext<'a> {
+    owner: ReachOwner<'a>,
+    session: &'a str,
+    home_hash: &'a str,
+    authority_hash: &'a str,
+    now: u64,
+}
 struct Lease {
     manifest: Signed<StateManifest>,
     ciphertext: Vec<u8>,
@@ -36,17 +55,13 @@ impl Snapshots {
         &self,
         store: &RouterRedbStore,
         node: &MigrationNode,
-        owner: ReachOwner<'_>,
-        session: &str,
-        known: u64,
-        id: Option<&str>,
-        page: u64,
-        now: u64,
+        request: SnapshotRead<'_>,
     ) -> Result<OperationResult> {
+        let SnapshotRead { owner, session, known, id, page, now } = request;
         let tx = store.begin_write()?;
         let now = super::store::clock(&tx, now)?;
         let authority = super::store::authority(&tx, owner.recipient_root, now)?;
-        authority.authorize(owner.actor, "message", now)?;
+        super::store::authorize_read(&authority, owner.actor, now)?;
         let home = super::store::home(&tx, owner.recipient_root)?;
         if home.record.home() != (node.node_id(), node.public_key()) {
             return Err(refuse(Reason::HomeRollback));
@@ -73,70 +88,17 @@ impl Snapshots {
             if account.len() >= 2 {
                 return Err(refuse(Reason::ForeignCapacity));
             }
-            let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-            let records = state.records()?;
-            let mut pages = Vec::new();
-            for (index, chunk) in records.chunks(32).enumerate() {
-                let value = StatePage {
-                    version: 1,
-                    snapshot_id: snapshot_id.clone(),
-                    page: u64::try_from(index).map_err(storage)?,
-                    records: chunk.to_vec(),
-                };
-                if super::store::encoded(&value)?.len() > 1024 * 1024 {
-                    return Err(refuse(Reason::ForeignCapacity));
-                }
-                pages.push(value);
-            }
-            let body = StateManifest {
-                version: 1,
-                account_anchor: owner.recipient_root.into(),
-                requesting_device: owner.actor.clone(),
-                home_head_hash: ramflux_protocol::home_migration::record_hash(&home.record)?,
-                authority_head_hash: custody::object_hash(authority.envelope())?,
-                revision: state.revision,
-                policy_revision: state.policy_revision(),
-                admission_revision: state.admission_revision,
-                snapshot_id,
-                page_count: u64::try_from(pages.len()).map_err(storage)?,
-                record_count: u64::try_from(records.len()).map_err(storage)?,
-                pages_hash: custody::framed_hash(STATE_PAGES_DOMAIN, &pages)?,
-                state_hash: state_hash(
-                    owner.recipient_root,
-                    state.revision,
-                    state.policy_revision(),
-                    state.admission_revision,
-                    &records,
-                )?,
-                issued_at: now,
-                expires_at: now
-                    .checked_add(60)
-                    .ok_or_else(|| refuse(Reason::ForeignUnavailable))?,
-            };
-            body.validate()?;
-            let signature = ramflux_protocol::encode_base64url(
-                node.key.sign(&custody::signing_bytes(STATE_DOMAIN, &body)?).to_bytes(),
-            );
-            let manifest = Signed { body, signature };
-            if super::store::encoded(&manifest)?.len() > 4096 {
-                return Err(refuse(Reason::ForeignCapacity));
-            }
-            let plaintext = zeroize::Zeroizing::new(super::store::encoded(&pages)?);
-            if plaintext.len() > MAX_STATE_BYTES {
-                return Err(refuse(Reason::ForeignCapacity));
-            }
-            let mut nonce = [0_u8; 12];
-            for (out, input) in nonce.iter_mut().zip(ramflux_crypto::random_32()?.iter()) {
-                *out = *input;
-            }
-            let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).map_err(storage)?;
-            let ciphertext = cipher
-                .encrypt(
-                    Nonce::from_slice(&nonce),
-                    Payload { msg: &plaintext, aad: manifest.body.snapshot_id.as_bytes() },
-                )
-                .map_err(|_| refuse(Reason::ForeignUnavailable))?;
-            account.push(Lease { manifest, ciphertext, nonce, session: session.into() });
+            account.push(self.new_lease(
+                node,
+                &state,
+                LeaseContext {
+                    owner,
+                    session,
+                    home_hash: &ramflux_protocol::home_migration::record_hash(&home.record)?,
+                    authority_hash: &custody::object_hash(authority.envelope())?,
+                    now,
+                },
+            )?);
         }
         let account = leases
             .get(owner.recipient_root)
@@ -168,5 +130,75 @@ impl Snapshots {
             .ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?
             .clone();
         Ok(OperationResult::ReachState { manifest: lease.manifest.clone(), page })
+    }
+    fn new_lease(
+        &self,
+        node: &MigrationNode,
+        state: &super::AccountReach,
+        context: LeaseContext<'_>,
+    ) -> Result<Lease> {
+        let LeaseContext { owner, session, now, .. } = context;
+        let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        let records = state.records()?;
+        let mut pages = Vec::new();
+        for (index, chunk) in records.chunks(32).enumerate() {
+            let value = StatePage {
+                version: 1,
+                snapshot_id: snapshot_id.clone(),
+                page: u64::try_from(index).map_err(storage)?,
+                records: chunk.to_vec(),
+            };
+            if super::store::encoded(&value)?.len() > 1024 * 1024 {
+                return Err(refuse(Reason::ForeignCapacity));
+            }
+            pages.push(value);
+        }
+        let body = StateManifest {
+            version: 1,
+            account_anchor: owner.recipient_root.into(),
+            requesting_device: owner.actor.clone(),
+            home_head_hash: context.home_hash.into(),
+            authority_head_hash: context.authority_hash.into(),
+            revision: state.revision,
+            policy_revision: state.policy_revision(),
+            admission_revision: state.admission_revision,
+            snapshot_id,
+            page_count: u64::try_from(pages.len()).map_err(storage)?,
+            record_count: u64::try_from(records.len()).map_err(storage)?,
+            pages_hash: custody::framed_hash(STATE_PAGES_DOMAIN, &pages)?,
+            state_hash: state_hash(
+                owner.recipient_root,
+                state.revision,
+                state.policy_revision(),
+                state.admission_revision,
+                &records,
+            )?,
+            issued_at: now,
+            expires_at: now.checked_add(60).ok_or_else(|| refuse(Reason::ForeignUnavailable))?,
+        };
+        body.validate()?;
+        let signature = ramflux_protocol::encode_base64url(
+            node.key.sign(&custody::signing_bytes(STATE_DOMAIN, &body)?).to_bytes(),
+        );
+        let manifest = Signed { body, signature };
+        if super::store::encoded(&manifest)?.len() > 4096 {
+            return Err(refuse(Reason::ForeignCapacity));
+        }
+        let plaintext = zeroize::Zeroizing::new(super::store::encoded(&pages)?);
+        if plaintext.len() > MAX_STATE_BYTES {
+            return Err(refuse(Reason::ForeignCapacity));
+        }
+        let mut nonce = [0_u8; 12];
+        for (out, input) in nonce.iter_mut().zip(ramflux_crypto::random_32()?.iter()) {
+            *out = *input;
+        }
+        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).map_err(storage)?;
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload { msg: &plaintext, aad: manifest.body.snapshot_id.as_bytes() },
+            )
+            .map_err(|_| refuse(Reason::ForeignUnavailable))?;
+        Ok(Lease { manifest, ciphertext, nonce, session: session.into() })
     }
 }

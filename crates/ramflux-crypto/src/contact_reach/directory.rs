@@ -9,7 +9,14 @@ use crate::{
 };
 use ed25519_dalek::SigningKey;
 use ramflux_protocol::{
-    contact_reach::{self as reach, directory::*},
+    contact_reach::{
+        self as reach,
+        directory::{
+            BINDING_DOMAIN, Binding, CENTRE_ROTATION_DOMAIN, CentreManifest, CentrePin,
+            CentreRotation, IndexResolve, NameOperation, OPERATION_DOMAIN, PROFILE_DOMAIN, Profile,
+            RESOLVE_DOMAIN,
+        },
+    },
     custody::{self, Envelope as Signed},
 };
 

@@ -4,6 +4,7 @@
 //! Real redb writer/reopen and current-key CAS tests using immutable signed authority fixtures.
 use super::*;
 use ramflux_crypto::custody::{SelfSigningKey, VerifiedRecord};
+use ramflux_protocol::contact_reach::{DECLINE_COOLDOWN, ReachMode, ReachPolicy};
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 const NOW: u64 = 1_700_000_100;
 fn digest(n: u8) -> String {

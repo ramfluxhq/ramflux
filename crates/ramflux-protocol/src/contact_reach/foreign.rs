@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Correlated account/session and node-service carriers for unified contact reach.
-use super::*;
+use super::{
+    Admission, Challenge, ChallengeRequest, Cost, DeliveryReach, Placement, ReachPolicy,
+    StateManifest, StatePage, Submission, actor, digest, directory, invalid, node, safe, text,
+};
 use crate::custody::{CustodyAuthority, DeviceRef, Envelope as Signed};
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +75,34 @@ pub struct Query {
     pub base: Option<HomeBase>,
     pub device_ref: Option<DeviceRef>,
 }
+impl Query {
+    /// Validate exact anchor/device/correlation and source/target names before any dial.
+    /// # Errors
+    /// Refuses malformed selectors, unsafe base floors and oversized requests.
+    pub fn validate(&self) -> Result<(), crate::ProtocolError> {
+        node(&self.source_node)?;
+        node(&self.target_node)?;
+        digest(&self.account_anchor)?;
+        digest(&self.nonce)?;
+        if let Some(hash) = &self.card_hash {
+            digest(hash)?;
+        }
+        if let Some(base) = &self.base {
+            safe(base.epoch)?;
+            digest(&base.hash)?;
+        }
+        if let Some(reference) = &self.device_ref {
+            actor(reference)?;
+            if reference.account_anchor != self.account_anchor {
+                return Err(invalid("query device anchor mismatch"));
+            }
+        }
+        if self.version != 1 || crate::canonical_json_bytes(self)?.len() > 4096 {
+            return Err(invalid("query version or byte budget"));
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -99,7 +130,7 @@ pub struct DirectoryBinding {
 }
 /// Existing service/SDK documents retain their original schemas and signatures.
 /// Consumers decode and validate these nested values with their owning codecs;
-/// the complete values, including explicit nulls, are covered by payload_hash.
+/// the complete values, including explicit nulls, are covered by `payload_hash`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery {
@@ -226,7 +257,7 @@ pub enum Operation {
         target_node_id: String,
     },
     UsernameMutate {
-        operation: Signed<directory::NameOperation>,
+        operation: Box<Signed<directory::NameOperation>>,
         cost: Option<Cost>,
     },
     UsernameStatus {
@@ -368,6 +399,102 @@ impl Request {
         safe(self.session_generation)?;
         if self.session_generation == 0 || !(1..=10_000).contains(&self.remaining_ms) {
             return Err(invalid("reach session generation or budget"));
+        }
+        Ok(())
+    }
+}
+
+impl Operation {
+    /// Match the exact result arm and immutable request identity before exposing an owner result.
+    /// # Errors
+    /// Refuses substituted envelope/profile ids, mismatched revisions and recursive composite results.
+    pub fn validate_result(&self, result: &OperationResult) -> Result<(), crate::ProtocolError> {
+        if matches!(result, OperationResult::Error { .. } | OperationResult::Challenge { .. }) {
+            return Ok(());
+        }
+        let valid = match (self, result) {
+            (Self::Query { .. }, OperationResult::Query { .. }) => true,
+            (
+                Self::Submit { submission, .. },
+                OperationResult::Submit { envelope_id, outcome, reason },
+            ) => {
+                envelope_id == &submission.envelope.envelope_id
+                    && (*outcome == SubmitOutcome::Refused) == reason.is_some()
+            }
+            (Self::Policy { update }, OperationResult::Policy { revision, .. }) => {
+                *revision == update.body.revision
+            }
+            (Self::Admission { update, .. }, OperationResult::Admission { revision, .. }) => {
+                update.body.expected_revision.checked_add(1) == Some(*revision)
+            }
+            (
+                Self::Start { update, submission, .. },
+                OperationResult::Start { revision, submission: result, .. },
+            )
+            | (
+                Self::Reply { update, submission, .. },
+                OperationResult::Reply { revision, submission: result, .. },
+            ) => {
+                update.body.expected_revision.checked_add(1) == Some(*revision)
+                    && matches!(result.as_ref(),OperationResult::Submit {
+                    envelope_id,outcome:SubmitOutcome::Spooled,reason:None } if envelope_id==&submission.envelope.envelope_id)
+            }
+            (
+                Self::ReachState { snapshot_id, page, .. },
+                OperationResult::ReachState { manifest, page: result },
+            ) => {
+                result.page == *page
+                    && snapshot_id.as_ref().is_none_or(|id| id == &manifest.body.snapshot_id)
+                    && result.snapshot_id == manifest.body.snapshot_id
+            }
+            (
+                Self::Strangers { after_seq, limit, .. },
+                OperationResult::Strangers { entries, next_seq },
+            ) => {
+                let mut previous = *after_seq;
+                let mut ordered = true;
+                for entry in entries {
+                    if entry.seq <= previous {
+                        ordered = false;
+                    }
+                    previous = entry.seq;
+                }
+                ordered
+                    && u64::try_from(entries.len()).is_ok_and(|n| n <= *limit && n <= 16)
+                    && *next_seq == previous
+                    && crate::canonical_json_bytes(entries)?.len() <= 2 * 1024 * 1024
+            }
+            (
+                Self::ProfilePublish { update, .. },
+                OperationResult::ProfilePublish { epoch, profile_hash, .. },
+            ) => {
+                *epoch == update.body.epoch
+                    && profile_hash
+                        == &crate::custody::framed_hash(directory::PROFILE_HASH_DOMAIN, update)?
+            }
+            (
+                Self::UsernameMutate { operation, .. },
+                OperationResult::UsernameMutate { receipt },
+            ) => {
+                receipt.body.operation_id == operation.body.operation_id
+                    && receipt.body.operation_hash
+                        == crate::custody::framed_hash(directory::OPERATION_HASH_DOMAIN, operation)?
+            }
+            (
+                Self::UsernameStatus { operation_id, operation_hash, .. },
+                OperationResult::UsernameStatus { receipt },
+            ) => {
+                receipt.body.operation_id == *operation_id
+                    && receipt.body.operation_hash == *operation_hash
+            }
+            (
+                Self::UsernameResolve { name, nonce },
+                OperationResult::UsernameResolve { resolve },
+            ) => resolve.body.name == *name && resolve.body.request_nonce == *nonce,
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid("reach operation/result mismatch"));
         }
         Ok(())
     }

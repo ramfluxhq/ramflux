@@ -3,7 +3,10 @@
 
 //! Account/session binding before a reach owner operation leaves the gateway.
 use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
-use ramflux_protocol::contact_reach::*;
+use ramflux_protocol::contact_reach::{
+    GatewayReachRequest, MAX_FRAME_BYTES, Operation, OwnerKind, RECIPIENT_PATH, RecipientRequest,
+    RecipientResponse, Response, decode,
+};
 
 pub(crate) fn recognizes(bytes: &[u8]) -> bool {
     bytes.len() <= MAX_FRAME_BYTES
@@ -19,6 +22,7 @@ pub(crate) async fn handle(
     runtime: &GatewaySessionRuntime,
     native: Option<&crate::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
     let frame: GatewayReachRequest = decode(bytes, MAX_FRAME_BYTES)?;
     let request = frame.request;
     request.validate()?;
@@ -46,10 +50,16 @@ pub(crate) async fn handle(
         | Operation::Reply { update, .. } => update.body.recipient_root.as_str(),
         _ => actor.account_anchor.as_str(),
     };
+    check_snapshot(&request.operation, &runtime.session_id, ramflux_node_core::now_unix_seconds())?;
     let owner = RecipientRequest {
         kind: OwnerKind::Owner,
         request_id: request.request_id.clone(),
-        remaining_ms: request.remaining_ms,
+        remaining_ms: u64::try_from(
+            std::time::Duration::from_millis(request.remaining_ms)
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| anyhow::anyhow!("contact request deadline"))?
+                .as_millis(),
+        )?,
         recipient_root: root.into(),
         actor: actor.clone(),
         operation: request.operation,
@@ -62,6 +72,13 @@ pub(crate) async fn handle(
         response.request_id == request.request_id,
         "contact reach owner correlation mismatch"
     );
+    owner.operation.validate_result(&response.result)?;
+    remember_snapshot(
+        &owner.operation,
+        &response.result,
+        &runtime.session_id,
+        ramflux_node_core::now_unix_seconds(),
+    )?;
     let response = ramflux_node_core::GatewayServerFrame::ContactForeignResult {
         response: Box::new(Response {
             request_id: request.request_id,
@@ -72,5 +89,54 @@ pub(crate) async fn handle(
     };
     let mut sink = send.lock().await;
     ramflux_transport::write_gateway_session_json(&mut **sink, &response).await?;
+    Ok(())
+}
+
+// The exact owner DTO deliberately carries no client session fields. Keep gateway snapshot
+// ownership separately so another session of the same device cannot continue a prior lease.
+struct SnapshotOwner {
+    session_id: String,
+    expires_at: u64,
+}
+static SNAPSHOTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, SnapshotOwner>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+fn check_snapshot(operation: &Operation, session: &str, now: u64) -> anyhow::Result<()> {
+    let Operation::ReachState { snapshot_id: Some(id), .. } = operation else { return Ok(()) };
+    let mut snapshots =
+        SNAPSHOTS.lock().map_err(|_| anyhow::anyhow!("snapshot owner lock unavailable"))?;
+    snapshots.retain(|_, owner| owner.expires_at > now);
+    anyhow::ensure!(
+        snapshots.get(id).is_some_and(|owner| owner.session_id == session),
+        "snapshot session mismatch"
+    );
+    Ok(())
+}
+fn remember_snapshot(
+    operation: &Operation,
+    result: &ramflux_protocol::contact_reach::OperationResult,
+    session: &str,
+    now: u64,
+) -> anyhow::Result<()> {
+    let Operation::ReachState { snapshot_id: None, .. } = operation else { return Ok(()) };
+    let ramflux_protocol::contact_reach::OperationResult::ReachState { manifest, .. } = result
+    else {
+        return Ok(());
+    };
+    let body = &manifest.body;
+    anyhow::ensure!(
+        body.issued_at.checked_add(60) == Some(body.expires_at) && body.expires_at > now,
+        "invalid snapshot lease"
+    );
+    let mut snapshots =
+        SNAPSHOTS.lock().map_err(|_| anyhow::anyhow!("snapshot owner lock unavailable"))?;
+    snapshots.retain(|_, owner| owner.expires_at > now);
+    anyhow::ensure!(snapshots.len() < 2048, "snapshot ownership capacity");
+    anyhow::ensure!(!snapshots.contains_key(&body.snapshot_id), "snapshot id reused");
+    snapshots.insert(
+        body.snapshot_id.clone(),
+        SnapshotOwner { session_id: session.into(), expires_at: body.expires_at },
+    );
     Ok(())
 }

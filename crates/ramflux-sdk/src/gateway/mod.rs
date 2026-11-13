@@ -24,6 +24,7 @@ pub use protocol::*;
 pub use push_route::*;
 
 mod custody;
+mod reach;
 #[cfg(test)]
 #[path = "submit_tests.rs"]
 mod submit_tests;

@@ -4,7 +4,18 @@
 //! Authenticated owner dispatch. Session/account facts are supplied by the custody service.
 use super::{ReachError, ReachOwner, Result, refuse, snapshots::Snapshots};
 use crate::{MigrationNode, RouterRedbStore};
-use ramflux_protocol::{contact_reach::*, custody::DeviceRef};
+use ramflux_protocol::{
+    contact_reach::{Operation, OperationResult, Reason, Request, Response},
+    custody::DeviceRef,
+};
+
+/// Identity and generation obtained from the live authenticated stream.
+#[derive(Clone, Copy)]
+pub struct ReachSession<'a> {
+    pub actor: &'a DeviceRef,
+    pub id: &'a str,
+    pub generation: u64,
+}
 
 pub struct ReachService {
     node: MigrationNode,
@@ -23,34 +34,30 @@ impl ReachService {
     pub fn owner(
         &self,
         store: &RouterRedbStore,
-        actor: &DeviceRef,
-        session: &str,
-        generation: u64,
+        session: ReachSession<'_>,
         request: &Request,
         now: u64,
     ) -> Response {
-        let result = self
-            .owner_inner(store, actor, session, generation, request, now)
-            .unwrap_or_else(|e| match e {
-                ReachError::Revision(revision) => OperationResult::Error {
-                    reason: Reason::ReachRevisionConflict,
-                    retry_after_ms: None,
-                    current_revision: Some(revision),
-                },
-                ReachError::Refused(reason) => {
-                    OperationResult::Error { reason, retry_after_ms: None, current_revision: None }
-                }
-                ReachError::Storage(_) => OperationResult::Error {
-                    reason: Reason::ForeignStorageUnavailable,
-                    retry_after_ms: None,
-                    current_revision: None,
-                },
-                _ => OperationResult::Error {
-                    reason: Reason::CustodyRefused,
-                    retry_after_ms: None,
-                    current_revision: None,
-                },
-            });
+        let result = self.owner_inner(store, session, request, now).unwrap_or_else(|e| match e {
+            ReachError::Revision(revision) => OperationResult::Error {
+                reason: Reason::ReachRevisionConflict,
+                retry_after_ms: None,
+                current_revision: Some(revision),
+            },
+            ReachError::Refused(reason) => {
+                OperationResult::Error { reason, retry_after_ms: None, current_revision: None }
+            }
+            ReachError::Storage(_) => OperationResult::Error {
+                reason: Reason::ForeignStorageUnavailable,
+                retry_after_ms: None,
+                current_revision: None,
+            },
+            _ => OperationResult::Error {
+                reason: Reason::CustodyRefused,
+                retry_after_ms: None,
+                current_revision: None,
+            },
+        });
         Response {
             request_id: request.request_id.clone(),
             session_id: request.session_id.clone(),
@@ -61,12 +68,11 @@ impl ReachService {
     fn owner_inner(
         &self,
         store: &RouterRedbStore,
-        actor: &DeviceRef,
-        session: &str,
-        generation: u64,
+        session: ReachSession<'_>,
         request: &Request,
         now: u64,
     ) -> Result<OperationResult> {
+        let ReachSession { actor, id: session, generation } = session;
         request.validate()?;
         if request.session_id != session || request.session_generation != generation {
             return Err(refuse(Reason::ForeignInvalidFrame));
@@ -94,12 +100,14 @@ impl ReachService {
             Operation::ReachState { known_revision, snapshot_id, page } => self.snapshots.read(
                 store,
                 &self.node,
-                owner,
-                session,
-                *known_revision,
-                snapshot_id.as_deref(),
-                *page,
-                now,
+                super::snapshots::SnapshotRead {
+                    owner,
+                    session,
+                    known: *known_revision,
+                    id: snapshot_id.as_deref(),
+                    page: *page,
+                    now,
+                },
             ),
             Operation::Cost { request, target_node_id }
                 if target_node_id == self.node.node_id() =>
@@ -108,7 +116,12 @@ impl ReachService {
                     return Err(refuse(Reason::ForeignReadRefused));
                 }
                 Ok(OperationResult::Challenge {
-                    challenge: store.reach_issue_cost(&self.node, request, now)?,
+                    challenge: store.reach_issue_cost(
+                        &self.node,
+                        &super::CostIssuerPeer::local(self.node.node_id()),
+                        request,
+                        now,
+                    )?,
                 })
             }
             _ => Err(refuse(Reason::ForeignCapabilityMissing)),

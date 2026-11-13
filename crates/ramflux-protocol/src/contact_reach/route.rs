@@ -48,6 +48,14 @@ impl Route {
         digest(&self.envelope_hash)?;
         digest(&self.authority_head_hash)?;
         text(&self.conversation_id)?;
+        if matches!(self.traffic, Traffic::Dm | Traffic::Receipt | Traffic::Typing) {
+            let expected =
+                crate::message::dm_scope::derive(&self.source.account_anchor, &self.recipient_root)
+                    .map_err(|_| invalid("invalid route DM root pair"))?;
+            if self.conversation_id != expected {
+                return Err(invalid("route conversation/root binding mismatch"));
+            }
+        }
         safe(self.issued_at)?;
         safe(self.expires_at)?;
         if self.version != 1 || self.expires_at <= self.issued_at {
@@ -152,4 +160,51 @@ pub struct Submission {
 pub struct DeliveryReach {
     pub route: Signed<Route>,
     pub cost: Option<Cost>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EphemeralFrameKind {
+    Ephemeral,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EphemeralFrame {
+    pub frame_type: EphemeralFrameKind,
+    pub envelope: crate::Envelope,
+    pub expires_at_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReachEphemeral {
+    pub route: Signed<Route>,
+    pub frame: EphemeralFrame,
+}
+impl ReachEphemeral {
+    /// Validate exact volatile frame/route size, clock units and original five-second lifetime.
+    /// # Errors
+    /// Refuses durable input, a renewed deadline and a substituted complete frame hash.
+    pub fn validate(&self, now_ms: u64) -> Result<(), ProtocolError> {
+        let b = &self.route.body;
+        b.validate()?;
+        safe(self.frame.expires_at_ms)?;
+        let deadline = crate::ephemeral::deadline(&self.frame.envelope, now_ms)
+            .map_err(|_| invalid("invalid reach ephemeral lifetime"))?;
+        let created = u64::try_from(self.frame.envelope.created_at)
+            .map_err(|_| invalid("negative ephemeral start"))?;
+        if b.traffic != Traffic::Typing
+            || b.issued_at != created
+            || created.checked_add(u64::from(self.frame.envelope.ttl)) != Some(b.expires_at)
+            || b.expires_at.checked_mul(1000).is_none_or(|limit| self.frame.expires_at_ms > limit)
+            || self.frame.expires_at_ms > deadline
+            || now_ms >= self.frame.expires_at_ms
+            || b.envelope_hash != crate::custody::framed_hash(EPHEMERAL_HASH_DOMAIN, &self.frame)?
+            || crate::canonical_json_bytes(&self.frame)?.len() > 32_768
+            || crate::canonical_json_bytes(&self.route)?.len() > 4096
+            || crate::canonical_json_bytes(self)?.len() > 40_960
+        {
+            return Err(invalid("reach ephemeral route or frame mismatch"));
+        }
+        Ok(())
+    }
 }

@@ -109,8 +109,9 @@ pub use relay_quic_pool::{
     RelayQuicPoolMetricsSnapshot, RelayQuicRequestError, RelayQuicTimeouts,
 };
 pub use tls_config::{
-    mesh_server_config, quic_gateway_client_config, quic_gateway_server_config,
-    tcp_gateway_client_config, tcp_gateway_server_config,
+    MeshBootstrapRootProvider, mesh_server_config, mesh_server_config_with_bootstrap,
+    quic_gateway_client_config, quic_gateway_server_config, tcp_gateway_client_config,
+    tcp_gateway_server_config,
 };
 pub use types::{
     AckFrame, AuthRequest, BackendKind, BackendProductionStatus, CursorFrame, DeliveryFrame,
@@ -174,3 +175,4 @@ pub use mesh_quic_admission::{
     MeshQuicAdmissionLimits, MeshQuicHandshakeDriver, MeshQuicHandshakeMetrics,
     MeshQuicHandshakeSnapshot, MeshQuicReadyConnection,
 };
+pub mod contact_egress;

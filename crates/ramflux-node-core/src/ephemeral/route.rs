@@ -250,7 +250,7 @@ impl crate::EphemeralRouterView<'_> {
         }
     }
 
-    fn admit_routed_replay(
+    pub(crate) fn admit_routed_replay(
         &self,
         envelope: &ramflux_protocol::Envelope,
         supplied_expires_at_ms: u64,

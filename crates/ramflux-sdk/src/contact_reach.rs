@@ -2,14 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
+mod projection;
+mod verification;
 use crate::SdkError;
-use ramflux_crypto::{contact_reach as crypto, custody::VerifiedRecord};
+pub use projection::{ConversationPermission, ConversationReach};
+use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::{
-    contact_reach::*,
+    contact_reach::{
+        Decision, MAX_STATE_BYTES, Reason, STATE_DOMAIN, StateManifest, StatePage, StateRecord,
+        check_submission_time, verify_pages,
+    },
     custody::{self, Envelope as Signed},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 fn refused(reason: Reason) -> SdkError {
     SdkError::ReachRefused(reason)
@@ -20,6 +26,7 @@ pub struct VerifiedReachState {
     pub(crate) records: Vec<StateRecord>,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
+#[derive(Clone, Copy)]
 pub struct ReachReadContext<'a> {
     pub authority: &'a VerifiedRecord,
     pub device: &'a custody::DeviceRef,
@@ -49,109 +56,23 @@ impl VerifiedReachState {
         {
             return Err(refused(Reason::HomeRollback));
         }
-        context.authority.authorize(context.device, "sync", context.now)?;
+        if context.device.account_anchor == *root {
+            context.authority.authorize(context.device, "sync", context.now)?;
+        } else {
+            context.authority.authorize_primary_management(
+                context.device,
+                "contact_consent",
+                context.now,
+            )?;
+        }
         ramflux_crypto::verify_canonical_signature(
             &custody::signing_bytes(STATE_DOMAIN, b)?,
             &manifest.signature,
             context.home_node_key,
         )?;
         let records = verify_pages(b, pages)?;
-        let mut bases = BTreeMap::new();
-        let mut friendship = BTreeSet::new();
-        for record in &records {
-            match record {
-                StateRecord::Policy { update, .. } => {
-                    crypto::verify_retained_policy(update, context.authority, context.now)?;
-                    bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
-                }
-                StateRecord::AdmissionMeta { revision, last_update } => {
-                    if (*revision == 0) != last_update.is_none() {
-                        return Err(refused(Reason::ForeignSnapshotInvalid));
-                    }
-                    if let Some(update) = last_update {
-                        crypto::verify_retained_admission(update, context.authority, context.now)?;
-                        if update.body.expected_revision.checked_add(1) != Some(*revision) {
-                            return Err(refused(Reason::ForeignSnapshotInvalid));
-                        }
-                    }
-                }
-                StateRecord::Grant { subject, permissions, grant_until, update } => {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
-                    if &update.body.subject != subject
-                        || update.body.decision != Decision::Allow
-                        || update.body.permissions != Some(*permissions)
-                        || update.body.grant_until != Some(*grant_until)
-                        || update.body.expected_revision >= b.admission_revision
-                    {
-                        return Err(refused(Reason::ForeignSnapshotInvalid));
-                    }
-                    if let Subject::Friendship { root } = subject {
-                        friendship.insert(root.as_str());
-                    }
-                    bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
-                }
-                StateRecord::Block { subject, update } => {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
-                    if &update.body.subject != subject || update.body.decision != Decision::Block {
-                        return Err(refused(Reason::ForeignSnapshotInvalid));
-                    }
-                }
-                StateRecord::Decline { root, until, update } => {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
-                    if update.body.subject != (Subject::Friendship { root: root.clone() })
-                        || update.body.decision != Decision::Decline
-                        || *until < update.body.issued_at
-                        || *until > ramflux_protocol::MAX_SAFE_JSON_INTEGER
-                    {
-                        return Err(refused(Reason::ForeignSnapshotInvalid));
-                    }
-                }
-                StateRecord::Retirement { subject, revision, update } => {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
-                    if &update.body.subject != subject
-                        || update.body.decision == Decision::Allow
-                        || update.body.expected_revision.checked_add(1) != Some(*revision)
-                        || *revision > b.admission_revision
-                    {
-                        return Err(refused(Reason::ForeignSnapshotInvalid));
-                    }
-                }
-                _ => {}
-            }
-        }
-        for record in &records {
-            if let StateRecord::Placement {
-                conversation_id,
-                revision,
-                placement,
-                relationship,
-                basis,
-                ..
-            } = record
-            {
-                if *revision > b.revision
-                    || basis.is_empty()
-                    || basis.len() > 2
-                    || basis.iter().any(|hash| !bases.contains_key(hash))
-                {
-                    return Err(refused(Reason::ForeignSnapshotInvalid));
-                }
-                let accepted = basis.iter().any(|hash| matches!(bases.get(hash),Some(StateRecord::Grant { subject:Subject::Friendship { root },.. }) if friendship.contains(root.as_str())));
-                let conversation = basis.iter().any(|hash| matches!(bases.get(hash),Some(StateRecord::Grant { subject:Subject::Conversation { conversation_id:id,.. },.. }) if id == conversation_id));
-                let open = basis.iter().any(|hash| matches!(bases.get(hash),Some(StateRecord::Policy { update,.. }) if update.body.mode == ReachMode::Open));
-                if *relationship == Relationship::Accepted && !accepted
-                    || *placement == Placement::Direct && !accepted && !open
-                    || *placement == Placement::Strangers
-                        && !accepted
-                        && !conversation
-                        && !basis
-                            .iter()
-                            .any(|h| matches!(bases.get(h), Some(StateRecord::Policy { .. })))
-                {
-                    return Err(refused(Reason::ForeignSnapshotInvalid));
-                }
-            }
-        }
+        let bases = verification::verify_records(&records, b, &context)?;
+        verification::verify_placements(&records, b, &bases)?;
         Ok(Self { manifest: b.clone(), records })
     }
     #[must_use]
@@ -185,11 +106,14 @@ impl crate::RamfluxClient {
             return Err(refused(Reason::AnchorMismatch));
         }
         let db = self.account_db()?;
-        db.surface_transaction(|| {
+        db.write_transaction(|| {
             let previous: Option<SavedReachState> =
                 db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
             if let Some(saved) = &previous {
-                if saved.conflict || verified.manifest.revision < saved.revision {
+                if saved.root != verified.manifest.account_anchor
+                    || saved.conflict
+                    || verified.manifest.revision < saved.revision
+                {
                     return Err(refused(Reason::HomeRollback));
                 }
                 if verified.manifest.revision == saved.revision {
@@ -203,24 +127,10 @@ impl crate::RamfluxClient {
                     return Ok(());
                 }
             }
-            let mut restrictions = previous.map_or_else(BTreeMap::new, |p| p.restrictions);
-            for record in &verified.records {
-                match record {
-                    StateRecord::Block { .. }
-                    | StateRecord::Decline { .. }
-                    | StateRecord::Floor { .. }
-                    | StateRecord::Conflict { .. } => {
-                        restrictions
-                            .insert(serde_json::to_string(&record.order_key()?)?, record.clone());
-                    }
-                    StateRecord::Retirement { subject, update, .. }
-                        if update.body.decision == Decision::Unblock =>
-                    {
-                        restrictions.remove(&serde_json::to_string(&("block", subject.key()?))?);
-                    }
-                    _ => {}
-                }
-            }
+            let restrictions = merge_restrictions(
+                previous.map_or_else(BTreeMap::new, |p| p.restrictions),
+                &verified.records,
+            )?;
             let saved = SavedReachState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
@@ -241,4 +151,106 @@ impl crate::RamfluxClient {
         }
         Ok(())
     }
+}
+
+fn denial_revision(record: &StateRecord) -> Result<Option<(String, u64)>, SdkError> {
+    Ok(match record {
+        StateRecord::Block { subject, update } => Some((
+            subject.key()?,
+            update
+                .body
+                .expected_revision
+                .checked_add(1)
+                .ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?,
+        )),
+        StateRecord::Floor { subject, revision, denied: true, .. } => {
+            Some((subject.key()?, *revision))
+        }
+        _ => None,
+    })
+}
+fn merge_restrictions(
+    mut retained: BTreeMap<String, StateRecord>,
+    records: &[StateRecord],
+) -> Result<BTreeMap<String, StateRecord>, SdkError> {
+    let mut denial_floors: BTreeMap<String, u64> = BTreeMap::new();
+    for record in retained.values().chain(records.iter()) {
+        if let Some((key, revision)) = denial_revision(record)? {
+            denial_floors
+                .entry(key)
+                .and_modify(|old| *old = (*old).max(revision))
+                .or_insert(revision);
+        }
+    }
+    for record in records {
+        if !matches!(
+            record,
+            StateRecord::Block { .. }
+                | StateRecord::Decline { .. }
+                | StateRecord::Floor { .. }
+                | StateRecord::Conflict { .. }
+        ) {
+            continue;
+        }
+        let key = serde_json::to_string(&record.order_key()?)?;
+        let merged = match (retained.get(&key), record) {
+            (
+                Some(StateRecord::Floor { subject, revision, denied, erase_generation, erased }),
+                StateRecord::Floor {
+                    revision: next_revision,
+                    denied: next_denied,
+                    erase_generation: next_generation,
+                    erased: next_erased,
+                    ..
+                },
+            ) => StateRecord::Floor {
+                subject: subject.clone(),
+                revision: (*revision).max(*next_revision),
+                denied: *denied || *next_denied,
+                erase_generation: (*erase_generation).max(*next_generation),
+                erased: *erased || *next_erased,
+            },
+            (
+                Some(StateRecord::Block { update: old, .. }),
+                StateRecord::Block { update: next, .. },
+            ) if old.body.expected_revision > next.body.expected_revision => {
+                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
+            }
+            (
+                Some(StateRecord::Decline { until: old, .. }),
+                StateRecord::Decline { until: next, .. },
+            ) if old > next => {
+                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
+            }
+            (Some(StateRecord::Conflict { .. }), StateRecord::Conflict { .. }) => {
+                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
+            }
+            _ => record.clone(),
+        };
+        retained.insert(key, merged);
+    }
+    for record in records {
+        let StateRecord::Retirement { subject, revision, update } = record else {
+            continue;
+        };
+        if update.body.decision != Decision::Unblock
+            || *revision <= denial_floors.get(&subject.key()?).copied().unwrap_or(0)
+        {
+            continue;
+        }
+        retained.remove(&serde_json::to_string(&("block", subject.key()?))?);
+        let floor_key = serde_json::to_string(&("floor", subject.key()?))?;
+        if let Some(StateRecord::Floor { revision: floor_revision, denied, .. }) =
+            retained.get_mut(&floor_key)
+            && *floor_revision <= *revision
+        {
+            *denied = false;
+        }
+    }
+    if retained.len() > 8192
+        || ramflux_protocol::canonical_json_bytes(&retained)?.len() > MAX_STATE_BYTES
+    {
+        return Err(refused(Reason::ForeignCapacity));
+    }
+    Ok(retained)
 }

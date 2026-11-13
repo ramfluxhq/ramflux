@@ -577,7 +577,9 @@ impl RouterHandle {
         &self,
         request: &ramflux_protocol::contact_reach::RecipientRequest,
     ) -> ramflux_protocol::contact_reach::RecipientResponse {
-        use ramflux_protocol::contact_reach::*;
+        use ramflux_protocol::contact_reach::{
+            OperationResult, OwnerResultKind, Reason, RecipientResponse,
+        };
         let Self::Tokio(runtime) = self;
         runtime.custody.get().map_or_else(
             || RecipientResponse {

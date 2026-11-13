@@ -14,6 +14,8 @@ use ramflux_protocol::{
 
 pub mod directory;
 mod peer;
+#[cfg(test)]
+mod tests;
 pub use peer::{VerifiedPeer, verify_notice, verify_peer_reply};
 
 fn reject(reason: &'static str) -> CryptoError {
@@ -133,6 +135,33 @@ fn retained_manager(
     }
     authority.authorize_primary_management(actor, "contact_consent", now)?;
     Ok(())
+}
+
+/// Verify a volatile route against already adopted current source authority.
+/// # Errors
+/// Refuses first-seen/stale branch evidence, changed frame bytes and a renewed lifetime.
+pub fn verify_ephemeral(
+    frame: &wire::ReachEphemeral,
+    authority: &VerifiedRecord,
+    now_ms: u64,
+) -> Result<(), CryptoError> {
+    frame.validate(now_ms)?;
+    let b = &frame.route.body;
+    let envelope = &frame.frame.envelope;
+    if b.source.account_anchor != authority.envelope().body.account_anchor
+        || b.authority_head_hash != custody::object_hash(authority.envelope())?
+        || b.source.device_id != envelope.source_device_id
+        || authority.envelope().body.principal_id != envelope.source_principal_id
+    {
+        return Err(reject("ephemeral source/authority mismatch"));
+    }
+    let certificate = authority.authorize(&b.source, "message", now_ms / 1000)?;
+    verify(wire::ROUTE_DOMAIN, &frame.route, &certificate.branch_signing_public_key)?;
+    crate::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(envelope)?,
+        &envelope.signed.signature,
+        &certificate.branch_signing_public_key,
+    )
 }
 
 /// Verify a submitted recipient decision. Notice and peer evidence are verified by the caller.

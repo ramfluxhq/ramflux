@@ -4,7 +4,11 @@
 //! Recipient-owned authorization and canonical state transitions; no network or trust writes.
 use super::{ReachError, Result, refuse, storage};
 use ramflux_protocol::{
-    contact_reach::*,
+    contact_reach::{
+        Admission, DECLINE_COOLDOWN, Decision, MAX_STATE_BYTES, MAX_SUBJECTS,
+        OPERATION_HASH_DOMAIN, Placement, ReachMode, ReachPolicy, Reason, Relationship, Route,
+        StateRecord, Subject, Traffic,
+    },
     custody::{Envelope as Signed, framed_hash},
 };
 use serde::{Deserialize, Serialize};
@@ -73,6 +77,33 @@ impl AccountReach {
         if current == 0 && update.body.mode != ReachMode::ContactsOnly {
             return Err(refuse(Reason::ReachPolicyRequired));
         }
+        if update.body.mode == ReachMode::ContactsOnly {
+            let basis = framed_hash(OPERATION_HASH_DOMAIN, &update)?;
+            let revision =
+                self.revision.checked_add(1).ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+            for record in self.placements.values_mut() {
+                if let StateRecord::Placement {
+                    conversation_id,
+                    placement,
+                    relationship,
+                    revision: row_revision,
+                    basis: row_basis,
+                    ..
+                } = record
+                {
+                    let granted = self.grants.values().any(|g| matches!(g,StateRecord::Grant {
+                        subject:Subject::Conversation { conversation_id:id,.. },.. } if id==conversation_id));
+                    if *relationship == Relationship::Unaccepted
+                        && *placement == Placement::Direct
+                        && !granted
+                    {
+                        *placement = Placement::Strangers;
+                        *row_revision = revision;
+                        *row_basis = vec![basis.clone()];
+                    }
+                }
+            }
+        }
         self.policy = Some(update);
         self.advance()
     }
@@ -94,51 +125,7 @@ impl AccountReach {
             .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
         let key = b.subject.key()?;
         match b.decision {
-            Decision::Allow => {
-                let permissions =
-                    b.permissions.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
-                let grant_until =
-                    b.grant_until.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
-                self.grants.insert(
-                    key.clone(),
-                    StateRecord::Grant {
-                        subject: b.subject.clone(),
-                        permissions,
-                        grant_until,
-                        update: update.clone(),
-                    },
-                );
-                self.retirements.remove(&key);
-                if let Some(id) = conversation {
-                    let accepted = matches!(b.subject, Subject::Friendship { .. });
-                    let previous_accepted = self.placements.get(id).is_some_and(|r| {
-                        matches!(
-                            r,
-                            StateRecord::Placement { relationship: Relationship::Accepted, .. }
-                        )
-                    });
-                    // Reply never moves a stranger thread or downgrades an accepted relationship.
-                    let (placement, relationship) = if accepted || previous_accepted {
-                        (Placement::Direct, Relationship::Accepted)
-                    } else {
-                        (Placement::Strangers, Relationship::Unaccepted)
-                    };
-                    self.placements.insert(
-                        id.into(),
-                        StateRecord::Placement {
-                            conversation_id: id.into(),
-                            revision: self
-                                .revision
-                                .checked_add(1)
-                                .ok_or_else(|| refuse(Reason::ForeignCapacity))?,
-                            placement,
-                            relationship,
-                            tombstone: false,
-                            basis: vec![framed_hash(OPERATION_HASH_DOMAIN, &update)?],
-                        },
-                    );
-                }
-            }
+            Decision::Allow => self.apply_allow(&update, conversation)?,
             Decision::Block | Decision::Decline => {
                 if let Some(root) = b.subject.root() {
                     self.grants.retain(|_,r| !matches!(r,StateRecord::Grant { subject,.. } if subject.root() == Some(root)));
@@ -201,9 +188,111 @@ impl AccountReach {
                 },
             );
         }
+        self.reconcile_placement(&update, conversation)?;
         self.admission_revision = next;
         self.last_update = Some(update);
         self.advance()
+    }
+
+    fn reconcile_placement(
+        &mut self,
+        update: &Signed<Admission>,
+        conversation: Option<&str>,
+    ) -> Result<()> {
+        let b = &update.body;
+        if b.decision != Decision::Allow
+            && b.decision != Decision::Unblock
+            && let Some(id) = conversation
+        {
+            let friendship = b
+                .subject
+                .root()
+                .map(|root| Subject::Friendship { root: root.into() }.key())
+                .transpose()?;
+            let accepted = friendship.as_ref().and_then(|key| self.grants.get(key));
+            let basis = if let Some(StateRecord::Grant { update, .. }) = accepted {
+                vec![framed_hash(OPERATION_HASH_DOMAIN, update)?]
+            } else {
+                vec![framed_hash(OPERATION_HASH_DOMAIN, &update)?]
+            };
+            if let Some(StateRecord::Placement {
+                placement,
+                relationship,
+                revision,
+                basis: old_basis,
+                ..
+            }) = self.placements.get_mut(id)
+            {
+                *placement =
+                    if accepted.is_some() { Placement::Direct } else { Placement::Strangers };
+                *relationship = if accepted.is_some() {
+                    Relationship::Accepted
+                } else {
+                    Relationship::Unaccepted
+                };
+                *revision =
+                    self.revision.checked_add(1).ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+                *old_basis = basis;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_allow(
+        &mut self,
+        update: &Signed<Admission>,
+        conversation: Option<&str>,
+    ) -> Result<()> {
+        let b = &update.body;
+        let key = b.subject.key()?;
+
+        let permissions = b.permissions.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
+        let grant_until = b.grant_until.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
+        self.grants.insert(
+            key.clone(),
+            StateRecord::Grant {
+                subject: b.subject.clone(),
+                permissions,
+                grant_until,
+                update: update.clone(),
+            },
+        );
+        self.retirements.remove(&key);
+        if let Some(id) = conversation {
+            let accepted = matches!(b.subject, Subject::Friendship { .. });
+            let friendship = b
+                .subject
+                .root()
+                .map(|root| Subject::Friendship { root: root.into() }.key())
+                .transpose()?;
+            let accepted_grant = friendship.as_ref().and_then(|key| self.grants.get(key));
+            let previous_accepted = accepted_grant.is_some();
+            let mut basis = vec![framed_hash(OPERATION_HASH_DOMAIN, &update)?];
+            if !accepted && let Some(StateRecord::Grant { update, .. }) = accepted_grant {
+                basis.push(framed_hash(OPERATION_HASH_DOMAIN, update)?);
+            }
+            // Reply never moves a stranger thread or downgrades an accepted relationship.
+            let (placement, relationship) = if accepted || previous_accepted {
+                (Placement::Direct, Relationship::Accepted)
+            } else {
+                (Placement::Strangers, Relationship::Unaccepted)
+            };
+            self.placements.insert(
+                id.into(),
+                StateRecord::Placement {
+                    conversation_id: id.into(),
+                    revision: self
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| refuse(Reason::ForeignCapacity))?,
+                    placement,
+                    relationship,
+                    tombstone: false,
+                    basis,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Evaluate recipient-owned denial state before any positive authority.
@@ -243,15 +332,19 @@ impl AccountReach {
             conversation_id: route.conversation_id.clone(),
         }
         .key()?;
-        let grant = self.grants.get(&friendship).or_else(|| self.grants.get(&conversation));
+        if self.blocks.contains_key(&conversation) {
+            return Err(refuse(Reason::ForeignReadRefused));
+        }
+        let grant = [&friendship, &conversation].into_iter().filter_map(|key| self.grants.get(key)).find(|record| {
+            matches!(record, StateRecord::Grant { grant_until, .. } if *grant_until == 0 || *grant_until > now)
+        });
         if let Some(StateRecord::Grant { permissions, grant_until, subject, .. }) = grant
             && (*grant_until == 0 || *grant_until > now)
         {
             let allowed = match route.traffic {
-                Traffic::Dm => true,
+                Traffic::Dm | Traffic::GroupInvite => true,
                 Traffic::Receipt => permissions.user_delivered || permissions.read,
                 Traffic::Typing => permissions.typing,
-                Traffic::GroupInvite => true,
                 _ => false,
             };
             if allowed {

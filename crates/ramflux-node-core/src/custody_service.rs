@@ -116,7 +116,9 @@ impl CustodyService {
         request: &ramflux_protocol::contact_reach::RecipientRequest,
         now: u64,
     ) -> ramflux_protocol::contact_reach::RecipientResponse {
-        use ramflux_protocol::contact_reach::*;
+        use ramflux_protocol::contact_reach::{
+            Operation, OperationResult, OwnerResultKind, Reason, RecipientResponse, Request,
+        };
         let session = ramflux_protocol::qualified_device_id(
             &request.actor.account_anchor,
             &request.actor.device_id,
@@ -130,19 +132,15 @@ impl CustodyService {
                 | Operation::Reply { update, .. } => update.body.recipient_root.as_str(),
                 _ => request.actor.account_anchor.as_str(),
             };
-            if request.recipient_root != derived {
-                OperationResult::Error {
-                    reason: Reason::AnchorMismatch,
-                    retry_after_ms: None,
-                    current_revision: None,
-                }
-            } else {
+            if request.recipient_root == derived {
                 service
                     .owner(
                         store,
-                        &request.actor,
-                        &session,
-                        1,
+                        crate::contact_reach::ReachSession {
+                            actor: &request.actor,
+                            id: &session,
+                            generation: 1,
+                        },
                         &Request {
                             request_id: request.request_id.clone(),
                             session_id: session.clone(),
@@ -153,6 +151,12 @@ impl CustodyService {
                         now,
                     )
                     .result
+            } else {
+                OperationResult::Error {
+                    reason: Reason::AnchorMismatch,
+                    retry_after_ms: None,
+                    current_revision: None,
+                }
             }
         } else {
             OperationResult::Error {
@@ -258,7 +262,7 @@ impl CustodyService {
         {
             return Err(CustodyRefusal::BindingRefused);
         }
-        if crate::contact_reach::enabled().map_err(persistence)? {
+        if crate::contact_reach::enabled() {
             self.reach = Some(
                 crate::contact_reach::ReachService::new((*service.node).clone())
                     .map_err(persistence)?,

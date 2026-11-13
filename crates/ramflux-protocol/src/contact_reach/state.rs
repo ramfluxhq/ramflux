@@ -86,6 +86,79 @@ pub enum StateRecord {
     },
 }
 impl StateRecord {
+    fn validate_shape(&self, manifest: &StateManifest) -> Result<(), ProtocolError> {
+        match self {
+            Self::Grant { subject, update, .. }
+            | Self::Block { subject, update }
+            | Self::Retirement { subject, update, .. } => {
+                subject.validate()?;
+                update.body.validate()?;
+                if update.body.subject != *subject
+                    || update.body.recipient_root != manifest.account_anchor
+                    || update.body.expected_revision >= manifest.admission_revision
+                {
+                    return Err(invalid("reach signed subject/revision mismatch"));
+                }
+            }
+            Self::Decline { root, until, update } => {
+                digest(root)?;
+                safe(*until)?;
+                update.body.validate()?;
+                let minimum = update
+                    .body
+                    .issued_at
+                    .checked_add(super::DECLINE_COOLDOWN)
+                    .ok_or_else(|| invalid("decline overflow"))?;
+                let maximum = update
+                    .body
+                    .expires_at
+                    .checked_add(super::DECLINE_COOLDOWN)
+                    .ok_or_else(|| invalid("decline overflow"))?;
+                if update.body.recipient_root != manifest.account_anchor
+                    || *until < minimum
+                    || *until >= maximum
+                    || update.body.expected_revision >= manifest.admission_revision
+                {
+                    return Err(invalid("reach decline deadline/revision mismatch"));
+                }
+            }
+            Self::Floor { subject, revision, erase_generation, .. } => {
+                subject.validate()?;
+                safe(*revision)?;
+                safe(*erase_generation)?;
+                if *revision > manifest.admission_revision
+                    || *erase_generation > manifest.admission_revision
+                {
+                    return Err(invalid("reach floor exceeds admission revision"));
+                }
+            }
+            Self::Placement { conversation_id, revision, basis, .. } => {
+                super::text(conversation_id)?;
+                safe(*revision)?;
+                if *revision > manifest.revision || basis.is_empty() || basis.len() > 2 {
+                    return Err(invalid("reach placement revision/basis"));
+                }
+                for hash in basis {
+                    digest(hash)?;
+                }
+            }
+            Self::Conflict { scope, revision, first_hash, other_hash } => {
+                safe(*revision)?;
+                digest(first_hash)?;
+                digest(other_hash)?;
+                let maximum = match scope {
+                    ConflictScope::Policy => manifest.policy_revision,
+                    ConflictScope::Admission => manifest.admission_revision,
+                };
+                if first_hash == other_hash || *revision > maximum {
+                    return Err(invalid("reach conflict record"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Canonical ordering by kind, then stable subject/conversation identity.
     /// # Errors
     /// Propagates invalid subject serialization.
@@ -240,6 +313,7 @@ pub fn verify_pages(
     let mut counts = std::collections::BTreeMap::new();
     let mut unique = BTreeSet::new();
     for record in &records {
+        record.validate_shape(manifest)?;
         let key = record.order_key()?;
         if previous.as_ref().is_some_and(|p| p >= &key) || !unique.insert(key.clone()) {
             return Err(invalid("reach records not canonical sorted unique"));

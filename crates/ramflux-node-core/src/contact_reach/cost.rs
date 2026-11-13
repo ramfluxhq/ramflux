@@ -9,7 +9,10 @@ use super::{
 use crate::{MigrationNode, RouterRedbStore};
 use ed25519_dalek::Signer;
 use ramflux_protocol::{
-    contact_reach::*,
+    contact_reach::{
+        COMMAND_LIFETIME, COST_CONTEXT_DOMAIN, COST_DOMAIN, Challenge, ChallengeRequest, Cost,
+        CostPurpose, Reason,
+    },
     custody::{self, Envelope as Signed},
 };
 use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -17,6 +20,88 @@ use serde::{Deserialize, Serialize};
 
 const CHALLENGES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("contact_reach_challenges_v1");
+const ISSUE_RATES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("contact_reach_challenge_rates_v1");
+/// TLS-derived source identity and observed node egress prefix; never a forwarded user address.
+pub struct CostIssuerPeer {
+    node: String,
+    prefix: String,
+}
+impl CostIssuerPeer {
+    /// Bind challenge budgets to an authenticated federation identity and socket address.
+    /// # Errors
+    /// Refuses non-federation service identities and inconsistent parsed identity facts.
+    pub fn from_tls(peer: &crate::MeshPeerIdentity, remote: std::net::IpAddr) -> Result<Self> {
+        let parsed = crate::parse_mesh_spiffe_uri(&peer.spiffe_uri)?;
+        if parsed.node_id != peer.node_id || parsed.service_id != "ramflux-federation" {
+            return Err(refuse(Reason::ForeignReadRefused));
+        }
+        let prefix = match remote {
+            std::net::IpAddr::V4(ip) => {
+                format!("{}/24", std::net::Ipv4Addr::from(u32::from(ip) & 0xffff_ff00))
+            }
+            std::net::IpAddr::V6(ip) => {
+                format!("{}/56", std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 72)))
+            }
+        };
+        Ok(Self { node: peer.node_id.clone(), prefix })
+    }
+    pub(super) fn local(node: &str) -> Self {
+        Self { node: node.into(), prefix: format!("local:{node}") }
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueRate {
+    count: u64,
+    until: u64,
+}
+fn charge_issue(tx: &redb::WriteTransaction, peer: &CostIssuerPeer, now: u64) -> Result<()> {
+    let window = now / 60;
+    let until = window
+        .checked_add(2)
+        .and_then(|n| n.checked_mul(60))
+        .ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
+    let mut table = tx.open_table(ISSUE_RATES).map_err(storage)?;
+    let expired = table
+        .iter()
+        .map_err(storage)?
+        .take(8192)
+        .map(|r| {
+            let (key, value) = r.map_err(storage)?;
+            Ok((key.value().to_owned(), row::<IssueRate>(value.value())?.until))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (key, until) in expired {
+        if until <= now {
+            table.remove(key.as_str()).map_err(storage)?;
+        }
+    }
+    for (scope, value, cap) in [
+        ("global", "", 1000_u64),
+        ("node", peer.node.as_str(), 60),
+        ("prefix", peer.prefix.as_str(), 120),
+    ] {
+        let key = serde_json::to_string(&(scope, window, value)).map_err(storage)?;
+        let prior = table
+            .get(key.as_str())
+            .map_err(storage)?
+            .map(|v| row::<IssueRate>(v.value()))
+            .transpose()?;
+        if prior.is_none() && table.len().map_err(storage)? >= 8192 {
+            return Err(refuse(Reason::ForeignCapacity));
+        }
+        let count = prior
+            .map_or(0, |r| r.count)
+            .checked_add(1)
+            .filter(|n| *n <= cap)
+            .ok_or_else(|| refuse(Reason::ForeignRateLimited))?;
+        table
+            .insert(key.as_str(), encoded(&IssueRate { count, until })?.as_slice())
+            .map_err(storage)?;
+    }
+    Ok(())
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Issued {
@@ -54,13 +139,18 @@ impl RouterRedbStore {
     pub fn reach_issue_cost(
         &self,
         node: &MigrationNode,
+        peer: &CostIssuerPeer,
         request: &ChallengeRequest,
         now: u64,
     ) -> Result<Signed<Challenge>> {
         request.validate()?;
+        if request.purpose != CostPurpose::Stranger {
+            return Err(refuse(Reason::CostInvalid));
+        }
         let nonce = ramflux_crypto::random_32()?;
         let tx = self.begin_write()?;
         let now = super::store::clock(&tx, now)?;
+        charge_issue(&tx, peer, now)?;
         let expires =
             now.checked_add(COMMAND_LIFETIME).ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
         let body = Challenge {

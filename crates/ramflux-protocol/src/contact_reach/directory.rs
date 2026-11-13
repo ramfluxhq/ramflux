@@ -10,6 +10,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod rpc;
+pub use rpc::*;
+
 pub const BINDING_DOMAIN: &str = "ramflux.identity.username_binding.v2";
 pub const OPERATION_DOMAIN: &str = "ramflux.identity.username_operation.v2";
 pub const PROFILE_DOMAIN: &str = "ramflux.identity.profile_certified.v1";
@@ -25,6 +28,40 @@ pub const CENTRE_ROTATION_DOMAIN: &str = "ramflux.identity.centre_rotation.v1";
 fn name(value: &str) -> Result<(), ProtocolError> {
     crate::username_directory::validate_username(value)
         .map_err(|_| invalid("invalid exact username"))
+}
+
+/// Validate claimable exact names under the pinned username skeleton/reserved-name policy.
+/// # Errors
+/// Refuses reserved literals, reserved skeletons and reserved prefixes.
+pub fn claimable_name(value: &str) -> Result<String, ProtocolError> {
+    name(value)?;
+    let key = crate::username_comparison_key(value)
+        .map_err(|_| invalid("invalid username comparison key"))?;
+    for reserved in [
+        "admin",
+        "administrator",
+        "root",
+        "system",
+        "support",
+        "security",
+        "ramflux",
+        "official",
+        "moderator",
+        "notify",
+        "federation",
+    ] {
+        let skeleton: String = unicode_security::skeleton(reserved).collect();
+        if value == reserved || key == skeleton {
+            return Err(invalid("reserved username"));
+        }
+    }
+    for prefix in ["ramflux_", "system_"] {
+        let skeleton: String = unicode_security::skeleton(prefix).collect();
+        if value.starts_with(prefix) || key.starts_with(&skeleton) {
+            return Err(invalid("reserved username prefix"));
+        }
+    }
+    Ok(key)
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +187,11 @@ impl NameOperation {
                         .is_some_and(|b| Some(&b.body.name) == self.old_name.as_ref())
             }
         };
+        if matches!(self.action, NameAction::Claim | NameAction::Rename) {
+            claimable_name(
+                &self.binding.as_ref().ok_or_else(|| invalid("binding required"))?.body.name,
+            )?;
+        }
         if !valid {
             return Err(invalid("invalid name action fields"));
         }
@@ -195,6 +237,9 @@ impl Profile {
             return Err(invalid("invalid profile principal"));
         }
         text(&self.display_name)?;
+        if crate::normalize_profile_display_name(&self.display_name)? != self.display_name {
+            return Err(invalid("profile display name must be normalized"));
+        }
         if !crate::text_safety::single_line_is_safe(&self.display_name)
             || crate::username_directory::normalize_bio(&self.bio)
                 .map_err(|_| invalid("invalid bio"))?
@@ -203,6 +248,8 @@ impl Profile {
             return Err(invalid("invalid profile text"));
         }
         if let Some(avatar) = &self.avatar {
+            crate::username_directory::Wire::validate(avatar)
+                .map_err(|_| invalid("invalid certified avatar reference"))?;
             digest(&avatar.content_hash)?;
             if avatar.size == 0 || avatar.size > 512 * 1024 || avatar.relay_ref.len() > 2048 {
                 return Err(invalid("invalid avatar bounds"));

@@ -267,6 +267,16 @@ impl GatewaySessionAccess for SessionClient {
             self.generation,
         ))
     }
+    fn reach_operation(
+        &mut self,
+        operation: ramflux_protocol::contact_reach::Operation,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::contact_reach::OperationResult> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.reach_operation(operation).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
     fn set_push_route(
         &mut self,
         route: Option<GatewayPushRouteRegistration>,

@@ -235,6 +235,8 @@ pub(crate) fn authorization_signers(
     let record = authority.envelope();
     let cert = &record.body.master_certificate;
     if record.body.account_anchor != body.account_anchor
+        || cert.body.custody_kind == ramflux_protocol::custody::CustodyKind::ExternalHuman
+            && !ramflux_protocol::contact_reach::enabled()
         || object_hash(record)? != body.authority_record_hash
         || object_hash(cert)? != body.management_certificate_hash
     {

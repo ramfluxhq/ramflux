@@ -58,8 +58,8 @@ impl Subject {
                 serde_json::json!(["group_sender", root, group_id])
             }
         };
-        Ok(String::from_utf8(crate::canonical_json_bytes(&key)?)
-            .map_err(|_| invalid("subject key encoding"))?)
+        String::from_utf8(crate::canonical_json_bytes(&key)?)
+            .map_err(|_| invalid("subject key encoding"))
     }
 }
 
@@ -120,6 +120,16 @@ impl Admission {
         }
         actor(&self.actor)?;
         self.subject.validate()?;
+        if self.subject.root() == Some(self.recipient_root.as_str()) {
+            return Err(invalid("reach peer must be a different root"));
+        }
+        if let Subject::Conversation { root, conversation_id } = &self.subject {
+            let expected = crate::message::dm_scope::derive(&self.recipient_root, root)
+                .map_err(|_| invalid("invalid reach DM root pair"))?;
+            if conversation_id != &expected {
+                return Err(invalid("reach conversation must use the deterministic v3 DM id"));
+            }
+        }
         safe(self.expected_revision)?;
         if self.version != 2 || self.expected_revision == crate::MAX_SAFE_JSON_INTEGER {
             return Err(invalid("admission version or exhausted revision"));

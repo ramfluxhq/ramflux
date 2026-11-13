@@ -20,6 +20,30 @@ use crate::{MeshTlsConfig, TransportError};
 pub(crate) type MeshRootPemProvider =
     Arc<dyn Fn() -> Result<Vec<String>, TransportError> + Send + Sync>;
 
+/// Bounded discovery callback for an unrecognized federation node's exact SPIFFE identity.
+/// Implementations must use public-only discovery, retained pins and a separate evictable cache.
+pub type MeshBootstrapRootProvider =
+    Arc<dyn Fn(&str) -> Result<Vec<String>, TransportError> + Send + Sync>;
+
+/// Configure provisional federation bootstrap without weakening ordinary service identities.
+/// The callback runs only for an otherwise untrusted federation certificate; rustls still
+/// verifies its complete chain and TLS proof of possession under the discovered CA.
+/// # Errors
+/// Returns certificate/key/configuration failures.
+pub fn mesh_server_config_with_bootstrap(
+    tls: &MeshTlsConfig,
+    roots: Arc<dyn Fn() -> Result<Vec<String>, TransportError> + Send + Sync>,
+    bootstrap: MeshBootstrapRootProvider,
+) -> Result<ServerConfig, TransportError> {
+    ensure_ring_crypto_provider_installed();
+    let mut verifier = DynamicMeshClientVerifier::new(tls.ca_cert.clone(), roots)?;
+    verifier.bootstrap = Some(bootstrap);
+    ServerConfig::builder()
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_single_cert(load_certs(&tls.service_cert)?, load_private_key(&tls.service_key)?)
+        .map_err(|e| TransportError::Tls(e.to_string()))
+}
+
 static RUSTLS_PROVIDER: Once = Once::new();
 const MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS_ENV: &str =
     "RAMFLUX_MESH_QUIC_MAX_CONCURRENT_BIDI_STREAMS";
@@ -184,6 +208,7 @@ struct DynamicMeshClientVerifier {
     root_pems_provider: MeshRootPemProvider,
     base_verifier: Arc<dyn ClientCertVerifier>,
     root_hint_subjects: Vec<rustls::DistinguishedName>,
+    bootstrap: Option<MeshBootstrapRootProvider>,
 }
 
 impl std::fmt::Debug for DynamicMeshClientVerifier {
@@ -209,6 +234,7 @@ impl DynamicMeshClientVerifier {
             root_pems_provider,
             base_verifier,
             root_hint_subjects: Vec::new(),
+            bootstrap: None,
         })
     }
 
@@ -236,7 +262,54 @@ impl ClientCertVerifier for DynamicMeshClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<rustls::server::danger::ClientCertVerified, TlsError> {
-        self.current_verifier()?.verify_client_cert(end_entity, intermediates, now)
+        let verifier = self.current_verifier()?;
+        match verifier.verify_client_cert(end_entity, intermediates, now) {
+            Ok(accepted) => Ok(accepted),
+            Err(TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
+                let bootstrap = self
+                    .bootstrap
+                    .as_ref()
+                    .ok_or(TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer))?;
+                if intermediates.len() > 3
+                    || intermediates
+                        .iter()
+                        .try_fold(end_entity.len(), |sum, c| sum.checked_add(c.len()))
+                        .is_none_or(|n| n > 64 * 1024)
+                {
+                    return Err(TlsError::General("contact certificate-chain budget".into()));
+                }
+                let uri = crate::mesh_tls::extract_spiffe_uri_from_certificate(end_entity)
+                    .map_err(|_| TlsError::General("contact certificate identity".into()))?
+                    .ok_or_else(|| {
+                        TlsError::General("contact certificate lacks node identity".into())
+                    })?;
+                if uri.len() > 512
+                    || !uri.starts_with("spiffe://")
+                    || !uri.ends_with("/ramflux-federation")
+                {
+                    return Err(TlsError::General("only federation may bootstrap".into()));
+                }
+                let roots = bootstrap(&uri)
+                    .map_err(|_| TlsError::General("contact node bootstrap refused".into()))?;
+                if roots.len() > 4
+                    || roots
+                        .iter()
+                        .try_fold(0_usize, |sum, pem| sum.checked_add(pem.len()))
+                        .is_none_or(|n| n > 64 * 1024)
+                {
+                    return Err(TlsError::General("contact bootstrap CA budget".into()));
+                }
+                let mut store = RootCertStore::empty();
+                add_pem_roots(&mut store, &roots)
+                    .map_err(|_| TlsError::General("contact bootstrap CA invalid".into()))?;
+                let verifier =
+                    WebPkiClientVerifier::builder(Arc::new(store)).build().map_err(|_| {
+                        TlsError::General("contact bootstrap verifier unavailable".into())
+                    })?;
+                verifier.verify_client_cert(end_entity, intermediates, now)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_tls12_signature(

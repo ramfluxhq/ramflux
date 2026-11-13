@@ -40,6 +40,7 @@ pub(crate) use object::*;
 
 mod contact_requests;
 mod identity_authority;
+pub(crate) mod reach;
 pub(crate) mod surface_transport;
 pub(crate) mod task;
 pub(crate) mod task_approval;

@@ -140,6 +140,19 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     ) -> GatewayCallFuture<'_, ramflux_protocol::VoiceLeaseResponse>;
     /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
+    /// Execute an exact prepared reach operation on the authenticated generation.
+    /// # Errors
+    /// Refuses implementations without the complete reach capability.
+    fn reach_operation(
+        &mut self,
+        _operation: ramflux_protocol::contact_reach::Operation,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::contact_reach::OperationResult> {
+        Box::pin(async {
+            Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ForeignCapabilityMissing,
+            ))
+        })
+    }
     fn set_push_route(
         &mut self,
         route: Option<GatewayPushRouteRegistration>,
@@ -265,6 +278,12 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         body: ramflux_protocol::VoiceLeaseRequest,
     ) -> GatewayCallFuture<'_, ramflux_protocol::VoiceLeaseResponse> {
         Box::pin(GatewaySessionEngine::voice_lease(self, body))
+    }
+    fn reach_operation(
+        &mut self,
+        operation: ramflux_protocol::contact_reach::Operation,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::contact_reach::OperationResult> {
+        Box::pin(GatewaySessionEngine::reach_operation(self, operation))
     }
     fn set_push_route(
         &mut self,

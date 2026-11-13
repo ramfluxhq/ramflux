@@ -8,7 +8,7 @@ use crate::{
     contact_reach::{ReachReadContext, VerifiedReachState},
 };
 use ramflux_protocol::{
-    contact_reach::*,
+    contact_reach::{Operation, OperationResult, Reason, Request},
     custody::{CustodyServerFrame, CustodySessionAction},
 };
 
@@ -24,6 +24,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         &mut self,
         operation: Operation,
     ) -> Result<OperationResult, SdkError> {
+        if !ramflux_protocol::contact_reach::enabled() {
+            return Err(refused(Reason::ForeignCapabilityMissing));
+        }
         let session = self.session.as_ref().ok_or_else(|| refused(Reason::ForeignUnavailable))?;
         let request = Request {
             request_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
@@ -46,6 +49,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         {
             return Err(refused(Reason::ForeignInvalidFrame));
         }
+        request.operation.validate_result(&response.result)?;
         if let OperationResult::Error { reason, .. } = response.result {
             return Err(refused(reason));
         }

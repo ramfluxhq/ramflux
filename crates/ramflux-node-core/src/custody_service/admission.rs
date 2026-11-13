@@ -512,9 +512,11 @@ impl CustodyService {
                 let service = self.reach.as_ref().ok_or(CustodyRefusal::Unsupported)?;
                 let response = service.owner(
                     store,
-                    &session.device_ref,
-                    &session.session_id,
-                    1,
+                    crate::contact_reach::ReachSession {
+                        actor: &session.device_ref,
+                        id: &session.session_id,
+                        generation: 1,
+                    },
                     &request,
                     now,
                 );
