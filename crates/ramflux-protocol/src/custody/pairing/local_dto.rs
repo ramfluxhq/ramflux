@@ -387,6 +387,7 @@ impl LocalResult {
                 || matches!(
                     method,
                     "pair.join"
+                        | "transfer.join"
                         | "pair.confirm"
                         | "pair.approve"
                         | "pair.cancel"

@@ -4,7 +4,7 @@
 //! Public pairing actions share the SDK coordinator; invitation bearers use private files.
 use crate::{
     RfError,
-    cli::{PairingAction, PairingCommand},
+    cli::{PairingAction, PairingCommand, PairingOperation},
 };
 use ramflux_protocol::custody::pairing::{
     PairingWire,
@@ -19,9 +19,21 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+mod output;
 mod registry;
+mod sas;
 
 pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(), RfError> {
+    handle_attended(socket, command).await.map_err(output::failure)
+}
+async fn handle_attended(socket: PathBuf, command: PairingCommand) -> Result<(), RfError> {
+    let prepared = sas::preflight(&command.action, command.sas_out.as_deref())?;
+    let display = sas::Display {
+        socket: &socket,
+        sas_out: command.sas_out.as_deref(),
+        account: &command.account,
+        prepared: std::cell::RefCell::new(prepared),
+    };
     let mut bus = PairingBusClient::connect(&socket, std::sync::Arc::new(TerminalProvider)).await?;
     let full_status = matches!(&command.action, PairingAction::TransferStatus(_));
     match command.action {
@@ -44,21 +56,26 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
                     lease_expires_at,
                 },
                 invitation_out,
-                &socket,
+                &display,
             )
             .await
         }
 
         PairingAction::Join { display_name, invitation_file } => {
-            join(&mut bus, &command.account, display_name, &invitation_file).await
+            join(&mut bus, &command.account, display_name, &invitation_file, &display).await
         }
-        PairingAction::Confirm { operation, transcript_hash, matches } => finish(
-            &socket,
-            invoke(
+        PairingAction::Confirm {
+            operation,
+            transcript_hash,
+            matches,
+            peer_sas_file,
+            peer_sas_attended,
+        } => {
+            sas::confirm(
                 &mut bus,
                 &command.account,
-                "confirm",
-                &Confirm {
+                &display,
+                Confirm {
                     schema: "ramflux.pairing.Confirm.v2".into(),
                     version: 2,
                     operation_id: operation.operation_id,
@@ -66,11 +83,13 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
                     transcript_hash,
                     r#match: matches,
                 },
+                peer_sas_file,
+                peer_sas_attended,
             )
-            .await?,
-        ),
+            .await
+        }
         PairingAction::Approve { operation, transcript_hash, proposal_hash, approved } => finish(
-            &socket,
+            &display,
             invoke(
                 &mut bus,
                 &command.account,
@@ -87,46 +106,70 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
             )
             .await?,
         ),
-        PairingAction::Status(operation) | PairingAction::TransferStatus(operation) => finish(
-            &socket,
-            invoke(
-                &mut bus,
-                &command.account,
-                if full_status { "transfer.status" } else { "status" },
-                &StatusRequest {
-                    schema: "ramflux.pairing.StatusRequest.v2".into(),
-                    version: 2,
-                    operation_id: operation.operation_id,
-                    generation: operation.generation,
-                },
-            )
-            .await?,
-        ),
-        PairingAction::Cancel(operation) => finish(
-            &socket,
-            invoke(
-                &mut bus,
-                &command.account,
-                "cancel",
-                &Cancel {
-                    schema: "ramflux.pairing.Cancel.v2".into(),
-                    version: 2,
-                    operation_id: operation.operation_id,
-                    generation: operation.generation,
-                },
-            )
-            .await?,
-        ),
+        PairingAction::Status(operation) | PairingAction::TransferStatus(operation) => {
+            status(&mut bus, &command.account, &display, operation, full_status).await
+        }
+        PairingAction::Cancel(operation) => {
+            cancel(&mut bus, &command.account, &display, operation).await
+        }
     }
 }
+async fn status(
+    bus: &mut PairingBusClient,
+    account: &str,
+    display: &sas::Display<'_>,
+    operation: PairingOperation,
+    full: bool,
+) -> Result<(), RfError> {
+    let result = invoke(
+        bus,
+        account,
+        if full { "transfer.status" } else { "status" },
+        &StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: operation.operation_id,
+            generation: operation.generation,
+        },
+    )
+    .await?;
+    finish(display, result)
+}
+async fn cancel(
+    bus: &mut PairingBusClient,
+    account: &str,
+    display: &sas::Display<'_>,
+    operation: PairingOperation,
+) -> Result<(), RfError> {
+    let result = invoke(
+        bus,
+        account,
+        "cancel",
+        &Cancel {
+            schema: "ramflux.pairing.Cancel.v2".into(),
+            version: 2,
+            operation_id: operation.operation_id,
+            generation: operation.generation,
+        },
+    )
+    .await?;
+    finish(display, result)
+}
+
 async fn join(
     bus: &mut PairingBusClient,
     account: &str,
     display_name: String,
     path: &Path,
+    display: &sas::Display<'_>,
 ) -> Result<(), RfError> {
     let owned = registry::JoinedFile::open(path)?;
     let token = read_invitation(path)?;
+    registry::Registry::open(display.socket)?.record_role(
+        &token.invitation.body.request_id,
+        account,
+        "responder",
+    )?;
     let result = invoke(
         bus,
         account,
@@ -137,7 +180,7 @@ async fn join(
     if matches!(&result.outcome, Outcome::Update { value } if value.result.is_none()) {
         owned.remove()?;
     }
-    show(result)
+    show(display, result)
 }
 
 struct InvitationOutput {
@@ -178,17 +221,18 @@ async fn begin(
     account: &str,
     mut request: Begin,
     path: PathBuf,
-    socket: &Path,
+    display: &sas::Display<'_>,
 ) -> Result<(), RfError> {
     let mut output = InvitationOutput::create(path)?;
     request.normalize();
     let result = invoke(bus, account, "begin", &request).await?;
-    let LocalResult { outcome: Outcome::Begin { value }, .. } = result else { return show(result) };
+    let LocalResult { outcome: Outcome::Begin { value }, .. } = result else {
+        return show(display, result);
+    };
     let bytes = Zeroizing::new(value.invite_token.to_wire_bytes().map_err(|_| invalid())?);
-    if let Err(error) = output
-        .commit(&bytes)
-        .and_then(|()| registry::Registry::open(socket)?.register(&value.operation_id, &output))
-    {
+    if let Err(error) = output.commit(&bytes).and_then(|()| {
+        registry::Registry::open(display.socket)?.register(&value.operation_id, &output, account)
+    }) {
         output.keep = false;
         let _ = invoke(
             bus,
@@ -204,7 +248,7 @@ async fn begin(
         .await;
         return Err(error);
     }
-    super::print_json(
+    output::print(
         &serde_json::json!({"operation_id":value.operation_id,"generation":value.generation,"expires_at":value.expires_at,"invitation_file":output.path}),
     )
 }
@@ -233,7 +277,7 @@ async fn invoke<T: PairingWire + serde::Serialize>(
         .map_err(|_| invalid())?;
     Ok(result)
 }
-fn finish(socket: &Path, result: LocalResult) -> Result<(), RfError> {
+fn finish(display: &sas::Display<'_>, result: LocalResult) -> Result<(), RfError> {
     let terminal = match &result.outcome {
         Outcome::Update { value }
             if matches!(
@@ -260,37 +304,24 @@ fn finish(socket: &Path, result: LocalResult) -> Result<(), RfError> {
         _ => None,
     };
     if let Some((operation, expired)) = terminal {
-        registry::Registry::open(socket)?.cleanup(operation)?;
+        registry::Registry::open(display.socket)?.cleanup(operation)?;
         if expired {
             eprintln!(
                 "Expired invitation files contain dead tokens; remove any unmanaged copies. Cleanup does not run while rf is absent."
             );
         }
     }
-    show(result)
+    show(display, result)
 }
 
-fn show(result: LocalResult) -> Result<(), RfError> {
+fn show(display: &sas::Display<'_>, mut result: LocalResult) -> Result<(), RfError> {
     if matches!(result.outcome, Outcome::Begin { .. }) {
         return Err(invalid());
     }
-    if let Outcome::Update { value } = &result.outcome
-        && let Some(indices) = &value.emoji_indices
-        && let Ok(mut terminal) = OpenOptions::new().write(true).open("/dev/tty")
-    {
-        let names = indices
-            .iter()
-            .map(|index| {
-                usize::try_from(*index)
-                    .ok()
-                    .and_then(|index| ramflux_crypto::custody::pairing::SAS_EMOJI.get(index))
-                    .map(|(_, name)| *name)
-                    .ok_or_else(invalid)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        writeln!(terminal, "Compare all seven SAS names: {}", names.join(" · "))?;
-    }
-    super::print_json(&serde_json::to_value(result)?)
+    sas::display(display, &mut result)?;
+    let exit = output::outcome(&result);
+    output::print(&serde_json::to_value(result)?)?;
+    if exit == 0 { Ok(()) } else { Err(RfError::PairingExit { code: exit }) }
 }
 fn read_invitation(path: &Path) -> Result<InviteToken, RfError> {
     let fd = rustix::fs::open(

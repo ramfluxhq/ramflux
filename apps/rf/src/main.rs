@@ -17,6 +17,8 @@ pub(crate) const DEFAULT_DATA_ROOT: &str = "/tmp/ramflux/rfd-data";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RfError {
+    #[error("Pairing command did not complete.")]
+    PairingExit { code: i32 },
     #[error("{0}")]
     Message(String),
     #[error("SDK error: {0}")]
@@ -33,7 +35,10 @@ pub(crate) enum RfError {
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("{error}");
-        std::process::exit(1);
+        std::process::exit(match error {
+            RfError::PairingExit { code } => code,
+            _ => 1,
+        });
     }
 }
 
