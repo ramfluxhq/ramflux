@@ -1072,7 +1072,7 @@ pub(crate) fn configured_command(
             .env("RAMFLUX_NOTIFY_COMPIO_FANOUT_WORKERS", "2")
             .env("RAMFLUX_NOTIFY_COMPIO_PROVIDER_WORKERS", "2");
     }
-    if service == "ramflux-gateway" {
+    if matches!(service, "ramflux-gateway" | "ramflux-relay") {
         child.env(
             "RAMFLUX_RELAY_SERVICE_KEY_REF",
             "literal:shutdown-test-relay-service-key-material",
