@@ -7,6 +7,7 @@ use crate::{AccountDbKey, AdoptionRow, BackupDatabase, StorageError};
 use rusqlite::params;
 mod objects;
 mod selection;
+mod tail;
 pub use selection::{
     FullGenerationRecoveryDraft, FullGenerationRecoveryWork, FullSelectedReceiverGeneration,
 };
@@ -156,6 +157,7 @@ impl FullReceiverDatabaseWork {
         objects::require_supported(&target)?;
         let row = &self.adoption;
         let tx = target.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tail::seed(&tx, &self.copy, &self.adoption, || self.live())?;
         tx.execute(
             "UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1",
             params![self.key.fingerprint()],

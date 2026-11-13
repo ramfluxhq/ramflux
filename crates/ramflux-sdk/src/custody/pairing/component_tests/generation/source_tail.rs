@@ -219,10 +219,16 @@ mod tests {
         rig.primary.sync_relay().await?;
         rig.participant_a.return_client(&mut rig.source.client)?;
         Box::pin(finish_owned_stream(&mut rig)).await?;
-        let before = rig
-            .participant_a
-            .query
-            .current_authority(&rig.source.client.account_db()?.principal_commitment)?;
+        let anchor = crate::custody::load_account(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id,
+            rig.now,
+        )?
+        .record()
+        .body
+        .account_anchor
+        .clone();
+        let before = rig.participant_a.query.current_authority(&anchor)?;
         let before = ramflux_crypto::custody::verify_publication(&before, rig.now)?;
         assert!(
             rig.source

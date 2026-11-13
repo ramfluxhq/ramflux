@@ -250,8 +250,13 @@ impl AccountDb {
             object_erasure_commitment(&self.principal_commitment, parent_wire, parent_manifest);
         let child =
             object_erasure_commitment(&self.principal_commitment, child_wire, child_manifest);
-        self.connection.execute("INSERT INTO object_payload_dependency SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child])?;
-        Ok(())
+        self.write_transaction(|| {
+            self.connection.execute("INSERT INTO object_payload_dependency SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child])?;
+            // Record B's independent assertion even when A already supplied this edge.
+            // Only the current selected full generation can acquire local ownership.
+            self.connection.execute("INSERT INTO pairing_full_tail_dependency SELECT t.operation_id,1,?1,?2 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.tail_status='pending' AND a.account_id=?3 AND EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child,self.local_account_id])?;
+            Ok(())
+        })
     }
 
     /// # Errors
@@ -300,3 +305,6 @@ mod selector_upgrade_tests;
 
 #[cfg(test)]
 mod selector_budget_tests;
+
+#[cfg(test)]
+mod tail_ownership_tests;
