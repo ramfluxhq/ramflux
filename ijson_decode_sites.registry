@@ -245,7 +245,6 @@ crates/ramflux-node-core/src/notify/route_authority.rs | open_binding | 1 | E | 
 crates/ramflux-node-core/src/notify/route_authority.rs | same_registered_owner | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify/routes.rs | open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify/routes.rs | validate | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/notify_wal.rs | notify_wal_compact | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify_wal.rs | raw_body_is_current_wake | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify_wal.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/redb_store.rs | load_snapshot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
