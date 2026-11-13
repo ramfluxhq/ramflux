@@ -789,8 +789,10 @@ jobs:
 
       - name: Isolate test temporary files
         env:
-          RF_CI_TMPBASE: ${{ runner.environment == 'github-hosted' && '/tmp' || env.RF_CI_TMPBASE }}
-        run: python3 -B scripts/ci/test-tmp.py init
+          RF_TMPFS: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$RF_TMPFS" = true ]; then export RF_CI_TMPBASE=/tmp; fi
+          python3 -B scripts/ci/test-tmp.py init
 
 
       - name: Install nextest
@@ -862,8 +864,10 @@ jobs:
 
       - name: Isolate test temporary files
         env:
-          RF_CI_TMPBASE: ${{ runner.environment == 'github-hosted' && '/tmp' || env.RF_CI_TMPBASE }}
-        run: python3 -B scripts/ci/test-tmp.py init
+          RF_TMPFS: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$RF_TMPFS" = true ]; then export RF_CI_TMPBASE=/tmp; fi
+          python3 -B scripts/ci/test-tmp.py init
 
 
       - name: Install nextest
