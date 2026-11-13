@@ -12,15 +12,8 @@ use crate::custody::{
         Install, Installation, NodeHeadPersist, full_generation::owner::FullGenerationPreparation,
     },
 };
-use ramflux_crypto::custody::{
-    CooperativeTransferInput, MasterKey, RecoveryPhrase, SelfSigningKey,
-    cooperative_transfer_preserving_devices,
-};
-use ramflux_protocol::{
-    canonical_json_bytes,
-    custody::{CustodyAuthority, Publication, object_hash},
-    encode_base64url,
-};
+use ramflux_crypto::custody::SelfSigningKey;
+use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
 
 struct Published {
@@ -35,7 +28,7 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
     rig.primary.sync_relay().await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     Box::pin(finish_owned_stream(&mut rig)).await?;
-    let published = publication(&rig, &operation)?;
+    let published = Box::pin(publication(&mut rig, &operation)).await?;
     refuses_before_j6_or_with_wrong_primary(&rig, &published, false)?;
     let pinned = pin_published_target(&rig, &published)?;
     refuses_before_j6_or_with_wrong_primary(&rig, &published, true)?;
@@ -91,88 +84,155 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
     hold.finish().await?;
     Ok(())
 }
-fn publication(rig: &Rig, operation: &str) -> Result<Published, Box<dyn std::error::Error>> {
-    let (record, live) = {
-        let slot = rig.participant_b.db.lock().map_err(|_| "B proposal owner")?;
-        let db = slot.as_ref().ok_or("B proposal writer")?;
+async fn publication(
+    rig: &mut Rig,
+    operation: &str,
+) -> Result<Published, Box<dyn std::error::Error>> {
+    let request = {
+        let slot = rig.participant_b.db.lock().map_err(|_| "B prepare owner")?;
+        let db = slot.as_ref().ok_or("B prepare writer")?;
+        let live = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .ok_or("B prepare live")?;
         let stage = db.open_full_transfer_stage(
             operation,
             ramflux_crypto::custody::pairing::PairingRole::Responder,
             rig.now,
         )?;
-        (
-            stage.resume_record()?,
-            db.pairing_live_rows()?
-                .into_iter()
-                .find(|row| row.operation_id == operation)
-                .ok_or("B live")?,
-        )
+        ramflux_protocol::custody::pairing::local_dto::Prepare {
+            schema: "ramflux.pairing.Prepare.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: live.generation,
+            transcript_hash: encode_base64url(stage.resume_record()?.th),
+        }
     };
-    let authority =
-        rig.participant_b.query.current_authority(&record.grant.destination_ref.account_anchor)?;
-    let current = ramflux_crypto::custody::verify_publication(&authority, rig.now)?;
-    let branch_ref = live.branch_vault_ref.clone().ok_or("own B branch")?;
-    let (publication, primary_ref) = candidate(rig, &record, &current, &branch_ref)?;
-    let hash = object_hash(&publication.record)?;
-    let head = HeadRow {
-        account_id: rig.participant_b.account_id.clone(),
-        operation_id: operation.into(),
-        invitation_id: Some(live.invitation_id),
-        generation: live.generation,
-        kind: "transfer".into(),
-        base_record_hash: record.base_record_hash,
-        base_epoch: current.envelope().body.device_set_epoch,
-        publisher_ref: canonical_json_bytes(&record.grant.source_ref)?,
-        candidate: canonical_json_bytes(&publication)?,
-        candidate_hash: hash.clone(),
-        state: "prepared".into(),
-        ack: None,
-        recipient_ref: Some(canonical_json_bytes(&record.grant.destination_ref)?),
-        revoked_ref: None,
-        created_at: rig.now,
-    };
-    prepare_head(rig, &head)?;
-    // Actual native core persistence happens after releasing the original B loan.
-    assert_eq!(rig.node.persist_head(&publication, rig.now)?, hash);
-    let authority =
-        rig.participant_b.query.current_authority(&record.grant.destination_ref.account_anchor)?;
-    let install = Install {
-        schema: "ramflux.pairing.Install.v2".into(),
-        version: 2,
-        account_id: rig.participant_b.account_id.clone(),
-        account_anchor: record.grant.destination_ref.account_anchor.clone(),
-        operation_id: operation.into(),
-        recipient_ref: record.grant.destination_ref,
-        recipient_mode: "new".into(),
-        install_purpose: "transfer_destination".into(),
-        record_hash: Some(hash),
-        prior_record_hash: None,
-        branch_vault_ref: branch_ref,
-        data_vault_ref: ramflux_storage::FileVaultSecretSource::owner_ref(
-            &rig.participant_b.account_id,
-        ),
-        primary_vault_ref: Some(primary_ref),
-        state: "vault_durable".into(),
-        cleanup_ref: None,
-        cleanup_owner_ref: None,
-        full_transfer: None,
-    };
+    let reservation = super::super::local_credential::load_reservation(
+        &rig.participant_b.root,
+        &rig.participant_b.account_id,
+    )?
+    .ok_or("B prepare reservation")?;
+    assert!(
+        rig.participant_a
+            .prepare_full_transfer_candidate(&request, reservation.frontend_generation)
+            .is_err(),
+        "A accepted B phrase preparation"
+    );
+    let mut wrong = request.clone();
+    wrong.generation += 1;
+    assert!(
+        rig.participant_b
+            .prepare_full_transfer_candidate(&wrong, reservation.frontend_generation)
+            .is_err(),
+        "stale frontend accepted phrase preparation"
+    );
+    // B must supply fresh attended phrase approval; data resume need not retain
+    // the original local confirmation flags. This is not a process-restart fixture.
+    rig.secondary.replace_full_confirmations_for_test((false, false))?;
+    let prepared = rig.secondary.prepare_full_transfer(&request).await?;
+    assert!(
+        matches!(prepared.outcome,ramflux_protocol::custody::pairing::local_dto::Outcome::FullStatus {value} if value.stage==ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Candidate)
+    );
+    let (publication, install) = rig.secondary.full_prepared_candidate_for_test()?;
+    let head = rig
+        .participant_b
+        .db
+        .lock()
+        .map_err(|_| "B prepared owner")?
+        .as_ref()
+        .ok_or("B prepared writer")?
+        .pairing_head()?
+        .ok_or("B durable prepared head")?;
+    assert_eq!(head.candidate, canonical_json_bytes(&publication)?);
+    assert_eq!(head.state, "prepared");
+    prove_source_preservation(rig, &publication, &install).await?;
+    // Independent real native persistence remains outside every local DB loan.
+    assert_eq!(rig.node.persist_head(&publication, rig.now)?, head.candidate_hash);
+    let authority = rig.participant_b.query.current_authority(&install.account_anchor)?;
     Ok(Published { authority, install, head })
 }
-fn prepare_head(rig: &Rig, head: &HeadRow) -> TestResult {
-    let slot = rig.participant_b.db.lock().map_err(|_| "B candidate owner")?;
-    let db = slot.as_ref().ok_or("B candidate writer")?;
-    let mut live = db
-        .pairing_live_rows()?
-        .into_iter()
-        .find(|row| row.operation_id == head.operation_id)
-        .ok_or("candidate live")?;
-    live.phase = "proposal_pending".into();
-    live.proposal_hash = Some(head.candidate_hash.clone());
-    db.put_pairing_live(&live)?;
-    db.commit_pairing_head(head)?;
+async fn prove_source_preservation(
+    rig: &mut Rig,
+    publication: &ramflux_protocol::custody::Publication,
+    install: &Install,
+) -> TestResult {
+    rig.participant_a.take_client(&mut rig.source.client)?;
+    let original = rig.primary.replace_full_confirmations_for_test((false, false))?;
+    let refused = rig.primary.preserve_full_candidate(publication.clone()).await.is_err();
+    rig.primary.replace_full_confirmations_for_test(original)?;
+    assert!(refused, "data metadata restored A preservation approval without local confirmation");
+    assert!(
+        rig.secondary.preserve_full_candidate(publication.clone()).await.is_err(),
+        "B accessed original A preservation signer"
+    );
+    let primary = rig
+        .participant_b
+        .vault
+        .load_primary(install.primary_vault_ref.as_deref().ok_or("B primary ref")?)?;
+    let mut removed = publication.clone();
+    let old = rig.participant_a.query.current_authority(&install.account_anchor)?;
+    let old_primary = &old.publication.record.body.master_certificate.body.primary_device_ref;
+    let mut body = removed.record.body.clone();
+    body.devices.retain(|device| device.device_id != old_primary.device_id);
+    removed.record = primary.sign_record(body)?;
+    assert!(
+        rig.primary.preserve_full_candidate(removed).await.is_err(),
+        "A approved a validly signed candidate that removed its branch"
+    );
+    let foreign = foreign_destination_branch(publication, &primary)?;
+    assert!(
+        rig.primary.preserve_full_candidate(foreign).await.is_err(),
+        "A approved a candidate with a substituted SAS-bound B key"
+    );
+    let signed = rig.primary.preserve_full_candidate(publication.clone()).await?;
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::custody::signing_bytes(&signed.body.schema, &signed.body)?,
+        &signed.signature,
+        &old.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    assert_eq!(
+        signed.body.new_record_hash,
+        ramflux_protocol::custody::object_hash(&publication.record)?
+    );
+    assert!(
+        rig.primary.preserve_full_candidate(publication.clone()).await? == signed,
+        "identical preservation was not durably idempotent"
+    );
+    rig.participant_a.return_client(&mut rig.source.client)?;
     Ok(())
 }
+
+fn foreign_destination_branch(
+    publication: &ramflux_protocol::custody::Publication,
+    primary: &SelfSigningKey,
+) -> Result<ramflux_protocol::custody::Publication, Box<dyn std::error::Error>> {
+    let mut foreign = publication.clone();
+    let mut body = foreign.record.body.clone();
+    let reference = body.master_certificate.body.primary_device_ref.clone();
+    let device = body
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == reference.device_id)
+        .ok_or("B candidate device")?;
+    let mut branch = device.branch_certificate.as_ref().ok_or("B candidate branch")?.body.clone();
+    branch.branch_signing_public_key = SelfSigningKey::generate()?.public_key();
+    let (signing, agreement) = ramflux_crypto::device_key_commitments(
+        &branch.branch_signing_public_key,
+        &branch.agreement_identity_public_key,
+    )?;
+    device.branch_certificate = Some(primary.certify_branch(branch)?);
+    device.signing_key_commitment = signing;
+    device.agreement_key_commitment = agreement;
+    foreign.record = primary.sign_record(body)?;
+    ramflux_crypto::custody::verify_publication(
+        &CustodyAuthority { publication: foreign.clone(), custodian_publication: None },
+        crate::custody::network_now()?,
+    )?;
+    Ok(foreign)
+}
+
 fn pin_published_target(
     rig: &Rig,
     published: &Published,
@@ -245,53 +305,6 @@ fn refuses_before_j6_or_with_wrong_primary(
         "refused G1 changed selected B"
     );
     Ok(())
-}
-
-fn candidate(
-    rig: &Rig,
-    record: &ramflux_crypto::custody::pairing::FullResumeRecord,
-    current: &ramflux_crypto::custody::VerifiedRecord,
-    branch_ref: &str,
-) -> Result<(Publication, String), Box<dyn std::error::Error>> {
-    let phrase = RecoveryPhrase::parse(rig.source.phrase.as_ref().ok_or("fixture local phrase")?)?;
-    let master = MasterKey::from_phrase(&phrase)?;
-    let primary = SelfSigningKey::generate()?;
-    let primary_ref = encode_base64url(ramflux_crypto::random_32()?);
-    rig.participant_b.vault.store_new(&primary_ref, &primary)?;
-    let branch = rig.participant_b.vault.load_branch(
-        branch_ref,
-        &current.envelope().body.principal_id,
-        &record.grant.destination_ref,
-    )?;
-    let mut certificate = current
-        .envelope()
-        .body
-        .devices
-        .first()
-        .and_then(|device| device.branch_certificate.as_ref())
-        .ok_or("branch template")?
-        .body
-        .clone();
-    certificate.device_id = record.grant.destination_ref.device_id.clone();
-    certificate.device_epoch = record.grant.destination_ref.device_epoch;
-    certificate.branch_signing_public_key =
-        encode_base64url(branch.signing.signing_key.verifying_key().to_bytes());
-    certificate.agreement_identity_public_key = encode_base64url(branch.agreement.public);
-    certificate.cert_id = encode_base64url(ramflux_crypto::random_32()?);
-    let candidate = cooperative_transfer_preserving_devices(
-        &master,
-        &primary,
-        current,
-        CooperativeTransferInput {
-            destination: record.grant.destination_ref.clone(),
-            fresh_destination: Some(certificate),
-            highest_observed_range: 0,
-            issued_at: rig.now,
-            master_cert_id: encode_base64url(ramflux_crypto::random_32()?),
-        },
-    )?;
-    let publication = Publication { record: candidate, compacted_ids: None };
-    Ok((publication, primary_ref))
 }
 
 fn finish_installed(
@@ -401,4 +414,32 @@ fn admits_exact_g3(rig: &Rig, db: &ramflux_storage::AccountDb, installed: &Insta
     )?;
     check()?;
     Ok(())
+}
+
+struct FullPhraseFixture {
+    phrase: Option<zeroize::Zeroizing<String>>,
+    setup: super::super::recipient::tests::Phrase,
+}
+pub(super) fn phrase_provider(
+    phrase: Option<&str>,
+) -> std::sync::Arc<dyn super::super::LocalCredentialProvider> {
+    std::sync::Arc::new(FullPhraseFixture {
+        phrase: phrase.map(|value| zeroize::Zeroizing::new(value.into())),
+        setup: super::super::recipient::tests::Phrase::setup(b"component-recipient-passphrase"),
+    })
+}
+impl super::super::LocalCredentialProvider for FullPhraseFixture {
+    fn provide(
+        &self,
+        request: &ramflux_protocol::custody::pairing::local_dto::CredentialRequest,
+    ) -> Result<super::super::CredentialOutcome, crate::SdkError> {
+        if request.action != "phrase" {
+            return self.setup.provide(request);
+        }
+        let phrase = self.phrase.as_ref().ok_or(crate::SdkError::PairingCode("WrongContext"))?;
+        Ok(super::super::CredentialOutcome::Provided {
+            passphrase: super::super::SecretUtf8::from_bytes(phrase.as_bytes())?,
+            confirmation: None,
+        })
+    }
 }

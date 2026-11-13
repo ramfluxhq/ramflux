@@ -505,4 +505,5 @@ impl LocalPairingParticipant {
 }
 
 mod full;
+pub use full::FullPreparedTransferCandidate;
 pub(crate) use full::FullProofSigner;

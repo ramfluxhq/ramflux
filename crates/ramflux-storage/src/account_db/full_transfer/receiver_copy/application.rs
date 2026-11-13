@@ -169,6 +169,10 @@ impl FullReceiverBaseCopy {
         let records = union.records;
         let bytes = union.total_bytes;
         let hash = self.hash.clone();
+        // Even an uncertain metadata COMMIT must never leave a durable key pointing
+        // at files removed on error. Unreferenced retained orphans are reclaimed by
+        // the next independently locked scratch pin; the current metadata owner is kept.
+        self.scratch.retain();
         stage.connection.call(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute("INSERT INTO receiver_generation VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(singleton) DO UPDATE SET generation_nonce=excluded.generation_nonce,stage_digest=excluded.stage_digest,manifest_hash=excluded.manifest_hash,workspace=excluded.workspace,private_key=excluded.private_key,union_root=excluded.union_root,records=excluded.records,encoded_bytes=excluded.encoded_bytes",params![nonce.as_slice(),digest.as_slice(),hash,workspace,key.as_slice(),root.as_slice(),records,bytes])?;
@@ -178,8 +182,6 @@ impl FullReceiverBaseCopy {
             }
             tx.commit()
         })?;
-        // A possible metadata commit must never leave its durable key pointing at deleted files.
-        self.scratch.retain();
         super::super::stage::sync_stage(&stage.directory)?;
         self.observation.require_current(stage.db)
     }
