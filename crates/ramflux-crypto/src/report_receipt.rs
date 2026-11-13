@@ -120,7 +120,8 @@ mod tests {
     #[test]
     fn v2_transcript_does_not_reuse_v1_domain() {
         let (_, input) = sample();
-        let preimage = node_report_receipt_preimage(&input).expect("preimage");
+        let preimage =
+            node_report_receipt_preimage(&input).expect("test: encode the node receipt preimage");
         assert!(preimage.starts_with(ramflux_protocol::domain::FRANKING_NODE_TAG_V2.as_bytes()));
         assert!(
             !preimage
@@ -132,9 +133,11 @@ mod tests {
     #[test]
     fn trusted_node_key_verifies_and_reporter_key_is_refused() {
         let (seed, input) = sample();
-        let signature = sign_node_report_receipt_with_seed(&input, seed).expect("sign");
+        let signature =
+            sign_node_report_receipt_with_seed(&input, seed).expect("test: sign the node receipt");
         let trusted = public_key_base64url_from_seed(seed);
-        verify_node_report_receipt(&input, &signature, &trusted).expect("trusted");
+        verify_node_report_receipt(&input, &signature, &trusted)
+            .expect("test: verify against the trusted node key");
         let reporter = public_key_base64url_from_seed([0x72; 32]);
         assert!(matches!(
             verify_node_report_receipt(&input, &signature, &reporter),

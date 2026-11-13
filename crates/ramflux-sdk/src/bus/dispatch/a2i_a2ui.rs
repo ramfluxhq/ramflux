@@ -129,8 +129,8 @@ mod tests {
         client.create_identity_root("principal_a2ui_test", [0x31; 32]);
         client.create_device_branch("principal_a2ui_test", "app_device_a2ui", 1, [0x32; 32]);
         let gateway = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse().expect("valid bind addr"),
-            gateway_addr: "127.0.0.1:1".parse().expect("valid gateway addr"),
+            bind_addr: "127.0.0.1:0".parse().expect("test: valid bind addr"),
+            gateway_addr: "127.0.0.1:1".parse().expect("test: valid gateway addr"),
             server_name: "ramflux-gateway".to_owned(),
             ca_cert: PathBuf::from("ca.pem"),
             principal_id: "principal_a2ui_test".to_owned(),
@@ -174,7 +174,10 @@ mod tests {
                     ..
                 })
             ));
-            assert_eq!(state.accounts.get("acct").expect("fixture account").pending_a2i.len(), 0);
+            assert_eq!(
+                state.accounts.get("acct").expect("test: fixture account").pending_a2i.len(),
+                0
+            );
         }
     }
 
@@ -205,7 +208,7 @@ mod tests {
     fn action(surface: &A2uiSurface) -> A2uiAction {
         A2uiAction {
             surface_id: surface.surface_id.clone(),
-            surface_hash: legacy_a2ui_render_profile_hash(surface).expect("surface hash"),
+            surface_hash: legacy_a2ui_render_profile_hash(surface).expect("test: surface hash"),
             component_id: "approve".to_owned(),
             permission: "mcp.approve".to_owned(),
             source_device_id: "app_device_a2ui".to_owned(),
@@ -239,7 +242,7 @@ mod tests {
             &mut state,
             &mut connection,
         )
-        .expect("a2ui action");
+        .expect("test: a2ui action");
         assert_eq!(result.response_body["accepted"], true);
         assert!(
             result.response_body["action"]["signature"]

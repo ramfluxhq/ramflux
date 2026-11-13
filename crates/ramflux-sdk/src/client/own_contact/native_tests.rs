@@ -17,10 +17,13 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     )?;
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
-    let value = own.client.change_self_sync(
-        "native-bootstrap-thread",
-        ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
-    )?;
+    let value = {
+        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        own.client.change_self_sync(
+            "native-bootstrap-thread",
+            ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
+        )?
+    };
     assert_eq!(value.revision, 1);
     let mut native = own.manifest.custody.as_ref().ok_or("native")?.clone();
     let primary = own.vault.primary_for_public_key(

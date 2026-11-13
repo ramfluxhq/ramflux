@@ -529,3 +529,6 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
 
 #[path = "pre_auth_custody_tests.rs"]
 pub(crate) mod pre_auth_matrix;
+
+#[path = "generation_zero_ingress_tests.rs"]
+mod generation_zero_ingress;

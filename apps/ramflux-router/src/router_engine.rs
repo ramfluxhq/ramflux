@@ -142,6 +142,12 @@ fn prepare_submission(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<PreparedSubmit> {
+    if matches!(
+        ramflux_node_core::check_entry_bound(&envelope),
+        Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused)
+    ) {
+        return Ok(complete_response(crate::durable_mode::rejected_security(&envelope)));
+    }
     record_decoded(&envelope);
     let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
     {

@@ -14,6 +14,7 @@ impl RamfluxClient {
         &self,
         conversation: &str,
     ) -> Result<Option<g::SelfSync>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let clear = g::SelfSync { operation: 3, revision: 1, ..Default::default() };
         let Some(state) = self.self_sync_state(conversation, &clear)? else {
             return Ok(None);

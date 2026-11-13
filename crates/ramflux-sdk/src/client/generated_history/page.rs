@@ -4,10 +4,9 @@
 //! Native own-root history transport, exact-item digest chain and atomic item imports.
 use crate::client::identity_authority::{HeadUse, NativeOperation};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
-use prost::Message as _;
 use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct Transfer {
@@ -18,6 +17,16 @@ struct Transfer {
     pages: BTreeMap<u64, Vec<u8>>,
     #[serde(default)]
     retired: Vec<Retired>,
+    #[serde(default)]
+    refusals: VecDeque<ItemRefusal>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ItemRefusal {
+    transfer: Vec<u8>,
+    page: u64,
+    item: usize,
+    code: crate::error::GeneratedRefusalCode,
 }
 
 // The wire TTL is u32 seconds. Keep every retired id for that entire maximum
@@ -92,14 +101,62 @@ impl Transfer {
 }
 
 fn edited(item: &g::HistoryItem) -> Result<bool, SdkError> {
-    let inner = g::Inner::decode(item.exact_inner.as_slice())
+    let inner = g::validation::scan_inner(&item.exact_inner)
         .map_err(|_| refused("history item Inner malformed"))?;
     Ok(inner.kind == 3
         || item.original_metadata_evidence.is_some()
         || !item.exact_original_identity.is_empty())
 }
 
+// A refusal can deny dependent items but never supplies origin authority for them.
+fn claimed_edit_target(item: &g::HistoryItem) -> Option<Vec<u8>> {
+    let inner = g::validation::scan_inner(&item.exact_inner).ok()?;
+    if inner.kind != 3 || inner.outcome != g::validation::ScanOutcome::Supported {
+        return None;
+    }
+    let content = g::registry::decode_body(inner.kind, inner.body, inner.layer).ok()?;
+    let Some(g::content::Value::Edit(edit)) = content.value else {
+        return None;
+    };
+    Some(edit.target?.id)
+}
+
+fn item_refusal(error: SdkError) -> Result<crate::error::GeneratedRefusalCode, SdkError> {
+    use crate::error::GeneratedRefusalCode as Code;
+    use g::original_header::EvidenceError;
+    match error {
+        SdkError::GeneratedRefused { code, .. } => Ok(code),
+        SdkError::HistoryEvidence(EvidenceError::OriginEvidenceMissing) => {
+            Ok(Code::OriginEvidenceMissing)
+        }
+        SdkError::HistoryEvidence(_) => Ok(Code::OriginCommitmentMismatch),
+        SdkError::InboundRejected(_) | SdkError::ReplayMismatch => Ok(Code::Content),
+        // Storage and transient authority failures propagate to the enclosing transaction.
+        error => Err(error),
+    }
+}
+
 impl RamfluxClient {
+    fn import_history_page_item(
+        &self,
+        entry: &GatewayInboxEntry,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        item: &g::HistoryItem,
+    ) -> Result<(), SdkError> {
+        let identity = if edited(item)? {
+            self.verify_generated_edited_history_item(item)?
+        } else {
+            Self::verify_history_message_origin(item)?.0
+        };
+        self.authorize_history_message_scope(&identity)?;
+        if edited(item)? {
+            self.apply_generated_history_edit(entry, item)?;
+        } else {
+            self.import_generated_history_message(source, item)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn authorize_generated_history_page(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -117,14 +174,6 @@ impl RamfluxClient {
         let key = format!("routed/history-transfer/{}", source.storage_key());
         let mut state = self.account_db()?.load_actor_state::<Transfer>(&key)?.unwrap_or_default();
         state.advance(&page, crate::time::now_unix_timestamp())?;
-        for item in &page.items {
-            let identity = if edited(item)? {
-                self.verify_generated_edited_history_item(item)?
-            } else {
-                Self::verify_history_message_origin(item)?.0
-            };
-            self.authorize_history_message_scope(&identity)?;
-        }
         Ok(page)
     }
 
@@ -142,12 +191,33 @@ impl RamfluxClient {
             if !state.advance(&page, crate::time::now_unix_timestamp())? {
                 return Ok(());
             }
-            for item in &page.items {
-                if edited(item)? {
-                    self.apply_generated_history_edit(entry, item)?;
+            let mut refused_targets = std::collections::BTreeSet::new();
+            for (index, item) in page.items.iter().enumerate() {
+                let target = claimed_edit_target(item);
+                let imported = if target.as_ref().is_some_and(|id| refused_targets.contains(id)) {
+                    Err(SdkError::GeneratedRefused {
+                        code: crate::error::GeneratedRefusalCode::OriginCommitmentMismatch,
+                        reason: "history item depends on a refused item".into(),
+                    })
                 } else {
-                    self.import_generated_history_message(&source, item)?;
+                    db.write_transaction(|| self.import_history_page_item(entry, &source, item))
+                };
+                let code = match imported {
+                    Ok(()) => continue,
+                    Err(error) => item_refusal(error)?,
+                };
+                if let Some(target) = target {
+                    refused_targets.insert(target);
                 }
+                if state.refusals.len() >= RETIRED_CAPACITY {
+                    state.refusals.pop_front();
+                }
+                state.refusals.push_back(ItemRefusal {
+                    transfer: page.transfer_id.clone(),
+                    page: page.page,
+                    item: index,
+                    code,
+                });
             }
             db.persist_actor_state(&key, &state)?;
             Ok(())

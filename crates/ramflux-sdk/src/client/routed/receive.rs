@@ -916,6 +916,9 @@ impl RamfluxClient {
         local: &str,
         code: &str,
     ) -> Result<(), SdkError> {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Ok(());
+        }
         if matches!(code, "authentication_failed" | "schema_invalid" | "routing_rejected") {
             return match self.commit_authenticated_refused_transport(entry, local) {
                 Err(error @ SdkError::Storage(_)) => Err(error),

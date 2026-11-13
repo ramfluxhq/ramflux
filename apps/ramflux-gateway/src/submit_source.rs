@@ -14,6 +14,7 @@ pub(crate) fn bind_source(
     {
         anyhow::bail!("submit source differs from authenticated session");
     }
+    ramflux_node_core::check_entry_bound(envelope)?;
     let mut envelope = envelope.clone();
     envelope.ext.ext.remove("source_device_authority");
     if ramflux_protocol::schema_profile::schema_v1_live() {

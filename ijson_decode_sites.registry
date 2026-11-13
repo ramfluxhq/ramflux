@@ -801,6 +801,9 @@ crates/ramflux-storage/src/account_db/backup_object_metadata.rs | references | 1
 crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 1 | A | strict=parse_i_json; independently verified immutable header boundary
 crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 2 | A | strict=parse_i_json; independently verified immutable header boundary
 crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 3 | C | admission=crates/ramflux-storage/src/account_db/backup_original_header.rs#verified_preimage#2
+crates/ramflux-storage/src/account_db/backup_reaction.rs | order | 1 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_reaction.rs | require_reaction_receipts_agree | 1 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_reaction.rs | require_reaction_receipts_agree | 2 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
 crates/ramflux-storage/src/account_db/backup_selector_admission.rs | validate_graph | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_selector_admission.rs | validate_graph | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_selector_admission/placeholders.rs | legacy_target_identity | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

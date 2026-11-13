@@ -553,7 +553,8 @@ pub(crate) fn notification_class_for_envelope(
         ramflux_protocol::DeliveryClass::SelfDeviceControl => {
             ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification
         }
-        ramflux_protocol::DeliveryClass::NotificationWake => {
+        ramflux_protocol::DeliveryClass::NotificationWake
+        | ramflux_protocol::DeliveryClass::CallWake => {
             ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
         }
         _ => ramflux_protocol::NotificationDeliveryClass::UserContentNotification,

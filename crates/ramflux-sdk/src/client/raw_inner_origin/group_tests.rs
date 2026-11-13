@@ -228,6 +228,7 @@ async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
             erasure_nonce: vec![50 + counter; 32],
             ..Default::default()
         };
+        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let wrapper = owner.client.encrypt_generated_group_message(
             "opening-group",
             &owner.config.device_id,

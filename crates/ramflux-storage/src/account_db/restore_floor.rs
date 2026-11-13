@@ -101,6 +101,7 @@ mod tests {
     #[test]
     fn actor_counter_floor_lifts_and_refuses_rollback() -> Result<(), Box<dyn std::error::Error>> {
         let (root, db) = crate::tests::test_db("actor-counter-floor")?;
+        let _root_guard = crate::tests::TestDirGuard(root.clone());
         let key = "restore-floor-test/counter";
         assert!(db.admit_actor_counter_floor(key, 3, FloorPolicy::Lift).is_err());
         db.write_transaction(|| db.admit_actor_counter_floor(key, 1 << 62, FloorPolicy::Refuse))?;
@@ -122,7 +123,7 @@ mod tests {
         );
         assert_eq!(db.load_actor_state::<u64>(key)?, Some(u64::MAX));
         drop(db);
-        std::fs::remove_dir_all(root)?;
+
         Ok(())
     }
 
@@ -130,7 +131,9 @@ mod tests {
     fn restore_refuses_archive_from_newer_schema_in_same_generation()
     -> Result<(), Box<dyn std::error::Error>> {
         let (source_root, source) = crate::tests::test_db("schema-downgrade-source")?;
+        let _source_root_guard = crate::tests::TestDirGuard(source_root.clone());
         let (target_root, target) = crate::tests::test_db("schema-downgrade-target")?;
+        let _target_root_guard = crate::tests::TestDirGuard(target_root.clone());
         source.persist_actor_state("message-identity/hlc/unreachable", &9_u64)?;
         source.connection.execute_batch(
             "CREATE TEMP TABLE newer_schema AS SELECT * FROM schema_migration ORDER BY schema_version DESC LIMIT 1;
@@ -166,8 +169,7 @@ mod tests {
                 .query_row("SELECT count(*) FROM runtime_actor_state", [], |row| row.get(0))?;
         assert_eq!(before, after);
         drop((merged, source, target));
-        std::fs::remove_dir_all(source_root)?;
-        std::fs::remove_dir_all(target_root)?;
+
         Ok(())
     }
 }

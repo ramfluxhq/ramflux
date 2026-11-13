@@ -150,6 +150,7 @@ impl RamfluxClient {
         conversation: &str,
         mut value: g::SelfSync,
     ) -> Result<g::SelfSync, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let source = self.owned_device_identity()?;
         self.authorize_self_sync(&source, conversation)?;
         self.require_backup_outbound_ready()?;
@@ -414,6 +415,7 @@ impl RamfluxClient {
     /// # Errors
     /// Requires same-root Sync authority and returns storage errors.
     pub fn bootstrap_self_sync(&self, sibling: &RootQualifiedDeviceRef) -> Result<(), SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         if sibling.root_commitment() != self.own_account_anchor()? {
             return Err(refused("foreign bootstrap target"));
         }

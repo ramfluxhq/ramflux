@@ -63,6 +63,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns authority and storage failures; the erase is atomic.
     pub fn erase_self_sync_conversation(&self, conversation: &str) -> Result<(), SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let own = self.owned_device_identity()?;
         self.authorize_self_sync(&own, conversation)?;
         let db = self.account_db()?;
@@ -97,6 +98,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns authority and storage failures.
     pub fn recreate_self_sync_conversation(&self, conversation: &str) -> Result<(), SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let own = self.owned_device_identity()?;
         self.authorize_self_sync(&own, conversation)?;
         self.account_db()?.persist_actor_state(

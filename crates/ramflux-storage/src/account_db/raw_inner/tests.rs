@@ -937,3 +937,68 @@ fn source_evidence_copy_is_charged_bound_and_erased_with_target() -> TestResult 
     );
     Ok(())
 }
+
+#[test]
+fn raw_wire_writer_validates_kinds_and_requires_reset_for_old_ddl() -> TestResult {
+    for old in [false, true] {
+        let (root, db) = test_db("raw-wire-kind-reset")?;
+        let _root = crate::tests::TestDirGuard(root);
+        if old {
+            db.connection.call(|sql| {
+                sql.execute_batch("DROP TABLE raw_inner_copy")?;
+                sql.execute_batch(&super::schema::SCHEMA.replace(
+                    "copy_kind TEXT NOT NULL,",
+                    "copy_kind TEXT NOT NULL CHECK(copy_kind IN ('outer_inner','nested_group','history_container')),",
+                ))
+            })?;
+        }
+        let write = |copy_id, kind| {
+            db.write_transaction(|| {
+                db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                    owner_id: "kind-owner",
+                    verified_source_anchor: "kind-root",
+                    copy_id,
+                    kind,
+                    bytes: b"exact retained bytes",
+                    bounded_metadata: b"{}",
+                })
+            })
+        };
+        write("seed", RawInnerCopyKind::OuterInner)?;
+        db.connection.call(|sql| super::schema::install(sql))?;
+        assert_eq!(
+            db.raw_inner_copy("seed")?.ok_or("seed missing")?.bytes,
+            b"exact retained bytes",
+            "install must preserve existing copies"
+        );
+        let inserted = write("evidence", RawInnerCopyKind::SourceEvidence);
+        if old {
+            assert!(
+                matches!(inserted, Err(StorageError::RawWireResetRequired)),
+                "old CHECK must produce the typed activation reset error"
+            );
+            let activation =
+                db.connection.call(|sql| Ok(super::schema::require_raw_wire_reset(sql)))?;
+            assert!(
+                matches!(activation, Err(StorageError::RawWireResetRequired)),
+                "activation must refuse the old table without rebuilding it"
+            );
+        } else {
+            inserted?;
+            db.connection.call(|sql| {
+                sql.execute(
+                    "UPDATE raw_inner_copy SET copy_kind='unknown' WHERE copy_id='seed'",
+                    [],
+                )
+            })?;
+            assert!(
+                matches!(
+                    write("seed", RawInnerCopyKind::OuterInner),
+                    Err(StorageError::AuthorizationRejected)
+                ),
+                "writer must refuse an unknown stored kind before accepting a duplicate"
+            );
+        }
+    }
+    Ok(())
+}

@@ -31,6 +31,7 @@ mod backup_object_erasure;
 mod backup_object_erasure_tests;
 mod backup_object_metadata;
 mod backup_original_header;
+mod backup_reaction;
 mod backup_retirement;
 mod backup_selector_admission;
 mod backup_self_sync;

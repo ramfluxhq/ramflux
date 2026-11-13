@@ -226,6 +226,7 @@ impl RamfluxClient {
         sender: &str,
         message: &g::Message,
     ) -> Result<g::Message, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         g::validation::validate_message(message).map_err(|_| refused("invalid group Message"))?;
         if message.sealed_group.is_some() {
             return Err(refused("recursive sealed group"));

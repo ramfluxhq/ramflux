@@ -197,7 +197,7 @@ async fn wait_disconnected(
 
 async fn next_session(
     handle: &ConnectionHandle,
-    sessions: &mut mpsc::UnboundedReceiver<SessionIo>,
+    sessions: &mut mpsc::Receiver<SessionIo>,
     generation: u64,
 ) -> Result<SessionIo, Box<dyn std::error::Error>> {
     for _ in 0..10_000 {

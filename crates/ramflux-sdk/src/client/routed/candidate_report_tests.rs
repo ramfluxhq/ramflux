@@ -747,3 +747,6 @@ async fn refused_first_c_does_not_strand_pair_successor() -> Result<(), SdkError
     assert!(b.client.direct_message_by_id("after-first-c-refusal")?.is_some());
     Ok(())
 }
+
+#[path = "legacy_quarantine_tests.rs"]
+mod legacy_quarantine;

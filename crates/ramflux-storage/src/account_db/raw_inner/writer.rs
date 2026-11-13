@@ -20,6 +20,16 @@ pub enum RawInnerCopyKind {
 }
 
 impl RawInnerCopyKind {
+    fn from_sql(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "outer_inner" => Ok(Self::OuterInner),
+            "nested_group" => Ok(Self::NestedGroup),
+            "history_container" => Ok(Self::HistoryContainer),
+            "source_evidence" => Ok(Self::SourceEvidence),
+            _ => Err(StorageError::AuthorizationRejected),
+        }
+    }
+
     fn as_sql(self) -> &'static str {
         match self {
             Self::OuterInner => "outer_inner",
@@ -54,6 +64,18 @@ pub(super) fn validate_id(value: &str) -> Result<(), StorageError> {
         return Err(StorageError::AuthorizationRejected);
     }
     Ok(())
+}
+
+fn copy_insert_error(kind: RawInnerCopyKind, error: rusqlite::Error) -> StorageError {
+    match &error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if kind == RawInnerCopyKind::SourceEvidence
+                && code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
+        {
+            StorageError::RawWireResetRequired
+        }
+        _ => StorageError::from(error),
+    }
 }
 
 pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), StorageError> {
@@ -105,7 +127,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         .optional()?;
     if let Some((existing_owner, existing_kind, existing_digest, existing_bytes)) = existing {
         if existing_owner == owner_id
-            && existing_kind == kind.as_sql()
+            && RawInnerCopyKind::from_sql(&existing_kind)? == kind
             && existing_digest == digest
             && existing_bytes == bytes
         {
@@ -138,7 +160,8 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         "INSERT INTO raw_inner_copy(copy_id,owner_id,copy_kind,raw_digest,raw_bytes,copy_metadata)
          VALUES(?1,?2,?3,?4,?5,?6)",
         params![copy_id, owner_id, kind.as_sql(), digest.as_slice(), bytes, metadata],
-    )?;
+    )
+    .map_err(|error| copy_insert_error(kind, error))?;
     db.execute(
         "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",
         params![format!("raw:{copy_id}"), owner_id],

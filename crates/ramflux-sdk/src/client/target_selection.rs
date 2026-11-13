@@ -168,6 +168,17 @@ pub(crate) fn schema_v1_selected() -> bool {
     schema_v1_live()
 }
 
+/// Refuse effectful generated entry points before any local allocation or write.
+pub(crate) fn require_schema_v1() -> Result<(), SdkError> {
+    if !schema_v1_selected() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::error::GeneratedRefusalCode::Content,
+            reason: "generated profile is not selected".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Map a kind onto an admitted layer. Never substitutes text for a control.
 /// # Errors
 /// Rejects the unspecified kind id.

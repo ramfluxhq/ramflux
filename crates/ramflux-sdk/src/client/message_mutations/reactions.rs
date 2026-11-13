@@ -25,6 +25,7 @@ impl RamfluxClient {
         conversation: &str,
         reaction: &g::Reaction,
     ) -> Result<bool, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let source = self.authenticated_device_identity(
             crate::client::identity_authority::HeadUse::NewAuthorization,
             entry,

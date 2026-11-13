@@ -200,9 +200,10 @@ impl AdapterError {
             }
             SdkError::GatewayWriterBusy => GeneratedErrorCode::RateLimited,
             SdkError::Json(_) => GeneratedErrorCode::InvalidJson,
-            SdkError::Storage(ramflux_storage::StorageError::SchemaResetRequired { .. }) => {
-                GeneratedErrorCode::SchemaResetRequired
-            }
+            SdkError::Storage(
+                ramflux_storage::StorageError::SchemaResetRequired { .. }
+                | ramflux_storage::StorageError::RawWireResetRequired,
+            ) => GeneratedErrorCode::SchemaResetRequired,
             SdkError::Storage(ramflux_storage::StorageError::MessageNotFound(_)) => {
                 GeneratedErrorCode::TargetNotFound
             }

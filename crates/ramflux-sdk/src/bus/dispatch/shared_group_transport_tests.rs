@@ -5,6 +5,8 @@
 use super::*;
 use crate::bus::runtime_tests;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+#[path = "shared_group_member_cap_fixture.rs"]
+mod member_cap_fixture;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn pending(client: &RamfluxClient) -> Result<Value, SdkError> {
     client
@@ -163,7 +165,7 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
         },
         Some(&primary),
     )?;
-    populate_member_cap(&source.client, &source.config.target_delivery_id, &primary)?;
+    member_cap_fixture::populate(&source.client, &source.config.target_delivery_id, &primary)?;
     let state = source
         .client
         .account_db()?
@@ -249,38 +251,6 @@ async fn assert_work_window_yields(source: &mut LocalBusAccountState, first: Val
     assert_eq!(yielded["round_active"], true);
     assert_eq!(yielded["attempt"], 1);
     assert_eq!(yielded["round_devices"], 0);
-    Ok(())
-}
-
-fn populate_member_cap(
-    client: &RamfluxClient,
-    target: &str,
-    primary: &ramflux_crypto::custody::SelfSigningKey,
-) -> TestResult {
-    for index in 2..ramflux_protocol::group_state::MAX_GROUP_STATE_MEMBERS {
-        let mut seed = [0xd5; 32];
-        seed[..8].copy_from_slice(&u64::try_from(index)?.to_le_bytes());
-        let identity = ramflux_crypto::certify_group_state_actor(
-            &ramflux_crypto::create_identity_root(&format!("member-{index}"), seed),
-            &ramflux_crypto::create_device_branch(
-                &format!("member-{index}"),
-                &format!("phone-{index}"),
-                1,
-                seed,
-            ),
-            &format!("target-{index}"),
-        )?
-        .identity;
-        client.shared_group_change_with_primary(
-            "group",
-            target,
-            ramflux_protocol::group_state::GroupStateChange::Add {
-                member: identity,
-                role: ramflux_protocol::SharedGroupRole::Member,
-            },
-            Some(primary),
-        )?;
-    }
     Ok(())
 }
 

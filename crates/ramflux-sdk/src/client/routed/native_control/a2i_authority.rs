@@ -9,6 +9,8 @@ impl RamfluxClient {
     /// # Errors
     /// Always returns the typed Authority refusal until a native contract exists.
     pub(crate) fn require_a2i_binding_authority() -> Result<(), SdkError> {
+        // Control 11 requires a durable native binding/grant authority at every generation.
+        // Generation zero grants no legacy execution authority for this control.
         Self::refuse_a2i_binding_authority()
     }
 

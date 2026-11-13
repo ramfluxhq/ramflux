@@ -22,6 +22,9 @@ pub enum StorageError {
         "SchemaResetRequired: storage generation {generation} differs from supported {supported}; preserve this path and create a fresh store for the matching profile"
     )]
     SchemaResetRequired { generation: i64, supported: i64 },
+    /// The pre-activation raw-copy table cannot retain the current evidence kinds.
+    #[error("RawWireResetRequired: preserve this store and reset it before raw-wire activation")]
+    RawWireResetRequired,
     #[error("object erased")]
     ObjectErased,
     #[error("object identity conflict; explicit verified replacement is required")]

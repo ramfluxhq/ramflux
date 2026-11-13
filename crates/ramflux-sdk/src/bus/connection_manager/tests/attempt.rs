@@ -110,7 +110,7 @@ async fn manager_retries_connector_error_with_the_same_backoff_policy()
 -> Result<(), Box<dyn std::error::Error>> {
     super::watchdog(async {
         let limits = limits();
-        let (sessions, mut receive) = mpsc::unbounded_channel();
+        let (sessions, mut receive) = mpsc::channel(8);
         let attempts = Arc::new(AtomicUsize::new(0));
         let handle = ConnectionHandle::start_with(
             config()?,
@@ -181,7 +181,7 @@ async fn manager_honours_a_long_local_cooldown_across_status_polls_and_network_r
 -> Result<(), Box<dyn std::error::Error>> {
     watchdog(async {
         let limits = limits();
-        let (sessions, mut receive) = mpsc::unbounded_channel();
+        let (sessions, mut receive) = mpsc::channel(8);
         let attempts = Arc::new(AtomicUsize::new(0));
         let handle = ConnectionHandle::start_with(
             config()?,

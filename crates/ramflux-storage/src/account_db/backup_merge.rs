@@ -137,8 +137,11 @@ impl BackupDatabase {
                     {
                         return Err(StorageError::AuthorizationRejected);
                     }
-                    let first = roots[0].as_str().ok_or(StorageError::AuthorizationRejected)?;
-                    let second = roots[1].as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    let [first, second] = roots.as_slice() else {
+                        return Err(StorageError::AuthorizationRejected);
+                    };
+                    let first = first.as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    let second = second.as_str().ok_or(StorageError::AuthorizationRejected)?;
                     if first != own_root && second != own_root {
                         return Err(StorageError::AuthorizationRejected);
                     }
@@ -434,6 +437,7 @@ impl BackupDatabase {
         self.merge_generated_identity_floors()?;
         // Losing Edit revisions are fenced before any incoming row is archived or merged.
         self.merge_edit_registers()?;
+        self.merge_reaction_registers()?;
         Ok(floors)
     }
 
@@ -888,7 +892,7 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
             )
         };
         return format!(
-            "{}>{} AND r.state_kind NOT LIKE 'dm-pair/%' AND r.state_kind NOT LIKE 'identity/%'",
+            "{}>{} AND r.state_kind NOT LIKE 'dm-pair/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'routed/reaction/%'",
             timestamp("r"),
             timestamp("l")
         );

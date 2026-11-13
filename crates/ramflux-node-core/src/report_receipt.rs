@@ -207,10 +207,10 @@ mod tests {
         let mut envelope = outer();
         let receipt =
             append_node_report_receipt(&mut envelope, "node-p08", &trusted, 1_760_000_001)
-                .expect("append");
+                .expect("test: append the authenticated envelope");
         assert!(envelope.node_report_receipt.is_some());
         verify_bound_node_report_receipt(&envelope, &receipt, trusted.public_key_base64url())
-            .expect("trusted");
+            .expect("test: verify against the trusted node key");
         assert!(
             verify_bound_node_report_receipt(&envelope, &receipt, reporter.public_key_base64url())
                 .is_err(),
@@ -230,12 +230,13 @@ mod tests {
         let inner = b"group-inner";
         let opening = [0x44; 32];
         let a0 = b"a0-bytes";
-        let commitment = ramflux_crypto::report_commitment(&opening, inner, a0).expect("C");
+        let commitment = ramflux_crypto::report_commitment(&opening, inner, a0)
+            .expect("test: compute the direct report commitment");
         let mut envelope = outer();
         envelope.report_commitment = ramflux_protocol::encode_base64url(commitment);
         envelope.delivery_class = CandidateDeliveryClass::Message;
-        let receipt =
-            append_node_report_receipt(&mut envelope, "node-p08", &trusted, 9).expect("append");
+        let receipt = append_node_report_receipt(&mut envelope, "node-p08", &trusted, 9)
+            .expect("test: append the authenticated envelope");
         let missing_opening = verify_group_report_evidence(
             &envelope,
             &receipt,
@@ -274,7 +275,7 @@ mod tests {
             },
             trusted.public_key_base64url(),
         )
-        .expect("complete group report");
+        .expect("test: complete group report");
     }
 
     #[test]

@@ -223,7 +223,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::Storage(StorageError::ObjectOwnershipUnverified { .. }) => {
             "ObjectOwnershipUnverified"
         }
-        SdkError::Storage(StorageError::SchemaResetRequired { .. }) => "SchemaResetRequired",
+        SdkError::Storage(
+            StorageError::SchemaResetRequired { .. } | StorageError::RawWireResetRequired,
+        ) => "SchemaResetRequired",
         SdkError::Storage(StorageError::AccountSchemaTooNew { .. }) => "AccountSchemaTooNew",
         SdkError::AttachmentDeleted => "AttachmentDeleted",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
@@ -303,7 +305,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         E::ObjectErased => "ObjectErased",
         E::ObjectIdentityConflict => "ObjectIdentityConflict",
         E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",
-        E::SchemaResetRequired { .. } => "SchemaResetRequired",
+        E::SchemaResetRequired { .. } | E::RawWireResetRequired => "SchemaResetRequired",
         E::AccountSchemaTooNew { .. } => "AccountSchemaTooNew",
         E::Io(_) | E::Sqlite(_) => "storage_unavailable",
         E::Integrity(_)

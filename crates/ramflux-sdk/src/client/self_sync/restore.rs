@@ -94,6 +94,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn self_sync_restore_does_not_reissue_stale_revision() -> TestResult {
+        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let own = Fixture::new("self-sync-restore-wait").await?;
         let mute = || g::SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };
         assert_eq!(own.client.change_self_sync("c", mute())?.revision, 1);
@@ -128,6 +129,7 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn self_sync_restore_restart_at_twenty_nine_seconds_restarts_the_barrier() -> TestResult {
+        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let mut own = Fixture::new("self-sync-restore-restart").await?;
         let mute = || g::SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };
         own.client
@@ -160,6 +162,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn self_sync_restore_requires_uninterrupted_live_time_and_incomplete_peer_never_clears()
     -> TestResult {
+        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let mut own = Fixture::new("self-sync-restore-live").await?;
         let sibling = own.enroll_sibling("self-sync-live-sibling", "sibling").await?;
         let mute = || g::SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };

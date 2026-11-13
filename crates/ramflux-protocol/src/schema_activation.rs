@@ -28,7 +28,9 @@ pub const SELF_SYNC_COMPLETE: &str = "self_sync_complete";
 pub const TYPED_RUNTIME_COMPLETE: &str = "typed_runtime_complete";
 /// Generation-zero codecs and their selection branches are deleted.
 pub const LEGACY_CODEC_REMOVED: &str = "legacy_codec_removed";
-/// The raw Inner wire and the schema-profile reset are installed for existing stores.
+/// The raw Inner wire and schema reset are installed for existing stores, including removal
+/// of development `raw_inner_copy` copy-kind CHECK constraints by resetting the store.
+/// Constrained stores must return `RawWireResetRequired`, never rebuild or migrate the table.
 pub const RAW_WIRE_RESET_INSTALLED: &str = "raw_wire_reset_installed";
 /// The real router and gateway module gate passed on the activation tree.
 pub const REAL_COMPONENT_GATE_GREEN: &str = "real_component_gate_green";
@@ -53,13 +55,12 @@ pub const PRECONDITIONS: [Precondition; 10] = [
 
 /// True when every listed precondition is attested.
 #[must_use]
-pub const fn all_met(rows: &[Precondition]) -> bool {
-    let mut index = 0;
-    while index < rows.len() {
-        if !rows[index].met {
+pub const fn all_met(mut rows: &[Precondition]) -> bool {
+    while let [first, rest @ ..] = rows {
+        if !first.met {
             return false;
         }
-        index += 1;
+        rows = rest;
     }
     true
 }

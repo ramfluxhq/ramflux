@@ -176,7 +176,10 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
         ..Default::default()
     };
     let value = source.client.change_self_sync("floor-thread", draft)?;
-    source.client.erase_self_sync_conversation("floor-thread")?;
+    {
+        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        source.client.erase_self_sync_conversation("floor-thread")?;
+    }
     assert_eq!(source.client.account_db()?.actor_state_keys("self-sync/state/")?.len(), 0);
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(matches!(

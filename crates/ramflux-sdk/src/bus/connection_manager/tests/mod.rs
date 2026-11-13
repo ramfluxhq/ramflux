@@ -59,7 +59,7 @@ impl GatewaySessionFrameSource for ScriptedStream {
     }
 }
 struct Connector {
-    sessions: mpsc::UnboundedSender<SessionIo>,
+    sessions: mpsc::Sender<SessionIo>,
     frame: Duration,
 }
 impl SessionConnector for Connector {
@@ -78,7 +78,7 @@ impl SessionConnector for Connector {
         engine.frame_timeout = self.frame;
         let result = self
             .sessions
-            .send(SessionIo { input, output, raw })
+            .try_send(SessionIo { input, output, raw })
             .map(|()| engine)
             .map_err(|_| SdkError::GatewaySessionNotEstablished);
         Box::pin(std::future::ready(result))
@@ -150,7 +150,7 @@ pub(crate) async fn ephemeral_fixture_for(
 ) -> Result<(ConnectionHandle, SessionIo), Box<dyn std::error::Error>> {
     let limits = limits();
     let frame = limits.frame;
-    let (sessions, mut receive) = mpsc::unbounded_channel();
+    let (sessions, mut receive) = mpsc::channel(8);
     let handle = ConnectionHandle::start_with(
         config,
         None,
@@ -165,8 +165,8 @@ pub(crate) async fn ephemeral_fixture_for(
 
 pub(crate) fn reconnecting_fixture(
     limits: RuntimeTimeouts,
-) -> Result<(ConnectionHandle, mpsc::UnboundedReceiver<SessionIo>), Box<dyn std::error::Error>> {
-    let (sessions, receive) = mpsc::unbounded_channel();
+) -> Result<(ConnectionHandle, mpsc::Receiver<SessionIo>), Box<dyn std::error::Error>> {
+    let (sessions, receive) = mpsc::channel(8);
     let frame = limits.frame;
     let handle = ConnectionHandle::start_with(
         config()?,
@@ -248,7 +248,7 @@ pub(crate) fn seeded(
     limits: RuntimeTimeouts,
 ) -> (ConnectionHandle, SessionIo) {
     let (engine, io) = seeded_engine(config.clone(), &limits);
-    let (sessions, _unused) = mpsc::unbounded_channel();
+    let (sessions, _unused) = mpsc::channel(8);
     let frame = limits.frame;
     let handle = ConnectionHandle::start_with(
         config,

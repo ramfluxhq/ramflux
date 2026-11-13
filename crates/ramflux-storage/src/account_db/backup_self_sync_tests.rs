@@ -35,6 +35,7 @@ fn self_sync_restore_imports_erase_floors_before_values_and_never_archives_erase
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
     ));
+    let _root_guard = crate::tests::TestDirGuard(root.clone());
     let source_index = AccountIndex::open(root.join("source"))?;
     let target_index = AccountIndex::open(root.join("target"))?;
     source_index.create_account("source", "own")?;
@@ -122,7 +123,7 @@ fn self_sync_restore_imports_erase_floors_before_values_and_never_archives_erase
     drop(target);
     drop(source_index);
     drop(target_index);
-    std::fs::remove_dir_all(root)?;
+
     Ok(())
 }
 
@@ -140,7 +141,9 @@ fn read(merged: &BackupDatabase, key: &str) -> Result<Option<Value>, Box<dyn std
 #[test]
 fn self_sync_restore_erases_local_repair_fingerprints_and_outbox_copies() -> TestResult {
     let (source_root, source) = crate::tests::test_db("sync-restore-retire-source")?;
+    let _source_root_guard = crate::tests::TestDirGuard(source_root.clone());
     let (target_root, target) = crate::tests::test_db("sync-restore-retire-target")?;
+    let _target_root_guard = crate::tests::TestDirGuard(target_root.clone());
     source.persist_actor_state(
         "self-sync/erase/restored-fence",
         &json!({"conversation_id":"erased","erased":true}),
@@ -187,7 +190,6 @@ fn self_sync_restore_erases_local_repair_fingerprints_and_outbox_copies() -> Tes
         "00000000000000000009"
     );
     drop((merged, source, target));
-    std::fs::remove_dir_all(source_root)?;
-    std::fs::remove_dir_all(target_root)?;
+
     Ok(())
 }

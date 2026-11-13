@@ -11,6 +11,7 @@ use serde_json::json;
 const THREAD: &str = "refresh-thread";
 
 fn mute(client: &RamfluxClient) -> Result<g::SelfSync, SdkError> {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     client.change_self_sync(THREAD, g::SelfSync { operation: 6, mute: true, ..Default::default() })
 }
 
@@ -169,6 +170,7 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
 #[tokio::test]
 async fn self_sync_sent_draft_issues_one_explicit_clear_and_retires_draft_body() -> TestResult {
     let own = Fixture::new("self-sync-draft-sent").await?;
+    let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(own.client.clear_self_sync_draft_after_send(THREAD)?.is_none(), "no draft, no clear");
     let draft = own.client.change_self_sync(
         THREAD,
@@ -200,6 +202,7 @@ async fn self_sync_courier_never_forwards_register_with_unauthenticated_referenc
     let own = Fixture::new("self-sync-courier-reference").await?;
     let id = blake3::hash(b"pinned before arrival").as_bytes().to_vec();
     // The pin target is unknown at first, so the register is stored as received.
+    let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let pin = own.client.change_self_sync(
         THREAD,
         g::SelfSync {

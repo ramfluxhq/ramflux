@@ -52,7 +52,7 @@ pub enum ReceiveEpochReconcileFailure {
 }
 
 /// Stable durable generated-message refusal class, shared with receive admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GeneratedRefusalCode {
     Identity,
     Authority,

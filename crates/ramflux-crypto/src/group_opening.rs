@@ -90,10 +90,10 @@ pub fn verify_group_message_opening(
             sealed.key_epoch,
             ramflux_protocol::encode_base64url(&sealed.group_state_hash),
         ))?;
-        let opening_key: &[u8; 32] =
-            (&opening[..32]).try_into().map_err(|_| CryptoError::GroupReportOpeningMissing)?;
-        let commitment_key: &[u8; 32] =
-            (&opening[32..]).try_into().map_err(|_| CryptoError::GroupReportOpeningMissing)?;
+        let (opening_key, remainder) =
+            opening.split_first_chunk::<32>().ok_or(CryptoError::GroupReportOpeningMissing)?;
+        let commitment_key =
+            remainder.first_chunk::<32>().ok_or(CryptoError::GroupReportOpeningMissing)?;
         let computed = franking_commitment(&FrankingCommitmentInput {
             plaintext,
             sender_device_id_hash: &sealed.sender_device_hash,

@@ -1031,7 +1031,9 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         E::ObjectErased => RamfluxErrorCode::ObjectErased,
         E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
         E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
-        E::SchemaResetRequired { .. } => RamfluxErrorCode::SchemaResetRequired,
+        E::SchemaResetRequired { .. } | E::RawWireResetRequired => {
+            RamfluxErrorCode::SchemaResetRequired
+        }
         E::OperationReconciliationRequired { .. } => RamfluxErrorCode::InvalidArgument,
         E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)

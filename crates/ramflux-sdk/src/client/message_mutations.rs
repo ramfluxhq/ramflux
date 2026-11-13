@@ -68,6 +68,7 @@ impl RamfluxClient {
         conversation: &str,
         delete: &ramflux_protocol::message::Delete,
     ) -> Result<(), SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let source = self.authenticated_device_identity(
             crate::client::identity_authority::HeadUse::NewAuthorization,
             entry,
@@ -228,6 +229,7 @@ impl RamfluxClient {
         conversation: &str,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         self.apply_generated_edit_with_metadata(entry, conversation, exact_inner, None)
     }
 

@@ -864,6 +864,10 @@ pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageE
         apply_account_migration(connection, migration)?;
     }
     connection.call(|db| crate::account_db::raw_inner::schema::install(db))?;
+    if ramflux_protocol::schema_profile::schema_v1_live() {
+        connection
+            .call(|db| Ok(crate::account_db::raw_inner::schema::require_raw_wire_reset(db)))??;
+    }
     connection.call(|db| crate::account_db::pairing::install(db))?;
     ensure_legacy_columns(connection)?;
     Ok(())

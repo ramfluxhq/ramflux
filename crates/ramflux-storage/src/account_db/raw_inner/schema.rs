@@ -15,7 +15,7 @@ CREATE INDEX IF NOT EXISTS raw_inner_owner_source ON raw_inner_owner(source_anch
 CREATE TABLE IF NOT EXISTS raw_inner_copy(
     copy_id TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL,
-    copy_kind TEXT NOT NULL CHECK(copy_kind IN ('outer_inner','nested_group','history_container','source_evidence')),
+    copy_kind TEXT NOT NULL,
     raw_digest BLOB NOT NULL CHECK(length(raw_digest)=32),
     raw_bytes BLOB NOT NULL,
     attempted_decoder TEXT NOT NULL DEFAULT '',
@@ -52,6 +52,21 @@ pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
     // A live caller's managed transaction also encloses both statements.
     db.execute_batch("UPDATE raw_inner_copy SET copy_metadata=(SELECT metadata FROM raw_inner_owner o WHERE o.owner_id=raw_inner_copy.owner_id) WHERE length(copy_metadata)=0 AND EXISTS(SELECT 1 FROM raw_inner_owner o WHERE o.owner_id=raw_inner_copy.owner_id AND length(o.metadata)>0)")?;
     db.execute_batch("UPDATE raw_inner_owner SET metadata=x'' WHERE length(metadata)>0")?;
+    Ok(())
+}
+
+/// Existing constrained development stores must be reset before activating raw wire storage.
+pub(crate) fn require_raw_wire_reset(db: &Connection) -> Result<(), crate::StorageError> {
+    let ddl: String = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='raw_inner_copy'",
+        [],
+        |row| row.get(0),
+    )?;
+    let normalized: String =
+        ddl.chars().filter(|ch| !ch.is_whitespace()).flat_map(char::to_lowercase).collect();
+    if normalized.contains("check(copy_kindin(") {
+        return Err(crate::StorageError::RawWireResetRequired);
+    }
     Ok(())
 }
 

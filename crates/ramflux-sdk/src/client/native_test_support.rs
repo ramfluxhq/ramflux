@@ -109,3 +109,11 @@ mod live_own_copy;
 mod generated_routes;
 
 mod peer_control_send;
+
+mod generation_zero_tests;
+
+mod history_item_tests;
+
+mod reaction_restore_tests;
+
+pub(crate) mod watchdog;

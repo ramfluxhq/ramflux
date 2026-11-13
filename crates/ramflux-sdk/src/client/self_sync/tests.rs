@@ -30,6 +30,7 @@ fn apply(client: &RamfluxClient, update: &g::SelfSync) -> Result<bool, SdkError>
 }
 
 fn install_read_messages(client: &RamfluxClient) -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let db = client.account_db()?;
     for (id, at) in [("m1", 1), ("m2", 2)] {
         db.import_direct_message_projection(DirectMessageWrite {
@@ -65,6 +66,7 @@ fn install_read_messages(client: &RamfluxClient) -> TestResult {
 
 #[test]
 fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut client, root) = client_with_account("self-sync", "principal_sync", "local")?;
     let db = client.account_db()?;
     db.persist_client_record("conversation", "c", &json!({"kind":"direct"}))?;
@@ -166,6 +168,7 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
 
 #[test]
 fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = g::SelfSync { mute: true, ..value(6, 6) };
     let b = value(7, 6);
     let c = value(7, 7);
@@ -215,6 +218,7 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
 
 #[test]
 fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut states = Vec::new();
     for order in [[read("m2", 1), read("m1", 2)], [read("m1", 2), read("m2", 1)]] {
         let (client, root) =
@@ -251,6 +255,7 @@ fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestRe
 
 #[test]
 fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (client, root) = client_with_account("self-sync-unseen-limit", "principal_sync", "local")?;
     let own = client.owned_device_identity()?;
     client
@@ -298,6 +303,7 @@ fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply(
 
 #[test]
 fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (client, root) = client_with_account("self-sync-read-order", "principal_sync", "local")?;
     install_read_messages(&client)?;
     let db = client.account_db()?;
@@ -323,6 +329,7 @@ fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() 
 
 #[test]
 fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut client, root) =
         client_with_account("self-sync-publication", "principal_sync", "local")?;
     let update = client.change_self_sync("c", value(7, 0))?;
@@ -385,6 +392,7 @@ fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publica
 
 #[test]
 fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copies() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (client, root) =
         client_with_account("self-sync-repair-lifetime", "principal_sync", "local")?;
     let a = g::SelfSync {
@@ -451,6 +459,7 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
 
 #[test]
 fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (client, root) =
         client_with_account("self-sync-repair-read-max", "principal_sync", "local")?;
     install_read_messages(&client)?;
@@ -476,6 +485,7 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
 
 #[test]
 fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (client, root) =
         client_with_account("self-sync-read-reference", "principal_sync", "local")?;
     let mut wrong_author = read("m2", 1);

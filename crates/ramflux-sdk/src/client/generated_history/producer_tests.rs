@@ -29,6 +29,7 @@ async fn history_chain_restart_reexports_prefix_and_starts_at_page_zero() -> Tes
 
 #[tokio::test]
 async fn history_staging_refuses_the_local_device_and_a_foreign_root() -> TestResult {
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let own = Fixture::new("history-producer-own").await?;
     let peer = Fixture::new("history-producer-peer").await?;
     assert_eq!(

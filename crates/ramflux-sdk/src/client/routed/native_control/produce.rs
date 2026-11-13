@@ -29,6 +29,7 @@ impl RamfluxClient {
         payload: g::control::Payload,
         operation_key: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let control = crate::client::generated_control::control_from_payload(payload)?;
         crate::client::generated_control::validate_control_native(&control)?;
         let body = Zeroizing::new(control.encode_to_vec());
@@ -82,6 +83,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns a storage error when the capture row cannot be removed.
     pub fn retire_generated_peer_control(&self, operation_key: &str) -> Result<(), SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         Ok(self.account_db()?.remove_actor_state(&capture_key(operation_key))?)
     }
 
@@ -102,6 +104,7 @@ impl RamfluxClient {
         distribution: &SdkGroupSenderKeyDistribution,
         recipient_device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         if distribution.sender_id != self.owned_device_identity()?.device_id() {
             return Err(content("group key producer must be its sender"));
         }
@@ -134,6 +137,7 @@ impl RamfluxClient {
         invite: &SdkGuardianInviteMessage,
         guardian_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if invite.inviter_principal_id != branch.principal_id
             || invite.inviter_device_id != branch.device_id
@@ -176,6 +180,7 @@ impl RamfluxClient {
         accept: &SdkGuardianAcceptMessage,
         owner_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if accept.guardian_principal_id != branch.principal_id
             || accept.guardian_device_id != branch.device_id
@@ -224,6 +229,7 @@ impl RamfluxClient {
         revoke: g::ObjectRevokeAccess,
         recipient_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let operation_key = format!(
             "object-revoke/{}/{}/{}",
             revoke.object_id, revoke.recipient_principal_id, revoke.link_id

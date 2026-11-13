@@ -343,6 +343,7 @@ impl RamfluxClient {
         handle: &SdkGuardianInviteHandle,
         accept: bool,
     ) -> Result<Option<SdkGuardianAcceptMessage>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             let key = pending_storage_key(&handle.source, &handle.invite_id);
