@@ -134,6 +134,15 @@ pub fn refresh_authority(
     now: u64,
 ) -> Result<(), SdkError> {
     let account = custody::load_data_account(root, account_id, now)?;
+    // A provably older native observation must not allocate an installation fence.
+    // Otherwise a rejected stale-node response can block an already installed device
+    // on its next ordinary unlock. Final installation still rechecks durable pins.
+    if authority.publication.record.body.account_anchor != account.record().body.account_anchor
+        || authority.publication.record.body.device_set_epoch
+            < account.record().body.device_set_epoch
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
     let hash = object_hash(&authority.publication.record)?;
     let reference = ramflux_protocol::custody::DeviceRef {
         account_anchor: account.record().body.account_anchor.clone(),

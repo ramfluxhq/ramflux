@@ -1748,4 +1748,5 @@ async fn settle_stream_work(rig: &Rig) {
     tokio::time::advance(std::time::Duration::from_millis(500)).await;
 }
 
+mod attended_join;
 mod frontend_writer;

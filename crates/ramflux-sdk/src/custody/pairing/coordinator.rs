@@ -35,6 +35,7 @@ pub(super) use full::cancel::FullRuntimeCancel;
 mod local_writer;
 mod registry;
 pub use local_writer::PairingLocalWriterService;
+mod attended_join;
 mod workflow;
 #[cfg(test)]
 pub(crate) use registry::settle_actor_data_for_test;
@@ -1027,6 +1028,14 @@ impl PairingActor {
     }
 
     #[cfg(test)]
+    pub(crate) fn wrap_transport_for_test(
+        &mut self,
+        wrap: impl FnOnce(Arc<dyn PairingTransport>) -> Arc<dyn PairingTransport>,
+    ) {
+        self.transport = wrap(self.transport.clone());
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn commitment_device_id(&self) -> Option<String> {
         self.ceremony.as_ref().and_then(|ceremony| {
@@ -1567,7 +1576,9 @@ pub async fn handle_bus(
     entry.require_live()?;
     let result = match method {
         "device.pair.begin" => Box::pin(actor.begin(bus_body(body)?)).await,
-        "device.pair.join" | "device.transfer.join" => Box::pin(actor.join(bus_body(body)?)).await,
+        "device.pair.join" | "device.transfer.join" => {
+            Box::pin(actor.join_attended(bus_body(body)?)).await
+        }
         "device.pair.confirm" | "device.transfer.confirm" => {
             Box::pin(actor.confirm(&bus_body(body)?)).await
         }

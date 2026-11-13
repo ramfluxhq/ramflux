@@ -469,15 +469,30 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             .map_err(|_| invalid())?;
         // Mandatory even when an operator and the client explicitly choose no binding.
         let material = self.stream.custody_exporter(&nonce)?;
-        let certificate = self
-            .account
-            .record()
+        let record = match &action {
+            CustodyProofAction::Publish { publication } => &publication.record,
+            _ => self.account.record(),
+        };
+        if record.body.account_anchor != self.device.account_anchor {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
+        let certificate = record
             .body
             .devices
             .iter()
-            .find(|d| d.device_id == self.device.device_id)
-            .and_then(|d| d.branch_certificate.as_ref())
+            .find(|device| {
+                device.device_id == self.device.device_id
+                    && device.device_epoch == self.device.device_epoch
+            })
+            .and_then(|device| device.branch_certificate.as_ref())
             .ok_or_else(invalid)?;
+        if certificate.body.branch_signing_public_key
+            != ramflux_protocol::encode_base64url(
+                self.credentials.signing.signing_key.verifying_key().to_bytes(),
+            )
+        {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
         let issued = now()?;
         let proof = sign_branch_proof_v3(
             &self.credentials.signing,
@@ -486,7 +501,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 version: 3,
                 device_ref: self.device.clone(),
                 certificate_hash: object_hash(certificate)?,
-                record_hash: object_hash(self.account.record())?,
+                record_hash: object_hash(record)?,
                 proof_id: random()?,
                 challenge_nonce: challenge.challenge_nonce,
                 action_hash: challenge.action_hash,

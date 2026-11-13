@@ -2,7 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Existing recipient private unlock: prompt off-loan, verify on the actual frontend.
-use super::*;
+use super::{
+    Arc, DeviceRef, Envelope, Invitation, SdkError, SecretUtf8, StageExisting, StageNew,
+    acquire_existing_secret, encode_base64url, load_reservation, random_32, require_existing_refs,
+    stored_data_vault_ref, verify_invitation, write_existing_install, write_floor_live,
+};
 
 /// Owns the private reply until a short frontend check. No database, data key or
 /// borrowed client crosses the provider wait. Dropping wipes the reply.
@@ -71,6 +75,13 @@ impl ExistingFrontendUnlock {
         let participant = &self.participant;
         let db = client.account_db()?;
         participant.full_selected_db(db, None)?;
+        let stored = load_reservation(&participant.root, &participant.account_id)?
+            .ok_or(SdkError::PairingCode("Retired"))?;
+        if stored.frontend_generation != self.frontend_generation
+            || stored.reservation_id != self.reservation_id
+        {
+            return Err(SdkError::PairingCode("Retired"));
+        }
         client.verify_active_account_secret(&participant.account_id, self.secret.as_bytes())?;
         let request = StageExisting {
             new: StageNew {
@@ -91,13 +102,6 @@ impl ExistingFrontendUnlock {
             crate::custody::network_now()?,
         )?;
         require_existing_refs(&request, &native)?;
-        let stored = load_reservation(&participant.root, &participant.account_id)?
-            .ok_or(SdkError::PairingCode("Retired"))?;
-        if stored.frontend_generation != self.frontend_generation
-            || stored.reservation_id != self.reservation_id
-        {
-            return Err(SdkError::PairingCode("Retired"));
-        }
         let staged = write_existing_install(&request, &encode_base64url(*random_32()?))?;
         write_floor_live(db, &request.new, &staged, self.ceremony_generation)?;
         Ok(staged.recipient_ref)

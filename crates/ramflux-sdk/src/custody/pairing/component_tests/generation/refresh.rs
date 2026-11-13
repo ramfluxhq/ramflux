@@ -14,6 +14,13 @@ use crate::custody::pairing::{
 #[tokio::test(start_paused = true)]
 async fn pairing_full_profile_refresh_preserves_selected_generation_and_source_secondary()
 -> TestResult {
+    Box::pin(run_refresh(false)).await
+}
+#[tokio::test(start_paused = true)]
+async fn pairing_authority_refresh_preserves_role_refs_after_reopen() -> TestResult {
+    crate::bus::credentials::contract_tests::deadline(Box::pin(run_refresh(true))).await
+}
+async fn run_refresh(reopen: bool) -> TestResult {
     let hold = ClockHold::new();
     let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
     rig.primary.sync_relay().await?;
@@ -62,6 +69,10 @@ async fn pairing_full_profile_refresh_preserves_selected_generation_and_source_s
         .map_err(|e| format!("refreshed owners/admission: {e}"))?;
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
+    if reopen {
+        reopen_refreshed_frontends(&mut rig, &authority, &old)
+            .map_err(|error| format!("test: refresh reopen: {error}"))?;
+    }
     hold.finish().await?;
     Ok(())
 }
@@ -192,5 +203,191 @@ fn finish_deferred_source_cleanup(
         .len(),
         0
     );
+    Ok(())
+}
+
+fn reopen_refreshed_frontends(
+    rig: &mut Rig,
+    authority: &CustodyAuthority,
+    old: &custody::BornAccount,
+) -> TestResult {
+    use crate::custody::pairing::ordinary_session_admitted;
+    let source =
+        custody::load_account(&rig.participant_a.root, &rig.participant_a.account_id, rig.now)?;
+    let primary =
+        custody::load_account(&rig.participant_b.root, &rig.participant_b.account_id, rig.now)?;
+    let owners = [
+        (
+            &rig.participant_a,
+            b"fresh-source-data".as_slice(),
+            source.branch_vault_ref().to_owned(),
+            source.primary_vault_ref().to_owned(),
+            "source-vault",
+        ),
+        (
+            &rig.participant_b,
+            b"component-recipient-passphrase".as_slice(),
+            primary.branch_vault_ref().to_owned(),
+            primary.primary_vault_ref().to_owned(),
+            "branch-vault",
+        ),
+    ];
+    rig.source.client = crate::RamfluxClient::new();
+    for (participant, password, branch_ref, primary_ref, directory) in owners {
+        assert!(
+            participant.db.lock().map_err(|_| "test: closed participant")?.is_none(),
+            "test: pairing close retained an ordinary database across the process-equivalent reopen"
+        );
+        let before = ramflux_storage::AccountIndex::open(&participant.root)?
+            .account_generation_selection(&participant.account_id)?;
+        let wrapped = ramflux_storage::AccountIndex::open(&participant.root)?
+            .load_wrapped_db_key(&participant.account_id)?
+            .ok_or("test: own wrapped data key")?;
+        let mut wrong = crate::RamfluxClient::new();
+        wrong.open_account_index(&participant.root)?;
+        assert!(
+            wrong.unlock_account(&participant.account_id, b"wrong-original-password").is_err(),
+            "test: refreshed native authority bypassed the original data password"
+        );
+        drop(wrong);
+        let mut frontend = crate::RamfluxClient::new();
+        frontend.open_account_index(&participant.root)?;
+        frontend.unlock_account(&participant.account_id, password).map_err(|error| {
+            format!("test: {} original password reopen: {error}", participant.account_id)
+        })?;
+        assert!(
+            ordinary_session_admitted(&frontend, &participant.account_id)?,
+            "test: refresh/reopen lost the exact installed-generation admission receipt"
+        );
+        let vault = super::super::super::recipient::tests::DiskVault::open(
+            participant.root.join(directory),
+        )?;
+        let current = custody::load_account(&participant.root, &participant.account_id, rig.now)?;
+        require_role_after_reopen(&current, &vault, authority, &branch_ref, &primary_ref, rig.now)
+            .map_err(|error| format!("test: {} reopened role: {error}", participant.account_id))?;
+        require_stale_head_refused(&frontend, participant, &vault, &current, old, rig.now)
+            .map_err(|error| {
+                format!("test: {} stale head refusal: {error}", participant.account_id)
+            })?;
+        let after =
+            frontend.account_index()?.account_generation_selection(&participant.account_id)?;
+        assert_eq!(
+            before.account, after.account,
+            "test: native refresh/reopen replaced the account's selected full data paths"
+        );
+        assert_eq!(
+            before.manifest_json, after.manifest_json,
+            "test: native refresh/reopen rewrote its selected full data manifest"
+        );
+        assert_eq!(
+            frontend
+                .account_index()?
+                .load_wrapped_db_key(&participant.account_id)?
+                .ok_or("test: retained data wrapping")?
+                .key_wrapping_ref,
+            wrapped.key_wrapping_ref,
+            "test: native refresh/reopen substituted this device's original data wrapping owner"
+        );
+    }
+    Ok(())
+}
+
+fn require_stale_head_refused(
+    frontend: &crate::RamfluxClient,
+    participant: &LocalPairingParticipant,
+    vault: &dyn crate::custody::PrimaryVault,
+    current: &custody::BornAccount,
+    old: &custody::BornAccount,
+    now: u64,
+) -> TestResult {
+    let before = crate::custody::pairing::install_store::list_pending(
+        &participant.root,
+        &participant.account_id,
+    )?;
+    let stale = CustodyAuthority { publication: old.publication(), custodian_publication: None };
+    assert!(
+        crate::custody::pairing::refresh_authority(
+            &participant.root,
+            frontend.account_db()?,
+            vault,
+            &participant.account_id,
+            &stale,
+            now
+        )
+        .is_err(),
+        "test: reopened authority pins accepted the old pre-refresh native head"
+    );
+    assert_eq!(
+        crate::custody::pairing::install_store::list_pending(
+            &participant.root,
+            &participant.account_id
+        )?,
+        before,
+        "test: stale-node refusal created an installation fence for the current device"
+    );
+    assert!(
+        crate::custody::pairing::ordinary_session_admitted(frontend, &participant.account_id)?,
+        "test: stale-node refusal removed current ordinary admission"
+    );
+    let retained = custody::load_account(&participant.root, &participant.account_id, now)?;
+    assert_eq!(
+        retained.record(),
+        current.record(),
+        "test: rejected stale refresh still rewrote native authority"
+    );
+    assert_eq!(
+        retained.branch_vault_ref(),
+        current.branch_vault_ref(),
+        "test: rejected stale refresh still rewrote the local branch owner"
+    );
+    assert_eq!(
+        retained.primary_vault_ref(),
+        current.primary_vault_ref(),
+        "test: rejected stale refresh still rewrote the local management role"
+    );
+    Ok(())
+}
+
+fn require_role_after_reopen(
+    current: &custody::BornAccount,
+    vault: &dyn crate::custody::PrimaryVault,
+    authority: &CustodyAuthority,
+    expected_branch: &str,
+    expected_primary: &str,
+    now: u64,
+) -> TestResult {
+    assert_eq!(
+        current.record(),
+        &authority.publication.record,
+        "test: refresh/reopen changed independently observed native authority"
+    );
+    assert_eq!(
+        current.branch_vault_ref(),
+        expected_branch,
+        "test: refresh/reopen changed this device's original branch vault reference"
+    );
+    assert_eq!(
+        current.primary_vault_ref(),
+        expected_primary,
+        "test: refresh/reopen changed the installed primary/secondary role reference"
+    );
+    drop(current.credentials(vault, current.local_device_id()?, now)?);
+    if expected_primary.is_empty() {
+        assert!(
+            matches!(
+                current.group_primary(vault),
+                Err(crate::SdkError::PairingCode("PrimaryRequired"))
+            ),
+            "test: demoted source regained management authority after reopen"
+        );
+    } else {
+        let key = current.group_primary(vault)?;
+        assert_eq!(
+            key.public_key(),
+            authority.publication.record.body.master_certificate.body.self_signing_public_key,
+            "test: recipient reopened another management key"
+        );
+        drop(key);
+    }
     Ok(())
 }

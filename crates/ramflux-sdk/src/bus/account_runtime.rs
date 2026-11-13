@@ -13,6 +13,7 @@ mod commands;
 mod transient;
 pub(super) use transient::TransientHost;
 mod connection;
+mod pairing_calls;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -66,6 +67,7 @@ struct AccountRuntime {
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     transient: TransientHost,
+    pairing: pairing_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -141,12 +143,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         connection_work,
         ledger: None,
         transient: TransientHost::default(),
+        pairing: pairing_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
     if let Some(state) = account.state.accounts.get(&account.id) {
@@ -421,6 +425,11 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => { self.publish_transient_updates(); continue; },
+                completion = self.pairing.receive() => {
+                    if let Some(completion) = completion
+                        && self.finish_pairing_begin(completion).await? { break; }
+                    continue;
+                },
                 command = self.receiver.recv() => command,
                 () = async {
                     match pairing {

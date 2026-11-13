@@ -761,6 +761,7 @@ fn pairing_existing_frontend_unlock_preserves_custom_vault_and_actual_writer() -
     client.set_vault_secret_source(Box::new(FrontendVaultSecret));
     client.open_account_index(root.path())?;
     client.seal_new_account_data(account, &reference.account_anchor, PHRASE)?;
+    client.unlock_account(account, PHRASE)?;
     let path = client.account_db()?.path.clone();
     let invite = invitation("existing", 25, Some(reference.clone()))?;
     let provider = Arc::new(Phrase::setup(PHRASE));

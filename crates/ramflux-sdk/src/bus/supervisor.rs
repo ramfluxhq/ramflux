@@ -491,7 +491,16 @@ impl Supervisor {
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let response = actor.request(request).await;
+        let response = if matches!(
+            request.request.method.as_str(),
+            "device.transfer.begin" | "device.pair.join" | "device.transfer.join"
+        ) {
+            // Source preparation and attended recipient input belong to the initiating
+            // connection/account lifecycle, beyond the ordinary command deadline.
+            super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await
+        } else {
+            actor.request(request).await
+        };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
             self.set_active(&id).await?;
