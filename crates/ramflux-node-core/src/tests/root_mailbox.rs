@@ -9,9 +9,11 @@ struct Mailbox {
     path: PathBuf,
     store: RouterRedbStore,
     router: RouterCore,
+    _directory: ramflux_test_support::TestPath,
 }
 fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
-    let path = temp_store_path("root-qualified-mailbox")?;
+    let _store_directory_0 = temp_store_path("root-qualified-mailbox")?;
+    let path = _store_directory_0.to_path_buf();
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -41,13 +43,13 @@ fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
         store.record_submission_increment(&key, expiry, Some(&queued.entry))?;
     }
     assert_eq!(router.resume("root-replay-target", 0, 10).len(), 2);
-    Ok(Mailbox { path, store, router })
+    Ok(Mailbox { path, store, router, _directory: _store_directory_0 })
 }
 
 #[test]
 fn copied_envelope_ids_from_distinct_roots_survive_mailbox_restart()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Mailbox { path, store, router: _ } = populated_mailbox()?;
+    let Mailbox { _directory, path, store, router: _ } = populated_mailbox()?;
     drop(store);
     let reopened = RouterRedbStore::open(&path)?;
     let restored = reopened.load_router()?.ok_or("restored router")?;
@@ -60,7 +62,7 @@ fn copied_envelope_ids_from_distinct_roots_survive_mailbox_restart()
 #[test]
 fn acknowledging_one_delivery_never_deletes_a_different_roots_same_id_message()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Mailbox { path, store, router } = populated_mailbox()?;
+    let Mailbox { _directory, path, store, router } = populated_mailbox()?;
     let entries = router.resume("root-replay-target", 0, 10);
     assert_eq!(entries[0].envelope.source_principal_id, "mallory");
     assert_eq!(entries[1].envelope.source_principal_id, "bob");
@@ -104,7 +106,7 @@ fn acknowledging_one_delivery_never_deletes_a_different_roots_same_id_message()
 fn retired_mailbox_import_is_refused_without_rewriting_sender_chosen_ids()
 -> Result<(), Box<dyn std::error::Error>> {
     use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
-    let Mailbox { path, store, router } = populated_mailbox()?;
+    let Mailbox { _directory, path, store, router } = populated_mailbox()?;
     let mut entries = router.resume("root-replay-target", 0, 10);
     let target = ramflux_protocol::encode_base64url("root-replay-target");
     entries[0].envelope.envelope_id = format!("delivery/v1/{target}/{:020}", entries[1].inbox_seq);

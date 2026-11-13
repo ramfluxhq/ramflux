@@ -45,7 +45,7 @@ async fn single_worker_reply_and_drop_inner() -> anyhow::Result<()> {
         let durable = Arc::new(tokio::sync::Notify::new());
         let progress_signal = Arc::clone(&durable);
         let observer = ramflux_node_core::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "accepted_assignment" && done {
                     progress_signal.notify_one();
@@ -106,7 +106,7 @@ async fn async_mesh_submit_waits_for_publication() -> anyhow::Result<()> {
         let durable = Arc::new(tokio::sync::Notify::new());
         let signal = Arc::clone(&durable);
         let observer = ramflux_node_core::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "accepted_assignment" && done {
                     signal.notify_one();

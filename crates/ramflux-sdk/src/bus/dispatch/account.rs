@@ -532,8 +532,9 @@ mod tests {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |t| t.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("rf-legacy-manifest-index-{}-{unique}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-legacy-manifest-index-{}-{unique}", std::process::id()));
         let manifest = backup_manifest();
         write_local_bus_account_manifest(&root, &manifest)?;
         std::fs::write(root.join(ramflux_storage::ACCOUNT_INDEX_FILE), b"not an index database")?;
@@ -548,15 +549,16 @@ mod tests {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
-        let root =
-            std::env::temp_dir().join(format!("rf-account-status-{}-{unique}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-account-status-{}-{unique}", std::process::id()));
         let manifest = backup_manifest();
         write_local_bus_account_manifest(&root, &manifest)?;
         let gateway = GatewaySessionConfig::quic(manifest.gateway.clone());
         let mut state = LocalBusDaemonState {
             account_index: None,
             nodes: crate::node::NodeStore::default(),
-            config: LocalBusConfig::new(root.join("bus.sock"), root.clone()),
+            config: LocalBusConfig::new(root.join("bus.sock"), root.to_path_buf()),
             accounts: BTreeMap::from([(
                 "alice".to_owned(),
                 LocalBusAccountState::disconnected(

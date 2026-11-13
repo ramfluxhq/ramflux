@@ -7,11 +7,13 @@ use crate::{AccountDbKey, AccountIndex};
 #[test]
 fn r4_twenty_thousand_downloaded_references_are_scanned_with_bounded_work()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "backup-missing-scan-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "backup-missing-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::generate()?)?;

@@ -6,9 +6,9 @@ use super::*;
 #[test]
 fn own_device_history_restores_member_pins_before_sender_keys_without_conflating_siblings()
 -> Result<(), SdkError> {
-    let (source, source_root) =
+    let (source_root, source) =
         client_with_account("group-pins-source", "principal_sync", "source_device_sync")?;
-    let (mut target, target_root) =
+    let (target_root, mut target) =
         client_with_account("group-pins-target", "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
     source.create_group("sync_group", "source_device_sync")?;
@@ -85,9 +85,9 @@ fn own_device_history_restores_member_pins_before_sender_keys_without_conflating
 #[test]
 fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_membership()
 -> Result<(), SdkError> {
-    let (source, source_root) =
+    let (source_root, source) =
         client_with_account("group-pin-conflict-source", "principal_sync", "source_device_sync")?;
-    let (mut target, target_root) =
+    let (target_root, mut target) =
         client_with_account("group-pin-conflict-target", "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
     source.create_group("sync_group", "source_device_sync")?;

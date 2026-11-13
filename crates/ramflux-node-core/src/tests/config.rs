@@ -69,7 +69,8 @@ allowed_service_ids = ["ramflux-router"]
 router = "ramflux-router:7443"
 "#,
     )?;
-    let root = temp_store_path("effective_redb_path_can_use_state_root_override")?;
+    let _store_directory_0 = temp_store_path("effective_redb_path_can_use_state_root_override")?;
+    let root = _store_directory_0.to_path_buf();
     let path =
         effective_redb_path_with_state_root(&config, Some(root.to_string_lossy().into_owned()));
     assert_eq!(path, root.join("ramflux-router.redb"));

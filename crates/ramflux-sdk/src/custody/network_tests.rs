@@ -11,12 +11,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-pub(crate) struct Root(pub(crate) PathBuf);
-impl Drop for Root {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+pub(crate) struct Root(pub(crate) ramflux_test_support::TestPath);
 struct Shutdown(tokio::sync::watch::Sender<bool>);
 impl Drop for Shutdown {
     fn drop(&mut self) {
@@ -199,10 +194,14 @@ pub(crate) async fn start_server_with_ack_fault(
 
 #[tokio::test]
 async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict() -> Result {
-    let root = Root(std::env::temp_dir().join(format!(
-        "cv-{}",
-        ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-    )));
+    let root = Root(
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "cv-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ),
+        ),
+    );
     std::fs::create_dir(&root.0)?;
     let (address, ca, server) = start_server(&root).await?;
     let socket = root.0.join("bus.sock");
@@ -217,7 +216,7 @@ async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict()
         let _bob_anchor = create(&socket, "bob", "Bob").await?;
         create(&socket, "impostor", "Alice").await?;
         let network = |id: &str| CustodyNetworkConfig {
-            account_root: root.0.clone(),
+            account_root: root.0.to_path_buf(),
             account_id: id.into(),
             device_id: "primary".into(),
             gateway_address: address,

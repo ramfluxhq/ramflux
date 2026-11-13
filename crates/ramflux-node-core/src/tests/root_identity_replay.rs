@@ -98,7 +98,8 @@ fn gateway_rejects_root_claim_and_committed_key_substitution_before_recording_re
 
 #[test]
 fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("gateway-replay-durable")?;
+    let _store_directory_0 = temp_store_path("gateway-replay-durable")?;
+    let path = _store_directory_0.to_path_buf();
     let open = gateway_open_frame("bob", "restart-nonce");
     let auth = gateway_auth_frame(&open, "restart-request", 1_760_000_000)?;
     let registered = gateway_registered_key(&open)?;
@@ -130,10 +131,12 @@ fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-auth-cost-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "gateway-auth-cost-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let store = GatewayRedbStore::open(&path)?;
     store.configure_replay(
         crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
@@ -198,7 +201,8 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
 #[test]
 fn signed_request_capacity_is_root_scoped_and_survives_restore()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("gateway-small-shares")?;
+    let _store_directory_1 = temp_store_path("gateway-small-shares")?;
+    let path = _store_directory_1.to_path_buf();
     let config = GatewayReplayConfig {
         root_budget: 2,
         per_root_share: 4,
@@ -294,7 +298,8 @@ fn rooted_auth(
 #[test]
 pub(crate) fn gateway_root_admission_preserves_honest_auth_and_submit_after_saturation()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("gateway-more-than64-roots")?;
+    let _store_directory_2 = temp_store_path("gateway-more-than64-roots")?;
+    let path = _store_directory_2.to_path_buf();
     let config = GatewayReplayConfig {
         root_budget: 70,
         per_root_share: 4,

@@ -28,8 +28,8 @@ fn key(n: u8) -> String {
 fn authority(generation: u64, n: u8) -> FederationAttachmentAuthority {
     FederationAttachmentAuthority { generation, signing_public_key: key(n) }
 }
-fn path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+fn path(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "rf-fed-authority-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -190,7 +190,8 @@ fn fresh_signed_records_drive_history_through_withdrawal_restart_and_peer_remova
 #[test]
 fn records_that_fail_verification_are_refused_with_the_exact_error_and_change_nothing() -> TestResult
 {
-    let store = FederationRedbStore::open(path("verify"))?;
+    let _store_directory_5 = path("verify");
+    let store = FederationRedbStore::open(&_store_directory_5)?;
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     assert_eq!(
@@ -226,7 +227,8 @@ fn records_that_fail_verification_are_refused_with_the_exact_error_and_change_no
 
 #[test]
 fn a_pin_needs_admission_and_a_negotiated_capability_at_every_lookup() -> TestResult {
-    let store = FederationRedbStore::open(path("lookup"))?;
+    let _store_directory_4 = path("lookup");
+    let store = FederationRedbStore::open(&_store_directory_4)?;
     let book = AttachmentAuthorityBook::new();
     // Never adopted: unadmitted is SourceUnknown, admitted is Unavailable.
     assert_eq!(
@@ -256,7 +258,8 @@ fn a_pin_needs_admission_and_a_negotiated_capability_at_every_lookup() -> TestRe
 
 #[test]
 fn adoption_holds_the_publication_lock_through_the_history_write() -> TestResult {
-    let store = FederationRedbStore::open(path("serialize"))?;
+    let _store_directory_3 = path("serialize");
+    let store = FederationRedbStore::open(&_store_directory_3)?;
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     // While the g4 history write has committed but g4 is not yet published, the book's
@@ -281,7 +284,8 @@ fn adoption_holds_the_publication_lock_through_the_history_write() -> TestResult
 #[test]
 fn concurrent_adoptions_never_publish_below_the_durable_maximum() -> TestResult {
     for round in 0..8_u8 {
-        let store = std::sync::Arc::new(FederationRedbStore::open(path("race"))?);
+        let _store_directory_2 = path("race");
+        let store = std::sync::Arc::new(FederationRedbStore::open(&_store_directory_2)?);
         let book = std::sync::Arc::new(AttachmentAuthorityBook::new());
         let live = std::sync::Arc::new(active(true));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(6));
@@ -456,7 +460,8 @@ fn noncanonical_authority_input_is_refused_with_the_exact_decoder_error() -> Tes
 
 #[test]
 fn a_first_time_peer_is_available_at_the_first_lookup_after_negotiation() -> TestResult {
-    let store = FederationRedbStore::open(path("first-time"))?;
+    let _store_directory_1 = path("first-time");
+    let store = FederationRedbStore::open(&_store_directory_1)?;
     let book = AttachmentAuthorityBook::new();
     let g4 = signed_adv(Some(authority(4, 4)))?;
     // Discovery verified the record while the handshake had not negotiated anything yet.
@@ -479,7 +484,8 @@ fn a_first_time_peer_is_available_at_the_first_lookup_after_negotiation() -> Tes
 #[test]
 fn a_fresh_record_that_withdraws_the_advertisement_clears_the_pin_despite_an_old_negotiated_set()
 -> TestResult {
-    let store = FederationRedbStore::open(path("withdraw"))?;
+    let _store_directory_0 = path("withdraw");
+    let store = FederationRedbStore::open(&_store_directory_0)?;
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     assert_eq!(

@@ -6,7 +6,7 @@ use crate::{AccountDb, AccountIndex};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn legacy_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn legacy_db(tag: &str) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let root = crate::tests::temp_root(tag);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
@@ -32,7 +32,9 @@ fn remove_bundle_schema(db: &AccountDb) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(crate) fn migrated_db(tag: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+pub(crate) fn migrated_db(
+    tag: &str,
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = legacy_db(tag)?;
     remove_bundle_schema(&db)?;
     drop(db);

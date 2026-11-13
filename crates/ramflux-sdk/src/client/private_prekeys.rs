@@ -117,11 +117,13 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn account() -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-private-prekeys-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+    fn account() -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-private-prekeys-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let mut client = RamfluxClient::new();
         client.create_identity_root("alice", [11; 32]);
         client.create_device_branch("alice", "phone", 1, [12; 32]);

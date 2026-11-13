@@ -873,7 +873,7 @@ pub(super) fn insert_archived(
 /// Builds a database whose archive triggers carry the pre-fix guard (listed prefixes only).
 pub(super) fn old_archive_trigger_fixture(
     name: &str,
-) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = crate::tests::test_db(name)?;
     db.connection.execute_batch(
         "CREATE TABLE backup_archived_actor_state(source TEXT,state_kind TEXT,state_json BLOB,PRIMARY KEY(source,state_kind));",

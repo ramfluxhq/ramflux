@@ -19,13 +19,14 @@ pub(in crate::client) fn registered(result: &Result<(), SdkError>) {
 }
 struct Page {
     client: RamfluxClient,
-    root: std::path::PathBuf,
+
     envelope: SdkOwnDeviceSyncEnvelope,
     bytes: Vec<u8>,
+    root: ramflux_test_support::TestPath,
 }
 impl Page {
     fn new(label: &str, closed: bool) -> Result<Self, SdkError> {
-        let (client, root) = client_with_account(label, "principal_sync", "target_device_sync")?;
+        let (root, client) = client_with_account(label, "principal_sync", "target_device_sync")?;
         let envelope = envelope("source_device_sync", "target_device_sync");
         let mut records = Vec::new();
         for id in ["page-first", "page-second"] {

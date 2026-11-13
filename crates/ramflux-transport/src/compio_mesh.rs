@@ -672,7 +672,7 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
     use std::sync::{Arc, mpsc};
     use std::thread;
@@ -1399,12 +1399,16 @@ mod tests {
         ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_transport_{name}_{}_{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+    fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "ramflux_transport_{name}_{}_{}",
+                std::process::id(),
+                Instant::now().elapsed().as_nanos()
+            ));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }

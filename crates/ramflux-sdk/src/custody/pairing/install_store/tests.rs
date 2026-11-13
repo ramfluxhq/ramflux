@@ -144,11 +144,9 @@ fn cleanup_and_id_ref_size_negatives() -> Result<(), SdkError> {
 
 #[test]
 fn pending_file_cap_and_mode() -> Result<(), SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "pair01-p04-install-{}-{}",
-        std::process::id(),
-        encode_base64url([3; 8])
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("pair01-p04-install-{}-{}", std::process::id(), encode_base64url([3; 8])));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root)?;
     for n in 0..3 {
@@ -171,11 +169,10 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
 
 #[test]
 fn list_pending_binds_filename_account_and_size() -> Result<(), SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "pair01-p04-install-bind-{}-{}",
-        std::process::id(),
-        encode_base64url([4; 8])
-    ));
+    let root =
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("pair01-p04-install-bind-{}-{}", std::process::id(), encode_base64url([4; 8])),
+        );
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root)?;
     write_pending(&root, &base("enroll", "reserved"))?;

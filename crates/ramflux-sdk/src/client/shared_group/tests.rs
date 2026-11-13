@@ -3,12 +3,14 @@
 
 //! Full-state convergence, first-message keys, names and removal through SDK group APIs.
 use super::*;
-use std::path::{Path, PathBuf};
-pub(super) fn temp_root(label: &str) -> Result<PathBuf, SdkError> {
-    Ok(std::env::temp_dir().join(format!(
-        "ramflux-group-{label}-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )))
+use std::path::Path;
+pub(super) fn temp_root(label: &str) -> Result<ramflux_test_support::TestPath, SdkError> {
+    Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+        format!(
+            "ramflux-group-{label}-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ),
+    ))
 }
 pub(super) fn person(
     root: &Path,
@@ -20,7 +22,7 @@ pub(super) fn person(
     let mut client = RamfluxClient::new();
     client.create_identity_root(principal, [root_seed; 32]);
     client.create_device_branch(principal, device, 1, [device_seed; 32]);
-    client.open_account_index(root)?;
+    client.open_account_index(&root)?;
     let actor = client.owned_group_actor(&format!("target-{device}"))?;
     client.create_account("acct", &actor.identity.root_commitment)?;
     client.unlock_account("acct", b"shared-group-test")?;

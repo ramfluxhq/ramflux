@@ -26,7 +26,7 @@ impl Scenario {
         fast: bool,
         drivers: &[Driver],
     ) -> Result<Self> {
-        let store = crate::RouterRedbStore::open_without_wal(path)?;
+        let store = crate::RouterRedbStore::open_without_wal(&path)?;
         let router = crate::RouterCore::new();
         store.bootstrap_router(&router)?;
         // Known principals isolate admission from unchanged durable new-principal quotas.
@@ -139,10 +139,12 @@ impl Scenario {
 fn twenty_accounts_same_ip_become_live_within_issuance_windows() -> Result {
     for fast in [false, true] {
         for source in ["192.0.2.1", "2001:db8:1:2::1"] {
-            let path = std::env::temp_dir().join(format!(
-                "custody-population-{}.redb",
-                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-            ));
+            let path = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "custody-population-{}.redb",
+                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                ));
             {
                 let drivers = (0..20)
                     .map(|n| Driver::new(&format!("known-{n}"), 20 + n))

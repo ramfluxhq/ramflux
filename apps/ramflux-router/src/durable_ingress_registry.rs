@@ -135,7 +135,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     }
     let with_wal = std::env::var("RAMFLUX_ROUTER_WAL").ok().as_deref() != Some("0");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let (state, store, path) =
+    let (path, state, store) =
         crate::router_runtime::tests::test_router(&format!("s6c_p03_{with_wal}"))?;
     let handle = Arc::new(crate::router_runtime::RouterHandle::tokio(
         Arc::clone(&state),
@@ -869,7 +869,7 @@ fn assert_transport_matrix(
 async fn gateway_registration_is_bound_to_authenticated_instance_on_tcp_and_tokio_quic()
 -> Result<(), Box<dyn std::error::Error>> {
     let pki = MeshPki::new("gw-instance-identity")?;
-    let (state, store, path) = crate::router_runtime::tests::test_router("gw-instance-identity")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("gw-instance-identity")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio_with_node_id(
         state, store, None, "node-a",
     ));
@@ -1243,28 +1243,24 @@ fn assert_quic_families(
 }
 
 struct MeshPki {
-    root: PathBuf,
     ca_pem: String,
     router: ramflux_transport::MeshTlsConfig,
     gateway: ramflux_transport::MeshTlsConfig,
     gateway_a: ramflux_transport::MeshTlsConfig,
     gateway_b: ramflux_transport::MeshTlsConfig,
     federation: ramflux_transport::MeshTlsConfig,
-}
-
-impl Drop for MeshPki {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    root: ramflux_test_support::TestPath,
 }
 
 impl MeshPki {
     fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-s6c-p03-{name}-{}-{}",
-            std::process::id(),
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-s6c-p03-{name}-{}-{}",
+                std::process::id(),
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         std::fs::create_dir_all(&root)?;
         let ca_key = root.join("ca-key.pem");
         let ca = root.join("ca.pem");

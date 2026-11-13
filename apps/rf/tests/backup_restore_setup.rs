@@ -20,7 +20,9 @@ impl Drop for Daemon {
 async fn fresh_import_without_local_passphrase_refuses_before_verifying_archive()
 -> Result<(), Box<dyn std::error::Error>> {
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = PathBuf::from(format!("/tmp/rf-restore-{}-{unique}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-restore-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&root)?;
     let socket = root.join("bus.sock");
     let mut daemon = Daemon(

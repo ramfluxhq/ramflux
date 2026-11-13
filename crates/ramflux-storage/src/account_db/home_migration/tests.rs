@@ -4,22 +4,20 @@
 //! Private jobs cannot race their public progress, escape into backups or overwrite another job.
 use super::*;
 use crate::{AccountDbKey, AccountIndex, BackupDatabase};
-use std::path::PathBuf;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Root(PathBuf);
-impl Drop for Root {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+struct Root(ramflux_test_support::TestPath);
 fn hash(byte: u8) -> String {
     ramflux_protocol::encode_base64url([byte; 32])
 }
 fn fixture() -> Result<(Root, AccountIndex, AccountDb, AccountDbKey)> {
-    let root = Root(std::env::temp_dir().join(format!(
-        "rf-home-migration-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )));
+    let root = Root(
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "rf-home-migration-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ),
+        ),
+    );
     let index = AccountIndex::open(&root.0)?;
     index.create_account("human", &hash(1))?;
     let key = AccountDbKey::generate()?;

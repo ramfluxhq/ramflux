@@ -34,16 +34,17 @@ impl Drop for Process {
 }
 
 struct Fixture {
-    root: PathBuf,
-    seed: PathBuf,
-    output: PathBuf,
     public: String,
+    root: ramflux_test_support::TestPath,
+    seed: std::path::PathBuf,
+    output: std::path::PathBuf,
 }
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let root = std::env::temp_dir()
-            .join(format!("rf-custody-{}", encode_base64url(ramflux_crypto::random_32()?)));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-custody-{}", encode_base64url(ramflux_crypto::random_32()?)));
         fs::create_dir(&root)?;
         let seed = root.join("node-signing.key");
         fs::write(&seed, encode_base64url([7; 32]))?;
@@ -109,12 +110,6 @@ impl Fixture {
             &fs::read(values.get("RAMFLUX_CUSTODY_NODE_RECORD_FILE").ok_or("missing record")?)?,
             512 * 1024,
         )?)
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

@@ -1731,15 +1731,18 @@ mod spool_tests {
     pub(super) const OPERATION: &str = "op-spool-1";
     pub(super) const OBJECT_ID: &str = "object_spool_1";
 
-    pub(super) fn temp_data_root(test: &str) -> PathBuf {
+    pub(super) fn temp_data_root(test: &str) -> ramflux_test_support::TestPath {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("ramflux-spool-{test}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-spool-{test}-{}-{nanos}", std::process::id()))
     }
 
-    pub(super) fn make_state(data_root: PathBuf) -> LocalBusDaemonState {
+    pub(super) fn make_state(data_root: &Path) -> LocalBusDaemonState {
+        let data_root = data_root.to_path_buf();
         let mut client = RamfluxClient::new();
         client.create_identity_root("principal_spool_test", [0x51; 32]);
         client.create_device_branch("principal_spool_test", "device_spool_test", 1, [0x52; 32]);
@@ -1830,7 +1833,7 @@ mod spool_tests {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             for profile in [false, true] {
                 let directory = tempfile::TempDir::new()?;
-                let mut state = make_state(directory.path().to_path_buf());
+                let mut state = make_state(directory.path());
                 if profile {
                     state.accounts.get_mut(ACCOUNT).ok_or("test: account")?.client.node_relay_options = Some(RelayTransferOptions {
                         relay_endpoint: "quic://127.0.0.1:18443".into(),
@@ -1865,7 +1868,7 @@ mod spool_tests {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             for retired in [serde_json::json!("retired-test-key"), serde_json::Value::Null] {
                 let directory = tempfile::TempDir::new()?;
-                let mut state = make_state(directory.path().to_path_buf());
+                let mut state = make_state(directory.path());
                 dispatch(&mut state, "object.put.begin", begin_body(1, &plaintext_hash(b"x")))
                     .await?;
                 let spool = object_put_spool_path(directory.path(), ACCOUNT, OPERATION);
@@ -1900,7 +1903,7 @@ mod spool_tests {
     #[tokio::test]
     async fn begin_chunk_finish_commits_compact_terminal_and_cleans_up() {
         let root = temp_data_root("happy");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0xA5_u8; 3 * 1024]; // three 1 KiB chunks
         let hash = plaintext_hash(&plaintext);
         dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
@@ -1942,7 +1945,7 @@ mod spool_tests {
     #[tokio::test]
     async fn oversize_begin_is_rejected_before_creating_a_file() {
         let root = temp_data_root("oversize");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let error = dispatch(
             &mut state,
             "object.put.begin",
@@ -1958,7 +1961,7 @@ mod spool_tests {
     #[tokio::test]
     async fn offset_gap_fails_closed_and_destroys_the_spool() {
         let root = temp_data_root("gap");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x11_u8; 2048];
         dispatch(
             &mut state,
@@ -1979,7 +1982,7 @@ mod spool_tests {
     #[tokio::test]
     async fn duplicate_offset_fails_closed() {
         let root = temp_data_root("dup");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x22_u8; 2048];
         dispatch(
             &mut state,
@@ -2003,7 +2006,7 @@ mod spool_tests {
     #[tokio::test]
     async fn chunk_beyond_total_len_fails_closed() {
         let root = temp_data_root("overrun");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         dispatch(&mut state, "object.put.begin", begin_body(1024, &plaintext_hash(&[0x33; 1024])))
             .await
             .expect("begin");
@@ -2019,7 +2022,7 @@ mod spool_tests {
     #[tokio::test]
     async fn hash_mismatch_at_finish_fails_closed_and_cleans_up() {
         let root = temp_data_root("hashmismatch");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x44_u8; 1024];
         // Bind a hash that does NOT match the streamed bytes.
         let wrong_hash = plaintext_hash(&[0x99_u8; 1024]);
@@ -2048,7 +2051,7 @@ mod spool_tests {
     #[tokio::test]
     async fn oversize_chunk_payload_fails_closed() {
         let root = temp_data_root("bigchunk");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let total = MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 4096;
         dispatch(
             &mut state,
@@ -2072,7 +2075,7 @@ mod spool_tests {
     #[tokio::test]
     async fn rehydrate_resumes_a_chunk_phase_spool_after_restart() {
         let root = temp_data_root("rehydrate_resume");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0xB3_u8; 4096];
         let hash = plaintext_hash(&plaintext);
         dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
@@ -2108,7 +2111,7 @@ mod spool_tests {
     async fn rehydrate_fails_closed_on_prefix_hash_mismatch() {
         use std::io::{Seek as _, SeekFrom, Write as _};
         let root = temp_data_root("rehydrate_mismatch");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0xC4_u8; 4096];
         let hash = plaintext_hash(&plaintext);
         dispatch(&mut state, "object.put.begin", begin_body(plaintext.len(), &hash))
@@ -2190,7 +2193,7 @@ mod spool_tests {
     async fn attachment_last_owner_deletion_closes_download_spool_and_refuses_later_reads()
     -> Result<(), SdkError> {
         let root = temp_data_root("get_attachment_erasure");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let mut donor = ramflux_sync::ObjectStore::new();
         let object = donor.put_encrypted_object(GET_OBJECT_ID, b"private attachment spool")?;
         let key = donor.object_key(GET_OBJECT_ID)?;
@@ -2253,7 +2256,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_begin_read_finish_streams_bounded_and_cleans_up() {
         let root = temp_data_root("get_happy");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         // 3 * 512 KiB + a partial tail: forces multiple bounded reads and a final short read.
         let plaintext = vec![0xC7_u8; 3 * MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 4096];
         let hash = plaintext_hash(&plaintext);
@@ -2332,7 +2335,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_read_frame_stays_below_cap_for_a_maximal_read() {
         let root = temp_data_root("get_framecap");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x5A_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES];
         put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
         dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
@@ -2365,7 +2368,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_read_gap_overlap_and_out_of_range_fail_closed() {
         let root = temp_data_root("get_faults");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x33_u8; 4096];
         put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
         dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
@@ -2395,7 +2398,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_read_oversize_len_fails_closed() {
         let root = temp_data_root("get_biglen");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x44_u8; MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES + 8192];
         put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
         dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
@@ -2415,7 +2418,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_begin_of_unknown_object_fails_and_leaves_no_spool() {
         let root = temp_data_root("get_missing");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let error =
             dispatch(&mut state, "object.get.begin", get_begin_body("object_does_not_exist"))
                 .await
@@ -2428,7 +2431,7 @@ mod spool_tests {
     #[tokio::test]
     async fn get_begin_reentry_restarts_from_a_clean_spool() {
         let root = temp_data_root("get_reentry");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x77_u8; 2048];
         put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
         dispatch(&mut state, "object.get.begin", get_begin_body(GET_OBJECT_ID))
@@ -2454,7 +2457,7 @@ mod spool_tests {
     #[tokio::test]
     async fn small_one_shot_get_still_returns_plaintext() {
         let root = temp_data_root("get_oneshot");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         let plaintext = vec![0x9E_u8; 4096];
         put_local_object(&mut state, GET_OBJECT_ID, &plaintext).await;
         let response =

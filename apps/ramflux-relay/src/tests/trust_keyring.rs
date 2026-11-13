@@ -147,8 +147,10 @@ fn live_k1() -> ramflux_node_core::RelayTrustSnapshotCache {
     cache
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("ramflux-a2b2-{name}-{}.json", std::process::id()))
+fn tmp(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-a2b2-{name}-{}.json", std::process::id()))
 }
 
 #[test]

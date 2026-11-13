@@ -808,11 +808,12 @@ fn fresh_group_transcript(
 mod tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-group-session-{test_name}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-group-session-{test_name}-{}-{nanos}", std::process::id()))
     }
 
     #[test]

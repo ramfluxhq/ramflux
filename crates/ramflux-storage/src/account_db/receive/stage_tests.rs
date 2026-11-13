@@ -8,7 +8,9 @@ use crate::{AccountDb, StorageError};
 use rusqlite::params;
 use stage::{ReceiveStage, ReceiveStageResult as R};
 
-pub(super) fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+pub(super) fn setup(
+    name: &str,
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = crate::tests::test_db(name)?;
     db.install_receive_ledger_schema()?;
     db.connection.execute(

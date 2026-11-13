@@ -115,7 +115,7 @@ fn assert_deleted(client: &RamfluxClient, id: &str) -> Result<(), SdkError> {
 
 #[test]
 fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), SdkError> {
-    let (client, root) = client_with_account("t18-fields", "principal_sync", "target_device_sync")?;
+    let (root, client) = client_with_account("t18-fields", "principal_sync", "target_device_sync")?;
     let body = b"original inner body";
     let ciphertext = [1_u8, 2, 3];
     let bytes = prefix_bytes(
@@ -228,7 +228,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
 #[test]
 fn own_sent_raw_erasure_and_replay_reference_survive_restore_without_resurrection()
 -> Result<(), SdkError> {
-    let (client, root) =
+    let (root, client) =
         client_with_account("t18-restore", "principal_sync", "target_device_sync")?;
     let body = b"erasure canary body";
     let ciphertext = [9_u8, 8, 7];
@@ -296,7 +296,7 @@ fn own_sent_raw_erasure_and_replay_reference_survive_restore_without_resurrectio
 
 fn own_import_race(history_first: bool) -> Result<(), SdkError> {
     let label = if history_first { "t12-history-first" } else { "t12-copy-first" };
-    let (client, root) = client_with_account(label, "principal_sync", "target_device_sync")?;
+    let (root, client) = client_with_account(label, "principal_sync", "target_device_sync")?;
     let body = b"race canary body";
     let ciphertext = [4_u8, 5, 6];
     let sent = generated_from_prefix(&prefix_bytes(

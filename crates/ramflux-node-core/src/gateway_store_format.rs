@@ -48,10 +48,12 @@ mod tests {
     {
         for (with_data, old_marker) in [(false, false), (true, false), (false, true), (true, true)]
         {
-            let path = std::env::temp_dir().join(format!(
-                "gateway-old-format-{}.redb",
-                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-            ));
+            let path = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "gateway-old-format-{}.redb",
+                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                ));
             {
                 let db = redb::Database::create(&path)?;
                 let write = db.begin_write()?;

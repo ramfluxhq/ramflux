@@ -7,10 +7,10 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 type Reply = ramflux_node_core::EnvelopeSubmitResponse;
 struct Fixture {
-    root: std::path::PathBuf,
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     handle: RouterHandle,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new(mode: u8, label: &str) -> anyhow::Result<Self> {

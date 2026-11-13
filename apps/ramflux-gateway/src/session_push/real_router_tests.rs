@@ -5,12 +5,11 @@
 use super::*;
 use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
 use std::io::BufRead;
-struct Child(std::process::Child, std::path::PathBuf);
+struct Child(std::process::Child, ramflux_test_support::TestPath);
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-        let _ = std::fs::remove_dir_all(&self.1);
     }
 }
 async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
@@ -75,7 +74,8 @@ async fn real_router_with_state(
         }
     });
     tokio::time::timeout(Duration::from_secs(15), ready).await??;
-    let mut context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
+    let mut context = fixture_value_0;
     context.store =
         Arc::new(ramflux_node_core::GatewayRedbStore::open(child.1.join("gateway.redb"))?);
     context.store.configure_replay(

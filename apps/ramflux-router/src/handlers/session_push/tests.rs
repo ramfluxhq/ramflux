@@ -18,7 +18,7 @@ fn call(router: &RouterHandle, method: &str, path: &str, body: Value) -> anyhow:
     Ok(serde_json::from_slice(&response.body)?)
 }
 fn seed(name: &str) -> anyhow::Result<(RouterHandle, std::path::PathBuf, Value)> {
-    let (state, store, path) = crate::router_runtime::tests::test_router(name)?;
+    let (path, state, store) = crate::router_runtime::tests::test_router(name)?;
     let router = RouterHandle::tokio(state, store, None);
     let envelope = crate::router_runtime::tests::current_envelope(name, "target")?;
     let response = call(&router, "POST", "/mvp0/envelope", serde_json::to_value(envelope)?)?;
@@ -171,7 +171,7 @@ fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
 #[test]
 fn delayed_old_incarnation_ack() -> anyhow::Result<()> {
     // The raw old request is delayed before entering the restarted router.
-    let (state, store, path) = crate::router_runtime::tests::test_router("delayed-old-E")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("delayed-old-E")?;
     let old = store.initialize_inbox("target")?;
     let backup = path.with_extension("backup");
     std::fs::copy(&path, &backup)?;
@@ -264,7 +264,7 @@ fn session_push_requires_gateway_peer() -> anyhow::Result<()> {
 }
 #[test]
 fn capable_establishment_initializes_empty_inbox() -> anyhow::Result<()> {
-    let (state, store, path) = crate::router_runtime::tests::test_router("capable-empty")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("capable-empty")?;
     let router = RouterHandle::tokio(state, store, None);
     let session = ramflux_node_core::SessionDescriptor {
         target_delivery_id: "target_alice".into(),
@@ -306,7 +306,7 @@ fn fanout_mesh_retains_acceptance_metadata() -> anyhow::Result<()> {
     Ok(())
 }
 fn fanout_metadata_case(quic: bool) -> anyhow::Result<()> {
-    let (state, store, path) = crate::router_runtime::tests::test_router("fanout-metadata")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("fanout-metadata")?;
     crate::router_runtime::tests::register_test_device_at(
         &state,
         "alice",

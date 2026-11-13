@@ -7,8 +7,9 @@ use super::*;
 #[test]
 fn registration_older_than_the_confirmed_deregistration_is_refused()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _store_directory_0 = temp_store_path("r5_route_fence")?;
     let mut store = NotifyRedbStore::open_with_route_key(
-        temp_store_path("r5_route_fence")?,
+        _store_directory_0.to_path_buf(),
         NodeSecret::ephemeral()?,
     )?;
     store.set_push_route_authorizer(|_| Ok(true));

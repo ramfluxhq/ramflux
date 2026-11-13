@@ -765,7 +765,6 @@ fn forwarded_migration_reply(
 #[cfg(test)]
 pub(crate) mod tests {
     use std::net::TcpListener;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
@@ -834,7 +833,7 @@ pub(crate) mod tests {
     #[test]
     fn tokio_handle_matches_submit_and_replay_oracle() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_submit", "target_runtime_submit")?;
-        let (oracle_state, oracle_store, _oracle_path) = test_router("submit_oracle")?;
+        let (_oracle_path, oracle_state, oracle_store) = test_router("submit_oracle")?;
         let oracle = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
@@ -844,7 +843,7 @@ pub(crate) mod tests {
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
 
-        let (handle, _handle_path) = test_handle("submit_handle")?;
+        let (_handle_path, handle) = test_handle("submit_handle")?;
         let via_handle = handle.submit_envelope_from(
             envelope.clone(),
             Instant::now(),
@@ -865,7 +864,7 @@ pub(crate) mod tests {
     #[test]
     fn tokio_handle_async_submit_matches_replay_oracle() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_async_submit", "target_runtime_async_submit")?;
-        let (handle, _handle_path) = test_handle("async_submit_handle")?;
+        let (_handle_path, handle) = test_handle("async_submit_handle")?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let via_handle = runtime.block_on(handle.submit_envelope_async_from(
             envelope.clone(),
@@ -949,7 +948,7 @@ pub(crate) mod tests {
     fn tokio_handle_matches_bound_ack_and_nack_oracle() -> anyhow::Result<()> {
         let envelope = current_envelope("env_runtime_ack", "target_runtime_ack")?;
 
-        let (oracle_state, oracle_store, _oracle_path) = test_router("ack_oracle")?;
+        let (_oracle_path, oracle_state, oracle_store) = test_router("ack_oracle")?;
         let submitted = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
@@ -972,7 +971,7 @@ pub(crate) mod tests {
             &ack_request,
         )?;
 
-        let (handle, _handle_path) = test_handle("ack_handle")?;
+        let (_handle_path, handle) = test_handle("ack_handle")?;
         let submitted = handle.submit_envelope_from(
             envelope,
             Instant::now(),
@@ -1008,7 +1007,7 @@ pub(crate) mod tests {
     fn tokio_handle_matches_fanout_oracle() -> anyhow::Result<()> {
         let request = fanout_request("env_runtime_fanout")?;
 
-        let (oracle_state, oracle_store, _oracle_path) = test_router("fanout_oracle")?;
+        let (_oracle_path, oracle_state, oracle_store) = test_router("fanout_oracle")?;
         register_test_device(oracle_state.as_ref(), "alice", "alice_laptop", "target_laptop", 2)?;
         let oracle = crate::router_engine::own_device_fanout(
             oracle_state.as_ref(),
@@ -1016,7 +1015,7 @@ pub(crate) mod tests {
             &request,
         )?;
 
-        let (handle, _handle_path) = test_handle("fanout_handle")?;
+        let (_handle_path, handle) = test_handle("fanout_handle")?;
         register_test_device(handle.state(), "alice", "alice_laptop", "target_laptop", 2)?;
         let via_handle = handle.own_device_fanout(&request)?;
 
@@ -1106,7 +1105,7 @@ pub(crate) mod tests {
             });
             let now =
                 i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
-            let (handle, _path) = migrated_test_handle(&url, 1, Duration::from_secs(60), now)?;
+            let (_path, handle) = migrated_test_handle(&url, 1, Duration::from_secs(60), now)?;
             let handle = Arc::new(handle);
             let slow_handle = Arc::clone(&handle);
             let mut slow = tokio::spawn(async move {
@@ -1205,7 +1204,7 @@ pub(crate) mod tests {
                     &delivery_tx,
                 )
             });
-            let (old_handle, _old_path) =
+            let (_old_path, old_handle) =
                 migrated_test_handle(&url, 2, Duration::from_secs(2), now)?;
             let envelope = current_envelope("env_runtime_real_forward", "target_alice")?;
             let first = old_handle
@@ -1389,9 +1388,9 @@ pub(crate) mod tests {
         }
     }
 
-    fn test_handle(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
-        let (state, store, path) = test_router(name)?;
-        Ok((RouterHandle::tokio(state, store, None), path))
+    fn test_handle(name: &str) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
+        let (path, state, store) = test_router(name)?;
+        Ok((path, RouterHandle::tokio(state, store, None)))
     }
 
     fn migrated_test_handle(
@@ -1399,7 +1398,7 @@ pub(crate) mod tests {
         concurrency: usize,
         forward_timeout: Duration,
         now: i64,
-    ) -> anyhow::Result<(RouterHandle, PathBuf)> {
+    ) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
         let path = temp_store_path("migrated_runtime")?;
         crate::router_engine::window_tests::fixture_at(
             &path,
@@ -1424,22 +1423,22 @@ pub(crate) mod tests {
             concurrency,
             forward_timeout,
         );
-        Ok((RouterHandle::Tokio(Arc::new(runtime)), path))
+        Ok((path, RouterHandle::Tokio(Arc::new(runtime))))
     }
 
     pub(crate) fn test_router(
         name: &str,
     ) -> anyhow::Result<(
+        ramflux_test_support::TestPath,
         Arc<ramflux_node_core::RouterCore>,
         Arc<ramflux_node_core::RouterRedbStore>,
-        PathBuf,
     )> {
         let path = temp_store_path(name)?;
         let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
         let state = Arc::new(ramflux_node_core::RouterCore::new());
         register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
         store.record_identity_registry(&state.mvp1_identities_snapshot())?;
-        Ok((state, store, path))
+        Ok((path, state, store))
     }
 
     pub(crate) fn current_envelope(
@@ -1691,13 +1690,11 @@ pub(crate) mod tests {
         Ok(request)
     }
 
-    fn temp_store_path(test_name: &str) -> anyhow::Result<PathBuf> {
+    fn temp_store_path(test_name: &str) -> anyhow::Result<ramflux_test_support::TestPath> {
         let suffix = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-        Ok(std::env::temp_dir().join(format!(
-            "ramflux-router-{test_name}-{}-{}.redb",
-            std::process::id(),
-            suffix
-        )))
+        Ok(ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-router-{test_name}-{}-{}.redb", std::process::id(), suffix)))
     }
     mod publication;
     mod sender_retry;

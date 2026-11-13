@@ -7,7 +7,8 @@ use super::*;
 #[test]
 fn legacy_wal_record_without_acceptance_time_is_refused() -> Result<(), Box<dyn std::error::Error>>
 {
-    let path = temp_store_path("r4_legacy_wal")?;
+    let _store_directory_0 = temp_store_path("r4_legacy_wal")?;
+    let path = _store_directory_0.to_path_buf();
     let wal = path.with_extension("wal");
     let now = i64::try_from(now_unix_seconds())?;
     let mut envelope = envelope("legacy-wal", "legacy-wal-mailbox", DeliveryClass::OpaqueEvent);

@@ -154,7 +154,7 @@ async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_a
         fixture.config,
         fixture.manifest.principal_commitment,
     );
-    let legacy = super::tests::account_state(
+    let (_directory, legacy) = super::tests::account_state(
         "legacy-refusal",
         "legacy",
         "legacy-owner",

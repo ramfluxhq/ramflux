@@ -7,10 +7,12 @@ use ramflux_protocol::large_attachment::QualifiedOwner;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[test]
 fn retirement_outbox_seals_complete_fanout_and_reopens_with_indexed_pages() -> Result {
-    let root = std::env::temp_dir().join(format!(
-        "rf-retirement-outbox-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-retirement-outbox-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let index = AccountIndex::open(&root)?;
     let anchor = ramflux_protocol::encode_base64url([1; 32]);
     index.create_account("human", &anchor)?;
@@ -151,10 +153,12 @@ pub(super) fn signed_requests(
 #[test]
 fn restore_keeps_target_attachment_authority_and_recounts_its_budgets() -> Result {
     use crate::BackupDatabase;
-    let root = std::env::temp_dir().join(format!(
-        "rf-retirement-restore-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-retirement-restore-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("account", "owner")?;
     let key = AccountDbKey::generate()?;

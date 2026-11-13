@@ -62,8 +62,10 @@ fn attest(
 }
 #[test]
 fn copied_publication_and_stolen_branch_cannot_mint_genesis_at_a_fresh_node() -> Result {
-    let a_store = RouterRedbStore::open(temp_store_path("migration-bootstrap-a")?)?;
-    let b_store = RouterRedbStore::open(temp_store_path("migration-bootstrap-b")?)?;
+    let _store_directory_0 = temp_store_path("migration-bootstrap-a")?;
+    let a_store = RouterRedbStore::open(_store_directory_0.to_path_buf())?;
+    let _store_directory_1 = temp_store_path("migration-bootstrap-b")?;
+    let b_store = RouterRedbStore::open(_store_directory_1.to_path_buf())?;
     let a = RouterCore::new();
     a.set_local_home_node_id(Some("node".into()));
     let b = RouterCore::new();

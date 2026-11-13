@@ -2462,13 +2462,13 @@ mod tests {
         ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_mesh_quic_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux_mesh_quic_{name}_{}_{}", std::process::id(), nanos));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }

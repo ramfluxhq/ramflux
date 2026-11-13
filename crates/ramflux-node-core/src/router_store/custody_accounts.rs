@@ -339,10 +339,12 @@ mod tests {
         use ramflux_protocol::custody::{
             CapacityHint, CapacityScope, CustodyRefusal, CustodyServerFrame,
         };
-        let path = std::env::temp_dir().join(format!(
-            "rf-quota-hint-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-quota-hint-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         {
             let store = RouterRedbStore::open_without_wal(&path)?;
             for (key, daily, burst, total, expected) in [
@@ -398,10 +400,12 @@ mod tests {
     #[test]
     fn configured_prefix_limits_cover_ipv4_and_ipv6_source_keys()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-custody-policy-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-custody-policy-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         {
             let mut store = RouterRedbStore::open_without_wal(&path)?;
             for source in ["192.0.2.9", "2001:db8:1:2::9"] {
@@ -426,10 +430,12 @@ mod tests {
     #[test]
     fn inspection_preserves_durable_rows_and_redacts_prefixes_after_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-custody-inspection-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-custody-inspection-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let encoded =
             serde_json::to_vec(&Budget { day: 1, daily: 8, minute: 1441, burst: 2, total: 8 })?;
         {

@@ -29,7 +29,8 @@ fn router_backed_authorizer(
 fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = std::sync::Arc::new(RouterCore::new());
-    let router_store = RouterRedbStore::open_without_wal(temp_store_path("r3_revoked_router")?)?;
+    let _store_directory_0 = temp_store_path("r3_revoked_router")?;
+    let router_store = RouterRedbStore::open_without_wal(_store_directory_0.to_path_buf())?;
     let principal = "principal_revoked_push";
     let request =
         registration_request(&router, principal, "lost-phone", 921, None, "ip_revoked_push")?;
@@ -43,8 +44,9 @@ fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
     let owner = router.mvp1_device_auth_key_checked(&qualified)?.ok_or("registered device")?;
     assert!(!owner.revoked);
 
+    let _store_directory_1 = temp_store_path("r3_revoked_notify")?;
     let mut store = NotifyRedbStore::open_with_route_key(
-        temp_store_path("r3_revoked_notify")?,
+        _store_directory_1.to_path_buf(),
         NodeSecret::ephemeral()?,
     )?;
     store.set_push_route_authorizer(router_backed_authorizer(std::sync::Arc::clone(&router)));
@@ -103,7 +105,8 @@ fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
 fn persisted_rows_without_server_deadlines_are_refused() -> Result<(), Box<dyn std::error::Error>> {
     const FORMAT: redb::TableDefinition<&str, u8> =
         redb::TableDefinition::new("router_expiry_index_format_v1");
-    let path = temp_store_path("r3_legacy_rows")?;
+    let _store_directory_2 = temp_store_path("r3_legacy_rows")?;
+    let path = _store_directory_2.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     drop(store);

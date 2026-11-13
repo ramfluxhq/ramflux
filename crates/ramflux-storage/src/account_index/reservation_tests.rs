@@ -26,12 +26,14 @@ fn wrapped() -> WrappedAccountDbKey {
 #[test]
 fn account_index_reservation_preserves_every_legacy_row_and_wrapped_key_byte()
 -> Result<(), StorageError> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-reservation-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-reservation-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("existing", "legacy-root")?;
     index.store_wrapped_db_key("existing", &wrapped())?;
@@ -46,12 +48,14 @@ fn account_index_reservation_preserves_every_legacy_row_and_wrapped_key_byte()
 #[test]
 fn account_index_release_never_deletes_a_different_owner_or_a_wrapped_key()
 -> Result<(), StorageError> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-release-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-release-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
     let index = AccountIndex::open(&root)?;
     index.reserve_account("birth", "anchor")?;
     let before = snapshot(&index, "birth")?;

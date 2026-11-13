@@ -165,7 +165,9 @@ mod tests {
     #[test]
     fn mounted_secret_allows_group_read_but_never_world_access() -> Result<(), NodeCoreError> {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("rf-node-secret-mode-{}", std::process::id()));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-node-secret-mode-{}", std::process::id()));
         std::fs::write(&path, ramflux_protocol::encode_base64url([7_u8; 32]))
             .map_err(|_| invalid())?;
         for (mode, accepted) in [

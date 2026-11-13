@@ -8,10 +8,12 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn parked_contact_retry_is_bounded_and_directory_or_roster_changes_wake_it() -> TestResult {
     for trigger in ["schedule", "directory", "roster", "upgrade"] {
-        let root = std::env::temp_dir().join(format!(
-            "rf-contact-retry-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-contact-retry-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            ));
         let own = super::tests::client(&root.join("own"), "bob", 1)?;
         let mut sibling = super::tests::client(&root.join("sibling"), "bob", 1)?;
         sibling.create_device_branch("bob", "second", 1, [8; 32]);

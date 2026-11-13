@@ -76,23 +76,20 @@ fn padded_body(n: usize) -> String {
 }
 
 struct Pki {
-    root: PathBuf,
     ca_pem: String,
     router: MeshTlsConfig,
     federation: MeshTlsConfig,
     gateway: MeshTlsConfig,
-}
-impl Drop for Pki {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    root: ramflux_test_support::TestPath,
 }
 fn pki(name: &str) -> TestResult<Pki> {
-    let root: PathBuf = std::env::temp_dir().join(format!(
-        "rf-router-{name}-{}-{}",
-        std::process::id(),
-        Instant::now().elapsed().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-router-{name}-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
     std::fs::create_dir_all(&root)?;
     let (ca_key, ca) = (root.join("ca-key.pem"), root.join("ca.pem"));
     openssl(&["genpkey", "-algorithm", "ED25519", "-out", s(&ca_key)?])?;
@@ -168,7 +165,7 @@ async fn assert_cap_matrix(endpoint: &str, pki: &Pki) -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_route_cap_is_exact_on_raw_received_bytes_through_real_quic() -> TestResult {
     let pki = pki("ingress")?;
-    let (state, store, db_path) = crate::router_runtime::tests::test_router("source-ingress")?;
+    let (db_path, state, store) = crate::router_runtime::tests::test_router("source-ingress")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
     let roots_pem = pki.ca_pem.clone();
     let server = MeshQuicServer::bind_with_pem_roots_provider(
@@ -732,7 +729,7 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
     let _serial = IJSON_TEST_LOCK.lock().await;
 
     let pki = pki("ijson-postcard")?;
-    let (state, store, db_path) = crate::router_runtime::tests::test_router("ijson-postcard")?;
+    let (db_path, state, store) = crate::router_runtime::tests::test_router("ijson-postcard")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
     let roots_pem = pki.ca_pem.clone();
     let server = MeshQuicServer::bind_with_pem_roots_provider(
@@ -1174,7 +1171,7 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
 #[test]
 fn compio_source_route_cap_is_exact_on_raw_received_bytes_through_real_quic() -> TestResult {
     let pki = Arc::new(pki("ingress-compio")?);
-    let (state, store, db_path) = crate::router_runtime::tests::test_router("source-compio")?;
+    let (db_path, state, store) = crate::router_runtime::tests::test_router("source-compio")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
     let runtime =
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
@@ -1222,7 +1219,7 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
     let _serial = IJSON_TEST_LOCK.blocking_lock();
 
     let pki = Arc::new(pki("ijson-compio-live")?);
-    let (state, store, db_path) = crate::router_runtime::tests::test_router("ijson-compio-live")?;
+    let (db_path, state, store) = crate::router_runtime::tests::test_router("ijson-compio-live")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
     let runtime =
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;

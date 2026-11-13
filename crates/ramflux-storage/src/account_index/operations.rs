@@ -137,12 +137,14 @@ mod tests {
     use super::*;
     use crate::OperationLookup;
     type Case = Result<(), Box<dyn std::error::Error>>;
-    fn root() -> Result<std::path::PathBuf, std::time::SystemTimeError> {
-        Ok(std::env::temp_dir().join(format!(
-            "supervisor-lookup-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        )))
+    fn root() -> Result<ramflux_test_support::TestPath, std::time::SystemTimeError> {
+        Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "supervisor-lookup-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ),
+        ))
     }
     #[test]
     fn typed_lookup_reports_absent_completed_pending_mismatch() -> Case {

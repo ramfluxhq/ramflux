@@ -2141,12 +2141,15 @@ mod t21a1_tests {
         Ok(())
     }
 
-    fn slot_test_client(test_name: &str) -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
+    fn slot_test_client(
+        test_name: &str,
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-sdk-slot-{test_name}-{}-{nanos}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-slot-{test_name}-{}-{nanos}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("acct", "principal")?;

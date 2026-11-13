@@ -67,12 +67,14 @@ mod tests {
     const SNAPSHOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("router_snapshot_v1");
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "ramflux-router-operator-{label}-{}-{}.redb",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ))
+    fn path(label: &str) -> ramflux_test_support::TestPath {
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "ramflux-router-operator-{label}-{}-{}.redb",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
     }
 
     fn insert_row(path: &Path, stale: bool) -> anyhow::Result<()> {

@@ -939,7 +939,7 @@ pub(crate) mod tests {
 
     #[test]
     fn explicit_history_sync_does_not_duplicate_a_live_outgoing_copy() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("live-copy-history", "principal_sync", "target_device_sync")?;
         let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
             client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -991,7 +991,7 @@ pub(crate) mod tests {
     #[test]
     fn history_import_then_delete_then_live_copy_keeps_the_original_tombstone()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("history-delete-live", "principal_sync", "target_device_sync")?;
         let message = DirectMessageRecord {
             conversation_id: "direct".into(),
@@ -1076,7 +1076,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_late_live_copy_reuses_history_and_preserves_account_deletion() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("history-first", "principal_sync", "target_device_sync")?;
         client.send_direct_message("direct", "live-message", "source_device_sync", &[1, 2, 3])?;
         client.account_db()?.store_message_content(
@@ -1166,7 +1166,7 @@ pub(crate) mod tests {
     #[test]
     fn a_siblings_history_copy_does_not_duplicate_the_authors_local_outgoing_row()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("history-roundtrip", "principal_sync", "target_device_sync")?;
         client.send_direct_message("direct", "authored", "target_device_sync", &[1, 2, 3])?;
         client.account_db()?.store_message_content("direct", "authored", b"outgoing live body")?;
@@ -1217,7 +1217,7 @@ pub(crate) mod tests {
     #[test]
     fn group_copy_envelopes_are_opaque_stable_on_retry_and_distinct_per_message()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("opaque-envelope", "principal_sync", "source_device_sync")?;
         let first = client.own_group_copy_envelope("group", "conversation", "message", None)?;
         assert_ne!(first, "message");
@@ -1241,13 +1241,13 @@ pub(crate) mod tests {
     #[test]
     fn an_original_dm_or_group_recipient_consumes_its_copy_without_a_second_timeline_row()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("original-recipient", "principal_sync", "target_device_sync")?;
         let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
             client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             "source_device_sync",
         )?;
-        let (primary, primary_root) =
+        let (primary_root, primary) =
             client_with_account("original-source", "principal_sync", "source_device_sync")?;
         primary.create_group("own-group", "source_device_sync")?;
         primary.account_db()?.upsert_group_member_snapshot(
@@ -1319,7 +1319,7 @@ pub(crate) mod tests {
     #[test]
     fn equal_sender_labels_ids_and_text_do_not_merge_different_authenticated_ciphertexts()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("different-ciphertexts", "principal_sync", "target_device_sync")?;
         client.send_direct_message("direct", "shared-id", "same-label", &[9, 8, 7])?;
         client.account_db()?.store_message_content("direct", "shared-id", b"same text")?;
@@ -1361,7 +1361,7 @@ pub(crate) mod tests {
     #[test]
     fn ambiguous_ciphertext_history_keeps_both_sources_and_exact_envelope_aliases()
     -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("ambiguous-ciphertext", "principal_sync", "target_device_sync")?;
         let authority = client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let a = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
@@ -1472,17 +1472,19 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    fn temp_root(test_name: &str) -> PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir().join(format!("ramflux-sdk-own-device-sync-{test_name}-{nanos}"))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-own-device-sync-{test_name}-{nanos}"))
     }
 
     pub(crate) fn client_with_account(
         test_name: &str,
         principal: &str,
         device_id: &str,
-    ) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let root = temp_root(test_name);
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [0x51; 32]);
@@ -1490,7 +1492,7 @@ pub(crate) mod tests {
         client.open_account_index(&root)?;
         client.create_account("acct", principal)?;
         client.unlock_account("acct", b"own-device-sync-test")?;
-        Ok((client, root))
+        Ok((root, client))
     }
 
     pub(crate) fn envelope(
@@ -1590,7 +1592,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rejected_task_history_items_do_not_abort_ordinary_message_restore() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("task-best-effort", "principal_sync", "target_device_sync")?;
         let message = DirectMessageRecord {
             conversation_id: "direct".into(),
@@ -1628,7 +1630,7 @@ pub(crate) mod tests {
 
     #[test]
     fn own_device_history_import_preserves_direct_message_created_at() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("created-at", "principal_sync", "target_device_sync")?;
         let message = DirectMessageRecord {
             conversation_id: "conv_sync_dm".to_owned(),
@@ -1656,7 +1658,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sibling_tombstone_deletes_a_live_copy_without_restoring_content() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("deleted-import", "principal_sync", "target_device_sync")?;
         client.account_db()?.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "thread",
@@ -1703,7 +1705,7 @@ pub(crate) mod tests {
 
     #[test]
     fn own_device_history_import_skips_group_message_below_joined_epoch() -> Result<(), SdkError> {
-        let (client, root) =
+        let (root, client) =
             client_with_account("joined-epoch", "principal_sync", "target_device_sync")?;
         let old_group_message = DirectMessageRecord {
             conversation_id: "conv_sync_group".to_owned(),
@@ -1779,9 +1781,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn own_device_history_does_not_export_live_device_pair_secrets() -> Result<(), SdkError> {
-        let (source, source_root) =
+        let (source_root, source) =
             client_with_account("pair-history-source", "principal_sync", "source_device_sync")?;
-        let (target, target_root) =
+        let (target_root, target) =
             client_with_account("pair-history-target", "principal_sync", "target_device_sync")?;
         let session = ramflux_crypto::DmSession::initiator(
             [1; 32],
@@ -1884,7 +1886,7 @@ pub(crate) mod tests {
     #[test]
     fn control_import_skip_keys_distinguish_pages_and_are_retry_idempotent() -> Result<(), SdkError>
     {
-        let (client, root) =
+        let (root, client) =
             client_with_account("surface-skip-pages", "principal_sync", "target_device_sync")?;
         let envelope = envelope("source_device_sync", "target_device_sync");
         let mut control = crate::client::surface::SurfaceControl {
@@ -1948,12 +1950,12 @@ mod backup_contact_paging_tests {
     #[test]
     fn every_restricted_contact_is_restored_across_authenticated_authority_pages()
     -> Result<(), SdkError> {
-        let (source, source_root) = super::tests::client_with_account(
+        let (source_root, source) = super::tests::client_with_account(
             "backup-contact-pages-source",
             "principal_sync",
             "source",
         )?;
-        let (target, target_root) = super::tests::client_with_account(
+        let (target_root, target) = super::tests::client_with_account(
             "backup-contact-pages-target",
             "principal_sync",
             "target",

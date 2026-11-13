@@ -6,20 +6,22 @@ use super::*;
 use crate::bus::actor::AccountCommand;
 use serde_json::json;
 
-fn test_root() -> PathBuf {
+fn test_root() -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    std::env::temp_dir().join(format!("rf-fetch-bus-{}-{unique}-{sequence}", std::process::id()))
+    ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-fetch-bus-{}-{unique}-{sequence}", std::process::id()))
 }
 
 fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("recipient", [0x51; 32]);
     client.create_device_branch("recipient", "device", 1, [0x52; 32]);
-    client.open_account_index(root)?;
+    client.open_account_index(&root)?;
     client.create_account("account", "commitment")?;
     client.unlock_account("account", b"secret")?;
     client.account_db()?.persist_actor_state("attachment/reference/object", &json!({"reference":{

@@ -351,7 +351,8 @@ fn https_exchange(
     body: &[u8],
     extra_headers: &str,
 ) -> TestResult<Vec<u8>> {
-    let root = temp_store_path("pairing-https")?.with_extension("tls");
+    let _store_directory_0 = temp_store_path("pairing-https")?;
+    let root = _store_directory_0.to_path_buf().with_extension("tls");
     std::fs::create_dir_all(&root)?;
     let (ca, cert, key) = openssl_leaf(&root)?;
     let server_config = rustls_server_config(&cert, &key)?;
@@ -552,7 +553,8 @@ fn prove_token_cannot_open_session(
 
 #[test]
 fn pairing_root_free_routes_cannot_authorize_account() -> TestResult {
-    let path = temp_store_path("pairing-root-free")?;
+    let _store_directory_1 = temp_store_path("pairing-root-free")?;
+    let path = _store_directory_1.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

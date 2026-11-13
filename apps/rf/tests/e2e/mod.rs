@@ -66,19 +66,19 @@ impl ChildGuard {
 }
 
 pub struct Stack {
-    pub root: PathBuf,
     pub discovery_url: String,
     pub gateway_public: String,
     pub router_mesh: String,
     pub node_id: String,
     pub admin_url: String,
     _servers: Vec<ChildGuard>,
+    pub root: ramflux_test_support::TestPath,
 }
 
 pub struct Daemon {
-    pub socket: PathBuf,
-    pub data_root: PathBuf,
     child: ChildGuard,
+    pub socket: std::path::PathBuf,
+    pub data_root: std::path::PathBuf,
 }
 
 pub struct Account {
@@ -90,22 +90,14 @@ pub struct Account {
     pub target_delivery_id: String,
 }
 
-impl Drop for Stack {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 struct RootGuard {
-    path: PathBuf,
     keep: bool,
+    path: ramflux_test_support::TestPath,
 }
 
 impl Drop for RootGuard {
     fn drop(&mut self) {
-        if !self.keep {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        if !self.keep {}
     }
 }
 
@@ -161,7 +153,9 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
 
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
     let mut guard = RootGuard { path: root.clone(), keep: false };
     std::fs::create_dir_all(root.join("secrets"))?;
     std::fs::create_dir_all(root.join("state"))?;
@@ -1893,11 +1887,13 @@ fn wait_leader_reaped(group: &mut proc::ProcessGroup, budget: Duration) -> Resul
 
 /// Harness proof: Drop of an unresponsive daemon returns inside `budget` with no leftovers.
 pub fn prove_unresponsive_daemon_drop_within(budget: Duration) -> Result<()> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-cli-e2e-hung-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-cli-e2e-hung-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
     std::fs::create_dir_all(&root)?;
     let socket = root.join("hung.sock");
     let data_root = root.join("data");

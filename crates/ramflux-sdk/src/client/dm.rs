@@ -872,14 +872,17 @@ pub(crate) fn decode_dm_attachment_body(
 mod tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-dm-{test_name}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-dm-{test_name}-{}-{nanos}", std::process::id()))
     }
 
-    fn test_client(test_name: &str) -> Result<(PathBuf, RamfluxClient), SdkError> {
+    fn test_client(
+        test_name: &str,
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let root = temp_root(test_name);
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
@@ -938,7 +941,7 @@ mod tests {
 
     fn reopen_client(root: &std::path::Path) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
-        client.open_account_index(root)?;
+        client.open_account_index(&root)?;
         client.unlock_account("acct", b"test-secret")?;
         Ok(client)
     }

@@ -7,10 +7,12 @@ use super::*;
 #[test]
 fn outbound_spool_accepted_before_commit_still_delivers_without_extra_hop()
 -> Result<(), Box<dyn std::error::Error>> {
-    let directory = std::env::temp_dir().join(format!(
-        "rf-outbound-migration-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let directory = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-outbound-migration-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     std::fs::create_dir(&directory)?;
     let spool_path = directory.join("federation.redb");
     let router_path = directory.join("router.redb");

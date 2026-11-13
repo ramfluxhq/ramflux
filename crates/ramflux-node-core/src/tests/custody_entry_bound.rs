@@ -7,7 +7,8 @@ use super::*;
 fn entry_admission_all_origins_native_custody() -> Result {
     for mode in 0..=1 {
         for over in [false, true] {
-            let root = temp_store_path(&format!("native-entry-bound-{mode}-{over}"))?;
+            let _store_directory_0 = temp_store_path(&format!("native-entry-bound-{mode}-{over}"))?;
+            let root = _store_directory_0.to_path_buf();
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;

@@ -277,8 +277,14 @@ fn relay_cycle(handle: &RouterHandle, created: &Created) -> TestResult {
 
 fn wired_handle(
     name: &str,
-) -> anyhow::Result<(RouterHandle, PairingEnv, PathBuf, PathBuf, String)> {
-    let (state, store, redb) = crate::router_runtime::tests::test_router(name)?;
+) -> anyhow::Result<(
+    ramflux_test_support::TestPath,
+    ramflux_test_support::TestPath,
+    RouterHandle,
+    PairingEnv,
+    String,
+)> {
+    let (redb, state, store) = crate::router_runtime::tests::test_router(name)?;
     let record = redb.with_extension("node-record.json");
     let now = wall()?;
     let public = write_node_record(&record, "node", now)?;
@@ -293,12 +299,12 @@ fn wired_handle(
     ]);
     let handle = RouterHandle::tokio(state, store, None);
     handle.enable_custody(&node_config("node", ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES)?)?;
-    Ok((handle, env, redb, record, public))
+    Ok((redb, record, handle, env, public))
 }
 
 #[test]
 fn pairing_mesh_requires_federation_peer() -> TestResult {
-    let (state, store, path) = crate::router_runtime::tests::test_router("pairing-mesh-peer")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("pairing-mesh-peer")?;
     let handle = RouterHandle::tokio(state, store, None);
     let response = mesh(&handle, "ramflux-gateway", PAIRING_CLAIM_PATH, b"{}")?;
     assert_eq!(response.status, "403 Forbidden");
@@ -308,7 +314,7 @@ fn pairing_mesh_requires_federation_peer() -> TestResult {
 
 #[test]
 fn enable_custody_requires_ticket_key_match() -> TestResult {
-    let (state, store, redb) =
+    let (redb, state, store) =
         crate::router_runtime::tests::test_router("pairing-mesh-key-mismatch")?;
     let record = redb.with_extension("node-record.json");
     let now = wall()?;
@@ -338,7 +344,7 @@ fn enable_custody_requires_ticket_key_match() -> TestResult {
 
 #[test]
 fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
-    let (handle, env, redb, record, public) = wired_handle("pairing-mesh-wiring")?;
+    let (redb, record, handle, env, public) = wired_handle("pairing-mesh-wiring")?;
     let (created, node_key) = native_create(&handle, 1)?;
     assert_eq!(node_key, public);
     relay_cycle(&handle, &created)?;

@@ -50,7 +50,8 @@ fn old_session_refreshes_set_before_cross_node_delivery_and_revocation_refuses_i
             devices,
         },
     )?;
-    let store = RouterRedbStore::open(temp_store_path("session-revocation")?)?;
+    let _store_directory_0 = temp_store_path("session-revocation")?;
+    let store = RouterRedbStore::open(_store_directory_0.to_path_buf())?;
     router.publish_signed_device_set(
         &crate::DeviceSetPublishRequest { root_public_key: first.root_public_key, record: next },
         &store,
@@ -69,7 +70,8 @@ fn old_session_refreshes_set_before_cross_node_delivery_and_revocation_refuses_i
 #[test]
 fn federation_new_root_budget_is_per_peer_durable_and_does_not_charge_known_roots()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("peer-root-budget")?;
+    let _store_directory_1 = temp_store_path("peer-root-budget")?;
+    let path = _store_directory_1.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let now = 1_760_000_010;
     let mut last = None;

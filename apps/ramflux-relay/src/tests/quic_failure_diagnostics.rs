@@ -57,7 +57,8 @@ fn exercise_relay(mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     let certs = issue_test_ca_and_service_cert(&root, "node-relay-a", "ramflux-relay")?;
     let config = test_config(&certs.tls, "unused-retention:0");
     let server_config = validate_relay_client_quic_tls(&config)?;
-    let store = v3_temp_store()?;
+    let (_fixture_directory_0, fixture_value_0) = v3_temp_store()?;
+    let store = fixture_value_0;
     let metrics = RelayClientQuicMetrics::default();
     let context = RelayClientQuicContext {
         metrics: metrics.clone(),

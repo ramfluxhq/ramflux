@@ -15,9 +15,9 @@ use tracing_subscriber::prelude::*;
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-pub(crate) fn fixture(name: &str) -> PathBuf {
+pub(crate) fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "publication-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -205,7 +205,7 @@ fn aborted_slot_capacity() -> Result {
         let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let captured = Arc::clone(&commits);
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "tombstone_commit" && done {
                     captured.fetch_add(1, Ordering::Relaxed);
@@ -289,7 +289,7 @@ fn single_worker_reply_and_drop() -> Result {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if matches!(op, "tombstone_checkpoint" | "begin_write" | "tombstone_commit") {
                     captured.lock().expect("events").push((

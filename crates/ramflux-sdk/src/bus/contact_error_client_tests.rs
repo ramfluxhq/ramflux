@@ -6,11 +6,13 @@ use super::*;
 #[tokio::test]
 async fn contact_confirmation_details_and_retry_hints_survive_the_sdk_client_round_trip()
 -> Result<(), SdkError> {
-    let path = std::env::temp_dir().join(format!(
-        "ramflux-contact-errors-{}-{}.sock",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-contact-errors-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
+        ));
     let listener = tokio::net::UnixListener::bind(&path)?;
     let expected = LocalBusErrorBody {
         code: "ValidationFailed".into(),

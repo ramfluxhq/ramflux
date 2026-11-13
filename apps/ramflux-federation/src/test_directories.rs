@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub(crate) struct TestDirectory {
-    path: PathBuf,
+    path: ramflux_test_support::TestPath,
 }
 
 impl Deref for TestDirectory {
@@ -32,14 +32,22 @@ impl Drop for TestDirectory {
     }
 }
 
-pub(crate) fn temp_cert_root(name: &str) -> io::Result<TestDirectory> {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    create_unique(&std::env::temp_dir(), name, &SEQUENCE).map(|path| TestDirectory { path })
+pub(crate) fn temp_cert_root(_name: &str) -> io::Result<TestDirectory> {
+    let path = ramflux_test_support::TestPath::new()?;
+    created_directories()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_path_buf());
+    Ok(TestDirectory { path })
 }
 
-pub(crate) fn temp_store_path(name: &str) -> io::Result<PathBuf> {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    Ok(create_unique(&std::env::temp_dir(), name, &SEQUENCE)?.join("store.redb"))
+pub(crate) fn temp_store_path(_name: &str) -> io::Result<ramflux_test_support::TestPath> {
+    let directory = ramflux_test_support::TestPath::new()?;
+    created_directories()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(directory.to_path_buf());
+    Ok(directory.join("store.redb"))
 }
 
 pub(crate) fn remove_store_path(path: &Path) -> io::Result<()> {
@@ -133,8 +141,8 @@ fn store_paths_are_allocated_inside_exclusive_directories() -> io::Result<()> {
 
 #[test]
 fn cleanup_rejects_an_untracked_matching_directory() -> io::Result<()> {
-    let path =
-        std::env::temp_dir().join(format!("ramflux-federation-untracked-{}", std::process::id()));
+    let path = ramflux_test_support::TestPath::new()?
+        .child(format!("ramflux-federation-untracked-{}", std::process::id()));
     std::fs::create_dir_all(&path)?;
     let store = path.join("store.redb");
     let Err(error) = remove_store_path(&store) else {

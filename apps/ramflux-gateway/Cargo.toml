@@ -43,6 +43,7 @@ compio = { version = "=0.19.1", features = ["time"], optional = true }
 workspace = true
 
 [dev-dependencies]
+ramflux-test-support.workspace = true
 ramflux-storage = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "test-support"] }

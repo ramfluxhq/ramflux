@@ -240,12 +240,14 @@ mod tests {
     use std::fs;
     #[test]
     fn failed_publication_removes_its_temporary_file() -> Result<(), RfError> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-custody-atomic-{}",
-            ramflux_protocol::encode_base64url(
-                ramflux_crypto::random_32().map_err(|error| invalid(error.to_string()))?
-            )
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-custody-atomic-{}",
+                ramflux_protocol::encode_base64url(
+                    ramflux_crypto::random_32().map_err(|error| invalid(error.to_string()))?
+                )
+            ));
         let directory = PrivateDir::open(&path)?;
         directory.write_immutable("kept", b"original")?;
         assert!(directory.write_immutable("kept", b"replacement").is_err());
@@ -257,12 +259,14 @@ mod tests {
 
     #[test]
     fn directory_replacement_never_redirects_descriptor_relative_writes() -> Result<(), RfError> {
-        let parent = std::env::temp_dir().join(format!(
-            "rf-custody-fd-{}",
-            ramflux_protocol::encode_base64url(
-                ramflux_crypto::random_32().map_err(|error| invalid(error.to_string()))?
-            )
-        ));
+        let parent = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-custody-fd-{}",
+                ramflux_protocol::encode_base64url(
+                    ramflux_crypto::random_32().map_err(|error| invalid(error.to_string()))?
+                )
+            ));
         let directory = PrivateDir::open(&parent)?;
         let child = directory.child("records")?;
         fs::rename(parent.join("records"), parent.join("retained"))?;

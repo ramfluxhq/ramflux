@@ -4,27 +4,17 @@
 #![cfg(test)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
+pub(crate) use ramflux_test_support::TestPath;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn temp_root(test_name: &str) -> PathBuf {
-    let nanos =
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir().join(format!("ramflux-storage-{test_name}-{}-{nanos}", std::process::id()))
+pub(crate) fn temp_root(test_name: &str) -> TestPath {
+    TestPath::new().expect("test: create storage directory").child(test_name)
 }
 
-pub(crate) struct TestDirGuard(pub(crate) PathBuf);
-impl Drop for TestDirGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageError> {
+pub(crate) fn test_db(test_name: &str) -> Result<(TestPath, AccountDb), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
@@ -35,7 +25,7 @@ pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageEr
 
 pub(crate) fn signed_test_db(
     test_name: &str,
-) -> Result<(PathBuf, AccountDb, ramflux_crypto::DeviceBranch), StorageError> {
+) -> Result<(TestPath, AccountDb, ramflux_crypto::DeviceBranch), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;

@@ -24,8 +24,8 @@ fn payload(seq: u64) -> RouterWalPayload {
         local_delivery: None,
     }
 }
-fn root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+fn root(label: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "fatal-{label}-{}-{}",
         std::process::id(),
         crate::now_unix_seconds()

@@ -4,8 +4,10 @@
 //! Complete signer totals and isolated upgrade admission across large task accounts.
 use super::*;
 use crate::{AccountDbKey, AccountIndex};
-fn database(label: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
-    let root = std::env::temp_dir().join(format!("task-usage-{label}-{}", std::process::id()));
+fn database(label: &str) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("task-usage-{label}-{}", std::process::id()));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "principal")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;

@@ -2224,7 +2224,6 @@ mod tests {
                 1_760_000_001
             )?);
             drop(store);
-            remove_router_wal_dir(path);
         }
         Ok(())
     }
@@ -2308,7 +2307,7 @@ mod tests {
             Some("env_router_wal_recover")
         );
         assert!(fs::metadata(&segment)?.len() < len_with_tail);
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2361,7 +2360,7 @@ mod tests {
         assert_eq!(submissions.len(), 2);
         assert!(submissions.iter().any(|submission| submission.replay_key == left_replay_key));
         assert!(submissions.iter().any(|submission| submission.replay_key == right_replay_key));
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2420,7 +2419,7 @@ mod tests {
 
         let reopened = RouterWalStore::open(&root)?;
         assert_eq!(reopened.submissions(0).len(), thread_count);
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2460,7 +2459,7 @@ mod tests {
 
         let reopened = RouterWalStore::open(&root)?;
         assert_eq!(reopened.submissions(0).len(), 64);
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2485,7 +2484,7 @@ mod tests {
             submissions[0].entry.as_ref().map(|entry| entry.target_delivery_id.as_str()),
             Some("target_router_wal_pipeline")
         );
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2545,7 +2544,7 @@ mod tests {
             "ROUTER_WAL_BENCH ops_per_sec={ops_per_sec:.2} total_ops={completed_ops} threads={thread_count} elapsed_ms={:.2}",
             elapsed.as_secs_f64() * 1000.0
         );
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2606,7 +2605,7 @@ mod tests {
             "ROUTER_WAL_ASYNC_BENCH ops_per_sec={ops_per_sec:.2} total_ops={completed_ops} concurrency={concurrency} elapsed_ms={:.2}",
             elapsed.as_secs_f64() * 1000.0
         );
-        remove_router_wal_dir(root);
+
         Ok(())
     }
 
@@ -2682,17 +2681,13 @@ mod tests {
         }
     }
 
-    fn temp_router_wal_dir(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_router_wal_dir(
+        test_name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-        Ok(std::env::temp_dir().join(format!(
-            "ramflux-node-core-{test_name}-{}-{}",
-            std::process::id(),
-            elapsed.as_nanos()
-        )))
-    }
-
-    fn remove_router_wal_dir(path: PathBuf) {
-        let _removed = fs::remove_dir_all(path);
+        Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("ramflux-node-core-{test_name}-{}-{}", std::process::id(), elapsed.as_nanos()),
+        ))
     }
 
     fn first_router_wal_segment_file(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {

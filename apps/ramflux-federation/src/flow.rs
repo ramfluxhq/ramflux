@@ -824,10 +824,12 @@ mod tests {
     #[test]
     fn shutdown_during_spool_batch_stops_before_next_send() -> Result<(), Box<dyn std::error::Error>>
     {
-        let path = std::env::temp_dir().join(format!(
-            "rf-spool-cancel-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-spool-cancel-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let store = ramflux_node_core::FederationRedbStore::open(&path)?;
         let forward = retained_forward()?;
         for _ in 0..64 {
@@ -863,10 +865,12 @@ mod tests {
     #[test]
     fn revoked_spool_head_is_dead_lettered_durably_and_other_sender_to_same_peer_delivers()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-spool-r9-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-spool-r9-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let store = ramflux_node_core::FederationRedbStore::open(&path)?;
         let first = retained_forward()?;
         let mut second = first.clone();
@@ -1003,10 +1007,12 @@ mod tests {
     #[test]
     fn federation_handler_never_reports_concurrent_pending_retry_as_delivered()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-forward-handler-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-forward-handler-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let store = Arc::new(ramflux_node_core::FederationRedbStore::open(&path)?);
         let router = Arc::new(ramflux_node_core::RouterCore::new());
         let request = Arc::new(inbound_handler_request()?);
@@ -1106,10 +1112,12 @@ mod tests {
     #[test]
     fn inbound_forward_passes_signed_migration_evidence_and_never_reports_dormant_as_accepted()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-migration-carry-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-migration-carry-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let store = ramflux_node_core::FederationRedbStore::open(&path)?;
         let mut request = inbound_handler_request()?;
         request.migration_evidence = Some(ramflux_node_core::ForwardedMigrationEvidence {
@@ -1207,10 +1215,12 @@ mod tests {
                 external_human_primary: None,
             },
         )?;
-        let path = std::env::temp_dir().join(format!(
-            "rf-plain-ingress-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-plain-ingress-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let source_store = ramflux_node_core::RouterRedbStore::open(path.with_extension("source"))?;
         let destination_store =
             ramflux_node_core::RouterRedbStore::open(path.with_extension("destination"))?;

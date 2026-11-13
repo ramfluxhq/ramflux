@@ -22,28 +22,48 @@ def initialize():
     root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=base))
     root = root.resolve()
     with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
-        output.write(f"RF_TEST_TMPBASE={root.parent}\n")
+        output.write(f"RF_CI_TMPBASE={Path(base).resolve()}\n")
         for key in ("TMPDIR", "TMP", "TEMP", "RF_TEST_TMPDIR"):
             output.write(f"{key}={root}\n")
 
 
-def check():
-    root = Path(os.environ["RF_TEST_TMPDIR"])
-    leaked = leftovers(root)
-    for name in leaked:
-        print(f"::error::test temporary entry leaked: {name}")
-    print(f"TEST_TMP_LEAKS={len(leaked)}")
-    # Only remove the dedicated directory created by init, never arbitrary TMPDIR.
-    if root.parent.resolve() != Path(os.environ["RF_TEST_TMPBASE"]).resolve() or not root.name.startswith("rf-tests-"):
-        raise ValueError("refusing cleanup outside the private CI test directory")
-    shutil.rmtree(root)
-    # Post-job cache/actions also create temporary files; do not leave them a deleted TMPDIR.
+def restore_environment():
+    # Restore before inspection/cleanup: privileged leftovers must not break post-job actions.
     if env_file := os.environ.get("GITHUB_ENV"):
         with Path(env_file).open("a", encoding="utf-8") as output:
             for key in ("TMPDIR", "TMP", "TEMP"):
                 output.write(f"{key}={os.environ['RUNNER_TEMP']}\n")
             output.write("RF_TEST_TMPDIR=\n")
-    return int(bool(leaked))
+
+
+def check():
+    root = Path(os.environ["RF_TEST_TMPDIR"])
+    restore_environment()
+    expected = Path(os.environ.get("RF_CI_TMPBASE") or os.environ["RUNNER_TEMP"]).resolve()
+    if root.is_symlink() or root.parent.resolve() != expected or not root.name.startswith("rf-tests-"):
+        print("::error::refusing cleanup outside the configured CI temporary base")
+        return 1
+    errors = []
+    try:
+        leaked = leftovers(root)
+    except OSError as error:
+        leaked = []
+        errors.append((root, error))
+    for name in leaked:
+        print(f"::error::test temporary entry leaked: {name}")
+    print(f"TEST_TMP_LEAKS={len(leaked)}")
+
+    def failed(_operation, path, exception):
+        errors.append((Path(path), exception[1]))
+
+    try:
+        shutil.rmtree(root, onerror=failed)
+    except OSError as error:
+        errors.append((root, error))
+    for path, error in errors:
+        print(f"::error::temporary entry could not be inspected/removed: {path}: {error}")
+    print(f"TEST_TMP_CLEANUP_ERRORS={len(errors)}")
+    return int(bool(leaked or errors))
 
 
 class Tests(unittest.TestCase):
@@ -66,7 +86,7 @@ class Tests(unittest.TestCase):
                 root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=parent))
                 if leaked:
                     (root / "ramflux-leaked").mkdir()
-                with patch.dict(os.environ, {"RF_TEST_TMPBASE": str(parent), "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": ""}):
+                with patch.dict(os.environ, {"RUNNER_TEMP": str(parent), "RF_CI_TMPBASE": "", "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": ""}):
                     with contextlib.redirect_stdout(io.StringIO()) as output:
                         self.assertEqual(check(), int(leaked))
                     self.assertIn(f"TEST_TMP_LEAKS={int(leaked)}", output.getvalue())
@@ -92,6 +112,38 @@ class Tests(unittest.TestCase):
             for key in ("TMPDIR", "TMP", "TEMP"):
                 self.assertEqual(restored[key], str(parent), "post-job actions need an existing temp directory")
             self.assertEqual(restored["RF_TEST_TMPDIR"], "")
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "requires unprivileged POSIX permissions")
+    def test_permission_failure_restores_environment_and_removes_accessible_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve()
+            root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=parent))
+            blocked = root / "ramflux-privileged"
+            blocked.mkdir()
+            (blocked / "owned-file").touch()
+            (root / "rf-accessible").touch()
+            env_file = parent / "github-env"
+            blocked.chmod(0)
+            try:
+                with patch.dict(os.environ, {"RUNNER_TEMP": str(parent), "RF_CI_TMPBASE": "", "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": str(env_file)}):
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(check(), 1)
+                self.assertIn("could not be inspected/removed", output.getvalue())
+                self.assertFalse((root / "rf-accessible").exists())
+                restored = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+                self.assertEqual(restored["TMPDIR"], str(parent))
+                self.assertEqual(restored["RF_TEST_TMPDIR"], "")
+            finally:
+                blocked.chmod(0o700)
+
+    def test_forged_recorded_parent_does_not_authorize_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=parent))
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(parent / "configured"), "RF_CI_TMPBASE": "", "RF_TEST_TMPBASE": str(parent), "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": ""}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(check(), 1)
+            self.assertTrue(root.exists(), "a recorded parent must not override the configured base")
 
 
 def main():

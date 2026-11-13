@@ -5,9 +5,9 @@ use super::*;
 
 struct Fixture {
     client: RamfluxClient,
-    root: PathBuf,
     reference: SdkDmAttachmentRef,
     package: SdkObjectSharePackage,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
@@ -26,8 +26,9 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
         let sequence = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir()
-            .join(format!("rf-deferred-{}-{unique}-{sequence}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-deferred-{}-{unique}-{sequence}", std::process::id()));
         let client = open(&root, true)?;
         // Construct a real encrypted key slot using the donor's object key.
         let mut donor = RamfluxClient::new();
@@ -80,16 +81,11 @@ impl Fixture {
         Ok(Self { client, root, reference, package })
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
 fn open(root: &Path, create: bool) -> Result<RamfluxClient, SdkError> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("recipient", [0x21; 32]);
     client.create_device_branch("recipient", "recipient-device", 1, [0x22; 32]);
-    client.open_account_index(root)?;
+    client.open_account_index(&root)?;
     if create {
         client.create_account("account", "commitment")?;
     }

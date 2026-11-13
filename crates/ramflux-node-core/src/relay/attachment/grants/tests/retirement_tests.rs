@@ -6,11 +6,13 @@ use ramflux_protocol::large_attachment::AttachmentRetirement;
 fn large_retired_grant_blocks_old_token_renewal_and_late_publish() {
     let now = 1_700_000_001;
     let (native, grant) = fixtures();
-    let root = std::env::temp_dir().join(format!(
-        "rf-retire-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-retire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("db");
     let store = RelayRedbStore::open(&path).unwrap();
@@ -159,7 +161,9 @@ fn large_retired_grant_blocks_old_token_renewal_and_late_publish() {
 #[test]
 fn retirement_accepts_current_owner_devices_and_scopes_operation_ids() {
     use super::super::fixture::RetirementFixture;
-    let root = std::env::temp_dir().join(format!("rf-current-owner-{}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-current-owner-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let fixture = RetirementFixture::new(&root.join("db"));

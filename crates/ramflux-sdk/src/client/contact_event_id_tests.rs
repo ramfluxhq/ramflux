@@ -20,7 +20,7 @@ fn event_count(client: &RamfluxClient) -> Result<usize, SdkError> {
 
 #[test]
 fn same_second_blocks_and_unblocks_have_distinct_decision_event_ids() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-same-second")?;
+    let (root, client) = unlocked_client("decision-same-second")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let first = client.block_friend_link_at("link", 1000)?;
     let first_id = checkpoint(&client, "friend.control")?;
@@ -42,7 +42,7 @@ fn same_second_blocks_and_unblocks_have_distinct_decision_event_ids() -> Result<
 
 #[test]
 fn later_second_reblock_does_not_conflict() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-later-second")?;
+    let (root, client) = unlocked_client("decision-later-second")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     client.block_friend_link_at("link", 1000)?;
     let old_id = checkpoint(&client, "friend.control")?;
@@ -58,7 +58,7 @@ fn later_second_reblock_does_not_conflict() -> Result<(), SdkError> {
 
 #[test]
 fn removal_scope_cycles_in_one_consent_epoch_have_distinct_ids() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-remove-cycle")?;
+    let (root, client) = unlocked_client("decision-remove-cycle")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     client.remove_friend_link_at("link", "me", 1000)?;
     let first = checkpoint(&client, "friend.control")?;
@@ -83,7 +83,7 @@ fn removal_scope_cycles_in_one_consent_epoch_have_distinct_ids() -> Result<(), S
 
 #[test]
 fn sibling_reblock_after_local_lift_and_duplicate_tombstone_are_safe() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-sibling")?;
+    let (root, client) = unlocked_client("decision-sibling")?;
     let own = client.owned_device_identity()?.root_commitment().to_owned();
     let peer = ramflux_protocol::encode_base64url([0x33; 32]);
     client.establish_friend_link("link", &own, &peer)?;
@@ -108,7 +108,7 @@ fn sibling_reblock_after_local_lift_and_duplicate_tombstone_are_safe() -> Result
 
 #[test]
 fn legacy_rows_and_new_decision_replays_survive_reopen() -> Result<(), SdkError> {
-    let (mut client, root) = unlocked_client("decision-legacy-reopen")?;
+    let (root, mut client) = unlocked_client("decision-legacy-reopen")?;
     let legacy = b"{\"type\":\"friend.blocked\",\"link_id\":\"link\",\"legacy\":true}";
     client.append_event("friend.blocked:link", "friend.blocked", legacy)?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
@@ -138,7 +138,7 @@ fn legacy_rows_and_new_decision_replays_survive_reopen() -> Result<(), SdkError>
 
 #[test]
 fn a_new_decline_preserves_legacy_rows_and_its_replay_is_idempotent() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-decline")?;
+    let (root, client) = unlocked_client("decision-decline")?;
     let legacy = b"{\"type\":\"friend.rejected\",\"legacy\":true}";
     client.append_event("friend.rejected:pending", "friend.rejected", legacy)?;
     client.record_pending_friend_link("pending", "peer", "principal_contact")?;
@@ -159,7 +159,7 @@ fn a_new_decline_preserves_legacy_rows_and_its_replay_is_idempotent() -> Result<
 
 #[test]
 fn regranted_object_revocations_use_their_own_decision_identity() -> Result<(), SdkError> {
-    let (client, root) = unlocked_client("decision-regrant")?;
+    let (root, client) = unlocked_client("decision-regrant")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let mut ids = Vec::new();
     for at in [1000, 1000, 1002] {
@@ -187,7 +187,7 @@ fn regranted_object_revocations_use_their_own_decision_identity() -> Result<(), 
 #[test]
 fn equal_stamps_and_payloads_from_distinct_device_signers_have_distinct_ids() -> Result<(), SdkError>
 {
-    let (mut client, root) = unlocked_client("decision-device-namespace")?;
+    let (root, mut client) = unlocked_client("decision-device-namespace")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let blocked = client.block_friend_link_at("link", 1000)?;
     let first_id = checkpoint(&client, "friend.control")?;

@@ -956,7 +956,7 @@ mod tests {
         let router = issue_test_service_cert(&ca, "node-retention-a", "ramflux-router")?;
         let (router_quic_endpoint, received) =
             spawn_router_gc_quic_server(router.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_router_gc_sweep_uses_quic")?;
+        let (store_path, store) = temp_retention_store("retention_router_gc_sweep_uses_quic")?;
         let mut config = test_retention_config(&retention.tls, "127.0.0.1:1");
         config.mesh.endpoints.insert("gateway".into(), "127.0.0.1:1".into());
         config.mesh.endpoints.insert("notify".into(), "127.0.0.1:1".into());
@@ -985,7 +985,7 @@ mod tests {
         let router = issue_test_service_cert(&ca, "node-retention-a", "ramflux-router")?;
         let (router_blocking_endpoint, received) =
             spawn_router_gc_blocking_server(router.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_router_gc_sweep_opt_out")?;
+        let (store_path, store) = temp_retention_store("retention_router_gc_sweep_opt_out")?;
         let config = test_retention_config(&retention.tls, &router_blocking_endpoint);
 
         run_gc_sweep_once_with_router_async_endpoint(
@@ -1011,7 +1011,7 @@ mod tests {
         let router = issue_test_service_cert(&ca, "node-retention-a", "ramflux-router")?;
         let (router_blocking_endpoint, received) =
             spawn_router_gc_blocking_server(router.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_router_gc_sweep_fallback")?;
+        let (store_path, store) = temp_retention_store("retention_router_gc_sweep_fallback")?;
         let config = test_retention_config(&retention.tls, &router_blocking_endpoint);
 
         run_gc_sweep_once_with_router_async_endpoint(
@@ -1037,7 +1037,7 @@ mod tests {
         let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
         let (federation_quic_endpoint, received) =
             spawn_router_gc_quic_server(federation.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_uses_quic")?;
+        let (store_path, store) = temp_retention_store("retention_federation_gc_sweep_uses_quic")?;
         let config = test_retention_config_with_endpoint(
             &retention.tls,
             "federation",
@@ -1069,7 +1069,7 @@ mod tests {
         let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
         let (federation_blocking_endpoint, received) =
             spawn_router_gc_blocking_server(federation.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_opt_out")?;
+        let (store_path, store) = temp_retention_store("retention_federation_gc_sweep_opt_out")?;
         let config = test_retention_config_with_endpoint(
             &retention.tls,
             "federation",
@@ -1100,7 +1100,7 @@ mod tests {
         let federation = issue_test_service_cert(&ca, "node-retention-a", "ramflux-federation")?;
         let (federation_blocking_endpoint, received) =
             spawn_router_gc_blocking_server(federation.tls.clone(), retention.ca_pem.clone())?;
-        let (store, store_path) = temp_retention_store("retention_federation_gc_sweep_fallback")?;
+        let (store_path, store) = temp_retention_store("retention_federation_gc_sweep_fallback")?;
         let config = test_retention_config_with_endpoint(
             &retention.tls,
             "federation",
@@ -1122,20 +1122,23 @@ mod tests {
         Ok(())
     }
 
-    fn temp_path(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_path(
+        test_name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        Ok(std::env::temp_dir().join(format!(
-            "ramflux-retention-{test_name}-{}-{}",
-            std::process::id(),
-            elapsed.as_nanos()
-        )))
+        Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("ramflux-retention-{test_name}-{}-{}", std::process::id(), elapsed.as_nanos()),
+        ))
     }
 
     fn temp_retention_store(
         test_name: &str,
-    ) -> Result<(ramflux_node_core::RetentionRedbStore, PathBuf), Box<dyn std::error::Error>> {
+    ) -> Result<
+        (ramflux_test_support::TestPath, ramflux_node_core::RetentionRedbStore),
+        Box<dyn std::error::Error>,
+    > {
         let path = temp_path(test_name)?;
-        Ok((ramflux_node_core::RetentionRedbStore::open(&path)?, path))
+        Ok((path.clone(), ramflux_node_core::RetentionRedbStore::open(&path)?))
     }
 
     fn cleanup_store(path: &Path) {
@@ -1300,13 +1303,13 @@ mod tests {
         ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_retention_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux_retention_{name}_{}_{}", std::process::id(), nanos));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }

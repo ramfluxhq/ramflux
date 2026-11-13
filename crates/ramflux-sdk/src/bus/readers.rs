@@ -471,7 +471,7 @@ mod tests {
     use super::*;
     #[test]
     fn generated_page_reader_returns_bounds_and_shared_errors() -> Result<(), SdkError> {
-        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+        let (root, client) = crate::client::own_device_sync::tests::client_with_account(
             "generated-page-reader",
             "principal_sync",
             "local",
@@ -499,8 +499,9 @@ mod tests {
     async fn message_rows_preserve_actor_kind_and_leave_legacy_metadata_unknown()
     -> Result<(), SdkError> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos());
-        let path = std::env::temp_dir()
-            .join(format!("rf-reader-actor-kind-{}-{suffix}", std::process::id()));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-reader-actor-kind-{}-{suffix}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&path)?;
         client.create_account("reader", "reader")?;
@@ -555,8 +556,9 @@ mod tests {
     fn failed_attachment_fetch_keeps_the_conversation_content_snapshot_unchanged()
     -> Result<(), SdkError> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-message-fetch-snapshot-{}-{suffix}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-message-fetch-snapshot-{}-{suffix}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "a")?;
@@ -581,8 +583,9 @@ mod tests {
     async fn read_markers_follow_the_authenticated_viewer_root_without_copying_signing_keys()
     -> Result<(), SdkError> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-reader-root-{}-{suffix}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-reader-root-{}-{suffix}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root("alice", [1; 32]);
         client.create_device_branch("alice", "phone", 1, [2; 32]);
@@ -637,7 +640,7 @@ mod read_model_selector_tests {
     fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
     -> Result<(), Box<dyn std::error::Error>> {
         let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+        let (root, client) = crate::client::own_device_sync::tests::client_with_account(
             "reader-selectors",
             "principal_sync",
             "local",

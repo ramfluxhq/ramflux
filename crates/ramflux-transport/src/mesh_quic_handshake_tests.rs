@@ -15,18 +15,20 @@ use tokio::task::JoinHandle;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub(crate) struct Certificates {
-    root: PathBuf,
     ca: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
     pub(crate) server: MeshTlsConfig,
+    root: ramflux_test_support::TestPath,
 }
 impl Certificates {
     pub(crate) fn new() -> TestResult<Self> {
         crate::tls_config::ensure_ring_crypto_provider_installed();
-        let root = std::env::temp_dir().join(format!(
-            "quic_admission_{}_{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "quic_admission_{}_{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            ));
         std::fs::create_dir_all(&root)?;
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -82,12 +84,6 @@ impl Certificates {
         Ok(endpoint)
     }
 }
-impl Drop for Certificates {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 struct Harness {
     addr: SocketAddr,
     metrics: MeshQuicHandshakeMetrics,

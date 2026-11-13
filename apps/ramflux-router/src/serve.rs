@@ -1332,7 +1332,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn raw_submit_bridge_returns_committed_mesh_metadata() -> anyhow::Result<()> {
-        let (state, store, path) = crate::router_runtime::tests::test_router("compio-metadata")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("compio-metadata")?;
         let router =
             std::sync::Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
         let bridge = super::RouterSubmitBridge {

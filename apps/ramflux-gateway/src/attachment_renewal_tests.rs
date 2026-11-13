@@ -536,11 +536,13 @@ mod relay_clamp {
 
     #[test]
     fn relay_refuses_a_w_that_outlives_its_challenge_and_accepts_the_clamped_one() -> Result {
-        let path = std::env::temp_dir().join(format!(
-            "rf-gw-clamp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-gw-clamp-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let spec = FixtureSpec {
             case: 1,
             source: "node-owner".into(),

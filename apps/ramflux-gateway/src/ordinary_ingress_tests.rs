@@ -11,21 +11,27 @@ use std::time::{Duration, Instant};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn context(custody: Option<crate::custody::Pools>) -> anyhow::Result<GatewayListenerContext> {
-    let context = crate::session::tests::test_gateway_context()?;
-    Ok(GatewayListenerContext {
-        custody,
-        node_id: context.node_id,
-        gateway_id: context.gateway_id,
-        peers: context.peers,
-        router: context.router,
-        notify: context.notify,
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key: context.relay_service_key,
-        state: context.state,
-        store: context.store,
-        hub: context.hub,
-    })
+fn context(
+    custody: Option<crate::custody::Pools>,
+) -> anyhow::Result<(ramflux_test_support::TestPath, GatewayListenerContext)> {
+    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
+    let context = fixture_value_0;
+    Ok((
+        _fixture_directory_0,
+        GatewayListenerContext {
+            custody,
+            node_id: context.node_id,
+            gateway_id: context.gateway_id,
+            peers: context.peers,
+            router: context.router,
+            notify: context.notify,
+            #[cfg(feature = "itest-local-mint")]
+            relay_service_key: context.relay_service_key,
+            state: context.state,
+            store: context.store,
+            hub: context.hub,
+        },
+    ))
 }
 
 fn full_pool(
@@ -76,10 +82,12 @@ async fn ordinary_tcp_and_relay_pool_quic_work_without_custody_configuration() -
 }
 
 async fn exercise(pools: Option<crate::custody::Pools>, refusal: CustodyRefusal) -> Result {
-    let root = std::env::temp_dir().join(format!(
-        "ramflux-ordinary-ingress-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-ordinary-ingress-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     std::fs::create_dir(&root)?;
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let tls = ramflux_transport::MeshTlsConfig {
@@ -98,7 +106,7 @@ async fn exercise(pools: Option<crate::custody::Pools>, refusal: CustodyRefusal)
     )?;
     let quic_address = endpoint.local_addr()?;
     let full = pools.is_some();
-    let context = context(pools)?;
+    let (_context_directory, context) = context(pools)?;
     let tcp_server = tokio::spawn(serve_gateway_tcp_listener(
         listener,
         ramflux_transport::tcp_gateway_server_config(&tls)?,

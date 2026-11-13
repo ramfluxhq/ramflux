@@ -806,8 +806,10 @@ async fn stream_upload_status(
 mod tests {
     use super::object_get_open_temp;
 
-    fn unique_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rf-object-get-{tag}-{}", std::process::id()));
+    fn unique_dir(tag: &str) -> ramflux_test_support::TestPath {
+        let dir = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-object-get-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         dir

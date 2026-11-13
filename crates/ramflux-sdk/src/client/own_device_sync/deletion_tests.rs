@@ -6,7 +6,7 @@ use super::tests::{bundle, client_with_account, envelope};
 use super::*;
 
 fn sibling_deleted_copy_order(deletion_first: bool, copies: usize) -> Result<(), SdkError> {
-    let (client, root) = client_with_account(
+    let (root, client) = client_with_account(
         if deletion_first { "sibling-delete-first" } else { "sibling-live-first" },
         "principal_sync",
         "target_device_sync",

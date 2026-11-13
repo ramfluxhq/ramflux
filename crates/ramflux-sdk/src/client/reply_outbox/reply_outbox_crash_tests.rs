@@ -164,20 +164,22 @@ fn device_target(client: &RamfluxClient) -> Result<String, SdkError> {
 }
 
 pub(super) struct Fixture {
-    root: std::path::PathBuf,
-    peer_root: std::path::PathBuf,
     pub client: RamfluxClient,
     pub peer: RamfluxClient,
+    root: ramflux_test_support::TestPath,
+    peer_root: ramflux_test_support::TestPath,
 }
 
 impl Fixture {
     pub(super) fn new() -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("rf-reply-outbox-{}-{}", std::process::id(), n));
-        let peer_root =
-            std::env::temp_dir().join(format!("rf-reply-outbox-peer-{}-{}", std::process::id(), n));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-reply-outbox-{}-{}", std::process::id(), n));
+        let peer_root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-reply-outbox-peer-{}-{}", std::process::id(), n));
         let client = open_identity(&root, "acct", "acct-device", [41; 32], [42; 32])?;
         let peer = open_identity(&peer_root, "peer", "peer-device", [43; 32], [44; 32])?;
         let db = client.account_db()?;
@@ -235,8 +237,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.client.active_account_db = None;
         self.peer.active_account_db = None;
-        let _ = std::fs::remove_dir_all(&self.root);
-        let _ = std::fs::remove_dir_all(&self.peer_root);
     }
 }
 
@@ -250,7 +250,7 @@ fn open_identity(
     let mut client = RamfluxClient::new();
     client.create_identity_root(principal, root_seed);
     client.create_device_branch(principal, device, 1, device_seed);
-    client.open_account_index(root)?;
+    client.open_account_index(&root)?;
     client.create_account(principal, &format!("{principal}-commitment"))?;
     client.unlock_account(principal, b"reply-outbox-secret")?;
     client.initialize_and_publish_prekey_bundle(principal, device, device, device_seed, None)?;

@@ -122,7 +122,7 @@ fn initialization_and_first_preparation_share_one_identity() -> Result {
         let (release, wait) = std::sync::mpsc::sync_channel(1);
         let wait = Mutex::new(wait);
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "inbox_identity_reserved" && done {
                     entered.send(()).map_err(std::io::Error::other)?;

@@ -27,9 +27,9 @@ const EXPIRES_AT_MS: u64 = 1_760_000_005_000;
 const NOW_LIVE_MS: u64 = 1_760_000_004_999;
 
 struct TestCa {
-    cert: PathBuf,
-    key: PathBuf,
     pem: String,
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
 }
 
 struct TestPeerCerts {
@@ -40,16 +40,16 @@ struct TestPeerCerts {
 struct ForwardServer {
     endpoint: String,
     hub: Arc<GatewaySessionHub>,
-    _root: PathBuf,
+    _root: ramflux_test_support::TestPath,
 }
 
-fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn temp_cert_root(
+    name: &str,
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ramflux_gw_forward_id_{name}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux_gw_forward_id_{name}_{}_{}", std::process::id(), nanos));
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }

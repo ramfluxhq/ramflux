@@ -10,9 +10,9 @@ use crate::{
 use redb::ReadableDatabase;
 use std::sync::atomic::{AtomicBool, Ordering};
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
-fn fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "p2-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -94,7 +94,7 @@ pub(crate) fn upgrade() -> Result {
             let rotated = Arc::new(AtomicBool::new(false));
             let observed = Arc::clone(&rotated);
             let guard = observe(
-                root.clone(),
+                root.to_path_buf(),
                 Arc::new(move |_, op, _| {
                     if op == "rotation_pending" {
                         observed.store(true, Ordering::SeqCst);
@@ -181,7 +181,7 @@ pub(super) fn head_matrix() -> Result {
             let armed = Arc::new(AtomicBool::new(true));
             let hook_segment = segment.clone();
             let _guard = observe(
-                root.clone(),
+                root.to_path_buf(),
                 Arc::new(move |path, op, done| {
                     if path == hook_segment
                         && op == "head_commit"

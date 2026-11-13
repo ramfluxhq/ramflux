@@ -188,7 +188,8 @@ impl Driver {
 }
 #[test]
 fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -> Result {
-    let path = temp_store_path("custody-network-challenge")?;
+    let _store_directory_0 = temp_store_path("custody-network-challenge")?;
+    let path = _store_directory_0.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -308,7 +309,8 @@ fn signed_request(
 }
 #[test]
 fn custody_session_requests_bind_connection_possession_nonce_and_current_head() -> Result {
-    let path = temp_store_path("custody-session-binding")?;
+    let _store_directory_1 = temp_store_path("custody-session-binding")?;
+    let path = _store_directory_1.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -404,7 +406,8 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
 
 #[test]
 fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_restart() -> Result {
-    let path = temp_store_path("custody-node-pins")?;
+    let _store_directory_2 = temp_store_path("custody-node-pins")?;
+    let path = _store_directory_2.to_path_buf();
     let (first, _) = node()?;
     let root = SigningKey::from_bytes(&[8; 32]);
     let key_id = first.envelope().body.proxy_keys[0].key_id.clone();
@@ -453,7 +456,8 @@ fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_res
 
 #[test]
 fn custody_node_key_signing_deadline_cannot_restart_after_overlap_history_is_removed() -> Result {
-    let path = temp_store_path("custody-key-deadline")?;
+    let _store_directory_3 = temp_store_path("custody-key-deadline")?;
+    let path = _store_directory_3.to_path_buf();
     let (first, _) = node()?;
     let root = SigningKey::from_bytes(&[8; 32]);
     let later = NOW + 606_001;
@@ -500,7 +504,8 @@ fn custody_node_key_signing_deadline_cannot_restart_after_overlap_history_is_rem
 
 #[test]
 fn custody_mesh_unauthenticated_ipv6_prefix_cannot_exhaust_other_sources() -> Result {
-    let path = temp_store_path("custody-unauthenticated-prefixes")?;
+    let _store_directory_4 = temp_store_path("custody-unauthenticated-prefixes")?;
+    let path = _store_directory_4.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -533,7 +538,8 @@ fn custody_mesh_unauthenticated_ipv6_prefix_cannot_exhaust_other_sources() -> Re
 
 #[test]
 fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -> Result {
-    let path = temp_store_path("custody-publication-quota-admission")?;
+    let _store_directory_5 = temp_store_path("custody-publication-quota-admission")?;
+    let path = _store_directory_5.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -608,7 +614,8 @@ fn registered_direct_driver(
 
 #[test]
 fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> Result {
-    let path = temp_store_path("custody-direct-grant-fence")?;
+    let _store_directory_6 = temp_store_path("custody-direct-grant-fence")?;
+    let path = _store_directory_6.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -737,7 +744,8 @@ fn publication_session(
 fn durable_view_publication() -> Result {
     use std::sync::{Arc, mpsc};
     for mode in 0..=2 {
-        let root = temp_store_path(&format!("custody-published-{mode}"))?;
+        let _store_directory_7 = temp_store_path(&format!("custody-published-{mode}"))?;
+        let root = _store_directory_7.to_path_buf();
         let store = Arc::new(crate::publication::open_durability_fixture(&root, mode)?);
         let router = Arc::new(RouterCore::new());
         store.bootstrap_router(&router)?;

@@ -221,7 +221,9 @@ mod tests {
 
     #[test]
     fn malformed_registration_and_upstream_ack_are_typed_rejections() -> anyhow::Result<()> {
-        let path = std::env::temp_dir().join("unused-registration-tls");
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child("unused-registration-tls");
         let router = crate::RouterMeshClient {
             endpoint: "127.0.0.1:1".into(),
             server_name: "router".into(),

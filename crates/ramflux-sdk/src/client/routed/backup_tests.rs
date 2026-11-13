@@ -315,10 +315,12 @@ async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ra
 
 // Key-only recovery uses the cryptographic root, rather than a display-name namespace.
 fn canonical_key_recovery_fixture() -> Result<Fixture, SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "ramflux-key-recovery-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-key-recovery-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let mut client = RamfluxClient::new();
     let identity = client.create_identity_root("alice", [41; 32]);
     let commitment =

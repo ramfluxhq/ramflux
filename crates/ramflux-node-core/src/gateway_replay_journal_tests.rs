@@ -28,10 +28,12 @@ fn request(index: usize, expires_at: i64) -> ramflux_protocol::SignedRequest {
 }
 
 fn renewal_case(inject_obsolete_index: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-renewed-replay-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "gateway-renewed-replay-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let root = ramflux_crypto::create_identity_root("owner", [41; 32]);
     let branch = ramflux_crypto::create_device_branch("owner", "device", 1, [42; 32]);
     let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
@@ -102,11 +104,13 @@ fn source(seed: u8) -> Result<ramflux_crypto::RootQualifiedDeviceRef, Box<dyn st
     let device = ramflux_crypto::create_device_branch("owner", "device", 1, [42; 32]);
     Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &device)?)
 }
-fn test_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    Ok(std::env::temp_dir().join(format!(
-        "gateway-quota-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )))
+fn test_path() -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+        format!(
+            "gateway-quota-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ),
+    ))
 }
 fn config(roots: u64, share: u64) -> crate::GatewayReplayConfig {
     crate::GatewayReplayConfig {

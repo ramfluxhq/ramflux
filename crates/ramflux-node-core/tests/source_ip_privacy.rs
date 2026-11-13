@@ -10,13 +10,13 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const HASH_PREFIX: &str = "SOURCE_PRIVACY_HASH=";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
-struct Fixture(PathBuf);
+struct Fixture(ramflux_test_support::TestPath);
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         loop {
             let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("rf-source-privacy-{}-{nonce}", std::process::id()));
+            let path = ramflux_test_support::TestPath::new()?
+                .child(format!("rf-source-privacy-{}-{nonce}", std::process::id()));
             match std::fs::create_dir(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -43,12 +43,6 @@ impl Fixture {
             .collect()
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn probe(config: &Path, service: &str, mounted: Option<&Path>) -> Result<Output, std::io::Error> {
     probe_command(config, service, mounted)?.output()
 }

@@ -66,10 +66,12 @@ mod tests {
     #[test]
     fn clean_restart_is_immediate_crash_waits_and_true_rollback_is_typed() -> anyhow::Result<()> {
         for enabled in [false, true] {
-            let path = std::env::temp_dir().join(format!(
-                "gateway-startup-{}.redb",
-                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-            ));
+            let path = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "gateway-startup-{}.redb",
+                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                ));
             let store = GatewayRedbStore::open(&path)?;
             let mut state = GatewayState::new();
             state.set_pre_auth_policy(ramflux_node_core::GatewayPreAuthPolicy {

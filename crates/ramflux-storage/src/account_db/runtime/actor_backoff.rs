@@ -76,11 +76,13 @@ mod tests {
     #[test]
     fn ready_pages_skip_backoff_before_limit_and_cleanup_never_deletes_originals()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-actor-backoff-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-actor-backoff-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;

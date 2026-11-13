@@ -138,13 +138,14 @@ fn finish(mut child: std::process::Child, success: bool) -> Result {
 // Each nextest case owns one bounded matrix row. The re-exec entry point stays
 // NAME, so every original hold/failure and surface-ordering assertion is retained.
 fn matrix_case(mode: &str, populated: bool, due: bool) -> Result {
-    let root = std::env::temp_dir()
-        .join(format!("startup-matrix-{}-{mode}-{populated}-{due}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("startup-matrix-{}-{mode}-{populated}-{due}", std::process::id()));
     let seed = root.join("seed");
     let parent_opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = Arc::clone(&parent_opens);
     let _observer = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |_, op, done| {
             if op == "startup_fixture_open" && done {
                 observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -254,7 +255,7 @@ pub(super) fn child() -> Result {
     let hook_control = control.clone();
     let once = AtomicBool::new(false);
     let _guard = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |path, op, done| {
             if path == target
                 && op == operation
@@ -331,8 +332,9 @@ fn legacy_surfaces(router: &crate::RouterCore, store: &RouterRedbStore, control:
 }
 pub(super) fn redb_crashes() -> Result {
     for kind in ["uncertain", "reply-loss"] {
-        let root =
-            std::env::temp_dir().join(format!("startup-redb-crash-{}-{kind}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("startup-redb-crash-{}-{kind}", std::process::id()));
         setup(&root, "redb", false, false)?;
         finish(command(&root, "redb").env("RAMFLUX_MATRIX_CRASH", kind).spawn()?, false)?;
         let store = open(&root, "redb")?;

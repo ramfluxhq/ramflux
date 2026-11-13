@@ -12,11 +12,13 @@ use std::{fs, sync::Mutex};
 fn large_scoped_grants_bind_reference_owner_and_grantee() {
     let now = 1_700_000_001;
     let (native, grant) = fixtures();
-    let root = std::env::temp_dir().join(format!(
-        "rf-grants-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-grants-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("db");
     let store = RelayRedbStore::open(&path).unwrap();

@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "si
 workspace = true
 
 [dev-dependencies]
+ramflux-test-support.workspace = true
 ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 ed25519-dalek.workspace = true
@@ -37,5 +38,5 @@ bytes.workspace = true
 http-body-util = "0.1"
 hyper.workspace = true
 hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
-tempfile = "3"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "sync"] }

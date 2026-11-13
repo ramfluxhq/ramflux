@@ -61,7 +61,7 @@ async fn offline_cases() -> Result<(), Box<dyn std::error::Error>> {
     for streaming in [false, true] {
         for relay in [false, true] {
             let root = temp_data_root("conditional-gate");
-            let mut state = make_state(root.clone());
+            let mut state = make_state(&root);
             state
                 .accounts
                 .get_mut(ACCOUNT)
@@ -124,7 +124,7 @@ async fn conditional_object_delete_keeps_local_tombstones_offline_and_gates_rela
 -> Result<(), Box<dyn std::error::Error>> {
     for relay in [false, true] {
         let root = temp_data_root("conditional-delete");
-        let mut state = make_state(root.clone());
+        let mut state = make_state(&root);
         state
             .accounts
             .get_mut(ACCOUNT)

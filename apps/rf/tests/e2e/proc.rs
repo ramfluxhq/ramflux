@@ -184,11 +184,13 @@ pub(crate) fn run_group_output(
     command: &mut Command,
     deadline: Duration,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    let stem = std::env::temp_dir().join(format!(
-        "rf-cli-e2e-proc-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+    let stem = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-cli-e2e-proc-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
     let out_path = PathBuf::from(format!("{}.out", stem.display()));
     let err_path = PathBuf::from(format!("{}.err", stem.display()));
     let result = (|| -> Result<Output, Box<dyn std::error::Error>> {
@@ -275,11 +277,13 @@ pub(crate) fn run_group_output_with_stdin(
     stdin_bytes: &[u8],
     deadline: Duration,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    let stem = std::env::temp_dir().join(format!(
-        "rf-cli-e2e-proc-in-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+    let stem = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-cli-e2e-proc-in-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
     let out_path = PathBuf::from(format!("{}.out", stem.display()));
     let err_path = PathBuf::from(format!("{}.err", stem.display()));
     let result = (|| -> Result<Output, Box<dyn std::error::Error>> {

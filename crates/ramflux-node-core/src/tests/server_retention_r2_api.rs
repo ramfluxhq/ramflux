@@ -57,7 +57,8 @@ fn mailbox_reads_hide_expired_entries_without_mutating_the_shard() {
 #[test]
 fn repeated_nacks_dead_letter_without_keeping_ciphertext() -> Result<(), Box<dyn std::error::Error>>
 {
-    let path = temp_store_path("server_retention_dead_letter")?;
+    let _store_directory_0 = temp_store_path("server_retention_dead_letter")?;
+    let path = _store_directory_0.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
@@ -93,7 +94,8 @@ fn repeated_nacks_dead_letter_without_keeping_ciphertext() -> Result<(), Box<dyn
 #[test]
 fn durable_sweep_removes_only_rows_whose_index_deadline_is_due()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("server_retention_index_sweep")?;
+    let _store_directory_1 = temp_store_path("server_retention_index_sweep")?;
+    let path = _store_directory_1.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     let now = i64::try_from(now_unix_seconds())?;
@@ -135,7 +137,8 @@ fn retention_requests_cannot_move_a_node_clock_forward() {
 
 #[test]
 fn router_wal_keeps_issued_watermarks_after_expiry() -> Result<(), Box<dyn std::error::Error>> {
-    let root = temp_store_path("server_retention_wal_watermark")?.with_extension("wal");
+    let _store_directory_2 = temp_store_path("server_retention_wal_watermark")?;
+    let root = _store_directory_2.to_path_buf().with_extension("wal");
     let store = RouterWalStore::open(&root)?;
     let mut message = envelope("old", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = 1_000;
@@ -151,8 +154,9 @@ fn router_wal_keeps_issued_watermarks_after_expiry() -> Result<(), Box<dyn std::
 #[test]
 fn revocation_sweep_batches_authority_lookups() -> Result<(), Box<dyn std::error::Error>> {
     let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _store_directory_3 = temp_store_path("server_retention_revocation_batch")?;
     let mut store = NotifyRedbStore::open_with_route_key(
-        temp_store_path("server_retention_revocation_batch")?,
+        _store_directory_3.to_path_buf(),
         NodeSecret::ephemeral()?,
     )?;
     let seen = std::sync::Arc::clone(&batches);

@@ -7,11 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[test]
 fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_root = std::env::temp_dir().join(format!(
-        "ramflux-sdk-cabi-smoke-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
+    let temp_root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-sdk-cabi-smoke-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
     std::fs::create_dir_all(&temp_root)?;
 
     let account_root = temp_root.join("accounts");

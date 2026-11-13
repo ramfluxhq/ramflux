@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type Events = Arc<Mutex<Vec<(PathBuf, String)>>>;
 
-fn fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "wal-durability-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -163,7 +163,7 @@ fn segment_directory_before_ack() -> TestResult {
                 events
                     .iter()
                     .skip(sync + 1)
-                    .any(|e| e == &(writer.root.clone(), "directory_sync".into()))
+                    .any(|e| e == &(writer.root.to_path_buf(), "directory_sync".into()))
             );
         }
         drop(writer);
@@ -182,7 +182,7 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let expected = root.clone();
     let _guard = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |path, op, completed| {
             if path == expected && op == "directory_sync" && !completed {
                 entered_tx.send(()).map_err(io::Error::other)?;
@@ -197,7 +197,8 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     );
     let worker_root = root.clone();
     let worker = thread::spawn(move || {
-        let writer = RouterWalWriterState::open(worker_root, 0, 0, 1024).expect("open");
+        let writer =
+            RouterWalWriterState::open(worker_root.to_path_buf(), 0, 0, 1024).expect("open");
         done_tx.send(()).expect("done");
         writer
     });
@@ -230,7 +231,7 @@ fn failed_recovery_sync_refuses_open() -> TestResult {
     let reached = Arc::new(AtomicBool::new(false));
     let reached_hook = Arc::clone(&reached);
     let _guard = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |_, op, completed| {
             if op == "sync_all" && !completed {
                 reached_hook.store(true, Ordering::SeqCst);
@@ -323,7 +324,7 @@ fn wait_for_abort(mut child: std::process::Child) -> TestResult {
 }
 
 fn record_k_child(root: PathBuf) -> TestResult {
-    let mut writer = RouterWalWriterState::open(root.clone(), 2, 0, u64::MAX)?;
+    let mut writer = RouterWalWriterState::open(root.to_path_buf(), 2, 0, u64::MAX)?;
     let record_count = std::sync::atomic::AtomicUsize::new(0);
     let _guard = observe(
         root,

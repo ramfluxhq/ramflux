@@ -12,13 +12,14 @@ mod vault;
 
 struct Gateway {
     public: Fixture,
-    accounts: PathBuf,
     address: std::net::SocketAddr,
     vault: Arc<vault::Vault>,
     router: Arc<RouterCore>,
     store: Arc<RouterRedbStore>,
     serving: tokio::task::JoinHandle<anyhow::Result<()>>,
     mesh: tokio::task::JoinHandle<anyhow::Result<()>>,
+    accounts: std::path::PathBuf,
+    _context_directory: ramflux_test_support::TestPath,
 }
 impl Drop for Gateway {
     fn drop(&mut self) {
@@ -54,7 +55,9 @@ impl Gateway {
             start_mesh(&public.root, Arc::clone(&router), Arc::clone(&store), service)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let mut context = crate::session::tests::test_gateway_context()?;
+        let (_fixture_directory_0, fixture_value_0) =
+            crate::session::tests::test_gateway_context()?;
+        let mut context = fixture_value_0;
         context.router = client;
         let context = crate::serve::GatewayListenerContext {
             custody: crate::custody::initialize()?,
@@ -74,7 +77,17 @@ impl Gateway {
             ramflux_transport::tcp_gateway_server_config(&public.tls)?,
             context,
         ));
-        Ok(Self { public, accounts, address, vault: Arc::default(), router, store, serving, mesh })
+        Ok(Self {
+            public,
+            accounts,
+            address,
+            vault: Arc::default(),
+            router,
+            store,
+            serving,
+            mesh,
+            _context_directory: _fixture_directory_0,
+        })
     }
     fn config(&self, id: &str) -> CustodyNetworkConfig {
         CustodyNetworkConfig {

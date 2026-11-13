@@ -296,17 +296,18 @@ impl RamfluxClient {
 mod t24b1_client_db_reopen_tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> std::path::PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-t24b1-{test_name}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-t24b1-{test_name}-{}-{nanos}", std::process::id()))
     }
 
     fn open_client(root: &std::path::Path, create: bool) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
-        client.open_account_index(root)?;
+        client.open_account_index(&root)?;
         if create {
             client.create_account("acct", "principal")?;
         }

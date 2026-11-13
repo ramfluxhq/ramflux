@@ -24,8 +24,9 @@ fn failed_checkpoint_saves_are_retried_not_dropped() {
 #[test]
 fn explicit_deregistration_deletes_only_the_bound_owners_routes()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _store_directory_0 = temp_store_path("r3_deregister")?;
     let mut store = NotifyRedbStore::open_with_route_key(
-        temp_store_path("r3_deregister")?,
+        _store_directory_0.to_path_buf(),
         NodeSecret::ephemeral()?,
     )?;
     store.set_push_route_authorizer(|_| Ok(true));

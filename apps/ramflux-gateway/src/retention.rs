@@ -78,7 +78,9 @@ mod tests {
             },
             time::{Duration, UNIX_EPOCH},
         };
-        let context = crate::session::tests::test_gateway_context()?;
+        let (_fixture_directory_0, fixture_value_0) =
+            crate::session::tests::test_gateway_context()?;
+        let context = fixture_value_0;
         let listener = crate::pre_auth_transport_tests::support::listener_context(&context);
         let checkpoint = crate::gateway_state(&context.state)?.admission_checkpoint(100);
         context.store.save_admission_checkpoint(&checkpoint)?;
@@ -127,7 +129,9 @@ mod tests {
             sync::mpsc,
             time::{Duration, UNIX_EPOCH},
         };
-        let context = crate::session::tests::test_gateway_context()?;
+        let (_fixture_directory_1, fixture_value_1) =
+            crate::session::tests::test_gateway_context()?;
+        let context = fixture_value_1;
         let listener = crate::pre_auth_transport_tests::support::listener_context(&context);
         let checkpoint = crate::gateway_state(&context.state)?.admission_checkpoint(100);
         context.store.save_admission_checkpoint(&checkpoint)?;

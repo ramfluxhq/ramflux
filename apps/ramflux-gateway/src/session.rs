@@ -2369,7 +2369,8 @@ pub(crate) mod tests {
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
         let runtime = test_runtime(&branch)?;
-        let context = test_gateway_context()?;
+        let (_fixture_directory_0, fixture_value_0) = test_gateway_context()?;
+        let context = fixture_value_0;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
         let request = ramflux_node_core::RelayTokenIssueRequest {
@@ -2387,7 +2388,8 @@ pub(crate) mod tests {
     fn relay_token_issue_accepts_authenticated_owner_put() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let context = test_gateway_context()?;
+        let (_fixture_directory_1, fixture_value_1) = test_gateway_context()?;
+        let context = fixture_value_1;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
         let request = ramflux_node_core::RelayTokenIssueRequest {
@@ -2416,7 +2418,8 @@ pub(crate) mod tests {
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
         let runtime = test_runtime(&branch)?;
-        let context = test_gateway_context()?;
+        let (_fixture_directory_2, fixture_value_2) = test_gateway_context()?;
+        let context = fixture_value_2;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 
@@ -2447,7 +2450,8 @@ pub(crate) mod tests {
     fn relay_token_issue_binding_failure_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let context = test_gateway_context()?;
+        let (_fixture_directory_3, fixture_value_3) = test_gateway_context()?;
+        let context = fixture_value_3;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 
@@ -2474,7 +2478,8 @@ pub(crate) mod tests {
     fn relay_token_issue_expired_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let context = test_gateway_context()?;
+        let (_fixture_directory_4, fixture_value_4) = test_gateway_context()?;
+        let context = fixture_value_4;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 
@@ -2661,16 +2666,19 @@ pub(crate) mod tests {
         Ok(request)
     }
 
-    pub(crate) fn test_gateway_context() -> anyhow::Result<crate::GatewayQuicContext> {
+    pub(crate) fn test_gateway_context()
+    -> anyhow::Result<(ramflux_test_support::TestPath, crate::GatewayQuicContext)> {
         // A process-wide counter guarantees a unique redb path per context even when parallel tests
         // create contexts within the same clock tick (redb rejects opening the same file twice).
         static NEXT_DB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let store_path = std::env::temp_dir().join(format!(
-            "ramflux-gateway-relay-token-{}-{}-{}.redb",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
-            NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        ));
+        let store_path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "ramflux-gateway-relay-token-{}-{}-{}.redb",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
+                NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ));
         let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(&store_path)?);
         store.configure_replay(
             ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
@@ -2702,35 +2710,38 @@ pub(crate) mod tests {
             signaling: None,
             relay: None,
         };
-        Ok(crate::GatewayQuicContext {
-            custody: None,
-            node_id: "node-gateway-test".to_owned(),
-            gateway_id: "ramflux-gateway".to_owned(),
-            peers: crate::GatewayPeerDirectory::empty(&config),
-            router: crate::RouterMeshClient {
-                endpoint: "127.0.0.1:7443".to_owned(),
-                server_name: "ramflux-router".to_owned(),
-                tls: ramflux_transport::MeshTlsConfig {
-                    ca_cert: "ca.pem".into(),
-                    service_cert: "gateway.pem".into(),
-                    service_key: "gateway-key.pem".into(),
+        Ok((
+            store_path,
+            crate::GatewayQuicContext {
+                custody: None,
+                node_id: "node-gateway-test".to_owned(),
+                gateway_id: "ramflux-gateway".to_owned(),
+                peers: crate::GatewayPeerDirectory::empty(&config),
+                router: crate::RouterMeshClient {
+                    endpoint: "127.0.0.1:7443".to_owned(),
+                    server_name: "ramflux-router".to_owned(),
+                    tls: ramflux_transport::MeshTlsConfig {
+                        ca_cert: "ca.pem".into(),
+                        service_cert: "gateway.pem".into(),
+                        service_key: "gateway-key.pem".into(),
+                    },
+                    client: ramflux_transport::MeshHttpClient::new(),
+                    async_mesh: None,
                 },
-                client: ramflux_transport::MeshHttpClient::new(),
-                async_mesh: None,
+                notify: crate::NotifyHttpClient {
+                    endpoint: "http://127.0.0.1:18085".to_owned(),
+                    signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
+                    mesh: None,
+                    wake_calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                },
+                #[cfg(feature = "itest-local-mint")]
+                relay_service_key: b"relay-service-key-test".to_vec(),
+                state: Arc::new(Mutex::new(state)),
+                store,
+                hub: Arc::new(crate::GatewaySessionHub::default()),
+                remote_addr: "127.0.0.1:50000".parse()?,
             },
-            notify: crate::NotifyHttpClient {
-                endpoint: "http://127.0.0.1:18085".to_owned(),
-                signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
-                mesh: None,
-                wake_calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            },
-            #[cfg(feature = "itest-local-mint")]
-            relay_service_key: b"relay-service-key-test".to_vec(),
-            state: Arc::new(Mutex::new(state)),
-            store,
-            hub: Arc::new(crate::GatewaySessionHub::default()),
-            remote_addr: "127.0.0.1:50000".parse()?,
-        })
+        ))
     }
 }
 

@@ -942,7 +942,7 @@ fn source_evidence_copy_is_charged_bound_and_erased_with_target() -> TestResult 
 fn raw_wire_writer_validates_kinds_and_requires_reset_for_old_ddl() -> TestResult {
     for old in [false, true] {
         let (root, db) = test_db("raw-wire-kind-reset")?;
-        let _root = crate::tests::TestDirGuard(root);
+        let _root = root;
         if old {
             db.connection.call(|sql| {
                 sql.execute_batch("DROP TABLE raw_inner_copy")?;

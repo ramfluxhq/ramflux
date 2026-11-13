@@ -396,12 +396,16 @@ fn store_snapshot(path: &Path) -> Result<(u64, Vec<u8>), Box<dyn std::error::Err
     Ok((meta.len(), ramflux_crypto::blake3_256("ramflux.test.durable_ingress.v1", &bytes).into()))
 }
 
-fn temp_store_path(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "ramflux-s6c-p03-fed-{name}-{}-{}.redb",
-        std::process::id(),
-        ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-    ));
+fn temp_store_path(
+    name: &str,
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-s6c-p03-fed-{name}-{}-{}.redb",
+            std::process::id(),
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ));
     Ok(path)
 }
 

@@ -20,7 +20,7 @@ const NOW: u64 = 1_700_000_001;
 const UPLOAD: [u8; 32] = [21; 32];
 
 /// Creates a file-backed ledger with one committed attachment that grants can bind to.
-fn open_committed_ledger(name: &str) -> (std::path::PathBuf, AttachmentLedger) {
+fn open_committed_ledger(name: &str) -> (ramflux_test_support::TestPath, AttachmentLedger) {
     let path = super::tests::path(name);
     let db = redb::Database::create(&path).unwrap();
     let tx = db.begin_write().unwrap();

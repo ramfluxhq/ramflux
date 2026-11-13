@@ -277,10 +277,11 @@ mod tests {
     const NOW: i64 = 1_760_000_000;
     const FUTURE_EXPIRES_AT: i64 = 4_000_000_000;
 
-    fn temp_root(test_name: &str) -> PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-bot-{test_name}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-bot-{test_name}-{}-{nanos}", std::process::id()))
     }
 
     fn gateway_config() -> GatewaySessionConfig {
@@ -296,7 +297,7 @@ mod tests {
         })
     }
 
-    fn test_state(test_name: &str) -> (LocalBusDaemonState, PathBuf) {
+    fn test_state(test_name: &str) -> (ramflux_test_support::TestPath, LocalBusDaemonState) {
         let root = temp_root(test_name);
         let mut client = RamfluxClient::new();
         client.create_identity_root(PRINCIPAL_ID, [0x61; 32]);
@@ -308,7 +309,7 @@ mod tests {
         let state = LocalBusDaemonState {
             account_index: None,
             nodes: crate::node::NodeStore::default(),
-            config: LocalBusConfig::new(root.join("rfd.sock"), root.clone()),
+            config: LocalBusConfig::new(root.join("rfd.sock"), root.to_path_buf()),
             accounts: BTreeMap::from([(
                 ACCOUNT_ID.to_owned(),
                 LocalBusAccountState::disconnected(
@@ -321,7 +322,7 @@ mod tests {
             attended_accounts: BTreeSet::new(),
             subscribers: BTreeMap::new(),
         };
-        (state, root)
+        (root, state)
     }
 
     fn request(method: &str, body: serde_json::Value) -> LocalBusFrame {
@@ -445,7 +446,7 @@ mod tests {
 
     #[test]
     fn bot_pin_then_signed_install_persists_and_rehydrates() {
-        let (mut state, root) = test_state("install_rehydrate");
+        let (root, mut state) = test_state("install_rehydrate");
         let bot = bot_device([0x71; 32]);
         trust_pin(&mut state, &bot);
         let installer = state.accounts[ACCOUNT_ID].client.device_branch.clone().expect("device");
@@ -480,7 +481,7 @@ mod tests {
 
     #[test]
     fn bot_install_rejects_missing_pin_bad_signature_or_missing_consent() {
-        let (mut state, root) = test_state("negative_install");
+        let (root, mut state) = test_state("negative_install");
         let bot = bot_device([0x72; 32]);
         let installer = state.accounts[ACCOUNT_ID].client.device_branch.clone().expect("device");
         let manifest = signed_manifest(&bot);
@@ -515,7 +516,7 @@ mod tests {
 
     #[test]
     fn bot_revoke_writes_tombstone_and_blocks_reinstall() {
-        let (mut state, root) = test_state("revoke");
+        let (root, mut state) = test_state("revoke");
         let bot = bot_device([0x73; 32]);
         trust_pin(&mut state, &bot);
         let installer = state.accounts[ACCOUNT_ID].client.device_branch.clone().expect("device");

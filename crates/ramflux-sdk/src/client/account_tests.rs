@@ -12,11 +12,12 @@ use std::time::{Duration, Instant};
 const WRITER_CHILD: &str = "client::account::tests::account_writer_sdk_process_fixture";
 const WRITER_ROOT_ENV: &str = "RAMFLUX_SDK_WRITER_TEST_ROOT";
 
-fn temp_root(test_name: &str) -> PathBuf {
+fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
     let nanos =
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir()
-        .join(format!("ramflux-sdk-account-{test_name}-{}-{nanos}", std::process::id()))
+    ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-sdk-account-{test_name}-{}-{nanos}", std::process::id()))
 }
 
 fn wrapped_db_key(
@@ -24,7 +25,7 @@ fn wrapped_db_key(
     local_account_id: &str,
     secret: &[u8],
 ) -> Result<AccountDbKey, SdkError> {
-    let index = AccountIndex::open(root)?;
+    let index = AccountIndex::open(&root)?;
     let vault_secret = FileVaultSecretSource::new(index.root()).vault_secret(local_account_id)?;
     let wrapped = index
         .load_wrapped_db_key(local_account_id)?
@@ -68,7 +69,7 @@ fn account_writer_sdk_process_fixture() -> Result<(), Box<dyn std::error::Error>
     let Some(root) = std::env::var_os(WRITER_ROOT_ENV) else {
         return Ok(());
     };
-    let index = AccountIndex::open(root)?;
+    let index = AccountIndex::open(&root)?;
     let _lease = index.acquire_account_writer("acct")?;
     std::fs::write(index.root().join("sdk-writer-ready"), [])?;
     std::thread::sleep(Duration::from_secs(60));

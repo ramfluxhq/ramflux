@@ -35,11 +35,13 @@ fn error(value: impl std::fmt::Display) -> ramflux_node_core::NodeCoreError {
 mod tests {
     #[test]
     fn export_preserves_identity_and_refuses_overwrite() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-key-export-{}-{}",
-            std::process::id(),
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-key-export-{}-{}",
+                std::process::id(),
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         std::fs::create_dir(&root)?;
         let path = root.join("node.key");
         let mut state = ramflux_node_core::FederationTrustState::new();

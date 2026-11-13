@@ -4,11 +4,13 @@
 //! New-device restriction ordering, retry cursor and bounded history export regressions.
 use super::*;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-fn path() -> Result<std::path::PathBuf, SdkError> {
-    Ok(std::env::temp_dir().join(format!(
-        "rf-contact-r9-{}",
-        ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-    )))
+fn path() -> Result<ramflux_test_support::TestPath, SdkError> {
+    Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+        format!(
+            "rf-contact-r9-{}",
+            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+        ),
+    ))
 }
 fn client(path: &std::path::Path, principal: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     super::tests::client(path, principal, seed)

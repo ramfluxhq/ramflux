@@ -84,6 +84,7 @@ chacha20 = { version = "=0.9.1", features = ["zeroize"] }
 poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 
 [dev-dependencies]
+ramflux-test-support.workspace = true
 serde_json = { version = "1.0", features = ["raw_value"] }
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }
@@ -91,7 +92,7 @@ ramflux-node-core = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
 quinn = { workspace = true }
 tokio = { version = "1.42", features = ["test-util"] }
-tempfile = "3"
+tempfile.workspace = true
 
 [build-dependencies]
 cbindgen = "0.29.3"

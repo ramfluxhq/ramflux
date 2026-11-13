@@ -199,7 +199,7 @@ async fn outgoing_after_ack_fence_is_consumed() -> TestResult {
         c.a.client.owned_device_identity()?.root_commitment(),
     )?;
     c.a.client.node_relay_options = Some(relay.options("alice"));
-    let hook = fence_by_path(c.a.root.clone(), c.a.id.clone(), "refused");
+    let hook = fence_by_path(c.a.root.to_path_buf(), c.a.id.clone(), "refused");
     let (mut engine, sent) = Wire::engine_with_hook(&c.a, &c.b, Some(hook))?;
     let message = super::r5::outgoing(&c.a, &c.b, "p310-send");
     let attachments = ids.map(attachment);

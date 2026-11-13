@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn typed_updates_invalidate_deleted_cache_and_resync_stale_cursor()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+        let (root, client) = crate::client::own_device_sync::tests::client_with_account(
             "typed-cache",
             "principal_sync",
             "local",

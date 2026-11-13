@@ -100,7 +100,7 @@ fn ack_batch_reopen_equivalence() -> Result {
         let a = Arc::clone(&starts);
         let b = Arc::clone(&commits);
         let observer = crate::durability_test_hooks::observe(
-            right.clone(),
+            right.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if done && op == "direct_begin" {
                     a.fetch_add(1, Ordering::Relaxed);
@@ -218,7 +218,7 @@ fn ack_batch_atomic_failure() -> Result {
         let before = pending(&router);
         let cursor_before = router.target_shard("target").inbox.cursor_state("target").cloned();
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(|_, op, _| {
                 if op == "ack_candidate" {
                     Err(std::io::Error::other("discard candidate"))
@@ -301,7 +301,7 @@ fn atomic_child(root: std::ffi::OsString) -> Result {
     let store = test_store(&root, mode, 1 << 20)?;
     let router = seed(&store, 3, mode, false)?;
     let _observer = crate::durability_test_hooks::observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |_, op, done| {
             if op == "direct_commit" {
                 if cut == "failed" && !done {

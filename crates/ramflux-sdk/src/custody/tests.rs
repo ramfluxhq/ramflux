@@ -14,23 +14,13 @@ use std::{
 };
 use zeroize::Zeroizing;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-pub(crate) struct Root(pub(crate) PathBuf);
+pub(crate) struct Root(pub(crate) ramflux_test_support::TestPath);
 impl Root {
     pub(crate) fn new() -> Result<Self> {
-        let base = if cfg!(target_os = "macos") {
-            PathBuf::from("/private/tmp")
-        } else {
-            std::env::temp_dir()
-        };
-        let root =
-            base.join(format!("rf-custody-{}", ramflux_protocol::encode_base64url(*random()?)));
+        let root = ramflux_test_support::TestPath::new()?
+            .child(format!("rf-custody-{}", ramflux_protocol::encode_base64url(*random()?)));
         std::fs::create_dir(&root)?;
         Ok(Self(root))
-    }
-}
-impl Drop for Root {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 #[derive(Default)]
@@ -38,8 +28,8 @@ pub(crate) struct TestVault {
     secrets: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     pub(crate) fail: AtomicBool,
     fail_branch: AtomicBool,
-    commit_obstacle: Mutex<Option<PathBuf>>,
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
+    commit_obstacle: Mutex<Option<ramflux_test_support::TestPath>>,
 }
 impl TestVault {
     pub(crate) fn entry_count(&self) -> std::result::Result<usize, SdkError> {

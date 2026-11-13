@@ -11,14 +11,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn shared_relay_store_handles_concurrent_save_and_expiry_without_reopen() -> Result<(), String> {
-    let store_path = std::env::temp_dir().join(format!(
-        "ramflux-relay-shared-store-{}-{}.redb",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|source| source.to_string())?
-            .as_nanos()
-    ));
+    let store_path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-relay-shared-store-{}-{}.redb",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|source| source.to_string())?
+                .as_nanos()
+        ));
     let store = Arc::new(RelayRedbStore::open(&store_path).map_err(|source| source.to_string())?);
     let state = Arc::new(Mutex::new(RelayCacheState::new()));
     {

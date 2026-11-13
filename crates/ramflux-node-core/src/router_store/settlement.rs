@@ -120,7 +120,7 @@ mod tests {
         let (committed, observed) = std::sync::mpsc::sync_channel(1);
         let signal = std::sync::Mutex::new(Some(committed));
         let registration = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             std::sync::Arc::new(move |_, operation, done| {
                 if operation == "direct_commit"
                     && done

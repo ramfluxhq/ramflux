@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "inbox-incarnation-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -80,7 +80,7 @@ fn entry(seq: u64) -> InboxEntry {
 }
 
 fn reopen(path: &Path) -> std::result::Result<RouterRedbStore, NodeCoreError> {
-    RouterRedbStore::open_without_wal(path)
+    RouterRedbStore::open_without_wal(&path)
 }
 
 #[test]

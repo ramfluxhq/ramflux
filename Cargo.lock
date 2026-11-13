@@ -3373,6 +3373,7 @@ dependencies = [
  "ramflux-core",
  "ramflux-protocol",
  "ramflux-sdk",
+ "ramflux-test-support",
  "reqwest",
  "rustix",
  "serde",
@@ -3460,6 +3461,7 @@ dependencies = [
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-sdk",
+ "ramflux-test-support",
  "ramflux-transport",
  "redb",
  "rustls",
@@ -3488,6 +3490,7 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-sdk",
  "ramflux-storage",
+ "ramflux-test-support",
  "ramflux-transport",
  "rcgen",
  "redb",
@@ -3531,6 +3534,7 @@ dependencies = [
  "ramflux-core",
  "ramflux-crypto",
  "ramflux-protocol",
+ "ramflux-test-support",
  "redb",
  "rustix",
  "rustls",
@@ -3566,6 +3570,7 @@ dependencies = [
  "p256",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-test-support",
  "ramflux-transport",
  "rcgen",
  "redb",
@@ -3596,6 +3601,7 @@ dependencies = [
  "prost-reflect",
  "quote",
  "ramflux-core",
+ "ramflux-test-support",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -3621,6 +3627,7 @@ dependencies = [
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-test-support",
  "ramflux-transport",
  "redb",
  "serde",
@@ -3635,6 +3642,7 @@ name = "ramflux-retention"
 version = "0.1.0"
 dependencies = [
  "ramflux-node-core",
+ "ramflux-test-support",
  "ramflux-transport",
  "redb",
  "serde_json",
@@ -3657,6 +3665,7 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-sdk",
  "ramflux-sync",
+ "ramflux-test-support",
  "rustix",
  "serde",
  "serde_json",
@@ -3678,6 +3687,7 @@ dependencies = [
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-test-support",
  "ramflux-transport",
  "rcgen",
  "redb",
@@ -3715,6 +3725,7 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-storage",
  "ramflux-sync",
+ "ramflux-test-support",
  "ramflux-transport",
  "rcgen",
  "reqwest",
@@ -3762,6 +3773,7 @@ dependencies = [
  "ramflux-core",
  "ramflux-crypto",
  "ramflux-protocol",
+ "ramflux-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3787,6 +3799,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ramflux-test-support"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "ramflux-transport"
 version = "0.1.0"
 dependencies = [
@@ -3805,6 +3824,7 @@ dependencies = [
  "quinn",
  "ramflux-core",
  "ramflux-protocol",
+ "ramflux-test-support",
  "rcgen",
  "reqwest",
  "rustls",

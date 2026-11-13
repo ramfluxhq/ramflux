@@ -1290,21 +1290,28 @@ pub(crate) mod tests {
     static TEMP_CERT_ROOT_SEQUENCE: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
 
-    pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub(crate) fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         temp_cert_root_at(name, nanos)
     }
 
-    fn temp_cert_root_at(name: &str, nanos: u128) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_cert_root_at(
+        name: &str,
+        nanos: u128,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         for _ in 0..32 {
             let sequence =
                 TEMP_CERT_ROOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "ramflux_gateway_{name}_{}_{}_{}",
-                std::process::id(),
-                nanos,
-                sequence
-            ));
+            let root = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "ramflux_gateway_{name}_{}_{}_{}",
+                    std::process::id(),
+                    nanos,
+                    sequence
+                ));
             match std::fs::create_dir(&root) {
                 Ok(()) => return Ok(root),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}

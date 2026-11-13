@@ -712,7 +712,8 @@ fn row_map_queue_full() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn final_registration_capability() -> TestResult {
-    let wake_context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
+    let wake_context = fixture_value_0;
     row_path_is_same_node_forward();
     row_map_queue_full();
     row_durable_wake_positive_control(&wake_context).await?;

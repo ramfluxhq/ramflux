@@ -10,11 +10,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-struct Fixture(PathBuf);
+struct Fixture(ramflux_test_support::TestPath);
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = ramflux_test_support::TestPath::new()?.child(format!(
             "ramflux-notify-env-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -49,12 +49,6 @@ impl Fixture {
         self.command(provider).output()
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 #[test]
 fn an_unexpanded_optional_credential_path_fails_closed_without_its_value()
 -> Result<(), Box<dyn std::error::Error>> {

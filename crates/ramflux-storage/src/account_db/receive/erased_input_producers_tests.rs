@@ -20,7 +20,7 @@ fn work(sequence: u64, payload: &str, principal: &str, device: &str, now: i64) -
     serde_json::to_vec(&v).expect("entry encoding")
 }
 
-fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn setup(name: &str) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = super::stage_tests::setup(name)?;
     db.connection.disable_background_checkpoints_for_test();
     Ok((root, db))

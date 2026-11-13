@@ -45,11 +45,13 @@ mod tests {
     #[tokio::test]
     async fn cli_object_list_reads_every_bounded_metadata_page()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-list-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-list-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         std::fs::create_dir_all(&root)?;
         let socket = root.join("bus.sock");
         let listener = tokio::net::UnixListener::bind(&socket)?;

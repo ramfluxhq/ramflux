@@ -932,9 +932,9 @@ fn display_key(key: &Key) -> String {
     format!("{} | {} | {}", key.path, key.function, key.ordinal)
 }
 
-fn temp_tree(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let root =
-        std::env::temp_dir().join(format!("ramflux-ijson-site-{}-{label}", std::process::id()));
+fn temp_tree(label: &str) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    let root = ramflux_test_support::TestPath::new()?
+        .child(format!("ramflux-ijson-site-{}-{label}", std::process::id()));
     if root.exists() {
         fs::remove_dir_all(&root)?;
     }

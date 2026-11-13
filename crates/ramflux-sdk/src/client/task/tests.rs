@@ -8,18 +8,17 @@ use ramflux_protocol::{
     TaskAccept, TaskEvent, TaskEventBody, TaskProposal, TaskStart, TaskStatus, TaskStep, TaskUpdate,
 };
 use serde_json::json;
-use std::path::PathBuf;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Fixture {
-    root: PathBuf,
     human: RamfluxClient,
     agent: RamfluxClient,
+    root: ramflux_test_support::TestPath,
 }
 fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     let mut c = RamfluxClient::new();
     c.create_identity_root(id, [seed; 32]);
     c.create_device_branch(id, &format!("{id}-device"), 1, [seed + 1; 32]);
-    c.open_account_index(root)?;
+    c.open_account_index(&root)?;
     c.create_account(id, id)?;
     c.unlock_account(id, b"task-test-secret")?;
     Ok(c)
@@ -38,11 +37,13 @@ fn member(client: &RamfluxClient, name: &str) -> Result<String, SdkError> {
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "rf-task-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-task-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
         let human = client(&root.join("human"), "human", 61)?;
         let agent = client(&root.join("agent"), "agent", 71)?;
         for (local, remote) in [(&human, &agent), (&agent, &human)] {
@@ -66,7 +67,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.human = RamfluxClient::new();
         self.agent = RamfluxClient::new();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn sign(

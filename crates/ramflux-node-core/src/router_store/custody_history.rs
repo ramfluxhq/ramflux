@@ -217,10 +217,12 @@ mod tests {
     #[test]
     fn full_consent_history_refuses_publication_atomically_without_evicting_unexpired_records()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-custody-history-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-custody-history-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let vector: serde_json::Value = serde_json::from_str(include_str!(
             "../../../ramflux-crypto/tests/fixtures/custody_v3.json"
         ))?;

@@ -36,7 +36,9 @@ fn count(db: &AccountDb, sql: &str) -> Result<i64, StorageError> {
 
 /// 2,500 pre-fix rows: 1,200 no-op replay values and 1,300 envelope copies across both tables.
 /// Owners are mixed live/deleted; `late` owns the highest-rowid copy of each table.
-fn pre_fix_fixture(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn pre_fix_fixture(
+    name: &str,
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = old_archive_trigger_fixture(name)?;
     for owner in ["live", "late", "gone"] {
         db.send_direct_message("thread", owner, "peer", b"secret")?;

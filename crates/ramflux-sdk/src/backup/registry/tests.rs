@@ -4,8 +4,11 @@
 use super::*;
 use ramflux_storage::BackupCounts;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-fn staged(now: u64) -> Result<VerifiedBackup, Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
+fn staged(
+    root: &ramflux_test_support::TestPath,
+    now: u64,
+) -> Result<VerifiedBackup, Box<dyn std::error::Error>> {
+    let path = root.join(format!(
         "rf-backup-stage-{}",
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     ));
@@ -28,7 +31,7 @@ fn staged(now: u64) -> Result<VerifiedBackup, Box<dyn std::error::Error>> {
         },
         archive_bytes: 42,
         checks: BackupAttachmentChecks { verified: 3, ..BackupAttachmentChecks::default() },
-        staging: VerifiedBackupStaging::new(path, [91; 32], now)?,
+        staging: VerifiedBackupStaging::new(path.to_path_buf(), [91; 32], now)?,
     })
 }
 #[test]
@@ -58,10 +61,11 @@ fn daemon_job_rows_are_secret_free_and_advance_only_through_their_own_phases() -
 }
 #[test]
 fn only_a_fully_verified_restore_can_install_and_installing_cannot_be_cancelled() -> TestResult {
+    let directory = ramflux_test_support::TestPath::new()?;
     let mut registry = BackupJobRegistry::default();
     let job = registry.start(BackupJobKind::Restore, "restore.rfb".into(), 10)?;
     assert!(registry.install(&job.job_id, 11).is_err());
-    let verified = registry.verified(&job.job_id, staged(10)?, 11)?;
+    let verified = registry.verified(&job.job_id, staged(&directory, 10)?, 11)?;
     assert_eq!(verified.counts.as_ref().map(|c| c.messages), Some(10001));
     let (installing, stage) = registry.install(&job.job_id, 12)?;
     assert!(installing.seq > verified.seq);
@@ -75,9 +79,10 @@ fn only_a_fully_verified_restore_can_install_and_installing_cannot_be_cancelled(
 }
 #[test]
 fn cancel_and_thirty_minute_expiry_destroy_staging_and_release_the_job_slot() -> TestResult {
+    let directory = ramflux_test_support::TestPath::new()?;
     let mut registry = BackupJobRegistry::default();
     let job = registry.start(BackupJobKind::Restore, "restore".into(), 10)?;
-    let archive = staged(10)?;
+    let archive = staged(&directory, 10)?;
     let path = archive.staging.directory().to_owned();
     registry.verified(&job.job_id, archive, 11)?;
     assert!(registry.expire(1809).is_empty());
@@ -91,7 +96,7 @@ fn cancel_and_thirty_minute_expiry_destroy_staging_and_release_the_job_slot() ->
     drop(expired);
     assert!(!path.exists());
     let next = registry.start(BackupJobKind::Restore, "next".into(), 1811)?;
-    let archive = staged(1811)?;
+    let archive = staged(&directory, 1811)?;
     let path = archive.staging.directory().to_owned();
     registry.verified(&next.job_id, archive, 1812)?;
     let flag = registry.cancellation(&next.job_id)?;
@@ -104,10 +109,11 @@ fn cancel_and_thirty_minute_expiry_destroy_staging_and_release_the_job_slot() ->
 }
 #[test]
 fn any_missing_or_mismatched_attachment_prevents_verified_staging() -> TestResult {
+    let directory = ramflux_test_support::TestPath::new()?;
     for missing in [false, true] {
         let mut registry = BackupJobRegistry::default();
         let job = registry.start(BackupJobKind::Restore, "restore".into(), 0)?;
-        let mut archive = staged(0)?;
+        let mut archive = staged(&directory, 0)?;
         let path = archive.staging.directory().to_owned();
         if missing {
             archive.checks.missing = 1;
@@ -122,9 +128,10 @@ fn any_missing_or_mismatched_attachment_prevents_verified_staging() -> TestResul
 }
 #[test]
 fn failure_releases_verified_staging_and_kept_newer_is_a_per_category_object() -> TestResult {
+    let directory = ramflux_test_support::TestPath::new()?;
     let mut registry = BackupJobRegistry::default();
     let job = registry.start(BackupJobKind::Restore, "restore".into(), 0)?;
-    let archive = staged(0)?;
+    let archive = staged(&directory, 0)?;
     let path = archive.staging.directory().to_owned();
     registry.verified(&job.job_id, archive, 1)?;
     let (failed, discard) =

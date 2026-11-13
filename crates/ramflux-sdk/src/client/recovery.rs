@@ -1365,10 +1365,11 @@ mod tests {
         principal_id: &str,
         device_id: &str,
         device_seed: [u8; 32],
-    ) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let nanos = now_unix_timestamp();
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-sdk-recovery-{test_name}-{}-{nanos}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-recovery-{test_name}-{}-{nanos}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal_id, [0x21; 32]);
         client.create_device_branch(principal_id, device_id, 1, device_seed);

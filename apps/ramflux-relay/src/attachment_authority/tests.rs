@@ -40,8 +40,8 @@ fn hex(bytes: &[u8]) -> String {
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
-fn path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+fn path(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "rf-authority-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -133,16 +133,18 @@ struct Env {
     issuer: SourceIssuer,
     cap: Vec<u8>,
     now: u64,
+    _directory: ramflux_test_support::TestPath,
 }
 impl Env {
     fn new(name: &str) -> Self {
         Self::at(name, T0)
     }
     fn at(name: &str, now: u64) -> Self {
-        let f = RetirementFixture::new_with(&path(name), now, &spec());
+        let directory = path(name);
+        let f = RetirementFixture::new_with(&directory, now, &spec());
         let issuer = SourceIssuer::new(f.registry.clone(), f.source_signer(), policy()).unwrap();
         let cap = capability(&f, f.grant.grant().grant_id);
-        Self { f, issuer, cap, now }
+        Self { f, issuer, cap, now, _directory: directory }
     }
     fn g(&self) -> &ScopedAttachmentGrant {
         self.f.grant.grant()
@@ -530,6 +532,7 @@ fn crash_after_commit_emits_no_token_and_restart_resend_is_replay() {
         cap: capability(&f, f.grant.grant().grant_id),
         f,
         now,
+        _directory: root.clone(),
     };
     let t = e.target();
     let challenge = e.mint(e.g(), &e.cap, &t);

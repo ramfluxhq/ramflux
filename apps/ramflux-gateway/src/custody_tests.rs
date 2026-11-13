@@ -12,15 +12,17 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 struct Fixture {
-    root: PathBuf,
     tls: ramflux_transport::MeshTlsConfig,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new() -> Result<Self> {
-        let root = std::env::temp_dir().join(format!(
-            "ramflux-proxy-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "ramflux-proxy-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         std::fs::create_dir(&root)?;
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let tls = ramflux_transport::MeshTlsConfig {
@@ -32,11 +34,6 @@ impl Fixture {
         std::fs::write(&tls.service_cert, cert.cert.pem())?;
         std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
         Ok(Self { root, tls })
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 struct AuthorityFixture {

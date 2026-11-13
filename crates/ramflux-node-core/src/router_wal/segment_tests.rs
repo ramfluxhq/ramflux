@@ -26,8 +26,9 @@ pub(super) fn matrix() -> Result {
     Ok(())
 }
 fn held_boundary(pipeline: bool, roll: bool, operation: &'static str) -> Result {
-    let root = std::env::temp_dir()
-        .join(format!("segment-matrix-{}-{pipeline}-{roll}-{operation}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("segment-matrix-{}-{pipeline}-{roll}-{operation}", std::process::id()));
     fs::create_dir_all(&root)?;
     let shard = router_wal_shard_root(&root, 0);
     fs::create_dir_all(&shard)?;
@@ -42,7 +43,7 @@ fn held_boundary(pipeline: bool, roll: bool, operation: &'static str) -> Result 
     let hook_armed = Arc::clone(&armed);
     let hook_segment = segment.clone();
     let _guard = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |path, op, completed| {
             let header_ready = operation != "directory_sync"
                 || log
@@ -129,8 +130,9 @@ fn held_boundary(pipeline: bool, roll: bool, operation: &'static str) -> Result 
 }
 
 fn new_ancestor_order(pipeline: bool) -> Result {
-    let base =
-        std::env::temp_dir().join(format!("segment-ancestors-{}-{pipeline}", std::process::id()));
+    let base = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("segment-ancestors-{}-{pipeline}", std::process::id()));
     fs::create_dir_all(&base)?;
     let intermediate = base.join("new");
     let root = intermediate.join("wal");
@@ -138,7 +140,7 @@ fn new_ancestor_order(pipeline: bool) -> Result {
     let events = Arc::new(Mutex::new(Vec::new()));
     let output = Arc::clone(&events);
     let _guard = observe(
-        base.clone(),
+        base.to_path_buf(),
         Arc::new(move |path, op, done| {
             if done {
                 output.lock().expect("events").push((path.to_path_buf(), op.to_owned()));
@@ -164,7 +166,7 @@ fn new_ancestor_order(pipeline: bool) -> Result {
         .iter()
         .enumerate()
         .skip(shard_mkdir + 1)
-        .find(|(_, event)| *event == &(root.clone(), "directory_sync".into()))
+        .find(|(_, event)| *event == &(root.to_path_buf(), "directory_sync".into()))
         .expect("new shard parent sync")
         .0;
     assert!(shard_mkdir < parent_sync);

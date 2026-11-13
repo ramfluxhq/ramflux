@@ -18,7 +18,8 @@ fn clean(path: &std::path::Path) {
 #[test]
 fn registration_legacy_snapshot_is_unchanged_by_small_admissions_and_replay_is_exact() -> TestResult
 {
-    let path = temp_store_path("registration-deltas-legacy")?;
+    let _store_directory_0 = temp_store_path("registration-deltas-legacy")?;
+    let path = _store_directory_0.to_path_buf();
     let router = RouterCore::new();
     let alice = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     router.mvp1_register_identity(&alice)?;
@@ -73,11 +74,12 @@ fn registration_legacy_snapshot_is_unchanged_by_small_admissions_and_replay_is_e
 fn registration_journal_checkpoints_at_count_and_byte_bounds_without_replaying_old_authority()
 -> TestResult {
     for byte_boundary in [false, true] {
-        let path = temp_store_path(if byte_boundary {
+        let _store_directory_1 = temp_store_path(if byte_boundary {
             "registration-byte-bound"
         } else {
             "registration-count-bound"
         })?;
+        let path = _store_directory_1.to_path_buf();
         let router = RouterCore::new();
         let alice = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
         let store = RouterRedbStore::open(&path)?;
@@ -162,7 +164,8 @@ fn registration_failure_restores_only_affected_entries_and_all_receipts() -> Tes
 
 #[test]
 fn router_store_failure_rolls_back_authority_and_session_and_allows_retry() -> TestResult {
-    let path = temp_store_path("registration-router-store-failure")?;
+    let _store_directory_2 = temp_store_path("registration-router-store-failure")?;
+    let path = _store_directory_2.to_path_buf();
     let router = RouterCore::new();
     let request = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     let store = RouterRedbStore::open(&path)?;
@@ -197,7 +200,8 @@ fn router_store_failure_rolls_back_authority_and_session_and_allows_retry() -> T
 
 #[test]
 fn concurrent_two_root_router_admissions_both_commit() -> TestResult {
-    let path = temp_store_path("registration-concurrent-roots")?;
+    let _store_directory_3 = temp_store_path("registration-concurrent-roots")?;
+    let path = _store_directory_3.to_path_buf();
     let router = RouterCore::new();
     let alice = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     let bob = registration_request(&router, "bob", "phone", 2, None, "192.0.2.2")?;
@@ -233,7 +237,8 @@ fn concurrent_two_root_router_admissions_both_commit() -> TestResult {
 
 #[test]
 fn downgrade_snapshot_change_causes_typed_reupgrade_refusal_without_epoch_rollback() -> TestResult {
-    let path = temp_store_path("registration-downgrade-fence")?;
+    let _store_directory_4 = temp_store_path("registration-downgrade-fence")?;
+    let path = _store_directory_4.to_path_buf();
     let router = RouterCore::new();
     let first = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     let store = RouterRedbStore::open(&path)?;
@@ -324,7 +329,8 @@ fn downgrade_snapshot_change_causes_typed_reupgrade_refusal_without_epoch_rollba
 }
 #[test]
 fn registration_delta_persists_pending_failed_source_charges_and_current_policy() -> TestResult {
-    let path = temp_store_path("registration-budget-charges")?;
+    let _store_directory_5 = temp_store_path("registration-budget-charges")?;
+    let path = _store_directory_5.to_path_buf();
     let router = RouterCore::new();
     router.mvp6_set_registration_policy(RegistrationPolicy {
         per_source_ip_registration_limit: 3,

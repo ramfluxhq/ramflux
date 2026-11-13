@@ -38,7 +38,8 @@ fn custody_registry_without_custody_preserves_current_registry_bytes() -> TestRe
 }
 #[test]
 fn custody_registry_durable_head_latch_and_conflict_fence_survive_restart() -> TestResult {
-    let path = temp_store_path("custody-head")?;
+    let _store_directory_0 = temp_store_path("custody-head")?;
+    let path = _store_directory_0.to_path_buf();
     let publication = native()?;
     let now = publication.record.body.issued_at;
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([2; 32]));
@@ -133,7 +134,8 @@ fn custody_registry_rejects_legacy_publication_after_native_genesis() -> TestRes
 #[test]
 fn custody_consent_history_retains_exact_superseded_heads_across_restart_and_expires() -> TestResult
 {
-    let path = temp_store_path("custody-consent-history")?;
+    let _store_directory_1 = temp_store_path("custody-consent-history")?;
+    let path = _store_directory_1.to_path_buf();
     let original = native()?;
     let now = original.record.body.issued_at;
     let anchor = original.record.body.account_anchor.clone();

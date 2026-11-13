@@ -144,10 +144,12 @@ mod tests {
         let other_root = ramflux_crypto::create_identity_root("retirement-other", [74; 32]);
         let local = RootQualifiedDeviceRef::for_owned_account_device(&local_root, "local")?;
         let other = RootQualifiedDeviceRef::for_owned_account_device(&other_root, "primary")?;
-        let root = std::env::temp_dir().join(format!(
-            "rf-device-retirement-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-device-retirement-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("local", local.root_commitment())?;
         let db = AccountDb::open(&index, "local", &crate::AccountDbKey::generate()?)?;

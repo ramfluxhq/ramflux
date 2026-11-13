@@ -1592,7 +1592,6 @@ fn mesh_fanout_response(
 #[cfg(test)]
 mod tests {
     mod forwarded_reply;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1628,7 +1627,7 @@ mod tests {
         if legacy_release_subprocesses()? {
             return Ok(());
         }
-        let (state, store, path) = crate::router_runtime::tests::test_router("legacy-release")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("legacy-release")?;
         let now = 1_760_000_020;
         let request = crate::router_runtime::tests::register_test_device_at(
             &state,
@@ -1761,7 +1760,7 @@ mod tests {
 
     #[test]
     fn forwarded_endpoint_is_not_reachable_from_client_listener() -> anyhow::Result<()> {
-        let (state, store, path) = crate::router_runtime::tests::test_router("forwarded-role")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("forwarded-role")?;
         let mut envelope =
             crate::router_runtime::tests::current_envelope("forwarded-role", "active-target")?;
         state.refresh_registered_envelope_authority(&mut envelope)?;
@@ -1823,7 +1822,7 @@ mod tests {
 
     #[test]
     fn migration_peer_ingress_requires_the_federation_role_before_decoding() -> anyhow::Result<()> {
-        let (state, store, path) = crate::router_runtime::tests::test_router("migration-role")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("migration-role")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         for peer in ["ramflux-gateway", "ramflux-relay", "ramflux-retention"] {
             let response = handle_mesh_request_value(
@@ -1872,7 +1871,7 @@ mod tests {
     fn authority_refresh_requires_federation_mesh_and_replaces_attached_authority()
     -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let (state, store, path) = crate::router_runtime::tests::test_router("authority-refresh")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("authority-refresh")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let mut envelope =
             crate::router_runtime::tests::current_envelope("refresh-authority", "peer")?;
@@ -1922,7 +1921,7 @@ mod tests {
     #[test]
     fn mesh_quic_request_submit_uses_async_router_path() -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let (state, store, path) = crate::router_runtime::tests::test_router("mesh_async_submit")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("mesh_async_submit")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let envelope = crate::router_runtime::tests::current_envelope(
             "env_router_async_ingress",
@@ -2051,12 +2050,10 @@ mod tests {
         Ok(())
     }
 
-    fn temp_path(test_name: &str) -> anyhow::Result<PathBuf> {
+    fn temp_path(test_name: &str) -> anyhow::Result<ramflux_test_support::TestPath> {
         let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        Ok(std::env::temp_dir().join(format!(
-            "ramflux-router-{test_name}-{}-{}",
-            std::process::id(),
-            elapsed.as_nanos()
-        )))
+        Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("ramflux-router-{test_name}-{}-{}", std::process::id(), elapsed.as_nanos()),
+        ))
     }
 }

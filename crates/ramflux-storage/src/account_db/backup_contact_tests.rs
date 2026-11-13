@@ -7,11 +7,13 @@ use crate::{AccountDbKey, AccountIndex};
 #[test]
 fn r3_merge_preserves_contact_release_delete_and_denial_fences_and_maximum_authority_floor()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-contact-fences-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-contact-fences-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let si = AccountIndex::open(root.join("source"))?;
     let li = AccountIndex::open(root.join("local"))?;
     si.create_account("a", "root")?;

@@ -211,7 +211,7 @@ async fn connect_mock() -> TestResult<Connected> {
         .map_err(|error| error.to_string())?;
     let sent = Arc::new(Mutex::new(Vec::new()));
     let config = CustodyNetworkConfig {
-        account_root: root.0.clone(),
+        account_root: root.0.to_path_buf(),
         account_id: "alice".into(),
         device_id: "primary".into(),
         gateway_address: "127.0.0.1:1".parse()?,

@@ -76,9 +76,9 @@ fn establish_capable(router: &RouterHandle, target: &str) -> TestResult {
     Ok(())
 }
 
-fn fresh(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
-    let (state, store, path) = crate::router_runtime::tests::test_router(name)?;
-    Ok((RouterHandle::tokio(state, store, None), path))
+fn fresh(name: &str) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
+    let (path, state, store) = crate::router_runtime::tests::test_router(name)?;
+    Ok((path, RouterHandle::tokio(state, store, None)))
 }
 
 fn sign_seed() -> [u8; 32] {
@@ -206,7 +206,7 @@ fn observe_post(
 }
 
 fn row_accepted_and_read_only() -> TestResult {
-    let (router, path) = fresh("p06-ok")?;
+    let (path, router) = fresh("p06-ok")?;
     establish_capable(&router, TARGET)?;
     let envelope = signed_ephemeral("ok", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
@@ -230,7 +230,7 @@ fn row_accepted_and_read_only() -> TestResult {
 }
 
 fn row_non_gateway_peer() -> TestResult {
-    let (router, path) = fresh("p06-peer")?;
+    let (path, router) = fresh("p06-peer")?;
     establish_capable(&router, TARGET)?;
     let envelope = signed_ephemeral("peer", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
@@ -263,7 +263,7 @@ fn row_non_gateway_peer() -> TestResult {
 }
 
 fn row_deadline_mismatch() -> TestResult {
-    let (router, path) = fresh("p06-d")?;
+    let (path, router) = fresh("p06-d")?;
     establish_capable(&router, TARGET)?;
     let envelope = signed_ephemeral("d", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
@@ -279,7 +279,7 @@ fn row_deadline_mismatch() -> TestResult {
 }
 
 fn row_revoked_source() -> TestResult {
-    let (router, path) = fresh("p06-revoked")?;
+    let (path, router) = fresh("p06-revoked")?;
     establish_capable(&router, TARGET)?;
     let envelope = signed_ephemeral("revoked", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
@@ -295,7 +295,7 @@ fn row_revoked_source() -> TestResult {
 }
 
 fn row_root_mismatch() -> TestResult {
-    let (router, path) = fresh("p06-root")?;
+    let (path, router) = fresh("p06-root")?;
     establish_capable(&router, TARGET)?;
     let mut envelope = signed_ephemeral("root", TARGET)?;
     envelope.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
@@ -311,7 +311,7 @@ fn row_root_mismatch() -> TestResult {
 }
 
 fn row_offline() -> TestResult {
-    let (router, path) = fresh("p06-offline")?;
+    let (path, router) = fresh("p06-offline")?;
     let envelope = signed_ephemeral("offline", "target_offline")?;
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
@@ -326,7 +326,7 @@ fn row_offline() -> TestResult {
 }
 
 fn row_no_map_entry() -> TestResult {
-    let (router, path) = fresh("p06-nomap")?;
+    let (path, router) = fresh("p06-nomap")?;
     let target = "target_no_map";
     router.state().upsert_session(descriptor(target, GATEWAY, SESSION, 1))?;
     router.state().mark_live(target)?;
@@ -346,7 +346,7 @@ fn row_no_map_entry() -> TestResult {
 }
 
 fn row_map_ne_descriptor() -> TestResult {
-    let (router, path) = fresh("p06-mapne")?;
+    let (path, router) = fresh("p06-mapne")?;
     let target = "target_map_ne";
     establish_capable(&router, target)?;
     router.state().clear_ephemeral_capability(target);
@@ -367,7 +367,7 @@ fn row_map_ne_descriptor() -> TestResult {
 }
 
 fn row_not_local() -> TestResult {
-    let (router, path) = fresh("p06-not-local")?;
+    let (path, router) = fresh("p06-not-local")?;
     establish_capable(&router, TARGET)?;
     let keys =
         router.state().mvp1_identities_snapshot().identity_keys_for_target_delivery_id(TARGET);
@@ -402,7 +402,7 @@ fn row_not_local() -> TestResult {
 
 fn row_gate_off_named_candidate_field_is_refused() -> TestResult {
     anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
-    let (router, path) = fresh("p06b-gate-off-named")?;
+    let (path, router) = fresh("p06b-gate-off-named")?;
     establish_capable(&router, TARGET)?;
     let mut envelope = signed_ephemeral("named", TARGET)?;
     envelope.delivery_mode = Some("durable".into());
@@ -425,7 +425,7 @@ fn row_gate_off_named_candidate_field_is_refused() -> TestResult {
 }
 
 fn row_decode_invalid() -> TestResult {
-    let (router, path) = fresh("p06-decode")?;
+    let (path, router) = fresh("p06-decode")?;
     establish_capable(&router, TARGET)?;
     let before = router.state().ephemeral_durable_snapshot()?;
     let before_store = store_bytes(&path)?;
@@ -479,7 +479,7 @@ fn ephemeral_route_read_only() -> TestResult {
 
 #[test]
 fn ephemeral_deadline() -> TestResult {
-    let (router, path) = fresh("p06-deadline")?;
+    let (path, router) = fresh("p06-deadline")?;
     establish_capable(&router, TARGET)?;
     let envelope = signed_ephemeral("deadline", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
@@ -545,8 +545,8 @@ fn ephemeral_deadline() -> TestResult {
 
 #[test]
 fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
-    let (live_router, live_path) = fresh("clock-live")?;
-    let (expired_router, expired_path) = fresh("clock-expired")?;
+    let (live_path, live_router) = fresh("clock-live")?;
+    let (expired_path, expired_router) = fresh("clock-expired")?;
     establish_capable(&live_router, TARGET)?;
     establish_capable(&expired_router, TARGET)?;
     let live_env = signed_ephemeral("clock-live", TARGET)?;
@@ -573,7 +573,7 @@ fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
 
 #[test]
 fn ephemeral_dispatch_observer_calibrates_durable_enqueue() -> TestResult {
-    let (router, path) = fresh("p16-dispatch-control")?;
+    let (path, router) = fresh("p16-dispatch-control")?;
     let mut envelope = signed_ephemeral("dispatch-control", TARGET)?;
     envelope.ext.ext.remove("delivery_mode");
     envelope.signed.signature =

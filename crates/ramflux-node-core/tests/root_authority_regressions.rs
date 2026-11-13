@@ -64,9 +64,9 @@ fn named(principal: &str, device_id: &str, seed: u8) -> TestResultFixture {
     Ok(Fixture { root, device, x, request })
 }
 type TestResultFixture = Result<Fixture, Box<dyn std::error::Error>>;
-fn path() -> Result<std::path::PathBuf, CryptoError> {
-    Ok(std::env::temp_dir()
-        .join(format!("rf-authority-r2-{}.redb", encode_base64url(random_32()?))))
+fn path() -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    Ok(ramflux_test_support::TestPath::new()?
+        .child(format!("rf-authority-r2-{}.redb", encode_base64url(random_32()?))))
 }
 fn lookup(f: &Fixture) -> Result<String, serde_json::Error> {
     Ok(format!(

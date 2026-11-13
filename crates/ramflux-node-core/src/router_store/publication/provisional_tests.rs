@@ -28,7 +28,7 @@ fn provisional_inbox_identity_is_atomic() -> Result {
             let writes = Arc::new(AtomicUsize::new(0));
             let counted = Arc::clone(&writes);
             let observer = crate::durability_test_hooks::observe(
-                root.clone(),
+                root.to_path_buf(),
                 Arc::new(move |_, op, done| {
                     if matches!(op, "begin_write" | "direct_begin") && !done {
                         counted.fetch_add(1, Ordering::Relaxed);

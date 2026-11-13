@@ -7,12 +7,14 @@ use crate::{AccountDbKey, AccountIndex};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn account(
     label: &str,
-) -> Result<(std::path::PathBuf, AccountIndex, AccountDb), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "backup-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+) -> Result<(ramflux_test_support::TestPath, AccountIndex, AccountDb), Box<dyn std::error::Error>> {
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "backup-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::generate()?)?;

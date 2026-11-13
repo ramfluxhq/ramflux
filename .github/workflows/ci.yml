@@ -247,7 +247,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Isolate test temporary files
-        run: python3 -B scripts/ci/test-tmp.py init
+        run: python -B scripts/ci/test-tmp.py init
       - name: Install pinned Rust toolchain
         run: |
           toolchain="$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
@@ -295,7 +295,7 @@ jobs:
           node crates/ramflux-card/web/build-web.mjs --check target/card-web/cards target/card-web/policy.json
       - name: Reject leaked test temporary files
         if: always() && env.RF_TEST_TMPDIR != ''
-        run: python3 -B scripts/ci/test-tmp.py check
+        run: python -B scripts/ci/test-tmp.py check
 
   doctests:
     name: Doctests
@@ -723,7 +723,7 @@ jobs:
           mapfile -t platform < <(find target/debug/deps -maxdepth 1 -type f -name 'linux_vault_platform-*' -executable)
           test "${#sdk[@]}" -eq 1
           test "${#platform[@]}" -eq 1
-          sudo --preserve-env=PATH python3 -B scripts/ci/run-libtest.py --junit target/nextest/ci/junit-vault-secret-service.xml -- bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
+          sudo --preserve-env=PATH,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR python3 -B scripts/ci/run-libtest.py --junit target/nextest/ci/junit-vault-secret-service.xml -- bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
       - name: Upload vault JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

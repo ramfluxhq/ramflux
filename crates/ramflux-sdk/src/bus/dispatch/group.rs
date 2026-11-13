@@ -1754,7 +1754,7 @@ pub(crate) mod history;
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::SystemTime;
 
     #[test]
     fn group_wrapper_preserves_existing_typed_error_contracts() {
@@ -1823,12 +1823,6 @@ mod tests {
         Ok(())
     }
 
-    fn temp_root(test_name: &str) -> PathBuf {
-        let nanos =
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir().join(format!("ramflux-sdk-dispatch-group-{test_name}-{nanos}"))
-    }
-
     fn gateway_config(principal: &str, device: &str, target: &str) -> GatewaySessionConfig {
         GatewaySessionConfig::auto(GatewayQuicEndpointConfig {
             bind_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -1848,17 +1842,20 @@ mod tests {
         principal: &str,
         device: &str,
         seed: [u8; 32],
-    ) -> Result<LocalBusAccountState, SdkError> {
+    ) -> Result<(ramflux_test_support::TestPath, LocalBusAccountState), SdkError> {
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [0x31; 32]);
         client.create_device_branch(principal, device, 1, seed);
-        client.open_account_index(temp_root(test_name))?;
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: create group dispatch directory")
+            .child(test_name);
+        client.open_account_index(&root)?;
         client.create_account(account_id, principal)?;
         client.unlock_account(account_id, b"dispatch-group-test")?;
         let own = client.device_root(&client.local_device_reference(device)?)?;
         let gateway = gateway_config(principal, device, &format!("target_{device}"))
             .with_account_identity(&client)?;
-        Ok(LocalBusAccountState::disconnected(client, gateway, own))
+        Ok((root, LocalBusAccountState::disconnected(client, gateway, own)))
     }
 
     fn member_add_body(group_id: &str, member_id: &str) -> LocalBusGroupMemberAddRequest {
@@ -1892,7 +1889,7 @@ mod tests {
     #[test]
     fn dispatch_onboard_event_skips_signed_role_local_seed_for_non_admin_signer()
     -> Result<(), SdkError> {
-        let bob = account_state(
+        let (_directory, bob) = account_state(
             "bob_s44_seed",
             "bob_s44_account",
             "principal_bob",
@@ -1922,7 +1919,7 @@ mod tests {
     #[tokio::test]
     async fn federated_group_member_resolve_requires_remote_manifest_base() -> Result<(), SdkError>
     {
-        let account = account_state(
+        let (_directory, account) = account_state(
             "alice_federated_missing_manifest_base",
             "alice_account",
             "principal_alice",
@@ -1967,7 +1964,7 @@ mod tests {
     }
     #[test]
     fn dispatch_onboard_event_owner_can_sign_multiple_direct_adds() -> Result<(), SdkError> {
-        let alice = account_state(
+        let (_directory, alice) = account_state(
             "alice_s44_seed",
             "alice_s44_account",
             "principal_alice",

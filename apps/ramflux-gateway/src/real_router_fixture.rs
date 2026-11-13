@@ -7,7 +7,7 @@ use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
 use std::io::BufRead;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-pub(crate) struct Child(std::process::Child, std::path::PathBuf);
+pub(crate) struct Child(std::process::Child, ramflux_test_support::TestPath);
 impl Child {
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.1
@@ -17,7 +17,6 @@ impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-        let _ = std::fs::remove_dir_all(&self.1);
     }
 }
 pub(crate) async fn real_router_with_custody(
@@ -91,7 +90,8 @@ pub(crate) async fn real_router_with_custody(
         }
     });
     tokio::time::timeout(Duration::from_secs(15), ready).await??;
-    let mut context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
+    let mut context = fixture_value_0;
     context.node_id = "test-node".into();
     context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(
         child.1.join("gateway.redb"),

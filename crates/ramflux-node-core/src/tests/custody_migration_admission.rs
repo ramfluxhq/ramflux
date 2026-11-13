@@ -6,7 +6,8 @@ use super::*;
 
 #[test]
 fn migration_direct_grant_respects_listener_capacity_revocation_and_one_use_scope() -> Result {
-    let path = temp_store_path("migration-direct-admission")?;
+    let _store_directory_0 = temp_store_path("migration-direct-admission")?;
+    let path = _store_directory_0.to_path_buf();
     let store = RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

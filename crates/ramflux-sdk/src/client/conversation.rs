@@ -353,13 +353,17 @@ impl RamfluxClient {
 mod tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos =
             SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir().join(format!("ramflux-sdk-conversation-list-{test_name}-{nanos}"))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-conversation-list-{test_name}-{nanos}"))
     }
 
-    fn client_with_account(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    fn client_with_account(
+        test_name: &str,
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let root = temp_root(test_name);
         let mut client = RamfluxClient::new();
         client.create_identity_root("principal_conv", [0x71; 32]);
@@ -367,12 +371,12 @@ mod tests {
         client.open_account_index(&root)?;
         client.create_account("acct", "principal_conv")?;
         client.unlock_account("acct", b"conversation-list-test")?;
-        Ok((client, root))
+        Ok((root, client))
     }
 
     #[test]
     fn conversation_list_returns_inserted_conversations() -> Result<(), SdkError> {
-        let (client, root) = client_with_account("returns-inserted")?;
+        let (root, client) = client_with_account("returns-inserted")?;
         let metadata = MessageMetadata::default();
         client.account_db()?.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "conv_one",

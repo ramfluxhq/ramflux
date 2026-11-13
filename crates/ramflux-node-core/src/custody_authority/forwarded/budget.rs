@@ -179,11 +179,13 @@ mod tests {
             pins: ramflux_crypto::custody::AuthorityPins::default(),
         })?)
     }
-    fn database() -> Result<(std::path::PathBuf, redb::Database)> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-pin-budget-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+    fn database() -> Result<(ramflux_test_support::TestPath, redb::Database)> {
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-pin-budget-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let db = redb::Database::create(&path)?;
         Ok((path, db))
     }

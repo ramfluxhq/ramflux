@@ -73,7 +73,8 @@ async fn submit_after_recipient_ack(
         &router.tls,
         Arc::new(move || Ok(vec![gateway.ca_pem.clone()])),
     )?;
-    let mut context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_0, fixture_value_0) = super::tests::test_gateway_context()?;
+    let mut context = fixture_value_0;
     context.router = crate::RouterMeshClient {
         endpoint: "127.0.0.1:0".into(),
         server_name: "ramflux-router".into(),
@@ -335,7 +336,8 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
 async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox()
 -> Result<(), Box<dyn std::error::Error>> {
     for later in [false, true] {
-        let context = super::tests::test_gateway_context()?;
+        let (_fixture_directory_1, fixture_value_1) = super::tests::test_gateway_context()?;
+        let context = fixture_value_1;
         let runtime = test_runtime()?;
         let submitted = test_envelope(i64::try_from(ramflux_node_core::now_unix_seconds())?)?;
         let mut expected = submitted.clone();

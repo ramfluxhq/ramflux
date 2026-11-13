@@ -8,10 +8,12 @@ use ramflux_protocol::group_state::{GroupStateChange, SharedGroupRole};
 #[test]
 fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backoff()
 -> Result<(), SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-group-queue-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-group-queue-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let mut client = RamfluxClient::new();
     client.create_identity_root("owner", [11; 32]);
     client.create_device_branch("owner", "owner", 1, [12; 32]);

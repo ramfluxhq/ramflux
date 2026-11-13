@@ -177,8 +177,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = Root(
-            std::env::temp_dir()
-                .join(format!("ramflux-custody-tls-{}-{suffix}", std::process::id())),
+            ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!("ramflux-custody-tls-{}-{suffix}", std::process::id())),
         );
         std::fs::create_dir(&root.0)?;
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;

@@ -4,12 +4,14 @@
 //! Count actual legacy lookups and durable misses across writer and reader restarts.
 use super::*;
 
-fn legacy_samples() -> Result<(PathBuf, RamfluxClient), SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-status-count-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
-    ));
+fn legacy_samples() -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-status-count-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
+        ));
     let mut client = RamfluxClient::new();
     client.open_account_index(&root)?;
     client.create_account("status-account", "Status")?;

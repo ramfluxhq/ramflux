@@ -28,7 +28,8 @@ fn request(
 fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
     for mode in 0..3 {
         for abort in [false, true] {
-            let root = temp_store_path(&format!("native-retry-{mode}-{abort}"))?;
+            let _store_directory_0 = temp_store_path(&format!("native-retry-{mode}-{abort}"))?;
+            let root = _store_directory_0.to_path_buf();
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;
@@ -161,7 +162,8 @@ fn hold(root: PathBuf, abort: bool) -> Hold {
 #[test]
 fn sender_signature_requires_ciphertext_hash_on_custody_delivery() -> Result {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let root = temp_store_path("native-v2-hash-binding")?;
+    let _store_directory_1 = temp_store_path("native-v2-hash-binding")?;
+    let root = _store_directory_1.to_path_buf();
     let store = crate::publication::open_durability_fixture(&root, 0)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

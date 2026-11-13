@@ -513,7 +513,7 @@ mod tests {
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [root_seed; 32]);
         client.create_device_branch(principal, "shared", 1, [root_seed + 1; 32]);
-        client.open_account_index(path)?;
+        client.open_account_index(&path)?;
         client.create_account(principal, principal)?;
         client.unlock_account(principal, b"own-contact-test")?;
         Ok(client)
@@ -521,11 +521,13 @@ mod tests {
     #[test]
     fn sibling_acceptance_supplies_the_pinned_root_but_never_replaces_a_pin_or_local_block()
     -> TestResult {
-        let path = std::env::temp_dir().join(format!(
-            "rf-own-contact-{}-{}",
-            std::process::id(),
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-own-contact-{}-{}",
+                std::process::id(),
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let own = client(&path.join("own"), "bob", 1)?;
         let peer = client(&path.join("peer"), "alice", 3)?;
         let impostor = client(&path.join("impostor"), "alice", 5)?;
@@ -563,10 +565,12 @@ mod tests {
     }
     #[test]
     fn sibling_link_id_collision_cannot_replace_a_different_blocked_relationship() -> TestResult {
-        let path = std::env::temp_dir().join(format!(
-            "rf-contact-collision-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-contact-collision-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let own = client(&path.join("own"), "bob", 1)?;
         let peer = client(&path.join("peer"), "alice", 3)?;
         let other = client(&path.join("other"), "carol", 5)?;
@@ -592,10 +596,12 @@ mod tests {
     }
     #[test]
     fn contacts_accepted_before_activation_are_backfilled_once_per_own_set() -> TestResult {
-        let path = std::env::temp_dir().join(format!(
-            "rf-contact-backfill-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-contact-backfill-{}",
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
         let own = client(&path.join("own"), "bob", 1)?;
         let peer = client(&path.join("peer"), "alice", 3)?;
         let mut sibling = client(&path.join("sibling"), "bob", 1)?;

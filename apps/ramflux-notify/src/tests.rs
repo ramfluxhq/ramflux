@@ -13,10 +13,10 @@ const TEST_EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqG
 #[test]
 fn s13_dispatch_sends_wake_to_tls_h2_provider() -> Result<(), Box<dyn std::error::Error>> {
     let stub = LocalH2ProviderStub::start()?;
-    let store_path = std::env::temp_dir().join(format!(
-        "ramflux-notify-s13-dispatch-{}.redb",
-        ramflux_node_core::now_unix_seconds()
-    ));
+    let store_path =
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("ramflux-notify-s13-dispatch-{}.redb", ramflux_node_core::now_unix_seconds()),
+        );
     let _ = std::fs::remove_file(&store_path);
     let store = ramflux_node_core::NotifyRedbStore::open(&store_path)?;
     let subscription = test_webpush_subscription();
@@ -410,8 +410,8 @@ fn bench_node_service_signing_seed() -> [u8; 32] {
     ]
 }
 
-fn notify_ingest_bench_temp_root() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+fn notify_ingest_bench_temp_root() -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "ramflux-notify-ingest-bench-{}-{}",
         std::process::id(),
         ramflux_node_core::now_unix_seconds()
@@ -427,13 +427,11 @@ struct NotifyMeshTestCert {
 #[cfg(feature = "itest-http")]
 fn notify_mesh_test_cert_root(
     name: &str,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ramflux_notify_{name}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux_notify_{name}_{}_{}", std::process::id(), nanos));
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }

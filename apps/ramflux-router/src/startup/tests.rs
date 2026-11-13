@@ -46,7 +46,9 @@ fn legacy_surfaces_wait_for_startup_recovery() -> anyhow::Result<()> {
     legacy_child()
 }
 fn legacy_child() -> anyhow::Result<()> {
-    let root = std::env::temp_dir().join(format!("legacy-startup-{}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("legacy-startup-{}", std::process::id()));
     std::fs::create_dir_all(&root)?;
     let path = root.join("db");
     let state = Arc::new(RouterCore::new());
@@ -84,7 +86,7 @@ fn legacy_child() -> anyhow::Result<()> {
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let observer_guard = ramflux_node_core::durability_test_hooks::observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |_, operation, completed| {
             if operation == "immediate_commit" && completed {
                 entered_tx.send(()).map_err(std::io::Error::other)?;

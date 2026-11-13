@@ -62,7 +62,8 @@ fn refusal_router() -> anyhow::Result<RefusalRouter> {
 #[tokio::test]
 async fn legacy_ack_relays_forward_backpressure() -> anyhow::Result<()> {
     let (router, task, root) = refusal_router()?;
-    let mut context = super::super::tests::test_gateway_context()?;
+    let (_fixture_directory_0, fixture_value_0) = super::super::tests::test_gateway_context()?;
+    let mut context = fixture_value_0;
     context.router = router;
     let (send, frames) = sink();
     super::super::handle_gateway_ack(&send, &context, &test_runtime()?, &ack()?).await?;

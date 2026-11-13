@@ -86,7 +86,8 @@ fn assert_layer_manifest_round_trip(
 
 #[test]
 fn custody_principal_owner_is_first_authenticated_root_and_survives_restart() -> TestResult {
-    let path = temp_store_path("custody-principal-ownership")?;
+    let _store_directory_0 = temp_store_path("custody-principal-ownership")?;
+    let path = _store_directory_0.to_path_buf();
     let first = native("alice", 10)?;
     let second = native("alice", 20)?;
     let now = first.record.body.issued_at;
@@ -148,7 +149,8 @@ fn custody_and_current_registration_profiles_cannot_take_each_others_principal()
 
 #[test]
 fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> TestResult {
-    let path = temp_store_path("custody-publication-budget")?;
+    let _store_directory_1 = temp_store_path("custody-publication-budget")?;
+    let path = _store_directory_1.to_path_buf();
     let now = 1_760_000_000;
     let source = "192.0.2.1".parse()?;
     let first = native("budget-0", 10)?;
@@ -214,7 +216,8 @@ fn custody_publication_prefix_budget_and_incremental_head_survive_restart() -> T
 
 #[test]
 fn custody_global_principal_rate_is_shared_across_prefixes_and_durable() -> TestResult {
-    let path = temp_store_path("custody-global-principal-rate")?;
+    let _store_directory_2 = temp_store_path("custody-global-principal-rate")?;
+    let path = _store_directory_2.to_path_buf();
     let now = 1_760_000_000;
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
@@ -265,7 +268,8 @@ fn custody_global_principal_rate_is_shared_across_prefixes_and_durable() -> Test
 
 #[test]
 fn custody_rows_do_not_grow_or_deep_clone_the_legacy_registry_snapshot() -> TestResult {
-    let path = temp_store_path("custody-snapshot-isolation")?;
+    let _store_directory_3 = temp_store_path("custody-snapshot-isolation")?;
+    let path = _store_directory_3.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -305,7 +309,8 @@ fn custody_rows_do_not_grow_or_deep_clone_the_legacy_registry_snapshot() -> Test
 
 #[test]
 fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> TestResult {
-    let path = temp_store_path("custody-scoped-registration-owner")?;
+    let _store_directory_4 = temp_store_path("custody-scoped-registration-owner")?;
+    let path = _store_directory_4.to_path_buf();
     let publication = native("alice", 10)?;
     {
         let store = RouterRedbStore::open_without_wal(&path)?;
@@ -345,7 +350,8 @@ fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> Te
 
 #[test]
 fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys() -> TestResult {
-    let path = temp_store_path("custody-ordinary-directory")?;
+    let _store_directory_5 = temp_store_path("custody-ordinary-directory")?;
+    let path = _store_directory_5.to_path_buf();
     let now = crate::now_unix_seconds();
     let (publication, signed_declaration) = native_with_message_layer("ordinary-alice", 10, now)?;
     let branch = ramflux_crypto::create_device_branch("ordinary-alice", "primary", 1, [12; 32]);
@@ -446,7 +452,8 @@ fn native_registered_envelope_uses_current_custody_without_a_legacy_device_set()
     let now = crate::now_unix_seconds();
     let seed = 60;
     let publication = native_at("native-envelope-alice", seed, now)?;
-    let path = temp_store_path("native-envelope-authority")?;
+    let _store_directory_6 = temp_store_path("native-envelope-authority")?;
+    let path = _store_directory_6.to_path_buf();
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -502,8 +509,10 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
     let now = crate::now_unix_seconds();
     let seed = 70;
     let publication = native_at("foreign-native-sender", seed, now)?;
-    let a_path = temp_store_path("native-forward-a")?;
-    let b_path = temp_store_path("native-forward-b")?;
+    let _store_directory_7 = temp_store_path("native-forward-a")?;
+    let a_path = _store_directory_7.to_path_buf();
+    let _store_directory_8 = temp_store_path("native-forward-b")?;
+    let b_path = _store_directory_8.to_path_buf();
     let a_store = RouterRedbStore::open_without_wal(&a_path)?;
     let b_store = RouterRedbStore::open_without_wal(&b_path)?;
     let a = RouterCore::new();
@@ -565,8 +574,10 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     let now = crate::now_unix_seconds();
     let seed = 80;
     let publication = native_at("forwarded-floors", seed, now)?;
-    let a_path = temp_store_path("floor-a")?;
-    let b_path = temp_store_path("floor-b")?;
+    let _store_directory_9 = temp_store_path("floor-a")?;
+    let a_path = _store_directory_9.to_path_buf();
+    let _store_directory_10 = temp_store_path("floor-b")?;
+    let b_path = _store_directory_10.to_path_buf();
     let a_store = RouterRedbStore::open_without_wal(&a_path)?;
     let b_store = RouterRedbStore::open_without_wal(&b_path)?;
     let a = RouterCore::new();
