@@ -15,7 +15,10 @@ apps/ramflux-federation/src/admin_http.rs | handle_admin_mesh_observability_requ
 apps/ramflux-federation/src/admin_http.rs | handle_home_node_forward_request | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-federation/src/attachment_renewal.rs | inbound_peer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/attachment_renewal.rs | local_peer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 1 | C | admission=crates/ramflux-transport/src/mesh_http.rs#post_json#1,crates/ramflux-transport/src/quic_gateway.rs#read_quic_json_frame#1
+apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 1 | C | admission=crates/ramflux-card/src/ffi.rs | ramflux_card_event | 1 | E | excluded=bounded native card event DTO; no Envelope/Ack/Nack or SDK admission
+crates/ramflux-card/src/spec.rs | parse | 1 | E | excluded=bounded closed local card profile with duplicate-key rejection; no Envelope/Ack/Nack admission
+crates/ramflux-card/src/tree.rs | parse | 1 | E | excluded=bounded semantic tree from verified project interpreter; no Envelope/Ack/Nack admission
+crates/ramflux-transport/src/mesh_http.rs#post_json#1,crates/ramflux-transport/src/quic_gateway.rs#read_quic_json_frame#1
 apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 2 | C | admission=crates/ramflux-transport/src/mesh_http.rs#post_json#1,crates/ramflux-transport/src/quic_gateway.rs#read_quic_json_frame#1
 apps/ramflux-federation/src/helpers.rs | router_response_error | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
