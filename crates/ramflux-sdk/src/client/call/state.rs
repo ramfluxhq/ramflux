@@ -236,6 +236,14 @@ impl LiveCall {
         }
     }
 
+    fn select_callee(&mut self, peer: CallEndpoint) {
+        if self.callee != peer {
+            self.gateway_answered = false;
+        }
+        self.callee = peer;
+        self.refresh_media();
+    }
+
     /// Retain only a verified operation's exact peer and immutable Start binding.
     pub(crate) fn apply_media_for(
         &mut self,
@@ -399,11 +407,7 @@ impl LiveCall {
                     .remove(&c.callee)
                     .ok_or_else(|| invalid("answer has no fresh offer key"))?;
                 self.offer_keys.clear();
-                if self.callee != c.callee {
-                    self.gateway_answered = false;
-                }
-                self.callee = c.callee.clone();
-                self.refresh_media();
+                self.select_callee(c.callee.clone());
                 self.set_state("connecting", now)?;
                 for loser in self
                     .invited
