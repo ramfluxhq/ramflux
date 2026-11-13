@@ -21,6 +21,9 @@ impl LocalPairingParticipant {
         if install.recipient_mode != "new" || install.account_id != self.account_id {
             return Err(wrong());
         }
+        if cancellation.is_cancelled() {
+            return Err(ramflux_storage::StorageError::PairingField("Cancelled").into());
+        }
         let operation = &install.operation_id;
         // The query receipt owns no database, vault key or frontend loan.
         let observation = self.full_recipient_publication_query(operation)?.observe()?;

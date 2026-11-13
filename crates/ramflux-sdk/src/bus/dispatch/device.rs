@@ -43,6 +43,7 @@ pub(crate) async fn dispatch_device_bus_request(
         | "device.transfer.join"
         | "device.transfer.confirm"
         | "device.transfer.cancel"
+        | "device.transfer.tail_abandon"
         | "device.transfer.prepare"
         | "device.transfer.affirm"
         | "device.transfer.status"

@@ -398,12 +398,14 @@ impl LocalResult {
                         | "transfer.affirm"
                         | "transfer.confirm"
                         | "transfer.cancel"
+                        | "transfer.tail_abandon"
                         | "transfer.status"
                 ),
             "method",
         )?;
         require(
-            !matches!(self.outcome, Outcome::FullStatus { .. }) || method == "transfer.status",
+            !matches!(self.outcome, Outcome::FullStatus { .. })
+                || matches!(method, "transfer.status" | "transfer.tail_abandon"),
             "full_status_method",
         )?;
         require(

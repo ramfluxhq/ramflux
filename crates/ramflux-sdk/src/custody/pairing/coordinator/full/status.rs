@@ -41,6 +41,15 @@ impl PairingActor {
         if let Some(job) = self.tail_jobs.get(&request.operation_id) {
             return job.result(request);
         }
+        if self
+            .recovered_tail_status
+            .as_ref()
+            .is_some_and(|status| status.operation_id == request.operation_id)
+        {
+            if let Some(result) = self.recovered_tail_result(request)? {
+                return Ok(result);
+            }
+        }
         if self.ceremony.is_none() {
             if let Some(result) = Box::pin(self.resume_full_tail(request)).await? {
                 return Ok(result);

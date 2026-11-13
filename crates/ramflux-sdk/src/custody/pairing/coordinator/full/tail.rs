@@ -8,6 +8,7 @@ use ramflux_protocol::custody::pairing::full_transfer::{
     DataPacket, ManifestAssembler, SourceManifest, manifest_hash,
 };
 use std::sync::Arc;
+mod abandon;
 mod io;
 mod receive;
 mod resume;
@@ -35,7 +36,7 @@ enum Phase {
 }
 pub(in crate::custody::pairing::coordinator) struct TailJob {
     packet: Option<FullPacketEpoch>,
-    pub(super) epoch: Option<super::epoch::FullEpochJob>,
+    pub(in crate::custody::pairing::coordinator) epoch: Option<super::epoch::FullEpochJob>,
     io: TailIo,
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
@@ -126,37 +127,6 @@ impl TailJob {
     }
 }
 impl PairingActor {
-    pub(in crate::custody::pairing::coordinator) async fn abandon_completed_tail(
-        &mut self,
-        operation: &str,
-        generation: u64,
-    ) -> Result<bool, SdkError> {
-        let Some(job) = self.tail_jobs.get_mut(operation) else {
-            return Ok(false);
-        };
-        if job.io.generation != generation {
-            return Err(wrong());
-        }
-        job.io.cancelled.cancel();
-        job.packet = None;
-        if let Some(epoch) = job.epoch.take() {
-            epoch.abort_and_drain().await;
-        }
-        self.full_runtime.drain_local_jobs().await;
-        self.full_runtime.drain_local_work();
-        let op = operation.to_owned();
-        job.io
-            .writer
-            .request(move |db| {
-                db.abandon_full_tail(&op, generation, crate::custody::network_now()?)?;
-                Ok(())
-            })
-            .await?;
-        if !job.merged() {
-            job.abandoned = true;
-        }
-        Ok(true)
-    }
     pub(in crate::custody::pairing::coordinator) async fn advance_full_tails(
         &mut self,
     ) -> Result<(), SdkError> {

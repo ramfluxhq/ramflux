@@ -28,7 +28,9 @@ pub(super) fn body(method: &str, bytes: &[u8]) -> CAbiResult<serde_json::Value> 
         "device.pair.join" | "device.transfer.join" => decode::<Join>(bytes),
         "device.pair.confirm" | "device.transfer.confirm" => decode::<Confirm>(bytes),
         "device.pair.approve" => decode::<Approve>(bytes),
-        "device.pair.cancel" | "device.transfer.cancel" => decode::<Cancel>(bytes),
+        "device.pair.cancel" | "device.transfer.cancel" | "device.transfer.tail_abandon" => {
+            decode::<Cancel>(bytes)
+        }
         "device.pair.status" | "device.transfer.status" => decode::<StatusRequest>(bytes),
         "device.transfer.prepare" => decode::<Prepare>(bytes),
         "device.transfer.affirm" => decode::<TransferAffirm>(bytes),

@@ -508,15 +508,15 @@ impl PairingActor {
     pub async fn cancel(&mut self, cancel: &Cancel) -> Result<LocalResult, SdkError> {
         cancel.validate().map_err(|e| wire(&e))?;
         self.require_open()?;
-        if self.abandon_completed_tail(&cancel.operation_id, cancel.generation).await? {
-            return self
-                .transfer_status(&StatusRequest {
-                    schema: "ramflux.pairing.StatusRequest.v2".into(),
-                    version: 2,
-                    operation_id: cancel.operation_id.clone(),
-                    generation: cancel.generation,
+        if self.tail_jobs.contains_key(&cancel.operation_id)
+            || self.ceremony.as_ref().is_some_and(|c| {
+                c.full.as_ref().is_some_and(|full| {
+                    full.publication.source_acknowledged()
+                        || full.publication.destination_installed()
                 })
-                .await;
+            })
+        {
+            return Err(SdkError::PairingCode("InvalidInput"));
         }
         self.with_ceremony(|c| check_generation(c, &cancel.operation_id, cancel.generation))?;
         self.fail("cancelled", "Retired").await
@@ -543,15 +543,13 @@ impl PairingActor {
             && self.local_writer.is_some()
             && let Some(recovered) = &self.recovered_installation
         {
-            let request = StatusRequest {
-                schema: "ramflux.pairing.StatusRequest.v2".into(),
-                version: 2,
-                operation_id: recovered.status.operation_id.clone(),
-                generation: recovered.status.generation,
-            };
+            let request = recovered.status_request();
             Box::pin(self.resume_full_tail(&request)).await?;
         }
-        self.advance_full_tails().await?;
+        if let Err(error) = self.advance_full_tails().await {
+            self.note_background_error(&error);
+            return Err(error);
+        }
         if self.ceremony.is_none() {
             if let Some((operation, job)) = self.tail_jobs.iter().next_back() {
                 return job.result(&StatusRequest {
@@ -1659,6 +1657,7 @@ pub async fn handle_bus(
         }
         "device.pair.status" => Box::pin(actor.status(&bus_body(body)?)).await,
         "device.transfer.begin" => Box::pin(actor.begin_full(bus_body(body)?)).await,
+        "device.transfer.tail_abandon" => Box::pin(actor.tail_abandon(&bus_body(body)?)).await,
         "device.transfer.prepare" => Box::pin(actor.prepare_full_transfer(&bus_body(body)?)).await,
         "device.transfer.affirm" => Box::pin(actor.affirm_full_transfer(&bus_body(body)?)).await,
         "device.transfer.status" => {

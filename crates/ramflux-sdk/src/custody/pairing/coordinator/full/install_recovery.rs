@@ -219,6 +219,15 @@ impl PairingActor {
     }
 }
 impl RecoveredInstallation {
+    pub(in crate::custody::pairing::coordinator) fn status_request(&self) -> StatusRequest {
+        StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: self.status.operation_id.clone(),
+            generation: self.status.generation,
+        }
+    }
+
     pub(super) fn result(&self, request: &StatusRequest) -> Result<LocalResult, SdkError> {
         if request.operation_id != self.status.operation_id
             || request.generation != self.status.generation

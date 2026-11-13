@@ -72,6 +72,7 @@ impl PairingActor {
             })
             .await?;
         let owned = request.clone();
+        let tail_status = tail_disposition(&scope);
         let result = self
             .installation_loan(move |db| {
                 let now = crate::custody::network_now()?;
@@ -95,7 +96,7 @@ impl PairingActor {
             scope.bytes_total,
             scope.cut,
             result,
-            tail_disposition(&scope),
+            tail_status,
         );
         status.validate().map_err(|error| super::wire(&error))?;
         self.recovered_installation = Some(RecoveredInstallation { install, status });

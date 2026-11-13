@@ -92,6 +92,21 @@ async fn dispatch(socket: PathBuf, command: TransferCommand) -> Result<(), RfErr
         TransferAction::Status(operation) => {
             super::status(&mut client, &command.account, &display, operation, true).await
         }
+        TransferAction::TailAbandon(operation) => {
+            let result = invoke(
+                &mut client,
+                &command.account,
+                "transfer.tail_abandon",
+                &ramflux_protocol::custody::pairing::local_dto::Cancel {
+                    schema: "ramflux.pairing.Cancel.v2".into(),
+                    version: 2,
+                    operation_id: operation.operation_id,
+                    generation: operation.generation,
+                },
+            )
+            .await?;
+            super::finish(&display, result)
+        }
         TransferAction::Cancel(operation) => {
             super::cancel(&mut client, &command.account, &display, operation).await
         }

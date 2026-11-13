@@ -62,6 +62,8 @@ pub(crate) enum TransferAction {
     },
     Status(PairingOperation),
     Cancel(PairingOperation),
+    /// Explicitly abandon incomplete tail data on the installed recipient.
+    TailAbandon(PairingOperation),
     /// Affirm one resumed source candidate. Positive approval requires an interactive terminal.
     Affirm {
         #[command(flatten)]

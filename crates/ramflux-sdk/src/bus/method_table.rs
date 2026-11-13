@@ -81,6 +81,7 @@ methods! {
         "device.transfer.join",
         "device.transfer.confirm",
         "device.transfer.cancel",
+        "device.transfer.tail_abandon",
         "device.transfer.prepare",
         "device.pair.confirm",
         "device.transfer.affirm",
@@ -336,6 +337,7 @@ mod pairing_tests {
             "device.transfer.prepare",
             "device.transfer.affirm",
             "device.transfer.cancel",
+            "device.transfer.tail_abandon",
         ] {
             let method = classify(name).ok_or("test: missing attended pairing action")?;
             assert_eq!(

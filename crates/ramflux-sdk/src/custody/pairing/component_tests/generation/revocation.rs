@@ -128,7 +128,10 @@ fn refuse_stale(rig: &Rig, stale: &CustodyAuthority, current: &CustodyAuthority)
     );
     Ok(())
 }
-fn revoke_source(rig: &Rig, source_id: &str) -> Result<String, crate::SdkError> {
+pub(in crate::custody::pairing::component_tests) fn revoke_source(
+    rig: &Rig,
+    source_id: &str,
+) -> Result<String, crate::SdkError> {
     let account =
         custody::load_account(&rig.participant_b.root, &rig.participant_b.account_id, rig.now)?;
     let reference = account.record().body.master_certificate.body.primary_device_ref.clone();

@@ -34,7 +34,7 @@ impl TailJob {
         local_result(value)
     }
 }
-fn local_result(value: FullStatus) -> Result<LocalResult, SdkError> {
+pub(super) fn local_result(value: FullStatus) -> Result<LocalResult, SdkError> {
     value.validate().map_err(|_| wrong())?;
     Ok(LocalResult {
         schema: "ramflux.pairing.LocalResult.v2".into(),
@@ -160,7 +160,7 @@ impl PairingActor {
         }
         Ok(None)
     }
-    async fn retained_tail_snapshot(
+    pub(super) async fn retained_tail_snapshot(
         &self,
         request: &StatusRequest,
     ) -> Result<
