@@ -210,10 +210,16 @@ impl PairingActor {
                 .map_err(|_| SdkError::PairingCode("WrongContext"))?;
                 let context = self.participant_context()?;
                 let saved = proposal.clone();
-                block(self.full_runtime.clone(), move || {
-                    participant.save_context(&context, &saved)
-                })
-                .await?;
+                if let Some(writer) = &self.local_writer {
+                    writer
+                        .request(move |db| participant.save_context_in(db, &context, &saved))
+                        .await?;
+                } else {
+                    block(self.full_runtime.clone(), move || {
+                        participant.save_context(&context, &saved)
+                    })
+                    .await?;
+                }
                 self.with_ceremony_mut(|c| {
                     c.displayed_proposal = Some(object_hash(&proposal)?);
                     c.enrollment = Some(proposal);
@@ -255,8 +261,14 @@ impl PairingActor {
             Payload::Installed { operation_id, record_hash, .. } => {
                 let op = operation_id.clone();
                 let hash = record_hash.clone();
-                block(self.full_runtime.clone(), move || participant.finish_install(&op, &hash))
+                if let Some(writer) = &self.local_writer {
+                    writer.request(move |db| participant.finish_install_in(db, &op, &hash)).await?;
+                } else {
+                    block(self.full_runtime.clone(), move || {
+                        participant.finish_install(&op, &hash)
+                    })
                     .await?;
+                }
                 self.queue_channel(Payload::Completed {
                     operation_id,
                     record_hash,
@@ -300,10 +312,19 @@ impl PairingActor {
         })?;
         self.flush_send().await?;
         let recipient_ref = context.transcript.responder.device_ref.clone();
-        let published = block(self.full_runtime.clone(), move || {
-            participant.publish_enrollment(&context, &proposal)
-        })
-        .await?;
+        let published = if let Some(writer) = &self.local_writer {
+            let local = participant.clone();
+            let work = writer
+                .request(move |db| local.prepare_enrollment_in(db, &context, &proposal))
+                .await?;
+            let observed = block(self.full_runtime.clone(), move || work.submit()).await?;
+            writer.request(move |db| observed.acknowledge(&participant, db)).await?
+        } else {
+            block(self.full_runtime.clone(), move || {
+                participant.publish_enrollment(&context, &proposal)
+            })
+            .await?
+        };
         self.identity.base_record_hash.clone_from(&published.record_hash);
         self.identity.base_epoch = published.epoch;
         self.with_ceremony_mut(|c| {

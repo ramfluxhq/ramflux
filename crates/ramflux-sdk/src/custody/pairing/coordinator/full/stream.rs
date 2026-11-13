@@ -21,14 +21,14 @@ mod work;
 pub(super) struct FullStreamFinished {
     pub(super) packet: FullPacketEpoch,
     pub(super) manifest: SourceManifest,
-    receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
+    pub(super) receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
 }
 pub(super) struct FullStreamState {
     service: Option<FullLocalIoService>,
     pub(super) job: Option<FullStreamJob>,
     pub(super) complete: Option<SourceManifest>,
     failure: Option<&'static str>,
-    receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
+    pub(super) receiver: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
     pub(super) progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
 }
 pub(in crate::custody::pairing::coordinator) struct FullStreamJob(
@@ -98,6 +98,9 @@ impl PairingActor {
     pub(in crate::custody::pairing::coordinator) fn service_staged_full_target(
         &mut self,
     ) -> Result<(), SdkError> {
+        if self.local_writer.is_some() {
+            return Ok(());
+        }
         if !self.ceremony.as_ref().is_some_and(|c| {
             c.role == PairingRole::Responder
                 && c.full.as_ref().is_some_and(|full| full.common.recipient_mode == "new")

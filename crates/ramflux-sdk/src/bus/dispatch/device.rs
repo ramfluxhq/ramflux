@@ -189,35 +189,42 @@ async fn dispatch_push_route_set(
 
 async fn dispatch_device_pair(
     request: &LocalBusFrame,
-    state: &LocalBusDaemonState,
+    state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
-    crate::bus::pairing::ensure_actor(state, account_id, request).await?;
-    let work = crate::custody::pairing::handle_bus(
-        &state.config.data_root,
-        account_id,
-        &request.method,
-        request.body.clone(),
-    );
-    tokio::pin!(work);
-    let result = loop {
-        let signal = crate::custody::pairing::work_signal(&state.config.data_root, account_id);
-        tokio::select! {
-            result = &mut work => break result,
-            () = async {
-                match signal {
-                    Some(signal) => signal.notified().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(account) = state.accounts.get(account_id) {
-                    crate::custody::pairing::service_full_transfer(
-                        &state.config.data_root, account_id, account.client.account_db()?,
-                    )?;
+    Box::pin(crate::bus::pairing::ensure_actor(state, account_id, request)).await?;
+    let result = {
+        let work = crate::custody::pairing::handle_bus(
+            &state.config.data_root,
+            account_id,
+            &request.method,
+            request.body.clone(),
+        );
+        tokio::pin!(work);
+        loop {
+            let signal = crate::custody::pairing::work_signal(&state.config.data_root, account_id);
+            tokio::select! {
+                result = &mut work => break result,
+                () = async {
+                    match signal {
+                        Some(signal) => signal.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(account) = state.accounts.get(account_id) {
+                        crate::custody::pairing::service_full_transfer(
+                            &state.config.data_root, account_id, account.client.account_db()?,
+                        )?;
+                    }
                 }
             }
         }
     };
+    if result.is_ok()
+        && let Some(account) = state.accounts.get_mut(account_id)
+    {
+        crate::bus::pairing::refresh_source_role(account)?;
+    }
     match result {
         Ok(result) => Ok(local_bus_ok(serde_json::to_value(result)?)),
         Err(SdkError::PairingCode("NotFound")) => {

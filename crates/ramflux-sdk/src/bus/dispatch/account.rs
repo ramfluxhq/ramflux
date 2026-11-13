@@ -187,9 +187,11 @@ async fn local_bus_account_lock(
             None,
         )?;
     }
+    let pairing_pending =
+        crate::custody::pairing::work_signal(&state.config.data_root, account_id).is_some();
     crate::custody::pairing::remove_actor_and_drain(&state.config.data_root, account_id).await?;
     let removed = state.accounts.remove(account_id);
-    if removed.is_none() {
+    if removed.is_none() && !pairing_pending {
         return Err(SdkError::AccountNotOpen(account_id.to_owned()));
     }
     if state.active_account_id.as_deref() == Some(account_id) {

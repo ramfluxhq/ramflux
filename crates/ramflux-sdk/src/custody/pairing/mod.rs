@@ -39,7 +39,9 @@ pub use coordinator::{
     PairingActor, PairingIdentity, PairingLocalWriterService, handle_bus, install_actor,
     pairing_enabled, remove_actor, remove_actor_and_drain, validate_head_advance,
 };
-pub(crate) use coordinator::{install_actor_with_writer, service_full_transfer, work_signal};
+pub(crate) use coordinator::{
+    install_actor_with_writer, service_full_transfer, take_installed_recipient, work_signal,
+};
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};
 pub use local_credential::{

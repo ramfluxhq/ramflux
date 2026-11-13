@@ -39,7 +39,9 @@ mod workflow;
 #[cfg(test)]
 pub(crate) use registry::settle_actor_data_for_test;
 pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
-pub(crate) use registry::{install_actor_with_writer, service_full_transfer, work_signal};
+pub(crate) use registry::{
+    install_actor_with_writer, service_full_transfer, take_installed_recipient, work_signal,
+};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);

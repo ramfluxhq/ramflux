@@ -41,6 +41,10 @@ pub(super) async fn ensure_actor(
         }
         _ => return Ok(()),
     }
+    install_source(state, account_id).await
+}
+
+async fn install_source(state: &LocalBusDaemonState, account_id: &str) -> Result<(), SdkError> {
     let config = state.config.pairing.clone().ok_or(SdkError::PairingCode("NotFound"))?;
     if !config.enabled {
         return Err(SdkError::PairingCode("NotFound"));
@@ -180,7 +184,7 @@ async fn install_new_recipient(
     }
     let root = &state.config.data_root;
     // Account IDs are local choices; a token cannot select an existing account's vault.
-    crate::custody::valid_id(account_id)?;
+    let provider = provider_for_account(root, account_id.into())?;
     if crate::custody::account_exists(root, account_id)? {
         return Err(SdkError::PairingCode("Busy"));
     }
@@ -224,7 +228,7 @@ async fn install_new_recipient(
         root: root.clone(),
         account_id: account_id.into(),
         vault,
-        provider: provider_for_account(root, account_id.into())?,
+        provider,
         db: Mutex::new(None),
         persist: Arc::new(NativePairingPublication { native: proof, runtime: runtime.clone() }),
         query: Arc::new(NativePairingQuery { config: gateway, runtime }),
@@ -249,4 +253,63 @@ async fn install_new_recipient(
     actor.set_full_node(node);
     actor.set_participant(participant);
     install_actor_with_writer(root, account_id.into(), actor, None)
+}
+
+/// G3 is the only path from a new recipient staging actor to an ordinary unlocked account.
+pub(super) fn adopt_installed(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+) -> Result<bool, SdkError> {
+    if state.accounts.contains_key(account_id) {
+        return Ok(false);
+    }
+    let Some(client) =
+        crate::custody::pairing::take_installed_recipient(&state.config.data_root, account_id)?
+    else {
+        return Ok(false);
+    };
+    let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let anchor = native.record().body.account_anchor.clone();
+    let device_id = native.local_device_id()?.to_owned();
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        gateway_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+        server_name: String::new(),
+        ca_cert: std::path::PathBuf::new(),
+        principal_id: native.record().body.principal_id.clone(),
+        device_id,
+        target_delivery_id: client.owned_device_identity()?.storage_key().into(),
+        prekey_http_url: None,
+    };
+    let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(native);
+    let mut account = super::state::LocalBusAccountState::disconnected(client, gateway, anchor);
+    account.activation_pending = true;
+    account.native_setup = Some(state.config.clone());
+    let index = account.client.account_index()?;
+    index.set_account_unlocked(account_id, true)?;
+    index.set_active_account(account_id)?;
+    state.accounts.insert(account_id.into(), account);
+    state.active_account_id = Some(account_id.into());
+    Ok(true)
+}
+
+pub(super) fn refresh_source_role(
+    account: &mut super::state::LocalBusAccountState,
+) -> Result<(), SdkError> {
+    if account.client.born_v3_account.is_none() {
+        return Ok(());
+    }
+    let id = account.client.account_db()?.local_account_id.clone();
+    let root = account.client.account_index()?.root();
+    let current = crate::custody::load_data_account(root, &id, crate::custody::network_now()?)?;
+    if account
+        .client
+        .born_v3_account
+        .as_ref()
+        .is_some_and(|cached| cached.record() != current.record())
+    {
+        account.gateway_config = account.gateway_config.clone().with_born_v3_account(&current);
+        account.client.born_v3_account = Some(Box::new(current));
+    }
+    Ok(())
 }

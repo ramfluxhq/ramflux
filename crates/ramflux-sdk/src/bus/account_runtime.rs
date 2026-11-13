@@ -330,21 +330,49 @@ impl AccountRuntime {
         }
         Ok(true)
     }
-
-    fn service_pairing_data(&self) {
-        if let Some(account) = self.state.accounts.get(&self.id)
-            && let Err(error) = account.client.account_db().and_then(|db| {
+    fn service_pairing_data(&mut self) {
+        match super::pairing::adopt_installed(&mut self.state, &self.id) {
+            Ok(true) => {
+                if let Err(error) = self.initialize_readers().and_then(|()| self.start_connection())
+                {
+                    tracing::warn!(
+                        error_code = local_bus_error_code(&error),
+                        "installed pairing frontend startup deferred"
+                    );
+                }
+                self.start_courier();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                error_code = local_bus_error_code(&error),
+                "pairing frontend handback deferred"
+            ),
+        }
+        let result = self.state.accounts.get(&self.id).map_or(Ok(false), |account| {
+            account.client.account_db().and_then(|db| {
                 crate::custody::pairing::service_full_transfer(
                     &self.state.config.data_root,
                     &self.id,
                     db,
                 )
             })
-        {
-            tracing::warn!(
+        });
+        match result {
+            Ok(true) => {
+                if let Some(account) = self.state.accounts.get_mut(&self.id)
+                    && let Err(error) = super::pairing::refresh_source_role(account)
+                {
+                    tracing::debug!(
+                        error_code = local_bus_error_code(&error),
+                        "pairing public role refresh deferred"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
                 error_code = local_bus_error_code(&error),
                 "pairing local data step deferred; account remains open"
-            );
+            ),
         }
     }
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {

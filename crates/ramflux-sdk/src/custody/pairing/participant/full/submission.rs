@@ -19,6 +19,7 @@ use std::{path::PathBuf, sync::Arc};
 
 /// Exact durable source submission, created only by an attended live coordinator.
 /// There is no database, stage key, primary key or participant owner in this work item.
+#[derive(Clone)]
 pub struct FullSourceSubmission {
     work: Arc<SubmissionWork>,
 }
@@ -37,6 +38,7 @@ struct SubmissionWork {
 }
 /// Exact publication independently observed through A's own native query.
 /// This receipt still needs the original local writer to commit J6 and pin the tail.
+#[derive(Clone)]
 pub struct FullSourcePublished {
     submission: Arc<SubmissionWork>,
     authority: CustodyAuthority,
@@ -225,7 +227,7 @@ impl LocalPairingParticipant {
             ((operation.into(), generation, th), observation),
             runtime,
             cancelled,
-            approval,
+            approval.body.expires_at,
         )
     }
 
@@ -235,17 +237,23 @@ impl LocalPairingParticipant {
         observed: ((String, u64, [u8; 32]), super::FullSourceCandidateObservation),
         runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
         cancelled: FullStageIoCancel,
-        affirmed: ramflux_protocol::custody::Envelope<
+        affirmed: &ramflux_protocol::custody::Envelope<
             ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
         >,
     ) -> Result<FullSourceSubmission, SdkError> {
         let (scope, observation) = observed;
         self.require_source_observation(&observation, &scope)?;
         let retained = self.retained_full_candidate_in(db, &observation)?;
-        if canonical_json_bytes(&retained)? != canonical_json_bytes(&affirmed)? {
+        if canonical_json_bytes(&retained)? != canonical_json_bytes(affirmed)? {
             return Err(wrong());
         }
-        self.prepare_source_submission_in(db, (scope, observation), runtime, cancelled, retained)
+        self.prepare_source_submission_in(
+            db,
+            (scope, observation),
+            runtime,
+            cancelled,
+            retained.body.expires_at,
+        )
     }
 
     fn prepare_source_submission_in(
@@ -254,9 +262,7 @@ impl LocalPairingParticipant {
         observed: ((String, u64, [u8; 32]), super::FullSourceCandidateObservation),
         runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
         cancelled: FullStageIoCancel,
-        approval: ramflux_protocol::custody::Envelope<
-            ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
-        >,
+        approval_expires_at: u64,
     ) -> Result<FullSourceSubmission, SdkError> {
         let (scope, observation) = observed;
         let (operation, generation, th) = scope;
@@ -325,7 +331,7 @@ impl LocalPairingParticipant {
                 head,
                 reference: stage.reference().clone(),
                 publication,
-                approval_expires_at: approval.body.expires_at,
+                approval_expires_at,
                 unlock,
                 cancelled,
                 runtime,
