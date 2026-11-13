@@ -117,6 +117,8 @@ fn sweep_abandoned_stages(
     public_path: &Path,
     before: std::time::SystemTime,
 ) -> Result<(), NodeCoreError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     let published = match std::fs::metadata(public_path) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -130,13 +132,11 @@ fn sweep_abandoned_stages(
         let metadata = std::fs::symlink_metadata(entry.path()).map_err(redb_error)?;
         // A leftover hard-link to the published inode is committed state, not an orphan.
         #[cfg(unix)]
-        if {
-            use std::os::unix::fs::MetadataExt;
-            metadata.nlink() > 1
-                || published.as_ref().is_some_and(|published| {
-                    published.dev() == metadata.dev() && published.ino() == metadata.ino()
-                })
-        } {
+        if metadata.nlink() > 1
+            || published.as_ref().is_some_and(|published| {
+                published.dev() == metadata.dev() && published.ino() == metadata.ino()
+            })
+        {
             continue;
         }
         // Without a portable file-identity check, retain stages when a public DB exists.
