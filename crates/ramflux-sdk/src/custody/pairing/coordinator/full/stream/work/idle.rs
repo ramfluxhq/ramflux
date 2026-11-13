@@ -65,7 +65,7 @@ impl FullStreamWork {
         manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
         self.fresh().await?;
-        if self.prepared_candidate {
+        if self.prepared_resume() {
             // The durable candidate pins the already verified union. Reconnecting
             // cannot rebuild it from a later B snapshot or mint another candidate.
             let proof = self.io.prepared_duplex().await?;

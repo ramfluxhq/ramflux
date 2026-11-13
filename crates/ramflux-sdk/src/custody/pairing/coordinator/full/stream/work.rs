@@ -77,7 +77,7 @@ impl FullStreamWork {
         let reverse = self.receive_manifest().await?;
         self.fresh().await?;
         self.io.retain_reverse_manifest(&reverse).await?;
-        if self.prepared_candidate {
+        if self.prepared_resume() {
             return self.finish_prepared_source(manifest, reverse).await;
         }
         self.receive_and_apply_reverse(&reverse).await?;

@@ -81,11 +81,16 @@ impl FullStreamState {
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
+#[derive(Clone, Copy)]
+enum StreamResume {
+    Data,
+    Prepared,
+}
 struct FullStreamWork {
     role: PairingRole,
     forward_started: bool,
     source_idle: bool,
-    prepared_candidate: bool,
+    resume: StreamResume,
     idle_manifest: Option<SourceManifest>,
     pending_rebind: Option<ramflux_protocol::custody::pairing::full_transfer::DataPacket>,
     packet: FullPacketEpoch,
@@ -98,6 +103,11 @@ struct FullStreamWork {
     anchor: String,
     linked_target: bool,
     new_target: Option<(String, ramflux_protocol::custody::DeviceRef)>,
+}
+impl FullStreamWork {
+    fn prepared_resume(&self) -> bool {
+        matches!(self.resume, StreamResume::Prepared)
+    }
 }
 impl PairingActor {
     /// New B has no ordinary account session yet. Its coordinator owns the actual
@@ -216,7 +226,7 @@ impl PairingActor {
             role,
             forward_started: false,
             source_idle: state.source_idle,
-            prepared_candidate: full.prepared_resume,
+            resume: if full.prepared_resume { StreamResume::Prepared } else { StreamResume::Data },
             idle_manifest: state.idle_manifest.clone(),
             pending_rebind: None,
             progress: progress.clone(),
