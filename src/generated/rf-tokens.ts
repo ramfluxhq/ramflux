@@ -9,6 +9,8 @@ export interface RFTheme {
     readonly badge: string;
     readonly bg: string;
     readonly bubble_max: number;
+    readonly chart_1: string;
+    readonly chart_2: string;
     readonly column_max: number;
     readonly composer_min: number;
     readonly control: string;
@@ -76,6 +78,7 @@ export interface RFTheme {
     readonly size_metric: number;
     readonly size_mobile_body: number;
     readonly size_mobile_caption: number;
+    readonly size_mobile_large_title: number;
     readonly size_page: number;
     readonly size_secondary: number;
     readonly size_subheading: number;
@@ -96,6 +99,8 @@ export const light: RFTheme = Object.freeze({
     badge: "#222224",
     bg: "#FCFBF9",
     bubble_max: 600,
+    chart_1: "#2A78D6",
+    chart_2: "#EB6834",
     column_max: 880,
     composer_min: 48,
     control: "#8E8E8E",
@@ -163,6 +168,7 @@ export const light: RFTheme = Object.freeze({
     size_metric: 32,
     size_mobile_body: 17,
     size_mobile_caption: 11,
+    size_mobile_large_title: 32,
     size_page: 24,
     size_secondary: 13,
     size_subheading: 17,
@@ -183,6 +189,8 @@ export const dark: RFTheme = Object.freeze({
     badge: "#EBEBEB",
     bg: "#171716",
     bubble_max: 600,
+    chart_1: "#3987E5",
+    chart_2: "#D95926",
     column_max: 880,
     composer_min: 48,
     control: "#7A7A7A",
@@ -250,6 +258,7 @@ export const dark: RFTheme = Object.freeze({
     size_metric: 32,
     size_mobile_body: 17,
     size_mobile_caption: 11,
+    size_mobile_large_title: 32,
     size_page: 24,
     size_secondary: 13,
     size_subheading: 17,

@@ -49,7 +49,7 @@ function chart(c:Component,theme:RFTheme):CardNode {
   const table=RFCardTable({id:c.id+":table",label:c.title+" — data table",columns,rows,theme});
   const design=RFCardText({id:c.id+":design",text:"Chart design pending · data table available",theme});
   const n=RFCardChartFrame({id:c.id,title:c.title,summary:"Data table available",content:[design,table],theme});
-  n.attrs={...n.attrs,style:{...n.attrs?.style,color:theme.primary},plot:{kind:c.kind,unit:c.unit,scale:c.scale,series:c.series}};return n;
+  n.attrs={...n.attrs,style:{...n.attrs?.style,color:theme.chart_1},plot:{kind:c.kind,unit:c.unit,scale:c.scale,series:c.series}};return n;
 }
 export function render(input:string):void {
   const data=JSON.parse(input) as {theme:"light"|"dark";components:Component[]};
