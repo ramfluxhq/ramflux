@@ -1,35 +1,31 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::CardError;
+use crate::{CardError, Component, FieldKind, Scalar};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-
 pub(crate) const MAX_INPUT: usize = 16 * 1024;
 pub(crate) const MAX_MODEL: usize = 4096;
 pub(crate) const MAX_JSON_DEPTH: usize = 16;
 pub(crate) const MAX_COMPONENTS: usize = 32;
+pub(crate) const MAX_FIELDS: usize = 16;
+pub(crate) const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 const MAX_MODEL_FIELDS: usize = 32;
-
-/// The first closed declarative catalog. No scripts, URLs or authority fields.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardSpec {
     pub catalog: String,
-    pub components: Vec<Form>,
+    pub components: Vec<Component>,
     #[serde(deserialize_with = "unique_model")]
-    pub model: BTreeMap<String, String>,
+    pub model: BTreeMap<String, Scalar>,
+    #[serde(default)]
+    pub theme: Theme,
 }
-/// A form owns exactly one local text binding and a declarative submit action.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Form {
-    pub id: String,
-    pub component: String,
-    pub title: String,
-    pub label: String,
-    pub binding: String,
-    pub submit: String,
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
 }
-
 /// Check raw byte/depth limits before deserialization allocates any values.
 pub(crate) fn preflight(bytes: &[u8], max: usize) -> Result<(), CardError> {
     if bytes.len() > max {
@@ -71,19 +67,19 @@ pub(crate) fn identifier(s: &str) -> bool {
 }
 fn unique_model<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<BTreeMap<String, String>, D::Error> {
+) -> Result<BTreeMap<String, Scalar>, D::Error> {
     struct Visitor;
     impl<'de> serde::de::Visitor<'de> for Visitor {
-        type Value = BTreeMap<String, String>;
+        type Value = BTreeMap<String, Scalar>;
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("unique string model keys")
+            f.write_str("unique scalar model keys")
         }
         fn visit_map<A: serde::de::MapAccess<'de>>(
             self,
             mut map: A,
         ) -> Result<Self::Value, A::Error> {
             let mut result = BTreeMap::new();
-            while let Some((key, value)) = map.next_entry::<String, String>()? {
+            while let Some((key, value)) = map.next_entry::<String, Scalar>()? {
                 if result.len() >= MAX_MODEL_FIELDS || result.insert(key, value).is_some() {
                     return Err(serde::de::Error::custom("duplicate or excessive model keys"));
                 }
@@ -94,9 +90,9 @@ fn unique_model<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_map(Visitor)
 }
 impl CardSpec {
-    /// Parse a bounded closed card, before constructing a VM.
+    /// Parse bounded declarative card input before constructing a VM.
     /// # Errors
-    /// Rejects unknown fields, invalid bindings and all catalog/resource violations.
+    /// Rejects unknown properties, invalid ownership/bindings and resource limits.
     pub fn parse(bytes: &[u8]) -> Result<Self, CardError> {
         preflight(bytes, MAX_INPUT)?;
         let spec: Self = serde_json::from_slice(bytes)?;
@@ -111,44 +107,204 @@ impl CardSpec {
             return Err(CardError::Limit("components"));
         }
         if self.model.len() > MAX_MODEL_FIELDS
-            || self.model.iter().any(|(k, v)| k.len() > 64 || v.len() > MAX_MODEL)
+            || self.model.iter().any(|(k, v)| !identifier(k) || v.display().len() > MAX_MODEL)
+            || serde_json::to_vec(&self.model)?.len() > MAX_MODEL
         {
-            return Err(CardError::Limit("model fields"));
-        }
-        if serde_json::to_vec(&self.model)?.len() > MAX_MODEL {
             return Err(CardError::Limit("model"));
         }
-        if self.model.keys().any(|s| !identifier(s)) {
-            return Err(CardError::Invalid("model key"));
-        }
         let (mut ids, mut bindings) = (BTreeSet::new(), BTreeSet::new());
-        for form in &self.components {
-            if form.component != "rf.form"
-                || !identifier(&form.id)
-                || !identifier(&form.submit)
-                || form.title.len() > 256
-                || form.label.len() > 256
-                || !ids.insert(&form.id)
-            {
-                return Err(CardError::Invalid("form properties"));
+        for component in &self.components {
+            if !identifier(component.id()) || !ids.insert(component.id()) {
+                return Err(CardError::Invalid("component identity"));
             }
-            let key = form.binding.strip_prefix('/').ok_or(CardError::Invalid("local binding"))?;
-            if !identifier(key) || !self.model.contains_key(key) || !bindings.insert(key) {
-                return Err(CardError::Invalid("binding ownership"));
+            match component {
+                Component::Form(form) => {
+                    if form.title.len() > 256
+                        || !identifier(&form.submit)
+                        || (!form.fields.is_empty()
+                            && (!form.label.is_empty() || !form.binding.is_empty()))
+                    {
+                        return Err(CardError::Invalid("form properties"));
+                    }
+                    let fields = form.normalized_fields();
+                    if fields.is_empty() || fields.len() > MAX_FIELDS {
+                        return Err(CardError::Limit("fields"));
+                    }
+                    let mut field_ids = BTreeSet::new();
+                    for field in fields {
+                        if !identifier(&field.id)
+                            || field.id == "submit"
+                            || !field_ids.insert(field.id.clone())
+                            || field.label.len() > 256
+                            || field.error.as_ref().is_some_and(|e| e.is_empty() || e.len() > 256)
+                        {
+                            return Err(CardError::Invalid("field properties"));
+                        }
+                        let key = field
+                            .binding
+                            .strip_prefix('/')
+                            .ok_or(CardError::Invalid("local binding"))?;
+                        if !identifier(key) || !bindings.insert(key) {
+                            return Err(CardError::Invalid("binding ownership"));
+                        }
+                        let value =
+                            self.model.get(key).ok_or(CardError::Invalid("dangling binding"))?;
+                        let type_matches = matches!(
+                            (field.kind, value),
+                            (FieldKind::Input | FieldKind::Select, Scalar::Text(_))
+                                | (FieldKind::Number, Scalar::Number(_))
+                                | (FieldKind::Toggle, Scalar::Toggle(_))
+                        );
+                        if !type_matches {
+                            return Err(CardError::Invalid("field value type"));
+                        }
+                        if field.kind != FieldKind::Select && !field.options.is_empty() {
+                            return Err(CardError::Invalid("options belong to select"));
+                        }
+                        if field.kind == FieldKind::Select {
+                            let mut options = BTreeSet::new();
+                            if field.options.is_empty()
+                                || field.options.len() > MAX_FIELDS
+                                || field.options.iter().any(|v| {
+                                    !identifier(&v.id)
+                                        || v.label.len() > 256
+                                        || !options.insert(v.id.clone())
+                                })
+                            {
+                                return Err(CardError::Invalid("select options"));
+                            }
+                            if let Scalar::Text(selected) = value {
+                                if !field.options.iter().any(|v| v.id == *selected) {
+                                    return Err(CardError::Invalid("selected option"));
+                                }
+                            }
+                        }
+                        if field.kind != FieldKind::Number
+                            && (field.minimum.is_some() || field.maximum.is_some())
+                        {
+                            return Err(CardError::Invalid("number bounds"));
+                        }
+                        if let Scalar::Number(number) = value {
+                            if !safe_integer(*number)
+                                || field
+                                    .minimum
+                                    .is_some_and(|min| !safe_integer(min) || *number < min)
+                                || field
+                                    .maximum
+                                    .is_some_and(|max| !safe_integer(max) || *number > max)
+                                || matches!((field.minimum,field.maximum), (Some(a),Some(b)) if a>b)
+                            {
+                                return Err(CardError::Invalid("number range"));
+                            }
+                        }
+                    }
+                }
+                Component::Task(task) => {
+                    if !identifier(&task.task_ref)
+                        || task.title.len() > 256
+                        || task.requester.len() > 256
+                        || task.owner.len() > 256
+                        || task.progress.is_some_and(|v| v > 100)
+                        || task.steps.len() > MAX_FIELDS
+                    {
+                        return Err(CardError::Invalid("task projection"));
+                    }
+                    let mut steps = BTreeSet::new();
+                    if task
+                        .steps
+                        .iter()
+                        .any(|s| !identifier(&s.id) || s.text.len() > 256 || !steps.insert(&s.id))
+                    {
+                        return Err(CardError::Invalid("task steps"));
+                    }
+                }
+                Component::Chart(chart) => {
+                    if chart.title.len() > 256
+                        || chart.unit.len() > 32
+                        || chart.scale == 0
+                        || chart.scale > 1_000_000
+                        || chart.series.is_empty()
+                        || chart.series.len() > 2
+                    {
+                        return Err(CardError::Invalid("chart profile"));
+                    }
+                    let mut series = BTreeSet::new();
+                    for s in &chart.series {
+                        if !identifier(&s.id)
+                            || !series.insert(&s.id)
+                            || s.label.len() > 256
+                            || s.points.is_empty()
+                            || s.points.len() > MAX_FIELDS
+                            || s.points.iter().any(|p| p.label.len() > 64 || !safe_integer(p.value))
+                        {
+                            return Err(CardError::Invalid("chart series"));
+                        }
+                    }
+                    let first = chart.series.first().ok_or(CardError::Invalid("chart series"))?;
+                    if chart.series.iter().any(|s| {
+                        s.points.iter().map(|p| &p.label).ne(first.points.iter().map(|p| &p.label))
+                    }) {
+                        return Err(CardError::Invalid("chart labels"));
+                    }
+                }
+                Component::Approval(approval) => {
+                    if !identifier(&approval.request_ref)
+                        || approval.task_binding.as_ref().is_some_and(|s| !identifier(s))
+                        || approval.explanation.len() > 1024
+                    {
+                        return Err(CardError::Invalid("approval references"));
+                    }
+                }
             }
         }
+        crate::projection::expected(self)?.check_limits()?;
         Ok(())
     }
     pub(crate) fn render_input(&self) -> Result<String, CardError> {
-        let rows: Vec<_> = self.components.iter().map(|f| {
-            let key = f.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
-            let value = self.model.get(key).ok_or(CardError::Invalid("binding value"))?;
-            Ok(serde_json::json!({"id":f.id,"title":f.title,"label":f.label,"value":value,"submit":f.submit}))
-        }).collect::<Result<_, CardError>>()?;
-        Ok(serde_json::to_string(&rows)?)
+        let mut components = Vec::new();
+        for component in &self.components {
+            let mut value = serde_json::to_value(component)?;
+            if let Component::Form(form) = component {
+                let fields = form
+                    .normalized_fields()
+                    .into_iter()
+                    .map(|field| {
+                        let key =
+                            field.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
+                        let scalar =
+                            self.model.get(key).ok_or(CardError::Invalid("binding value"))?;
+                        Ok(serde_json::json!({"field":field,"value":scalar}))
+                    })
+                    .collect::<Result<Vec<_>, CardError>>()?;
+                value
+                    .as_object_mut()
+                    .ok_or(CardError::Invalid("form shape"))?
+                    .insert("resolved_fields".into(), serde_json::Value::Array(fields));
+            }
+            components.push(value);
+        }
+        Ok(serde_json::to_string(&serde_json::json!({"theme":self.theme,"components":components}))?)
+    }
+    pub(crate) fn slots(&self) -> Vec<crate::HostSecuritySlot> {
+        self.components
+            .iter()
+            .filter_map(|component| {
+                if let Component::Approval(a) = component {
+                    Some(crate::HostSecuritySlot {
+                        component: a.id.clone(),
+                        request_ref: a.request_ref.clone(),
+                        task_binding: a.task_binding.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
-
+fn safe_integer(value: i64) -> bool {
+    (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +336,7 @@ mod tests {
         spec.components = vec![spec.components[0].clone(); MAX_COMPONENTS + 1];
         assert!(spec.validate().is_err(), "component limit must reject before VM allocation");
         spec = CardSpec::parse(input.as_bytes()).expect("test: fixture");
-        spec.model.insert("name".into(), "x".repeat(MAX_MODEL));
+        spec.model.insert("name".into(), Scalar::Text("x".repeat(MAX_MODEL)));
         assert!(spec.validate().is_err(), "model serialization must fit 4 KiB");
         assert!(
             preflight(&[b'['; MAX_JSON_DEPTH + 1], MAX_INPUT).is_err(),
