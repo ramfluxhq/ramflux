@@ -11,6 +11,7 @@ fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
     for (local, peer) in [(a, b), (b, a)] {
         review::trust(local, peer)?;
         let own = r9::manifest(local)?;
+        local.client.persist_fetched_identity_directory(&own)?;
         let remote = r9::manifest(peer)?;
         local
             .client
@@ -44,6 +45,8 @@ fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError>
         let peer = sender.client.call_device_identity(&c.callee)?;
         let peer_record = sender.client.trusted_device(HeadUse::NewAuthorization, &peer)?;
         let created_at = u64::try_from(c.created_at).map_err(|_| invalid("test: call clock"))?;
+        let entropy = ramflux_crypto::random_32()?;
+        let reference = entropy.get(..16).ok_or_else(|| invalid("test: call reference entropy"))?;
         let body = ramflux_protocol::CallIntentV1 {
             version: 1,
             signing_key_id: ramflux_protocol::encode_base64url(
@@ -59,8 +62,8 @@ fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError>
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| invalid("test: peer epoch"))?,
             target_delivery_id: c.callee.device_id.clone(),
-            call_ref: c.call_id.clone(),
-            source_event_id: format!("call-start-{}", c.call_id),
+            call_ref: ramflux_protocol::encode_base64url(reference),
+            source_event_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
             kind: ramflux_protocol::CallIntentKind::OneToOne,
             action: ramflux_protocol::CallIntentAction::Start,
             seq: 0,
