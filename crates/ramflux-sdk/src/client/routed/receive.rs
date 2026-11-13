@@ -263,14 +263,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, false>(
+        let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments, prepared: None },
             Self::legacy_persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     pub(crate) async fn apply_routed_prepared_entry(
@@ -280,14 +282,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Result<super::PreparedInbound, SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, false>(
+        let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments: false, prepared: Some(prepared) },
             Self::legacy_persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     /// Same prepare/open as live apply; persist joins the caller's receive transaction.
@@ -299,14 +303,16 @@ impl RamfluxClient {
         prepared: Option<Result<super::PreparedInbound, SdkError>>,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, true>(
+        let apply = self.apply_routed_entry_with_source::<true, true>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments: false, prepared },
             persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     fn legacy_persist(

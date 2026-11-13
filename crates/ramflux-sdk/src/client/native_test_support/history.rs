@@ -148,7 +148,7 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
     Ok(())
 }
 
-async fn receive_first_hand(
+pub(super) async fn receive_first_hand(
     source: &mut Fixture,
     peer: &Fixture,
 ) -> TestResult<(g::EventIdentity, g::HistoryItem, String)> {

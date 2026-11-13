@@ -20,14 +20,22 @@ impl RamfluxClient {
         if !crate::client::target_selection::schema_v1_selected() {
             return Err(content("generated durable profile is not selected"));
         }
-        let root = message.recipient_principal_commitment.as_deref()
+        let root = message
+            .recipient_principal_commitment
+            .as_deref()
             .ok_or_else(|| authority("peer control requires an explicit recipient root"))?;
-        if require_contact { self.require_accepted_contact(root)?; }
-        let device = message.recipient_device_id.as_deref()
+        if require_contact {
+            self.require_accepted_contact(root)?;
+        }
+        let device = message
+            .recipient_device_id
+            .as_deref()
             .ok_or_else(|| authority("peer control recipient device absent"))?;
         let remote = self.device_identity_for_root(root, device)?;
         let (pinned_principal, _) = self.pinned_peer(&remote)?;
-        if (pinned_principal != principal && root != principal) || root == self.own_account_anchor()? {
+        if (pinned_principal != principal && root != principal)
+            || root == self.own_account_anchor()?
+        {
             return Err(authority("peer control recipient differs from its native role"));
         }
         Ok(root.to_owned())
@@ -39,7 +47,8 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
         exact: &[u8],
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let mut inner = g::Inner::decode(exact).map_err(|_| content("generated control malformed"))?;
+        let mut inner =
+            g::Inner::decode(exact).map_err(|_| content("generated control malformed"))?;
         inner.body.zeroize();
         let identity = inner.identity.ok_or_else(|| content("control identity absent"))?;
         if message.conversation_id != identity.conversation_id {
@@ -54,9 +63,16 @@ impl RamfluxClient {
         let envelope = self.account_db()?.write_transaction(|| {
             self.bind_outgoing_delivery(&local, &message, &crate::client::routed::Kind::Control)?;
             let sealed = self.seal_routed_with_route_in(
-                &message, exact, Route::control(),
-                SealPair { local: &engine.config().device_id, remote: &recipient,
-                    session: &mut session, header, bundle },
+                &message,
+                exact,
+                Route::control(),
+                SealPair {
+                    local: &engine.config().device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
                 Some((g::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
             )?;
             crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)
@@ -92,7 +108,10 @@ impl RamfluxClient {
         let root = self.native_control_target(&message, &accept.owner_principal_id, true)?;
         let exact = self.generated_guardian_accept_inner(accept, &root)?;
         let accepted = self.submit_generated_peer_control(engine, message, &exact).await?;
-        self.retire_generated_peer_control(&format!("guardian-accept/{}", accept.invite_id))?;
+        self.retire_generated_peer_control(&format!(
+            "guardian-accept/{root}/{}",
+            accept.invite_id
+        ))?;
         Ok(accepted)
     }
 
@@ -106,7 +125,10 @@ impl RamfluxClient {
         revoke: g::ObjectRevokeAccess,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let root = self.native_control_target(&message, &revoke.recipient_principal_id, false)?;
-        let operation = format!("object-revoke/{}/{}/{}", revoke.object_id, revoke.recipient_principal_id, revoke.link_id);
+        let operation = format!(
+            "object-revoke/{}/{}/{}",
+            revoke.object_id, revoke.recipient_principal_id, revoke.link_id
+        );
         let exact = self.generated_object_revoke_inner(revoke, &root)?;
         let accepted = self.submit_generated_peer_control(engine, message, &exact).await?;
         self.retire_generated_peer_control(&operation)?;

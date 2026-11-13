@@ -408,8 +408,11 @@ mod tests {
         let db = own.client.account_db()?;
         let owner = &sent.message_id;
         db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &first))?;
-        let key = db.message_actor_keys(owner, "routed/own-sent-attestation/")?
-            .into_iter().next().ok_or("first proof")?;
+        let key = db
+            .message_actor_keys(owner, "routed/own-sent-attestation/")?
+            .into_iter()
+            .next()
+            .ok_or("first proof")?;
         let retained = db.raw_inner_copy(&key)?.ok_or("first raw proof")?.bytes;
         let mut outer = g::Inner::decode(first.exact_outer_inner.as_slice())?;
         let mut control = g::Control::decode(outer.body.as_slice())?;
@@ -421,16 +424,23 @@ mod tests {
         };
         repeated.envelope_id = "independent-history-envelope".into();
         outer.body = control.encode_to_vec();
-        let second = signed_proof(&own, outer.identity.as_ref().ok_or("identity")?,
-            outer.encode_to_vec(), crate::custody::network_now()?)?;
+        let second = signed_proof(
+            &own,
+            outer.identity.as_ref().ok_or("identity")?,
+            outer.encode_to_vec(),
+            crate::custody::network_now()?,
+        )?;
         assert_ne!(first.exact_outer_inner, second.exact_outer_inner);
         db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &second))?;
         assert_eq!(db.raw_inner_copy(&key)?.ok_or("retained proof")?.bytes, retained);
         let mut corrupt = first;
         corrupt.origin.evidence.report_opening[0] ^= 1;
         db.persist_actor_state(&key, &corrupt)?;
-        assert!(db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &second)).is_err(),
-            "an invalid local proof must never win duplicate reconciliation");
+        assert!(
+            db.write_transaction(|| own.client.persist_own_sent_attestation(owner, &second))
+                .is_err(),
+            "an invalid local proof must never win duplicate reconciliation"
+        );
         Ok(())
     }
 

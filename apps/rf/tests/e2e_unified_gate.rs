@@ -268,7 +268,9 @@ fn unified_receipt_and_delete_reach_the_peer_read_model() -> e2e::Result<()> {
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
 #[test]
 fn unified_tampered_commitment_never_reaches_the_reader_after_restart() -> e2e::Result<()> {
-    if dormant("tampered binding") { return Ok(()); }
+    if dormant("tampered binding") {
+        return Ok(());
+    }
     let stack = boot_stack()?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -307,8 +309,17 @@ fn unified_tampered_commitment_never_reaches_the_reader_after_restart() -> e2e::
 }
 
 #[cfg(feature = "itest-rfd-fault")]
-fn assert_tampered_absent(daemon: &Daemon, account: &Account, conversation: &str, calibration: &str, secret: &str) -> e2e::Result<()> {
-    let page = rf_json(&daemon.socket, &["dm", "list", "--account", &account.id, "--conversation", conversation, "--limit", "100"])?;
+fn assert_tampered_absent(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    calibration: &str,
+    secret: &str,
+) -> e2e::Result<()> {
+    let page = rf_json(
+        &daemon.socket,
+        &["dm", "list", "--account", &account.id, "--conversation", conversation, "--limit", "100"],
+    )?;
     assert_eq!(page["schema"], SCHEMA);
     assert_eq!(texts(&page, "messages"), vec![calibration.to_owned()]);
     assert!(!page.to_string().contains(secret));
