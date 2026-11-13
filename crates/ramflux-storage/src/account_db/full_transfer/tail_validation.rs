@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Complete tail root/codec admission off-loan, before any selected-B mutation or receipt.
+use super::receiver_read::{OwnedReceiverInput, ReceiverInput};
+use super::{FullScalarInputCounts, FullTailEndpoint, full_transfer_catalog};
+use crate::StorageError;
+use ramflux_crypto::custody::pairing::PairingRole;
+use rusqlite::params;
+
+/// One decrypt-only local worker, counted/drained by the SDK's original root owner.
+/// It retains no actual B connection/key, native authority, signer or publication permission.
+pub struct FullTailValidationWork {
+    input: OwnedReceiverInput,
+    hash: String,
+    digest: [u8; 32],
+}
+/// Non-forgeable complete input result. It is not a merge, semantic DV or admission lease.
+pub struct FullValidatedTailInput {
+    hash: String,
+    digest: [u8; 32],
+    counts: FullScalarInputCounts,
+    guard: super::source_scalar::SourceGuard,
+}
+fn wrong() -> StorageError {
+    StorageError::PairingField("WrongContext")
+}
+impl FullTailEndpoint<'_> {
+    /// Move root/record validation away from B's ordinary writer loan.
+    /// Drop the caller's account writer loan before running the returned local worker.
+    /// # Errors
+    /// Refuses wrong roles, incomplete input, foreign tail/hash or expired native admission.
+    pub fn into_validation_work(
+        self,
+        hash: &str,
+        now: u64,
+    ) -> Result<FullTailValidationWork, StorageError> {
+        self.require_tail(hash, now)?;
+        let record = self.stage.resume_record()?;
+        if record.role != PairingRole::Responder {
+            return Err(wrong());
+        }
+        let input = self.stage.pin_tail_read_input(hash, now)?;
+        Ok(FullTailValidationWork { input, hash: hash.into(), digest: record.stage_digest()? })
+    }
+    /// Bind a completed input check back to this fresh G3/native-admitted endpoint.
+    /// This never writes portable data, a semantic receipt or a merged status.
+    /// # Errors
+    /// Refuses a foreign/replaced input, lost root unlock, changed digest or expired authority.
+    pub fn accept_validated_input(
+        &self,
+        input: FullValidatedTailInput,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        input.guard.require()?;
+        self.require_tail(&input.hash, now)?;
+        if self.stage.resume_record()?.role != PairingRole::Responder
+            || self.stage.resume_record()?.stage_digest()? != input.digest
+        {
+            return Err(wrong());
+        }
+        self.stage.connection.execute_batch("CREATE TABLE IF NOT EXISTS tail_input_validated(manifest_hash TEXT PRIMARY KEY,stage_digest BLOB NOT NULL CHECK(length(stage_digest)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL)")?;
+        self.stage.connection.execute("INSERT INTO tail_input_validated VALUES(?1,?2,?3,?4) ON CONFLICT(manifest_hash) DO NOTHING",
+            params![input.hash,input.digest.as_slice(),input.counts.records,input.counts.encoded_bytes])?;
+        super::stage::sync_stage(&self.stage.directory)?;
+        self.require_live(now)
+    }
+}
+impl FullTailValidationWork {
+    /// Verify the complete signed root, unique ordered keys, closed codecs and exact totals.
+    /// No selected B writes or semantic receipt can occur in this worker.
+    /// # Errors
+    /// Refuses corruption, unsupported owners, malformed input, lock/cancel or stale selection.
+    pub fn validate(self) -> Result<FullValidatedTailInput, StorageError> {
+        self.input.require_io()?;
+        let counts =
+            self.input.index_forward_scalar_records(&self.hash, full_transfer_catalog())?;
+        self.input.require_io()?;
+        Ok(FullValidatedTailInput {
+            hash: self.hash,
+            digest: self.digest,
+            counts,
+            guard: self.input.source_guard(),
+        })
+    }
+}

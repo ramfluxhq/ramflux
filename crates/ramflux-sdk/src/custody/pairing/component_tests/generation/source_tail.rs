@@ -385,6 +385,21 @@ mod tests {
                 "test: exact received tail retry rewrote a durable slot"
             );
         }
+        drop(source);
+        let work = target.into_validation_work(&hash, now)?;
+        drop(slot);
+        let validated = work.validate()?;
+        let slot = rig.participant_b.db.lock().map_err(|_| "test: tail input return")?;
+        let db = slot.as_ref().ok_or("test: tail input writer absent")?;
+        let endpoint = db.open_full_tail_endpoint(operation, 1, current, now)?;
+        endpoint.accept_validated_input(validated, now)?;
+        drop(endpoint);
+        let scope = db.full_installed_recipient_tail_scope(operation, 1, now)?;
+        assert_eq!(
+            Some(scope.cut),
+            signed.manifest.previous_cut.map(|cut| cut.0),
+            "test: validated input was reported as semantically merged tail data"
+        );
         Ok(())
     }
 }
