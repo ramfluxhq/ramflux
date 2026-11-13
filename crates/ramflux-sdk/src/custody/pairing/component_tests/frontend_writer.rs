@@ -6,6 +6,8 @@
 mod tests {
     use super::super::*;
     use crate::custody::pairing::PairingLocalWriterService;
+    #[cfg(feature = "c-abi")]
+    mod bindings;
     mod prepared_resume;
     mod tail;
     struct Registered(std::path::PathBuf, String);

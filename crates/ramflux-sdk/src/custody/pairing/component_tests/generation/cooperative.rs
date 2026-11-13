@@ -3,7 +3,7 @@
 
 //! A source lock on either side of native durability cannot fabricate or roll back authority.
 use super::*;
-use crate::custody::pairing::{Installation, LocalPairingParticipant};
+use crate::custody::pairing::{Installation, LocalPairingParticipant, PairingAuthorityQuery};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
 #[tokio::test(start_paused = true)]
