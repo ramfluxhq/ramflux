@@ -4,16 +4,20 @@
 //! S10a endpoint admission after the transport's authenticated ciphertext handoff.
 use super::{
     GatewayInboxEntry, HeadUse, Kind, Opened, RamfluxClient, Routing, SdkError,
-    associated_data_from_outer, decode, invalid, refuse_received_outer_fields, report,
+    associated_data_from_outer, decode, invalid, refuse_received_outer_fields,
+    report::{
+        opened_inner_plaintext, refuse_direct_candidate_opening, refuse_payload_outer_mismatch,
+    },
 };
 use prost::Message as _;
 use ramflux_protocol::message::{
-    self as g,
-    validation::{self, ScanOutcome},
+    Edit, EventIdentity, Inner, Reaction, Typing,
+    content::Value,
+    validation::{ScanOutcome, ScannedInner, scan_inner},
 };
 
 pub(crate) enum EphemeralContent {
-    Typing(g::EventIdentity, g::Typing),
+    Typing(EventIdentity, Typing),
     Unsupported,
     NonTyping,
 }
@@ -59,7 +63,7 @@ impl RamfluxClient {
             .typing_conversation_before_decrypt(envelope)?
             .ok_or_else(|| invalid("ephemeral input requires an established scope"))?;
         let packet = decode(envelope)?;
-        report::refuse_payload_outer_mismatch(envelope, &packet)?;
+        refuse_payload_outer_mismatch(envelope, &packet)?;
         if packet.x3dh.is_some() {
             return Err(invalid("ephemeral input cannot bootstrap"));
         }
@@ -72,13 +76,13 @@ impl RamfluxClient {
         }
         let (mut session, bundle_hash) =
             self.recv_pair_session(&local_device, &remote_device, &envelope.envelope_id, &packet)?;
-        report::refuse_direct_candidate_opening(envelope, &session, &Kind::Direct)?;
+        refuse_direct_candidate_opening(envelope, &session, &Kind::Direct)?;
         let aad =
             associated_data_from_outer(envelope, &envelope.source_device_id, local, &bundle_hash)?;
         let decrypted =
             zeroize::Zeroizing::new(session.decrypt_with_franking_keys(&packet.ciphertext, &aad)?);
-        let body = report::opened_inner_plaintext(envelope, &decrypted.plaintext)?;
-        let decoded = g::Inner::decode(body.as_slice()).ok();
+        let body = opened_inner_plaintext(envelope, &decrypted.plaintext)?;
+        let decoded = Inner::decode(body.as_slice()).ok();
         let identity = decoded.as_ref().and_then(|inner| inner.identity.as_ref());
         if let Some(identity) = identity {
             self.check_ephemeral_identity(
@@ -109,7 +113,7 @@ impl RamfluxClient {
 
     fn check_ephemeral_identity(
         &self,
-        identity: &g::EventIdentity,
+        identity: &EventIdentity,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
         conversation: &str,
         kind: u32,
@@ -126,7 +130,7 @@ impl RamfluxClient {
             || identity.group_id.is_some()
             || identity.group_epoch.is_some()
             || identity.id.len() != 32
-            || (kind != 7 && g::identity::verify(identity).is_err())
+            || (kind != 7 && ramflux_protocol::message::identity::verify(identity).is_err())
         {
             return Err(invalid("ephemeral identity conflicts with authenticated source/scope"));
         }
@@ -138,8 +142,7 @@ impl RamfluxClient {
         opened: &Opened,
         entry: &GatewayInboxEntry,
     ) -> Result<EphemeralContent, SdkError> {
-        let scanned = validation::scan_inner(&opened.body)
-            .map_err(|_| invalid("malformed ephemeral Inner"))?;
+        let scanned = scan_inner(&opened.body).map_err(|_| invalid("malformed ephemeral Inner"))?;
         if scanned.outcome == ScanOutcome::Unsupported {
             if scanned.kind == 7 {
                 return Ok(EphemeralContent::NonTyping);
@@ -148,7 +151,7 @@ impl RamfluxClient {
             return Ok(EphemeralContent::Unsupported);
         }
         let (identity, content) = Self::decode_generated_inner(&opened.body)?;
-        let Some(g::content::Value::Typing(typing)) = content.value else {
+        let Some(Value::Typing(typing)) = content.value else {
             return Ok(EphemeralContent::NonTyping);
         };
         let deadline = entry
@@ -170,12 +173,12 @@ impl RamfluxClient {
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
-        scanned: &validation::ScannedInner<'_>,
+        scanned: &ScannedInner<'_>,
     ) -> Result<(), SdkError> {
         let source = &opened.remote_device;
         let target = match scanned.kind {
-            3 => g::Edit::decode(scanned.body).ok().and_then(|edit| edit.target),
-            5 => g::Reaction::decode(scanned.body).ok().and_then(|reaction| reaction.target),
+            3 => Edit::decode(scanned.body).ok().and_then(|edit| edit.target),
+            5 => Reaction::decode(scanned.body).ok().and_then(|reaction| reaction.target),
             _ => None,
         };
         if target.as_ref().is_some_and(|target| {
