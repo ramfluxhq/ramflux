@@ -21,7 +21,7 @@ pub struct FullTailEndpoint<'a> {
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
 }
-fn authority_error(error: ramflux_crypto::CryptoError) -> StorageError {
+fn authority_error(error: &ramflux_crypto::CryptoError) -> StorageError {
     match error {
         ramflux_crypto::CryptoError::Pairing("LeaseExpired") => {
             StorageError::PairingField("LeaseExpired")
@@ -96,7 +96,7 @@ impl FullTailEndpoint<'_> {
             return Err(StorageError::PairingField("LeaseExpired"));
         }
         verify_full_tail_authority(&self.stage.resume_record()?.grant, self.current, now)
-            .map_err(authority_error)
+            .map_err(|error| authority_error(&error))
     }
     fn require_tail(&self, hash: &str, now: u64) -> Result<(), StorageError> {
         self.require_live(now)?;
