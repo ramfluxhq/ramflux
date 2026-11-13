@@ -59,12 +59,13 @@ impl AccountRuntime {
             let _ = reply.send(Err(SdkError::PairingCode("Busy")));
             return;
         }
-        if let Err(error) =
-            crate::bus::pairing::ensure_actor(&self.state, &self.id, &command.request).await
-        {
-            let _ = reply.send(Err(error));
-            return;
-        }
+        let staged = match self.prepare_pairing_owner(&command).await {
+            Ok(staged) => staged,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
         let root = self.state.config.data_root.clone();
         let account = self.id.clone();
         let mut shutdown = self.shutdown.clone();
@@ -75,12 +76,18 @@ impl AccountRuntime {
             let mut reply = reply;
             let mut cancelled = false;
             let result = {
-                let work = crate::custody::pairing::handle_bus(
-                    &root,
-                    &account,
-                    &command.request.method,
-                    command.request.body.clone(),
-                );
+                let work = async {
+                    if let Some(staged) = &staged {
+                        staged.install().await?;
+                    }
+                    crate::custody::pairing::handle_bus(
+                        &root,
+                        &account,
+                        &command.request.method,
+                        command.request.body.clone(),
+                    )
+                    .await
+                };
                 tokio::pin!(work);
                 tokio::select! {
                     biased;
@@ -91,11 +98,25 @@ impl AccountRuntime {
                     result=&mut work=>result.and_then(|result|Ok(ActorResponse {body:serde_json::to_value(result)?,events:Vec::new(),nodes:None})),
                 }
             };
+            if let Some(staged) = &staged {
+                staged.drain(cancelled || result.is_err()).await;
+            }
             if cancelled {
                 let _ = crate::custody::pairing::remove_actor_and_drain(&root, &account).await;
             }
             Completion { command, reply, result }
         }));
+    }
+    async fn prepare_pairing_owner(
+        &self,
+        command: &AccountCommand,
+    ) -> Result<Option<crate::bus::pairing::StagedResume>, SdkError> {
+        let staged =
+            crate::bus::pairing::capture_staged_resume(&self.state, &self.id, &command.request)?;
+        if staged.is_none() {
+            crate::bus::pairing::ensure_actor(&self.state, &self.id, &command.request).await?;
+        }
+        Ok(staged)
     }
     pub(super) async fn finish_pairing_begin(
         &mut self,
