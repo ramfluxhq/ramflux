@@ -53,7 +53,7 @@ impl FullTransferStage<'_> {
         let reader = Reader::new(
             reader::Inputs {
                 connection: self.connection,
-                lock: std::sync::Arc::new(self.lock),
+                lock: self.lock,
                 directory: self.directory,
                 key: std::sync::Arc::new(key),
                 direction: 1,

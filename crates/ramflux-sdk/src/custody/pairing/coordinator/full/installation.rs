@@ -71,23 +71,29 @@ impl PairingActor {
     {
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let writer = self.local_writer.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let cancellation = self.full_runtime.stage_owner()?;
+        let pin_cancel = cancellation.clone();
         let operation = install.operation_id.clone();
         let pinned = writer
             .request(move |db| {
-                let stage = db.open_full_transfer_stage(
+                let mut stage = db.open_full_transfer_stage(
                     &operation,
                     PairingRole::Responder,
                     crate::custody::network_now()?,
                 )?;
+                stage.bind_local_io_cancellation(&pin_cancel)?;
                 Ok(stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?)
             })
             .await?;
         let copy = self.full_runtime.clone().run_blocking(move || Ok(pinned.copy()?)).await?;
         let operation = install.operation_id.clone();
+        let replay_cancel = cancellation.clone();
         let replay = writer
             .request(move |db| {
                 let now = crate::custody::network_now()?;
-                let stage = db.open_full_transfer_stage(&operation, PairingRole::Responder, now)?;
+                let mut stage =
+                    db.open_full_transfer_stage(&operation, PairingRole::Responder, now)?;
+                stage.bind_local_io_cancellation(&replay_cancel)?;
                 Ok(stage.into_receiver_replay_work(copy, now)?)
             })
             .await?;
@@ -97,11 +103,12 @@ impl PairingActor {
         let preparation = writer
             .request(move |db| {
                 let now = crate::custody::network_now()?;
-                let stage = db.open_full_transfer_stage(
+                let mut stage = db.open_full_transfer_stage(
                     &install.operation_id,
                     PairingRole::Responder,
                     now,
                 )?;
+                stage.bind_local_io_cancellation(&cancellation)?;
                 FullGenerationPreparation::pin(
                     &Installation { root: &local.root, db, vault: local.vault.as_ref(), now },
                     &stage,
@@ -204,7 +211,8 @@ impl PairingActor {
         };
         client.born_v3_account = Some(Box::new(native));
         client.active_account_db = slot.take();
-        *client.native_head_freshness.get_mut() = Default::default();
+        *client.native_head_freshness.get_mut() =
+            crate::client::identity_authority::NativeHeadFreshness::default();
         *client.profile_read_cache.get_mut() = None;
         *service = replacement;
         Ok(true)

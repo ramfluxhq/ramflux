@@ -3,6 +3,7 @@
 
 //! Positive G2 recovery revalidates encrypted retained provenance against selected bytes.
 use super::{FullSelectedReceiverGeneration, Materialization, Selection, wrong};
+use crate::account_db::full_transfer::receiver_read::{OwnedReceiverInput, ReceiverInput};
 use crate::{AccountDbKey, AdoptionRow, BackupDatabase, FullRecipientInstallStage, StorageError};
 use ramflux_protocol::{canonical_json_bytes, encode_base64url, parse_i_json};
 use std::{
@@ -37,6 +38,17 @@ impl FullRecipientInstallStage<'_> {
         marker: &[u8],
         adoption: &AdoptionRow,
     ) -> Result<FullSelectedReceiverGeneration, StorageError> {
+        self.pin_generation_recovery(marker, adoption)?.verify()?.accept(self)
+    }
+    /// Pin a decrypt-only selected-generation verifier during one short local loan.
+    /// Release this stage/writer loan before running the returned root-drained work.
+    /// # Errors
+    /// Refuses unbacked selected metadata, another nonce/root or missing signed receipts.
+    pub fn pin_generation_recovery(
+        &self,
+        marker: &[u8],
+        adoption: &AdoptionRow,
+    ) -> Result<FullGenerationRecoveryWork, StorageError> {
         if marker.len() > 4096 {
             return Err(wrong());
         }
@@ -76,19 +88,104 @@ impl FullRecipientInstallStage<'_> {
         {
             return Err(wrong());
         }
-        verify_selected(self, saved)?;
-        let proof = FullSelectedReceiverGeneration {
-            materialization: Materialization::Recovered(Box::new(Recovered {
-                path: db.path.clone(),
-                key: db.current_key.clone(),
-                adoption: adoption.clone(),
-                cancelled: self.stage.source_cancelled.clone(),
-                unlock: db.full_local_unlock_guard()?,
-            })),
+        let manifest = self.stage.current_forward_manifest()?.ok_or_else(wrong)?;
+        let hash = encode_base64url(
+            ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)
+                .map_err(|_| wrong())?,
+        );
+        let input = self.stage.pin_receiver_read_input(&hash, self.historical_time)?;
+        let (cut, observation) = db.pin_full_transfer_target()?;
+        drop(cut);
+        Ok(FullGenerationRecoveryWork {
+            input,
+            saved,
+            path: db.path.clone(),
+            key: db.current_key.clone(),
+            adoption: adoption.clone(),
+            cancelled: self.stage.source_cancelled.clone(),
+            unlock: db.full_local_unlock_guard()?,
+            observation,
             index: db.account_index.clone(),
             marker: Zeroizing::new(marker.to_vec()),
+            digest: record.stage_digest()?,
+        })
+    }
+}
+/// Independently owned selected-byte verification; no actual frontend DB is retained.
+/// The original unlock remains weak and all local keys belong to the root-drained job.
+pub struct FullGenerationRecoveryWork {
+    input: OwnedReceiverInput,
+    saved: Retained,
+    path: PathBuf,
+    key: AccountDbKey,
+    adoption: AdoptionRow,
+    cancelled: Arc<AtomicBool>,
+    unlock: crate::FullLocalUnlockGuard,
+    observation: crate::FullTargetObservation,
+    index: Arc<crate::AccountIndex>,
+    marker: Zeroizing<Vec<u8>>,
+    digest: [u8; 32],
+}
+/// Actual selected bytes matched their encrypted qualified ledger; no new approval.
+pub struct FullGenerationRecoveryDraft {
+    path: PathBuf,
+    key: AccountDbKey,
+    adoption: AdoptionRow,
+    cancelled: Arc<AtomicBool>,
+    unlock: crate::FullLocalUnlockGuard,
+    observation: crate::FullTargetObservation,
+    index: Arc<crate::AccountIndex>,
+    marker: Zeroizing<Vec<u8>>,
+    digest: [u8; 32],
+}
+impl FullGenerationRecoveryWork {
+    /// Traverse the retained and actual selected bytes without an ordinary writer loan.
+    /// # Errors
+    /// Refuses changed/locked B, replaced selection, corrupt bytes or provenance disagreement.
+    pub fn verify(self) -> Result<FullGenerationRecoveryDraft, StorageError> {
+        self.input.require_io()?;
+        self.input.require_target(&self.observation)?;
+        verify_selected(&self.input, &self.saved, &self.path, &self.key)?;
+        self.input.require_io()?;
+        self.input.require_target(&self.observation)?;
+        Ok(FullGenerationRecoveryDraft {
+            path: self.path,
+            key: self.key,
+            adoption: self.adoption,
+            cancelled: self.cancelled,
+            unlock: self.unlock,
+            observation: self.observation,
+            index: self.index,
+            marker: self.marker,
+            digest: self.digest,
+        })
+    }
+}
+impl FullGenerationRecoveryDraft {
+    /// Recheck the same actual selected writer before the exact G3 local transition.
+    /// # Errors
+    /// Refuses another stage/selection, B writes during verification or a lost original unlock.
+    pub fn accept(
+        self,
+        stage: &FullRecipientInstallStage<'_>,
+    ) -> Result<FullSelectedReceiverGeneration, StorageError> {
+        self.unlock.require_unlocked()?;
+        self.observation.require_current(stage.stage.db)?;
+        if stage.stage.resume_record()?.stage_digest()? != self.digest {
+            return Err(wrong());
+        }
+        let proof = FullSelectedReceiverGeneration {
+            materialization: Materialization::Recovered(Box::new(Recovered {
+                path: self.path,
+                key: self.key,
+                adoption: self.adoption,
+                cancelled: self.cancelled,
+                unlock: self.unlock,
+            })),
+            index: self.index,
+            marker: self.marker,
         };
-        proof.require_database(db)?;
+        proof.require_database(stage.stage.db)?;
         Ok(proof)
     }
 }
@@ -99,18 +196,17 @@ fn retained(stage: &crate::FullTransferStage<'_>) -> Result<Retained, StorageErr
     }))?)
 }
 fn verify_selected(
-    stage: &FullRecipientInstallStage<'_>,
-    saved: Retained,
+    input: &OwnedReceiverInput,
+    saved: &Retained,
+    path: &std::path::Path,
+    selected_key: &AccountDbKey,
 ) -> Result<(), StorageError> {
-    let input = &stage.stage;
-    input.verify_retained_receiver_application(stage.historical_time)?;
+    input.require_io()?;
     let scratch = crate::account_db::full_transfer::receiver_scratch::Scratch::reopen_retained(
-        &input.directory,
+        input.directory(),
         &saved.workspace,
     )?;
     let key = AccountDbKey::from_bytes(*saved.key);
-    let selected = BackupDatabase::open_full_receiver_copy(&input.db.path, &input.db.current_key)?;
-    super::super::objects::verify(&input.db.path)?;
     let record = input.resume_record()?;
     let owners = [
         crate::account_db::mac_subkeys::full::source_key(&record.grant.source_ref)?,
@@ -122,15 +218,21 @@ fn verify_selected(
         total_bytes: saved.bytes,
         chunks_root: saved.root,
     };
-    crate::account_db::full_transfer::receiver_materialization::Verification {
-        directory: &scratch.path,
-        key: &key,
-        encoding: &encoding,
-        owners: &owners,
-        private: &selected,
-        private_key: &input.db.current_key,
-        stage: input,
+    for (database, own_key) in
+        [(scratch.path.join("private.db"), &key), (path.to_owned(), selected_key)]
+    {
+        let private = BackupDatabase::open_full_receiver_copy(&database, own_key)?;
+        crate::account_db::full_transfer::receiver_materialization::Verification {
+            directory: &scratch.path,
+            key: &key,
+            encoding: &encoding,
+            owners: &owners,
+            private: &private,
+            private_key: own_key,
+            stage: input,
+        }
+        .run()?;
     }
-    .run()?;
-    Ok(())
+    super::super::objects::verify(path)?;
+    input.require_io()
 }

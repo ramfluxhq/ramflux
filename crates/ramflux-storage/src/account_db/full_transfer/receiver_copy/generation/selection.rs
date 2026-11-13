@@ -51,7 +51,7 @@ impl FullPreparedReceiverDatabase {
         install: &crate::BackupIndexInstall<'_>,
         now: u64,
     ) -> Result<(), StorageError> {
-        self.verify(stage)?;
+        self.require_attested(stage)?;
         self.check_selection(stage, install, now)?;
         self.0.copy.observation.commit_prepared_generation(stage.db, install)
     }
@@ -111,6 +111,7 @@ pub struct FullSelectedReceiverGeneration {
     marker: zeroize::Zeroizing<Vec<u8>>,
 }
 mod recovery;
+pub use recovery::{FullGenerationRecoveryDraft, FullGenerationRecoveryWork};
 enum Materialization {
     Prepared(Box<FullPreparedReceiverDatabase>),
     Recovered(Box<recovery::Recovered>),

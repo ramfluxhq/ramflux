@@ -12,6 +12,7 @@ use ramflux_protocol::custody::pairing::full_transfer::SourceManifest;
 
 mod work;
 pub use work::FullReceiverReplayWork;
+pub(super) use work::OwnedReceiverInput;
 
 pub(super) trait ReadSeek: std::io::Read + std::io::Seek {}
 impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}

@@ -85,7 +85,7 @@ impl FullReceiverBaseCopy {
         stage.verified_duplex(now)?;
         self.retain_for_installation(stage, now)
     }
-    /// Verify/fsync the exact private generation, then commit its key/root in encrypted
+    /// Require the off-loan verified private generation, then commit its key/root in encrypted
     /// stage SQL before exposing the narrow receipt-signing request. This restores no
     /// approval after lock/restart and selects neither paths nor native authority.
     /// # Errors
@@ -95,7 +95,7 @@ impl FullReceiverBaseCopy {
         stage: &FullTransferStage<'_>,
         now: u64,
     ) -> Result<FullAppliedDataReceipt, StorageError> {
-        self.verify_materialization(stage)?;
+        self.require_materialization_stamp(stage)?;
         let record = stage.resume_record()?;
         if now >= record.grant.expires_at || now >= stage.reference().lease_expires_at.0 {
             return Err(StorageError::PairingField("LeaseExpired"));
@@ -304,3 +304,6 @@ mod recovery;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stamp_tests;

@@ -22,6 +22,7 @@ impl LocalWriterPort {
         authority: CustodyAuthority,
     ) -> Result<FullGenerationCommitted, SdkError> {
         self.require_participant(&participant)?;
+        let cancellation = self.scope.runtime.stage_owner()?;
         #[cfg(test)]
         let scope = self.scope.clone();
         self.request_with(false, move |reply| {
@@ -41,8 +42,9 @@ impl LocalWriterPort {
                     }
                     let now = crate::custody::network_now()?;
                     let operation = prepared.install().operation_id.clone();
-                    let stage =
+                    let mut stage =
                         db.open_full_transfer_stage(&operation, PairingRole::Responder, now)?;
+                    stage.bind_local_io_cancellation(&cancellation)?;
                     prepared.select(
                         &Installation {
                             root: &participant.root,
@@ -67,21 +69,22 @@ impl LocalWriterPort {
     ) -> Result<FullGenerationCommitted, SdkError> {
         self.require_participant(&participant)?;
         let runtime = self.scope.runtime.clone();
+        let cancellation = runtime.stage_owner()?;
         self.request_with(false, move |reply| Box::new(Work {
             action: move |db: &ramflux_storage::AccountDb| {
                 db.with_full_transfer_install_fence(|| {
                     runtime.require_live()?;
                     let now = crate::custody::network_now()?;
-                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
-                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let mut stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    stage.bind_local_io_cancellation(&cancellation)?;
                     let pinned = stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?;
                     drop(stage);
                     let copy = pinned.copy()?;
-                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
-                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let mut stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    stage.bind_local_io_cancellation(&cancellation)?;
                     let copy = stage.into_receiver_replay_work(copy, now)?.replay()?;
-                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
-                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let mut stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    stage.bind_local_io_cancellation(&cancellation)?;
                     let local = Installation { root: &participant.root, db, vault: participant.vault.as_ref(), now };
                     let preparation = crate::custody::pairing::full_generation::owner::FullGenerationPreparation::pin(&local, &stage, copy, install, &authority)?;
                     let prepared = preparation.prepare()?;

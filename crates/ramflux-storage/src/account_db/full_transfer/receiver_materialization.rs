@@ -13,6 +13,8 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroize::{Zeroize as _, Zeroizing};
 
+mod verification_file;
+
 fn mismatch() -> StorageError {
     StorageError::PairingField("ManifestMismatch")
 }
@@ -35,16 +37,18 @@ pub(super) struct Verification<'a, I: super::receiver_read::ReceiverInput> {
 impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
     pub(super) fn run(&self) -> Result<(), StorageError> {
         self.stage.require_io()?;
+        let comparison = verification_file::VerificationFile::create(self.directory)?;
         let path = self.directory.join("contributions.db");
         let mut db = super::receiver_contributions::open(&path, self.key)?;
+        comparison.attach(&db, self.key)?;
         let tx = db.transaction()?;
         let guard = self.stage.source_guard();
         self.verify_root(&tx, &guard)?;
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS materialized_record(family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL,seen INTEGER NOT NULL DEFAULT 0 CHECK(seen IN(0,1)),PRIMARY KEY(family,key)) WITHOUT ROWID; DELETE FROM materialized_record;")?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS verifier.materialized_record(family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL,seen INTEGER NOT NULL DEFAULT 0 CHECK(seen IN(0,1)),PRIMARY KEY(family,key)) WITHOUT ROWID; DELETE FROM verifier.materialized_record;")?;
         self.expected(&tx)?;
         self.actual(&tx)?;
         if tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM materialized_record WHERE seen=0)",
+            "SELECT EXISTS(SELECT 1 FROM verifier.materialized_record WHERE seen=0)",
             [],
             |r| r.get::<_, bool>(0),
         )? {
@@ -141,7 +145,7 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
                         .map_err(|_| mismatch())?
                         .ok_or_else(mismatch)?,
                 );
-                if db.execute("UPDATE materialized_record SET seen=1 WHERE family=?1 AND key=?2 AND record=?3",params![header.0.family,header.0.key,encoded.as_slice()])? != 1 { return Err(mismatch()); }
+                if db.execute("UPDATE verifier.materialized_record SET seen=1 WHERE family=?1 AND key=?2 AND record=?3",params![header.0.family,header.0.key,encoded.as_slice()])? != 1 { return Err(mismatch()); }
                 count = count.checked_add(1).ok_or_else(mismatch)?;
             }
             if count != family.source_rows.0 {
@@ -155,6 +159,6 @@ fn retain_expected(db: &Connection, bytes: &[u8]) -> Result<(), StorageError> {
     let mut input = bytes;
     let header =
         Header(read_record_header(&mut input).map_err(|_| mismatch())?.ok_or_else(mismatch)?);
-    if db.execute("INSERT INTO materialized_record(family,key,record) VALUES(?1,?2,?3) ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE materialized_record.record=excluded.record",params![header.0.family,header.0.key,bytes])? != 1 { return Err(mismatch()); }
+    if db.execute("INSERT INTO verifier.materialized_record(family,key,record) VALUES(?1,?2,?3) ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE verifier.materialized_record.record=excluded.record",params![header.0.family,header.0.key,bytes])? != 1 { return Err(mismatch()); }
     Ok(())
 }

@@ -2,7 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private ordinary data unlock for a new recipient; never an account/session admission.
-use super::*;
+use super::{
+    Arc, FreshPairingNative, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
+    HttpRelay, LocalPairingParticipant, Mutex, NativePairingPublication, NativePairingQuery,
+    PairingActor, PairingIdentity, PairingNative, PairingWire, SdkError, install_actor_with_writer,
+    provider_for_account,
+};
 use crate::custody::pairing::{
     local_credential::{load_reservation, scoped},
     private_credential::PrivateCredentialScope,
@@ -120,8 +125,8 @@ fn unlock(
 }
 
 pub(super) async fn install(
-    config: crate::LocalBusConfig,
-    nodes: crate::node::NodeStore,
+    config: Arc<crate::LocalBusConfig>,
+    nodes: Arc<crate::node::NodeStore>,
     account: &str,
     request: &StatusRequest,
     owner: &Owner,

@@ -16,6 +16,7 @@ impl LocalPairingParticipant {
     pub(crate) fn install_new_full_generation(
         &self,
         install: &Install,
+        cancellation: &ramflux_storage::FullStageIoCancel,
     ) -> Result<CustodyAuthority, SdkError> {
         if install.recipient_mode != "new" || install.account_id != self.account_id {
             return Err(wrong());
@@ -28,11 +29,12 @@ impl LocalPairingParticipant {
             let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
             let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             observation.acknowledge(db)?;
-            let stage = db.open_full_transfer_stage(
+            let mut stage = db.open_full_transfer_stage(
                 operation,
                 PairingRole::Responder,
                 crate::custody::network_now()?,
             )?;
+            stage.bind_local_io_cancellation(cancellation)?;
             // Every earlier copy is stale after J3/J6 bookkeeping. Rebase from B's
             // actual current generation, retaining the frozen independently verified source.
             stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?
@@ -42,15 +44,17 @@ impl LocalPairingParticipant {
             let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
             let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             let now = crate::custody::network_now()?;
-            db.open_full_transfer_stage(operation, PairingRole::Responder, now)?
-                .into_receiver_replay_work(copy, now)?
+            let mut stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
+            stage.bind_local_io_cancellation(cancellation)?;
+            stage.into_receiver_replay_work(copy, now)?
         };
         let copy = replay.replay()?;
         let preparation = {
             let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
             let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             let now = crate::custody::network_now()?;
-            let stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
+            let mut stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
+            stage.bind_local_io_cancellation(cancellation)?;
             FullGenerationPreparation::pin(
                 &Installation { root: &self.root, db, vault: self.vault.as_ref(), now },
                 &stage,
@@ -64,7 +68,8 @@ impl LocalPairingParticipant {
             let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
             let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             let now = crate::custody::network_now()?;
-            let stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
+            let mut stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
+            stage.bind_local_io_cancellation(cancellation)?;
             prepared.select(
                 &Installation { root: &self.root, db, vault: self.vault.as_ref(), now },
                 &stage,

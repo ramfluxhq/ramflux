@@ -26,7 +26,7 @@ fn wrong() -> StorageError {
 /// Owned local bulk work only: independent stage bytes/key and a weak original-B writer.
 pub struct FullReverseSourceWork {
     connection: Connection,
-    _lock: std::fs::File,
+    _lock: std::sync::Arc<std::fs::File>,
     directory: PathBuf,
     key: FullSourceMetadataKey,
     cut: Option<crate::account_db::backup::FullTransferCut>,

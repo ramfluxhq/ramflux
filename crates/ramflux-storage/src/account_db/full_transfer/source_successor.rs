@@ -28,7 +28,7 @@ use pending::PendingSnapshot;
 /// SDK must count/drain this owner on account lock and never carry it over network waits.
 pub struct FullSourceSuccessorWork {
     connection: Connection,
-    _lock: File,
+    _lock: std::sync::Arc<File>,
     key: super::keys::FullSourceMetadataKey,
     guard: SourceGuard,
     directory: PathBuf,

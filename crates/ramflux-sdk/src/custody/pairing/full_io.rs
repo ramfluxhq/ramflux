@@ -224,7 +224,7 @@ fn apply_action(
                 return Err(wrong());
             }
             if let Some(copy) = &copy {
-                copy.verify_materialization(&stage)?;
+                copy.require_materialized_generation(&stage)?;
             }
             FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, copy)
         }
@@ -242,18 +242,7 @@ fn apply_action(
             FullLocalResult::Semantic(application::apply(action, scope, &mut stage)?)
         }
         FullLocalAction::ObservePrepublication(current) => {
-            // Retain rollback/revocation/fork observations even when the current
-            // native role/key predicate refuses further data work.
-            stage.observe_full_native_head(&current)?;
-            ramflux_crypto::custody::pairing::verify_full_prepublication_authority(
-                &stage.resume_record()?.grant,
-                &current,
-                custody::network_now()?,
-            )?;
-            FullLocalResult::NativeObserved {
-                current_hash: ramflux_protocol::custody::object_hash(current.envelope())?,
-                bound_hash: stage.full_prepublication_record_hash()?,
-            }
+            observe_prepublication(&mut stage, &current)?
         }
         FullLocalAction::PrepareEmptyReverse => {
             if scope.role != PairingRole::Responder {
@@ -311,6 +300,23 @@ fn apply_action(
             stage.verify_forward_root(&hash)?;
             FullLocalResult::ForwardRootChecked
         }
+    })
+}
+
+fn observe_prepublication(
+    stage: &mut FullTransferStage<'_>,
+    current: &ramflux_crypto::custody::VerifiedRecord,
+) -> Result<FullLocalResult, SdkError> {
+    // Retain rollback/revocation/fork observations before testing the current role.
+    stage.observe_full_native_head(current)?;
+    ramflux_crypto::custody::pairing::verify_full_prepublication_authority(
+        &stage.resume_record()?.grant,
+        current,
+        custody::network_now()?,
+    )?;
+    Ok(FullLocalResult::NativeObserved {
+        current_hash: ramflux_protocol::custody::object_hash(current.envelope())?,
+        bound_hash: stage.full_prepublication_record_hash()?,
     })
 }
 

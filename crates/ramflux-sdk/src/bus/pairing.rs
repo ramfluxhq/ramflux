@@ -23,8 +23,8 @@ mod staged_resume;
 pub(crate) use staged_resume::unlock_for_test;
 
 pub(super) struct StagedResume {
-    config: crate::LocalBusConfig,
-    nodes: crate::node::NodeStore,
+    config: Arc<crate::LocalBusConfig>,
+    nodes: Arc<crate::node::NodeStore>,
     account: String,
     request: StatusRequest,
     owner: staged_resume::Owner,
@@ -36,8 +36,8 @@ impl StagedResume {
         request: StatusRequest,
     ) -> Result<Self, SdkError> {
         Ok(Self {
-            config: state.config.clone(),
-            nodes: state.nodes.clone(),
+            config: Arc::new(state.config.clone()),
+            nodes: Arc::new(state.nodes.clone()),
             account: account.into(),
             request,
             owner: staged_resume::Owner::new(&state.config.data_root, account)?,
