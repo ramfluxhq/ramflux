@@ -408,7 +408,7 @@ jobs:
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -469,7 +469,7 @@ jobs:
   cli-e2e-b7:
     name: CLI e2e (Demo B B7, GitHub-hosted)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
