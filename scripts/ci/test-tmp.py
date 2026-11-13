@@ -66,16 +66,21 @@ class Tests(unittest.TestCase):
                     self.assertIn(f"TEST_TMP_LEAKS={int(leaked)}", output.getvalue())
                 self.assertFalse(root.exists(), "CI scratch must be removed after recording the verdict")
 
-    def test_owned_directory_cleans_up_on_failure(self):
+    def test_initialize_assigns_all_platform_temp_variables(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            try:
-                with tempfile.TemporaryDirectory(prefix="ramflux-", dir=root):
-                    self.assertEqual(len(leftovers(root)), 1)
-                    raise RuntimeError("test failure")
-            except RuntimeError:
-                pass
-            self.assertEqual(leftovers(root), [])
+            parent = Path(directory).resolve()
+            env_file = parent / "github-env"
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(parent), "GITHUB_ENV": str(env_file), "RF_CI_TMPBASE": ""}):
+                initialize()
+            assigned = dict(line.split("=", 1) for line in env_file.read_text(encoding="utf-8").splitlines())
+            root = Path(assigned["RF_TEST_TMPDIR"])
+            self.assertTrue(root.is_dir())
+            self.assertEqual(root.parent, parent)
+            for key in ("TMPDIR", "TMP", "TEMP"):
+                self.assertEqual(assigned[key], str(root))
+            with patch.dict(os.environ, assigned), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(check(), 0)
+            self.assertFalse(root.exists())
 
 
 def main():
