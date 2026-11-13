@@ -216,7 +216,6 @@ impl LiveCall {
                 .ok_or_else(|| invalid("local call generation exhausted"))?;
             self.gateway_generation = generation.map(str::to_owned);
             self.peer_media.clear();
-            self.gateway_answered = false;
             self.media_held = true;
         }
         Ok(())
@@ -229,7 +228,7 @@ impl LiveCall {
     fn refresh_media(&mut self) {
         let permission = self.peer_media.get(self.media_peer());
         self.media_held = permission.is_none_or(|permission| !permission.allowed);
-        self.gateway_answered = permission.is_some_and(|permission| permission.answered);
+        self.gateway_answered |= permission.is_some_and(|permission| permission.answered);
         if let Some(permission) = permission
             && !permission.call_ref.is_empty()
         {
@@ -400,6 +399,9 @@ impl LiveCall {
                     .remove(&c.callee)
                     .ok_or_else(|| invalid("answer has no fresh offer key"))?;
                 self.offer_keys.clear();
+                if self.callee != c.callee {
+                    self.gateway_answered = false;
+                }
                 self.callee = c.callee.clone();
                 self.refresh_media();
                 self.set_state("connecting", now)?;

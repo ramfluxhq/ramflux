@@ -289,7 +289,8 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let selected = alice.client.voice_calls.get_mut(&id).ok_or("test: selected call")?;
         assert!(selected.expire(now+31)?, "unanswered Start exceeded its immutable signed deadline");
         both_confirmed.bind_gateway_generation(Some("fresh-authenticated-generation"))?;
-        assert!(both_confirmed.media_held, "reconnect retained a peer's old media permission");
+        assert!(both_confirmed.media_held && both_confirmed.gateway_answered, "reconnect must hold media while retaining the verified answered lifecycle");
+        assert!(!both_confirmed.expire(now+31)?, "reconnect reset the answered lifecycle to the ring deadline");
         Ok(())
     })).await?
 }
