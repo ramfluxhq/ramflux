@@ -20,6 +20,7 @@ function lintSource(source) {
   const file = ts.createSourceFile("form.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   if (file.parseDiagnostics.length) throw Error("invalid TSX source");
   function visit(node) {
+    if (ts.isModuleDeclaration(node) && (node.flags & ts.NodeFlags.GlobalAugmentation)) return; // erased JSX types
     if (ts.isIdentifier(node) && banned.has(node.text)) throw Error(`forbidden source identifier: ${node.text}`);
     if (ts.isImportDeclaration(node) || node.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isExportDeclaration(node) && node.moduleSpecifier)) throw Error("source module loading forbidden");
@@ -56,6 +57,7 @@ if (process.argv.includes("--test")) {
     assert.throws(() => lint(sample), undefined, `build lint accepted ${sample}`);
     assert.throws(() => lintSource(`if(false){${sample}}`), undefined, `source lint accepted dead code ${sample}`);
   }
+  lintSource("export {}; declare global { namespace JSX { interface IntrinsicElements {} } }");
   assert.throws(() => lint("unrecognizedAmbientAPI()"), undefined, "unknown ambient APIs must fail closed");
   lint("export function render(input){__rf_commit(JSON.stringify(JSON.parse(input)))}");
   console.log("LINT_TESTS_OK");
