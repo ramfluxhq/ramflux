@@ -3782,8 +3782,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "subtle",
- "thiserror 2.0.21",
  "tempfile",
+ "thiserror 2.0.21",
  "tracing",
  "zeroize",
 ]

@@ -3,6 +3,9 @@
 
 //! Recipient J0/J1: own branch vault and data-store passphrase, no master/SS.
 
+mod existing_frontend;
+pub(crate) use existing_frontend::ExistingFrontendUnlock;
+
 use super::coordinator::verify_invitation;
 use super::install_gate;
 use super::install_store::{self, Install};
@@ -450,6 +453,12 @@ fn require_existing_refs(
     if request.recipient_ref.device_id != native.local_device_id()? {
         return Err(SdkError::PairingField("recipient_ref"));
     }
+    if !native.record().body.devices.iter().any(|device| {
+        device.device_id == request.recipient_ref.device_id
+            && device.device_epoch == request.recipient_ref.device_epoch
+    }) {
+        return Err(SdkError::PairingField("recipient_ref"));
+    }
     if request.branch_vault_ref != native.branch_vault_ref() {
         return Err(SdkError::PairingField("branch_vault_ref"));
     }
@@ -470,6 +479,19 @@ fn unlock_existing(
     request: &StageExisting<'_>,
     client: &mut crate::RamfluxClient,
 ) -> Result<(), SdkError> {
+    let (secret, _) = acquire_existing_secret(request)?;
+    client.open_account_index(request.new.root)?;
+    if client.active_account_db.is_some() {
+        client.verify_active_account_secret(request.new.account_id, secret.as_bytes())?;
+    } else {
+        client.unlock_account(request.new.account_id, secret.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn acquire_existing_secret(
+    request: &StageExisting<'_>,
+) -> Result<(SecretUtf8, PersistedReservation), SdkError> {
     let reservation_id = encode_base64url(*random_32()?);
     persist_reservation(
         request.new.root,
@@ -483,7 +505,6 @@ fn unlock_existing(
         .ok_or(SdkError::PairingField("credential_reservation"))?;
     let expected = credential_request(&request.new, &reservation_id, "unlock")?;
     expected.validate_recipient_mode("existing").map_err(|error| wire(&error))?;
-    client.open_account_index(request.new.root)?;
     let binding = super::private_credential::PrivateCredentialScope::data(
         expected.clone(),
         Some(request.new.invitation.body.request_id.clone()),
@@ -496,12 +517,7 @@ fn unlock_existing(
             return Err(error);
         }
     };
-    if client.active_account_db.is_some() {
-        client.verify_active_account_secret(request.new.account_id, secret.as_bytes())?;
-    } else {
-        client.unlock_account(request.new.account_id, secret.as_bytes())?;
-    }
-    Ok(())
+    Ok((secret, stored))
 }
 
 fn write_existing_install(

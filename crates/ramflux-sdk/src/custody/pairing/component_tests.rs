@@ -1438,11 +1438,7 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         tokio::time::advance(std::time::Duration::from_millis(500)).await;
         source_signal.notified().await;
         target_signal.notified().await;
-        service_full_transfer(
-            &participant_a.root,
-            &participant_a.account_id,
-            source.client.account_db()?,
-        )?;
+        service_frontend(&participant_a.root, &participant_a.account_id, &source.client)?;
         let (source_done, source_state) = super::coordinator::settle_actor_data_for_test(
             &participant_a.root,
             &participant_a.account_id,

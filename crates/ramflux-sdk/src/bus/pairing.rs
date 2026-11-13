@@ -37,14 +37,22 @@ pub(super) async fn ensure_actor(
         }
         "device.pair.join" | "device.transfer.join" => {
             let join = validated_join(request)?;
-            return install_new_recipient(state, account_id, join).await;
+            return if join.token.invitation.body.recipient_mode == "existing" {
+                install_source(state, account_id, Some(&join)).await
+            } else {
+                install_new_recipient(state, account_id, join).await
+            };
         }
         _ => return Ok(()),
     }
-    install_source(state, account_id).await
+    install_source(state, account_id, None).await
 }
 
-async fn install_source(state: &LocalBusDaemonState, account_id: &str) -> Result<(), SdkError> {
+async fn install_source(
+    state: &LocalBusDaemonState,
+    account_id: &str,
+    recipient: Option<&Join>,
+) -> Result<(), SdkError> {
     let config = state.config.pairing.clone().ok_or(SdkError::PairingCode("NotFound"))?;
     if !config.enabled {
         return Err(SdkError::PairingCode("NotFound"));
@@ -69,8 +77,19 @@ async fn install_source(state: &LocalBusDaemonState, account_id: &str) -> Result
         device_epoch: device.device_epoch,
     };
     let primary = reference == record.body.master_certificate.body.primary_device_ref;
-    if !primary {
+    if recipient.is_none() && !primary {
         return Err(SdkError::PairingCode("PrimaryRequired"));
+    }
+    if let Some(join) = recipient {
+        let invitation = &join.token.invitation.body;
+        if invitation.destination_ref.as_ref() != Some(&reference)
+            || invitation.account_anchor != record.body.account_anchor
+            || invitation.base_record_hash != object_hash(record)?
+            || invitation.base_epoch != record.body.device_set_epoch
+            || primary
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
     }
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let profile =
@@ -106,6 +125,16 @@ async fn install_source(state: &LocalBusDaemonState, account_id: &str) -> Result
     let mut network = crate::gateway::proof_network_config(&gateway)?;
     // FreshPairingNative uses TCP, while the ordinary config's default address is QUIC.
     network.gateway_address = tcp;
+    let recipient_node = if let Some(join) = recipient {
+        let node =
+            crate::custody::CustodyConnection::discover_pairing_node(network.clone()).await?;
+        if node.envelope().body.node_signing_public_key != join.token.invitation.body.node_key {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        Some(node)
+    } else {
+        None
+    };
     let proof: Arc<dyn PairingNative> = Arc::new(FreshPairingNative::new(network, vault.clone()));
     let runtime = tokio::runtime::Handle::current();
     let participant = Arc::new(LocalPairingParticipant {
@@ -133,6 +162,9 @@ async fn install_source(state: &LocalBusDaemonState, account_id: &str) -> Result
         Arc::new(HttpRelay::from_config(&config)?),
         config,
     );
+    if let Some(node) = recipient_node {
+        actor.set_full_node(node);
+    }
     actor.set_participant(participant);
     let writer = actor.bind_frontend_writer(account.client.account_db()?)?;
     install_actor_with_writer(root, account_id.into(), actor, Some(writer))
@@ -230,7 +262,10 @@ async fn install_new_recipient(
         vault,
         provider,
         db: Mutex::new(None),
-        persist: Arc::new(NativePairingPublication { native: proof, runtime: runtime.clone() }),
+        persist: Arc::new(NativePairingPublication {
+            native: proof.clone(),
+            runtime: runtime.clone(),
+        }),
         query: Arc::new(NativePairingQuery { config: gateway, runtime }),
     });
     let mut actor = PairingActor::new(
@@ -246,7 +281,7 @@ async fn install_new_recipient(
             base_epoch: invitation.base_epoch,
             is_primary: false,
         },
-        None,
+        Some(proof),
         Arc::new(HttpRelay::from_config(&config)?),
         config,
     );

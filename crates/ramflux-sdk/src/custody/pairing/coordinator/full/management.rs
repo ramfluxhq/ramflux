@@ -150,7 +150,12 @@ impl PairingActor {
     /// inspection on A grants no approval and independently queries its current native head.
     /// # Errors
     /// Refuses incomplete data, another peer/phase, malformed candidate, expiry or stopped scope.
-    pub async fn poll_full_management_control(&mut self) -> Result<bool, SdkError> {
+    pub fn poll_full_management_control(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<bool, SdkError>> + Send + '_ {
+        Box::pin(self.poll_full_management_owned())
+    }
+    async fn poll_full_management_owned(&mut self) -> Result<bool, SdkError> {
         self.require_open()?;
         self.full_runtime.require_live()?;
         if self.ceremony.as_ref().is_some_and(|c| c.role == PairingRole::Initiator) {

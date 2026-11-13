@@ -158,6 +158,7 @@ fn pairing_cli_outcome_exit_codes_preserve_retry_and_refusal_categories() {
     }
     for (error, expected) in [
         (RfError::Sdk(ramflux_sdk::SdkError::PairingCode("Busy")), 3),
+        (RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy), 3),
         (RfError::Message("never display this input".into()), 1),
     ] {
         let fixed = output::failure(error);

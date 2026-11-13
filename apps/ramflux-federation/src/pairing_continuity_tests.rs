@@ -907,3 +907,49 @@ fn enroll_secondary(
     })?;
     Ok(primary.enroll_device(&current, cert, now.saturating_add(1))?)
 }
+
+pub(super) fn native_issue_refused_when_disabled() -> TestResult {
+    let node = spawn_node_mesh_at("https://relay.example:443".into(), None)?;
+    let mut prover = PrimaryProver::bootstrap(&node)?;
+    prover.service = Arc::new(
+        ramflux_node_core::CustodyService::new(
+            node.node.clone(),
+            false,
+            node.redb.as_ref(),
+            wall()?,
+        )?
+        .with_pairing_relay_if_enabled(
+            ramflux_crypto::fixture_signing_key().to_bytes(),
+            "https://relay.example:443".into(),
+        )?,
+    );
+    prover.publish()?;
+    let now = wall()?;
+    let reply = prover.run(CustodyProofAction::PairingIssue {
+        request: Box::new(ramflux_protocol::custody::pairing::native::Issue {
+            schema: "ramflux.pairing.Issue.v2".into(),
+            version: 2,
+            spec: ramflux_protocol::custody::pairing::native::CreateSpec {
+                schema: "ramflux.pairing.CreateSpec.v2".into(),
+                version: 2,
+                account_anchor: prover.reference.account_anchor.clone(),
+                primary_ref: prover.reference.clone(),
+                base_record_hash: object_hash(&prover.publication.record)?,
+                base_epoch: prover.publication.record.body.device_set_epoch,
+                purpose: "enroll".into(),
+                recipient_mode: "new".into(),
+                destination_ref: None,
+                capabilities: vec!["message".into()],
+                lease_not_before: now,
+                lease_expires_at: now + 86_400,
+                data_selection: vec![],
+                ttl_seconds: 300,
+            },
+        }),
+    })?;
+    assert!(
+        matches!(reply, CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported, .. }),
+        "test: default-off native service issued an invitation: {reply:?}"
+    );
+    Ok(())
+}

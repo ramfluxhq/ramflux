@@ -12,6 +12,7 @@ fn retired() -> SdkError {
 trait Request: Send {
     fn reject(self: Box<Self>, error: SdkError);
     fn apply(self: Box<Self>, db: &AccountDb);
+    fn apply_client(self: Box<Self>, client: &crate::RamfluxClient);
 }
 struct Work<F, R> {
     action: F,
@@ -28,6 +29,33 @@ where
     fn apply(self: Box<Self>, db: &AccountDb) {
         if !self.reply.is_closed() {
             let _ = self.reply.send((self.action)(db));
+        }
+    }
+    fn apply_client(self: Box<Self>, client: &crate::RamfluxClient) {
+        match client.account_db() {
+            Ok(db) => self.apply(db),
+            Err(error) => self.reject(error),
+        }
+    }
+}
+struct ClientWork<F, R> {
+    action: F,
+    reply: oneshot::Sender<Result<R, SdkError>>,
+}
+impl<F, R> Request for ClientWork<F, R>
+where
+    F: FnOnce(&crate::RamfluxClient) -> Result<R, SdkError> + Send + 'static,
+    R: Send + 'static,
+{
+    fn reject(self: Box<Self>, error: SdkError) {
+        let _ = self.reply.send(Err(error));
+    }
+    fn apply(self: Box<Self>, _db: &AccountDb) {
+        self.reject(SdkError::PairingCode("WrongContext"));
+    }
+    fn apply_client(self: Box<Self>, client: &crate::RamfluxClient) {
+        if !self.reply.is_closed() {
+            let _ = self.reply.send((self.action)(client));
         }
     }
 }
@@ -115,6 +143,23 @@ impl PairingLocalWriterService {
         envelope.request.apply(db);
         Ok(true)
     }
+    /// Service a short check that needs the actual frontend's configured vault provider.
+    /// The client and its data key never leave the frontend; outputs cannot borrow them.
+    /// # Errors
+    /// Same root/selection/lock checks as `try_apply`; no async or network work is permitted.
+    pub fn try_apply_client(&mut self, client: &crate::RamfluxClient) -> Result<bool, SdkError> {
+        let Ok(envelope) = self.receiver.try_recv() else {
+            return Ok(false);
+        };
+        let checked = client.account_db().and_then(|db| self.scope.require_db(db));
+        if let Err(error) = checked {
+            envelope.request.reject(error);
+            return Ok(true);
+        }
+        let _local = self.scope.runtime.local_work()?;
+        envelope.request.apply_client(client);
+        Ok(true)
+    }
 }
 impl LocalWriterPort {
     fn require_participant(
@@ -155,6 +200,18 @@ impl LocalWriterPort {
         &self,
         action: impl FnOnce(&AccountDb) -> Result<R, SdkError> + Send + 'static,
     ) -> Result<R, SdkError> {
+        self.request_with(move |reply| Box::new(Work { action, reply })).await
+    }
+    pub(super) async fn request_client<R: Send + 'static>(
+        &self,
+        action: impl FnOnce(&crate::RamfluxClient) -> Result<R, SdkError> + Send + 'static,
+    ) -> Result<R, SdkError> {
+        self.request_with(move |reply| Box::new(ClientWork { action, reply })).await
+    }
+    async fn request_with<R: Send + 'static>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<R, SdkError>>) -> Box<dyn Request>,
+    ) -> Result<R, SdkError> {
         self.scope.live()?;
         let permit = self
             .admission
@@ -162,7 +219,7 @@ impl LocalWriterPort {
             .try_acquire_owned()
             .map_err(|_| SdkError::PairingCode("Busy"))?;
         let (reply, receive) = oneshot::channel();
-        let envelope = Envelope { request: Box::new(Work { action, reply }), _permit: permit };
+        let envelope = Envelope { request: build(reply), _permit: permit };
         self.sender.try_send(envelope).map_err(|_| retired())?;
         self.scope.work.notify_one();
         let result = tokio::select! {

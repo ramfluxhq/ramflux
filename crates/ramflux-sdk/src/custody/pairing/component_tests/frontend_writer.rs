@@ -22,7 +22,7 @@ mod tests {
         loop {
             tokio::select! {
                 result=&mut work=>return result,
-                ()=signal.notified()=>{service.try_apply(client.account_db()?).map_err(|error| SdkError::LocalBus(format!("test: frontend service: {error}")))?;}
+                ()=signal.notified()=>{service.try_apply_client(client).map_err(|error| SdkError::LocalBus(format!("test: frontend service: {error}")))?;}
             }
         }
     }
@@ -203,8 +203,8 @@ mod tests {
                 tokio::select! {
                     result = &mut begin => break result,
                     () = signal.notified() => {
-                        crate::custody::pairing::service_full_transfer(
-                            &participant.root, &participant.account_id, source.client.account_db()?,
+                        crate::custody::pairing::service_frontend(
+                            &participant.root, &participant.account_id, &source.client,
                         )?;
                     }
                 }
@@ -325,7 +325,9 @@ mod tests {
         Box::pin(rig.secondary.prepare_full_transfer(&request)).await?;
         let mut retained = false;
         for _ in 0..72 {
+            rig.clock.advance_ms(1001);
             Box::pin(rig.secondary.poll_full_management_control()).await?;
+            rig.clock.advance_ms(1001);
             Box::pin(rig.primary.poll_full_management_control()).await?;
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
             {
@@ -389,7 +391,9 @@ mod tests {
                 .next()
                 .ok_or("test: source invitation row missing")?
                 .operation_id;
+            eprintln!("test: frontend publication data verified; delivering candidate and ready");
             Box::pin(deliver_candidate_and_ready(&mut rig, &operation)).await?;
+            eprintln!("test: frontend publication ready retained; starting own native publication");
             assert!(
                 drive(
                     Box::pin(rig.primary.advance_full_source_publication()),
@@ -408,6 +412,7 @@ mod tests {
                 .await?,
                 "test: completed source publication reused a consumed approval"
             );
+            eprintln!("test: frontend source native J6/secondary retirement complete");
             let current = crate::custody::load_account(
                 &rig.participant_a.root,
                 &rig.participant_a.account_id,
@@ -451,7 +456,7 @@ mod tests {
             );
             Box::pin(complete_full_installation(&mut rig, &operation)).await?;
             rig.primary.lock().await?;
-            rig.secondary.lock().await?;
+            Box::pin(handback_installed(rig.secondary, &rig.participant_b)).await?;
             Ok(())
         }))
         .await;
@@ -459,21 +464,36 @@ mod tests {
         result
     }
     async fn complete_full_installation(rig: &mut Rig, operation: &str) -> TestResult {
-        for _ in 0..8 {
-            Box::pin(rig.primary.poll_full_management_control()).await?;
-            Box::pin(rig.secondary.poll_full_management_control()).await?;
-            let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
-                schema: "ramflux.pairing.StatusRequest.v2".into(),
-                version: 2,
-                operation_id: operation.into(),
-                generation: 1,
-            };
-            if phase(rig.primary.status(&request).await?)? == "completed"
-                && phase(rig.secondary.status(&request).await?)? == "completed"
-            {
-                break;
-            }
-        }
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.primary.poll_full_management_control()).await?;
+        eprintln!("test: full Published sent; destination obtaining own native/G1-G3 evidence");
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.secondary.poll_full_management_control()).await?;
+        eprintln!("test: destination own G3 complete; sending Installed");
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.secondary.poll_full_management_control()).await?;
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.primary.poll_full_management_control()).await?;
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.primary.poll_full_management_control()).await?;
+        rig.clock.advance_ms(1001);
+        Box::pin(rig.secondary.poll_full_management_control()).await?;
+        let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: 1,
+        };
+        assert_eq!(
+            phase(rig.primary.status(&request).await?)?,
+            "completed",
+            "test: source did not close its exact full completion handshake"
+        );
+        assert_eq!(
+            phase(rig.secondary.status(&request).await?)?,
+            "completed",
+            "test: installed destination did not close its exact full completion handshake"
+        );
         assert!(
             ordinary_session_admitted_for_participant(&rig.participant_b)?,
             "test: own native publication plus actual G1/G2/G3 did not admit the new primary"
@@ -500,6 +520,50 @@ mod tests {
             db.path,
             rig.participant_b.root.join(selected.db_relative_path),
             "test: recipient actor retained the pre-G2 database"
+        );
+        Ok(())
+    }
+    async fn handback_installed(
+        actor: PairingActor,
+        participant: &LocalPairingParticipant,
+    ) -> TestResult {
+        crate::custody::pairing::install_actor(
+            &participant.root,
+            participant.account_id.clone(),
+            actor,
+        )?;
+        let _registered = Registered(participant.root.clone(), participant.account_id.clone());
+        let frontend = crate::custody::pairing::take_installed_recipient(
+            &participant.root,
+            &participant.account_id,
+        )?
+        .ok_or("test: own G3 did not hand the selected writer to the ordinary frontend")?;
+        assert!(
+            crate::custody::pairing::ordinary_session_admitted(&frontend, &participant.account_id)?,
+            "test: frontend handback bypassed or lost G3 admission"
+        );
+        assert!(
+            participant.db.lock().map_err(|_| "test: recipient slot")?.is_none(),
+            "test: handback retained another database owner in the pairing participant"
+        );
+        assert!(
+            crate::custody::pairing::take_installed_recipient(
+                &participant.root,
+                &participant.account_id
+            )?
+            .is_none(),
+            "test: a second frontend took the same selected database"
+        );
+        crate::custody::pairing::remove_actor_and_drain(&participant.root, &participant.account_id)
+            .await?;
+        assert!(
+            crate::custody::pairing::ordinary_session_admitted(&frontend, &participant.account_id)?,
+            "test: pairing shutdown closed the ordinary installed data owner"
+        );
+        assert_eq!(
+            frontend.account_db()?.load_actor_state::<String>("account/node-id")?.as_deref(),
+            Some("node"),
+            "test: handback lost the independently pinned receiving node selection"
         );
         Ok(())
     }

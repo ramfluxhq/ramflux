@@ -60,7 +60,8 @@ pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullSta
 pub use receiver_input::FullScalarInputCounts;
 pub use source_base::FullBaseSourceEncoding;
 pub use source_preparation::{
-    FullSourcePreparation, FullSourcePreparationCancel, PreparedFullSource,
+    FullSourcePreparation, FullSourcePreparationCancel, FullSourcePreparationWork,
+    PreparedFullSource,
 };
 pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;

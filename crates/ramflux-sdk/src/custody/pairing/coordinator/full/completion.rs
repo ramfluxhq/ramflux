@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Peer completion controls name exact local work; native and local generation owners authorize effects.
-use super::{PairingActor, SdkError};
+use super::{PairingActor, SdkError, publication::DestinationPhase};
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::{object_hash, pairing::full_transfer::FullControlPayload};
 fn wrong() -> SdkError {
@@ -14,7 +14,7 @@ impl PairingActor {
             c.role == PairingRole::Responder
                 && matches!(c.phase.as_str(), "locally_installed" | "completed")
                 && c.full.as_ref().is_some_and(|full| {
-                    full.common.recipient_mode == "new" && full.publication.destination_installed
+                    full.common.recipient_mode == "new" && full.publication.destination_installed()
                 })
         })
     }
@@ -44,7 +44,7 @@ impl PairingActor {
                     {
                         return Err(wrong());
                     }
-                    full.publication.destination_requested = true;
+                    full.publication.destination = DestinationPhase::Requested;
                     Ok(())
                 })?;
                 Box::pin(self.advance_full_destination_installation()).await?;
@@ -55,8 +55,8 @@ impl PairingActor {
                     let context = full.transcript.as_ref().ok_or_else(wrong)?;
                     if c.role != PairingRole::Initiator
                         || c.phase != "acknowledged"
-                        || !full.publication.source_j6
-                        || !full.publication.source_retired
+                        || !full.publication.source_acknowledged()
+                        || !full.publication.source_retired()
                         || operation_id != c.operation_id
                         || c.record_hash.as_deref() != Some(record_hash.as_str())
                         || context.responder.device_ref != recipient_ref
@@ -79,7 +79,7 @@ impl PairingActor {
                     let full = c.full.as_ref().ok_or_else(wrong)?;
                     if c.role != PairingRole::Responder
                         || c.phase != "locally_installed"
-                        || !full.publication.destination_installed
+                        || !full.publication.destination_installed()
                         || operation_id != c.operation_id
                         || c.record_hash.as_deref() != Some(record_hash.as_str())
                     {
@@ -100,8 +100,8 @@ impl PairingActor {
         let pending = self.with_ceremony(|c| {
             Ok(c.role == PairingRole::Responder
                 && c.full.as_ref().is_some_and(|full| {
-                    full.publication.destination_requested
-                        && !full.publication.destination_installed
+                    full.publication.destination_requested()
+                        && !full.publication.destination_installed()
                 }))
         })?;
         if !pending {
@@ -118,7 +118,7 @@ impl PairingActor {
         let authority = self
             .full_runtime
             .clone()
-            .run_blocking(move || participant.install_new_full_generation(install))
+            .run_blocking(move || participant.install_new_full_generation(&install))
             .await?;
         self.with_ceremony_mut(|c| {
             let full = c.full.as_mut().ok_or_else(wrong)?;
@@ -127,7 +127,7 @@ impl PairingActor {
             if object_hash(&candidate.record)? != hash {
                 return Err(wrong());
             }
-            full.publication.destination_installed = true;
+            full.publication.destination = DestinationPhase::Installed;
             if let Some(stream) = full.bootstrap.as_mut().and_then(|state| state.stream.as_mut()) {
                 stream.receiver.take();
             }
