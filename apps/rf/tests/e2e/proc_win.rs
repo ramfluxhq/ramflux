@@ -9,7 +9,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Write as _},
+    io::Read,
     os::windows::{
         io::{AsRawHandle, FromRawHandle},
         process::ExitStatusExt,

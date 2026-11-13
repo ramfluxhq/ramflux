@@ -385,6 +385,7 @@ pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns the OS error when the process token cannot be read.
+#[cfg(test)]
 pub(crate) fn owner_matches_user(owner: &Sid, user: &Sid) -> io::Result<bool> {
     super::owner_matches_user(owner, user)
 }
