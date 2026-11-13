@@ -9,7 +9,8 @@ type Props = {id:string;label?:string;title?:string;text?:string;value?:string|n
   required?:boolean;disabled?:boolean;error?:string;event?:CardAction;options?:readonly {id:string;label:string}[];
   color?:string;background?:string;border?:string;gap?:number;padding?:number;summary?:string;
   columns?:readonly {id:string;label:string}[];rows?:readonly {id:string;cells:Readonly<Record<string,string>>}[];
-  items?:readonly {id:string;text:string}[]};
+  items?:readonly {id:string;text:string}[];subtitle?:string;variant?:string;style?:Readonly<Record<string,string|number>>;
+  actionsCount?:number;legendCount?:number;leadingCount?:number;seriesColors?:readonly string[]};
 export function node(kind:string, id:string, text="", value="", children:CardNode[]=[]):CardNode {
   return {key:id,kind,text,value,action:null,children};
 }
@@ -33,3 +34,8 @@ export function List(p:Props):CardNode{const n=control("column",p);n.children=(p
 export function ChartFrame(p:Props,...children:CardNode[]):CardNode{const n=control("chart",p);n.children=children;return n}
 export function Form(p:Props,...children:CardNode[]):CardNode{const n=control("form",p);n.children=children;return n}
 export function createNode(component:(props:Props,...children:CardNode[])=>CardNode,props:Props,...children:CardNode[]):CardNode{return component(props,...children)}
+
+// These catalog families are not admitted by the closed production card profile.
+// Keep their generated signatures typechecked without introducing new controls.
+export function Header(_props:Props,..._children:CardNode[]):CardNode{throw new Error("header is not admitted by the card profile")}
+export function SearchField(_props:Props):CardNode{throw new Error("search is not admitted by the card profile")}
