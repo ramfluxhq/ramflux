@@ -20,7 +20,7 @@ struct Certificates {
 impl Certificates {
     fn new(label: &str) -> TestResult<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let root = PathBuf::from("/tmp").join(format!(
+        let root = std::env::temp_dir().join(format!(
             "rf-r8-{label}-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()

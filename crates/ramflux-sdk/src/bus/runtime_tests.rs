@@ -128,13 +128,19 @@ impl GatewaySessionFrameSource for Gateway {
 }
 
 pub(crate) fn root(name: &str) -> PathBuf {
+    const LABEL_CHARS: usize = 8;
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    PathBuf::from("/tmp")
-        .join(format!("ramflux-actor-{name}-{}-{sequence}-{unique}", std::process::id()))
+    let label: String =
+        ramflux_crypto::blake3_256_base64url("ramflux.sdk.test-root.v1", name.as_bytes())
+            .chars()
+            .take(LABEL_CHARS)
+            .collect();
+    std::env::temp_dir()
+        .join(format!("rf-actor-{label}-{}-{sequence}-{unique}", std::process::id()))
 }
 pub(crate) fn account(
     root: &Path,

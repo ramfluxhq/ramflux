@@ -6,7 +6,7 @@ use super::*;
 
 #[tokio::test]
 async fn subscription_refusals_preserve_replay_bounds_in_the_sdk_error() -> Result<(), SdkError> {
-    let root = PathBuf::from("/tmp").join(format!(
+    let root = std::env::temp_dir().join(format!(
         "ramflux-stream-error-{}-{}",
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
