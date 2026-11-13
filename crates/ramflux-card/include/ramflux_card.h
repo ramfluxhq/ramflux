@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #ifndef RAMFLUX_CARD_H
 #define RAMFLUX_CARD_H
-#define RAMFLUX_CARD_ABI_VERSION 3
+#define RAMFLUX_CARD_ABI_VERSION 4
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
@@ -27,11 +27,13 @@ typedef struct RamfluxCardOpen {
     RamfluxCardBytes trusted_key;
     RamfluxCardBytes descriptor;
     RamfluxCardBytes policy;
+    RamfluxCardBytes presentation;
 } RamfluxCardOpen;
 typedef void (*RamfluxCardCallback)(void *user, const uint8_t *json, size_t len);
 uint32_t ramflux_card_abi_version(void);
 int32_t ramflux_card_open(const RamfluxCardOpen *input, RamfluxCardCallback callback, void *user, uint64_t *out);
 int32_t ramflux_card_update(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);
+int32_t ramflux_card_present(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_event(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_suspend(uint64_t session, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_resume(uint64_t session, RamfluxCardCallback callback, void *user);

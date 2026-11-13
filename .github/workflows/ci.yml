@@ -281,6 +281,15 @@ jobs:
           rustup target add wasm32-unknown-unknown
           CC_wasm32_unknown_unknown=clang cargo clippy --locked -p ramflux-card --all-features --lib --target wasm32-unknown-unknown -- -D warnings
           CC_wasm32_unknown_unknown=clang cargo build --locked -p ramflux-card --features web --lib --target wasm32-unknown-unknown
+      - name: Build pinned web host and reject bundle drift
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo install --locked wasm-bindgen-cli --version 0.2.126
+          python3 -c 'import json,pathlib; p=pathlib.Path("target/card-web"); p.mkdir(parents=True,exist_ok=True); (p/"seed").write_bytes(bytes([7])*32); (p/"release.json").write_text(json.dumps(dict(app_id="org.ramflux.card",package_id="org.ramflux.card.library",security_epoch=1,version=1))); (p/"policy.json").write_text(json.dumps(dict(app_id="org.ramflux.card",package_id="org.ramflux.card.library",minimum_epoch=1,minimum_version=1,exact_descriptor_sha256=None)))'
+          cargo run --locked -p ramflux-card --features compiler --bin card-pack -- crates/ramflux-card/library/form.js target/card-web/seed target/card-web/release.json target/card-web/cards
+          wasm-bindgen target/wasm32-unknown-unknown/debug/ramflux_card.wasm --target web --out-dir crates/ramflux-card/web/pkg
+          node crates/ramflux-card/web/build-web.mjs target/card-web/cards target/card-web/policy.json
+          node crates/ramflux-card/web/build-web.mjs --check target/card-web/cards target/card-web/policy.json
 
   doctests:
     name: Doctests

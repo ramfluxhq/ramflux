@@ -30,6 +30,7 @@ pub struct RamfluxCardOpen {
     pub descriptor: RamfluxCardBytes,
     /// Pinned by the embedding release; never derived from the received package.
     pub policy: RamfluxCardBytes,
+    pub presentation: RamfluxCardBytes,
 }
 pub type RamfluxCardCallback = Option<unsafe extern "C" fn(*mut c_void, *const u8, usize)>;
 thread_local! {
@@ -155,7 +156,12 @@ pub unsafe extern "C" fn ramflux_card_open(
     // SAFETY: caller provides a valid aligned input structure for the call.
     let input = unsafe { &*input };
     let create = || -> Result<_, CardError> {
-        let spec = CardSpec::parse(&bytes(input.spec, MAX_INPUT)?)?;
+        let presentation = crate::Presentation::parse(&bytes(
+            input.presentation,
+            crate::presentation::MAX_PRESENTATION,
+        )?)?;
+        let spec =
+            CardSpec::parse(&bytes(input.spec, MAX_INPUT)?)?.with_presentation(presentation)?;
         let bytecode = bytes(input.bytecode, MAX_PACKAGE)?;
         let signature: [u8; 64] =
             bytes(input.signature, 64)?.try_into().map_err(|_| CardError::Signature)?;
@@ -209,6 +215,26 @@ pub unsafe extern "C" fn ramflux_card_update(
         Err(error) => return code(&error),
     };
     apply(id, callback, user, |session| session.update(spec))
+}
+/// Replace host-selected locale and tokens on the creating thread.
+/// # Safety
+/// Input and callback must be valid for the synchronous call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ramflux_card_present(
+    id: u64,
+    input: RamfluxCardBytes,
+    callback: RamfluxCardCallback,
+    user: *mut c_void,
+) -> i32 {
+    if IN_CALLBACK.with(Cell::get) {
+        return BUSY;
+    }
+    match bytes(input, crate::presentation::MAX_PRESENTATION)
+        .and_then(|b| crate::Presentation::parse(&b))
+    {
+        Ok(presentation) => apply(id, callback, user, |session| session.present(presentation)),
+        Err(error) => code(&error),
+    }
 }
 /// Deliver a versioned text edit or submit. Submit output is an intent, not a send.
 /// # Safety
@@ -310,6 +336,10 @@ mod tests {
     fn span(value: &[u8]) -> RamfluxCardBytes {
         RamfluxCardBytes { data: value.as_ptr(), len: value.len() }
     }
+    pub(super) fn host_presentation() -> Vec<u8> {
+        serde_json::to_vec(&crate::Presentation::bundled("en", false).expect("test: host catalog"))
+            .expect("test: catalog JSON")
+    }
     #[test]
     fn c_abi_owns_handles_callbacks_and_lifecycle() {
         let _guard = guard();
@@ -317,6 +347,7 @@ mod tests {
         let sig = p.signature;
         let public = p.public_key;
         let policy = serde_json::to_vec(&release().policy()).expect("test: pinned policy");
+        let presentation = host_presentation();
         let input = RamfluxCardOpen {
             spec: span(include_bytes!("../fixtures/form.json")),
             bytecode: span(&p.bytecode),
@@ -324,6 +355,7 @@ mod tests {
             trusted_key: span(&public),
             descriptor: span(&p.descriptor),
             policy: span(&policy),
+            presentation: span(&presentation),
         };
         let mut output = Output { values: Vec::new(), reentry: 0, failures: Vec::new() };
         let user = std::ptr::from_mut(&mut output).cast();
@@ -480,6 +512,10 @@ mod error_tests {
         let _guard = guard();
         let p = artifact(include_str!("../library/form.js"));
         let policy = serde_json::to_vec(&release().policy()).expect("test: host policy");
+        let presentation = serde_json::to_vec(
+            &crate::Presentation::bundled("en", false).expect("test: host catalog"),
+        )
+        .expect("test: JSON");
         let mut input = RamfluxCardOpen {
             spec: span(include_bytes!("../fixtures/form.json")),
             bytecode: span(&p.bytecode),
@@ -487,6 +523,7 @@ mod error_tests {
             trusted_key: span(&p.public_key),
             descriptor: span(&p.descriptor),
             policy: span(&policy),
+            presentation: span(&presentation),
         };
         let mut output = Output::default();
         let user = std::ptr::from_mut(&mut output).cast();
@@ -581,6 +618,7 @@ mod error_tests {
         let _guard = guard();
         let p = artifact(include_str!("../library/form.js"));
         let policy = serde_json::to_vec(&release().policy()).expect("test: host policy");
+        let presentation = super::tests::host_presentation();
         let input = RamfluxCardOpen {
             spec: span(include_bytes!("../fixtures/form.json")),
             bytecode: span(&p.bytecode),
@@ -588,6 +626,7 @@ mod error_tests {
             trusted_key: span(&p.public_key),
             descriptor: span(&p.descriptor),
             policy: span(&policy),
+            presentation: span(&presentation),
         };
         let mut handles = Vec::new();
         let mut output = Output::default();

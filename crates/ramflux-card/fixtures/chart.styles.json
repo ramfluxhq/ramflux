@@ -1,0 +1,56 @@
+{
+  "light": {
+    "root": null,
+    "metrics": {
+      "color": "#2A78D6",
+      "background": "#FFFFFF",
+      "border": "#E6E6E6",
+      "padding": 16
+    },
+    "metrics:design": {
+      "color": "#161616"
+    },
+    "metrics:table": {
+      "color": "#161616",
+      "border": "#E6E6E6",
+      "gap": 16,
+      "padding": 16
+    }
+  },
+  "dark": {
+    "root": null,
+    "metrics": {
+      "color": "#3987E5",
+      "background": "#1E1E1E",
+      "border": "#262626",
+      "padding": 16
+    },
+    "metrics:design": {
+      "color": "#EBEBEB"
+    },
+    "metrics:table": {
+      "color": "#EBEBEB",
+      "border": "#262626",
+      "gap": 16,
+      "padding": 16
+    }
+  },
+  "contrast": {
+    "root": null,
+    "metrics": {
+      "color": "#444444",
+      "background": "#FFFFFF",
+      "border": "#E6E6E6",
+      "padding": 16
+    },
+    "metrics:design": {
+      "color": "#000000"
+    },
+    "metrics:table": {
+      "color": "#000000",
+      "border": "#E6E6E6",
+      "gap": 16,
+      "padding": 16
+    }
+  }
+}

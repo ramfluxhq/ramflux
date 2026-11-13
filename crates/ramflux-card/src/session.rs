@@ -57,6 +57,7 @@ pub struct CardSession {
     version: u64,
     mounted_version: u64,
     spec: CardSpec,
+    validation_errors: BTreeMap<(String, String), &'static str>,
     package: SignedPackage,
     vm: Option<CardRuntime>,
     tree: Option<Tree>,
@@ -85,6 +86,7 @@ impl CardSession {
                 version: 1,
                 mounted_version: 1,
                 spec,
+                validation_errors: BTreeMap::new(),
                 package,
                 vm: Some(vm),
                 tree: Some(tree),
@@ -109,7 +111,43 @@ impl CardSession {
     /// Update a whole snapshot; every accepted snapshot advances the tree version.
     /// # Errors
     /// Fails validation or disables the VM on an evaluation failure.
-    pub fn update(&mut self, spec: CardSpec) -> Result<MutationBatch, CardError> {
+    pub fn update(&mut self, mut spec: CardSpec) -> Result<MutationBatch, CardError> {
+        spec.host.clone_from(&self.spec.host);
+        let result = self.update_inner(spec);
+        if result.is_ok() {
+            self.validation_errors.clear();
+        }
+        result
+    }
+    /// Whether the VM is active; admission/input refusal preserves this state.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.vm.is_some()
+    }
+    /// Switch host presentation atomically without accepting it from peer JSON.
+    /// # Errors
+    /// Rejects invalid catalogs, inactive sessions and evaluation failures.
+    pub fn present(
+        &mut self,
+        presentation: crate::Presentation,
+    ) -> Result<MutationBatch, CardError> {
+        presentation.validate()?;
+        let mut spec = self.spec.clone();
+        for component in &mut spec.components {
+            if let Component::Form(form) = component {
+                for field in &mut form.fields {
+                    if let Some(key) =
+                        self.validation_errors.get(&(form.id.clone(), field.id.clone()))
+                    {
+                        field.error = Some(presentation.text(key).into());
+                    }
+                }
+            }
+        }
+        spec.host = Some(presentation);
+        self.update_inner(spec)
+    }
+    fn update_inner(&mut self, spec: CardSpec) -> Result<MutationBatch, CardError> {
         spec.validate()?;
         let next = self.next_version()?;
         let result = self.vm.as_mut().ok_or(CardError::Inactive)?.render(&spec);
@@ -131,6 +169,55 @@ impl CardSession {
         self.spec = spec;
         self.tree = Some(tree);
         Ok(batch)
+    }
+    fn submit(&mut self, form: crate::Form) -> Result<EventResult, CardError> {
+        let mut errors = BTreeMap::new();
+        let mut fields = BTreeMap::new();
+        for f in form.fields.clone().into_iter().filter(|f| !f.disabled) {
+            let binding = f.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
+            let value = self.spec.model.get(binding).ok_or(CardError::Invalid("field"))?;
+            let missing = f.required
+                && match value {
+                    Scalar::Text(v) => v.trim().is_empty(),
+                    Scalar::Toggle(v) => !*v,
+                    Scalar::Number(_) => false,
+                };
+            if missing {
+                errors.insert(
+                    f.id.clone(),
+                    self.spec.presentation()?.text("form_required").to_owned(),
+                );
+                self.validation_errors.insert((form.id.clone(), f.id.clone()), "form_required");
+            } else if let Some(error) = &f.error {
+                errors.insert(f.id.clone(), error.clone());
+            }
+            fields.insert(binding.to_owned(), value.clone());
+        }
+        if !errors.is_empty() {
+            let mut spec = self.spec.clone();
+            for c in &mut spec.components {
+                if let Component::Form(candidate) = c
+                    && candidate.id == form.id
+                {
+                    for f in &mut candidate.fields {
+                        if let Some(error) = errors.get(&f.id) {
+                            f.error = Some(error.clone());
+                        }
+                    }
+                }
+            }
+            return Ok(EventResult::Validation { batch: self.update_inner(spec)? });
+        }
+        let next = self.next_version()?;
+        let batch = MutationBatch {
+            previous_version: self.mounted_version,
+            version: next,
+            mutations: Vec::new(),
+            host_slots: self.spec.slots(),
+        };
+        self.version = next;
+        self.mounted_version = next;
+        Ok(EventResult::Submit { action: form.submit, fields, batch })
     }
     /// Queue at most 32 bounded events; stale tokens are checked again on delivery.
     /// # Errors
@@ -171,7 +258,8 @@ impl CardSession {
                 {
                     return Some((form.clone(), None));
                 }
-                form.normalized_fields()
+                form.fields
+                    .clone()
                     .into_iter()
                     .find(|f| event.token.key == format!("{}:{}", form.id, f.id))
                     .map(|f| (form.clone(), Some(f)))
@@ -184,49 +272,7 @@ impl CardSession {
             if field.is_some() {
                 return Err(CardError::Invalid("submit control"));
             }
-            let mut errors = BTreeMap::new();
-            let mut fields = BTreeMap::new();
-            for f in form.normalized_fields().into_iter().filter(|f| !f.disabled) {
-                let binding = f.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
-                let value = self.spec.model.get(binding).ok_or(CardError::Invalid("field"))?;
-                let missing = f.required
-                    && match value {
-                        Scalar::Text(v) => v.trim().is_empty(),
-                        Scalar::Toggle(v) => !*v,
-                        Scalar::Number(_) => false,
-                    };
-                if missing {
-                    errors.insert(f.id.clone(), "Required".to_owned());
-                } else if let Some(error) = &f.error {
-                    errors.insert(f.id.clone(), error.clone());
-                }
-                fields.insert(binding.to_owned(), value.clone());
-            }
-            if !errors.is_empty() {
-                let mut spec = self.spec.clone();
-                for c in &mut spec.components {
-                    if let Component::Form(candidate) = c
-                        && candidate.id == form.id
-                    {
-                        for f in &mut candidate.fields {
-                            if let Some(error) = errors.get(&f.id) {
-                                f.error = Some(error.clone());
-                            }
-                        }
-                    }
-                }
-                return Ok(Some(EventResult::Validation { batch: self.update(spec)? }));
-            }
-            let next = self.next_version()?;
-            let batch = MutationBatch {
-                previous_version: self.mounted_version,
-                version: next,
-                mutations: Vec::new(),
-                host_slots: self.spec.slots(),
-            };
-            self.version = next;
-            self.mounted_version = next;
-            return Ok(Some(EventResult::Submit { action: form.submit, fields, batch }));
+            return self.submit(form).map(Some);
         }
         let field = field.ok_or(CardError::Invalid("field control"))?;
         let value = match (event.event, field.kind) {
@@ -236,6 +282,27 @@ impl CardSession {
             (EventKind::Toggle { value }, FieldKind::Toggle) => Scalar::Toggle(value),
             _ => return Err(CardError::Invalid("event value type")),
         };
+        if let Scalar::Number(number) = &value
+            && (field.minimum.is_some_and(|min| *number < min)
+                || field.maximum.is_some_and(|max| *number > max))
+        {
+            let mut spec = self.spec.clone();
+            for component in &mut spec.components {
+                if let Component::Form(candidate) = component
+                    && candidate.id == form.id
+                {
+                    for item in &mut candidate.fields {
+                        if item.id == field.id {
+                            item.error = Some(self.spec.presentation()?.text("form_range").into());
+                        }
+                    }
+                }
+            }
+            let batch = self.update_inner(spec)?;
+            self.validation_errors.insert((form.id, field.id), "form_range");
+            return Ok(Some(EventResult::Validation { batch }));
+        }
+        self.validation_errors.remove(&(form.id.clone(), field.id.clone()));
         let binding = field.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
         let mut spec = self.spec.clone();
         spec.model.insert(binding.into(), value);
@@ -250,7 +317,7 @@ impl CardSession {
                 }
             }
         }
-        Ok(Some(EventResult::Edited { batch: self.update(spec)? }))
+        Ok(Some(EventResult::Edited { batch: self.update_inner(spec)? }))
     }
     /// Release the interpreter and remove the mounted tree. Repeated suspension is safe.
     /// # Errors
@@ -435,10 +502,20 @@ mod regression_tests {
                 Component::Form(Form {
                     id: (*id).into(),
                     title: format!("Form {id}"),
-                    label: "Name".into(),
-                    binding: format!("/{id}"),
+
                     submit: format!("save-{id}"),
-                    fields: Vec::new(),
+                    fields: vec![crate::Field {
+                        id: "field".into(),
+                        kind: FieldKind::Input,
+                        label: "Name".into(),
+                        binding: format!("/{id}"),
+                        required: false,
+                        disabled: false,
+                        error: None,
+                        options: Vec::new(),
+                        minimum: None,
+                        maximum: None,
+                    }],
                     disabled: false,
                 })
             })

@@ -16,8 +16,10 @@ pub struct CardSpec {
     pub components: Vec<Component>,
     #[serde(deserialize_with = "unique_model")]
     pub model: BTreeMap<String, Scalar>,
-    #[serde(default)]
+    #[serde(default, skip_serializing, deserialize_with = "host_only")]
     pub theme: Theme,
+    #[serde(default, skip_serializing, deserialize_with = "host_only")]
+    pub(crate) host: Option<crate::Presentation>,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +27,9 @@ pub enum Theme {
     #[default]
     Light,
     Dark,
+}
+fn host_only<'de, D: serde::Deserializer<'de>, T>(_: D) -> Result<T, D::Error> {
+    Err(serde::de::Error::custom("host presentation is not peer data"))
 }
 /// Check raw byte/depth limits before deserialization allocates any values.
 pub(crate) fn preflight(bytes: &[u8], max: usize) -> Result<(), CardError> {
@@ -99,7 +104,25 @@ impl CardSpec {
         spec.validate()?;
         Ok(spec)
     }
+    pub(crate) fn presentation(&self) -> Result<crate::Presentation, CardError> {
+        self.host.clone().map_or_else(
+            || crate::Presentation::bundled("en", matches!(self.theme, Theme::Dark)),
+            Ok,
+        )
+    }
+    /// Attach independently selected host presentation, never peer configuration.
+    /// # Errors
+    /// Rejects invalid host locale/token catalogs.
+    pub fn with_presentation(
+        mut self,
+        presentation: crate::Presentation,
+    ) -> Result<Self, CardError> {
+        presentation.validate()?;
+        self.host = Some(presentation);
+        Ok(self)
+    }
     pub(crate) fn validate(&self) -> Result<(), CardError> {
+        self.presentation()?.validate()?;
         if self.catalog != "rf-card/v1" {
             return Err(CardError::Invalid("catalog"));
         }
@@ -133,7 +156,8 @@ impl CardSpec {
             let mut value = serde_json::to_value(component)?;
             if let Component::Form(form) = component {
                 let fields = form
-                    .normalized_fields()
+                    .fields
+                    .clone()
                     .into_iter()
                     .map(|field| {
                         let key =
@@ -150,7 +174,9 @@ impl CardSpec {
             }
             components.push(value);
         }
-        Ok(serde_json::to_string(&serde_json::json!({"theme":self.theme,"components":components}))?)
+        Ok(serde_json::to_string(
+            &serde_json::json!({"presentation":self.presentation()?,"components":components}),
+        )?)
     }
     pub(crate) fn slots(&self) -> Vec<crate::HostSecuritySlot> {
         self.components
@@ -174,13 +200,10 @@ fn validate_form(
     model: &BTreeMap<String, Scalar>,
     bindings: &mut BTreeSet<String>,
 ) -> Result<(), CardError> {
-    if form.title.len() > 256
-        || !identifier(&form.submit)
-        || (!form.fields.is_empty() && (!form.label.is_empty() || !form.binding.is_empty()))
-    {
+    if form.title.len() > 256 || !identifier(&form.submit) {
         return Err(CardError::Invalid("form properties"));
     }
-    let fields = form.normalized_fields();
+    let fields = form.fields.clone();
     if fields.is_empty() || fields.len() > MAX_FIELDS {
         return Err(CardError::Limit("fields"));
     }
@@ -244,12 +267,14 @@ fn validate_form(
 }
 
 fn validate_task(task: &crate::Task) -> Result<(), CardError> {
+    if task.steps.len() > MAX_FIELDS {
+        return Err(CardError::Limit("task steps"));
+    }
     if !identifier(&task.task_ref)
         || task.title.len() > 256
         || task.requester.len() > 256
         || task.owner.len() > 256
         || task.progress.is_some_and(|v| v > 100)
-        || task.steps.len() > MAX_FIELDS
     {
         return Err(CardError::Invalid("task projection"));
     }
@@ -262,22 +287,26 @@ fn validate_task(task: &crate::Task) -> Result<(), CardError> {
 }
 
 fn validate_chart(chart: &crate::Chart) -> Result<(), CardError> {
+    if chart.series.len() > 2 {
+        return Err(CardError::Limit("chart series"));
+    }
     if chart.title.len() > 256
         || chart.unit.len() > 32
         || chart.scale == 0
         || chart.scale > 1_000_000
         || chart.series.is_empty()
-        || chart.series.len() > 2
     {
         return Err(CardError::Invalid("chart profile"));
     }
     let mut series = BTreeSet::new();
     for s in &chart.series {
+        if s.points.len() > MAX_FIELDS {
+            return Err(CardError::Limit("chart points"));
+        }
         if !identifier(&s.id)
             || !series.insert(&s.id)
             || s.label.len() > 256
             || s.points.is_empty()
-            || s.points.len() > MAX_FIELDS
             || s.points.iter().any(|p| p.label.len() > 64 || !safe_integer(p.value))
         {
             return Err(CardError::Invalid("chart series"));
@@ -296,9 +325,11 @@ fn validate_chart(chart: &crate::Chart) -> Result<(), CardError> {
 }
 
 fn validate_approval(approval: &crate::Approval) -> Result<(), CardError> {
+    if approval.explanation.len() > 1024 {
+        return Err(CardError::Limit("approval text"));
+    }
     if !identifier(&approval.request_ref)
         || approval.task_binding.as_ref().is_some_and(|s| !identifier(s))
-        || approval.explanation.len() > 1024
     {
         return Err(CardError::Invalid("approval references"));
     }

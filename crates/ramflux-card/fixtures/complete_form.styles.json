@@ -1,0 +1,71 @@
+{
+  "light": {
+    "root": null,
+    "profile": null,
+    "profile:name": {
+      "color": "#161616",
+      "background": "#FFFFFF"
+    },
+    "profile:age": {
+      "color": "#161616",
+      "background": "#FFFFFF"
+    },
+    "profile:color": {
+      "color": "#161616",
+      "background": "#FFFFFF"
+    },
+    "profile:agree": {
+      "color": "#222224"
+    },
+    "profile:submit": {
+      "color": "#FFFFFF",
+      "background": "#222224"
+    }
+  },
+  "dark": {
+    "root": null,
+    "profile": null,
+    "profile:name": {
+      "color": "#EBEBEB",
+      "background": "#1E1E1E"
+    },
+    "profile:age": {
+      "color": "#EBEBEB",
+      "background": "#1E1E1E"
+    },
+    "profile:color": {
+      "color": "#EBEBEB",
+      "background": "#1E1E1E"
+    },
+    "profile:agree": {
+      "color": "#EBEBEB"
+    },
+    "profile:submit": {
+      "color": "#121211",
+      "background": "#EBEBEB"
+    }
+  },
+  "contrast": {
+    "root": null,
+    "profile": null,
+    "profile:name": {
+      "color": "#000000",
+      "background": "#FFFFFF"
+    },
+    "profile:age": {
+      "color": "#000000",
+      "background": "#FFFFFF"
+    },
+    "profile:color": {
+      "color": "#000000",
+      "background": "#FFFFFF"
+    },
+    "profile:agree": {
+      "color": "#222224"
+    },
+    "profile:submit": {
+      "color": "#FFFFFF",
+      "background": "#222224"
+    }
+  }
+}

@@ -18,7 +18,9 @@ const banned = new Set(["eval", "Function", "AsyncFunction", "GeneratorFunction"
   "RTCPeerConnection", "RTCDataChannel", "WebSocketStream", "File", "FileReader",
   "FileSystemFileHandle", "FileSystemDirectoryHandle", "showOpenFilePicker", "showDirectoryPicker",
   "setTimeout", "setInterval", "Request", "Response", "Headers"]);
-function lintSource(source, generatedStyles=false) {
+const recordBody='{if(key==="constructor"||key==="prototype"||key==="__proto__")return"";returnrecord[key]??"";}';
+const normalizedBody=body=>body.replace(/\s/g,"");
+function lintSource(source, generatedStyles=false, dataReader=false) {
   const file = ts.createSourceFile("form.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   if (file.parseDiagnostics.length) throw Error("invalid TSX source");
   function visit(node) {
@@ -29,14 +31,16 @@ function lintSource(source, generatedStyles=false) {
       if (!ts.isPropertyAccessExpression(parent) || parent.expression !== node || !allowed.includes(parent.name.text)) throw Error("intrinsic alias or member forbidden");
     }
     if (ts.isIdentifier(node) && banned.has(node.text)) throw Error(`forbidden source identifier: ${node.text}`);
-    if ((ts.isImportDeclaration(node) && !["./primitives", "../../../src/generated/RFCardComponents", "../../../src/generated/rf-tokens", "@rf/card", "./rf-tokens", "./RFCardStyles"].includes(node.moduleSpecifier.text)) || node.kind === ts.SyntaxKind.ImportKeyword ||
+    if ((ts.isImportDeclaration(node) && !["./primitives", "../../../src/generated/RFCardComponents", "../../../src/generated/rf-tokens", "@rf/card", "./rf-tokens", "./RFCardStyles", "./format", "./presentation-types"].includes(node.moduleSpecifier.text)) || node.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isExportDeclaration(node) && node.moduleSpecifier)) throw Error("source module loading forbidden");
     if (ts.isElementAccessExpression(node)) {
       const property = node.argumentExpression;
       const styleLookup=generatedStyles && ts.isCallExpression(node.expression) &&
         ts.isIdentifier(node.expression.expression) && node.expression.expression.text==="rfCardStyles" &&
         ts.isTemplateExpression(property) && ["card_chart_","card_page_header_default_","card_chat_header_","card_search_field_default_"].includes(property.head.text);
-      if (!ts.isStringLiteral(property) && !ts.isNumericLiteral(property) && !styleLookup) throw Error("source computed access forbidden");
+      let enclosing=node.parent;while(enclosing && !ts.isFunctionDeclaration(enclosing))enclosing=enclosing.parent;
+      const recordLookup=dataReader && ts.isIdentifier(node.expression) && node.expression.text==="record" && ts.isIdentifier(property) && property.text==="key" && enclosing?.name?.text==="readCell" && normalizedBody(enclosing.body.getText(file))===recordBody;
+      if (!ts.isStringLiteral(property) && !ts.isNumericLiteral(property) && !styleLookup && !recordLookup) throw Error("source computed access forbidden");
       if (ts.isStringLiteral(property) && banned.has(property.text)) throw Error("forbidden source property");
     }
     ts.forEachChild(node, visit);
@@ -60,7 +64,8 @@ export function lint(code) {
         (node.type === "ExportNamedDeclaration" && node.source)) throw Error("module loading forbidden");
     if (node.type === "Identifier" && banned.has(node.name)) throw Error(`forbidden identifier: ${node.name}`);
     if (node.type === "MemberExpression") {
-      if (node.computed && node.property.type !== "Literal") throw Error("computed access forbidden");
+      const recordLookup=node.object.type==="Identifier" && node.object.name==="record" && node.property.type==="Identifier" && node.property.name==="key" && ancestors.some(parent=>parent.type==="FunctionDeclaration" && parent.id?.name==="readCell" && normalizedBody(code.slice(parent.body.start,parent.body.end))===recordBody);
+      if (node.computed && node.property.type !== "Literal" && !recordLookup) throw Error("computed access forbidden");
       if (node.property.type === "Literal" && banned.has(node.property.value)) throw Error("forbidden property");
     }
   });
@@ -80,6 +85,12 @@ if (process.argv.includes("--test")) {
   lintSource(generated,true);
   for(const sample of ["rfCardStyles(theme)[key]","rfCardStyles(theme)['constructor']","foreign(theme)[`card_chart_${kind}_${density}`]","rfCardStyles(theme)[`constructor${kind}`]"])assert.throws(()=>lintSource(sample,true),undefined,"generated lookup exception must stay bounded");
   assert.throws(()=>lint("function rfCardStyles(){return {}};export function render(){const kind='line';return rfCardStyles()[`card_chart_${kind}`]}"),/computed access forbidden/,"emitted computed access stays forbidden");
+  assert.throws(()=>lintSource("function other(record,key){return record[key]}",false,true),/computed access/);
+  assert.throws(()=>lint("function other(record,key){return record[key]}"),/computed access/);
+  assert.throws(()=>lintSource("function readCell(record,key){return record[key]}",false,true),/computed access/);
+  assert.throws(()=>lint("function readCell(record,key){return record[key]}"),/computed access/);
+  lintSource("function readCell(record,key)"+recordBody.replace("returnrecord","return record"),false,true);
+  lint("function readCell(record,key)"+recordBody.replace("returnrecord","return record"));
   lintSource("export {}; declare global { namespace JSX { interface IntrinsicElements {} } }");
   assert.throws(() => lint("unrecognizedAmbientAPI()"), undefined, "unknown ambient APIs must fail closed");
   lint("export function render(input){__rf_commit(JSON.stringify(JSON.parse(input)))}");
@@ -90,11 +101,11 @@ if (process.argv.includes("--test")) {
   const result = await build({ entryPoints: [fileURLToPath(new URL("form.tsx", base))],
     bundle: true, format: "esm", platform: "neutral", target: "es2020", jsxFactory: "h",
     alias: {"@rf/card":fileURLToPath(new URL("primitives.ts",base))}, legalComments: "none", write: false, metafile: true });
-  const allowedFiles=new Set(["form.tsx","primitives.ts","../../../src/generated/RFCardComponents.tsx","../../../src/generated/RFCardStyles.ts","../../../src/generated/rf-tokens.ts"].map(p=>resolve(fileURLToPath(base),p)));
+  const allowedFiles=new Set(["form.tsx","primitives.ts","format.ts","presentation-types.ts","../../../src/generated/RFCardComponents.tsx","../../../src/generated/RFCardStyles.ts","../../../src/generated/rf-tokens.ts"].map(p=>resolve(fileURLToPath(base),p)));
   for(const input of Object.keys(result.metafile.inputs)) {
     const path=resolve(input);
     if(!allowedFiles.has(path))throw Error("only manifest-pinned generated and project sources are allowed: "+relative(fileURLToPath(base),path));
-    lintSource(await readFile(path,"utf8"),path===resolve(fileURLToPath(base),"../../../src/generated/RFCardComponents.tsx"));
+    lintSource(await readFile(path,"utf8"),path===resolve(fileURLToPath(base),"../../../src/generated/RFCardComponents.tsx"),path===resolve(fileURLToPath(base),"primitives.ts"));
   }
   const code = "// SPDX-License-Identifier: BSD-3-Clause\n" + result.outputFiles[0].text;
   lint(code);

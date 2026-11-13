@@ -12,6 +12,7 @@ mod ffi;
 #[cfg(test)]
 mod library_tests;
 mod package;
+mod presentation;
 mod projection;
 mod runtime;
 mod session;
@@ -28,6 +29,7 @@ pub use error::CardError;
 pub use package::{
     AcceptancePolicy, ENGINE_ID, HOST_ABI, PackageDescriptor, SignedPackage, catalog_digest,
 };
+pub use presentation::{Direction, Presentation};
 pub use runtime::CardRuntime;
 pub use session::{CardSession, Event, EventKind, EventResult, EventToken};
 pub use spec::{CardSpec, Theme};

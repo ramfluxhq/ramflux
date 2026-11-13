@@ -8,6 +8,7 @@ use wasm_bindgen::prelude::*;
 pub struct CardWorker {
     package: SignedPackage,
     session: Option<CardSession>,
+    presentation: crate::Presentation,
 }
 #[derive(Serialize)]
 struct Reply<T: Serialize> {
@@ -40,6 +41,7 @@ impl CardWorker {
         signature: &[u8],
         public_key: &[u8],
         policy: &str,
+        presentation: &str,
     ) -> Result<CardWorker, JsValue> {
         crate::spec::preflight(policy.as_bytes(), crate::package::MAX_DESCRIPTOR).map_err(error)?;
         let policy: AcceptancePolicy = serde_json::from_str(policy).map_err(error)?;
@@ -47,7 +49,11 @@ impl CardWorker {
         let public_key = public_key.try_into().map_err(|_| error("public key size"))?;
         let package = SignedPackage::verify(bytecode, descriptor, signature, public_key, &policy)
             .map_err(error)?;
-        Ok(Self { package, session: None })
+        Ok(Self {
+            package,
+            session: None,
+            presentation: crate::Presentation::parse(presentation.as_bytes()).map_err(error)?,
+        })
     }
     /// # Errors
     /// Rejects invalid selected JSON, active sessions, or resource exhaustion.
@@ -56,7 +62,10 @@ impl CardWorker {
             return Err(error("card already open"));
         }
         let (session, batch) = CardSession::open(
-            CardSpec::parse(selected_json.as_bytes()).map_err(error)?,
+            CardSpec::parse(selected_json.as_bytes())
+                .map_err(error)?
+                .with_presentation(self.presentation.clone())
+                .map_err(error)?,
             self.package.clone(),
         )
         .map_err(error)?;
@@ -79,6 +88,19 @@ impl CardWorker {
         session.enqueue(event).map_err(error)?;
         let outcome = session.next_event().map_err(error)?;
         self.reply(outcome)
+    }
+    /// Typed VM liveness, including after a rejected operation.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.session.as_ref().is_some_and(CardSession::is_active)
+    }
+    /// # Errors
+    /// Rejects invalid host presentation or failed evaluation.
+    pub fn present(&mut self, json: &str) -> Result<String, JsValue> {
+        let presentation = crate::Presentation::parse(json.as_bytes()).map_err(error)?;
+        let batch = self.active()?.present(presentation.clone()).map_err(error)?;
+        self.presentation = presentation;
+        self.reply(batch)
     }
     /// # Errors
     /// Rejects inactive sessions or exhausted version space.
