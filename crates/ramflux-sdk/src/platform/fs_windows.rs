@@ -10,6 +10,7 @@
 //! hygiene against other standard users and sandboxed processes; administrators and SYSTEM can
 //! always reach a user's files.
 
+#[cfg(test)]
 use std::cell::Cell;
 use std::fs::File;
 use std::io;
