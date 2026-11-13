@@ -34,6 +34,27 @@ fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+/// Failure text for the same-user pipe test. `pipe` is `None` when bind did not create one.
+/// `last_labeled_call` is the last call this thread named, which on a deadline is the bind
+/// call rather than the accept that is still waiting.
+fn explain_pipe(error: &str, pipe: Option<&std::ffi::OsStr>, name_file: &Path) -> String {
+    let call = win32::last_call();
+    let token = win32::diag::token_line();
+    let (built_pipe, built_file) =
+        match win32::process_facts().and_then(|facts| facts.user.to_sddl_string()) {
+            Ok(sid) => (name::pipe_sddl(&sid), name::name_file_sddl(&sid)),
+            Err(error) => (format!("build-failed:{error}"), format!("build-failed:{error}")),
+        };
+    let read_pipe = match pipe {
+        Some(pipe) => win32::diag::object_sddl(Path::new(pipe), true),
+        None => "pipe was not created".to_owned(),
+    };
+    let read_file = win32::diag::object_sddl(name_file, false);
+    format!(
+        "{error} | {token} | built_pipe={built_pipe} | read_pipe={read_pipe} | built_file={built_file} | read_file={read_file} | last_labeled_call={call}"
+    )
+}
+
 /// Bound one real pipe or thread wait. Paused time cannot cover a kernel object.
 async fn within<T>(work: impl Future<Output = T>) -> Result<T, String> {
     match tokio::time::timeout(STEP, work).await {
@@ -93,9 +114,19 @@ fn open_while_impersonating<G: Send + 'static>(
 async fn same_user_connects_and_bytes_round_trip() -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(text)?;
     let path = dir.path().join("daemon.sock");
-    let listener = bind(&path).map_err(text)?;
-    let owner = listener.owner().map_err(text)?;
-    within(async move {
+    let listener = match bind(&path) {
+        Ok(listener) => listener,
+        Err(error) => return Err(explain_pipe(&error.to_string(), None, &path)),
+    };
+    let pipe_name = listener.name().to_os_string();
+    let owner = match listener.owner() {
+        Ok(owner) => owner,
+        Err(error) => {
+            return Err(explain_pipe(&error.to_string(), Some(pipe_name.as_os_str()), &path));
+        }
+    };
+    let name_file = path.clone();
+    let outcome = within(async move {
         let (accepted, client) = tokio::join!(listener.accept(), connect(&path));
         let accepted = accepted.map_err(text)?;
         let mut client = client.map_err(text)?;
@@ -118,7 +149,12 @@ async fn same_user_connects_and_bytes_round_trip() -> Result<(), String> {
         client.read_exact(&mut reply).await.map_err(text)?;
         if &reply == b"ok" { Ok(()) } else { Err("reply changed in transit".to_owned()) }
     })
-    .await?
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(explain_pipe(&error, Some(pipe_name.as_os_str()), &name_file)),
+        Err(error) => Err(explain_pipe(&error, Some(pipe_name.as_os_str()), &name_file)),
+    }
 }
 
 #[tokio::test]

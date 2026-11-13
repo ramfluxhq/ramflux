@@ -20,10 +20,12 @@ const OTHER: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
 const BRANCH: &str = "branch:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 fn text(error: impl std::fmt::Display) -> String {
-    error.to_string()
+    let reason = super::last_unavailable();
+    if reason.is_empty() { error.to_string() } else { format!("{error} | unavailable: {reason}") }
 }
 
 fn vault() -> Result<(tempfile::TempDir, WindowsDpapiVault), String> {
+    super::clear_unavailable();
     let root = tempfile::tempdir().map_err(text)?;
     let vault = WindowsDpapiVault::for_data_root(root.path());
     Ok((root, vault))

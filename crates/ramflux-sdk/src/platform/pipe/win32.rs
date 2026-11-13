@@ -6,7 +6,7 @@
 //! `unsafe` block of the carrier lives in this file.
 #![allow(unsafe_code)]
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
@@ -46,6 +46,25 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenProcess, OpenProcessToken,
     OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
+
+#[cfg(test)]
+thread_local! {
+    static LAST_CALL: Cell<&'static str> = const { Cell::new("") };
+}
+
+/// Remember the Win32 call that is about to run, so a test can name the one that failed.
+pub(crate) fn note_call(name: &'static str) {
+    #[cfg(test)]
+    LAST_CALL.with(|slot| slot.set(name));
+    #[cfg(not(test))]
+    let _ = name;
+}
+
+/// The call named by the last [`note_call`] on this thread.
+#[cfg(test)]
+pub(crate) fn last_call() -> &'static str {
+    LAST_CALL.with(|slot| slot.get())
+}
 
 /// `SECURITY_MAX_SID_SIZE`: the largest binary SID.
 const MAX_SID_BYTES: usize = 68;
@@ -325,6 +344,7 @@ impl RestorePrivilege {
         let mut raw: HANDLE = std::ptr::null_mut();
         // SAFETY: the process pseudo-handle is always valid. On success `raw` is a live process
         // token opened for privilege adjustment, which this function owns.
+        note_call("OpenProcessToken");
         let opened = unsafe {
             OpenProcessToken(
                 GetCurrentProcess(),
@@ -357,6 +377,7 @@ impl RestorePrivilege {
         // privilege. `previous` has room for that privilege's prior state, and `returned`
         // receives how many bytes were required. `Drop` writes `previous` back.
         // `SetLastError` distinguishes "not held" from a real adjustment failure.
+        note_call("AdjustTokenPrivileges");
         let adjusted = unsafe {
             SetLastError(0);
             AdjustTokenPrivileges(
@@ -439,6 +460,7 @@ pub(super) fn set_handle_owner(
     kind: SE_OBJECT_TYPE,
     owner: &Sid,
 ) -> io::Result<()> {
+    note_call("SetSecurityInfo(owner)");
     // SAFETY: `handle` is open with WRITE_OWNER (or the restore privilege stands in for it).
     // `owner` is a SID that outlives the call.
     let status = unsafe {
@@ -484,6 +506,7 @@ pub(super) fn set_handle_dacl(
     descriptor: &SecurityDescriptor,
 ) -> io::Result<()> {
     let list = dacl_of(descriptor)?;
+    note_call("SetSecurityInfo(dacl)");
     // SAFETY: `handle` is open with WRITE_DAC or the restore privilege is enabled. `list`
     // points into `descriptor`, which the caller keeps alive through this call.
     let status = unsafe {
@@ -687,6 +710,7 @@ pub(super) fn create_instance(
     // SAFETY: `wide` is NUL-terminated. `attributes` and its descriptor outlive the call. The
     // returned handle is owned by `ListeningPipe`, which closes it.
     assigning_owner(|| unsafe {
+        note_call("CreateNamedPipeW");
         let handle = CreateNamedPipeW(
             wide.as_ptr(),
             open_mode,
@@ -796,6 +820,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
     // returned handle is owned by the `File`.
     assigning_owner(|| unsafe {
+        note_call("CreateFileW(create_new_file)");
         let handle = CreateFileW(
             wide.as_ptr(),
             GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
@@ -819,6 +844,9 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
 }
 
 pub(crate) mod files;
+
+#[cfg(test)]
+pub(crate) mod diag;
 
 #[cfg(test)]
 pub(crate) mod test_tokens;
