@@ -425,7 +425,8 @@ fn a_second_user_can_still_read_a_refused_junction_target() -> Result<(), String
         Err(error) => return Err(text(error)),
     }
     let sentinel = sentinel.clone();
-    let read = as_second_user(move || std::fs::read(sentinel))??;
+    let read = as_second_user(move || std::fs::read(sentinel))?
+        .map_err(|error| format!("second user could not read the shared target: {error}"))?;
     if read == b"shared-bytes" {
         Ok(())
     } else {
