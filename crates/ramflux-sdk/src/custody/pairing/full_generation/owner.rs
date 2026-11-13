@@ -35,6 +35,16 @@ pub struct FullGenerationCommitted {
     directory: FullGenerationDirectory,
     install: Install,
 }
+pub(crate) struct FullGenerationRecoveryPreparation {
+    data: ramflux_storage::FullGenerationRecoveryWork,
+    directory: FullGenerationDirectory,
+    install: Install,
+}
+pub(crate) struct FullGenerationRecoveryPrepared {
+    data: ramflux_storage::FullGenerationRecoveryDraft,
+    directory: FullGenerationDirectory,
+    install: Install,
+}
 fn acknowledged(
     local: &Installation<'_>,
     install: &Install,
@@ -236,6 +246,16 @@ impl FullGenerationCommitted {
         install: Install,
         authority: &CustodyAuthority,
     ) -> Result<Self, SdkError> {
+        Self::pin_recovery(local, stage, install, authority)?
+            .verify()?
+            .accept(local, stage, authority)
+    }
+    pub(crate) fn pin_recovery(
+        local: &Installation<'_>,
+        stage: &ramflux_storage::FullRecipientInstallStage<'_>,
+        install: Install,
+        authority: &CustodyAuthority,
+    ) -> Result<FullGenerationRecoveryPreparation, SdkError> {
         acknowledged(local, &install, authority)?;
         stage.require_preservation_after_native_ack(&authority.publication.record)?;
         let adoption = super::super::activate::adoption(&install)?;
@@ -248,8 +268,8 @@ impl FullGenerationCommitted {
         }
         let directory = FullGenerationDirectory::recover_selected(local.root, &install)?;
         let marker = FullGenerationManifest::for_install(&install)?.encode()?;
-        let data = stage.recover_selected_generation(&marker, &adoption)?;
-        Ok(Self { data, directory, install })
+        let data = stage.pin_generation_recovery(&marker, &adoption)?;
+        Ok(FullGenerationRecoveryPreparation { data, directory, install })
     }
     /// Open the exact selected generation while ordinary network admission stays closed.
     /// # Errors
@@ -293,5 +313,40 @@ impl FullGenerationCommitted {
         self.directory.finish_g3()?;
         local.db.retire_full_recipient_install_head(&adoption)?;
         Ok(())
+    }
+}
+
+impl FullGenerationRecoveryPreparation {
+    pub(crate) fn verify(self) -> Result<FullGenerationRecoveryPrepared, SdkError> {
+        Ok(FullGenerationRecoveryPrepared {
+            data: self.data.verify()?,
+            directory: self.directory,
+            install: self.install,
+        })
+    }
+}
+impl FullGenerationRecoveryPrepared {
+    pub(crate) fn accept(
+        self,
+        local: &Installation<'_>,
+        stage: &ramflux_storage::FullRecipientInstallStage<'_>,
+        authority: &CustodyAuthority,
+    ) -> Result<FullGenerationCommitted, SdkError> {
+        acknowledged(local, &self.install, authority)?;
+        stage.require_preservation_after_native_ack(&authority.publication.record)?;
+        let adoption = super::super::activate::adoption(&self.install)?;
+        require_selected_full_generation(local.root, &self.install, &adoption)?;
+        if install_store::read_pending(
+            local.root,
+            &self.install.account_id,
+            &self.install.operation_id,
+        )?
+        .as_ref()
+            != Some(&self.install)
+        {
+            return Err(pending());
+        }
+        let data = self.data.accept(stage)?;
+        Ok(FullGenerationCommitted { data, directory: self.directory, install: self.install })
     }
 }

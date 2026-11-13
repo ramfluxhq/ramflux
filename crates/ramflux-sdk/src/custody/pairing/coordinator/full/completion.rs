@@ -119,9 +119,12 @@ impl PairingActor {
         let outcome = if install.recipient_mode == "existing" {
             Box::pin(self.install_linked_full_generation(install)).await
         } else {
+            let cancellation = self.full_runtime.stage_owner()?;
             self.full_runtime
                 .clone()
-                .run_blocking(move || participant.install_new_full_generation(&install))
+                .run_blocking(move || {
+                    participant.install_new_full_generation(&install, &cancellation)
+                })
                 .await
         };
         let authority = match outcome {

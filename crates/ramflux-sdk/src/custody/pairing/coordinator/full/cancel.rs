@@ -82,6 +82,15 @@ impl FullRuntimeCancel {
         }
         Ok(())
     }
+    pub(crate) fn stage_owner(&self) -> Result<FullStageIoCancel, SdkError> {
+        self.require_live()?;
+        self.stage
+            .lock()
+            .map_err(|_| SdkError::PairingCode("Busy"))?
+            .as_ref()
+            .cloned()
+            .ok_or(SdkError::PairingCode("WrongContext"))
+    }
     pub(crate) fn register_stage(&self, stage: FullStageIoCancel) -> Result<(), SdkError> {
         let mut slot = self.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(error) = self.require_live() {

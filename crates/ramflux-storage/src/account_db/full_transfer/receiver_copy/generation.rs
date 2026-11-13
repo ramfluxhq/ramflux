@@ -7,7 +7,9 @@ use crate::{AccountDbKey, AdoptionRow, BackupDatabase, StorageError};
 use rusqlite::params;
 mod objects;
 mod selection;
-pub use selection::FullSelectedReceiverGeneration;
+pub use selection::{
+    FullGenerationRecoveryDraft, FullGenerationRecoveryWork, FullSelectedReceiverGeneration,
+};
 use std::{
     path::PathBuf,
     sync::{
@@ -25,10 +27,14 @@ pub struct FullReceiverDatabaseWork {
     adoption: AdoptionRow,
     guard: crate::FullLocalUnlockGuard,
     cancelled: Arc<AtomicBool>,
+    input: Option<super::super::receiver_read::OwnedReceiverInput>,
 }
 /// A durable private database, still requiring actual verification in a fresh local loan.
 /// Not a publication, selected generation, object-store proof or installed receipt.
-pub struct FullPreparedReceiverDatabase(FullReceiverDatabaseWork);
+pub struct FullPreparedReceiverDatabase(
+    FullReceiverDatabaseWork,
+    std::sync::Mutex<super::seal::FileSeal>,
+);
 impl FullReceiverBaseCopy {
     /// Bind a locally owned fresh generation path and adoption to this exact private union.
     /// Release the ordinary loan before running the returned bounded copy worker.
@@ -41,7 +47,7 @@ impl FullReceiverBaseCopy {
         adoption: AdoptionRow,
         now: u64,
     ) -> Result<FullReceiverDatabaseWork, StorageError> {
-        self.verify_materialization(stage)?;
+        self.require_materialization_stamp(stage)?;
         stage.verified_duplex(now)?;
         crate::account_db::pairing::journal::decode_adoption(&adoption)?;
         let record = stage.resume_record()?;
@@ -74,6 +80,7 @@ impl FullReceiverBaseCopy {
             return Err(wrong());
         }
         self.retain_for_installation(stage, now)?;
+        let input = stage.pin_receiver_read_input(&self.hash, now)?;
         Ok(FullReceiverDatabaseWork {
             copy: self,
             key: stage.db.current_key.clone(),
@@ -81,6 +88,7 @@ impl FullReceiverBaseCopy {
             adoption,
             guard: stage.db.full_local_unlock_guard()?,
             cancelled: stage.source_cancelled.clone(),
+            input: Some(input),
         })
     }
 }
@@ -94,8 +102,10 @@ impl FullReceiverDatabaseWork {
     /// Copy in bounded encrypted pages using B's existing key, preserving all B-local rows.
     /// # Errors
     /// Refuses cancellation, original unlock loss, path reuse, insufficient space or I/O.
-    pub fn prepare(self) -> Result<FullPreparedReceiverDatabase, StorageError> {
+    pub fn prepare(mut self) -> Result<FullPreparedReceiverDatabase, StorageError> {
         self.live()?;
+        let input = self.input.take().ok_or_else(wrong)?;
+        self.copy.verify_input(&input)?;
         let source = BackupDatabase::open_full_receiver_copy(
             &self.copy.scratch.path.join("private.db"),
             &self.copy.key,
@@ -109,9 +119,12 @@ impl FullReceiverDatabaseWork {
             let _ = std::fs::remove_file(self.path.with_extension("db-journal"));
         }
         result?;
+        drop(source);
         self.live()?;
         objects::prepare(&self.path)?;
-        Ok(FullPreparedReceiverDatabase(self))
+        let seal = self.verify_prepared(&input)?;
+        drop(input); // Release the stage owner before the next actual-writer request.
+        Ok(FullPreparedReceiverDatabase(self, std::sync::Mutex::new(seal)))
     }
     fn write(&self, source: &BackupDatabase) -> Result<(), StorageError> {
         let parent = self.path.parent().ok_or_else(wrong)?;
@@ -165,26 +178,50 @@ impl FullPreparedReceiverDatabase {
     /// # Errors
     /// Refuses changed B, corrupt prepared rows, wrong key/adoption or lost work ownership.
     pub fn verify(&self, stage: &FullTransferStage<'_>) -> Result<(), StorageError> {
+        let sealed = self.0.verify_prepared(stage)?;
+        *self.1.lock().map_err(|_| wrong())? = sealed;
+        Ok(())
+    }
+    pub(super) fn require_attested(
+        &self,
+        stage: &FullTransferStage<'_>,
+    ) -> Result<(), StorageError> {
         self.0.live()?;
-        self.0.copy.verify_materialization(stage)?;
-        let private = BackupDatabase::open_full_receiver_copy(&self.0.path, &self.0.key)?;
-        objects::require_supported(&private.db)?;
+        self.0.copy.require_materialization_stamp(stage)?;
+        self.1.lock().map_err(|_| wrong())?.require(&self.0.path)?;
         objects::verify(&self.0.path)?;
-        let row = &self.0.adoption;
+        self.0.copy.observation.require_current(stage.db)
+    }
+}
+impl FullReceiverDatabaseWork {
+    fn verify_prepared(
+        &self,
+        stage: &impl super::super::receiver_read::ReceiverInput,
+    ) -> Result<super::seal::FileSeal, StorageError> {
+        self.live()?;
+        self.copy.verify_input(stage)?;
+        let sealed = super::seal::FileSeal::capture(&self.path)?;
+        let private = BackupDatabase::open_full_receiver_copy(&self.path, &self.key)?;
+        objects::require_supported(&private.db)?;
+        objects::verify(&self.path)?;
+        let row = &self.adoption;
         let matches:bool=private.db.query_row("SELECT EXISTS(SELECT 1 FROM pairing_adoption WHERE account_id=?1 AND operation_id=?2 AND record_hash=?3 AND local_ref=?4 AND local_role=?5 AND branch_vault_ref=?6 AND data_vault_ref=?7 AND primary_vault_ref IS ?8 AND full_generation_nonce=?9 AND full_initial_union_root=?10)",params![row.account_id,row.operation_id,row.record_hash,row.local_ref,row.local_role,row.branch_vault_ref,row.data_vault_ref,row.primary_vault_ref,row.full_generation_nonce,row.full_initial_union_root],|row|row.get(0))?;
         if !matches {
             return Err(wrong());
         }
         super::super::receiver_materialization::Verification {
-            directory: &self.0.copy.scratch.path,
-            key: &self.0.copy.key,
-            encoding: self.0.copy.union.as_ref().ok_or_else(wrong)?,
-            owners: &self.0.copy.contributions.owners,
+            directory: &self.copy.scratch.path,
+            key: &self.copy.key,
+            encoding: self.copy.union.as_ref().ok_or_else(wrong)?,
+            owners: &self.copy.contributions.owners,
             private: &private,
-            private_key: &self.0.key,
+            private_key: &self.key,
             stage,
         }
         .run()?;
-        self.0.copy.observation.require_current(stage.db)
+        drop(private);
+        sealed.require(&self.path)?;
+        stage.require_target(&self.copy.observation)?;
+        Ok(sealed)
     }
 }

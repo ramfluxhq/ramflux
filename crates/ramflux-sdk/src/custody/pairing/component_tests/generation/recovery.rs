@@ -48,7 +48,15 @@ pub(super) fn finish_after_g2_restart(
         FullGenerationCommitted::recover(&local, &stage, wrong, &current).is_err(),
         "test: recovery accepted another G1 nonce with identical paths"
     );
-    let recovered = FullGenerationCommitted::recover(&local, &stage, install.clone(), &current)?;
+    let preparation =
+        FullGenerationCommitted::pin_recovery(&local, &stage, install.clone(), &current)?;
+    drop(stage);
+    // The private byte traversal carries only its own keys and weak unlock scope.
+    let prepared = preparation.verify()?;
+    let current = rig.participant_b.query.current_authority(&install.account_anchor)?;
+    let verified = ramflux_crypto::custody::verify_publication(&current, rig.now)?;
+    let stage = db.open_full_recipient_install_stage(&install.operation_id, &verified, rig.now)?;
+    let recovered = prepared.accept(&local, &stage, &current)?;
     drop(stage);
     let selected = super::finish_installed(rig, recovered, install, &current)?;
     assert!(

@@ -29,7 +29,7 @@ CREATE TABLE chunk(direction INTEGER NOT NULL,manifest_hash TEXT NOT NULL,idx IN
 /// This owner confers no SAS approval, publication authority or endpoint tail admission.
 pub struct FullTransferStage<'db> {
     pub(super) connection: Connection,
-    pub(super) lock: fs::File,
+    pub(super) lock: std::sync::Arc<fs::File>,
     pub(super) key: FullStageKey<'db>,
     pub(super) db: &'db AccountDb,
     pub(super) directory: PathBuf,
@@ -83,7 +83,7 @@ impl AccountDb {
         self.require_full_stage_unlock()?;
         Ok(FullTransferStage {
             connection,
-            lock,
+            lock: std::sync::Arc::new(lock),
             key,
             db: self,
             directory,
@@ -179,7 +179,7 @@ impl AccountDb {
         }
         let stage = FullTransferStage {
             connection,
-            lock,
+            lock: std::sync::Arc::new(lock),
             key,
             db: self,
             directory,
@@ -414,7 +414,7 @@ impl<'db> FullTransferStage<'db> {
             initialize_record(&parts.connection, &parts.db.local_account_id, record, expires_at)?;
         let mut stage = Self {
             connection: parts.connection,
-            lock: parts.lock,
+            lock: std::sync::Arc::new(parts.lock),
             key: parts.key,
             db: parts.db,
             directory: parts.directory,

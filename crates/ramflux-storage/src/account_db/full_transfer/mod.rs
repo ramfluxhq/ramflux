@@ -23,8 +23,9 @@ mod receiver_contributions;
 mod receiver_copy;
 mod receiver_read;
 pub use receiver_copy::{
-    FullAppliedDataReceipt, FullPinnedReceiverBase, FullPreparedReceiverDatabase,
-    FullReceiverBaseCopy, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
+    FullAppliedDataReceipt, FullGenerationRecoveryDraft, FullGenerationRecoveryWork,
+    FullPinnedReceiverBase, FullPreparedReceiverDatabase, FullReceiverBaseCopy,
+    FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
 };
 pub use receiver_read::FullReceiverReplayWork;
 mod receiver_input;

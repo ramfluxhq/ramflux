@@ -14,8 +14,11 @@ mod generation;
 pub(super) mod rebase;
 pub use application::FullAppliedDataReceipt;
 pub use generation::{
-    FullPreparedReceiverDatabase, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
+    FullGenerationRecoveryDraft, FullGenerationRecoveryWork, FullPreparedReceiverDatabase,
+    FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
 };
+
+mod seal;
 
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
@@ -48,6 +51,7 @@ pub struct FullReceiverBaseCopy {
     hash: String,
     // Close the encrypted database and erase its key before removing its scratch directory.
     scratch: Scratch,
+    attested: std::sync::Mutex<Option<seal::CopySeal>>,
 }
 
 impl FullTransferStage<'_> {
@@ -112,6 +116,7 @@ impl FullPinnedReceiverBase {
             stage_digest: self.stage_digest,
             hash: self.hash,
             scratch: self.scratch,
+            attested: std::sync::Mutex::new(None),
         })
     }
 }
@@ -151,7 +156,9 @@ impl FullReceiverBaseCopy {
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
             return Err(wrong());
         }
+        self.attested.lock().map_err(|_| wrong())?.take();
         let encoding = self.union.as_ref().ok_or_else(wrong)?;
+        let sealed = seal::CopySeal::capture(&self.scratch.path)?;
         let private = BackupDatabase::open_full_receiver_copy(
             &self.scratch.path.join("private.db"),
             &self.key,
@@ -166,6 +173,37 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
+        drop(private);
+        sealed.require(&self.scratch.path)?;
+        stage.require_target(&self.observation)?;
+        *self.attested.lock().map_err(|_| wrong())? = Some(sealed);
+        Ok(())
+    }
+    /// Require the same private files physically verified off-loan and unchanged B.
+    /// This is only data-application evidence, never a signature or install authority.
+    /// # Errors
+    /// Refuses replaced/changed files, missing verification or another current B writer.
+    pub fn require_materialized_generation(
+        &self,
+        stage: &FullTransferStage<'_>,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_stamp(stage)
+    }
+    pub(super) fn require_materialization_stamp(
+        &self,
+        stage: &impl super::receiver_read::ReceiverInput,
+    ) -> Result<(), StorageError> {
+        stage.require_io()?;
+        stage.require_target(&self.observation)?;
+        if stage.resume_record()?.stage_digest()? != self.stage_digest || self.union.is_none() {
+            return Err(wrong());
+        }
+        self.attested
+            .lock()
+            .map_err(|_| wrong())?
+            .as_ref()
+            .ok_or_else(wrong)?
+            .require(&self.scratch.path)?;
         stage.require_target(&self.observation)
     }
     /// Recheck the original B writer and exact stage before applying retained signed bytes.
@@ -185,6 +223,7 @@ impl FullReceiverBaseCopy {
     ) -> Result<FullScalarInputCounts, StorageError> {
         self.projected = None;
         self.union = None;
+        self.attested.lock().map_err(|_| wrong())?.take();
         stage.require_io()?;
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
             return Err(wrong());
@@ -206,6 +245,7 @@ impl FullReceiverBaseCopy {
             stage,
             &self.hash,
         )?;
+        let sealed = seal::CopySeal::capture(&self.scratch.path)?;
         super::receiver_materialization::Verification {
             directory: &self.scratch.path,
             key: &self.key,
@@ -216,7 +256,10 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
+        drop(private);
+        sealed.require(&self.scratch.path)?;
         stage.require_target(&self.observation)?;
+        *self.attested.lock().map_err(|_| wrong())? = Some(sealed);
         self.union = Some(union);
         self.projected = Some(counts);
         Ok(counts)

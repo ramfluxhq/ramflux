@@ -28,7 +28,7 @@ pub struct FullSourceTailCut {
 /// The frontend must return its ordinary database loan before running this owner.
 pub struct FullSourceTailWork {
     connection: Connection,
-    _lock: File,
+    _lock: std::sync::Arc<File>,
     key: super::keys::FullSourceMetadataKey,
     guard: SourceGuard,
     directory: PathBuf,

@@ -34,6 +34,7 @@ impl FullReceiverBaseCopy {
             stage.index_forward_scalar_records(hash, super::super::full_transfer_catalog())?;
         self.projected = None;
         self.union = None;
+        self.attested.lock().map_err(|_| wrong())?.take();
         let mut private = BackupDatabase::open_full_receiver_copy(
             &self.scratch.path.join("private.db"),
             &self.key,
@@ -45,6 +46,7 @@ impl FullReceiverBaseCopy {
             stage,
             hash,
         )?;
+        let sealed = super::seal::CopySeal::capture(&self.scratch.path)?;
         super::super::receiver_materialization::Verification {
             directory: &self.scratch.path,
             key: &self.key,
@@ -55,7 +57,10 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
+        drop(private);
+        sealed.require(&self.scratch.path)?;
         stage.require_target(&self.observation)?;
+        *self.attested.lock().map_err(|_| wrong())? = Some(sealed);
         hash.clone_into(&mut self.hash);
         self.projected = Some(counts);
         self.union = Some(encoding);

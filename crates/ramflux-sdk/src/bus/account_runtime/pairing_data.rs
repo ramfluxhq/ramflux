@@ -50,7 +50,7 @@ impl AccountRuntime {
     }
     fn pairing_readers_stale(&self) -> bool {
         let selected = self.pairing_database_path();
-        self.readers.lock().ok().is_some_and(|slot| {
+        self.readers.lock().is_ok_and(|slot| {
             slot.as_ref().is_some_and(|pool| {
                 selected.as_deref().is_some_and(|path| path != pool.generation_path())
             })

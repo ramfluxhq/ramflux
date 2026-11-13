@@ -17,7 +17,7 @@ struct RetainedCut {
     manifest: SourceManifest,
     key: Arc<FullChunkReadKey>,
 }
-struct Input {
+pub(in crate::account_db::full_transfer) struct OwnedReceiverInput {
     connection: crate::database::Connection,
     lock: Arc<std::fs::File>,
     directory: std::path::PathBuf,
@@ -28,7 +28,7 @@ struct Input {
 /// Root-drained private projection with at most nine retained input manifests.
 /// No original writer, database key, signer or publication permission is retained.
 pub struct FullReceiverReplayWork {
-    input: Input,
+    input: OwnedReceiverInput,
     copy: FullReceiverBaseCopy,
     through_hash: String,
 }
@@ -70,6 +70,15 @@ impl FullTransferStage<'_> {
         self.require_io()?;
         super::super::receiver_copy::rebase::require_before_selection(&self)?;
         copy.target_observation().require_current(self.db)?;
+        let input = self.pin_receiver_read_input(hash, now)?;
+        Ok(FullReceiverReplayWork { input, copy, through_hash: hash.into() })
+    }
+    pub(in crate::account_db::full_transfer) fn pin_receiver_read_input(
+        &self,
+        hash: &str,
+        now: u64,
+    ) -> Result<OwnedReceiverInput, StorageError> {
+        self.require_io()?;
         let record = self.resume_record()?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Responder
             || now >= record.grant.expires_at
@@ -108,17 +117,13 @@ impl FullTransferStage<'_> {
             return Err(wrong());
         }
         guard.require()?;
-        Ok(FullReceiverReplayWork {
-            input: Input {
-                connection: self.connection,
-                lock: Arc::new(self.lock),
-                directory: self.directory,
-                record,
-                guard,
-                manifests,
-            },
-            copy,
-            through_hash: hash.into(),
+        Ok(OwnedReceiverInput {
+            connection: self.connection.clone(),
+            lock: self.lock.clone(),
+            directory: self.directory.clone(),
+            record,
+            guard,
+            manifests,
         })
     }
 }
@@ -138,7 +143,12 @@ impl FullReceiverReplayWork {
         Ok(self.copy)
     }
 }
-impl ReceiverInput for Input {
+impl OwnedReceiverInput {
+    pub(in crate::account_db::full_transfer) fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+}
+impl ReceiverInput for OwnedReceiverInput {
     fn require_io(&self) -> Result<(), StorageError> {
         self.guard.require()
     }

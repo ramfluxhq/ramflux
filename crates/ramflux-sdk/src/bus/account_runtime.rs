@@ -331,6 +331,11 @@ impl AccountRuntime {
         }
     }
 
+    fn reap_transfer_jobs(&mut self) {
+        self.reap_upload_jobs();
+        self.reap_fetch_jobs();
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_serving(ready).await? {
             return Ok(());
@@ -350,8 +355,7 @@ impl AccountRuntime {
                 }
                 continue;
             }
-            self.reap_upload_jobs();
-            self.reap_fetch_jobs();
+            self.reap_transfer_jobs();
             let pairing =
                 crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
             let command = tokio::select! {
