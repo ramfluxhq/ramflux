@@ -43,7 +43,10 @@ pub(crate) fn submit(
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
     ramflux_protocol::ephemeral::require_durable(&envelope)
         .map_err(|_| CustodyRefusal::InvalidInput)?;
-    crate::check_entry_bound(&envelope).map_err(|_| CustodyRefusal::InvalidInput)?;
+    crate::check_entry_bound(&envelope).map_err(|error| match error {
+        crate::NodeCoreError::PayloadTooLarge => CustodyRefusal::PayloadTooLarge,
+        _ => CustodyRefusal::InvalidInput,
+    })?;
     candidate_size_preflight(&envelope)?;
     let DeliveryAuthority { source, .. } = credentials;
     verify_sender(credentials, &envelope, now)?;
