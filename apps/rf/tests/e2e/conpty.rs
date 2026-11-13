@@ -236,7 +236,7 @@ pub(super) fn spawn(rf: &Path, socket: &Path, display_name: &str) -> io::Result<
     if hr != 0 {
         return Err(io::Error::other(format!("CreatePseudoConsole {hr:#010x}")));
     }
-    let mut console = PseudoConsole(console_handle);
+    let console = PseudoConsole(console_handle);
     drop(input_read);
     drop(output_write);
     let mut attributes = AttributeList::new()?;
