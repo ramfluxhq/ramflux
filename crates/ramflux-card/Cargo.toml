@@ -7,10 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [features]
 default = []
 c-abi = []
 compiler = []
+web = ["dep:wasm-bindgen"]
 
 [dependencies]
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "properties"] }
@@ -26,6 +30,9 @@ web-time = "=1.1.0"
 
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "properties", "bindgen"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "=0.2.126", optional = true }
 
 [lints]
 workspace = true

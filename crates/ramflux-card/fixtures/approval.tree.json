@@ -1,0 +1,1 @@
+{"root":{"key":"root","kind":"column","text":"","value":"","action":null,"children":[{"key":"request","kind":"approval_info","text":"Request message","value":"","action":null,"children":[{"key":"request:explanation","kind":"text","text":"Please review this request.","value":"","action":null,"children":[]}]}]}}

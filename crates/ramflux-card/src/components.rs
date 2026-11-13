@@ -14,6 +14,11 @@ impl From<String> for Scalar {
         Self::Text(value)
     }
 }
+impl From<&str> for Scalar {
+    fn from(value: &str) -> Self {
+        Self::Text(value.into())
+    }
+}
 impl Scalar {
     #[must_use]
     pub fn display(&self) -> String {

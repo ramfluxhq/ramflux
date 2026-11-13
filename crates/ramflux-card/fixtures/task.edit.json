@@ -1,0 +1,1 @@
+{"previous_version":1,"version":2,"mutations":[{"op":"upsert","parent":"job","index":1,"node":{"key":"job:progress","kind":"progress","text":"Running","value":"","action":null,"children":[],"attrs":{"progress":75,"status":"Running"}}}]}

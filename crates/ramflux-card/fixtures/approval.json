@@ -1,0 +1,1 @@
+{"catalog":"rf-card/v1","theme":"light","components":[{"component":"rf.approval","id":"request","request_ref":"request-1","task_binding":"task-1","explanation":"Please review this request."}],"model":{}}

@@ -1,0 +1,1 @@
+{"previous_version":1,"version":2,"mutations":[{"op":"upsert","parent":"request","index":0,"node":{"key":"request:explanation","kind":"text","text":"Updated request message.","value":"","action":null,"children":[]}}],"host_slots":[{"component":"request","request_ref":"request-1","task_binding":"task-1"}]}

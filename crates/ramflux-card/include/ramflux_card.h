@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #ifndef RAMFLUX_CARD_H
 #define RAMFLUX_CARD_H
-#define RAMFLUX_CARD_ABI_VERSION 2
+#define RAMFLUX_CARD_ABI_VERSION 3
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus

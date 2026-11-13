@@ -34,7 +34,7 @@ pub struct Node {
     pub action: Option<String>,
     pub children: Vec<Node>,
     #[serde(default, skip_serializing_if = "Attrs::is_empty")]
-    pub attrs: Attrs,
+    pub attrs: Box<Attrs>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -314,6 +314,7 @@ mod depth_and_move_tests {
             value: String::new(),
             action: None,
             children: Vec::new(),
+            attrs: Box::default(),
         };
         for level in 1..LEVELS {
             node = Node {
@@ -323,6 +324,7 @@ mod depth_and_move_tests {
                 value: String::new(),
                 action: None,
                 children: vec![node],
+                attrs: Box::default(),
             };
         }
         let bytes = serde_json::to_vec(&Tree { root: node }).expect("test: bounded deep tree");

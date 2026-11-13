@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<html lang="en"><meta charset="utf-8"><title>Card worker test harness</title>
+<body><main id="card" aria-label="Card content"></main><aside id="host" aria-label="Host security slot"></aside><output id="status" aria-live="polite">Starting</output>
+<script type="module">
+import {CardView} from '../web/dist/adapter.js';
+const root=document.querySelector('#card'),status=document.querySelector('#status');
+window.intents=[];window.slots=[];window.failures=[];
+window.card=new CardView(root,new URL('../web/dist/worker.js',location.href),
+ (action,fields)=>{window.intents.push({action,fields});status.textContent='Submitted'},
+ slots=>{window.slots=slots;document.querySelector('#host').textContent=slots.length?'Host review required':''},
+ error=>{window.failures.push(error);status.textContent=error});
+const fixtures=await Promise.all(['complete_form','task','chart','approval'].map(async name=>await(await fetch('../fixtures/'+name+'.json')).json()));
+window.selected={catalog:'rf-card/v1',theme:'light',model:fixtures[0].model,components:fixtures.flatMap(f=>f.components)};
+await window.card.open(JSON.stringify(window.selected));status.textContent='Ready';
+</script></body></html>
