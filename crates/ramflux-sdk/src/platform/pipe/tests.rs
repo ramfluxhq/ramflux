@@ -310,7 +310,7 @@ async fn daemon_and_client_refuse_a_name_pre_created_by_a_second_user() -> Resul
     let runtime = tokio::runtime::Handle::current();
     let squatted = pipe_name.clone();
     let squatter = within(tokio::task::spawn_blocking(move || {
-        finish_thread(move || {
+        finish_thread(move || -> Result<_, String> {
             let guard = impersonate_user(&user, &password).map_err(text)?;
             let _context = runtime.enter();
             let pipe = ServerOptions::new().create(&squatted).map_err(text)?;
