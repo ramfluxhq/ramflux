@@ -1403,11 +1403,35 @@ impl PtySession {
                     return Ok(from + index + needle.len());
                 }
             }
+            #[cfg(windows)]
+            if let Some(status) = self.group.try_wait()? {
+                let buffer = lock_buf(&self.output);
+                if let Some(index) = buffer.get(from..).and_then(|slice| slice.find(needle)) {
+                    return Ok(from + index + needle.len());
+                }
+                return Err(format!("ceremony exited {status} before {needle:?}: {buffer}").into());
+            }
             if Instant::now() >= deadline {
                 let buffer = lock_buf(&self.output);
-                return Err(
-                    format!("timeout waiting for {needle:?} in ceremony output: {buffer}").into()
-                );
+                #[cfg(windows)]
+                {
+                    let state = match self.group.try_wait() {
+                        Ok(Some(status)) => format!("exited {status}"),
+                        Ok(None) => "still running".to_owned(),
+                        Err(error) => format!("wait error {error}"),
+                    };
+                    return Err(format!(
+                        "timeout waiting for {needle:?} in ceremony output ({state}): {buffer}"
+                    )
+                    .into());
+                }
+                #[cfg(not(windows))]
+                {
+                    return Err(format!(
+                        "timeout waiting for {needle:?} in ceremony output: {buffer}"
+                    )
+                    .into());
+                }
             }
             std::thread::sleep(Duration::from_millis(20));
         }
