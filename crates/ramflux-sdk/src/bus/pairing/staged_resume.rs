@@ -30,7 +30,9 @@ pub(super) fn has_pending(
             && row.recipient_mode == "new"
             && row.install_purpose == "transfer_destination"
             && row.prior_record_hash.is_none()
-            && ((!authority_exists && row.state == "vault_durable" && row.record_hash.is_none())
+            && ((!authority_exists
+                && row.state == "vault_durable"
+                && (row.record_hash.is_none() || row.primary_vault_ref.is_some()))
                 || (row.full_transfer.is_some()
                     && row.record_hash.is_some()
                     && row.primary_vault_ref.is_some()

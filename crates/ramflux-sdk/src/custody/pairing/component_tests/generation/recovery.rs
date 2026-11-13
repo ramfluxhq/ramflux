@@ -81,19 +81,37 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pairing_full_cold_status_recovers_selected_g2_without_approval() -> TestResult {
         let hold = ClockHold::new();
-        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor())).await;
+        let result =
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(2))).await;
         hold.finish().await?;
         result
     }
-    async fn run_actor() -> TestResult {
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_cold_status_rebuilds_unselected_g1_from_current_b() -> TestResult {
+        let hold = ClockHold::new();
+        for cut in [0, 1] {
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(cut))).await?;
+        }
+        hold.finish().await?;
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn primary_transfer_full_generation_publication_crash_cuts() -> TestResult {
+        let hold = ClockHold::new();
+        for cut in [3, 4, 5, 6] {
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(cut))).await?;
+        }
+        hold.finish().await?;
+        Ok(())
+    }
+    async fn run_actor(cut: u8) -> TestResult {
         use ramflux_protocol::custody::pairing::local_dto::StatusRequest;
         let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
         rig.primary.sync_relay().await?;
         rig.participant_a.return_client(&mut rig.source.client)?;
         Box::pin(finish_owned_stream(&mut rig)).await?;
         let published = Box::pin(publication(&mut rig, &operation)).await?;
-        let (committed, install, authority) = select_generation_case(&rig, &operation, published)?;
-        drop(committed);
+        let (install, authority) = retain_crash_cut(&rig, &operation, published, cut)?;
         let mut relay = None;
         rig.secondary.wrap_transport_for_test(|inner| {
             relay = Some(inner.clone());
@@ -108,6 +126,11 @@ mod tests {
             .join("custody_accounts")
             .join(&rig.participant_b.account_id)
             .join("authority.json");
+        let retained_authority = authority_path.with_extension("retained-test-authority");
+        let had_authority = authority_path.try_exists()?;
+        if had_authority {
+            std::fs::rename(&authority_path, &retained_authority)?;
+        }
         std::io::Write::write_all(
             &mut crate::platform::fs::create_new_owner_only(&authority_path)?,
             b"{}",
@@ -119,6 +142,9 @@ mod tests {
             "test: pending G2 hid malformed native authority"
         );
         std::fs::remove_file(&authority_path)?;
+        if had_authority {
+            std::fs::rename(&retained_authority, &authority_path)?;
+        }
         let request = {
             let pending = crate::custody::pairing::local_credential::load_reservation(
                 &rig.participant_b.root,
@@ -156,6 +182,43 @@ mod tests {
         .await?;
         rig.primary.lock().await?;
         Ok(())
+    }
+    fn retain_crash_cut(
+        rig: &Rig,
+        operation: &str,
+        published: Published,
+        cut: u8,
+    ) -> Result<(Install, CustodyAuthority), Box<dyn std::error::Error>> {
+        let result = match cut {
+            0 => (published.install, published.authority),
+            1 => {
+                let (prepared, authority) = prepare_generation_case(&rig, &operation, published)?;
+                let install = prepared.install().clone();
+                drop(prepared);
+                (install, authority)
+            }
+            _ => {
+                let (mut committed, mut install, authority) =
+                    select_generation_case(&rig, &operation, published)?;
+                if cut >= 3 {
+                    let selected = committed.open_selected()?;
+                    committed.retain_g3_crash_cut_for_test(
+                        &Installation {
+                            root: &rig.participant_b.root,
+                            db: &selected,
+                            vault: rig.participant_b.vault.as_ref(),
+                            now: rig.now,
+                        },
+                        &authority,
+                        cut,
+                    )?;
+                    install = committed.install().clone();
+                }
+                drop(committed);
+                (install, authority)
+            }
+        };
+        Ok(result)
     }
     async fn exercise_recovered_actor(
         rig: &Rig,

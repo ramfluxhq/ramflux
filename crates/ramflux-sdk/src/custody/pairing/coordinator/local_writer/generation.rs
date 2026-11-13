@@ -61,6 +61,43 @@ impl LocalWriterPort {
         })
         .await
     }
+    pub(in crate::custody::pairing::coordinator) async fn select_reconciled_full_generation(
+        &self,
+        participant: Arc<LocalPairingParticipant>,
+        prepared: FullGenerationPrepared,
+        observation: crate::custody::pairing::FullRecipientNativeObservation,
+    ) -> Result<FullGenerationCommitted, SdkError> {
+        self.require_participant(&participant)?;
+        let cancellation = self.scope.runtime.stage_owner()?;
+        self.request_with(false, move |reply| {
+            Box::new(Work {
+                action: move |db: &ramflux_storage::AccountDb| {
+                    observation.acknowledge(db)?;
+                    let now = crate::custody::network_now()?;
+                    let authority = observation.authority();
+                    let verified = ramflux_crypto::custody::verify_publication(authority, now)?;
+                    let mut stage = db.open_full_recipient_install_stage(
+                        &prepared.install().operation_id,
+                        &verified,
+                        now,
+                    )?;
+                    stage.bind_local_io_cancellation(&cancellation)?;
+                    prepared.select_reconciliation(
+                        &Installation {
+                            root: &participant.root,
+                            db,
+                            vault: participant.vault.as_ref(),
+                            now,
+                        },
+                        &stage,
+                        authority,
+                    )
+                },
+                reply,
+            })
+        })
+        .await
+    }
     pub(in crate::custody::pairing::coordinator) async fn rebase_full_generation(
         &self,
         participant: Arc<LocalPairingParticipant>,

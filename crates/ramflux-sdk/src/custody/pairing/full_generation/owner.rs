@@ -236,6 +236,10 @@ impl FullGenerationPrepared {
     }
 }
 impl FullGenerationCommitted {
+    #[must_use]
+    pub const fn install(&self) -> &Install {
+        &self.install
+    }
     /// Reconstruct the exact already selected G2 from its encrypted application ledger.
     /// Native observation must finish before this local installation-only operation.
     /// # Errors
@@ -289,15 +293,7 @@ impl FullGenerationCommitted {
     ) -> Result<(), SdkError> {
         let _authority =
             super::super::activate::authority_lock(local.root, &self.install.account_id)?;
-        acknowledged(local, &self.install, authority)?;
-        self.data.require_database(local.db)?;
-        let adoption = super::super::activate::adoption(&self.install)?;
-        require_selected_full_generation(local.root, &self.install, &adoption)?;
-        custody::write_generation_authority(local, &self.install, authority, &self.data)?;
-        let account = custody::load_data_account(local.root, &self.install.account_id, local.now)?;
-        if !custody::matches_generation_install(&account, &self.install)? {
-            return Err(pending());
-        }
+        let adoption = self.persist_native_files(local, authority)?;
         self.install.state = "authority_durable".into();
         install_store::write_pending(local.root, &self.install)?;
         local.db.commit_pairing_install(&adoption)?;
@@ -312,6 +308,46 @@ impl FullGenerationCommitted {
         require_selected_full_generation(local.root, &self.install, &adoption)?;
         self.directory.finish_g3()?;
         local.db.retire_full_recipient_install_head(&adoption)?;
+        Ok(())
+    }
+    fn persist_native_files(
+        &self,
+        local: &Installation<'_>,
+        authority: &CustodyAuthority,
+    ) -> Result<ramflux_storage::AdoptionRow, SdkError> {
+        acknowledged(local, &self.install, authority)?;
+        self.data.require_database(local.db)?;
+        let adoption = super::super::activate::adoption(&self.install)?;
+        require_selected_full_generation(local.root, &self.install, &adoption)?;
+        custody::write_generation_authority(local, &self.install, authority, &self.data)?;
+        let account = custody::load_data_account(local.root, &self.install.account_id, local.now)?;
+        if !custody::matches_generation_install(&account, &self.install)? {
+            return Err(pending());
+        }
+        Ok(adoption)
+    }
+    #[cfg(test)]
+    pub(crate) fn retain_g3_crash_cut_for_test(
+        &mut self,
+        local: &Installation<'_>,
+        authority: &CustodyAuthority,
+        cut: u8,
+    ) -> Result<(), SdkError> {
+        let _authority =
+            super::super::activate::authority_lock(local.root, &self.install.account_id)?;
+        let adoption = self.persist_native_files(local, authority)?;
+        if cut >= 4 {
+            self.install.state = "authority_durable".into();
+            install_store::write_pending(local.root, &self.install)?;
+        }
+        if cut >= 5 {
+            local.db.commit_pairing_install(&adoption)?;
+        }
+        if cut >= 6 {
+            let mut installed = self.install.clone();
+            installed.state = "installed".into();
+            install_store::write_installed(local.root, &installed)?;
+        }
         Ok(())
     }
 }
