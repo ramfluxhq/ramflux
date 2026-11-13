@@ -960,7 +960,6 @@ pub fn write_mesh_text_response(
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};

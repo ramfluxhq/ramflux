@@ -8,12 +8,6 @@ use crate::RelayRedbStore;
 use redb::ReadableTableMetadata;
 use std::{fs, path::Path};
 
-/// A unique directory per test, so parallel tests never share a database.
-fn unique() -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    root().join(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string())
-}
-
 fn owner(n: u64) -> AttachmentOwner {
     AttachmentOwner::from_authenticated_session(&format!("owner-{n}")).unwrap()
 }
@@ -76,7 +70,8 @@ fn tamper(ledger: &AttachmentLedger, f: impl FnOnce(&redb::WriteTransaction)) {
 
 #[test]
 fn large_payload_generation_pending_then_committed_once() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("relay.redb");
     let native = fixture();
@@ -233,7 +228,8 @@ fn terminal_budget_is_charged_at_admission_and_never_refunded() {
 
 #[test]
 fn terminal_counters_survive_restart_and_prune() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("relay.redb");
     let before;
@@ -291,7 +287,8 @@ fn terminal_owner_boundary_is_inclusive_and_mutation_free() {
 
 #[test]
 fn lowered_cap_reopen_keeps_existing_owners_working() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("relay.redb");
     {
@@ -331,7 +328,8 @@ fn lowered_cap_reopen_keeps_existing_owners_working() {
 #[test]
 fn corrupt_terminal_counters_fail_closed_on_reopen() {
     for case in 0..5 {
-        let dir = unique();
+        let temp = root();
+        let dir = temp.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("relay.redb");
         {
