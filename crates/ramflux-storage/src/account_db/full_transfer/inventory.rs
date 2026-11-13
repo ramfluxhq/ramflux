@@ -53,6 +53,8 @@ impl AccountDb {
     ) -> Result<FullTransferSchema, StorageError> {
         self.require_full_stage_unlock()?;
         let output = inspect(&self.connection, rules)?;
+        super::source_scalar::SourceGuard::new(self, None)
+            .require_remote_attachments(&self.connection)?;
         self.require_full_stage_unlock()?;
         Ok(output)
     }

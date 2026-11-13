@@ -16,9 +16,9 @@ mod vault;
 
 #[tokio::test]
 async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores() -> TestResult {
-    deadline(async {
+    deadline(Box::pin(async {
         let mut wire = Continuity::open()?;
-        let node = Arc::new(node::Access::new(&wire._node));
+        let node = Arc::new(node::Access::new(&wire.node));
         let (primary, mut a) =
             device::Device::create(node.clone(), "sdk-phone-a", true, &wire.config)?;
         let (recipient, mut b) =
@@ -82,7 +82,7 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
         wire.primary.lock().await?;
         wire.recipient.lock().await?;
         Ok(())
-    })
+    }))
     .await
 }
 

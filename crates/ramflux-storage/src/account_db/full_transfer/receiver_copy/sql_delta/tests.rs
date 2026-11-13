@@ -22,6 +22,7 @@ fn pairing_full_local_row_delta_preserves_nulls_rowids_and_no_trigger_side_effec
     let mut target_db = open(&target, &key)?;
     target_db.execute_batch("INSERT INTO local_rows VALUES(9,x'99','old'); INSERT INTO local_rows VALUES(10,NULL,NULL); INSERT INTO local_keys VALUES('two',x'0102'); DELETE FROM effects;")?;
     attach(&mut target_db, &source, &key)?;
+    table(&target_db, "optional_local")?;
     target_db.execute_batch("BEGIN IMMEDIATE")?;
     for name in ["local_rows", "local_keys"] {
         table(&target_db, name)?;
@@ -69,6 +70,14 @@ fn pairing_full_local_row_delta_preserves_nulls_rowids_and_no_trigger_side_effec
         source_db.query_row("SELECT count(*) FROM local_rows", [], |row| row.get::<_, u64>(0))?,
         1,
         "test: delta mutated its source"
+    );
+    source_db.execute_batch("CREATE TABLE optional_local(value TEXT)")?;
+    assert!(
+        matches!(
+            table(&target_db, "optional_local"),
+            Err(StorageError::PairingField("SnapshotInvalidated"))
+        ),
+        "test: a new B schema was silently skipped during retained rebase"
     );
     Ok(())
 }

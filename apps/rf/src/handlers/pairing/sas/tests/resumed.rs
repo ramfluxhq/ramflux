@@ -55,13 +55,15 @@ fn assert_resumed_candidate(mut current: Update, old_sas: &[u8]) -> TestResult {
     let prompted = std::cell::Cell::new(false);
     let rejected = super::super::super::transfer::attended_affirm(&mut request, &stale, |_| {
         prompted.set(true);
-        Ok("affirm".into())
+        Ok(zeroize::Zeroizing::new("affirm".into()))
     });
     assert!(
         rejected.is_err() && !prompted.get(),
         "test: stale generation reached attended approval"
     );
-    super::super::super::transfer::attended_affirm(&mut request, &current, |_| Ok("match".into()))?;
+    super::super::super::transfer::attended_affirm(&mut request, &current, |_| {
+        Ok(zeroize::Zeroizing::new("match".into()))
+    })?;
     assert!(!request.approved, "test: SAS match text approved a resumed candidate");
     let expected = request.new_record_hash.clone();
     super::super::super::transfer::attended_affirm(&mut request, &current, |prompt| {
@@ -69,7 +71,7 @@ fn assert_resumed_candidate(mut current: Update, old_sas: &[u8]) -> TestResult {
             prompt.contains(&expected),
             "test: terminal did not display exact resumed candidate"
         );
-        Ok("affirm".into())
+        Ok(zeroize::Zeroizing::new("affirm".into()))
     })?;
     assert!(request.approved, "test: fresh attended candidate affirmation was not retained");
     current.proposal_hash = Some(ramflux_protocol::encode_base64url([73; 32]));

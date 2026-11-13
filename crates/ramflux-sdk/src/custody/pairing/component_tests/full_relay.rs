@@ -133,7 +133,7 @@ impl FullPairingTransport for FullNativeFixture {
         Box::pin(async move {
             let encrypted = Zeroizing::new(
                 ramflux_protocol::decode_base64url(&request.packet.ciphertext)
-                    .map_err(|error| wire(&error))?,
+                    .map_err(|_| SdkError::PairingCode("InvalidInput"))?,
             );
             self.wire_evidence.observe(&encrypted);
             self.wire_evidence.sent(encrypted.len());
@@ -247,7 +247,8 @@ impl PairingTransport for FullNativeFixture {
             } = &request.frame
             {
                 let decoded = Zeroizing::new(
-                    ramflux_protocol::decode_base64url(ciphertext).map_err(|error| wire(&error))?,
+                    ramflux_protocol::decode_base64url(ciphertext)
+                        .map_err(|_| SdkError::PairingCode("InvalidInput"))?,
                 );
                 evidence.observe(&decoded);
                 evidence.sent(decoded.len());

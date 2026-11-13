@@ -42,6 +42,16 @@ pub(super) fn attach(
 
 pub(super) fn table(target: &Connection, table: &'static str) -> Result<(), StorageError> {
     crate::database::require_generation_rebase_deadline()?;
+    let (present, current): (bool, bool) = target.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1),EXISTS(SELECT 1 FROM current_b.sqlite_schema WHERE type='table' AND name=?1)",
+        params![table], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if !present && !current {
+        return Ok(());
+    }
+    if present != current {
+        return Err(StorageError::PairingField("SnapshotInvalidated"));
+    }
     // Names and column bounds have already been checked against the compiled census.
     let mut statement = target.prepare(&format!("SELECT CASE WHEN length(CAST(name AS BLOB))<=128 THEN name END FROM pragma_table_xinfo('{table}') WHERE hidden=0 LIMIT 257"))?;
     let mut columns = statement

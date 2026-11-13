@@ -70,6 +70,16 @@ impl SourceGuard {
             cancelled,
         }
     }
+    pub(super) fn require_remote_attachments(
+        &self,
+        snapshot: &Connection,
+    ) -> Result<(), StorageError> {
+        self.require()?;
+        let worker =
+            self.unlocked.upgrade_account_writer().ok_or(StorageError::AuthorizationRejected)?;
+        super::attachment_availability::require(snapshot, &worker)?;
+        self.require()
+    }
     pub(super) fn schema_generation(&self) -> Result<u64, StorageError> {
         self.require()?;
         let worker =

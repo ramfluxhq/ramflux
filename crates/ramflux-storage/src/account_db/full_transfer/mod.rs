@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Device-local full-transfer staging owners. They grant no native authority.
+mod attachment_availability;
 mod catalog;
 mod duplex;
 pub use duplex::FullDuplexReceipt;

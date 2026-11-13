@@ -71,7 +71,12 @@ fn primary_transfer_full_large_stream_is_bounded() -> TestResult {
         probe.bytes, encoded.total_bytes,
         "test: streamed bytes disagreed with signed totals"
     );
-    assert!(encoded.chunk_count > 16, "test: large input did not cross enough encrypted slots");
+    assert!(encoded.chunk_count > 1, "test: large input did not cross encrypted slot boundaries");
+    assert_eq!(
+        encoded.chunk_count,
+        ramflux_protocol::custody::pairing::full_transfer::chunk_layout(probe.bytes)?.0,
+        "test: streamed output has inconsistent chunk layout"
+    );
     assert!(
         probe.calls >= encoded.chunk_count,
         "test: multi-slot output was not streamed through bounded writes"

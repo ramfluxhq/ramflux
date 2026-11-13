@@ -224,7 +224,7 @@ async fn execute(socket: PathBuf, command: TransferCommand) -> Result<(), RfErro
 pub(super) fn attended_affirm(
     request: &mut TransferAffirm,
     current: &Update,
-    answer: impl FnOnce(&str) -> Result<String, RfError>,
+    answer: impl FnOnce(&str) -> Result<zeroize::Zeroizing<String>, RfError>,
 ) -> Result<(), RfError> {
     request.approved = false;
     if current.operation_id != request.operation_id
