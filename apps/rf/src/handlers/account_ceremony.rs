@@ -38,7 +38,7 @@ impl Terminal {
             if !input.is_terminal() {
                 return Err(RfError::Message("A local interactive terminal is required.".into()));
             }
-            super::windows_console::disable_line_input(&input).map_err(|error| {
+            super::windows_console::prepare_input(&input).map_err(|error| {
                 RfError::Message(format!("Could not protect terminal input: {error}"))
             })?;
             return Ok(Self { input, output, echo_disabled: false, skip_lf: false });
