@@ -2677,7 +2677,13 @@ pub(crate) mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
             NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
-        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(&store_path)?);
+        test_gateway_context_at(&store_path)
+    }
+
+    pub(crate) fn test_gateway_context_at(
+        store_path: &std::path::Path,
+    ) -> anyhow::Result<crate::GatewayQuicContext> {
+        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(store_path)?);
         store.configure_replay(
             ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
             0,

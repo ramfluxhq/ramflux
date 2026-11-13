@@ -35,10 +35,9 @@ mod tests {
     -> anyhow::Result<()> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let directory = tempfile::TempDir::new()?;
-            let mut context = crate::session::tests::test_gateway_context()?;
-            context.store = Arc::new(ramflux_node_core::GatewayRedbStore::open(
-                directory.path().join("gateway.redb"),
-            )?);
+            let context = crate::session::tests::test_gateway_context_at(
+                &directory.path().join("gateway.redb"),
+            )?;
             let source = |seed| {
                 let root = ramflux_crypto::create_identity_root("peer", [seed; 32]);
                 ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")
