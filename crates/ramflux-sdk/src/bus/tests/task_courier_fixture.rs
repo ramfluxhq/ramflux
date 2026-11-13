@@ -789,7 +789,7 @@ async fn refuse_fixture_call(
     context.validate()?;
     if generation != Some(context.session_generation.as_str())
         || context.session_id != "courier-session"
-        || context.request_id != submit.request.request_id
+        || context.request_id != submit.signed_request.request_id
         || context.envelope_id != submit.envelope.envelope_id
     {
         return Err("test: call submit did not bind its authenticated scheduling session".into());
