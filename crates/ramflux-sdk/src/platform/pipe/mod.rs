@@ -4,7 +4,9 @@
 //! Windows local-bus carrier: a per-user named pipe.
 //!
 //! The pipe's access list is hygiene against other standard users and sandboxed processes.
-//! Administrators and SYSTEM can always reach a user's data.
+//! Administrators and SYSTEM can always reach a user's data. An elevated token whose
+//! `TokenOwner` is BUILTIN\Administrators may leave that group as the object owner; the owner
+//! check accepts it only in that case, and the access list still names only the user.
 
 pub(crate) mod listener;
 mod name;

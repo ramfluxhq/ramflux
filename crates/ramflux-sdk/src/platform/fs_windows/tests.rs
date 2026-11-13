@@ -92,7 +92,9 @@ fn denied<T>(result: std::io::Result<T>, what: &str) -> Result<(), String> {
 }
 
 fn owned_by_me(path: &Path) -> Result<(), String> {
-    if files::path_owner(path).map_err(text)? == files::current_user().map_err(text)? {
+    let owner = files::path_owner(path).map_err(text)?;
+    let user = files::current_user().map_err(text)?;
+    if files::owner_matches_user(&owner, &user).map_err(text)? {
         Ok(())
     } else {
         Err(format!("{} is not owned by the current user", path.display()))

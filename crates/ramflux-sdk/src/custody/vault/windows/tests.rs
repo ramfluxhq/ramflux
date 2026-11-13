@@ -107,8 +107,10 @@ fn the_file_holds_no_plaintext_seed_and_belongs_to_the_user() -> Result<(), Stri
         return Err("the reference is on disk in the clear".to_owned());
     }
     let me = files::current_user().map_err(text)?;
-    if files::path_owner(&path).map_err(text)? != me
-        || files::path_owner(&vault.directory).map_err(text)? != me
+    let file_owner = files::path_owner(&path).map_err(text)?;
+    let directory_owner = files::path_owner(&vault.directory).map_err(text)?;
+    if !files::owner_matches_user(&file_owner, &me).map_err(text)?
+        || !files::owner_matches_user(&directory_owner, &me).map_err(text)?
     {
         return Err("vault files must belong to the current user".to_owned());
     }

@@ -90,34 +90,34 @@ fn sid_part(
     token: &OwnedHandle,
     class: TOKEN_INFORMATION_CLASS,
     label: &str,
-    pointer: impl FnOnce(&super::TokenBuffer) -> PSID,
+    pointer: impl FnOnce(&[u8]) -> PSID,
 ) -> String {
-    let buffer = match super::token_information(token, class) {
-        Ok(buffer) => buffer,
-        Err(error) => return format!("{label}=query-failed:{error}"),
-    };
-    // SAFETY: `pointer` returns the SID address written into `buffer` by the query above.
-    // `copy_from` accepts a null pointer and copies the SID before `buffer` is dropped.
-    let copied = unsafe { super::Sid::copy_from(pointer(&buffer)) };
+    // The SID is copied before the token buffer moves. A moved buffer leaves the SID pointer
+    // dangling, which is what made two reads of the same token disagree.
+    let copied = super::with_token_information(token, class, |bytes| {
+        // SAFETY: `pointer` returns the SID address written into `bytes`. `copy_from` accepts
+        // a null pointer and copies the SID before `bytes` is dropped.
+        unsafe { super::Sid::copy_from(pointer(bytes)) }
+    });
     match copied {
         Ok(sid) => match sid.to_sddl_string() {
             Ok(text) => format!("{label}={text}"),
             Err(error) => format!("{label}=string-failed:{error}"),
         },
-        Err(error) => format!("{label}=copy-failed:{error}"),
+        Err(error) => format!("{label}=query-failed:{error}"),
     }
 }
 
-fn token_user_sid(buffer: &super::TokenBuffer) -> PSID {
-    // SAFETY: a successful TokenUser query writes a TOKEN_USER at the aligned start of the
-    // buffer. The SID it names lives in that buffer.
-    unsafe { (*buffer.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+fn token_user_sid(bytes: &[u8]) -> PSID {
+    // SAFETY: a successful TokenUser query writes a TOKEN_USER at the aligned start of `bytes`.
+    // The SID it names lives in that slice.
+    unsafe { (*bytes.as_ptr().cast::<TOKEN_USER>()).User.Sid }
 }
 
-fn token_owner_sid(buffer: &super::TokenBuffer) -> PSID {
-    // SAFETY: a successful TokenOwner query writes a TOKEN_OWNER at the aligned start of the
-    // buffer. The SID it names lives in that buffer.
-    unsafe { (*buffer.0.as_ptr().cast::<TOKEN_OWNER>()).Owner }
+fn token_owner_sid(bytes: &[u8]) -> PSID {
+    // SAFETY: a successful TokenOwner query writes a TOKEN_OWNER at the aligned start of
+    // `bytes`. The SID it names lives in that slice.
+    unsafe { (*bytes.as_ptr().cast::<TOKEN_OWNER>()).Owner }
 }
 
 fn elevation_part(token: &OwnedHandle) -> String {
@@ -147,32 +147,33 @@ fn elevation_name(value: i32) -> &'static str {
 }
 
 fn integrity_part(token: &OwnedHandle) -> String {
-    let buffer = match super::token_information(token, TokenIntegrityLevel) {
-        Ok(buffer) => buffer,
-        Err(error) => return format!("integrity=query-failed:{error}"),
-    };
-    // SAFETY: a successful TokenIntegrityLevel query writes a TOKEN_MANDATORY_LABEL whose SID
-    // pointer addresses this buffer. The SID is checked before its last sub-authority is read.
-    let rid = unsafe {
-        let label = (*buffer.0.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
-        if label.is_null() || IsValidSid(label) == 0 {
-            return "integrity=missing".to_owned();
+    let rid = super::with_token_information(token, TokenIntegrityLevel, |bytes| {
+        // SAFETY: a successful TokenIntegrityLevel query writes a TOKEN_MANDATORY_LABEL whose
+        // SID pointer addresses `bytes`. The RID is copied out before the slice is dropped.
+        unsafe {
+            let label = (*bytes.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            if label.is_null() || IsValidSid(label) == 0 {
+                return Err(io::Error::other("token has no integrity label"));
+            }
+            let count_ptr = GetSidSubAuthorityCount(label);
+            if count_ptr.is_null() {
+                return Err(io::Error::other("integrity label has no count"));
+            }
+            let count = *count_ptr;
+            if count == 0 {
+                return Err(io::Error::other("integrity label has no RID"));
+            }
+            let rid_ptr = GetSidSubAuthority(label, u32::from(count) - 1);
+            if rid_ptr.is_null() {
+                return Err(io::Error::other("integrity label has no RID"));
+            }
+            Ok(*rid_ptr)
         }
-        let count_ptr = GetSidSubAuthorityCount(label);
-        if count_ptr.is_null() {
-            return "integrity=no-count".to_owned();
-        }
-        let count = *count_ptr;
-        if count == 0 {
-            return "integrity=no-rid".to_owned();
-        }
-        let rid_ptr = GetSidSubAuthority(label, u32::from(count) - 1);
-        if rid_ptr.is_null() {
-            return "integrity=no-rid".to_owned();
-        }
-        *rid_ptr
-    };
-    format!("integrity={rid:#x}/{}", integrity_name(rid))
+    });
+    match rid {
+        Ok(rid) => format!("integrity={rid:#x}/{}", integrity_name(rid)),
+        Err(error) => format!("integrity=query-failed:{error}"),
+    }
 }
 
 fn integrity_name(rid: u32) -> &'static str {
@@ -193,23 +194,13 @@ fn container_part(token: &OwnedHandle) -> String {
 }
 
 fn u32_field(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32> {
-    let buffer = super::token_information(token, class)?;
-    let bytes: [u8; 4] = buffer
-        .0
-        .get(..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| io::Error::other("token field shorter than 4 bytes"))?;
-    Ok(u32::from_ne_bytes(bytes))
+    // A 128-byte buffer makes TokenElevation return ERROR_BAD_LENGTH. The value is one u32.
+    super::token_dword(token, class)
 }
 
 fn i32_field(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io::Result<i32> {
-    let buffer = super::token_information(token, class)?;
-    let bytes: [u8; 4] = buffer
-        .0
-        .get(..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| io::Error::other("token field shorter than 4 bytes"))?;
-    Ok(i32::from_ne_bytes(bytes))
+    let value = super::token_dword(token, class)?;
+    i32::try_from(value).map_err(io::Error::other)
 }
 
 fn wide_name(path: &Path) -> io::Result<Vec<u16>> {
