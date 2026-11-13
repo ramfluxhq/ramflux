@@ -18,6 +18,7 @@ mod private_input;
 mod recipient_cancel;
 mod recovery;
 mod refresh;
+mod revocation;
 mod source_affirm;
 mod source_cancel;
 mod source_tail;
