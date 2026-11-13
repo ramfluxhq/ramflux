@@ -231,6 +231,13 @@ pub enum SdkError {
 }
 
 impl SdkError {
+    /// Classifies a captured NACK using the same strict mapper as live gateway operations.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn gateway_nack_for_test(reason: String) -> Self {
+        Self::gateway_nack(reason)
+    }
+
     pub(crate) fn gateway_nack(reason: String) -> Self {
         if reason == "gateway_writer_busy: retryable" {
             Self::GatewayWriterBusy
@@ -301,6 +308,28 @@ impl From<SyncError> for SdkError {
         match error {
             SyncError::ObjectErased => Self::ObjectErased,
             other => Self::Sync(other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SdkError;
+    #[test]
+    fn writer_busy_discriminator_requires_exact_wire_reason() {
+        assert!(matches!(
+            SdkError::gateway_nack("gateway_writer_busy: retryable".into()),
+            SdkError::GatewayWriterBusy
+        ));
+        for reason in [
+            "relay v3 token issue rejected: gateway_writer_busy: retryable",
+            "submit source rejected: gateway_writer_busy: retryable",
+            "gateway_writer_busy: retryable extra",
+        ] {
+            assert!(matches!(
+                SdkError::gateway_nack(reason.into()),
+                SdkError::GatewaySessionRejected(_)
+            ));
         }
     }
 }

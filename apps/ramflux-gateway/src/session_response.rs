@@ -14,6 +14,18 @@ impl std::error::Error for ClientWriteFailure {
         Some(&self.0)
     }
 }
+/// Retain the exact overload discriminator while keeping context on other failures.
+pub(crate) fn durable_rejection_reason(context: &str, error: &anyhow::Error) -> String {
+    if matches!(
+        error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+        Some(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+    ) {
+        ramflux_node_core::NodeCoreError::GatewayWriterBusy.to_string()
+    } else {
+        format!("{context}: {error}")
+    }
+}
+
 pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'static str {
     use ramflux_node_core::GatewayClientFrame as Frame;
     match frame {
@@ -36,5 +48,28 @@ pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'s
         Frame::Nack { .. } => "nack",
         Frame::Heartbeat { .. } => "heartbeat",
         Frame::Close { .. } => "close",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn busy_rejection_preserves_wire_type_and_other_context() {
+        let busy = anyhow::Error::new(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+            .context("waiting for disk");
+        assert_eq!(
+            durable_rejection_reason("submit source rejected", &busy),
+            "gateway_writer_busy: retryable"
+        );
+        for source in ["invalid signature", "gateway_writer_busy: retryable"] {
+            assert_eq!(
+                durable_rejection_reason(
+                    "submit source rejected",
+                    &anyhow::anyhow!(source.to_owned())
+                ),
+                format!("submit source rejected: {source}")
+            );
+        }
     }
 }

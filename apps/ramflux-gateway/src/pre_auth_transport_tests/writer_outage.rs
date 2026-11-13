@@ -44,6 +44,137 @@ pub(super) fn signed_operation(index: usize, device: &str) -> anyhow::Result<Gat
 pub(super) async fn response(client: &mut support::Client) -> anyhow::Result<GatewayServerFrame> {
     Ok(serde_json::from_slice(&client.stream.recv_frame().await?)?)
 }
+fn overflow_operations() -> anyhow::Result<Vec<GatewayClientFrame>> {
+    let template = |index| -> anyhow::Result<ramflux_protocol::SignedRequest> {
+        match signed_operation(index, "outage-device-8")? {
+            GatewayClientFrame::RelayTokenV3Issue { request } => Ok(request.signed_request),
+            _ => anyhow::bail!("token wrapper fixture"),
+        }
+    };
+    let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    let mut envelope = crate::session::submit_fixtures::test_envelope(now)?;
+    envelope.source_principal_id = "outage-principal-8".into();
+    envelope.source_device_id = "outage-device-8".into();
+    envelope.target_delivery_id = "outage-delivery-9".into();
+    envelope.signed.signing_key_id = "outage-device-8".into();
+    let root = ramflux_crypto::create_identity_root("outage-principal-8", [72; 32]);
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(ramflux_crypto::identity_root_commitment(
+            &root.signing_key.verifying_key()
+        )),
+    );
+    envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+        [32; 32],
+    );
+    let signed_request = operation_wrapper(template(81)?, "/gateway/session/submit", &envelope)?;
+    let operations = vec![
+        signed_operation(80, "outage-device-8")?,
+        GatewayClientFrame::Submit {
+            submit: ramflux_node_core::GatewaySubmitFrame { signed_request, envelope },
+        },
+    ];
+    #[cfg(feature = "itest-local-mint")]
+    let operations = {
+        let mut operations = operations;
+        let branch = ramflux_crypto::create_device_branch(
+            "outage-principal-8",
+            "outage-device-8",
+            1,
+            [32; 32],
+        );
+        let body = crate::session::tests::test_relay_token_issue_body(
+            &branch,
+            ramflux_node_core::ObjectRelayCapability::Put,
+        )?;
+        let signed_request = operation_wrapper(template(82)?, "/relay/v1/token/issue", &body)?;
+        operations.push(GatewayClientFrame::RelayTokenIssue {
+            request: ramflux_node_core::RelayTokenIssueRequest { signed_request, body },
+        });
+        operations
+    };
+    Ok(operations)
+}
+fn operation_wrapper<T: serde::Serialize>(
+    mut request: ramflux_protocol::SignedRequest,
+    path: &str,
+    body: &T,
+) -> anyhow::Result<ramflux_protocol::SignedRequest> {
+    request.path = path.into();
+    request.body_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        &ramflux_protocol::canonical_json_bytes(body)?,
+    );
+    request.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(&request, [32; 32])?;
+    Ok(request)
+}
+async fn busy_operations(
+    client: &mut support::Client,
+    operations: &[GatewayClientFrame],
+) -> anyhow::Result<()> {
+    for operation in operations {
+        client.stream.send_frame(&serde_json::to_vec(operation)?).await?;
+        let GatewayServerFrame::Nack { reason } = response(client).await? else {
+            anyhow::bail!("busy operation was acknowledged")
+        };
+        let error = ramflux_sdk::SdkError::gateway_nack_for_test(reason.clone());
+        assert!(
+            matches!(error, ramflux_sdk::SdkError::GatewayWriterBusy),
+            "busy NACK lost SDK GatewayWriterBusy typed outcome: {error}"
+        );
+        assert_eq!(
+            reason, "gateway_writer_busy: retryable",
+            "busy wire discriminator was prefixed"
+        );
+    }
+    Ok(())
+}
+async fn recover_operations(
+    client: &mut support::Client,
+    operations: &[GatewayClientFrame],
+    store: &ramflux_node_core::GatewayRedbStore,
+    before: usize,
+) -> anyhow::Result<()> {
+    for (index, operation) in operations.iter().enumerate() {
+        client.stream.send_frame(&serde_json::to_vec(operation)?).await?;
+        let reply = response(client).await?;
+        if let GatewayServerFrame::Nack { reason } = &reply {
+            assert!(
+                !matches!(
+                    ramflux_sdk::SdkError::gateway_nack_for_test(reason.clone()),
+                    ramflux_sdk::SdkError::GatewayWriterBusy
+                ),
+                "writer did not recover"
+            );
+            if matches!(operation, GatewayClientFrame::RelayTokenV3Issue { .. }) {
+                assert!(
+                    reason.starts_with("relay v3 token issue rejected: "),
+                    "non-busy context lost"
+                );
+            }
+        }
+        let expected = before + index + 1;
+        assert_eq!(store.durable_commit_count(), expected, "retry did not commit signed operation");
+        client.stream.send_frame(&serde_json::to_vec(operation)?).await?;
+        let GatewayServerFrame::Nack { reason } = response(client).await? else {
+            anyhow::bail!("duplicate operation was acknowledged")
+        };
+        assert!(
+            reason.to_ascii_lowercase().contains("replay"),
+            "duplicate did not reach replay refusal: {reason}"
+        );
+        assert!(
+            matches!(
+                ramflux_sdk::SdkError::gateway_nack_for_test(reason),
+                ramflux_sdk::SdkError::GatewaySessionRejected(_)
+            ),
+            "real replay refusal became busy"
+        );
+        assert_eq!(store.durable_commit_count(), expected, "replay committed again");
+    }
+    Ok(())
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires same-tree router; explicit gateway admission CI row"]
 async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
@@ -96,8 +227,8 @@ async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
         }
         assert_eq!(fixture.context.store.pending_network_writes(), 8);
         let overflow = clients.get_mut(8).ok_or_else(|| anyhow::anyhow!("overflow client"))?;
-        overflow.stream.send_frame(&serde_json::to_vec(&signed_operation(8, "outage-device-8")?)?).await?;
-        assert!(matches!(response(overflow).await?, GatewayServerFrame::Nack {reason} if reason.contains("gateway_writer_busy")), "overflow must return typed retryable busy");
+        let operations=overflow_operations()?;
+        busy_operations(overflow,&operations).await?;
         let heartbeat = clients.get_mut(9).ok_or_else(|| anyhow::anyhow!("heartbeat client"))?;
         heartbeat.stream.send_frame(&serde_json::to_vec(&GatewayClientFrame::Heartbeat { now:7331 })?).await?;
         assert!(matches!(response(heartbeat).await?, GatewayServerFrame::Heartbeat {now:7331}), "heartbeat stalled behind competing signed writes");
@@ -114,9 +245,8 @@ async fn competing_signed_writes_preserve_network_progress_and_bounded_pending()
         assert_eq!(fixture.context.store.durable_commit_count()-before, 9);
         assert_eq!(fixture.context.store.pending_network_writes(), 0);
         let client = clients.get_mut(8).ok_or_else(|| anyhow::anyhow!("recovery client"))?;
-        client.stream.send_frame(&serde_json::to_vec(&signed_operation(9, "outage-device-8")?)?).await?;
-        assert!(matches!(response(client).await?, GatewayServerFrame::Nack {reason} if reason.contains("capability is missing")));
-        assert_eq!(fixture.context.store.durable_commit_count()-before, 10);
+        recover_operations(client,&operations,&fixture.context.store,before+9).await?;
+        assert_eq!(fixture.context.store.durable_commit_count()-before,9+operations.len());
         Ok(())
     }).await?
 }

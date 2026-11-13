@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use super::session_response::durable_rejection_reason;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
@@ -1120,7 +1121,7 @@ async fn handle_gateway_relay_token_issue(
             write_gateway_handle(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: format!("relay token issue rejected: {error}"),
+                    reason: durable_rejection_reason("relay token issue rejected", &error),
                 },
             )
             .await
@@ -1157,7 +1158,7 @@ async fn handle_gateway_relay_token_v3_issue(
             write_gateway_handle(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: format!("relay v3 token issue rejected: {error}"),
+                    reason: durable_rejection_reason("relay v3 token issue rejected", &error),
                 },
             )
             .await
@@ -1441,7 +1442,7 @@ pub(crate) async fn handle_gateway_submit(
             write_gateway_handle(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: format!("submit source rejected: {error}"),
+                    reason: durable_rejection_reason("submit source rejected", &error),
                 },
             )
             .await?;
@@ -2591,7 +2592,7 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "itest-local-mint")]
-    fn test_relay_token_issue_body(
+    pub(crate) fn test_relay_token_issue_body(
         branch: &ramflux_crypto::DeviceBranch,
         capability: ramflux_node_core::ObjectRelayCapability,
     ) -> anyhow::Result<ramflux_node_core::RelayTokenIssueBody> {
