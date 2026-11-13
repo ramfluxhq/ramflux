@@ -192,14 +192,14 @@ mod tests {
         let result = match cut {
             0 => (published.install, published.authority),
             1 => {
-                let (prepared, authority) = prepare_generation_case(&rig, &operation, published)?;
+                let (prepared, authority) = prepare_generation_case(rig, operation, published)?;
                 let install = prepared.install().clone();
                 drop(prepared);
                 (install, authority)
             }
             _ => {
                 let (mut committed, mut install, authority) =
-                    select_generation_case(&rig, &operation, published)?;
+                    select_generation_case(rig, operation, published)?;
                 if cut >= 3 {
                     let selected = committed.open_selected()?;
                     committed.retain_g3_crash_cut_for_test(

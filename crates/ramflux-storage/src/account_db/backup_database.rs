@@ -66,9 +66,11 @@ impl BackupDatabase {
         let db = rusqlite::Connection::open(path)?;
         let hex = zeroize::Zeroizing::new(key.sqlcipher_hex());
         let pragma = zeroize::Zeroizing::new(format!(
-            "PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+            "PRAGMA key=\"x'{}'\"; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
             hex.as_str()
         ));
+        // A live B snapshot can inherit WAL mode. This private single-owner copy must
+        // checkpoint it into one immutable file before physical attestation and G2.
         db.execute_batch(&pragma)?;
         crate::schema_generation::validate(&db)?;
         crate::schema_object_erasure::validate(&db)?;

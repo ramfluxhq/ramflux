@@ -56,7 +56,8 @@ impl PairingActor {
         let prepared =
             self.full_runtime.clone().run_blocking(move || preparation.prepare()).await?;
         let install = prepared.install().clone();
-        let (committed, authority) = self.select_rebuilt_install(prepared, cancel).await?;
+        let (committed, authority) =
+            Box::pin(self.select_rebuilt_install(prepared, cancel)).await?;
         self.finish_linked_generation(committed, authority.clone()).await?;
         Ok((install, authority, expires))
     }

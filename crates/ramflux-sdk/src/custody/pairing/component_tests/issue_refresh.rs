@@ -41,7 +41,6 @@ mod tests {
             "test: Issue used the actor head cached before source preparation"
         );
         rig.primary.lock().await?;
-        rig.secondary.lock().await?;
         Ok(())
     }
 }

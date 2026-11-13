@@ -16,78 +16,85 @@ pub(in crate::custody::pairing::coordinator) struct RecoveredInstallation {
     pub(super) status: FullStatus,
 }
 impl PairingActor {
-    pub(super) async fn installation_loan<R: Send + 'static>(
+    pub(super) fn installation_loan<R: Send + 'static>(
         &self,
         action: impl FnOnce(&ramflux_storage::AccountDb) -> Result<R, SdkError> + Send + 'static,
-    ) -> Result<R, SdkError> {
-        if let Some(writer) = &self.local_writer {
-            return writer.request(action).await;
-        }
-        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let runtime = self.full_runtime.clone();
-        self.full_runtime
-            .clone()
-            .run_blocking(move || {
-                let _local = runtime.local_work()?;
-                let slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-                action(slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?)
-            })
-            .await
+    ) -> impl std::future::Future<Output = Result<R, SdkError>> + '_ {
+        Box::pin(async move {
+            if let Some(writer) = &self.local_writer {
+                return writer.request(action).await;
+            }
+            let participant =
+                self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+            let runtime = self.full_runtime.clone();
+            self.full_runtime
+                .clone()
+                .run_blocking(move || {
+                    let _local = runtime.local_work()?;
+                    let slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+                    action(slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?)
+                })
+                .await
+        })
     }
     /// Reconcile an already selected recipient generation without restoring data or human consent.
     /// # Errors
     /// Refuses another operation/generation, missing G2, corrupt bytes, lock or stale own native head.
-    pub async fn recover_full_installation(
-        &mut self,
-        request: &StatusRequest,
-    ) -> Result<Option<LocalResult>, SdkError> {
-        self.require_open()?;
-        request.validate().map_err(|error| super::wire(&error))?;
-        if self.ceremony.is_some() {
-            return Err(SdkError::PairingCode("Busy"));
-        }
-        if let Some(recovered) = &self.recovered_installation {
-            return recovered.result(request).map(Some);
-        }
-        let pending = self.pending_install(request).await?;
-        let Some((install, query, selected)) = pending else { return Ok(None) };
-        let observation = self.full_runtime.clone().run_blocking(move || query.observe()).await?;
-        let (install, authority, expires) = if selected {
-            let authority = observation.authority().clone();
-            let expires = self.recover_selected_install(install.clone(), observation).await?;
-            (install, authority, expires)
-        } else {
-            self.rebuild_unselected_install(install, observation).await?
-        };
-        self.identity.is_primary = true;
-        self.identity.local_ref = install.recipient_ref.clone();
-        self.identity.base_record_hash =
-            ramflux_protocol::custody::object_hash(&authority.publication.record)?;
-        self.identity.base_epoch = authority.publication.record.body.device_set_epoch;
-        self.identity.master_public_key = Some(
-            authority.publication.record.body.master_certificate.body.master_public_key.clone(),
-        );
-        self.recovered_installation = Some(RecoveredInstallation {
-            status: FullStatus {
-                attachment_absent: U64(0),
-                bytes_durable: U64(0),
-                bytes_total: U64(0),
-                cut: U64(0),
-                generation: request.generation,
-                lease_expires_at: expires,
-                operation_id: request.operation_id.clone(),
-                result: None,
-                role: "responder".into(),
-                stage: FullStatusStage::Installed,
-                tail_status: FullTailStatus::Pending,
-            },
-            install,
-        });
-        self.recovered_installation
-            .as_ref()
-            .ok_or(SdkError::PairingCode("WrongContext"))?
-            .result(request)
-            .map(Some)
+    pub fn recover_full_installation<'a>(
+        &'a mut self,
+        request: &'a StatusRequest,
+    ) -> impl std::future::Future<Output = Result<Option<LocalResult>, SdkError>> + 'a {
+        Box::pin(async move {
+            self.require_open()?;
+            request.validate().map_err(|error| super::wire(&error))?;
+            if self.ceremony.is_some() {
+                return Err(SdkError::PairingCode("Busy"));
+            }
+            if let Some(recovered) = &self.recovered_installation {
+                return recovered.result(request).map(Some);
+            }
+            let pending = self.pending_install(request).await?;
+            let Some((install, query, selected)) = pending else { return Ok(None) };
+            let observation =
+                self.full_runtime.clone().run_blocking(move || query.observe()).await?;
+            let (install, authority, expires) = if selected {
+                let authority = observation.authority().clone();
+                let expires =
+                    Box::pin(self.recover_selected_install(install.clone(), observation)).await?;
+                (install, authority, expires)
+            } else {
+                Box::pin(self.rebuild_unselected_install(install, observation)).await?
+            };
+            self.identity.is_primary = true;
+            self.identity.local_ref = install.recipient_ref.clone();
+            self.identity.base_record_hash =
+                ramflux_protocol::custody::object_hash(&authority.publication.record)?;
+            self.identity.base_epoch = authority.publication.record.body.device_set_epoch;
+            self.identity.master_public_key = Some(
+                authority.publication.record.body.master_certificate.body.master_public_key.clone(),
+            );
+            self.recovered_installation = Some(RecoveredInstallation {
+                status: FullStatus {
+                    attachment_absent: U64(0),
+                    bytes_durable: U64(0),
+                    bytes_total: U64(0),
+                    cut: U64(0),
+                    generation: request.generation,
+                    lease_expires_at: expires,
+                    operation_id: request.operation_id.clone(),
+                    result: None,
+                    role: "responder".into(),
+                    stage: FullStatusStage::Installed,
+                    tail_status: FullTailStatus::Pending,
+                },
+                install,
+            });
+            self.recovered_installation
+                .as_ref()
+                .ok_or(SdkError::PairingCode("WrongContext"))?
+                .result(request)
+                .map(Some)
+        })
     }
     async fn recover_selected_install(
         &self,
@@ -116,7 +123,7 @@ impl PairingActor {
             .await?;
         self.full_runtime.register_stage(cancel.clone())?;
         let prepared = self.full_runtime.clone().run_blocking(move || preparation.verify()).await?;
-        self.finish_recovered_install(install, prepared, cancel).await?;
+        Box::pin(self.finish_recovered_install(install, prepared, cancel)).await?;
         Ok(expires)
     }
     async fn pending_install(

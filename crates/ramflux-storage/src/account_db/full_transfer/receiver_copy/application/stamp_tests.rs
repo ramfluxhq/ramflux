@@ -36,6 +36,16 @@ mod tests {
             stage.retain_forward_chunk(&hash, u64::try_from(index)?, chunk)?;
         }
         let mut copy = stage.pin_receiver_base(&hash)?.copy()?;
+        let normalized = crate::BackupDatabase::open_full_receiver_copy(
+            &copy.scratch.path.join("private.db"),
+            &copy.key,
+        )?;
+        assert_eq!(
+            normalized.db.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+            "delete",
+            "test: private B copy retained a live WAL sidecar mode"
+        );
+        drop(normalized);
         copy.project(&stage)?;
         let private = copy.scratch.path.join("private.db");
         let replacement = copy.scratch.path.join("replacement.db");

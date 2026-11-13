@@ -155,6 +155,13 @@ impl PairingActor {
         ceremony.phase = "mutually_confirmed".into();
         ceremony.expires_at = expires;
         ceremony.displayed_th = Some(th);
+        let peer = if role == PairingRole::Initiator {
+            &snapshot.context.responder
+        } else {
+            &snapshot.context.initiator
+        };
+        ceremony.peer_ref = Some(peer.device_ref.clone());
+        ceremony.peer_name = Some(peer.display_name.clone());
         let mut full = FullCeremony::new(common, None);
         full.node = Some(node.clone());
         full.transcript = Some(snapshot.context);
