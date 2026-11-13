@@ -33,12 +33,13 @@ export class CardView {
     private readonly intent:(action:string,fields:unknown)=>void,
     private readonly hostSlots:(slots:readonly HostSlot[])=>void,
     private readonly failure:(message:string)=>void) {
+    if(this.root.childElementCount)throw Error("Card root must be empty");
     this.worker=createWorker(workerURL);this.root.inert=false;
     const channel=new MessageChannel();this.port=channel.port1;
     this.ready=new Promise((resolve,reject)=>{
       this.port.onmessage=event=>{
         if(event.data?.ready){resolve();return}
-        if(event.data?.seq===undefined){reject(Error("Card runtime unavailable"));return}
+        if(event.data?.seq===undefined){const error=Error("Card runtime unavailable");reject(error);this.abort(error);return}
         this.receive(event.data);
       };
       this.worker.onerror=()=>{const error=Error("Card runtime unavailable");reject(error);this.abort(error)};
@@ -59,10 +60,10 @@ export class CardView {
   }
   private abort(error:Error,notify=true):void {
     for(const pending of this.pending.values())pending.reject(error);this.pending.clear();
-    if(notify){this.port.close();this.releaseWorker();this.root.inert=true;this.failure(error.message)}
+    if(notify){this.port.close();this.releaseWorker();this.root.inert=true;this.hostSlots([]);this.failure(error.message)}
   }
   private async request(op:string,json?:string):Promise<Reply|null> {
-    if(this.disposed)throw Error("Card disposed");
+    if(this.disposed||this.released)throw Error("Card disposed");
     if(json!==undefined && (typeof json!=="string" || json.length>16384))throw Error("Card transport bound");
     if(this.pending.size>=32)throw Error("Card busy");
     // Reserve before awaiting readiness so the pre-init queue is bounded too.
