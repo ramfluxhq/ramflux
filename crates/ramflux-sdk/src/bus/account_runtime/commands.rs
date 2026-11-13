@@ -16,6 +16,13 @@ async fn wait_receive_gate(hook: Option<super::ReceiveGateHook>) {
 }
 
 impl AccountRuntime {
+    fn preemption_error(&self) -> SdkError {
+        self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref()).map_or(
+            SdkError::NetworkingPending,
+            super::super::connection_manager::ConnectionHandle::pending,
+        )
+    }
+
     async fn cancel_native_unlock(&mut self) -> Result<(), SdkError> {
         self.stop_connection().await;
         self.stop_courier().await;
@@ -52,6 +59,7 @@ impl AccountRuntime {
     }
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
+        self.pairing.stop().await;
         self.transfers.stop().await;
         if let Some(account) = self.state.accounts.get(&self.id) {
             account.client.recover_received_attachment_fetches()?;
@@ -169,6 +177,10 @@ impl AccountRuntime {
         if lifecycle {
             self.preempt_network_tasks().await?;
         }
+        if self.pairing.busy(&command.request.method) {
+            let _ = reply.send(Err(SdkError::PairingCode("Busy")));
+            return Ok(false);
+        }
         if !lifecycle {
             let mut shutdown = self.shutdown.clone();
             let mut preempt = self.preempt.clone();
@@ -176,7 +188,7 @@ impl AccountRuntime {
                 biased;
                 _=shutdown.changed()=>return Ok(true),
                 _=preempt.changed()=>{
-                    let error=self.state.accounts.get(&self.id).and_then(|account|account.connection.as_ref()).map_or(SdkError::NetworkingPending,super::super::connection_manager::ConnectionHandle::pending);
+                    let error=self.preemption_error();
                     let _=reply.send(Err(error));return Ok(false);
                 },
                 ()=reply.closed()=>return Ok(false),
@@ -187,12 +199,15 @@ impl AccountRuntime {
                 return Ok(false);
             }
         }
-        if command.request.method == "object.fetch" {
-            self.start_fetch(command, reply);
-            return Ok(false);
-        }
-        if command.request.method == "object.put.finish" {
-            self.start_upload(command, reply).await?;
+        if matches!(
+            command.request.method.as_str(),
+            "device.transfer.begin"
+                | "device.pair.join"
+                | "device.transfer.join"
+                | "object.fetch"
+                | "object.put.finish"
+        ) {
+            self.start_owned_command(command, reply).await?;
             return Ok(false);
         }
         #[cfg(test)]
@@ -225,15 +240,7 @@ impl AccountRuntime {
         }
         if cancelled {
             if preempted {
-                let error = self
-                    .state
-                    .accounts
-                    .get(&self.id)
-                    .and_then(|account| account.connection.as_ref())
-                    .map_or(
-                        SdkError::NetworkingPending,
-                        super::super::connection_manager::ConnectionHandle::pending,
-                    );
+                let error = self.preemption_error();
                 let _ = reply.send(Err(error));
             }
             if let Err(error) = self.publish(&command.request).await {
@@ -245,7 +252,7 @@ impl AccountRuntime {
         self.complete_command(&command, result, reply).await
     }
 
-    async fn complete_command(
+    pub(super) async fn complete_command(
         &mut self,
         command: &AccountCommand,
         result: Result<super::super::actor::ActorResponse, SdkError>,
@@ -271,5 +278,23 @@ impl AccountRuntime {
         };
         let _ = reply.send(result);
         Ok(command.request.method == "account.lock" && self.state.accounts.is_empty())
+    }
+}
+
+impl AccountRuntime {
+    pub(super) async fn start_owned_command(
+        &mut self,
+        command: AccountCommand,
+        reply: tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
+    ) -> Result<(), SdkError> {
+        match command.request.method.as_str() {
+            "device.transfer.begin" | "device.pair.join" | "device.transfer.join" => {
+                Box::pin(self.start_pairing_begin(command, reply)).await;
+            }
+            "object.fetch" => self.start_fetch(command, reply),
+            "object.put.finish" => self.start_upload(command, reply).await?,
+            _ => return Err(SdkError::LocalBus("unknown owned account command".into())),
+        }
+        Ok(())
     }
 }

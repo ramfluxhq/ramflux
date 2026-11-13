@@ -76,21 +76,7 @@ async fn install_source(
         device_id: device_id.into(),
         device_epoch: device.device_epoch,
     };
-    let primary = reference == record.body.master_certificate.body.primary_device_ref;
-    if recipient.is_none() && !primary {
-        return Err(SdkError::PairingCode("PrimaryRequired"));
-    }
-    if let Some(join) = recipient {
-        let invitation = &join.token.invitation.body;
-        if invitation.destination_ref.as_ref() != Some(&reference)
-            || invitation.account_anchor != record.body.account_anchor
-            || invitation.base_record_hash != object_hash(record)?
-            || invitation.base_epoch != record.body.device_set_epoch
-            || primary
-        {
-            return Err(SdkError::PairingCode("WrongContext"));
-        }
-    }
+    let primary = source_or_linked_role(recipient, &reference, record)?;
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let profile =
         state.nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NoNodeSelected)?;
@@ -125,16 +111,7 @@ async fn install_source(
     let mut network = crate::gateway::proof_network_config(&gateway)?;
     // FreshPairingNative uses TCP, while the ordinary config's default address is QUIC.
     network.gateway_address = tcp;
-    let recipient_node = if let Some(join) = recipient {
-        let node =
-            crate::custody::CustodyConnection::discover_pairing_node(network.clone()).await?;
-        if node.envelope().body.node_signing_public_key != join.token.invitation.body.node_key {
-            return Err(SdkError::PairingCode("WrongContext"));
-        }
-        Some(node)
-    } else {
-        None
-    };
+    let recipient_node = verified_recipient_node(recipient, network.clone()).await?;
     let proof: Arc<dyn PairingNative> = Arc::new(FreshPairingNative::new(network, vault.clone()));
     let runtime = tokio::runtime::Handle::current();
     let participant = Arc::new(LocalPairingParticipant {
@@ -168,6 +145,42 @@ async fn install_source(
     actor.set_participant(participant);
     let writer = actor.bind_frontend_writer(account.client.account_db()?)?;
     install_actor_with_writer(root, account_id.into(), actor, Some(writer))
+}
+
+async fn verified_recipient_node(
+    recipient: Option<&Join>,
+    network: crate::custody::CustodyNetworkConfig,
+) -> Result<Option<ramflux_crypto::custody::VerifiedNodeRecord>, SdkError> {
+    let Some(join) = recipient else {
+        return Ok(None);
+    };
+    let node = crate::custody::CustodyConnection::discover_pairing_node(network).await?;
+    if node.envelope().body.node_signing_public_key != join.token.invitation.body.node_key {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    Ok(Some(node))
+}
+
+fn source_or_linked_role(
+    recipient: Option<&Join>,
+    reference: &DeviceRef,
+    record: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+) -> Result<bool, SdkError> {
+    let primary = reference == &record.body.master_certificate.body.primary_device_ref;
+    if let Some(join) = recipient {
+        let invitation = &join.token.invitation.body;
+        if invitation.destination_ref.as_ref() != Some(reference)
+            || invitation.account_anchor != record.body.account_anchor
+            || invitation.base_record_hash != object_hash(record)?
+            || invitation.base_epoch != record.body.device_set_epoch
+            || primary
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+    } else if !primary {
+        return Err(SdkError::PairingCode("PrimaryRequired"));
+    }
+    Ok(primary)
 }
 
 fn validated_join(request: &LocalBusFrame) -> Result<Join, SdkError> {

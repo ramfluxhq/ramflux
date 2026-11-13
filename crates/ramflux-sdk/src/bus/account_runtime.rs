@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
 mod connection;
+mod pairing_calls;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -63,6 +64,7 @@ struct AccountRuntime {
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    pairing: pairing_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -137,12 +139,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         connection_sender,
         connection_work,
         ledger: None,
+        pairing: pairing_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
     if let Some(state) = account.state.accounts.get(&account.id) {
@@ -401,6 +405,11 @@ impl AccountRuntime {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
                         tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
                     }
+                    continue;
+                },
+                completion = self.pairing.receive() => {
+                    if let Some(completion) = completion
+                        && self.finish_pairing_begin(completion).await? { break; }
                     continue;
                 },
                 command = self.receiver.recv() => command,

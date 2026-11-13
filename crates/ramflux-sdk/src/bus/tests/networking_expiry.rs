@@ -97,6 +97,7 @@ impl Harness {
             connection_sender,
             connection_work,
             ledger: None,
+            pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             transfers: super::uploads::Transfers::start(),
             id: "expiry-runtime".into(),
             state: LocalBusDaemonState {

@@ -103,6 +103,7 @@ pub(super) fn runtime_for(
         connection_sender,
         connection_work,
         ledger: None,
+        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         receive_gate_hook: None,
         courier_events: None,
     }

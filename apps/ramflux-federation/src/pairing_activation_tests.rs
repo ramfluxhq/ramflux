@@ -20,10 +20,10 @@ mod tests {
                 let sentinel = root.path().join(format!("case-{index}"));
                 let mut command = tokio::process::Command::new(std::env::current_exe()?);
                 command
-                    .args(["--exact", EXACT])
+                    .args(["--exact", EXACT, "--nocapture"])
                     .env(CHILD, &sentinel)
                     .env_remove("RAMFLUX_DEVICE_PAIRING_ENABLED")
-                    .stdout(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit())
                     .kill_on_drop(true);
                 if let Some(flag) = flag {

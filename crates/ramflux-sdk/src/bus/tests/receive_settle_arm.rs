@@ -135,6 +135,7 @@ async fn case() -> TestResult {
         connection_sender,
         connection_work,
         ledger: None,
+        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         transfers: super::uploads::Transfers::start(),
         id: "settle-arm".into(),
         state: LocalBusDaemonState {
@@ -226,6 +227,7 @@ fn runtime_with_pending(
             connection_sender,
             connection_work,
             ledger: None,
+            pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             transfers: super::uploads::Transfers::start(),
             id: id.into(),
             state: LocalBusDaemonState {

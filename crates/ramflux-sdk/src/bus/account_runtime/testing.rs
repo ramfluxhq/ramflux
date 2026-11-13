@@ -144,6 +144,7 @@ impl AccountSessionHarness {
             connection_sender,
             connection_work,
             ledger: None,
+            pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             #[cfg(test)]
             receive_gate_hook: None,
             #[cfg(test)]
