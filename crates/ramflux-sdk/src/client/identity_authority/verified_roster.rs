@@ -41,6 +41,25 @@ impl VerifiedLayerRoster {
         Self { record }
     }
 
+    /// Current certificate scopes bound implicit group-device expansion.
+    #[must_use]
+    pub(crate) fn group_devices(&self, now: u64) -> std::collections::BTreeSet<String> {
+        let body = &self.record.envelope().body;
+        body.devices
+            .iter()
+            .filter(|entry| {
+                let device = ramflux_protocol::custody::DeviceRef {
+                    account_anchor: body.account_anchor.clone(),
+                    device_id: entry.device_id.clone(),
+                    device_epoch: entry.device_epoch,
+                };
+                self.record.authorize(&device, "group", now).is_ok()
+                    && self.record.authorize(&device, "message", now).is_ok()
+            })
+            .map(|entry| entry.device_id.clone())
+            .collect()
+    }
+
     #[must_use]
     pub(crate) fn device(&self, device_id: &str) -> Option<&Device> {
         self.record.envelope().body.devices.iter().find(|row| row.device_id == device_id)

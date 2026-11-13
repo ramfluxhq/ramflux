@@ -229,6 +229,11 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         [1, 0, 0, 0],
     ),
     (
+        "client/raw_inner_reparse.rs",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/raw_inner_reparse.rs")),
+        [0, 1, 0, 0],
+    ),
+    (
         "client/routed/device_revocation_tests.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -335,12 +340,12 @@ fn caller_classification_is_exhaustive() -> Result<(), Box<dyn std::error::Error
         for (name, expected) in names.iter().zip(counts) {
             let needle = format!(".{name}(");
             assert_eq!(source.matches(&needle).count(), *expected, "classify new caller in {path}");
-            for arguments in source.split(&needle).skip(1) {
-                let arguments = arguments.trim_start();
+            for (offset, _) in source.match_indices(&needle) {
+                let arguments = source[offset + needle.len()..].trim_start();
                 if arguments.starts_with("HeadUse::HistoricalRead") {
-                    assert_eq!(
-                        *path, "bus/dispatch/group/history.rs",
-                        "unreviewed historical consumer"
+                    assert!(
+                        historical_consumer_allowed(std::path::Path::new(path), source, offset)?,
+                        "unreviewed historical consumer in {path}"
                     );
                 }
                 assert!(
@@ -373,19 +378,68 @@ fn scan_historical_consumers(
         }
         let source = std::fs::read_to_string(&path)?;
         for (offset, _) in source.match_indices(&needle) {
-            let allowed = if path.ends_with("bus/dispatch/group/history.rs") {
-                true
-            } else if path.ends_with("bus/dispatch/group.rs") {
-                let start = source.find("fn group_receive_compat(").ok_or("reviewed projection")?;
-                let end = start + source[start..].find("\n}\n").ok_or("projection end")?;
-                (start..end).contains(&offset)
-            } else {
-                // The terminal comparison defines the clock-only bypass; it is not a consumer.
-                path.ends_with("client/identity_authority/custody_freshness.rs")
-                    && source[..offset].ends_with("if purpose == ")
-            };
+            let allowed = historical_consumer_allowed(&path, &source, offset)?;
             assert!(allowed, "unreviewed historical authority consumer: {}", path.display());
         }
     }
+    Ok(())
+}
+
+// Historical scope bypasses only the fetch-age clock. The retained-input worker
+// rechecks receipt/header/source/scope, discards ephemeral and native controls,
+// and permits no legacy-origin operation except already-admitted Message projection.
+fn historical_consumer_allowed(
+    path: &std::path::Path,
+    source: &str,
+    offset: usize,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if path.ends_with("bus/dispatch/group/history.rs") {
+        return Ok(true);
+    }
+    if path.ends_with("bus/dispatch/group.rs") {
+        return within_function(source, "group_receive_compat", offset);
+    }
+    if path.ends_with("client/raw_inner_reparse.rs") {
+        return Ok(within_function(source, "install_raw_reparse", offset)?
+            || within_function(source, "legacy_raw_reparse_source", offset)?);
+    }
+    // This terminal comparison defines the clock-only bypass, not a consumer.
+    Ok(path.ends_with("client/identity_authority/custody_freshness.rs")
+        && source[..offset].ends_with("if purpose == "))
+}
+
+fn within_function(
+    source: &str,
+    function: &str,
+    offset: usize,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let marker = format!("fn {function}(");
+    if source.matches(&marker).count() != 1 {
+        return Err(format!("ambiguous reviewed consumer {function}").into());
+    }
+    let start = source.find(&marker).ok_or("reviewed consumer absent")?;
+    let line = source[..start].rsplit('\n').next().ok_or("consumer line")?;
+    let indent = &line[..line.len() - line.trim_start().len()];
+    let close = format!("\n{indent}}}\n");
+    let end = start + source[start..].find(&close).ok_or("reviewed consumer end")?;
+    Ok((start..end).contains(&offset))
+}
+
+#[test]
+fn historical_reparse_scope_does_not_admit_another_authority_consumer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::path::Path::new("client/raw_inner_reparse.rs");
+    let source = include_str!("../raw_inner_reparse.rs");
+    let needle = ["HeadUse::", "HistoricalRead"].concat();
+    for (offset, _) in source.match_indices(&needle) {
+        assert!(historical_consumer_allowed(path, source, offset)?);
+    }
+    let planted =
+        format!("{source}\nfn new_authority() {{ client.trusted_device({needle}, source); }}\n");
+    let offset = planted.rfind(&needle).ok_or("planted consumer")?;
+    assert!(
+        !historical_consumer_allowed(path, &planted, offset)?,
+        "a new authority consumer requires its own review"
+    );
     Ok(())
 }

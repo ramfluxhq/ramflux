@@ -13,7 +13,7 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
     let id = ramflux_protocol::encode_base64url(&identity.id);
     let entry = seal(a, b, message("upgrade-opaque-original", "c"), raw)?;
     let opened = b.client.open_routed(&entry, &b.id)?;
-    let copy = b.client.authenticated_committed_key(HeadUse::HistoricalRead, &entry)?;
+    let copy = b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let source = &opened.remote_device;
     let provenance = crate::client::routed::generated_receive::Provenance {
         source: source.storage_key().into(),
