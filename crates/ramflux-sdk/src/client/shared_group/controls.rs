@@ -227,8 +227,8 @@ impl RamfluxClient {
                     .effective_role(&actor.identity.root_commitment, &actor.identity.device_id)
                     .is_none()
                     || self
-                        .observed_device_set(&actor.identity.root_commitment)?
-                        .is_none_or(|set| set.device_set_epoch < *device_set_epoch)
+                        .group_roster_epoch(&actor.identity.root_commitment)?
+                        .is_none_or(|epoch| epoch < *device_set_epoch)
                 {
                     return Err(StorageError::GroupPermissionDenied.into());
                 }

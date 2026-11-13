@@ -329,6 +329,18 @@ async fn apply_routed_or_defer(
             backpressure.completed(&account.client, &prepared.entry)?;
             Ok(reply)
         }
+        Err(SdkError::StorageCapacity { source_anchor, .. }) => {
+            run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, _| {
+                account.client.record_generated_capacity(
+                    &prepared.entry,
+                    &source_anchor,
+                    now_unix_timestamp(),
+                )?;
+                cover_w1_outcome(tx, prepared.entry.inbox_seq, true, &[], turn.compat)?;
+                Ok(())
+            })?;
+            Ok(None)
+        }
         Err(error) if directory_pending(&error) => {
             defer_routed_pending(
                 account,
@@ -599,6 +611,9 @@ fn open_already_covered(
     if held_retry_open(account, turn, handle_generation(), entry.inbox_seq, prepared)? {
         return Ok(true);
     }
+    if account.client.generated_capacity_held(entry)? {
+        return Ok(true);
+    }
     if !backpressure.holds(entry) {
         return Ok(false);
     }
@@ -661,6 +676,11 @@ fn admit_failure(
         if tx.account().has_inbox_retry(&key)? {
             return Ok(true);
         }
+        account.client.commit_generated_refusal_pair(
+            entry,
+            &account.gateway_config.device_id,
+            error_code,
+        )?;
         match SourceFailure::admit_in(
             tx,
             ReceiveFailure {
@@ -825,6 +845,7 @@ fn settled_routed_kind(
     entry: &GatewayInboxEntry,
     retry_key: Option<&str>,
 ) -> Result<Option<Kind>, SdkError> {
+    crate::client::routed::validate_routed_ciphertext(entry)?;
     let auth_key = match account.client.retained_committed_receipt_key(entry) {
         Ok(Some(key)) => key,
         Err(SdkError::InboundRejected(reason))

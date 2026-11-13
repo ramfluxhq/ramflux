@@ -88,6 +88,7 @@ impl SessionConnector for GatewayConnector {
 
 #[derive(Clone)]
 pub(crate) struct SessionMetadata {
+    pub ephemeral_negotiated: bool,
     pub config: GatewaySessionConfig,
     pub session: GatewaySessionState,
     pub mode: crate::gateway::session_push::SessionMode,
@@ -179,6 +180,8 @@ fn new_shared(
         courier_wakes: [
             "delivery-receipts",
             "own-device-copy",
+            "self-sync",
+            "own-history",
             "contact-control",
             "surface-resync",
             "pair-reset",

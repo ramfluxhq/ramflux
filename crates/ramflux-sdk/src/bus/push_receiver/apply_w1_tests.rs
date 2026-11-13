@@ -6,10 +6,10 @@
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
-    self, after_w1_cut, apply_page, binding_attempts, binding_give_up, covered_below,
-    force_covered_below, force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy,
-    queue_policy_kind, queue_projection, queue_terminal_reply, set_after_classify,
-    set_after_w1_cut, set_before_commit, set_cross_await, set_manifest_await, set_projection_key,
+    self, after_w1_cut, apply_page, binding_attempts, covered_below, force_covered_below,
+    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy, queue_policy_kind,
+    queue_projection, queue_terminal_reply, set_after_classify, set_after_w1_cut,
+    set_before_commit, set_cross_await, set_manifest_await, set_projection_key,
 };
 use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::receive::bind_retry_turns;
@@ -307,7 +307,7 @@ async fn apply_page_refuses_stale_generation_after_await() -> Result<(), SdkErro
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn legacy_binding_changed_gives_up_after_three() -> Result<(), SdkError> {
+async fn a2i_binding_change_refuses_before_legacy_retry() -> Result<(), SdkError> {
     let mut harness = open()?;
     let target = harness.account.target_delivery_id.clone();
     queue_unbound_answers(std::iter::repeat_n(true, 8));
@@ -321,10 +321,16 @@ async fn legacy_binding_changed_gives_up_after_three() -> Result<(), SdkError> {
     legacy_w1::set_fault(Fault::None);
     let error = refused.as_ref().err();
     assert!(
-        matches!(error, Some(SdkError::InboundRejected(text)) if text == binding_give_up()),
-        "give-up must be the typed error through apply_page: {error:?}"
+        matches!(
+            error,
+            Some(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                ..
+            })
+        ),
+        "A2I must refuse before legacy binding retries: {error:?}"
     );
-    assert_eq!(binding_attempts(), 3, "give-up is exactly three binding attempts");
+    assert_eq!(binding_attempts(), 0, "refused A2I never enters a binding retry");
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1),
@@ -905,6 +911,7 @@ fn persist_projection_receipt_at(
         },
         entry: entry.clone(),
         projected: false,
+        erasure_targets: Vec::new(),
     };
     account.client.account_db()?.persist_actor_state(key, &receipt)?;
     Ok(())

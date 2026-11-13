@@ -30,8 +30,8 @@ fn scalar(tag: u32, value: u64) -> Vec<u8> {
 #[test]
 fn every_interleaved_oneof_has_a_field_order_encoder() -> TestResult {
     let pool = descriptors()?;
-    assert_eq!(pool.all_messages().filter(|message| !message.is_map_entry()).count(), 253);
-    assert_eq!(pool.all_messages().count(), 254);
+    assert_eq!(pool.all_messages().filter(|message| !message.is_map_entry()).count(), 256);
+    assert_eq!(pool.all_messages().count(), 257);
     let mut interleaved = Vec::new();
     for message in pool.all_messages() {
         for choice in message.oneofs().filter(|choice| !choice.is_synthetic()) {
@@ -60,7 +60,12 @@ fn byte_limits_accept_the_cap_and_reject_one_more() -> TestResult {
     let pool = descriptors()?;
     for message in pool.all_messages().filter(|m| m.name().starts_with("Native")) {
         if message.get_field_by_name("canonical").is_some() {
-            caps.push((message.name().to_owned(), "canonical", 8 * 1024));
+            let cap = if message.name() == "NativeGroupSnapshot" {
+                crate::group_state::MAX_GROUP_STATE_BYTES
+            } else {
+                8 * 1024
+            };
+            caps.push((message.name().to_owned(), "canonical", cap));
         }
     }
     for (name, field, cap) in caps {

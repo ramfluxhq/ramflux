@@ -15,12 +15,108 @@ fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
 }
 
 impl RamfluxClient {
+    pub(super) fn authorize_generated_pair_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if source != opened.remote_device
+            || opened.routing.group_id.is_some()
+            || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+        {
+            return Err(invalid(
+                "pair reset requires the authenticated pair peer on a direct control route",
+            ));
+        }
+        if self.friend_rejection_reason(source.root_commitment())?.is_some() {
+            return Err(invalid("pair recovery forbidden for removed or blocked contact"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_generated_pair_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        identity: &ramflux_protocol::message::EventIdentity,
+        control: &ramflux_protocol::message::Control,
+        exact_inner: &[u8],
+    ) -> Result<(), SdkError> {
+        use ramflux_protocol::message::control::Payload;
+        self.authorize_generated_pair_control(opened, entry)?;
+        let key = format!(
+            "routed/pair-control-applied/{}/{}",
+            opened.remote_device.storage_key(),
+            ramflux_protocol::encode_base64url(&identity.id)
+        );
+        let digest = *blake3::hash(exact_inner).as_bytes();
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if let Some(old) = db.load_actor_state::<[u8; 32]>(&key)? {
+                return if old == digest { Ok(()) } else { Err(SdkError::ReplayMismatch) };
+            }
+            match control.payload.as_ref() {
+                Some(Payload::Reset(reset)) => {
+                    self.abandon_unconfirmed_candidate(&opened.local_device,
+                        &opened.remote_device, reset.rejected_bootstrap_floor)?;
+                },
+                Some(Payload::ResetAck(_)) => {},
+                _ => return Err(invalid("pair reset payload mismatch")),
+            }
+            db.append_journal(&format!("pair-reset:{}", ramflux_protocol::encode_base64url(&identity.id)),
+                "session.reset", &serde_json::json!({
+                    "device_id": opened.remote_device.storage_key(), "reason":"authenticated_reset_request",
+                }), super::now_unix_timestamp(), None)?;
+            db.persist_actor_state(&key, &digest)?;
+            Ok(())
+        })
+    }
+
+    fn project_generated_own_message_copy(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
+        let Ok((identity, content)) = Self::decode_generated_inner(body) else {
+            return Ok(false);
+        };
+        if let Some(ramflux_protocol::message::content::Value::SelfSync(sync)) = &content.value {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            if identity.conversation_id != opened.routing.conversation_id
+                || identity.author.as_ref().is_none_or(|author| {
+                    author.account_anchor != source.root_commitment()
+                        || author.device_id != source.device_id()
+                })
+            {
+                return Err(invalid("self sync identity differs from authenticated route"));
+            }
+            self.apply_self_sync_in(&source, &identity.conversation_id, sync)?;
+            return Ok(true);
+        }
+        let Some(ramflux_protocol::message::content::Value::Control(control)) = content.value
+        else {
+            return Ok(false);
+        };
+        let Some(ramflux_protocol::message::control::Payload::OwnMessageCopy(copy)) =
+            control.payload
+        else {
+            return Ok(false);
+        };
+        self.receive_generated_own_message_copy(opened, entry, &copy)?;
+        Ok(true)
+    }
+
     pub(super) fn project_routed_control(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if self.project_generated_own_message_copy(opened, entry, body)? {
+            return Ok(None);
+        }
         if self.receive_contact_control(entry, &opened.routing, body)? {
             return Ok(None);
         }
@@ -59,6 +155,15 @@ impl RamfluxClient {
         )? {
             return Ok(None);
         }
+        self.project_json_control(opened, entry, body)
+    }
+
+    fn project_json_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, SdkError> {
         let value: Value = serde_json::from_slice(body)?;
         if value["schema"] == "ramflux.sdk.own_device_sync.v1" {
             let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
@@ -71,55 +176,53 @@ impl RamfluxClient {
             }
             return Ok(None);
         }
-        if let Ok(mut event) = serde_json::from_slice::<A2iControlEvent>(body) {
-            if event.source_device_id != entry.envelope.source_device_id
-                || event.target_device_id != opened.local_device.device_id()
-            {
-                return Err(invalid("control event device binding mismatch"));
-            }
-            let source = self.bind_received_a2i_event(&mut event, entry)?;
-            if let Some(old) = self
-                .account_db()?
-                .load_actor_state::<A2iControlEvent>(&a2i_key(&source, &event.event_id)?)?
-            {
-                event.acknowledged = old.acknowledged;
-                if event != old {
-                    return Err(invalid(
-                        "control event id reused by another authenticated delivery",
-                    ));
-                }
-            }
-            self.account_db()?.persist_actor_state(
-                &self
-                    .authenticated_committed_key(HeadUse::NewAuthorization, entry)?
-                    .replace("routed/committed/", "routed/control/"),
-                &event,
-            )?;
-            self.account_db()?.persist_actor_state(&a2i_key(&source, &event.event_id)?, &event)?;
+        if serde_json::from_slice::<A2iControlEvent>(body).is_ok() {
+            Self::require_a2i_binding_authority()?;
         } else {
-            let event: Value = serde_json::from_slice(body)?;
-            if matches!(
-                event["type"].as_str(),
-                Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-            ) {
-                if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
-                    return Err(invalid("pair recovery forbidden for removed or blocked contact"));
-                }
-                if event["type"] == "pair.session.reset.v1"
-                    && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
-                {
-                    self.abandon_unconfirmed_candidate(
-                        &opened.local_device,
-                        &opened.remote_device,
-                        floor,
-                    )?;
-                }
-                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device.storage_key(),"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
-            } else {
-                self.project_contact_control(entry, &event)?;
-            }
+            self.project_pair_or_contact_control(opened, entry, body)?;
         }
         Ok(None)
+    }
+
+    fn project_pair_or_contact_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        let event: Value = serde_json::from_slice(body)?;
+        if matches!(
+            event["type"].as_str(),
+            Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+        ) {
+            if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
+                return Err(invalid("pair recovery forbidden for removed or blocked contact"));
+            }
+            if event["type"] == "pair.session.reset.v1"
+                && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
+            {
+                self.abandon_unconfirmed_candidate(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    floor,
+                )?;
+            }
+            self.account_db()?.append_journal(
+                &format!(
+                    "pair-reset:{}",
+                    self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+                ),
+                "session.reset",
+                &serde_json::json!({
+                    "device_id": opened.remote_device.storage_key(),
+                    "reason": "authenticated_reset_request"
+                }),
+                super::now_unix_timestamp(),
+                None,
+            )?;
+            return Ok(());
+        }
+        self.project_contact_control(entry, &event)
     }
     pub(crate) fn project_legacy_contact_control(
         &self,
@@ -239,11 +342,43 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    pub(crate) fn refresh_generated_control_cache(
+        &mut self,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
+        if crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body).is_ok()
+        {
+            if let Ok((_, content)) = Self::decode_generated_inner(body) {
+                use ramflux_protocol::message::{content, control};
+                match content.value {
+                    Some(content::Value::Call(call)) => {
+                        let native = crate::client::generated_call::native::to_native(call)?;
+                        self.refresh_native_call_control(&native, body)?;
+                    }
+                    Some(content::Value::Control(control)) => {
+                        if let Some(control::Payload::ObjectRevoke(revoke)) = control.payload
+                            && self.object_store.cached_object(&revoke.object_id).is_some()
+                        {
+                            self.object_store.tombstone(&revoke.object_id)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(super) fn refresh_routed_control_cache(
         &mut self,
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
+        if self.refresh_generated_control_cache(body)? {
+            return Ok(());
+        }
         if self.refresh_call_control(body)? {
             return Ok(());
         }

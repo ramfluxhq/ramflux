@@ -23,6 +23,18 @@ pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
 pub mod federation;
+pub(crate) mod generated_call;
+mod generated_capacity;
+pub(crate) mod generated_content;
+pub(crate) mod generated_control;
+mod generated_delete_fence;
+mod generated_edit_retirement;
+pub(crate) mod generated_group;
+mod generated_history;
+mod generated_identity;
+mod generated_pending_edit;
+mod generated_restore;
+pub(crate) mod generated_surface;
 pub mod group;
 mod group_control_roots;
 pub mod group_delivery;
@@ -40,6 +52,7 @@ pub(crate) mod inbox_failure;
 mod legacy_activation_guard_tests;
 pub(crate) mod legacy_w1;
 pub mod mcp_a2ui;
+pub(crate) mod message_mutations;
 mod native_branch;
 mod native_safety;
 #[cfg(test)]
@@ -55,19 +68,36 @@ mod own_group_lazy_authority;
 mod own_sent_delivery;
 pub(crate) mod own_sent_message;
 mod private_prekeys;
+pub(crate) mod raw_inner_origin;
+mod raw_inner_reparse;
 mod receipt_bindings;
 pub mod recovery;
+pub use raw_inner_reparse::ReparseProgress;
+mod generated_updates;
 pub(crate) mod reply_outbox;
 pub(crate) mod routed;
+pub mod self_sync;
 pub(crate) mod shared_group;
 pub mod storage;
 pub(crate) mod surface;
 pub(crate) mod target_selection;
 pub(crate) mod task;
+pub mod typed_messages;
+pub mod typed_read_model;
+pub mod typing;
+mod unsupported_view;
+
+#[cfg(test)]
+mod activation_guard_tests;
 
 use crate::prelude::*;
 
 pub struct RamfluxClient {
+    pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
+    pub(crate) typing_sender: std::cell::RefCell<typing::sender::TypingSender>,
+    pub(crate) self_sync_live_generation: std::cell::Cell<Option<u64>>,
+    pub(crate) self_sync_restore_clock:
+        std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
@@ -94,6 +124,10 @@ pub struct RamfluxClient {
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            typing_receiver: std::cell::RefCell::default(),
+            typing_sender: std::cell::RefCell::default(),
+            self_sync_live_generation: std::cell::Cell::new(None),
+            self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,
             voice_calls: BTreeMap::new(),

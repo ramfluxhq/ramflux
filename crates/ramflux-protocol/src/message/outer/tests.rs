@@ -64,22 +64,27 @@ fn collapse_tag() -> String {
     crate::encode_base64url([0x22_u8; 32])
 }
 
+fn report_commitment() -> String {
+    crate::encode_base64url([0x33_u8; 32])
+}
+
 fn candidate_value(mode: &str) -> Value {
     json!({
         "schema": CANDIDATE_ENVELOPE_SCHEMA,
         "version": 2,
-        "domain": crate::domain::ENVELOPE,
+        "domain": "ramflux.envelope.v2",
         "envelope_id": "envelope",
         "source_principal_id": "principal",
         "source_device_id": "device",
         "target_delivery_id": "target",
         "delivery_class": "message",
         "priority": "normal",
-        "ttl_seconds": 300,
+        "ttl": 300,
         "created_at": 1_762_128_000_i64,
-        "encrypted_payload": "payload",
-        "payload_hash": "hash",
+        "encrypted_payload": "cGF5bG9hZA",
+        "payload_hash": crate::hash_base64url(crate::domain::ENVELOPE, b"cGF5bG9hZA"),
         "collapse_tag": collapse_tag(),
+        "report_commitment": report_commitment(),
         "delivery_mode": mode,
         "node_report_receipt": null,
         "signing_key_id": "key",
@@ -94,9 +99,11 @@ const LIVE_ENVELOPE_GOLDEN: &[u8] = br#"{"created_at":1000,"delivery_class":"opa
 
 fn candidate_outer(mode: NamedDeliveryMode) -> CandidateOuterEnvelope {
     CandidateOuterEnvelope {
+        ext: crate::Ext::default(),
+        routing_set_id: None,
         schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
-        domain: crate::domain::ENVELOPE.to_owned(),
+        domain: "ramflux.envelope.v2".to_owned(),
         envelope_id: "envelope".to_owned(),
         source_principal_id: "principal".to_owned(),
         source_device_id: "device".to_owned(),
@@ -108,6 +115,7 @@ fn candidate_outer(mode: NamedDeliveryMode) -> CandidateOuterEnvelope {
         encrypted_payload: "payload".to_owned(),
         payload_hash: "hash".to_owned(),
         collapse_tag: collapse_tag(),
+        report_commitment: report_commitment(),
         delivery_mode: mode,
         node_report_receipt: None,
         signed: SignedFields {
@@ -201,6 +209,15 @@ fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
         OuterProfileError::UnknownMode.to_string(),
         "new profile rejects unknown delivery_mode"
     );
+    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
+    let mut live = live_envelope(None);
+    live.delivery_mode = Some("ephemeral".into());
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Ephemeral);
+    assert!(ephemeral::require_durable(&live).is_err());
+    live.ext.ext.insert("delivery_mode".into(), json!("durable"));
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Invalid);
+    live.delivery_mode = None;
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Invalid);
     Ok(())
 }
 
@@ -394,12 +411,39 @@ fn candidate_outer_round_trip_and_sender_excludes_receipt() -> Result<(), Box<dy
     let outer: CandidateOuterEnvelope = decode_candidate_outer_ijson(&serde_json::to_vec(&value)?)?;
     assert_eq!(outer.delivery_class, CandidateDeliveryClass::Message);
     let signed = super::candidate_outer_sender_signed_bytes(&outer)?;
-    let signed_json: Value = serde_json::from_slice(&signed)?;
+    assert!(signed.starts_with(crate::SENDER_TRANSCRIPT_PREFIX));
+    let signed_json: Value =
+        serde_json::from_slice(&signed[crate::SENDER_TRANSCRIPT_PREFIX.len()..])?;
     assert!(
         signed_json.get("node_report_receipt").is_none()
             || signed_json["node_report_receipt"].is_null()
     );
+    assert_eq!(signed_json["report_commitment"], json!(report_commitment()));
     assert_eq!(CRYPTOBOX_OVERHEAD_BYTES, 581);
+    Ok(())
+}
+
+#[test]
+fn candidate_outer_refuses_missing_or_short_report_commitment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut missing = candidate_value("durable");
+    missing.as_object_mut().ok_or("object")?.remove("report_commitment");
+    assert_eq!(
+        decode_candidate_outer_ijson(&serde_json::to_vec(&missing)?)
+            .err()
+            .ok_or("missing C")?
+            .to_string(),
+        OuterProfileError::Malformed.to_string()
+    );
+    let mut short = candidate_value("durable");
+    short["report_commitment"] = json!(crate::encode_base64url([0x33_u8; 31]));
+    assert_eq!(
+        decode_candidate_outer_ijson(&serde_json::to_vec(&short)?)
+            .err()
+            .ok_or("short C")?
+            .to_string(),
+        OuterProfileError::ReportCommitment.to_string()
+    );
     Ok(())
 }
 

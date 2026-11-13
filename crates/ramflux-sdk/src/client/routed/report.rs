@@ -6,6 +6,7 @@
 use super::{RamfluxClient, invalid};
 use crate::gateway::helpers::sdk_device_signed_fields;
 use crate::prelude::*;
+use prost::Message as _;
 use ramflux_protocol::message::outer::{
     candidate_report_a0_from_envelope, encode_candidate_report_a0,
 };
@@ -18,18 +19,26 @@ pub(super) struct DirectReport {
     pub a0_bytes: Vec<u8>,
 }
 
+pub(super) struct ReportPolicy<'a> {
+    pub local_device_id: &'a str,
+    pub mode: &'static str,
+    pub priority: ramflux_protocol::Priority,
+    pub outer_profile: Option<(&'static str, u32)>,
+}
+
 /// Nested packet plus the A0 committed at seal. Not a wire struct.
 #[must_use]
 pub(crate) struct SealedRouted {
     pub packet: SdkDmEncryptedEnvelope,
     pub committed_a0: Option<Vec<u8>>,
+    pub metadata_commitment: Option<String>,
 }
 
 impl SealedRouted {
     /// Split into the nested packet (wire body) and the A0 committed at seal.
     #[must_use]
-    pub(crate) fn into_parts(self) -> (SdkDmEncryptedEnvelope, Option<Vec<u8>>) {
-        (self.packet, self.committed_a0)
+    pub(crate) fn into_parts(self) -> (SdkDmEncryptedEnvelope, Option<Vec<u8>>, Option<String>) {
+        (self.packet, self.committed_a0, self.metadata_commitment)
     }
 }
 
@@ -79,13 +88,13 @@ pub(crate) fn refuse_a0_mismatch(
     Ok(())
 }
 
-pub(super) fn assemble_direct_report(
+pub(super) fn assemble_report_with_policy(
     client: &RamfluxClient,
     message: &GatewayDirectMessage,
     session: &ramflux_crypto::DmSession,
     inner: &[u8],
-    local_device_id: &str,
     recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    policy: &ReportPolicy<'_>,
 ) -> Result<DirectReport, SdkError> {
     let kcollapse =
         session.collapse_key().ok_or(ramflux_crypto::CryptoError::MissingCollapseKey)?;
@@ -98,8 +107,9 @@ pub(super) fn assemble_direct_report(
     let a0 = candidate_report_a0_from_envelope(&report_a0_envelope(
         client,
         message,
-        local_device_id,
+        policy.local_device_id,
         &ramflux_protocol::encode_base64url(collapse_tag),
+        policy,
     )?)?;
     let a0_bytes = encode_candidate_report_a0(&a0)?;
     let report_commitment = ramflux_crypto::report_commitment(&opening, inner, &a0_bytes)?;
@@ -129,9 +139,9 @@ pub(super) fn opened_inner_plaintext(
 pub(super) fn refuse_direct_candidate_opening(
     envelope: &ramflux_protocol::Envelope,
     session: &ramflux_crypto::DmSession,
-    kind: &super::Kind,
+    _kind: &super::Kind,
 ) -> Result<(), SdkError> {
-    if *kind != super::Kind::Direct || !crate::client::target_selection::schema_v1_selected() {
+    if !crate::client::target_selection::schema_v1_selected() {
         return Ok(());
     }
     if envelope.report_commitment.is_none() {
@@ -166,15 +176,18 @@ fn report_a0_envelope(
     message: &GatewayDirectMessage,
     local_device_id: &str,
     collapse_tag: &str,
+    policy: &ReportPolicy<'_>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let source_principal_id = client
         .device_branch
         .as_ref()
         .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
+    let profile =
+        policy.outer_profile.unwrap_or_else(|| crate::dm::candidate_outer_profile(policy.mode));
     let mut envelope = ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        schema: profile.0.to_owned(),
+        version: profile.1,
+        domain: profile.0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: sdk_device_signed_fields(local_device_id, ""),
         envelope_id: message.envelope_id.clone(),
@@ -182,13 +195,18 @@ fn report_a0_envelope(
         source_device_id: local_device_id.to_owned(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority: ramflux_protocol::Priority::Normal,
+        delivery_class: if profile.0 == ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        {
+            ramflux_protocol::DeliveryClass::Message
+        } else {
+            ramflux_protocol::DeliveryClass::OpaqueEvent
+        },
+        priority: policy.priority.clone(),
         ttl: message.ttl,
         created_at: message.created_at,
         encrypted_payload: String::new(),
         payload_hash: String::new(),
-        delivery_mode: Some("durable".to_owned()),
+        delivery_mode: Some(policy.mode.to_owned()),
         collapse_tag: Some(collapse_tag.to_owned()),
         report_commitment: None,
     };
@@ -203,4 +221,50 @@ fn decode_fixed_32(value: &str, field: &'static str) -> Result<[u8; 32], SdkErro
     let raw = ramflux_protocol::decode_base64url(value)
         .map_err(|_| invalid(&format!("{field} must be 32 bytes")))?;
     raw.as_slice().try_into().map_err(|_| invalid(&format!("{field} must be 32 bytes")))
+}
+
+/// Sender-side header commitment. The dormant legacy/native path has no generated Inner.
+pub(super) fn message_metadata_commitment(
+    body: &[u8],
+    created_at: i64,
+    ttl_seconds: u32,
+) -> Result<Option<String>, SdkError> {
+    if !crate::client::target_selection::schema_v1_selected()
+        || !ramflux_protocol::message::Inner::decode(body)
+            .is_ok_and(|inner| inner.identity.is_some())
+    {
+        return Ok(None);
+    }
+    let issued_at =
+        u64::try_from(created_at).map_err(|_| invalid("negative Message issue time"))?;
+    let expires_at = issued_at
+        .checked_add(u64::from(ttl_seconds))
+        .ok_or_else(|| invalid("Message expiry overflow"))?;
+    let result = ramflux_protocol::message::original_header::for_inner(body, issued_at, expires_at);
+    #[cfg(test)]
+    if result.is_err() && ALLOW_INVALID_HEADER_FIXTURE.with(std::cell::Cell::get) {
+        return Ok(None);
+    }
+    result.map_err(|error| invalid(&error.to_string()))
+}
+
+#[cfg(test)]
+thread_local! { static ALLOW_INVALID_HEADER_FIXTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Adversarial receive fixtures may seal bytes a conforming generated producer refuses.
+#[cfg(test)]
+pub(super) fn with_invalid_header_fixture<T>(seal: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ALLOW_INVALID_HEADER_FIXTURE.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(ALLOW_INVALID_HEADER_FIXTURE.with(|flag| flag.replace(true)));
+    seal()
+}
+
+#[cfg(test)]
+pub(super) fn allows_invalid_header_fixture() -> bool {
+    ALLOW_INVALID_HEADER_FIXTURE.with(std::cell::Cell::get)
 }

@@ -20,7 +20,15 @@ pub(super) enum BackupMergeMode<'a> {
 pub struct BackupMergeReport {
     pub restored: BackupCounts,
     pub kept_newer: BackupCounts,
+    pub refused_items: Vec<BackupItemRefusal>,
 }
+/// One logical incoming item and all its dependent revisions were refused.
+#[derive(Debug)]
+pub struct BackupItemRefusal {
+    pub message_id: String,
+    pub code: ramflux_protocol::message::original_header::EvidenceError,
+}
+
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -87,7 +95,11 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
         || table.starts_with("schema_")
         || matches!(
             table,
-            "runtime_outbox" | "runtime_operation" | "runtime_journal" | "runtime_journal_bounds"
+            "runtime_outbox"
+                | "runtime_operation"
+                | "runtime_journal"
+                | "runtime_journal_bounds"
+                | "runtime_message_sequence"
         )
         || matches!(
             table,
@@ -101,6 +113,71 @@ impl BackupDatabase {
     pub fn check_backup_pins(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
         self.attach(path, key)?;
         let result = (|| {
+            let own_root: String = self.db.query_row(
+                "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            // Both branches must already respect the reserved namespace before merge effects.
+            for database in ["main", "incoming"] {
+                let sql = format!(
+                    "SELECT substr(state_kind,length('directory/conversation/')+1),state_json FROM {database}.runtime_actor_state WHERE state_kind LIKE 'directory/conversation/dm:%'"
+                );
+                let mut statement = self.db.prepare(&sql)?;
+                let records = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
+                for record in records {
+                    let (conversation, bytes) = record?;
+                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    let roots = value["participant_roots"]
+                        .as_array()
+                        .ok_or(StorageError::AuthorizationRejected)?;
+                    if value["kind"] != "direct" || !value["group_id"].is_null() || roots.len() != 2
+                    {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    let [first, second] = roots.as_slice() else {
+                        return Err(StorageError::AuthorizationRejected);
+                    };
+                    let first = first.as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    let second = second.as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    if first != own_root && second != own_root {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    ramflux_protocol::message::dm_scope::validate_direct(
+                        &conversation,
+                        first,
+                        second,
+                    )
+                    .map_err(|_| StorageError::AuthorizationRejected)?;
+                    let existing: Option<Vec<u8>> = self
+                        .db
+                        .query_row(
+                            "SELECT state_json FROM main.runtime_actor_state WHERE state_kind=?1",
+                            [format!("directory/conversation/{conversation}")],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(existing) = existing {
+                        let old: serde_json::Value = serde_json::from_slice(&existing)?;
+                        let old_roots = old["participant_roots"]
+                            .as_array()
+                            .ok_or(StorageError::AuthorizationRejected)?;
+                        if old["kind"] != "direct"
+                            || !old["group_id"].is_null()
+                            || old_roots.len() != 2
+                            || old_roots
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<std::collections::BTreeSet<_>>()
+                                != std::collections::BTreeSet::from([first, second])
+                        {
+                            return Err(StorageError::AuthorizationRejected);
+                        }
+                    }
+                }
+            }
             let roots:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state l JOIN incoming.runtime_actor_state r USING(state_kind) WHERE l.state_kind LIKE 'directory/identity/%' AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment')<>json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment'))",[],|row|row.get(0))?;
             let pins:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key l JOIN incoming.group_member_device_key r USING(group_id,member_id) WHERE l.device_signing_public_key<>r.device_signing_public_key)",[],|row|row.get(0))?;
             let links:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM friend_link_projection l JOIN incoming.friend_link_projection r USING(link_id) WHERE l.requester_id<>r.requester_id OR l.target_id<>r.target_id)",[],|row|row.get(0))?;
@@ -233,6 +310,7 @@ impl BackupDatabase {
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
+            super::restore_floor::refuse_schema_downgrade(&self.db)?;
             let tables = self.begin_merge_inputs(candidate, after_capture)?;
             let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             super::large_segments::retirement::merge_floors(&self.db)?;
@@ -242,12 +320,14 @@ impl BackupDatabase {
             let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
             self.archive_group_transfer(&preserved_actor)?;
+            let refused_items = self.merge_original_header_agreement()?;
+            let self_sync_floors = self.merge_message_register_floors()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
-            let mut report = BackupMergeReport::default();
+            let mut report = BackupMergeReport { refused_items, ..Default::default() };
             for table in tables {
                 progress()?;
                 if table == "object_index" {
@@ -307,11 +387,8 @@ impl BackupDatabase {
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
             }
-            super::message_footprint::ensure_archive_actor_table(&self.db)?;
-            self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
-            if legacy_verifications {
-                self.finish_legacy_verification_import()?;
-            }
+            self.finish_pair_import(&preserved_actor, legacy_verifications)?;
+            self.merge_self_sync_values(&self_sync_floors)?;
             self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
@@ -322,16 +399,48 @@ impl BackupDatabase {
             Ok(report)
         })();
         if result.is_err() {
+            // This connection owns a private restore generation, never the live writer.
             let _ = self.db.execute_batch("ROLLBACK");
         }
-        self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
+        self.detach_merge_inputs()?;
         result
+    }
+    fn detach_merge_inputs(&self) -> Result<(), StorageError> {
+        self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
+        Ok(())
+    }
+    fn finish_pair_import(
+        &self,
+        preserved_actor: &str,
+        legacy_verifications: bool,
+    ) -> Result<(), StorageError> {
+        self.archive_imported_pair_sessions(preserved_actor)?;
+        if legacy_verifications {
+            self.finish_legacy_verification_import()?;
+        }
+        Ok(())
+    }
+    fn archive_imported_pair_sessions(&self, preserved_actor: &str) -> Result<(), StorageError> {
+        super::message_footprint::ensure_archive_actor_table(&self.db)?;
+        self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
+        Ok(())
     }
     fn archive_group_transfer(&self, preserved_actor: &str) -> Result<(), StorageError> {
         super::message_footprint::ensure_archive_actor_table(&self.db)?;
         self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'group-transfer/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';"))?;
         Ok(())
     }
+    fn merge_message_register_floors(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u64>, StorageError> {
+        let floors = self.merge_self_sync_floors()?;
+        self.merge_generated_identity_floors()?;
+        // Losing Edit revisions are fenced before any incoming row is archived or merged.
+        self.merge_edit_registers()?;
+        self.merge_reaction_registers()?;
+        Ok(floors)
+    }
+
     fn begin_merge_inputs(
         &self,
         candidate: bool,
@@ -495,7 +604,7 @@ impl BackupDatabase {
         } else {
             "r.state_json".into()
         };
-        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,{actor_body} FROM incoming.runtime_actor_state r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)"),params![source])?;
+        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,{actor_body} FROM incoming.runtime_actor_state r WHERE r.state_kind NOT LIKE 'self-sync/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)"),params![source])?;
         let event_values = columns(&self.db, "incoming", "local_event_log")?
             .iter()
             .map(|(name, _)| {
@@ -661,8 +770,13 @@ impl BackupDatabase {
 }
 fn merge_filter(table: &str, native_data_only: bool) -> String {
     format!(
-        "({}) AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
+        "({}){} AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
         base_merge_filter(table, native_data_only),
+        if table == "runtime_actor_state" {
+            " AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'message-identity/%'"
+        } else {
+            ""
+        },
         table.replace('\'', "''")
     )
 }
@@ -670,7 +784,7 @@ fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
     if table == "runtime_actor_state" && native_data_only {
         super::backup_native::DATA_STATE_FILTER
     } else if table == "runtime_actor_state" {
-        "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
+        "r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
     } else if table == "friend_link_projection" {
         "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
     } else if table == "contact_request_projection" {
@@ -778,7 +892,7 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
             )
         };
         return format!(
-            "{}>{} AND r.state_kind NOT LIKE 'dm-pair/%' AND r.state_kind NOT LIKE 'identity/%'",
+            "{}>{} AND r.state_kind NOT LIKE 'dm-pair/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'routed/reaction/%'",
             timestamp("r"),
             timestamp("l")
         );

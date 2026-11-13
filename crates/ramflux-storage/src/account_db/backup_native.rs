@@ -6,7 +6,7 @@ use super::{backup_database::BackupDatabase, backup_merge::BackupMergeMode};
 use crate::{AccountDbKey, BackupMergeReport, StorageError};
 use std::path::Path;
 
-pub(super) const DATA_STATE_FILTER: &str = "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'account/%' AND r.state_kind NOT LIKE 'sync/%' AND r.state_kind NOT LIKE 'gateway/%' AND (r.state_kind NOT LIKE 'directory/%' OR r.state_kind LIKE 'directory/conversation/%') AND (r.state_kind NOT LIKE 'dm-pair/%' OR r.state_kind LIKE 'dm-pair/session/%' OR r.state_kind LIKE 'dm-pair/retired/%') AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'";
+pub(super) const DATA_STATE_FILTER: &str = "r.state_kind NOT LIKE 'self-sync/pending/%' AND r.state_kind NOT LIKE 'self-sync/repair/%' AND r.state_kind NOT LIKE 'self-sync/repair-sent/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'account/%' AND r.state_kind NOT LIKE 'sync/%' AND r.state_kind NOT LIKE 'gateway/%' AND (r.state_kind NOT LIKE 'directory/%' OR r.state_kind LIKE 'directory/conversation/%') AND (r.state_kind NOT LIKE 'dm-pair/%' OR r.state_kind LIKE 'dm-pair/session/%' OR r.state_kind LIKE 'dm-pair/retired/%') AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'";
 
 pub(super) fn authority_table(table: &str) -> bool {
     matches!(
@@ -35,7 +35,7 @@ impl BackupDatabase {
     pub fn sanitize_native_backup(&self) -> Result<(), StorageError> {
         self.db.execute_batch("PRAGMA secure_delete=ON; BEGIN IMMEDIATE;
             DELETE FROM runtime_actor_state WHERE state_kind LIKE 'account/%' OR state_kind LIKE 'identity/owned_%' OR state_kind LIKE 'sync/%' OR state_kind LIKE 'gateway/%';
-            DELETE FROM runtime_operation; DELETE FROM message_footprint WHERE kind='journal'; DELETE FROM runtime_journal; DELETE FROM runtime_outbox;
+            DELETE FROM runtime_operation; DELETE FROM message_footprint WHERE kind='journal'; DELETE FROM runtime_journal; DELETE FROM runtime_message_sequence; DELETE FROM runtime_outbox;
             DELETE FROM outbox_queue; DELETE FROM session_capability_cache;
             DELETE FROM pending_recovery_projection; DELETE FROM pending_recovery_approval_projection;
             DELETE FROM guardian_recovery_share_projection; COMMIT; VACUUM;")?;
@@ -127,6 +127,36 @@ mod tests {
         native_exclusions(false)?;
         native_exclusions(true)
     }
+    fn add_store_copy_fixtures(source: &AccountDb, local: &AccountDb) -> TestResult {
+        add_local_raw_fixture(local)?;
+        source
+            .connection
+            .execute("INSERT INTO runtime_message_sequence VALUES('foreign-cursor',900)", [])?;
+        local
+            .connection
+            .execute("INSERT INTO runtime_message_sequence VALUES('local-cursor',8)", [])?;
+        Ok(())
+    }
+    fn assert_local_cursor_unchanged(merged: &BackupDatabase) -> TestResult {
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT count(*) FROM runtime_message_sequence WHERE message_id='foreign-cursor'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            0,
+            "a source journal cursor must never be imported"
+        );
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT seq FROM runtime_message_sequence WHERE message_id='local-cursor'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            8
+        );
+        Ok(())
+    }
     fn native_exclusions(candidate: bool) -> TestResult {
         let root = std::env::temp_dir().join(format!(
             "rf-native-merge-{}-{}",
@@ -141,7 +171,7 @@ mod tests {
         let local_key = AccountDbKey::generate()?;
         let source = AccountDb::open(&source_index, "account", &source_key)?;
         let local = AccountDb::open(&local_index, "account", &local_key)?;
-        add_local_raw_fixture(&local)?;
+        add_store_copy_fixtures(&source, &local)?;
         let retained = [
             ("identity/custody/anchor", json!({"pins":{"epoch":9,"fenced":true},"revision":9})),
             ("identity/owned_pending_set", json!({"revision":9})),
@@ -176,6 +206,7 @@ mod tests {
         } else {
             merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
         }
+        assert_local_cursor_unchanged(&merged)?;
         assert!(!merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/imported')", [], |row| row.get::<_,bool>(0))?, "derived own-copy state must not be imported without its actor row");
         assert!(merged.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_own_copy_state WHERE state_kind='own-device/status/local')", [], |row| row.get::<_,bool>(0))?);
         assert_eq!(

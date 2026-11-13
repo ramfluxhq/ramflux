@@ -6,6 +6,7 @@ use crate::prelude::*;
 use ramflux_storage::ContactRequestRecord;
 use serde_json::{Value, json};
 pub(in crate::client) mod delivery;
+mod generated;
 mod ingress;
 mod messages;
 mod metadata;

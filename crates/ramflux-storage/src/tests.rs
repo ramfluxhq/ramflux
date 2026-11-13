@@ -17,6 +17,13 @@ pub(crate) fn temp_root(test_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ramflux-storage-{test_name}-{}-{nanos}", std::process::id()))
 }
 
+pub(crate) struct TestDirGuard(pub(crate) PathBuf);
+impl Drop for TestDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;

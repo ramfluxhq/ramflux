@@ -13,10 +13,14 @@ use serde_json::{Value, json};
 
 mod bootstrap;
 mod controls;
+mod generated;
 mod receive_directory;
+mod snapshot_generated;
 pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
 mod creator_conflicts;
 mod devices;
+// Pure bounded selection for layer planning; this is not an authorization capability.
+pub(crate) use devices::select as select_layer_devices;
 mod federation;
 mod invitations;
 pub(crate) mod maintenance;
@@ -310,7 +314,20 @@ impl RamfluxClient {
         let state = verified.view();
         let mut members = BTreeSet::new();
         let mut roles = BTreeMap::new();
-        for (root, names) in self.shared_group_selected_devices(&verified)? {
+        let selected = match self.shared_group_selected_devices(&verified) {
+            Ok(selected) => selected,
+            Err(
+                SdkError::InboundPending(_)
+                | SdkError::SenderManifestRequired { .. }
+                | SdkError::FreshHeadRequired { .. },
+            ) => {
+                // Display only the verified historical roster when current authority is absent.
+                // Live routes and sends still use the strict roster selector directly.
+                devices::select(state, &BTreeMap::new())
+            }
+            Err(error) => return Err(error),
+        };
+        for (root, names) in selected {
             for device in names {
                 if let Some(role) = state.effective_role(&root, &device) {
                     members.insert(device.clone());

@@ -68,9 +68,11 @@ mod tests {
 
     fn candidate() -> CandidateOuterEnvelope {
         CandidateOuterEnvelope {
+            ext: ramflux_protocol::Ext::default(),
+            routing_set_id: None,
             schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
             version: 2,
-            domain: domain::ENVELOPE.to_owned(),
+            domain: "ramflux.envelope.v2".to_owned(),
             envelope_id: "envelope".to_owned(),
             source_principal_id: "principal".to_owned(),
             source_device_id: "device".to_owned(),
@@ -82,6 +84,7 @@ mod tests {
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
             collapse_tag: ramflux_protocol::encode_base64url([0x22_u8; 32]),
+            report_commitment: ramflux_protocol::encode_base64url([0x33_u8; 32]),
             delivery_mode: NamedDeliveryMode::Durable,
             node_report_receipt: None,
             signed: SignedFields {

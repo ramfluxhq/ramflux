@@ -845,11 +845,29 @@ message HistoryItem {
   reserved "origin_evidence";
   HistoryOriginEvidence source_evidence = 16;
   optional Delete tombstone = 3;
+  bytes exact_original_identity = 4;
+  HistoryOriginalMetadataEvidence original_metadata_evidence = 5;
+}
+message HistoryOriginalMetadataEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
+  optional OriginalGroupBinding group_binding = 4;
+  uint32 layer = 5; // Original Message layer; never inferred from the Edit.
+}
+message OriginalGroupBinding {
+  string group_id = 1;
+  QualifiedDevice author = 2;
+  uint64 key_epoch = 3;
+  bytes group_state_hash = 4;
 }
 message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
   optional NativeGroupSnapshot group_membership = 3;
+  bytes report_opening = 4;
+  bytes group_plaintext = 5;
+  bytes group_opening = 6;
 }
 message HistoryPage {
   bytes transfer_id = 1;
@@ -4276,7 +4294,7 @@ UnsupportedView replaces Content without exposing secret/raw bytes by default.
 | Delete | message, durable, generic wake | MessageRequest.delete / tombstone; S9 owner edges and raw-copy erase |
 | Reaction | message, durable | MessageRequest.reaction / Content.reaction; principal-scoped add/remove |
 | Receipt | message, durable; notification policy suppresses noisy UI locally | Content.receipt; delivered/read never inferred from transport ACK |
-| Typing | message, ephemeral, low, TTL 5 seconds, no push | MessageRequest.typing / transient Content.typing with expiry; never history |
+| Typing | message, ephemeral, low, TTL 5 seconds active / 1 second clear, no push | MessageRequest.send.content.typing with request expires_at zero / transient Content.typing with signed expiry; never history |
 | Control | message; durable except known live-presence operation | Content.control; all 16 operation/typed-payload mappings in section 3.2, including A2I and object revoke |
 | Surface | message, durable | Content.surface; SurfaceDelivery/ResyncRequest and every section 3.1 command/action/receipt; generated JsonValue data |
 | Task | message, durable | Content.task; every TaskEventBody, approval Request/Decision, Intent/Ack and own-history field in section 3.1 |
@@ -4357,9 +4375,26 @@ MessageUpdate, Content and all typed nested descriptors directly. Preserve
 request_id/account_id/operation_id and journal cursor across Rust, ProtoJSON,
 UniFFI, C ABI and WASM adapters. Generated wrappers can add transport correlation,
 not a second message schema or a stringly typed “payload” model. Business errors
-remain typed codes (PeerUpgradeRequired, StorageCapacity,
-SchemaResetRequired, authorization and crypto errors), with exact adapter tests;
-Unsupported is a successful typed row/update. Raw retrieval for local reparse is
+use the single OV2-RD-ERR generated error contract `{code, name, message, details}`.
+Codes and lowercase names are permanent across generated adapters:
+
+| Code | Name | Code | Name |
+|---|---|---|---|
+| 1 | invalid_argument | 9 | target_not_found |
+| 2 | invalid_json | 10 | target_deleted |
+| 3 | peer_upgrade_required | 11 | payload_too_large |
+| 4 | storage_capacity | 12 | rate_limited |
+| 5 | schema_reset_required | 13 | ephemeral_unavailable |
+| 6 | resync_required | 14 | crypto_failure |
+| 7 | edit_conflict | 15 | not_connected |
+| 8 | not_authorized | 16 | internal |
+
+Details carry cursor/floor/head for resync, target/expected/received for edit conflicts,
+and scope/source for storage capacity. Diagnostic text never determines a code.
+Generated Message pages return at most 100 rows and 768KiB encoded, descending immutable
+EventOrder, next_before, and snapshot_sequence. Each row carries its own durable last-change
+journal_sequence, retained independently of journal pruning. Local journal sequences are
+not imported from another store during backup merge. Unsupported is a successful typed row/update. Raw retrieval for local reparse is
 privileged, bounded and off the ordinary update/bus path. Native proofs and
 secret control bytes are not indiscriminately rendered into a desktop model.
 DM-FS-V3-02 consumes no application KindIds; its bootstrap is the canonical input
@@ -4483,7 +4518,7 @@ Completion definition (every row required):
 | Semantics | All 12 kinds send/receive through generated dispatch; Edit/Delete/Reaction enforce authorization/revision/tombstone rules; same Message/Service identity/order; attachments, groups, receipts, calls, tasks and own history still work |
 | Unknown input | Unknown kind, field, entity, nested signed payload or high layer commits Unsupported plus exact raw and provenance before ACK; bounded quota; no dead letter, NACK or action execution |
 | Privacy | Every raw copy registers transactionally; crash/absence/race tests cover active, prepared, journal, nested group, archived and restored paths; history-container invalidation and object last-owner rules both pass |
-| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority, signed TTL bound 1..5 s and indicator lifetime at most 5 s inside the signed interval; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
+| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority, signed TTL exactly 5 s active or 1 s clear and indicator lifetime inside the signed interval; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
 | Outer and reports | Exactly message/call_wake, uniform collapse_tag/report_commitment, named signed/AEAD-bound delivery_mode replaces the signed ext.delivery_mode bridge at reset; new profile rejects bridge/dual-field input; updated producers/consumers and node report flow |
 | Local surface | Generated requests/updates on bus, CLI/TUI and exported bindings; stale cursor resync and tombstone cache invalidation, typed errors, no JSON sniff fallback |
 
@@ -4748,3 +4783,133 @@ form/action authority, atomic updates and safe consumer delivery are required
 subsequent work. Renderer capability remains disabled until activation following
 consumer, bundle and platform admission. This amendment grants no execution,
 signing, attachment access or network authority.
+
+
+### S10a origin-evidence amendment (controller adoption of decisions audit r2, 2026-11-11)
+
+`HistoryOriginEvidence` retains its existing tags 1–3 and adds `bytes report_opening = 4`,
+`bytes group_plaintext = 5`, and `bytes group_opening = 6`. The first field carries kf;
+the latter two carry the exact verified nested Message and its native per-message opening.
+These are private evidence registered to the message erase lifetime. Every peer-authored
+HistoryItem requires verified origin evidence: sender envelope signature, device custody,
+group membership where applicable, C over exact Inner and A0, and group opening. Failed
+or absent evidence is refused before retention. OwnSentMessage alone uses sibling attestation.
+No HistoryItem or report may fall back to an attestation by a forwarding device.
+
+Live group admission requires the author's current pinned role even for an old verified epoch;
+late pre-removal messages are deliberately refused. Per-recipient signed envelopes prove
+authority; the symmetric sender key alone does not. Pairwise author equivocation is not
+automatically detected: recipients can demonstrate it by comparing valid openings.
+A later fan-out architecture requires new recipient-independent author proof. A future nonempty
+Message or Service native authority proof requires a new schema layer; v1 refuses it.
+
+Edit digests assume one plaintext representation per logical event (S10a compiled layer/floor 2).
+Before S10b introduces another representation, re-decide the digest rule.
+
+
+### S10a sweep-2 numeric decisions (controller adoption, 2026-11-11)
+
+The following are design choices, not measured limits. Sweep audit r1 replacement texts supersede the sweep where they differ.
+
+| Sweep item | Normative values |
+|---|---|
+| 3 ID restore | fresh natively authorized device epoch after rollback; no fixed jump |
+| 4 HLC | 48-bit physical milliseconds + 16-bit logical; 120,000 ms receive skew clamp |
+| 5 Pending Delete | 4,096 unmatched fences per source root |
+| 6 Unseen SelfSync conversations | 4,096 per account |
+| 7 SelfSync restore/draft | 30 s refresh fallback; draft text 65,536 UTF-8 bytes |
+| 9 Delete target set | 1–256 targets |
+| 11 Moderator epoch | current owner/admin and permission at the named verified epoch |
+| 13 Edit revision | maximum 1,000,000 |
+| 14 Reactions | 8 visible present tokens per root/target; 2,048 total register keys per target, including absent markers |
+| 17 Capacity diagnostics | at most 64 content-free rows |
+| 26 Typed history pages | at most 100 rows and 768 KiB encoded |
+| 27 Adapter errors | permanent codes 1–16, per adopted OV2-RD-ERR |
+| 30 Typing cadence/rates | 4,000 ms cadence; 20/conversation/60 s sender; receiver burst 6, refill 1/2 s; 30/root/60 s |
+| 32 Typing ratchet | 256 ephemeral seals per pair-session incarnation; dropped/offline suppression 60 s |
+| 33 Typing memory | 64 indicators and 256 dedup entries per account |
+| 36 History pages | 32-byte transfer id; at most 32 items and 4 MiB, also Inner/frame cap |
+| 37 Receipt target set | 1–256 targets |
+| 51 Cosmetic Service | at most 64 subjects and 1,024 UTF-8 text bytes |
+
+OV-P19-PINCAP additionally fixes `SELF_SYNC_MAX_PINS_PER_CONVERSATION = 100` active pin
+scopes per own root/conversation; clear registers and erased revision floors do not count.
+
+
+The sole new hash grammar is raw BLAKE3(LP(domain) || transcript); never pass these
+transcripts through the historical unframed-domain helper. Event-id transcript is
+LP(account_anchor) || LP(device_id) || u64_be(device_epoch) || LP(conversation_id) ||
+u64_be(device_sequence). Tombstone transcript is LP(Delete event id). History page
+transcript is LP(transfer_id) || u64_be(page) || LP(previous_page_digest) ||
+u32_be(item_count) || concatenation of LP(each exact encoded HistoryItem).
+Durable peer sequence numbers occupy 1..2^63-1; independently durable own-only counters
+occupy 2^63 | private_counter, private_counter in 1..2^63-1. Native re-enrollment and
+fresh authorized device epoch are mandatory after rollback; exact retransmits retain identities.
+Replicated registers use immutable signed HLC/qualified author including epoch/sequence/id;
+receive-time clipping is display-only. Typing's 256-seal allowance lasts for the entire
+pair-session incarnation and never resets on durable sealing, ACK, elapsed time or incoming traffic.
+History transfers expire after 60 seconds without a newly accepted page; retries do not renew them.
+Capacity lookahead stays within native ACK-window/ratchet bounds, and a local clock deadline
+is labeled local_retention_deadline_elapsed, never proof of node loss.
+
+
+Reaction register writes compare the immutable signed EventOrder including root,
+device epoch and raw event id. Greater writes advance absent/present order markers
+also when visibility is unchanged. Visible selection takes the greatest signed
+orders per reacting root, breaking equal-order ties by UTF-8 token bytes, and
+retains at most eight; other present registers remain stored. The register cap
+counts absent markers and is an explicit resource refusal, not universal convergence.
+
+### OV-ORIGIN-SIG amendment (controller adoption of origin-signature audit r1)
+
+The v2 sender transcript is `UTF8("ramflux.envelope.sig.v2") || 0x00 || JCS(object)`.
+Schema and domain are `ramflux.envelope.v2`, version is 2. One protocol implementation
+serves every live/evidence verifier and both outer representations. It excludes ciphertext,
+signature, node_report_receipt, ext.source_device_authority, ext.home_node_migration_forward_count,
+and ext.franking.{franking_tag,node_id,accepted_at}; all other sender fields remain signed,
+including signing_key_id, signature_alg, routing_set_id and ext.source_root_commitment.
+The existing payload_hash is deliberately unchanged: base64url(BLAKE3(UTF8("ramflux.envelope.v1")
+|| ASCII(strict canonical base64url encrypted_payload))). This legacy hash domain is unframed;
+the new LP-domain grammar for event/edit/tombstone/history hashes does not change it.
+WithCiphertext checks canonical ciphertext encoding and hash BEFORE producing transcript bytes
+or accepting a signature. Evidence requires the ciphertext key absent, never empty, and records
+ciphertext_bound=false. Evidence binds exact Inner to the signer through C/kf and native proofs;
+it proves no property about absent ciphertext. Keep AEAD A and C/A0 unchanged. The actual
+activation reset drops or re-signs in-flight old signed rows and admits no legacy signature fallback.
+
+
+### OV-EDIT-HISTORY: adopted edit-history audit r1
+
+Original metadata commitment is HEADER-ONLY, domain `ramflux.message.original_header.v1`:
+raw BLAKE3(LP(domain) || LP(u32_be(layer)) || LP(u32_be(kind)) || LP(deterministic
+EventIdentity) || LP(u64_be(issued_at)) || LP(u64_be(expires_at)) || LP(group_binding)).
+Times are signed outer created_at and checked created_at+ttl, in seconds. Group binding
+is empty for DM; otherwise LP(group_id)||LP(canonical QualifiedDevice author)||
+LP(u64_be(key_epoch))||LP(raw group_state_hash). No original body field is committed or retained.
+The ext is required on every Message outer, forbidden on other kinds, recomputed after C
+before any projection or retention, and signed by the v2 sender transcript. A0 is unchanged.
+HistoryItem tags 4/5 carry canonical original identity (<=1 KiB) and body-free original
+metadata evidence (outer <=8 KiB), only with an Edit and no tombstone. Group evidence retains
+only group_id/author/key_epoch/group_state_hash, native manifest and signed group snapshot.
+Verified original and Edit roots must match; target id/conversation/root bind to that original
+identity. Import uses normal (revision,event id) order without previous-digest conflict checks.
+One edit transaction retires every original kf/report opening, group plaintext/opening,
+old body, prepared own-copy and cached page, then installs body-free evidence. C remains safe
+only because kf is retired: knowing I alone does not permit a keyed commitment guess check.
+Original reports fail ReportOpeningRetired. Later edits keep one original metadata proof and
+only the current Edit proof; Delete erases both. Own-sent current-state transfer uses sibling
+attestation without tags 4/5. Full-Message replacement/drop-media cases from this audit override
+older text/entities-only restrictions. Exact rules/tests are OV-EDIT-HISTORY in the decisions file.
+
+### S10a DM identity and ephemeral boundary (final controller addenda)
+
+See [activation amendments](amendments/s10a-dm-ephemeral-boundary.md) for the
+canonical root-pair DM transcript, reserved namespace and Typing operation
+receipt exemption, signed-start gate and privacy boundary.
+
+See [Unsupported diagnostics](amendments/s10a-unsupported-diagnostics.md) for
+ordered reason labels, opaque local handles and retirement of those handles.
+
+Private revision entropy amendment for activation: [layer 3 / floor 3](message-private-revision-amendment.md).
+
+Native full-state group bootstrap additionally uses the controller-adopted fixed snapshot arm; see [the S10a group snapshot amendment](message_schema_v1_group_snapshot.md) (OV-GROUP-SNAPSHOT-ARM; provisional audit pending).

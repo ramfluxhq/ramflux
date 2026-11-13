@@ -39,19 +39,64 @@ pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
 pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
         SdkError::DirectoryAuthorityUnavailable { source, .. } => deterministic(source),
+        SdkError::GeneratedRefused { code, .. } => Some(code.as_str()),
+        SdkError::HistoryEvidence(error) => Some(match error {
+            ramflux_protocol::message::original_header::EvidenceError::OriginEvidenceMissing => {
+                "generated_origin_evidence_missing"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::OriginCommitmentMismatch => {
+                "generated_origin_commitment_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::EditTargetMismatch => {
+                "generated_edit_target_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::EditAuthorMismatch => {
+                "generated_edit_author_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::ReportOpeningRetired => {
+                "generated_report_opening_retired"
+            }
+        }),
         SdkError::ReplayMismatch => Some("replay_mismatch"),
+        SdkError::EditConflict { .. } => Some("edit_conflict"),
         SdkError::Crypto(
             ramflux_crypto::CryptoError::VerifyFailed
             | ramflux_crypto::CryptoError::InvalidSignatureLength(_)
+            | ramflux_crypto::CryptoError::InvalidPublicKeyLength(_)
+            | ramflux_crypto::CryptoError::Base64(_)
+            | ramflux_crypto::CryptoError::IdentityAuthority(_)
+            | ramflux_crypto::CryptoError::DeviceRevoked
+            | ramflux_crypto::CryptoError::BranchProofReplay
+            | ramflux_crypto::CryptoError::TransparencyProofFailed
+            | ramflux_crypto::CryptoError::InvalidHomeNodeMigrationProof(_)
+            | ramflux_crypto::CryptoError::Pairing(_)
+            | ramflux_crypto::CryptoError::SFrame(_)
+            | ramflux_crypto::CryptoError::VoiceRebind(_)
+            | ramflux_crypto::CryptoError::MembershipCommitmentMismatch
+            | ramflux_crypto::CryptoError::ReportFrameTooShort
+            | ramflux_crypto::CryptoError::ReportInnerLengthMismatch
+            | ramflux_crypto::CryptoError::ReportPaddingOrHeaderRefused
+            | ramflux_crypto::CryptoError::ReportInnerTooLarge
+            | ramflux_crypto::CryptoError::ReportA0TooLarge
+            | ramflux_crypto::CryptoError::NodeReportReceiptTooLarge
+            | ramflux_crypto::CryptoError::NodeReportReceiptMismatch
+            | ramflux_crypto::CryptoError::GroupReportOpeningMissing
+            | ramflux_crypto::CryptoError::GroupReportAuthorMissing
             | ramflux_crypto::CryptoError::AeadFailed
             | ramflux_crypto::CryptoError::KeyCommitmentMismatch
             | ramflux_crypto::CryptoError::CommitmentMismatch
             | ramflux_crypto::CryptoError::ReportCommitmentMismatch
             | ramflux_crypto::CryptoError::ReportCommitmentMissing
             | ramflux_crypto::CryptoError::MissingCollapseKey,
+        )
+        | SdkError::Protocol(
+            ramflux_protocol::ProtocolError::PayloadHashMismatch
+            | ramflux_protocol::ProtocolError::SignatureVerificationFailed,
         ) => Some("authentication_failed"),
         SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)) => Some("i_json_rejected"),
-        SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
+        SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(_))
+        | SdkError::Json(_)
+        | SdkError::Protocol(_) => Some("schema_invalid"),
         SdkError::InboundRejected(_) | SdkError::CallControlReceiptCapacity { .. } => {
             Some("routing_rejected")
         }
@@ -126,6 +171,11 @@ pub(crate) fn verified_failure_policy(
     // A failed cache lookup is a dependency miss, not a second failure that wedges the inbox.
     let missing_manifest =
         source_record.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none());
+    let target_dependency = if let Some(opened) = opened.as_ref() {
+        missing_generated_target(client, &opened.body)?
+    } else {
+        None
+    };
     let (class, subject) = if !authenticated || missing_manifest {
         (
             "manifest",
@@ -134,6 +184,8 @@ pub(crate) fn verified_failure_policy(
                 |source| source.storage_key().to_owned(),
             ),
         )
+    } else if let Some(subject) = target_dependency {
+        ("message_target", subject)
     } else if let Some(group) = group {
         ("group", group.to_owned())
     } else {
@@ -146,6 +198,33 @@ pub(crate) fn verified_failure_policy(
         subject,
         at,
     })
+}
+
+fn missing_generated_target(
+    client: &RamfluxClient,
+    bytes: &[u8],
+) -> Result<Option<String>, SdkError> {
+    use ramflux_protocol::message as g;
+    let Ok((_, content)) = RamfluxClient::decode_generated_inner(bytes) else {
+        return Ok(None);
+    };
+    let references = match content.value {
+        Some(g::content::Value::Edit(value)) => value.target.into_iter().collect::<Vec<_>>(),
+        Some(g::content::Value::Reaction(value)) => value.target.into_iter().collect(),
+        Some(g::content::Value::SelfSync(value)) => {
+            value.read_through.into_iter().chain(value.pin).collect()
+        }
+        _ => Vec::new(),
+    };
+    for reference in references {
+        let id = ramflux_protocol::encode_base64url(&reference.id);
+        if client.direct_message_by_id(&id)?.is_none()
+            && !client.account_db()?.message_is_deleted(&id)?
+        {
+            return Ok(Some(format!("{}/{id}", reference.conversation_id)));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn set_failure_policy(
@@ -189,6 +268,42 @@ mod tests {
             Some("authentication_failed")
         );
         assert_eq!(deterministic(&SdkError::InboundRejected("x".into())), Some("routing_rejected"));
+        for error in [
+            ramflux_protocol::ProtocolError::PayloadHashMismatch,
+            ramflux_protocol::ProtocolError::SignatureVerificationFailed,
+        ] {
+            assert_eq!(deterministic(&SdkError::Protocol(error)), Some("authentication_failed"));
+        }
         assert_eq!(deterministic(&SdkError::IdentityRootMissing), None);
+    }
+}
+
+#[cfg(test)]
+mod immutable_crypto_refusal_tests {
+    use super::deterministic;
+    use crate::SdkError;
+    use ramflux_crypto::CryptoError;
+    #[test]
+    fn malformed_crypto_frames_and_authority_failures_never_become_local_retries() {
+        for error in [
+            CryptoError::ReportFrameTooShort,
+            CryptoError::ReportInnerLengthMismatch,
+            CryptoError::ReportPaddingOrHeaderRefused,
+            CryptoError::InvalidPublicKeyLength(7),
+            CryptoError::IdentityAuthority("scope denied"),
+            CryptoError::DeviceRevoked,
+            CryptoError::GroupReportOpeningMissing,
+            CryptoError::NodeReportReceiptMismatch,
+        ] {
+            assert_eq!(deterministic(&SdkError::Crypto(error)), Some("authentication_failed"));
+        }
+        for error in [
+            CryptoError::GroupLeaseUnavailable,
+            CryptoError::GroupSenderKeyUnavailable,
+            CryptoError::MaxSkipExceeded,
+            CryptoError::RandomUnavailable("local".into()),
+        ] {
+            assert_eq!(deterministic(&SdkError::Crypto(error)), None);
+        }
     }
 }

@@ -115,6 +115,20 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
     ),
     ("replay_guard.rs:holds_envelope", Class::NonIngress("in-memory replay-guard read")),
     (
+        "report_receipt.rs:append_node_report_receipt",
+        Class::NonIngress(
+            "signs acceptance evidence on an already admitted candidate; no persistence or delivery",
+        ),
+    ),
+    (
+        "report_receipt.rs:verify_bound_node_report_receipt",
+        Class::NonIngress("pure candidate receipt signature and binding verification"),
+    ),
+    (
+        "report_receipt.rs:verify_group_report_evidence",
+        Class::NonIngress("pure candidate group opening and native author evidence verification"),
+    ),
+    (
         "replay_guard.rs:envelope_replay_tuple_key",
         Class::NonIngress("pure replay-key construction"),
     ),
@@ -179,7 +193,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let sink_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Sink).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 35));
+    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 38));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

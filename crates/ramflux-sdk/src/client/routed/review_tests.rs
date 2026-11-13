@@ -383,8 +383,7 @@ impl ramflux_transport::GatewaySessionFrameSource for Inbox {
 }
 
 #[tokio::test]
-async fn mixed_a2i_batch_commits_and_acks_control_without_losing_direct_messages()
--> Result<(), SdkError> {
+async fn closed_a2i_api_preserves_mixed_inbox_for_supported_receive() -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 200)?;
     let mut bob = Fixture::new("bob", 210)?;
     trust(&bob, &alice)?;
@@ -411,32 +410,22 @@ async fn mixed_a2i_batch_commits_and_acks_control_without_losing_direct_messages
         Route::control(),
     )?;
     control.inbox_seq = 2;
-    let (mut engine, writes) = Inbox::engine(bob.config()?, vec![first, control.clone()])?;
-    let events = bob.client.receive_a2i_control_events(&mut engine, 10).await?;
-    let mut expected = event;
-    expected.source_principal_id = Some(alice.id.clone());
-    expected.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
-        &alice
-            .client
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key(),
-    ));
-    assert_eq!(events, vec![expected]);
-    assert_eq!(bob.client.direct_messages("thread")?.len(), 1);
-    assert_eq!(bob.client.gateway_receive_cursor("bob")?, 2);
+    let (mut engine, writes) = Inbox::engine(bob.config()?, vec![first.clone(), control.clone()])?;
+    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 10).await);
     assert_eq!(
-        writes
-            .lock()
-            .map_err(|_| invalid("mutex"))?
-            .iter()
-            .filter(|value| value["frame_type"] == "ack")
-            .count(),
-        2
+        writes.lock().map_err(|_| invalid("mutex"))?.len(),
+        0,
+        "closed A2I API cannot consume the mixed inbox or ACK any entry"
     );
-    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &control, false).await.is_ok());
+    assert_eq!(bob.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(bob.client.gateway_receive_cursor("bob")?, 0);
+    // The supported direct receiver can still apply the unconsumed message.
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &first, false).await?;
+    assert_eq!(bob.client.direct_messages("thread")?.len(), 1);
+    assert_a2i_authority_refused(
+        bob.client.apply_routed_entry(&mut engine, &pool()?, &control, false).await,
+    );
+    assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 0);
     Ok(())
 }
 

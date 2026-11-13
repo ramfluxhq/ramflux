@@ -4,8 +4,8 @@
 //! Local read projections and immutable actor-owned control views.
 
 use crate::prelude::{
-    A2iControlEvent, LocalBusContactSafetyRequest, LocalBusConversationRequest,
-    LocalBusDaemonState, LocalBusDeviceListResponse, LocalBusFrame, LocalBusGroupRequest,
+    LocalBusContactSafetyRequest, LocalBusConversationRequest, LocalBusDaemonState,
+    LocalBusDeviceListResponse, LocalBusFrame, LocalBusGroupRequest,
     LocalBusMessageFrankingEvidenceRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectPutStatusRequest, LocalBusObjectTransferStatusRequest, LocalMcpAuditRecord,
     RamfluxClient, SdkError, local_bus_account, local_bus_account_manifest_path,
@@ -295,22 +295,8 @@ fn verification(
     )
 }
 
-fn a2i(client: &RamfluxClient, pending: bool) -> Result<Value, SdkError> {
-    let mut events = Vec::new();
-    for event in client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")? {
-        if event.source_principal_commitment.is_none()
-            || event.source_principal_id.is_none()
-            || (pending && event.acknowledged)
-        {
-            continue;
-        }
-        let source = client.a2i_event_identity(&event)?;
-        let mut row = serde_json::to_value(&event)?;
-        row["acknowledge_id"] =
-            json!(crate::client::routed::control::a2i_key(&source, &event.event_id)?);
-        events.push(row);
-    }
-    Ok(json!({"events":events}))
+fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {
+    RamfluxClient::refuse_a2i_binding_authority()
 }
 
 fn upload_status(
@@ -324,4 +310,21 @@ fn upload_status(
         request,
         view.upload_offsets.get(&body.operation_id).copied(),
     )
+}
+
+#[cfg(test)]
+mod a2i_authority_tests {
+    use super::*;
+    #[test]
+    fn a2i_reader_refuses_before_reading_retained_rows() {
+        for pending in [false, true] {
+            assert!(matches!(
+                a2i(&RamfluxClient::new(), pending),
+                Err(SdkError::GeneratedRefused {
+                    code: crate::error::GeneratedRefusalCode::Authority,
+                    ..
+                })
+            ));
+        }
+    }
 }

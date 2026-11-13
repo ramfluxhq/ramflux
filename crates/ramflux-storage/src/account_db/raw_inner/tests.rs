@@ -24,9 +24,9 @@ fn unsupported_quota_is_atomic_and_preserves_existing_rows() -> TestResult {
         })?;
     }
 
-    // 16 valid outer copies leave 576 bytes in the source budget. The nested
-    // copy is charged at its actual size and crosses that boundary by one byte.
-    let nested = vec![0x72; 577];
+    // Each copy also charges its two-byte provenance. Exactly 544 bytes remain;
+    // 543 raw bytes plus two provenance bytes cross that boundary by one byte.
+    let nested = vec![0x72; 543];
     let failed = db.write_transaction(|| {
         db.persist_actor_state("test/ratchet", &serde_json::json!({"counter":9}))?;
         db.put_unsupported_raw_copy(RawInnerCopyWrite {
@@ -53,7 +53,7 @@ fn unsupported_quota_is_atomic_and_preserves_existing_rows() -> TestResult {
     assert!(db.load_actor_state::<serde_json::Value>("test/ratchet")?.is_none());
     let usage = db.unsupported_raw_quota(Some("verified-root"))?;
     assert_eq!(usage.owners, 1);
-    assert_eq!(usage.raw_bytes, (16 * super::writer::MAX_INNER_BYTES) as u64);
+    assert_eq!(usage.raw_bytes, (16 * (super::writer::MAX_INNER_BYTES + 2)) as u64);
     Ok(())
 }
 
@@ -100,7 +100,10 @@ fn raw_copy_write_requires_transaction_and_charges_duplicate_copies() -> TestRes
     })?;
     let usage = db.unsupported_raw_quota(Some("root"))?;
     assert_eq!(usage.owners, 1);
-    assert_eq!(usage.raw_bytes, (bytes.len() * 2 + b"serialized history container".len()) as u64);
+    assert_eq!(
+        usage.raw_bytes,
+        (bytes.len() * 2 + b"serialized history container".len() + 6) as u64
+    );
     Ok(())
 }
 
@@ -833,11 +836,6 @@ fn full_merge_does_not_restore_a_bound_raw_copy_after_target_deletion() -> TestR
     Ok(())
 }
 
-fn persist_mac_tombstone(db: &AccountDb, message: &str) -> Result<(), StorageError> {
-    let mac = db.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())?;
-    db.persist_actor_state(&format!("message/deleted/{mac}"), &serde_json::json!({"version":2}))
-}
-
 #[test]
 fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> TestResult {
     let root = crate::tests::temp_root("raw-inner-mac-tombstone-merge");
@@ -858,7 +856,7 @@ fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> Tes
         })
     })?;
     target.send_direct_message("thread", "mac-only-message", "sender", b"body")?;
-    persist_mac_tombstone(&target, "mac-only-message")?;
+    target.persist_mac_tombstone("mac-only-message")?;
     assert!(
         matches!(target.message_is_deleted("mac-only-message"), Ok(true)),
         "MAC tombstone must make message_is_deleted return true"
@@ -898,5 +896,109 @@ fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> Tes
         still_live, 0,
         "final erasure must not have set deleted=1; the merge filter has to drop the copy"
     );
+    Ok(())
+}
+
+#[test]
+fn source_evidence_copy_is_charged_bound_and_erased_with_target() -> TestResult {
+    let (_root, db) = test_db("source-evidence-copy")?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "event",
+            verified_source_anchor: "root",
+            copy_id: "evidence",
+            kind: RawInnerCopyKind::SourceEvidence,
+            bytes: b"private opening and native evidence",
+            bounded_metadata: b"metadata",
+        })?;
+        db.bind_raw_inner_copy("evidence", "target")
+    })?;
+    assert_eq!(
+        db.raw_inner_copy("evidence")?.ok_or("copy")?.kind,
+        RawInnerCopyKind::SourceEvidence
+    );
+    assert_eq!(
+        db.unsupported_raw_quota(None)?.raw_bytes,
+        u64::try_from(b"private opening and native evidence".len() + b"metadata".len())?
+    );
+    db.import_deleted_message_projection("c", "target", false, 1)?;
+    assert!(db.raw_inner_copy("evidence")?.is_none());
+    assert_eq!(db.unsupported_raw_quota(None)?.raw_bytes, 0);
+    assert!(
+        db.write_transaction(|| db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "event",
+            verified_source_anchor: "root",
+            copy_id: "evidence",
+            kind: RawInnerCopyKind::SourceEvidence,
+            bytes: b"late",
+            bounded_metadata: b"metadata",
+        }))
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn raw_wire_writer_validates_kinds_and_requires_reset_for_old_ddl() -> TestResult {
+    for old in [false, true] {
+        let (root, db) = test_db("raw-wire-kind-reset")?;
+        let _root = crate::tests::TestDirGuard(root);
+        if old {
+            db.connection.call(|sql| {
+                sql.execute_batch("DROP TABLE raw_inner_copy")?;
+                sql.execute_batch(&super::schema::SCHEMA.replace(
+                    "copy_kind TEXT NOT NULL,",
+                    "copy_kind TEXT NOT NULL CHECK(copy_kind IN ('outer_inner','nested_group','history_container')),",
+                ))
+            })?;
+        }
+        let write = |copy_id, kind| {
+            db.write_transaction(|| {
+                db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                    owner_id: "kind-owner",
+                    verified_source_anchor: "kind-root",
+                    copy_id,
+                    kind,
+                    bytes: b"exact retained bytes",
+                    bounded_metadata: b"{}",
+                })
+            })
+        };
+        write("seed", RawInnerCopyKind::OuterInner)?;
+        db.connection.call(|sql| super::schema::install(sql))?;
+        assert_eq!(
+            db.raw_inner_copy("seed")?.ok_or("seed missing")?.bytes,
+            b"exact retained bytes",
+            "install must preserve existing copies"
+        );
+        let inserted = write("evidence", RawInnerCopyKind::SourceEvidence);
+        if old {
+            assert!(
+                matches!(inserted, Err(StorageError::RawWireResetRequired)),
+                "old CHECK must produce the typed activation reset error"
+            );
+            let activation =
+                db.connection.call(|sql| Ok(super::schema::require_raw_wire_reset(sql)))?;
+            assert!(
+                matches!(activation, Err(StorageError::RawWireResetRequired)),
+                "activation must refuse the old table without rebuilding it"
+            );
+        } else {
+            inserted?;
+            db.connection.call(|sql| {
+                sql.execute(
+                    "UPDATE raw_inner_copy SET copy_kind='unknown' WHERE copy_id='seed'",
+                    [],
+                )
+            })?;
+            assert!(
+                matches!(
+                    write("seed", RawInnerCopyKind::OuterInner),
+                    Err(StorageError::AuthorizationRejected)
+                ),
+                "writer must refuse an unknown stored kind before accepting a duplicate"
+            );
+        }
+    }
     Ok(())
 }

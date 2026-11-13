@@ -12,7 +12,6 @@
 )]
 use super::selector_reopen::Case;
 use super::*;
-use crate::bus::push_receiver::apply::cover_held_in;
 use crate::bus::sync_driver::source::w0::SourceW0;
 use crate::client::a2i::queue_unbound_answers;
 use crate::client::dm::LegacyReceive;
@@ -91,7 +90,11 @@ fn stage_w0(
 ) -> Result<(), SdkError> {
     let db = client.account_db()?;
     db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(target, INCARNATION)?;
+    if let Some(epoch) = db.receive_epoch(target)? {
+        assert_eq!(epoch, INCARNATION, "fixture stages more than one entry in the same epoch");
+    } else {
+        db.seed_receive_epoch_for_test(target, INCARNATION)?;
+    }
     let json = serde_json::to_vec(entry)?;
     let gate = SourceW0 {
         expected: ReceiveExpectation {
@@ -432,26 +435,27 @@ fn cut_reject(
     Ok(())
 }
 
-fn cut_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-    let conversation = a2i_control_conversation_id("alice", "bob");
-    stage_w0(&receiver.client, &receiver.id, entry)?;
-    let pre = snap(&receiver.client, entry, &conversation)?;
-    assert_eq!(pre.a2i, 0);
-    assert_eq!(pre.cursor, 0);
-    assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
+fn a2i_refusal_preserves_staged_state(
+    receiver: &mut Fixture,
+    entry: &GatewayInboxEntry,
+    conversation: &str,
+    fault: Fault,
+) -> Result<(), SdkError> {
+    stage_w0(&receiver.client, &entry.target_delivery_id, entry)?;
+    let before = snap(&receiver.client, entry, conversation)?;
+    assert_a2i_authority_refused(legacy_w1::run(fault, || {
         apply_a2i(&receiver.client, &receiver.id, entry)
     }));
+    assert_eq!(snap(&receiver.client, entry, conversation)?, before);
     reopen(&mut receiver.client, &receiver.id)?;
-    assert_eq!(snap(&receiver.client, entry, &conversation)?, pre);
-    apply_a2i(&receiver.client, &receiver.id, entry)?;
-    let post = snap(&receiver.client, entry, &conversation)?;
-    assert!(post.a2i > 0, "A2I missing receipt/event");
-    assert!(post.ratchet);
-    assert_eq!(post.cursor, 0, "A2I W1 must not embed ACK/cursor");
-    assert_eq!(post.work, 1);
-    reopen(&mut receiver.client, &receiver.id)?;
-    assert_eq!(snap(&receiver.client, entry, &conversation)?, post);
+    assert_a2i_authority_refused(apply_a2i(&receiver.client, &receiver.id, entry));
+    assert_eq!(snap(&receiver.client, entry, conversation)?, before);
     Ok(())
+}
+
+fn cut_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    let conversation = a2i_control_conversation_id("alice", "bob");
+    a2i_refusal_preserves_staged_state(receiver, entry, &conversation, Fault::BeforeCommit)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -626,24 +630,7 @@ fn redrive_reject(
 
 fn redrive_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
     let conversation = a2i_control_conversation_id("alice", "bob");
-    stage_w0(&receiver.client, &receiver.id, entry)?;
-    assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
-        apply_a2i(&receiver.client, &receiver.id, entry)
-    }));
-    apply_a2i(&receiver.client, &receiver.id, entry)?;
-    let once = snap(&receiver.client, entry, &conversation)?;
-    assert!(once.a2i > 0);
-    reopen(&mut receiver.client, &receiver.id)?;
-    apply_a2i(&receiver.client, &receiver.id, entry)?;
-    assert_eq!(snap(&receiver.client, entry, &conversation)?, once);
-    Ok(())
-}
-
-fn assert_inbound(result: Result<(), SdkError>, text: &str) {
-    match result {
-        Err(SdkError::InboundRejected(got)) if got == text => {}
-        other => panic!("expected InboundRejected({text:?}), got {other:?}"),
-    }
+    a2i_refusal_preserves_staged_state(receiver, entry, &conversation, Fault::None)
 }
 
 fn stored_body(
@@ -663,43 +650,26 @@ fn cut_a2i_endpoint_mismatch() -> Result<(), SdkError> {
     let sender = Fixture::new("alice", 201)?;
     let mut receiver = Fixture::new("bob", 211)?;
     let entry = a2i_sealed(&sender, &mut receiver, 1, "carol", true, None)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    assert_inbound(
-        apply_a2i(&receiver.client, &receiver.id, &entry),
-        "legacy A2I endpoint mismatch",
-    );
-    Ok(())
+    a2i_refusal_preserves_staged_state(&mut receiver, &entry, "closed-a2i", Fault::None)
 }
 
 fn cut_a2i_payload_reuse() -> Result<(), SdkError> {
     let sender = Fixture::new("alice", 221)?;
     let mut receiver = Fixture::new("bob", 231)?;
     let entry = a2i_entry(&sender, &mut receiver, 1)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    apply_a2i(&receiver.client, &receiver.id, &entry)?;
+    a2i_refusal_preserves_staged_state(&mut receiver, &entry, "closed-a2i", Fault::None)?;
     let local = receiver.id.clone();
-    // Same envelope id, different payload. Bind its session to the same conversation (the recv
-    // session is one row per conversation) so the routing check passes and the receipt check
-    // rejects the reuse, matching the live order.
-    let envelope_id = entry.envelope.envelope_id.clone();
-    let reused =
-        a2i_sealed_to(&sender, &mut receiver, 2, &local, false, Some(&envelope_id), &local)?;
-    let wire: SdkDmEncryptedEnvelope = serde_json::from_slice(
-        &ramflux_protocol::decode_base64url(&reused.envelope.encrypted_payload)
-            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+    let reused = a2i_sealed_to(
+        &sender,
+        &mut receiver,
+        2,
+        &local,
+        false,
+        Some(&entry.envelope.envelope_id),
+        &local,
     )?;
-    let header = wire.x3dh.ok_or_else(|| SdkError::LocalBus("reused A2I has no header".into()))?;
-    let conversation = a2i_control_conversation_id("alice", "bob");
-    let recv = receiver
-        .client
-        .create_recv_dm_session_with_aad(&header, dm_associated_data(&conversation))?;
-    receiver.client.send_direct_message(&conversation, "a2i-reuse-prior", &sender.id, b"prior")?;
-    receiver.client.persist_dm_session(&conversation, "a2i-reuse-prior", "recv", &recv)?;
-    assert_inbound(
-        apply_a2i(&receiver.client, &receiver.id, &reused),
-        "legacy A2I envelope id reused",
-    );
-    Ok(())
+    assert_ne!(entry.envelope.payload_hash, reused.envelope.payload_hash);
+    a2i_refusal_preserves_staged_state(&mut receiver, &reused, "closed-a2i", Fault::None)
 }
 
 fn cut_a2i_routing_hold() -> Result<(), SdkError> {
@@ -707,18 +677,11 @@ fn cut_a2i_routing_hold() -> Result<(), SdkError> {
     let mut receiver = Fixture::new("bob", 251)?;
     let target = receiver.id.clone();
     let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    let pre = snap(&receiver.client, &entry, "held-a2i")?;
-    apply_a2i(&receiver.client, &receiver.id, &entry)?;
-    let post = snap(&receiver.client, &entry, "held-a2i")?;
-    assert!(post.held > pre.held, "unbound A2I must remain held");
-    assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
-    assert_eq!(post.cursor, 0);
-    Ok(())
+    a2i_refusal_preserves_staged_state(&mut receiver, &entry, "held-a2i", Fault::None)
 }
 
 /// The ledger target is the delivery id; the receiver's local device id is `receiver.id`. The
-/// legitimate A2I must bind to the local device, so it is applied exactly once (not held).
+/// closed A2I authority gate refuses before that binding can create an effect.
 fn cut_a2i_delivery_is_not_device() -> Result<(), SdkError> {
     let sender = Fixture::new("alice", 245)?;
     let mut receiver = Fixture::new("bob", 247)?;
@@ -726,20 +689,7 @@ fn cut_a2i_delivery_is_not_device() -> Result<(), SdkError> {
     assert_ne!(delivery, receiver.id);
     let local = receiver.id.clone();
     let entry = a2i_sealed_to(&sender, &mut receiver, 1, &local, true, None, delivery)?;
-    stage_w0(&receiver.client, delivery, &entry)?;
-    let conversation = a2i_control_conversation_id("alice", "bob");
-    let pre = snap(&receiver.client, &entry, &conversation)?;
-    apply_a2i(&receiver.client, &receiver.id, &entry)?;
-    let post = snap(&receiver.client, &entry, &conversation)?;
-    assert!(post.a2i > pre.a2i, "bound A2I was not applied against the local device");
-    assert_eq!(post.held, pre.held, "bound A2I must not be held");
-    assert!(post.ratchet);
-    assert_eq!(post.work, 1);
-    apply_a2i(&receiver.client, &receiver.id, &entry)?;
-    assert_eq!(snap(&receiver.client, &entry, &conversation)?, post, "A2I applied twice");
-    reopen(&mut receiver.client, &receiver.id)?;
-    assert_eq!(snap(&receiver.client, &entry, &conversation)?, post);
-    Ok(())
+    a2i_refusal_preserves_staged_state(&mut receiver, &entry, "closed-a2i", Fault::None)
 }
 
 fn cut_dm_delivery_is_not_device() -> Result<(), SdkError> {
@@ -768,19 +718,7 @@ fn cut_binding_appeared() -> Result<(), SdkError> {
     let mut receiver = Fixture::new("bob", 252)?;
     let target = receiver.id.clone();
     let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    let pre = snap(&receiver.client, &entry, "held-a2i")?;
-    let raced = legacy_w1::run(Fault::BindingAppeared, || {
-        apply_a2i(&receiver.client, &receiver.id, &entry)
-    });
-    assert!(matches!(raced, Err(SdkError::LegacyBindingChanged)), "{raced:?}");
-    let mid = snap(&receiver.client, &entry, "held-a2i")?;
-    assert_eq!(mid, pre, "binding-appeared race must write nothing");
-    apply_a2i(&receiver.client, &receiver.id, &entry)?;
-    let post = snap(&receiver.client, &entry, "held-a2i")?;
-    assert!(post.held > pre.held, "redrive without the hook must hold unbound A2I");
-    assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
-    Ok(())
+    a2i_refusal_preserves_staged_state(&mut receiver, &entry, "held-a2i", Fault::BindingAppeared)
 }
 
 fn cut_binding_flip() -> Result<(), SdkError> {
@@ -788,73 +726,29 @@ fn cut_binding_flip() -> Result<(), SdkError> {
     let mut receiver = Fixture::new("bob", 72)?;
     let target = receiver.id.clone();
     let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    let db = receiver.client.account_db()?;
-    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
-    let mut held = None;
-    let mut apply_error = None;
-    db.receive_transaction(gate.expected, 1, |tx| {
-        match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
-            Ok(is_held) => {
-                if is_held {
-                    cover_held_in(tx, entry.inbox_seq, &[])?;
-                }
-                held = Some(is_held);
-                Ok(())
-            }
-            Err(error) => {
-                apply_error = Some(error);
-                Err(StorageError::Integrity("binding flip apply failed"))
-            }
-        }
-    })?;
-    assert!(apply_error.is_none(), "unbound A2I must hold: {apply_error:?}");
-    assert_eq!(held, Some(true), "in-tx unbound check holds");
-    let held_snap = snap(&receiver.client, &entry, "held-a2i")?;
-    assert!(held_snap.held > 0, "held cover matches the in-tx hold");
-    assert_eq!(held_snap.a2i, 0, "held path must not also apply a receipt");
-
-    let sender = Fixture::new("alice", 74)?;
-    let mut receiver = Fixture::new("bob", 76)?;
-    let target = receiver.id.clone();
-    let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
-    let pre = snap(&receiver.client, &entry, "held-a2i")?;
+    stage_w0(&receiver.client, &target, &entry)?;
+    let before = snap(&receiver.client, &entry, "held-a2i")?;
     queue_unbound_answers([false]);
     let db = receiver.client.account_db()?;
     let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
-    let mut apply_error = None;
-    let mut flipped = None;
-    let fenced = db.receive_transaction(gate.expected, 1, |tx| {
-        match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
-            Ok(is_held) => {
-                if is_held {
-                    cover_held_in(tx, entry.inbox_seq, &[])?;
-                }
-                flipped = Some(is_held);
-                Ok(())
-            }
-            Err(error) => {
-                apply_error = Some(error);
-                Err(StorageError::Integrity("binding flip apply failed"))
-            }
-        }
-    });
-    let post = snap(&receiver.client, &entry, "held-a2i")?;
-    match (fenced, flipped, apply_error) {
-        (Ok(()), Some(true), None) => {
-            assert!(post.held > pre.held, "held disposition covers");
-            assert_eq!(post.a2i, pre.a2i, "held must not also apply a receipt");
-        }
-        (Ok(()), Some(false), None) => {
-            assert_eq!(post.held, pre.held, "applied disposition must not issue held cover");
-            assert!(post.a2i > pre.a2i, "applied A2I writes a receipt");
-        }
-        (Err(_), None, Some(_)) => {
-            assert_eq!(post, pre, "failed inner apply rolls back");
-        }
-        other => panic!("mixed or unexpected flip outcome: {other:?} snap={post:?}"),
-    }
+    db.receive_transaction(gate.expected, 1, |tx| {
+        assert_a2i_authority_refused(receiver.client.apply_legacy_a2i_w1_in(
+            tx,
+            &entry,
+            &receiver.id,
+            gate.expected,
+            1,
+        ));
+        Ok(())
+    })?;
+    assert!(
+        !receiver.client.legacy_a2i_is_unbound(&receiver.id, &entry)?,
+        "authority refusal must not consume the legacy binding input"
+    );
+    assert_eq!(snap(&receiver.client, &entry, "held-a2i")?, before);
+    reopen(&mut receiver.client, &receiver.id)?;
+    assert_a2i_authority_refused(apply_a2i(&receiver.client, &receiver.id, &entry));
+    assert_eq!(snap(&receiver.client, &entry, "held-a2i")?, before);
     Ok(())
 }
 

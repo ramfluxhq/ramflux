@@ -142,6 +142,12 @@ fn prepare_submission(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<PreparedSubmit> {
+    if matches!(
+        ramflux_node_core::check_entry_bound(&envelope),
+        Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused)
+    ) {
+        return Ok(complete_response(crate::durable_mode::rejected_security(&envelope)));
+    }
     record_decoded(&envelope);
     let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
     {
@@ -426,40 +432,49 @@ fn committed_preparation(
         )
         .unwrap_or_else(|error| {
             tracing::warn!(%error, %target_delivery_id, "committed forward preparation refused");
-            let outcome = match error {
-                ramflux_node_core::NodeCoreError::HomeMigration(reason)
-                    if !matches!(
-                        reason,
-                        ramflux_protocol::home_migration::Refusal::StorageUnavailable
-                            | ramflux_protocol::home_migration::Refusal::EvidenceRequired
-                            | ramflux_protocol::home_migration::Refusal::PeeringUnavailable
-                            | ramflux_protocol::home_migration::Refusal::MigrationInProgress
-                    ) =>
-                {
-                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
-                        target_delivery_id,
-                        reason: format!("committed_forward:{reason:?}"),
-                    }
-                }
-                ramflux_node_core::NodeCoreError::Unauthorized(reason) => {
-                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
-                        target_delivery_id,
-                        reason,
-                    }
-                }
-                ramflux_node_core::NodeCoreError::DeliveryModeRefused
-                | ramflux_node_core::NodeCoreError::PayloadTooLarge => {
-                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
-                        target_delivery_id,
-                        reason: error.to_string(),
-                    }
-                }
-                _ => {
-                    ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
-                }
-            };
-            ramflux_node_core::RouterForwardPreparation::Complete(Box::new(outcome))
+            ramflux_node_core::RouterForwardPreparation::Complete(Box::new(
+                committed_forward_error_outcome(&error, target_delivery_id),
+            ))
         })
+}
+
+/// Map committed-home-forward refusals the same way `router.rs` maps `check_entry_bound`.
+/// Home-migration retryables stay in progress; leftover bound errors are security refusals.
+fn committed_forward_error_outcome(
+    error: &ramflux_node_core::NodeCoreError,
+    target_delivery_id: String,
+) -> ramflux_node_core::RouterSubmitOutcome {
+    match error {
+        ramflux_node_core::NodeCoreError::HomeMigration(reason)
+            if !matches!(
+                reason,
+                ramflux_protocol::home_migration::Refusal::StorageUnavailable
+                    | ramflux_protocol::home_migration::Refusal::EvidenceRequired
+                    | ramflux_protocol::home_migration::Refusal::PeeringUnavailable
+                    | ramflux_protocol::home_migration::Refusal::MigrationInProgress
+            ) =>
+        {
+            ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id,
+                reason: format!("committed_forward:{reason:?}"),
+            }
+        }
+        ramflux_node_core::NodeCoreError::Unauthorized(reason) => {
+            ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id,
+                reason: reason.clone(),
+            }
+        }
+        ramflux_node_core::NodeCoreError::DeliveryModeRefused
+        | ramflux_node_core::NodeCoreError::PayloadTooLarge
+        | ramflux_node_core::NodeCoreError::InvalidConfiguration(_) => {
+            ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id,
+                reason: error.to_string(),
+            }
+        }
+        _ => ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id },
+    }
 }
 
 fn submission_refusal(
@@ -823,6 +838,32 @@ mod tests {
             .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn invalid_configuration_committed_forward_is_rejected_security() {
+        let outcome = super::committed_forward_error_outcome(
+            &ramflux_node_core::NodeCoreError::InvalidConfiguration("bad report commitment".into()),
+            "target".into(),
+        );
+        assert!(
+            matches!(
+                outcome,
+                ramflux_node_core::RouterSubmitOutcome::RejectedSecurity { ref reason, .. }
+                    if reason.contains("invalid configuration")
+            ),
+            "exact RejectedSecurity, got {outcome:?}"
+        );
+        let retryable = super::committed_forward_error_outcome(
+            &ramflux_node_core::NodeCoreError::HomeMigration(
+                ramflux_protocol::home_migration::Refusal::StorageUnavailable,
+            ),
+            "target".into(),
+        );
+        assert!(
+            matches!(retryable, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }),
+            "home-migration retryables stay in progress, got {retryable:?}"
+        );
     }
 
     #[test]

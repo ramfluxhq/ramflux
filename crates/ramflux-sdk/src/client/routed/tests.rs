@@ -3,6 +3,20 @@
 
 use super::*;
 use crate::client::identity_authority::HeadUse;
+fn assert_a2i_authority_refused<T>(result: Result<T, SdkError>) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                ..
+            })
+        ),
+        "A2I authority refusal missing: {error:?}"
+    );
+}
+
 struct Fixture {
     root: PathBuf,
     client: RamfluxClient,
@@ -197,13 +211,20 @@ fn seal_as(
     body: &[u8],
     route: Route,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    let (mut message, sealed) = seal_nested(sender, receiver, message, body, route)?;
+    let (mut message, sealed) = super::report::with_invalid_header_fixture(|| {
+        seal_nested(sender, receiver, message, body, route)
+    })?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     let mut envelope = gateway_direct_message_envelope_sealed(
         &sender.config()?,
         &message,
         None,
         sealed.committed_a0.as_deref(),
+    )?;
+    crate::dm::add_message_metadata_commitment(
+        &sender.config()?,
+        &mut envelope,
+        sealed.metadata_commitment,
     )?;
     // Adversarial fixtures can deliberately claim an owner the production sender cannot emit.
     envelope.source_principal_id.clone_from(&message.source_principal_id);
@@ -1057,3 +1078,5 @@ fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError>
     assert!(alice.client.v2_blocks_legacy(&bob.reference()?)?);
     Ok(())
 }
+#[path = "candidate_ephemeral_tests.rs"]
+pub(super) mod candidate_ephemeral;

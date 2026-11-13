@@ -13,7 +13,7 @@ type Case = Result<(), Box<dyn std::error::Error>>;
 
 async fn connected(
     handle: &ConnectionHandle,
-    sessions: &mut mpsc::UnboundedReceiver<SessionIo>,
+    sessions: &mut mpsc::Receiver<SessionIo>,
 ) -> Result<SessionIo, Box<dyn std::error::Error>> {
     let io = sessions.recv().await.ok_or("session was not opened")?;
     handle.require_live(Duration::from_secs(600)).await?;
@@ -21,7 +21,7 @@ async fn connected(
 }
 async fn next_session(
     handle: &ConnectionHandle,
-    sessions: &mut mpsc::UnboundedReceiver<SessionIo>,
+    sessions: &mut mpsc::Receiver<SessionIo>,
     generation: u64,
 ) -> Result<SessionIo, Box<dyn std::error::Error>> {
     while handle.snapshot().phase != ConnectionPhase::Backoff {

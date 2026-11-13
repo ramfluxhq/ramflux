@@ -13,11 +13,11 @@ use zeroize::Zeroizing;
 pub(crate) const PACKET_SCHEMA: &str = "ramflux.sdk.group_state.v2";
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SharedGroupPacket {
-    schema: String,
-    snapshot_base64: String,
+pub(super) struct SharedGroupPacket {
+    pub(super) schema: String,
+    pub(super) snapshot_base64: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    distribution_base64: Option<Zeroizing<String>>,
+    pub(super) distribution_base64: Option<Zeroizing<String>>,
 }
 pub(crate) enum PreparedSharedGroup {
     Snapshot(SnapshotPrepared),
@@ -46,6 +46,9 @@ struct PacketHeader<'a> {
     schema: Option<&'a str>,
 }
 pub(crate) fn is_packet(bytes: &[u8]) -> bool {
+    if super::snapshot_generated::decode(bytes).is_ok_and(|packet| packet.is_some()) {
+        return true;
+    }
     serde_json::from_slice::<PacketHeader<'_>>(bytes).is_ok_and(|header| {
         header.schema == Some(PACKET_SCHEMA)
             || header.schema == Some(super::controls::CONTROL_SCHEMA)
@@ -54,6 +57,13 @@ pub(crate) fn is_packet(bytes: &[u8]) -> bool {
 pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, SdkError> {
     if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
         return Err(invalid("group state packet exceeds its byte budget"));
+    }
+    if let Some(packet) = super::snapshot_generated::decode(bytes)? {
+        let canonical = ramflux_protocol::decode_base64url(&packet.snapshot_base64)
+            .map_err(|_| invalid("snapshot encoding invalid"))?;
+        return Ok(Some(verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(
+            &canonical,
+        )?)?));
     }
     if !serde_json::from_slice::<PacketHeader<'_>>(bytes)
         .is_ok_and(|header| header.schema == Some(PACKET_SCHEMA))
@@ -109,13 +119,13 @@ impl RamfluxClient {
         if opened.routing.kind != crate::client::routed::Kind::GroupControl {
             return Ok(None);
         }
-        if serde_json::from_slice::<PacketHeader<'_>>(body)
-            .is_ok_and(|header| header.schema == Some(super::controls::CONTROL_SCHEMA))
-        {
+        ramflux_protocol::message::dm_scope::validate_group(&opened.routing.conversation_id)
+            .map_err(|_| invalid("reserved DM conversation namespace"))?;
+        if let Some(decoded) = super::generated::decode(body)? {
+            let packet = decoded.packet;
             if body.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES {
                 return Err(invalid("group control byte budget exceeded"));
             }
-            let packet: super::GroupControlPacket = ramflux_protocol::parse_i_json(body)?;
             if directory.is_some() {
                 self.prepare_group_control_with_directory(
                     engine,
@@ -128,7 +138,7 @@ impl RamfluxClient {
             } else {
                 self.prepare_group_control(engine, entry, &opened.routing, &packet).await?;
             }
-            return Ok(Some(PreparedSharedGroup::Control(packet)));
+            return Ok(decoded.supported.then_some(PreparedSharedGroup::Control(packet)));
         }
         let Some(state) = decode_packet(body)? else { return Ok(None) };
         if opened.routing.group_id.as_deref() != Some(state.view().group_id.as_str())
@@ -163,20 +173,33 @@ impl RamfluxClient {
             Err(error) => return Err(error.into()),
         }
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
+        let prepared = self.prepare_shared_group_payload(state.clone(), body)?;
+        if crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body).is_ok_and(|scanned| {
+                scanned.outcome == ramflux_protocol::message::validation::ScanOutcome::Unsupported
+            })
+        {
+            return Ok(None);
+        }
         if needs_consent {
             return Ok(Some(PreparedSharedGroup::Invitation {
                 state,
                 body: Zeroizing::new(body.to_vec()),
             }));
         }
-        self.prepare_shared_group_payload(state, body).map(Some)
+        Ok(Some(prepared))
     }
     pub(super) fn prepare_shared_group_payload(
         &self,
         state: VerifiedGroupState,
         body: &[u8],
     ) -> Result<PreparedSharedGroup, SdkError> {
-        let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(body)?;
+        ramflux_protocol::message::dm_scope::validate_group(&state.view().conversation_id)
+            .map_err(|_| invalid("reserved DM conversation namespace"))?;
+        let packet = match super::snapshot_generated::decode(body)? {
+            Some(packet) => packet,
+            None => ramflux_protocol::parse_i_json::<SharedGroupPacket>(body)?,
+        };
         let distribution = packet
             .distribution_base64
             .map(|encoded| {
@@ -187,7 +210,9 @@ impl RamfluxClient {
                     ramflux_protocol::decode_base64url(&encoded)
                         .map_err(|_| invalid("invalid group bootstrap key encoding"))?,
                 );
-                let parsed: SdkGroupSenderKeyDistribution = ramflux_protocol::parse_i_json(&bytes)?;
+                let parsed = super::snapshot_generated::NativeDistribution(
+                    ramflux_protocol::parse_i_json::<SdkGroupSenderKeyDistribution>(&bytes)?,
+                );
                 let issuer = &state.snapshot().issuer.identity;
                 let source =
                     self.device_identity_for_root(&issuer.root_commitment, &issuer.device_id)?;
@@ -210,10 +235,30 @@ impl RamfluxClient {
                         "group bootstrap key is not from the authenticated issuer",
                     ));
                 }
+                Self::verify_group_distribution_auth(&parsed, &source)?;
                 Ok(bytes)
             })
             .transpose()?;
         Ok(PreparedSharedGroup::Snapshot(SnapshotPrepared { state, distribution }))
+    }
+    pub(crate) fn authorize_prepared_shared_group(
+        &self,
+        prepared: &PreparedSharedGroup,
+        entry: &GatewayInboxEntry,
+        route: &crate::client::routed::Routing,
+    ) -> Result<(), SdkError> {
+        match prepared {
+            PreparedSharedGroup::Control(packet) => {
+                self.authorize_native_group_control_packet(entry, route, packet)?;
+            }
+            PreparedSharedGroup::Snapshot(snapshot) => {
+                self.authorize_native_snapshot_state(&snapshot.state, entry, route)?;
+            }
+            PreparedSharedGroup::Invitation { state, .. } => {
+                self.authorize_native_snapshot_state(state, entry, route)?;
+            }
+        }
+        Ok(())
     }
     pub(crate) fn apply_prepared_shared_group(
         &self,

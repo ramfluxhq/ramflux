@@ -7,7 +7,7 @@ use super::super::*;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GroupControlBody {
-    #[prost(oneof = "group_control_body::Value", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "group_control_body::Value", tags = "1, 2, 3, 4, 5")]
     pub value: ::core::option::Option<group_control_body::Value>,
 }
 /// Nested message and enum types in `GroupControlBody`.
@@ -22,6 +22,8 @@ pub mod group_control_body {
         DeviceSet(super::GroupControlBodyDeviceSet),
         #[prost(message, tag = "4")]
         Transfer(super::GroupControlBodyTransfer),
+        #[prost(message, tag = "5")]
+        Snapshot(super::GroupControlBodySnapshot),
     }
 }
 impl serde::Serialize for GroupControlBody {
@@ -51,6 +53,9 @@ impl serde::Serialize for GroupControlBody {
                 group_control_body::Value::Transfer(v) => {
                     struct_ser.serialize_field("transfer", v)?;
                 }
+                group_control_body::Value::Snapshot(v) => {
+                    struct_ser.serialize_field("snapshot", v)?;
+                }
             }
         }
         struct_ser.end()
@@ -62,13 +67,15 @@ impl<'de> serde::Deserialize<'de> for GroupControlBody {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["request", "result", "device_set", "deviceSet", "transfer"];
+        const FIELDS: &[&str] =
+            &["request", "result", "device_set", "deviceSet", "transfer", "snapshot"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Request,
             Result,
             DeviceSet,
             Transfer,
+            Snapshot,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -94,6 +101,7 @@ impl<'de> serde::Deserialize<'de> for GroupControlBody {
                             "result" => Ok(GeneratedField::Result),
                             "deviceSet" | "device_set" => Ok(GeneratedField::DeviceSet),
                             "transfer" => Ok(GeneratedField::Transfer),
+                            "snapshot" => Ok(GeneratedField::Snapshot),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -149,6 +157,14 @@ impl<'de> serde::Deserialize<'de> for GroupControlBody {
                             value__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(group_control_body::Value::Transfer);
+                        }
+                        GeneratedField::Snapshot => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("snapshot"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(group_control_body::Value::Snapshot);
                         }
                     }
                 }

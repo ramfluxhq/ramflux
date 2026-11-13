@@ -7,6 +7,7 @@ use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 mod backfill_retry;
+mod generated;
 #[cfg(test)]
 mod native_tests;
 #[cfg(test)]
@@ -261,6 +262,8 @@ impl RamfluxClient {
         Ok(result)
     }
     pub(crate) fn stage_contact_backfill_batch(&self) -> Result<usize, SdkError> {
+        self.stage_native_self_sync_bootstrap()?;
+        self.stage_native_history_bootstrap()?;
         self.stage_contact_backfill_batch_at(crate::time::now_unix_timestamp())
     }
     fn stage_contact_backfill_batch_at(&self, now: i64) -> Result<usize, SdkError> {
@@ -417,6 +420,13 @@ impl RamfluxClient {
             return Ok(OwnContactReceiveOutcome::NotPacket);
         };
         let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
+        self.apply_own_contact(&contact)
+    }
+
+    fn validate_own_contact(
+        &self,
+        contact: &Contact,
+    ) -> Result<Option<ramflux_storage::FriendLinkRecord>, SdkError> {
         let own = self.owned_device_identity()?;
         let peer = &contact.manifest.principal_commitment;
         let link = &contact.link;
@@ -438,6 +448,13 @@ impl RamfluxClient {
             ));
         }
         crate::client::contact::verify_device_manifest(&contact.manifest, peer)?;
+        Ok(link_by_id)
+    }
+
+    fn apply_own_contact(&self, contact: &Contact) -> Result<OwnContactReceiveOutcome, SdkError> {
+        let link_by_id = self.validate_own_contact(contact)?;
+        let peer = &contact.manifest.principal_commitment;
+        let link = &contact.link;
         let existing = self
             .account_db()?
             .friend_link_for_peer(peer)?

@@ -157,3 +157,54 @@ fn hold(root: PathBuf, abort: bool) -> Hold {
     );
     Hold { arrived, attachment, release, _observer: observer }
 }
+
+#[test]
+fn sender_signature_requires_ciphertext_hash_on_custody_delivery() -> Result {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let root = temp_store_path("native-v2-hash-binding")?;
+    let store = crate::publication::open_durability_fixture(&root, 0)?;
+    let router = RouterCore::new();
+    store.bootstrap_router(&router)?;
+    let (driver, service, session) = publication_session(&router, &store)?;
+    let target = session.target_delivery_id.clone();
+    store.initialize_inbox(&target)?;
+    router.prepare_publication_target(&store, &target)?;
+    let mut signed = envelope("native-v2-origin", &target, DeliveryClass::Message);
+    signed.schema = "ramflux.envelope.v2".into();
+    signed.domain = "ramflux.envelope.v2".into();
+    signed.version = 2;
+    signed.source_principal_id = "alice".into();
+    signed.source_device_id = "primary".into();
+    signed.created_at = i64::try_from(NOW)?;
+    signed.delivery_mode = Some("durable".into());
+    signed.collapse_tag = Some(ramflux_protocol::encode_base64url([2; 32]));
+    signed.report_commitment = Some(ramflux_protocol::encode_base64url([3; 32]));
+    signed.encrypted_payload = ramflux_protocol::encode_base64url(b"ciphertext");
+    signed.payload_hash = ramflux_protocol::hash_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        signed.encrypted_payload.as_bytes(),
+    );
+    signed.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(driver.reference.account_anchor),
+    );
+    signed.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&signed)?,
+        [12; 32],
+    );
+    let accepted =
+        service.mesh(&router, &store, request(&driver, &session, signed.clone(), 71)?, PEER, NOW);
+    assert!(
+        matches!(accepted, CustodyServerFrame::Submitted { .. }),
+        "positive custody verification: {accepted:?}"
+    );
+    let before = store.inbox_status(&target)?;
+    signed.encrypted_payload = ramflux_protocol::encode_base64url(b"different ciphertext");
+    let refused = service.mesh(&router, &store, request(&driver, &session, signed, 72)?, PEER, NOW);
+    assert!(
+        matches!(refused, CustodyServerFrame::Refused { code: CustodyRefusal::InvalidInput, .. }),
+        "hash mismatch precedes sender retry: {refused:?}"
+    );
+    assert_eq!(store.inbox_status(&target)?, before);
+    Ok(())
+}

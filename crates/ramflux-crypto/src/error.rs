@@ -77,6 +77,14 @@ pub enum CryptoError {
     MissingCollapseKey,
     #[error("report opening A0 field exceeds u32 length")]
     ReportA0TooLarge,
+    #[error("node report receipt field exceeds u32 length")]
+    NodeReportReceiptTooLarge,
+    #[error("node report receipt mismatch")]
+    NodeReportReceiptMismatch,
+    #[error("group report requires per-message opening")]
+    GroupReportOpeningMissing,
+    #[error("group report requires native author proof")]
+    GroupReportAuthorMissing,
 }
 
 impl From<ramflux_protocol::custody::pairing::WireError> for CryptoError {

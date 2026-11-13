@@ -71,6 +71,8 @@ pub enum ReceiverDropReason {
     WrongSource,
     #[error("ephemeral envelope signature does not verify")]
     BadSignature,
+    #[error("ephemeral ciphertext differs from signed payload hash")]
+    PayloadHashMismatch,
     #[error("received frame deadline does not match authenticated expiry")]
     ReceivedDeadlineMismatch,
 }
@@ -127,14 +129,14 @@ pub fn authenticate<'a>(
     if envelope.source_principal_id != expected_source_principal_id {
         return Err(ReceiverDropReason::WrongSource);
     }
-    let signed_bytes = ramflux_protocol::envelope_sender_signed_bytes(envelope)
-        .map_err(|_| ReceiverDropReason::BadSignature)?;
-    ramflux_crypto::verify_canonical_signature(
-        &signed_bytes,
-        &envelope.signed.signature,
-        signing_public_key,
-    )
-    .map_err(|_| ReceiverDropReason::BadSignature)?;
+    ramflux_protocol::verify_envelope_sender_signature(envelope, signing_public_key).map_err(
+        |error| match error {
+            ramflux_protocol::ProtocolError::PayloadHashMismatch => {
+                ReceiverDropReason::PayloadHashMismatch
+            }
+            _ => ReceiverDropReason::BadSignature,
+        },
+    )?;
     Ok(AuthenticatedCiphertext { envelope })
 }
 

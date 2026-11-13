@@ -44,7 +44,9 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         E::ObjectOwnershipUnverified { .. } => {
             failure(BackupFailureCode::ObjectOwnershipUnverified)
         }
-        E::SchemaResetRequired { .. } => failure(BackupFailureCode::SchemaResetRequired),
+        E::SchemaResetRequired { .. } | E::RawWireResetRequired => {
+            failure(BackupFailureCode::SchemaResetRequired)
+        }
         E::AccountSchemaTooNew { .. } => failure(BackupFailureCode::UnsupportedVersion),
         E::Integrity(_) | E::HistoryBundleHashMismatch => failure(BackupFailureCode::Tampered),
         E::Sqlite(_) if error.is_insufficient_space() => {

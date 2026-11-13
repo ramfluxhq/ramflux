@@ -293,6 +293,9 @@ pub(super) fn read(
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
         "message.list" | "message.read" => {
+            if crate::client::target_selection::schema_v1_selected() {
+                return generated_page(client, &request.body);
+            }
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             message_page(client, &body.conversation_id)
         }
@@ -304,7 +307,85 @@ fn closed() -> SdkError {
     SdkError::LocalBus("account reader stopped".to_owned())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedPageRequest {
+    conversation_id: String,
+    #[serde(default)]
+    before_order_key: Option<ramflux_protocol::message::EventIdentity>,
+    #[serde(default = "default_generated_page_limit")]
+    limit: u32,
+    /// Durable change cursor. Present selects the change batch of the read model.
+    #[serde(default)]
+    after_sequence: Option<u64>,
+    /// Base64url message identifier. Present selects the single-message read model.
+    #[serde(default)]
+    message_id: Option<String>,
+    /// True selects the rendered read-model page instead of bare generated updates.
+    #[serde(default)]
+    read_model: bool,
+}
+pub(super) fn generated_page(
+    client: &RamfluxClient,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, SdkError> {
+    let result = (|| {
+        let body: GeneratedPageRequest = serde_json::from_value(body.clone())?;
+        // Read-model selectors are exclusive; every one of them reads the durable store only.
+        if let Some(message_id) = body.message_id.as_deref() {
+            if body.after_sequence.is_some() || body.before_order_key.is_some() {
+                return Err(crate::bindings::AdapterError::new(
+                    crate::bindings::GeneratedErrorCode::InvalidArgument,
+                    "message_id excludes page and change cursors",
+                )
+                .into());
+            }
+            return Ok(serde_json::to_value(
+                client.generated_message_detail(&body.conversation_id, message_id)?,
+            )?);
+        }
+        if let Some(after_sequence) = body.after_sequence {
+            if body.before_order_key.is_some() {
+                return Err(crate::bindings::AdapterError::new(
+                    crate::bindings::GeneratedErrorCode::InvalidArgument,
+                    "after_sequence excludes before_order_key",
+                )
+                .into());
+            }
+            return Ok(serde_json::to_value(client.generated_message_changes(
+                &body.conversation_id,
+                after_sequence,
+                body.limit,
+            )?)?);
+        }
+        if body.read_model {
+            return Ok(serde_json::to_value(client.generated_message_view_page(
+                &body.conversation_id,
+                body.before_order_key.as_ref(),
+                body.limit,
+            )?)?);
+        }
+        Ok(serde_json::to_value(client.generated_message_page(
+            &body.conversation_id,
+            body.before_order_key.as_ref(),
+            body.limit,
+        )?)?)
+    })();
+    result.map_err(|error| crate::bindings::AdapterError::from_sdk(&error).into())
+}
+
+fn default_generated_page_limit() -> u32 {
+    100
+}
+
 fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json::Value, SdkError> {
+    if crate::client::target_selection::schema_v1_selected() {
+        return Ok(serde_json::to_value(client.generated_message_page(
+            conversation,
+            None,
+            100,
+        )?)?);
+    }
     let db = client.account_db()?;
     let mut messages = Vec::new();
     for message in client.direct_messages(conversation)? {
@@ -388,6 +469,32 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_page_reader_returns_bounds_and_shared_errors() -> Result<(), SdkError> {
+        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+            "generated-page-reader",
+            "principal_sync",
+            "local",
+        )?;
+        let page =
+            generated_page(&client, &serde_json::json!({"conversation_id":"empty","limit":3}))?;
+        assert_eq!(page["messages"], serde_json::json!([]));
+        assert_eq!(page["snapshot_sequence"], client.account_db()?.journal_bounds()?.head_seq);
+        assert!(page["next_before"].is_null());
+        for (request, code) in [
+            (serde_json::json!({"conversation_id":"empty","limit":0}), 1),
+            (serde_json::json!({"conversation_id":"empty","limit":101}), 1),
+            (serde_json::json!({"conversation_id":"empty","raw":true}), 2),
+        ] {
+            let error = generated_page(&client, &request).err().ok_or_else(closed)?;
+            let SdkError::GeneratedApi(error) = error else { return Err(closed()) };
+            assert_eq!(error.code, code);
+        }
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn message_rows_preserve_actor_kind_and_leave_legacy_metadata_unknown()
     -> Result<(), SdkError> {
@@ -514,6 +621,66 @@ mod tests {
         let second = readers.request(request).await?;
         assert_eq!(second["conversations"][0]["unread_count"], 1);
         readers.stop().await;
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod read_model_selector_tests {
+    use super::*;
+    use crate::bindings::{AdapterError, GeneratedErrorCode};
+    use serde_json::json;
+
+    #[test]
+    fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+            "reader-selectors",
+            "principal_sync",
+            "local",
+        )?;
+        for (body, code) in [
+            (
+                json!({"conversation_id":"c","message_id":"x","after_sequence":1}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"conversation_id":"c","message_id":"short"}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"conversation_id":"c","after_sequence":0,"limit":0}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"conversation_id":"c","after_sequence":0,"limit":101}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (json!({"conversation_id":"c","unknown":1}), GeneratedErrorCode::InvalidJson),
+        ] {
+            let error = generated_page(&client, &body).err().ok_or("request accepted")?;
+            assert_eq!(AdapterError::from_sdk(&error).code, code as i32, "{body}");
+        }
+        let missing = ramflux_protocol::encode_base64url([3_u8; 32]);
+        let error = generated_page(&client, &json!({"conversation_id":"c","message_id":missing}))
+            .err()
+            .ok_or("missing message served")?;
+        assert_eq!(AdapterError::from_sdk(&error).code, GeneratedErrorCode::TargetNotFound as i32);
+
+        let changes = generated_page(&client, &json!({"conversation_id":"c","after_sequence":0}))?;
+        assert_eq!(changes["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+        assert_eq!(changes["changes"], json!([]));
+        assert_eq!(changes["more"], false);
+        assert_eq!(changes["next_after"], changes["snapshot_sequence"]);
+        let page = generated_page(&client, &json!({"conversation_id":"c","read_model":true}))?;
+        assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+        assert_eq!(page["messages"], json!([]));
+        assert!(page["next_before"].is_null());
+        let bare = generated_page(&client, &json!({"conversation_id":"c"}))?;
+        assert!(bare.get("schema").is_none(), "bare generated page keeps its existing shape");
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())

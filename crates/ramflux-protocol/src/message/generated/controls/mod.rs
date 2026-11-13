@@ -50,6 +50,9 @@ pub use group_control_body_request_types::*;
 #[path = "group_control_body_result.rs"]
 mod group_control_body_result_types;
 pub use group_control_body_result_types::*;
+#[path = "group_control_body_snapshot.rs"]
+mod group_control_body_snapshot_types;
+pub use group_control_body_snapshot_types::*;
 #[path = "group_control_body_transfer.rs"]
 mod group_control_body_transfer_types;
 pub use group_control_body_transfer_types::*;
@@ -77,6 +80,9 @@ pub use history_item_types::*;
 #[path = "history_origin_evidence.rs"]
 mod history_origin_evidence_types;
 pub use history_origin_evidence_types::*;
+#[path = "history_original_metadata_evidence.rs"]
+mod history_original_metadata_evidence_types;
+pub use history_original_metadata_evidence_types::*;
 #[path = "history_page.rs"]
 mod history_page_types;
 pub use history_page_types::*;

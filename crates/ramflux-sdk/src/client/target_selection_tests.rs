@@ -887,6 +887,15 @@ async fn bad_cached_authority_isolates_that_member_as_stale() -> TestResult {
     assert_eq!(alice_row.variant_counter, 1);
     assert_eq!(bob_row.variant_counter, 2);
     assert_eq!(bob_row.selected_layer, PROFILE_FLOOR);
+    assert!(
+        bob_row.targets.iter().all(|target| target.device_epoch == 0),
+        "stale planning metadata cannot borrow another root's device authority"
+    );
+    let state = owner.client.account_db()?.shared_group_state("g-iso")?.ok_or("signed group")?;
+    assert!(
+        owner.client.shared_group_selected_devices(&state).is_err(),
+        "layer planning must not relax live roster authorization"
+    );
     assert!(!alice_row.targets.iter().any(|target| target.device_id == "bob"));
     assert_target_stale(&dm, bob.config.device_id.as_str())?;
     Ok(())
@@ -911,4 +920,17 @@ fn control_route_selects_control_kind() {
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Control), KindId::KindControl);
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::GroupControl), KindId::KindControl);
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Direct), KindId::KindMessage);
+}
+
+#[test]
+fn group_logical_event_id_is_message_id_not_group_id() -> TestResult {
+    assert!(
+        group_logical_event_id("g1", Some("g1")).is_err(),
+        "using group_id as the event id must fail"
+    );
+    assert_eq!(group_logical_event_id("g1", Some("msg-1"))?, "msg-1");
+    let generated = group_logical_event_id("g1", None)?;
+    assert_ne!(generated, "g1");
+    assert_ne!(generated, "");
+    Ok(())
 }

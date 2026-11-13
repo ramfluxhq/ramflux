@@ -6,7 +6,7 @@ use crate::prelude::*;
 use ramflux_protocol::group_state::{
     MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT, SharedGroupState,
 };
-pub(super) fn select(
+pub(crate) fn select(
     state: &SharedGroupState,
     manifests: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeMap<String, BTreeSet<String>> {
@@ -89,7 +89,20 @@ impl RamfluxClient {
             .map(|m| &m.identity.root_commitment)
             .collect::<BTreeSet<_>>()
         {
-            if let Some(set) = self.observed_device_set(root)? {
+            if let Some(authority) =
+                self.current_custody_authority(root, crate::custody::network_now()?)?
+            {
+                let now = crate::custody::network_now()?;
+                let names = crate::client::identity_authority::VerifiedLayerRoster::from_verified(
+                    authority,
+                )
+                .group_devices(now);
+                manifests.insert(root.clone(), names);
+            } else if self.custody_mode_observed(root)? {
+                return Err(SdkError::InboundPending(
+                    "native group roster authority unavailable".into(),
+                ));
+            } else if let Some(set) = self.observed_device_set(root)? {
                 manifests.insert(
                     root.clone(),
                     set.devices
@@ -102,6 +115,20 @@ impl RamfluxClient {
         }
         Ok(select(state.view(), &manifests))
     }
+    pub(super) fn group_roster_epoch(&self, root: &str) -> Result<Option<u64>, SdkError> {
+        if let Some(authority) =
+            self.current_custody_authority(root, crate::custody::network_now()?)?
+        {
+            return Ok(Some(authority.envelope().body.device_set_epoch));
+        }
+        if self.custody_mode_observed(root)? {
+            return Err(SdkError::InboundPending(
+                "native group roster authority unavailable".into(),
+            ));
+        }
+        Ok(self.observed_device_set(root)?.map(|set| set.device_set_epoch))
+    }
+
     pub(crate) fn ensure_shared_group_device(
         &self,
         state: &ramflux_crypto::VerifiedGroupState,

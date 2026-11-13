@@ -17,9 +17,11 @@ pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
 pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
 pub(crate) mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
+mod generated;
+mod generated_authority;
 mod receive;
 pub(crate) mod w1;
-const RECEIPTS: &str = "own-device/message-receipt/";
+pub(super) const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwnDeviceMessage {
@@ -47,6 +49,16 @@ impl OwnDeviceMessage {
         if !manifest.devices.iter().any(|d| d.device_id == recipient) {
             return Err(invalid("own-device recipient is not active"));
         }
+        if entry.envelope.source_principal_id != manifest.principal_id
+            || entry.envelope.ext.ext.get("source_root_commitment").and_then(Value::as_str)
+                != Some(manifest.principal_commitment.as_str())
+        {
+            return Err(invalid("own-device outer authority mismatch"));
+        }
+        ramflux_protocol::verify_envelope_sender_signature(
+            &entry.envelope,
+            &source.branch_public_key,
+        )?;
         ramflux_crypto::verify_device_branch_signature(
             &source.branch_public_key,
             &self.signing()?,
@@ -88,7 +100,7 @@ impl OwnKeySlot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PrivateContext {
+pub(super) struct PrivateContext {
     message: String,
     principal: String,
     root: String,
@@ -99,7 +111,7 @@ struct PrivateContext {
     expires_at: i64,
 }
 impl PrivateContext {
-    fn validate(
+    pub(super) fn validate(
         &self,
         id: &str,
         principal: &str,
@@ -180,7 +192,7 @@ impl Receipt {
     }
 }
 impl OwnDeviceMessage {
-    fn open(
+    pub(super) fn open(
         &self,
         key: &[u8; 32],
     ) -> Result<(PrivateContext, zeroize::Zeroizing<Vec<u8>>), SdkError> {
@@ -248,9 +260,14 @@ pub(crate) struct OwnMessageInput<'a> {
     pub body: &'a [u8],
 }
 pub(crate) struct OwnCopyDraft {
-    packet: OwnDeviceMessage,
-    key: zeroize::Zeroizing<[u8; 32]>,
-    messages: Vec<GatewayDirectMessage>,
+    pub(crate) packet: OwnDeviceMessage,
+    pub(super) key: zeroize::Zeroizing<[u8; 32]>,
+    pub(super) messages: Vec<GatewayDirectMessage>,
+    pub(super) source: ramflux_protocol::message::QualifiedDevice,
+    pub(super) siblings: Vec<ramflux_protocol::message::QualifiedDevice>,
+    pub(super) conversation: String,
+    pub(super) created_at: i64,
+    pub(super) expires_at: i64,
 }
 
 impl RamfluxClient {
@@ -284,9 +301,12 @@ impl RamfluxClient {
             &self.device_identity_for_root(&root, &source)?,
             NativeOperation::Sync,
         )?;
-        if !manifest.devices.iter().any(|d| d.device_id == source) {
-            return Err(invalid("own-device source is not active"));
-        }
+        let source_epoch = manifest
+            .devices
+            .iter()
+            .find(|device| device.device_id == source)
+            .map(|device| device.device_epoch)
+            .ok_or_else(|| invalid("own-device source is not active"))?;
         let _ = Self::candidate_target_plan(|| {
             Self::own_copy_selection_request(
                 input.id,
@@ -347,19 +367,49 @@ impl RamfluxClient {
                 )
                 .map_err(|_| invalid("own-device encryption failed"))?,
         );
+        let (messages, siblings) =
+            self.own_copy_target_messages(&context, &packet, &source, &targets, input.created_at)?;
+        Ok(Some(OwnCopyDraft {
+            packet,
+            key,
+            messages,
+            source: generated::qualified(&context.root, &source, source_epoch),
+            siblings,
+            conversation: context.conversation.clone(),
+            created_at: input.created_at,
+            expires_at,
+        }))
+    }
+
+    fn own_copy_target_messages(
+        &self,
+        context: &PrivateContext,
+        packet: &OwnDeviceMessage,
+        source: &str,
+        targets: &[crate::prekey::SdkDeviceManifestEntry],
+        created_at: i64,
+    ) -> Result<
+        (Vec<GatewayDirectMessage>, Vec<ramflux_protocol::message::QualifiedDevice>),
+        SdkError,
+    > {
         let mut messages = Vec::new();
+        let mut siblings = Vec::new();
         for target in targets {
             self.require_native_operation(
                 &self.device_identity_for_root(&context.root, &target.device_id)?,
                 NativeOperation::Sync,
             )?;
             let request: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":self.content_ttl()?}),
+                json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":created_at,"ttl":self.content_ttl()?}),
             )?;
-            let message = request.into_gateway_message_with_body(Vec::new());
-            messages.push(message);
+            messages.push(request.into_gateway_message_with_body(Vec::new()));
+            siblings.push(generated::qualified(
+                &context.root,
+                &target.device_id,
+                target.device_epoch,
+            ));
         }
-        Ok(Some(OwnCopyDraft { packet, key, messages }))
+        Ok((messages, siblings))
     }
 
     pub(crate) fn own_copy_material_requests(

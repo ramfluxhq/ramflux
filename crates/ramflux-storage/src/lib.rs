@@ -8,7 +8,9 @@ pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
 pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,
 };
-pub use account_db::backup_merge::BackupMergeReport;
+pub use account_db::backup_edit_register::PARKED_EDIT_REVIEW;
+pub use account_db::backup_merge::{BackupItemRefusal, BackupMergeReport};
+pub use account_db::restore_floor::{FloorPolicy, admit_floor};
 mod account_erase;
 mod account_index;
 mod account_writer;
@@ -97,7 +99,7 @@ pub use account_db::object_retention::{
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,
-    RawInnerQuotaScope,
+    RawInnerQuotaScope, RawInnerReparseRow,
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;

@@ -133,7 +133,7 @@ CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON r
         }
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT IN ('gateway_receive_receipt','gateway_receive_work','gateway_ack_intent','gateway_inbox_loss','gateway_receive_epoch','message_footprint_migration','receive_erased_input','raw_inner_owner','raw_inner_copy','raw_inner_evidence','pairing_floor','pairing_live','pairing_head','pairing_terminal','pairing_adoption') AND name NOT LIKE 'account_mac_%' AND name NOT LIKE 'object_segment_%' AND name NOT LIKE 'object_retention_%' AND name NOT LIKE 'object_erasure_%' AND name NOT LIKE 'object_reference_%' AND name NOT LIKE 'object_legacy_%' AND name NOT LIKE 'object_identity_%' AND name NOT LIKE 'object_payload_%' AND name NOT LIKE 'object_transport_%' AND name NOT IN ('object_message_reference','object_runtime_response','account_erasure_generation') AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_attachment_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT LIKE 'runtime_own_copy_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT IN ('gateway_receive_receipt','gateway_receive_work','gateway_ack_intent','gateway_inbox_loss','gateway_receive_epoch','message_footprint_migration','receive_erased_input','raw_inner_owner','raw_inner_copy','raw_inner_evidence','pairing_floor','pairing_live','pairing_head','pairing_terminal','pairing_adoption') AND name NOT LIKE 'account_mac_%' AND name NOT LIKE 'object_segment_%' AND name NOT LIKE 'object_retention_%' AND name NOT LIKE 'object_erasure_%' AND name NOT LIKE 'object_reference_%' AND name NOT LIKE 'object_legacy_%' AND name NOT LIKE 'object_identity_%' AND name NOT LIKE 'object_payload_%' AND name NOT LIKE 'object_transport_%' AND name NOT IN ('object_message_reference','object_runtime_response','account_erasure_generation') AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_attachment_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT LIKE 'runtime_own_copy_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_message_sequence','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -159,10 +159,19 @@ CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON r
                 // A privacy fence can erase an inserted/updated copy in an earlier AFTER
                 // trigger. Do not publish its original identity-bearing keys afterward.
                 let present = format!("EXISTS(SELECT 1 FROM \"{quoted}\" WHERE rowid=NEW.rowid)");
+                // Private pair crypto state is never a product update. In particular,
+                // Typing may persist only the ratchet/allowance, without an outbox trail.
+                let private_pair = if table == "runtime_actor_state" {
+                    format!(
+                        "{source}.state_kind NOT LIKE 'dm-pair/session/%' AND {source}.state_kind NOT LIKE 'dm-pair/ephemeral-seals/%'"
+                    )
+                } else {
+                    "1".to_owned()
+                };
                 let guard = match operation {
-                    "insert" => format!("WHEN {present}"),
-                    "update" => format!("WHEN {present} AND ({changed})"),
-                    _ => String::new(),
+                    "insert" => format!("WHEN {present} AND ({private_pair})"),
+                    "update" => format!("WHEN {present} AND ({changed}) AND ({private_pair})"),
+                    _ => format!("WHEN {private_pair}"),
                 };
                 let fields = names
                     .iter()

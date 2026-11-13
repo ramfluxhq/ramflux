@@ -42,10 +42,23 @@ async fn public_receivers_preserve_bare_directory_errors_and_log_kind() -> TestR
                 .err()
         }
         .ok_or("directory outage must fail")?;
-        assert!(
-            matches!(error, SdkError::Transport(_)),
-            "public receiver must preserve bare transport error: {error:?}"
-        );
+        if control {
+            assert!(
+                matches!(
+                    error,
+                    SdkError::GeneratedRefused {
+                        code: crate::error::GeneratedRefusalCode::Authority,
+                        ..
+                    }
+                ),
+                "A2I must refuse before fetching a directory: {error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, SdkError::Transport(_)),
+                "public receiver must preserve bare transport error: {error:?}"
+            );
+        }
     }
     let pending = SdkError::DirectoryAuthorityUnavailable {
         root: "peer".into(),

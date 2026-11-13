@@ -823,13 +823,38 @@ impl Supervisor {
         self.require_restore_ready(id, false)?;
         let actor =
             self.accounts.borrow().get(id).cloned().ok_or_else(|| self.account_unavailable(id))?;
+        let account_id = id.to_owned();
+        let transient = request
+            .body
+            .get("topics")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|topics| {
+                topics.iter().any(|topic| {
+                    matches!(topic.as_str(), Some("*" | ramflux_protocol::message::TRANSIENT_TOPIC))
+                })
+            });
         if let Some(task) = self.streams.borrow_mut().remove(&connection.connection_id) {
             task.abort();
         }
+        self.subscribers.borrow_mut().remove(&connection.connection_id);
         if let Some(task) =
             super::subscription::start(actor.reader_pool()?, request, connection.outbound.clone())
                 .await?
         {
+            // The acknowledgement is already queued. Only live transient traffic uses
+            // this router; all durable topics retain their journal-tail ordering.
+            if transient {
+                self.subscribers.borrow_mut().insert(
+                    connection.connection_id,
+                    LocalBusSubscriber {
+                        account_id,
+                        topics: BTreeSet::from([
+                            ramflux_protocol::message::TRANSIENT_TOPIC.to_owned()
+                        ]),
+                        outbound: connection.outbound.clone(),
+                    },
+                );
+            }
             self.streams.borrow_mut().insert(connection.connection_id, task);
         }
         Ok(())

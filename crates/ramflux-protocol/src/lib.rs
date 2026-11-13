@@ -38,6 +38,7 @@ pub use identity_keys::*;
 pub mod object_relay_v3;
 mod protocol_object;
 mod replay;
+pub mod schema_activation;
 pub mod schema_profile;
 mod signature;
 mod state;
@@ -127,7 +128,15 @@ pub use principal_directory::{
     PrincipalLookupResponse,
 };
 mod envelope_sender;
-pub use envelope_sender::{candidate_outer_sender_signed_bytes, envelope_sender_signed_bytes};
+mod sender_transcript;
+pub use envelope_sender::{
+    candidate_outer_sender_signed_bytes, envelope_sender_signed_bytes,
+    verify_envelope_sender_signature,
+};
+pub use sender_transcript::{
+    SENDER_TRANSCRIPT_PREFIX, SenderTranscript, SenderTranscriptMode, sender_origin_evidence,
+    sender_signed_transcript, verify_sender_signature,
+};
 
 mod call;
 pub use call::*;

@@ -21,7 +21,7 @@ impl RamfluxClient {
         }
         Ok(Some(state.snapshot().state_hash.clone()))
     }
-    fn validate_group_key_head(
+    pub(crate) fn validate_group_key_head(
         &self,
         group: &str,
         epoch: u64,
@@ -62,7 +62,7 @@ impl RamfluxClient {
         let head = self.current_group_key_head(group_id, group_key_epoch)?;
         self.load_group_key_at_head(group_id, sender, group_key_epoch, direction, head.as_deref())
     }
-    fn load_group_key_at_head(
+    pub(crate) fn load_group_key_at_head(
         &self,
         group_id: &str,
         sender: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -602,12 +602,24 @@ impl RamfluxClient {
         sender_id: &str,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.encrypt_group_message_in(group_id, sender_id, plaintext))
+    }
+
+    fn encrypt_group_message_in(
+        &self,
+        group_id: &str,
+        sender_id: &str,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SdkError> {
         self.require_backup_outbound_ready()?;
         self.assert_shared_group_send_capacity(group_id, sender_id)?;
+        let logical_event_id =
+            crate::client::target_selection::group_logical_event_id(group_id, None)?;
         let _ = self.candidate_group_target_plan(
             group_id,
             sender_id,
-            group_id,
+            &logical_event_id,
             ramflux_protocol::message::KindId::KindMessage,
         )?;
         let group = self.group_state(group_id)?;
@@ -626,6 +638,7 @@ impl RamfluxClient {
             state.group_state_hash.as_deref(),
         )?;
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
+        self.capture_own_authored_group(group_id, sender_id, plaintext)?;
         let ciphertext = session.encrypt(plaintext, &associated_data)?;
         state.session_snapshot = session.snapshot();
         self.persist_group_sender_key_state(
@@ -684,6 +697,16 @@ impl RamfluxClient {
         message_id: &str,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Vec<u8>, SdkError> {
+        let mut output = self.decrypt_group_envelope_with_opening(envelope, message_id, source)?;
+        Ok(std::mem::take(&mut output.plaintext))
+    }
+
+    pub(crate) fn decrypt_group_envelope_with_opening(
+        &self,
+        envelope: &SdkGroupEncryptedEnvelope,
+        message_id: &str,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<ramflux_crypto::DmDecryptionOutput, SdkError> {
         if source.device_id() != envelope.sender_id {
             return Err(SdkError::InboundRejected("group sender identity mismatch".into()));
         }
@@ -741,7 +764,8 @@ impl RamfluxClient {
             envelope.group_state_hash.as_deref(),
         )?;
         let mut session = ramflux_crypto::DmSession::from_snapshot(state.session_snapshot.clone())?;
-        let plaintext = session.decrypt(&envelope.ciphertext, &associated_data)?;
+        let plaintext =
+            session.decrypt_with_franking_keys(&envelope.ciphertext, &associated_data)?;
         state.session_snapshot = session.snapshot();
         if !self.record_group_sender_key_counter(envelope, source, message_id)? {
             return Err(SdkError::LocalBus(format!(

@@ -146,6 +146,9 @@ pub use native_prekey_bundle_types::*;
 #[path = "native_signed_device_set.rs"]
 mod native_signed_device_set_types;
 pub use native_signed_device_set_types::*;
+#[path = "original_group_binding.rs"]
+mod original_group_binding_types;
+pub use original_group_binding_types::*;
 #[path = "padded_inner.rs"]
 mod padded_inner_types;
 pub use padded_inner_types::*;

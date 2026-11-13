@@ -512,9 +512,67 @@ pub(crate) fn gateway_envelope_from_sealed(
     sealed: crate::client::routed::SealedRouted,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
-    let (packet, committed_a0) = sealed.into_parts();
+    let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
     message.encrypted_body = serde_json::to_vec(&packet)?;
-    gateway_direct_message_envelope_sealed(config, message, franking, committed_a0.as_deref())
+    let mut envelope =
+        gateway_direct_message_envelope_sealed(config, message, franking, committed_a0.as_deref())?;
+    add_message_metadata_commitment(config, &mut envelope, metadata_commitment)?;
+    Ok(envelope)
+}
+
+/// Dedicated generated durable constructor; the generation-zero constructor stays dormant.
+pub(crate) fn gateway_generated_envelope_from_sealed(
+    config: &GatewaySessionConfig,
+    message: &mut GatewayDirectMessage,
+    sealed: crate::client::routed::SealedRouted,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let (packet, committed, metadata) = sealed.into_parts();
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let mut envelope = gateway_envelope_with_policy(
+        config,
+        message,
+        None,
+        committed.as_deref(),
+        GatewayEnvelopePolicy {
+            mode: "durable",
+            priority: ramflux_protocol::Priority::Normal,
+            outer_profile: Some((ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
+        },
+    )?;
+    add_message_metadata_commitment(config, &mut envelope, metadata)?;
+    ramflux_protocol::message::outer::decode_candidate_outer_ijson(
+        &ramflux_protocol::canonical_json_bytes(&envelope)?,
+    )
+    .map_err(|error| SdkError::InboundRejected(format!("generated outer profile: {error}")))?;
+    Ok(envelope)
+}
+
+pub(crate) fn gateway_ephemeral_envelope_from_sealed(
+    config: &GatewaySessionConfig,
+    message: &mut GatewayDirectMessage,
+    sealed: crate::client::routed::SealedRouted,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Err(SdkError::InboundRejected(
+            "generated ephemeral delivery requires schema v1".into(),
+        ));
+    }
+    let (packet, committed, metadata_commitment) = sealed.into_parts();
+    if metadata_commitment.is_some() {
+        return Err(SdkError::InboundRejected("Message metadata on ephemeral delivery".into()));
+    }
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    gateway_envelope_with_policy(
+        config,
+        message,
+        None,
+        committed.as_deref(),
+        GatewayEnvelopePolicy {
+            mode: "ephemeral",
+            priority: ramflux_protocol::Priority::Low,
+            outer_profile: None,
+        },
+    )
 }
 
 pub(crate) fn gateway_direct_message_envelope_sealed(
@@ -523,15 +581,53 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    gateway_envelope_with_policy(
+        config,
+        message,
+        franking,
+        committed_a0,
+        GatewayEnvelopePolicy {
+            mode: "durable",
+            priority: ramflux_protocol::Priority::Normal,
+            outer_profile: None,
+        },
+    )
+}
+
+/// One profile choice for the candidate producer and its exact C/A0 construction.
+/// Ordinary legacy carriers remain dormant until the final activation change.
+pub(crate) fn candidate_outer_profile(mode: &str) -> (&'static str, u32) {
+    if mode == "ephemeral" && crate::client::target_selection::schema_v1_selected() {
+        (ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)
+    } else {
+        (ramflux_protocol::domain::ENVELOPE, 1)
+    }
+}
+
+struct GatewayEnvelopePolicy {
+    mode: &'static str,
+    priority: ramflux_protocol::Priority,
+    outer_profile: Option<(&'static str, u32)>,
+}
+
+fn gateway_envelope_with_policy(
+    config: &GatewaySessionConfig,
+    message: &GatewayDirectMessage,
+    franking: Option<&SdkDmFrankingMetadata>,
+    committed_a0: Option<&[u8]>,
+    policy: GatewayEnvelopePolicy,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let mode = policy.mode;
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),
     );
+    let profile = policy.outer_profile.unwrap_or_else(|| candidate_outer_profile(mode));
     let mut envelope = ramflux_protocol::Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.envelope.v1".to_owned(),
+        schema: profile.0.to_owned(),
+        version: profile.1,
+        domain: profile.0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: if ramflux_protocol::schema_profile::schema_v1_live() {
             crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "")
@@ -547,8 +643,13 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
         source_device_id: config.device_id.clone(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority: ramflux_protocol::Priority::Normal,
+        delivery_class: if profile.0 == ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        {
+            ramflux_protocol::DeliveryClass::Message
+        } else {
+            ramflux_protocol::DeliveryClass::OpaqueEvent
+        },
+        priority: policy.priority,
         ttl: message.ttl,
         created_at: message.created_at,
         encrypted_payload,
@@ -563,6 +664,9 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
         nested_tag.as_deref(),
         nested_commitment.as_deref(),
     );
+    if crate::client::target_selection::schema_v1_selected() {
+        envelope.delivery_mode = Some(mode.to_owned());
+    }
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
             return Err(SdkError::GatewaySessionRejected(
@@ -626,6 +730,7 @@ pub(crate) fn candidate_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     collapse_tag: [u8; 32],
+    report_commitment: [u8; 32],
     mode: ramflux_protocol::message::outer::NamedDeliveryMode,
 ) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
@@ -638,9 +743,11 @@ pub(crate) fn candidate_direct_message_envelope(
         .as_ref()
         .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
     let outer = ramflux_protocol::message::outer::CandidateOuterEnvelope {
+        ext: ramflux_protocol::Ext::default(),
+        routing_set_id: None,
         schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        domain: "ramflux.envelope.v2".to_owned(),
         envelope_id: message.envelope_id.clone(),
         source_principal_id,
         source_device_id: config.device_id.clone(),
@@ -659,6 +766,7 @@ pub(crate) fn candidate_direct_message_envelope(
         encrypted_payload,
         payload_hash,
         collapse_tag: ramflux_protocol::encode_base64url(collapse_tag),
+        report_commitment: ramflux_protocol::encode_base64url(report_commitment),
         delivery_mode: mode,
         node_report_receipt: None,
         signed: sdk_signed_fields(""),
@@ -684,4 +792,24 @@ pub(crate) fn a2i_control_conversation_id(
     target_device_id: &str,
 ) -> String {
     format!("a2i.control:{source_device_id}:{target_device_id}")
+}
+
+/// Include the audited Message header in the sender signature before publishing the envelope.
+pub(crate) fn add_message_metadata_commitment(
+    config: &GatewaySessionConfig,
+    envelope: &mut ramflux_protocol::Envelope,
+    commitment: Option<String>,
+) -> Result<(), SdkError> {
+    if let Some(commitment) = commitment {
+        envelope.ext.ext.insert(
+            ramflux_protocol::message::original_header::EXT_KEY.into(),
+            serde_json::Value::String(commitment),
+        );
+        envelope.signed.signature = if let Some(branch) = config.device_branch.as_ref() {
+            ramflux_crypto::sign_protocol_object_with_device_branch(branch, envelope)?
+        } else {
+            ramflux_crypto::sign_protocol_object(envelope)?
+        };
+    }
+    Ok(())
 }

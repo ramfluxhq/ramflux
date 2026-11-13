@@ -193,6 +193,8 @@ impl BackupDatabase {
     ) -> Result<(), StorageError> {
         for group in groups {
             let state = group.state.view();
+            ramflux_protocol::message::dm_scope::validate_group(&state.conversation_id)
+                .map_err(|_| StorageError::AuthorizationRejected)?;
             let id = &state.group_id;
             let role = local.and_then(|actor| {
                 state.effective_role(&actor.identity.root_commitment, &actor.identity.device_id)

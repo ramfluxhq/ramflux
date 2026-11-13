@@ -16,14 +16,26 @@ pub enum RawInnerCopyKind {
     OuterInner,
     NestedGroup,
     HistoryContainer,
+    SourceEvidence,
 }
 
 impl RawInnerCopyKind {
+    fn from_sql(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "outer_inner" => Ok(Self::OuterInner),
+            "nested_group" => Ok(Self::NestedGroup),
+            "history_container" => Ok(Self::HistoryContainer),
+            "source_evidence" => Ok(Self::SourceEvidence),
+            _ => Err(StorageError::AuthorizationRejected),
+        }
+    }
+
     fn as_sql(self) -> &'static str {
         match self {
             Self::OuterInner => "outer_inner",
             Self::NestedGroup => "nested_group",
             Self::HistoryContainer => "history_container",
+            Self::SourceEvidence => "source_evidence",
         }
     }
 }
@@ -54,6 +66,18 @@ pub(super) fn validate_id(value: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn copy_insert_error(kind: RawInnerCopyKind, error: rusqlite::Error) -> StorageError {
+    match &error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if kind == RawInnerCopyKind::SourceEvidence
+                && code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
+        {
+            StorageError::RawWireResetRequired
+        }
+        _ => StorageError::from(error),
+    }
+}
+
 pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), StorageError> {
     let RawInnerCopyWrite {
         owner_id,
@@ -70,13 +94,17 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     validate_id(source_anchor)?;
     validate_id(copy_id)?;
     let max_bytes = match kind {
-        RawInnerCopyKind::HistoryContainer => MAX_HISTORY_CONTAINER_BYTES,
+        RawInnerCopyKind::HistoryContainer | RawInnerCopyKind::SourceEvidence => {
+            MAX_HISTORY_CONTAINER_BYTES
+        }
         RawInnerCopyKind::OuterInner | RawInnerCopyKind::NestedGroup => MAX_INNER_BYTES,
     };
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
         return Err(StorageError::AuthorizationRejected);
     }
-    if message_deleted(db, owner_id)? || raw_copy_deleted(db, copy_id)? {
+    if super::super::deleted_messages::message_is_deleted_on(db, owner_id)?
+        || raw_copy_deleted(db, copy_id)?
+    {
         return Err(StorageError::AuthorizationRejected);
     }
     let recorded_source: Option<String> = db
@@ -99,7 +127,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         .optional()?;
     if let Some((existing_owner, existing_kind, existing_digest, existing_bytes)) = existing {
         if existing_owner == owner_id
-            && existing_kind == kind.as_sql()
+            && RawInnerCopyKind::from_sql(&existing_kind)? == kind
             && existing_digest == digest
             && existing_bytes == bytes
         {
@@ -122,17 +150,18 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         }
         return Err(StorageError::AuthorizationRejected);
     }
-    quota::reserve(db, owner_id, source_anchor, bytes.len() as u64)?;
+    quota::reserve(db, owner_id, source_anchor, (bytes.len() + metadata.len()) as u64)?;
     db.execute(
-        "INSERT INTO raw_inner_owner(owner_id,source_anchor,metadata) VALUES(?1,?2,?3)
+        "INSERT INTO raw_inner_owner(owner_id,source_anchor,metadata) VALUES(?1,?2,x'')
          ON CONFLICT(owner_id) DO NOTHING",
-        params![owner_id, source_anchor, metadata],
+        params![owner_id, source_anchor],
     )?;
     db.execute(
-        "INSERT INTO raw_inner_copy(copy_id,owner_id,copy_kind,raw_digest,raw_bytes)
-         VALUES(?1,?2,?3,?4,?5)",
-        params![copy_id, owner_id, kind.as_sql(), digest.as_slice(), bytes],
-    )?;
+        "INSERT INTO raw_inner_copy(copy_id,owner_id,copy_kind,raw_digest,raw_bytes,copy_metadata)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![copy_id, owner_id, kind.as_sql(), digest.as_slice(), bytes, metadata],
+    )
+    .map_err(|error| copy_insert_error(kind, error))?;
     db.execute(
         "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",
         params![format!("raw:{copy_id}"), owner_id],
@@ -162,7 +191,7 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
     if !exists {
         return Err(StorageError::AuthorizationRejected);
     }
-    if message_deleted(db, message_id)? {
+    if super::super::deleted_messages::message_is_deleted_on(db, message_id)? {
         return Err(StorageError::AuthorizationRejected);
     }
     let binding_id = format!("raw:{copy_id}");
@@ -183,10 +212,6 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
         params![binding_id, message_id],
     )?;
     Ok(())
-}
-
-pub(crate) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool, StorageError> {
-    super::super::deleted_messages::message_is_deleted_on(db, message_id)
 }
 
 pub(crate) fn raw_copy_deleted(db: &Connection, copy_id: &str) -> Result<bool, StorageError> {
@@ -280,6 +305,7 @@ impl AccountDb {
                         "outer_inner" => RawInnerCopyKind::OuterInner,
                         "nested_group" => RawInnerCopyKind::NestedGroup,
                         "history_container" => RawInnerCopyKind::HistoryContainer,
+                        "source_evidence" => RawInnerCopyKind::SourceEvidence,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
                     Ok(RawInnerCopy { copy_id: row.get(0)?, owner_id: row.get(1)?, kind, digest, bytes: row.get(4)? })

@@ -103,3 +103,68 @@ async fn native_call_invite_answer_and_replay_use_real_master_and_anchor() -> Te
     assert!(bob.client.identity_root.is_none());
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() -> TestResult {
+    let alice = Fixture::new("generated-cache-alice").await?;
+    let mut bob = Fixture::new("generated-cache-bob").await?;
+    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )?;
+    for fixture in [&alice, &bob] {
+        fixture.client.establish_friend_link(
+            "native-cache-friend",
+            &alice.client.own_account_anchor()?,
+            &bob.client.own_account_anchor()?,
+        )?;
+        fixture.client.account_db()?.persist_client_record(
+            "conversation",
+            &conversation,
+            &json!({
+                "kind": "direct", "group_id": null,
+                "participants": [alice.manifest.principal_id, bob.manifest.principal_id],
+            }),
+        )?;
+    }
+    let local = alice.client.call_local_endpoint()?;
+    let peer = bob.client.call_local_endpoint()?;
+    let id = ramflux_protocol::encode_base64url([39; 16]);
+    let mut outgoing = LiveCall::outgoing(
+        id.clone(),
+        conversation.clone(),
+        local,
+        vec![peer.clone()],
+        crate::time::now_unix_timestamp(),
+    )?;
+    outgoing.pin_peer(peer, bob.manifest.devices[0].branch_public_key.clone())?;
+    let (entry, native_body) = signed_control(&alice, &outgoing.pending[0])?;
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let signed = decode(&native_body)?.ok_or("signed call")?;
+    let identity = alice.client.account_db()?.write_transaction(|| {
+        alice.client.allocate_generated_identity(
+            &conversation,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )
+    })?;
+    let raw = RamfluxClient::encode_generated_inner(
+        identity,
+        &ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Call(
+                crate::client::generated_call::native::from_native(&signed),
+            )),
+        },
+    )?;
+    bob.client.account_db()?.write_transaction(|| {
+        bob.client.project_native_call_control(&entry, &conversation, None, &signed, &raw)
+    })?;
+    assert!(bob.client.refresh_generated_control_cache(&raw)?);
+    assert!(
+        bob.client.voice_calls.contains_key(&id),
+        "generated cache lost the committed native call transition"
+    );
+    Ok(())
+}

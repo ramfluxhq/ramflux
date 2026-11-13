@@ -45,6 +45,13 @@ struct Work {
     targets: Vec<Target>,
     #[serde(default)]
     context_delivery: Option<crate::client::surface::OwnContextDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generated: Option<Vec<GeneratedCopy>>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct GeneratedCopy {
+    device: String,
+    envelope: ramflux_protocol::Envelope,
 }
 pub(crate) fn copy_id(client: &RamfluxClient, id: &str) -> Result<String, SdkError> {
     let source = client.read_device_identity()?.ok_or(SdkError::IdentityRootMissing)?;
@@ -111,6 +118,7 @@ fn stage_inner(
         local_manifest: held,
         targets: Vec::new(),
         context_delivery: None,
+        generated: None,
     };
     db.write_transaction(|| {
         let (rows, bytes) = db.own_copy_actor_usage(PREFIX)?;
@@ -239,6 +247,10 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         db.persist_client_record(directory, record, &row)?;
     }
     Ok(())
+}
+
+fn sealed(work: &Work) -> bool {
+    work.packet.is_some() || work.generated.is_some()
 }
 
 fn message_owner(work: &Work) -> Option<&str> {

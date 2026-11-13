@@ -30,6 +30,7 @@ compile_error!("production builds must not enable itest-legacy-accounts");
 #[cfg(all(feature = "itest-legacy-accounts", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-legacy-accounts");
 
+pub mod bindings;
 mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
@@ -133,11 +134,13 @@ pub use client::conversation::ConversationSummary;
 #[cfg(feature = "itest-fingerprint")]
 pub use client::dm_session::RecvCommitFingerprint;
 pub use client::recovery::{
-    SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteMessage,
-    SdkGuardianRecoveryShare, SdkPendingRecoveryState, SdkPendingRecoveryStatus,
-    SdkRecoveryInitiateRequest, SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember,
-    recovery_member_public_key_base64url, verify_guardian_accept,
+    SdkFinalizedRecovery, SdkGuardianAcceptMessage, SdkGuardianInviteHandle,
+    SdkGuardianInviteMessage, SdkGuardianRecoveryShare, SdkPendingGuardianInvite,
+    SdkPendingRecoveryState, SdkPendingRecoveryStatus, SdkRecoveryInitiateRequest,
+    SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember, recovery_member_public_key_base64url,
+    verify_guardian_accept,
 };
+pub use client::{ReparseProgress, self_sync, typed_messages, typed_read_model, typing};
 pub use constants::*;
 pub use dm::{
     SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,
@@ -152,7 +155,7 @@ pub use ephemeral::{
     ReceiverLifetime, admit_authenticated_ciphertext, authenticate, decode_ephemeral_result,
     echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral, ttl_seconds,
 };
-pub use error::{GroupOperation, ReceiveEpochReconcileFailure, SdkError};
+pub use error::{GeneratedRefusalCode, GroupOperation, ReceiveEpochReconcileFailure, SdkError};
 mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,

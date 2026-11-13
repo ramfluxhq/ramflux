@@ -16,6 +16,12 @@ impl RamfluxClient {
         body: &[u8],
         metadata: Option<&MessageMetadata>,
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if crate::client::target_selection::schema_v1_selected()
+            && let super::generated_receive::GeneratedProjection::Handled(projected) =
+                self.project_generated_entry(opened, entry, body, metadata)?
+        {
+            return Ok(projected);
+        }
         let route = &opened.routing;
         match route.kind {
             Kind::Direct => self.project_routed_direct(opened, entry, body, metadata),

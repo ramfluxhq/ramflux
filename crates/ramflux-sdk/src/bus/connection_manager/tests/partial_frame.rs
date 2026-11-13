@@ -110,7 +110,7 @@ async fn case() -> Case {
     config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
     let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), Box::new(stream));
     engine.frame_timeout = Duration::from_secs(600);
-    let (sessions, mut reconnects) = mpsc::unbounded_channel();
+    let (sessions, mut reconnects) = mpsc::channel(8);
     let handle = ConnectionHandle::start_with(
         config,
         Some(engine),

@@ -18,17 +18,32 @@ pub(crate) fn scan(
     layer: u32,
     depth: usize,
 ) -> Result<ScanOutcome, ValidationError> {
-    if depth > MAX_DEPTH {
-        return Err(ValidationError::Limit);
-    }
-    if matches!(descriptor.name(), "Task" | "Surface") && bytes.len() > 30_720 {
-        return Err(ValidationError::Limit);
-    }
+    scan_context(
+        descriptor,
+        bytes,
+        layer,
+        depth,
+        !matches!(
+            descriptor.name(),
+            "MessageRequest" | "SendMessage" | "MessageUpdate" | "Content"
+        ),
+    )
+}
+
+fn scan_context(
+    descriptor: &MessageDescriptor,
+    bytes: &[u8],
+    layer: u32,
+    depth: usize,
+    private_body: bool,
+) -> Result<ScanOutcome, ValidationError> {
+    message_limits(descriptor, bytes, depth)?;
     let mut input = bytes;
     let mut previous = 0;
     let mut counts = BTreeMap::<u32, usize>::new();
     let mut choices = BTreeSet::new();
     let mut outcome = ScanOutcome::Supported;
+    let mut revision_nonce_length = 0;
     let (mut operation, mut payload) = (0, 0);
     let mut object_key: Option<&str> = None;
     let mut map_keys = BTreeMap::<u32, &str>::new();
@@ -38,6 +53,9 @@ pub(crate) fn scan(
             return Err(ValidationError::NonCanonical);
         }
         previous = field.tag;
+        if descriptor.name() == "Message" && field.tag == 17 {
+            revision_nonce_length = field.bytes.len();
+        }
         let Some(schema) = descriptor.get_field(field.tag) else {
             outcome = ScanOutcome::Unsupported;
             continue;
@@ -78,7 +96,7 @@ pub(crate) fn scan(
         if registry::field_layer(descriptor.name(), field.tag).is_none_or(|first| first > layer) {
             outcome = ScanOutcome::Unsupported;
         }
-        if scan_field(&schema, &field, layer, depth)? == ScanOutcome::Unsupported {
+        if scan_field(&schema, &field, layer, depth, private_body)? == ScanOutcome::Unsupported {
             outcome = ScanOutcome::Unsupported;
         }
         if descriptor.name() == "Control" {
@@ -87,6 +105,14 @@ pub(crate) fn scan(
             } else if field.tag >= 16 {
                 payload = field.tag;
             }
+        }
+    }
+    if descriptor.name() == "Message" {
+        let forbidden = !private_body || counts.contains_key(&16);
+        if (forbidden && counts.contains_key(&17))
+            || (!forbidden && layer >= 3 && revision_nonce_length != 32)
+        {
+            return Err(ValidationError::Content);
         }
     }
     if outcome == ScanOutcome::Supported {
@@ -106,6 +132,23 @@ pub(crate) fn scan(
     Ok(outcome)
 }
 
+fn message_limits(
+    descriptor: &MessageDescriptor,
+    bytes: &[u8],
+    depth: usize,
+) -> Result<(), ValidationError> {
+    if depth > MAX_DEPTH {
+        return Err(ValidationError::Limit);
+    }
+    if matches!(descriptor.name(), "Task" | "Surface") && bytes.len() > 30_720 {
+        return Err(ValidationError::Limit);
+    }
+    if descriptor.name() == "GroupKeyDistribution" && bytes.len() > 4096 {
+        return Err(ValidationError::Limit);
+    }
+    Ok(())
+}
+
 fn collection_cap(message: &str, field: &str, count: usize) -> Result<(), ValidationError> {
     let maximum = match (message, field) {
         ("Message", "entities") => MAX_ENTITIES,
@@ -120,6 +163,7 @@ fn scan_field(
     field: &wire::Field<'_>,
     layer: u32,
     depth: usize,
+    private_body: bool,
 ) -> Result<ScanOutcome, ValidationError> {
     let expected = match schema.kind() {
         Kind::Double | Kind::Fixed64 | Kind::Sfixed64 => 1,
@@ -140,7 +184,16 @@ fn scan_field(
         return Err(ValidationError::NonCanonical);
     }
     match schema.kind() {
-        Kind::Message(message) => return scan(&message, field.bytes, layer, depth + 1),
+        Kind::Message(message) => {
+            return scan_context(
+                &message,
+                field.bytes,
+                layer,
+                depth + 1,
+                private_body
+                    && !(schema.parent_message().name() == "SelfSync" && schema.name() == "draft"),
+            );
+        }
         Kind::Enum(enumeration) => {
             let signed = i64::from_le_bytes(field.scalar.to_le_bytes());
             if i32::try_from(signed).ok().and_then(|number| enumeration.get_value(number)).is_none()
@@ -160,6 +213,7 @@ fn scan_field(
             let cap = match (schema.parent_message().name(), schema.name()) {
                 ("Thumbnail", "encoded_image") => 16 * 1024,
                 (_, "native_authority_proof") => 8 * 1024,
+                ("NativeGroupSnapshot", "canonical") => crate::group_state::MAX_GROUP_STATE_BYTES,
                 (name, "canonical") if name.starts_with("Native") => 8 * 1024,
                 _ => super::validation::MAX_INNER_BYTES,
             };
@@ -225,4 +279,64 @@ fn json_member_key(mut bytes: &[u8]) -> Result<&str, ValidationError> {
         }
     }
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message as _;
+
+    #[test]
+    fn native_snapshot_leaf_uses_native_cap_without_expanding_other_leaves()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
+        for name in ["NativeGroupSnapshot", "NativeGroupActor"] {
+            let descriptor = pool
+                .all_messages()
+                .find(|value| value.name() == name)
+                .ok_or("native descriptor missing")?;
+            let cap = if name == "NativeGroupSnapshot" {
+                crate::group_state::MAX_GROUP_STATE_BYTES
+            } else {
+                8192
+            };
+            for size in [cap, cap + 1] {
+                let bytes = super::super::NativeGroupSnapshot { canonical: vec![b'x'; size] }
+                    .encode_to_vec();
+                let result = scan(&descriptor, &bytes, 3, 0);
+                if size == cap {
+                    assert_eq!(result?, ScanOutcome::Supported, "{name} at cap");
+                } else {
+                    assert_eq!(result, Err(ValidationError::Limit), "{name} beyond cap");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn group_distribution_is_bounded_before_native_parsing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
+        let descriptor = pool
+            .all_messages()
+            .find(|value| value.name() == "GroupKeyDistribution")
+            .ok_or("distribution descriptor missing")?;
+        for size in [4093, 4094] {
+            // Tag + minimal two-byte length produce exactly cap / cap+1.
+            let bytes = super::super::GroupKeyDistribution {
+                sender_key_seed: vec![1; size],
+                ..Default::default()
+            }
+            .encode_to_vec();
+            assert_eq!(bytes.len(), size + 3);
+            let result = scan(&descriptor, &bytes, 3, 0);
+            if size == 4093 {
+                assert_eq!(result?, ScanOutcome::Supported);
+            } else {
+                assert_eq!(result, Err(ValidationError::Limit));
+            }
+        }
+        Ok(())
+    }
 }

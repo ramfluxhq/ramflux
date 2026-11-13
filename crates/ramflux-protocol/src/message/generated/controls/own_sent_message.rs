@@ -6,6 +6,7 @@
 use super::super::*;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
 pub struct OwnSentMessage {
     #[prost(string, tag = "1")]
     pub envelope_id: ::prost::alloc::string::String,

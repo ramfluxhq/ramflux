@@ -285,7 +285,7 @@ async fn legacy_quarantine_survives_v2_upgrade_without_ack_or_dead_letter() -> R
 }
 
 #[tokio::test]
-async fn two_authenticated_devices_can_deliver_the_same_a2i_event_id_independently()
+async fn two_authenticated_devices_are_independently_refused_without_a2i_grant_authority()
 -> Result<(), SdkError> {
     let alice = Fixture::new("alice", 41)?;
     let carol = Fixture::new("carol", 81)?;
@@ -293,6 +293,7 @@ async fn two_authenticated_devices_can_deliver_the_same_a2i_event_id_independent
     trust(&bob, &alice)?;
     trust(&bob, &carol)?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
+    let mut keys = std::collections::BTreeSet::new();
     for sender in [&alice, &carol] {
         let event = A2iControlEvent {
             source_principal_id: None,
@@ -314,15 +315,21 @@ async fn two_authenticated_devices_can_deliver_the_same_a2i_event_id_independent
             &serde_json::to_vec(&event)?,
             Route::control(),
         )?;
-        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+        let source = bob.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
+        keys.insert(crate::client::routed::control::a2i_key(&source, &event.event_id)?);
+        assert_a2i_authority_refused(
+            bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await,
+        );
     }
     let persisted = bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?;
-    assert_eq!(persisted.len(), 2);
+    assert_eq!(keys.len(), 2);
+    assert_eq!(persisted.len(), 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Result<(), SdkError> {
+async fn legacy_a2i_refusal_has_no_ack_or_persistent_effects_across_reopen() -> Result<(), SdkError>
+{
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     trust(&bob, &alice)?;
@@ -367,21 +374,20 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
         envelope: gateway_direct_message_envelope(&alice.config()?, &msg, None)?,
     };
     let (mut engine, writes) = Inbox::engine(bob.config()?, vec![entry])?;
-    let mut expected = event;
-    expected.source_principal_id = Some(alice.id.clone());
-    expected.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
-        &alice
-            .client
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key(),
-    ));
-    assert_eq!(bob.client.receive_a2i_control_events(&mut engine, 16).await?, vec![expected]);
-    assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 1);
-    assert!(writes.lock().map_err(|_| invalid("mutex"))?.iter().any(|v| v["frame_type"] == "ack"));
-    assert_eq!(bob.client.gateway_receive_cursor("bob")?, 1);
+    // The complete effect snapshot includes the optional receive-ledger tables.
+    bob.client.account_db()?.install_receive_ledger_schema()?;
+    assert_eq!(bob.client.account_db()?.receive_epoch("bob")?, None);
+    let before = bob.client.account_db()?.durable_rows_for_test()?;
+    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 16).await);
+    assert_eq!(bob.client.account_db()?.durable_rows_for_test()?, before);
+    bob.client.active_account_db = None;
+    bob.client.unlock_account("bob", b"routed-test")?;
+    let reopened = bob.client.account_db()?.durable_rows_for_test()?;
+    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 16).await);
+    assert_eq!(bob.client.account_db()?.durable_rows_for_test()?, reopened);
+    assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 0);
+    assert_eq!(writes.lock().map_err(|_| invalid("mutex"))?.len(), 0);
+    assert_eq!(bob.client.gateway_receive_cursor("bob")?, 0);
     Ok(())
 }
 
@@ -443,7 +449,11 @@ async fn legacy_a2i_rejects_envelope_id_reused_with_different_payload() -> Resul
     let mut bob = Fixture::new("bob", 61)?;
     let (entry, _) = sealed_legacy_a2i(&alice, &mut bob, "bob", "legacy-reuse")?;
     let (mut engine, _) = Inbox::engine(bob.config()?, vec![entry.clone()])?;
-    bob.client.receive_a2i_control_events(&mut engine, 16).await?;
+    // The complete effect snapshot includes the optional receive-ledger tables.
+    bob.client.account_db()?.install_receive_ledger_schema()?;
+    assert_eq!(bob.client.account_db()?.receive_epoch("bob")?, None);
+    let before = bob.client.account_db()?.durable_rows_for_test()?;
+    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 16).await);
     let mut reused = entry.clone();
     reused.inbox_seq = 2;
     let raw = ramflux_protocol::decode_base64url(&reused.envelope.encrypted_payload)
@@ -462,10 +472,8 @@ async fn legacy_a2i_rejects_envelope_id_reused_with_different_payload() -> Resul
     )?;
     let (mut engine, _) = Inbox::engine(bob.config()?, vec![reused])?;
     let reused = bob.client.receive_a2i_control_events(&mut engine, 16).await;
-    assert!(
-        matches!(&reused, Err(SdkError::InboundRejected(text)) if text == "legacy A2I envelope id reused"),
-        "{reused:?}"
-    );
+    assert_a2i_authority_refused(reused);
+    assert_eq!(bob.client.account_db()?.durable_rows_for_test()?, before);
     Ok(())
 }
 
@@ -476,10 +484,8 @@ async fn legacy_a2i_rejects_endpoint_mismatch() -> Result<(), SdkError> {
     let (entry, _) = sealed_legacy_a2i(&alice, &mut bob, "carol", "legacy-endpoint")?;
     let (mut engine, _) = Inbox::engine(bob.config()?, vec![entry])?;
     let mismatched = bob.client.receive_a2i_control_events(&mut engine, 16).await;
-    assert!(
-        matches!(&mismatched, Err(SdkError::InboundRejected(text)) if text == "legacy A2I endpoint mismatch"),
-        "{mismatched:?}"
-    );
+    assert_a2i_authority_refused(mismatched);
+    assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 0);
     Ok(())
 }
 
@@ -637,39 +643,42 @@ async fn attachment_references_with_one_object_id_remain_independent_for_each_se
 }
 
 #[tokio::test]
-async fn acknowledging_a2i_control_persists_the_decision_beyond_the_memory_cache()
--> Result<(), SdkError> {
+async fn retained_a2i_rows_cannot_be_exposed_or_acknowledged_after_reopen() -> Result<(), SdkError>
+{
     let alice = Fixture::new("alice", 41)?;
     let mut bob = Fixture::new("bob", 61)?;
     trust(&bob, &alice)?;
-    let event = A2iControlEvent {
-        source_principal_id: None,
-        source_principal_commitment: None,
-        event_id: "ack-event".to_owned(),
-        event_type: "a2i.control".to_owned(),
-        source_device_id: "alice".to_owned(),
-        target_device_id: "bob".to_owned(),
-        control_domain: "message".to_owned(),
-        action: "test".to_owned(),
+    let root = alice.client.surface_local_root_commitment()?;
+    let source = bob.client.device_identity_for_root(&root, "alice")?;
+    let retained = A2iControlEvent {
+        source_principal_id: Some("alice".into()),
+        source_principal_commitment: Some(root),
+        event_id: "ack-event".into(),
+        event_type: "a2i.control".into(),
+        source_device_id: "alice".into(),
+        target_device_id: "bob".into(),
+        control_domain: "message".into(),
+        action: "test".into(),
         subject_base64: String::new(),
         created_at: 1,
         acknowledged: false,
     };
-    let entry = seal_as(
-        &alice,
-        &bob,
-        message("ack-control", "controls"),
-        &serde_json::to_vec(&event)?,
-        Route::control(),
-    )?;
-    let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    let mut account = crate::bus::state::LocalBusAccountState::new(
+    let key = crate::client::routed::control::a2i_key(&source, &retained.event_id)?;
+    bob.client.account_db()?.persist_actor_state(&key, &retained)?;
+    for method in ["a2i.list", "a2i.list_pending"] {
+        let request = LocalBusFrame::request("cached", None, "a2i", method, serde_json::json!({}));
+        assert_a2i_authority_refused(
+            crate::bus::test_account_reader_request(bob.client.account_db()?, request).await,
+        );
+    }
+    let config = bob.config()?;
+    let own_root = bob.client.surface_local_root_commitment()?;
+    let mut account = crate::bus::state::LocalBusAccountState::disconnected(
         std::mem::take(&mut bob.client),
-        engine,
-        "bob".to_owned(),
+        config,
+        own_root,
     );
-    account.pending_a2i.insert(event.event_id.clone(), event.clone());
+    account.pending_a2i.insert(key, retained.clone());
     let mut state = crate::bus::state::LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
@@ -679,20 +688,26 @@ async fn acknowledging_a2i_control_persists_the_decision_beyond_the_memory_cache
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    // Reconstructing from durable state must not create two cache aliases for the same event.
-    let request = LocalBusFrame::request(
-        "ack",
-        Some("bob".to_owned()),
-        "a2i",
-        "a2i.acknowledge",
-        serde_json::json!({"event_id":"ack-event"}),
-    );
-    crate::bus::dispatch::a2i_a2ui::dispatch_a2i_bus_request(&request, &mut state).await?;
+    for method in ["a2i.append", "a2i.list", "a2i.list_pending", "a2i.acknowledge"] {
+        let request = LocalBusFrame::request(
+            "refused",
+            Some("bob".into()),
+            "a2i",
+            method,
+            serde_json::json!({"event_id":"ack-event"}),
+        );
+        assert_a2i_authority_refused(
+            crate::bus::dispatch::a2i_a2ui::dispatch_a2i_bus_request(&request, &mut state).await,
+        );
+    }
     let account = state.accounts.get_mut("bob").ok_or_else(|| invalid("account"))?;
     account.pending_a2i.clear();
-    let events = account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?;
-    assert_eq!(events.len(), 1);
-    assert!(events[0].acknowledged);
+    account.client.active_account_db = None;
+    account.client.unlock_account("bob", b"routed-test")?;
+    assert_eq!(
+        account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?,
+        vec![retained]
+    );
     Ok(())
 }
 

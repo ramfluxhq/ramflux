@@ -91,6 +91,10 @@ pub enum CandidateDeliveryClass {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateOuterEnvelope {
+    #[serde(flatten)]
+    pub ext: crate::Ext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_set_id: Option<String>,
     pub schema: String,
     pub version: u32,
     pub domain: String,
@@ -100,11 +104,13 @@ pub struct CandidateOuterEnvelope {
     pub target_delivery_id: String,
     pub delivery_class: CandidateDeliveryClass,
     pub priority: crate::Priority,
+    #[serde(rename = "ttl")]
     pub ttl_seconds: u32,
     pub created_at: i64,
     pub encrypted_payload: String,
     pub payload_hash: String,
     pub collapse_tag: String,
+    pub report_commitment: String,
     pub delivery_mode: NamedDeliveryMode,
     #[serde(default)]
     pub node_report_receipt: Option<Value>,
@@ -381,13 +387,16 @@ pub fn decode_candidate_outer_ijson(
 /// Bound fields on an already-typed candidate envelope.
 ///
 /// # Errors
-/// Schema, collapse tag, identifier, or TTL refusals.
+/// Schema, collapse tag, report commitment, identifier, or TTL refusals.
 pub fn validate_candidate_outer(outer: &CandidateOuterEnvelope) -> Result<(), OuterProfileError> {
     if outer.schema != CANDIDATE_ENVELOPE_SCHEMA {
         return Err(OuterProfileError::Malformed);
     }
     if decode_collapse_tag(&outer.collapse_tag)?.len() != 32 {
         return Err(OuterProfileError::CollapseTag);
+    }
+    if decode_report_commitment(&outer.report_commitment)?.len() != 32 {
+        return Err(OuterProfileError::ReportCommitment);
     }
     for id in [
         outer.envelope_id.as_str(),
@@ -462,9 +471,7 @@ pub fn accept_after_size_preflight(
 pub fn candidate_outer_sender_signed_bytes(
     outer: &CandidateOuterEnvelope,
 ) -> Result<Vec<u8>, ProtocolError> {
-    let mut sender = outer.clone();
-    sender.node_report_receipt = None;
-    crate::signed_bytes(&sender)
+    Ok(crate::sender_signed_transcript(outer, crate::SenderTranscriptMode::WithCiphertext)?.bytes)
 }
 
 /// Refuse a live envelope that still carries the signed ext bridge.
@@ -618,6 +625,10 @@ pub fn advertised_client_protocol_versions(base: &[String]) -> Vec<String> {
 
 fn decode_collapse_tag(tag: &str) -> Result<Vec<u8>, OuterProfileError> {
     crate::decode_base64url(tag).map_err(|_| OuterProfileError::CollapseTag)
+}
+
+fn decode_report_commitment(encoded: &str) -> Result<Vec<u8>, OuterProfileError> {
+    crate::decode_base64url(encoded).map_err(|_| OuterProfileError::ReportCommitment)
 }
 
 fn identifier_len(ids: &[&str]) -> usize {

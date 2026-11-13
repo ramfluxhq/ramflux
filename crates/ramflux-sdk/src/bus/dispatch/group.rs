@@ -798,149 +798,164 @@ pub(crate) async fn dispatch_group_send_request(
         }
         account.client.retain_authored_surface(carrier)?;
     }
-    let encrypted_body = if let Some(existing) =
-        existing.filter(|row| !row.encrypted_body.is_empty())
-    {
-        if existing.conversation_id != body.conversation_id || existing.sender_id != body.sender_id
-        {
-            return Err(SdkError::LocalBus("group message scope collision".into()));
-        }
-        if surface.is_none()
-            && account.client.account_db()?.message_content(&body.message_id)?.as_deref()
-                != Some(plaintext_body.as_slice())
-        {
-            return Err(SdkError::LocalBus(format!(
-                "group message id collision for {}",
-                body.message_id
-            )));
-        }
-        let stored: SdkGroupEncryptedEnvelope = serde_json::from_slice(&existing.encrypted_body)?;
-        if stored.group_id != body.group_id
-            || stored.sender_id != body.sender_id
-            || stored.group_key_epoch != group_state.group_epoch
-        {
-            return Err(SdkError::LocalBus(
-                "group epoch changed; retry requires a fresh message id".into(),
-            ));
-        }
-        existing.encrypted_body
-    } else {
-        account.client.encrypt_group_message(&body.group_id, &body.sender_id, &plaintext_body)?
-    };
+    let (encrypted_body, own_copy) = account.client.account_db()?.write_transaction(|| {
+        let encrypted_body =
+            if let Some(existing) = existing.filter(|row| !row.encrypted_body.is_empty()) {
+                if existing.conversation_id != body.conversation_id
+                    || existing.sender_id != body.sender_id
+                {
+                    return Err(SdkError::LocalBus("group message scope collision".into()));
+                }
+                if surface.is_none()
+                    && account.client.account_db()?.message_content(&body.message_id)?.as_deref()
+                        != Some(plaintext_body.as_slice())
+                {
+                    return Err(SdkError::LocalBus(format!(
+                        "group message id collision for {}",
+                        body.message_id
+                    )));
+                }
+                let stored: SdkGroupEncryptedEnvelope =
+                    serde_json::from_slice(&existing.encrypted_body)?;
+                if stored.group_id != body.group_id
+                    || stored.sender_id != body.sender_id
+                    || stored.group_key_epoch != group_state.group_epoch
+                {
+                    return Err(SdkError::LocalBus(
+                        "group epoch changed; retry requires a fresh message id".into(),
+                    ));
+                }
+                existing.encrypted_body
+            } else {
+                account.client.encrypt_group_message(
+                    &body.group_id,
+                    &body.sender_id,
+                    &plaintext_body,
+                )?
+            };
+        let own_copy = account.client.account_db()?.write_transaction(|| {
+            // Acquire the writer before reading the existing projection (WAL snapshot upgrades
+            // can fail immediately after a concurrent commit, regardless of busy_timeout).
+            account.client.account_db()?.fill_pending_message_body(
+                &body.conversation_id,
+                &body.message_id,
+                &body.sender_id,
+                &encrypted_body,
+            )?;
+            if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
+                if existing.encrypted_body.is_empty() {
+                    account.client.account_db()?.fill_pending_message_body(
+                        &body.conversation_id,
+                        &body.message_id,
+                        &body.sender_id,
+                        &encrypted_body,
+                    )?;
+                } else if existing.encrypted_body != encrypted_body {
+                    return Err(SdkError::LocalBus("group message id collision".into()));
+                }
+            } else {
+                account.client.send_direct_message(
+                    &body.conversation_id,
+                    &body.message_id,
+                    &body.sender_id,
+                    &encrypted_body,
+                )?;
+            }
+            if let Some(carrier) = &surface {
+                let outcome =
+                    if let Some(outcome) = account.client.surface_delivery_receipt(carrier)? {
+                        outcome
+                    } else {
+                        account.client.preflight_surface(carrier)?
+                    };
+                account.client.account_db()?.replace_surface_message_content(
+                    &body.conversation_id,
+                    &body.message_id,
+                    outcome.fallback_text.as_bytes(),
+                )?;
+            } else {
+                account.client.account_db()?.store_message_content(
+                    &body.conversation_id,
+                    &body.message_id,
+                    &plaintext_body,
+                )?;
+                if crate::client::target_selection::schema_v1_selected() {
+                    account.client.clear_self_sync_draft_after_send(&body.conversation_id)?;
+                }
+            }
+            let ticket = if surface.is_none() {
+                account.client.queue_own_sent_copy(&body.message_id, || {
+                    let original_recipients = if let Some(routes) = &fanout_routes {
+                        routes
+                            .iter()
+                            .filter(|route| {
+                                route.member_principal_commitment.as_deref()
+                                    == Some(account.principal_commitment.as_str())
+                            })
+                            .map(|route| {
+                                Ok::<_, SdkError>(
+                                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                                        .map_or_else(
+                                            || route.member_id.clone(),
+                                            |(_, device)| device,
+                                        ),
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        account
+                            .client
+                            .group_member_routes(&body.group_id)?
+                            .into_iter()
+                            .filter(|route| {
+                                route.target_delivery_id == body.target_delivery_id
+                                    && route.member_principal_commitment.as_deref()
+                                        == Some(account.principal_commitment.as_str())
+                            })
+                            .map(|route| {
+                                Ok::<_, SdkError>(
+                                    ramflux_protocol::parse_qualified_device_id(&route.member_id)?
+                                        .map_or(route.member_id, |(_, device)| device),
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+
+                    let envelope = account.client.own_group_copy_envelope(
+                        &body.group_id,
+                        &body.conversation_id,
+                        &body.message_id,
+                        body.envelope_id.as_deref(),
+                    )?;
+                    account.client.stage_own_sent_message(
+                        crate::client::own_sent_message::OwnSentInput {
+                            envelope: &envelope,
+                            conversation: &body.conversation_id,
+                            message: &body.message_id,
+                            sender: &body.sender_id,
+                            original_recipients: &original_recipients,
+                            group: Some(&body.group_id),
+                            peer: None,
+                            body: &plaintext_body,
+                            ciphertext: &encrypted_body,
+                            at: now_unix_timestamp(),
+                        },
+                    )?;
+                    Ok(envelope)
+                })
+            } else {
+                None
+            };
+            Ok::<_, SdkError>(ticket)
+        })?;
+        Ok::<_, SdkError>((encrypted_body, own_copy))
+    })?;
     let mut response = serde_json::json!({
         "group_id": body.group_id,
         "conversation_id": body.conversation_id,
         "message_id": body.message_id,
         "client_message_id":client_message_id,
     });
-    let own_copy = account.client.account_db()?.write_transaction(|| {
-        // Acquire the writer before reading the existing projection (WAL snapshot upgrades
-        // can fail immediately after a concurrent commit, regardless of busy_timeout).
-        account.client.account_db()?.fill_pending_message_body(
-            &body.conversation_id,
-            &body.message_id,
-            &body.sender_id,
-            &encrypted_body,
-        )?;
-        if let Some(existing) = account.client.direct_message_by_id(&body.message_id)? {
-            if existing.encrypted_body.is_empty() {
-                account.client.account_db()?.fill_pending_message_body(
-                    &body.conversation_id,
-                    &body.message_id,
-                    &body.sender_id,
-                    &encrypted_body,
-                )?;
-            } else if existing.encrypted_body != encrypted_body {
-                return Err(SdkError::LocalBus("group message id collision".into()));
-            }
-        } else {
-            account.client.send_direct_message(
-                &body.conversation_id,
-                &body.message_id,
-                &body.sender_id,
-                &encrypted_body,
-            )?;
-        }
-        if let Some(carrier) = &surface {
-            let outcome = if let Some(outcome) = account.client.surface_delivery_receipt(carrier)? {
-                outcome
-            } else {
-                account.client.preflight_surface(carrier)?
-            };
-            account.client.account_db()?.replace_surface_message_content(
-                &body.conversation_id,
-                &body.message_id,
-                outcome.fallback_text.as_bytes(),
-            )?;
-        } else {
-            account.client.account_db()?.store_message_content(
-                &body.conversation_id,
-                &body.message_id,
-                &plaintext_body,
-            )?;
-        }
-        let ticket = if surface.is_none() {
-            account.client.queue_own_sent_copy(&body.message_id, || {
-                let original_recipients = if let Some(routes) = &fanout_routes {
-                    routes
-                        .iter()
-                        .filter(|route| {
-                            route.member_principal_commitment.as_deref()
-                                == Some(account.principal_commitment.as_str())
-                        })
-                        .map(|route| {
-                            Ok::<_, SdkError>(
-                                ramflux_protocol::parse_qualified_device_id(&route.member_id)?
-                                    .map_or_else(|| route.member_id.clone(), |(_, device)| device),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    account
-                        .client
-                        .group_member_routes(&body.group_id)?
-                        .into_iter()
-                        .filter(|route| {
-                            route.target_delivery_id == body.target_delivery_id
-                                && route.member_principal_commitment.as_deref()
-                                    == Some(account.principal_commitment.as_str())
-                        })
-                        .map(|route| {
-                            Ok::<_, SdkError>(
-                                ramflux_protocol::parse_qualified_device_id(&route.member_id)?
-                                    .map_or(route.member_id, |(_, device)| device),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-
-                let envelope = account.client.own_group_copy_envelope(
-                    &body.group_id,
-                    &body.conversation_id,
-                    &body.message_id,
-                    body.envelope_id.as_deref(),
-                )?;
-                account.client.stage_own_sent_message(
-                    crate::client::own_sent_message::OwnSentInput {
-                        envelope: &envelope,
-                        conversation: &body.conversation_id,
-                        message: &body.message_id,
-                        sender: &body.sender_id,
-                        original_recipients: &original_recipients,
-                        group: Some(&body.group_id),
-                        peer: None,
-                        body: &plaintext_body,
-                        ciphertext: &encrypted_body,
-                        at: now_unix_timestamp(),
-                    },
-                )?;
-                Ok(envelope)
-            })
-        } else {
-            None
-        };
-        Ok::<_, SdkError>(ticket)
-    })?;
     let message_id = body.message_id.clone();
     let result = async {
         if let (Some(envelope_id), Some(source_principal_id), Some(target_delivery_id)) = (
@@ -993,26 +1008,25 @@ pub(crate) async fn dispatch_group_send_request(
             };
             if let Some(federation) = body.federation.as_ref() {
                 let engine = account.session_client().await?;
-                message.encrypted_body = serde_json::to_vec(
-                    &account
-                        .client
-                        .seal_federated_message_async(
-                            &engine,
-                            crate::client::federation::SealForward {
-                                message: &message,
-                                plaintext: &encrypted_body,
-                                federation,
-                                route: crate::client::routed::Route::group_message(&body.group_id),
-                                timeout: account.timeouts.http,
-                            },
-                        )
-                        .await?,
-                )?;
+                let sealed = account
+                    .client
+                    .seal_federated_message_async(
+                        &engine,
+                        crate::client::federation::SealForward {
+                            message: &message,
+                            plaintext: &encrypted_body,
+                            federation,
+                            route: crate::client::routed::Route::group_message(&body.group_id),
+                            timeout: account.timeouts.http,
+                        },
+                    )
+                    .await;
                 let forwarded = account
                     .client
-                    .forward_federated_gateway_message_async(
+                    .forward_federated_sealed_async(
                         &engine,
-                        &message,
+                        &mut message,
+                        sealed?,
                         federation,
                         account.timeouts.http,
                     )
@@ -1098,13 +1112,13 @@ pub(crate) async fn dispatch_group_send_request(
                         )
                         .await;
                     account.apply_session_metadata(engine);
-                    message.encrypted_body = serde_json::to_vec(&sealed?)?;
                     let engine = account.session_client().await?;
                     let forwarded = account
                         .client
-                        .forward_federated_gateway_message_async(
+                        .forward_federated_sealed_async(
                             &engine,
-                            &message,
+                            &mut message,
+                            sealed?,
                             federation,
                             account.timeouts.http,
                         )
@@ -1124,7 +1138,6 @@ pub(crate) async fn dispatch_group_send_request(
                         .await;
                     let entry = match sealed {
                         Ok(sealed) => {
-                            // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
                             engine
                                 .submit_envelope(gateway_envelope_from_sealed(
                                     engine.config(),
@@ -1252,7 +1265,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             },
             distribution_base64: ramflux_protocol::encode_base64url(&distribution),
         };
-        let message = GatewayDirectMessage {
+        let mut message = GatewayDirectMessage {
             conversation_id,
             message_id: envelope_id.clone(),
             envelope_id,
@@ -1266,7 +1279,8 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             ttl: account.client.content_ttl()?,
         };
         let payload_bytes = group_distribution_payload(
-            &account.client, engine.config(), group_id, &payload)?;
+            &account.client, engine.config(), group_id, &payload, &recipient)?;
+        normalize_generated_group_distribution(&mut message, &payload_bytes)?;
         let value = send_group_sender_key_distribution_message(
             &account.client,
             &mut engine,
@@ -1317,6 +1331,7 @@ fn group_distribution_payload(
     config: &GatewaySessionConfig,
     group_id: &str,
     legacy: &SdkGroupSenderKeyDistributionEnvelope,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> Result<Vec<u8>, SdkError> {
     if let Some(state) = client.account_db()?.shared_group_state(group_id)? {
         let state = ramflux_crypto::resign_group_state_snapshot(
@@ -1324,10 +1339,26 @@ fn group_distribution_payload(
             &client.owned_group_actor(&config.target_delivery_id)?,
             &state,
         )?;
-        client.shared_group_packet(&state, true)
+        client.shared_group_packet_for_recipient(&state, recipient)
     } else {
         Ok(serde_json::to_vec(legacy)?)
     }
+}
+
+fn normalize_generated_group_distribution(
+    message: &mut GatewayDirectMessage,
+    payload: &[u8],
+) -> Result<(), SdkError> {
+    if crate::client::target_selection::schema_v1_selected() {
+        let inner = <ramflux_protocol::message::Inner as prost::Message>::decode(payload)
+            .map_err(|_| SdkError::ReplayMismatch)?;
+        message
+            .conversation_id
+            .clone_from(&inner.identity.as_ref().ok_or(SdkError::ReplayMismatch)?.conversation_id);
+        message.message_id =
+            RamfluxClient::shared_group_packet_message_id(payload, &message.message_id)?;
+    }
+    Ok(())
 }
 
 struct DistributionMessage<'a> {

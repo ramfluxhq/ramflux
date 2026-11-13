@@ -41,6 +41,10 @@ pub(super) fn record_session(
     account: &LocalBusAccountState,
     snapshot: &super::connection_manager::NetworkingSnapshot,
 ) -> Result<bool, SdkError> {
+    account.client.note_self_sync_live_session(
+        (snapshot.state == super::connection_manager::NetworkingState::Live)
+            .then_some(snapshot.generation),
+    );
     let previous = account.client.account_db()?.load_actor_state::<Value>("account/networking")?;
     let mut body = match previous.clone() {
         Some(body) => body,

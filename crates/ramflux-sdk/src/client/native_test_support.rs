@@ -33,10 +33,21 @@ impl Fixture {
         client.seal_new_account_data(id, &anchor, b"native fixture data passphrase")?;
         client.unlock_account(id, b"native fixture data passphrase")?;
         client.initialize_born_v3_branch(device, vault.clone()).await?;
+        Self::ready(client, root, vault, id, device, account.record().clone())
+    }
+    fn ready(
+        client: RamfluxClient,
+        root: Root,
+        vault: Arc<TestVault>,
+        id: &str,
+        device: &str,
+        record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    ) -> TestResult<Self> {
+        let anchor = record.body.account_anchor.clone();
         let identity = client.owned_device_identity()?;
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
         let manifest = SdkDeviceManifestResponse::from_native(CustodyManifest {
-            publication: Publication { record: account.record().clone(), compacted_ids: None },
+            publication: Publication { record, compacted_ids: None },
             custodian_publication: None,
             devices: vec![CustodyManifestDevice {
                 device_ref: DeviceRef {
@@ -78,3 +89,31 @@ impl Fixture {
         Ok(Self { client, vault, manifest, config, root })
     }
 }
+
+mod history;
+mod sibling;
+
+#[path = "native_test_support/authored.rs"]
+mod authored;
+
+mod authored_edit;
+
+mod authored_epoch;
+
+mod authored_group;
+
+mod authored_edit_erasure;
+
+mod live_own_copy;
+
+mod generated_routes;
+
+mod peer_control_send;
+
+mod generation_zero_tests;
+
+mod history_item_tests;
+
+mod reaction_restore_tests;
+
+pub(crate) mod watchdog;

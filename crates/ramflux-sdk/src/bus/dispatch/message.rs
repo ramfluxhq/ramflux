@@ -36,6 +36,13 @@ pub(crate) async fn dispatch_message_bus_request(
         }
         "message.list" | "message.read" => {
             let account_id = request_account_id(request)?;
+            if crate::client::target_selection::schema_v1_selected() {
+                let account = local_bus_account(state, account_id)?;
+                return Ok(local_bus_ok(super::super::readers::generated_page(
+                    &account.client,
+                    &request.body,
+                )?));
+            }
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             let account = local_bus_account(state, account_id)?;
             let messages = account
@@ -843,10 +850,15 @@ pub(crate) async fn dispatch_message_receive_request(
             serde_json::json!({"entries":fresh}),
         )
     });
-    Ok(LocalBusDispatchResult {
-        response_body: serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext}),
-        event,
-    })
+    let mut response_body = serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext});
+    if crate::client::target_selection::schema_v1_selected() {
+        // The page above is a volatile delivery hint that a restart or a long backlog truncates.
+        // Unified consumers read committed messages from the durable reader named here.
+        response_body["durable_reader"] = serde_json::json!("message.read");
+        response_body["snapshot_sequence"] =
+            serde_json::json!(account.client.account_db()?.journal_bounds()?.head_seq);
+    }
+    Ok(LocalBusDispatchResult { response_body, event })
 }
 
 fn quarantine_projection_failure(

@@ -11,6 +11,10 @@ pub(super) struct EventBatch {
     pub accepted: oneshot::Sender<()>,
 }
 
+pub(super) fn is_transient(frame: &LocalBusFrame) -> bool {
+    frame.method == ramflux_protocol::message::TRANSIENT_TOPIC && frame.seq == Some(0)
+}
+
 pub(super) fn broadcast(
     subscribers: &mut BTreeMap<u64, LocalBusSubscriber>,
     events: &[LocalBusFrame],
@@ -20,12 +24,51 @@ pub(super) fn broadcast(
             if event.account_id.as_deref() == Some(&subscriber.account_id)
                 && subscriber.topics.contains(&event.method)
             {
-                subscriber.outbound.try_send(event.clone()).is_ok()
+                // Keep the final slot available for the durable stream's lagged notice.
+                if is_transient(event) && subscriber.outbound.capacity() <= 1 {
+                    return !subscriber.outbound.is_closed();
+                }
+                if !is_transient(event) && signals_lag() && subscriber.outbound.capacity() <= 1 {
+                    // The reserved final slot carries the lag notice. The subscriber then
+                    // resumes from the durable journal instead of silently missing an event.
+                    lagged(subscriber, event);
+                    return false;
+                }
+                match subscriber.outbound.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) if is_transient(event) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) if signals_lag() => {
+                        lagged(subscriber, event);
+                        false
+                    }
+                    Err(_) => false,
+                }
             } else {
                 true
             }
         });
     }
+}
+
+/// Unified message events never drop a slow subscriber silently. Dormant with the generation.
+fn signals_lag() -> bool {
+    crate::client::target_selection::schema_v1_selected()
+}
+
+/// Final frame of an overflowing subscription. Committed events stay in the durable journal;
+/// the consumer resubscribes from its applied cursor or takes a new snapshot.
+fn lagged(subscriber: &LocalBusSubscriber, event: &LocalBusFrame) {
+    let mut frame = event.clone();
+    frame.kind = LocalBusFrameKind::Event;
+    "stream".clone_into(&mut frame.sdk_api);
+    "stream.lagged".clone_into(&mut frame.method);
+    frame.seq = None;
+    frame.body = serde_json::json!({
+        "last_delivered_seq": serde_json::Value::Null,
+        "dropped_frame_id": event.frame_id,
+        "dropped_topic": event.method,
+    });
+    let _ = subscriber.outbound.try_send(frame);
 }
 
 pub(super) async fn publish(
@@ -90,4 +133,121 @@ pub(super) async fn publish(
 
 fn closed() -> SdkError {
     SdkError::LocalBus("subscription router stopped before outbox acceptance".to_owned())
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+
+    #[test]
+    fn transient_overflow_keeps_subscriber_and_durable_slot() -> Result<(), SdkError> {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut subscribers = BTreeMap::from([(
+            1,
+            LocalBusSubscriber {
+                account_id: "a".into(),
+                topics: BTreeSet::from([
+                    ramflux_protocol::message::TRANSIENT_TOPIC.into(),
+                    "message.received".into(),
+                ]),
+                outbound: tx,
+            },
+        )]);
+        let mut frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            ramflux_protocol::message::TRANSIENT_TOPIC,
+            serde_json::json!({}),
+        );
+        frame.kind = LocalBusFrameKind::Event;
+        frame.seq = Some(0);
+        broadcast(&mut subscribers, &[frame.clone(), frame.clone(), frame]);
+        assert_eq!(subscribers.len(), 1);
+        let mut durable = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            "message.received",
+            serde_json::json!({}),
+        );
+        durable.kind = LocalBusFrameKind::Event;
+        durable.seq = Some(40);
+        broadcast(&mut subscribers, &[durable]);
+        assert_eq!(subscribers.len(), 1);
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(0));
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(40));
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        let mut closed_frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            ramflux_protocol::message::TRANSIENT_TOPIC,
+            serde_json::json!({}),
+        );
+        closed_frame.seq = Some(0);
+        broadcast(&mut subscribers, &[closed_frame]);
+        assert!(subscribers.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+
+    fn subscriber(tx: mpsc::Sender<LocalBusFrame>) -> BTreeMap<u64, LocalBusSubscriber> {
+        BTreeMap::from([(
+            1,
+            LocalBusSubscriber {
+                account_id: "a".into(),
+                topics: BTreeSet::from(["state.changed".into()]),
+                outbound: tx,
+            },
+        )])
+    }
+
+    fn durable(sequence: u64) -> LocalBusFrame {
+        let mut frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "account",
+            "state.changed",
+            serde_json::json!({}),
+        );
+        frame.kind = LocalBusFrameKind::Event;
+        frame.frame_id = format!("outbox_{sequence}");
+        frame
+    }
+
+    #[test]
+    fn unified_overflow_ends_with_a_lag_notice_instead_of_a_silent_drop() -> Result<(), SdkError> {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (tx, mut rx) = mpsc::channel(3);
+        let mut subscribers = subscriber(tx);
+        broadcast(&mut subscribers, &[durable(1), durable(2), durable(3), durable(4)]);
+        assert!(subscribers.is_empty(), "an overflowing subscriber must resubscribe");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_1");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_2");
+        let notice = rx.try_recv().map_err(|_| closed())?;
+        assert_eq!((notice.sdk_api.as_str(), notice.method.as_str()), ("stream", "stream.lagged"));
+        assert_eq!(notice.body["dropped_frame_id"], "outbox_3");
+        assert_eq!(notice.body["dropped_topic"], "state.changed");
+        assert!(notice.body["last_delivered_seq"].is_null());
+        assert!(rx.try_recv().is_err(), "nothing follows the lag notice");
+        Ok(())
+    }
+
+    #[test]
+    fn dormant_generation_keeps_the_existing_overflow_behaviour() -> Result<(), SdkError> {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut subscribers = subscriber(tx);
+        broadcast(&mut subscribers, &[durable(1), durable(2), durable(3)]);
+        assert!(subscribers.is_empty());
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_1");
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.frame_id, "outbox_2");
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
 }

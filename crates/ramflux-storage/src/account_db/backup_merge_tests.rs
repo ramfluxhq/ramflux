@@ -352,3 +352,64 @@ fn backup_tombstone_classifies_only_devices_under_the_local_account_root() -> Te
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn backup_reserved_dm_scopes_require_canonical_immutable_root_bindings() -> TestResult {
+    let root = std::env::temp_dir().join(format!(
+        "rf-backup-dm-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    let first = ramflux_protocol::encode_base64url([0; 32]);
+    let second = ramflux_protocol::encode_base64url([208; 32]);
+    let third = ramflux_protocol::encode_base64url([99; 32]);
+    let scope = ramflux_protocol::message::dm_scope::derive(&first, &second)?;
+    let si = AccountIndex::open(root.join("source"))?;
+    let li = AccountIndex::open(root.join("local"))?;
+    si.create_account("source", &first)?;
+    li.create_account("local", &first)?;
+    let source = AccountDb::open(&si, "source", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&li, "local", &AccountDbKey::generate()?)?;
+    for (index, record) in [
+        serde_json::json!({"kind":"group", "group_id":"squat"}),
+        serde_json::json!({"kind":"direct", "group_id":null, "participant_roots":[first,third]}),
+        serde_json::json!({"kind":"direct", "group_id":null}),
+        serde_json::json!({"kind":"direct", "group_id":null, "participant_roots":[second,first]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        source.persist_client_record("conversation", &scope, &record)?;
+        let incoming = root.join(format!("incoming-{index}.db"));
+        let saved = source.write_backup_snapshot(&incoming)?;
+        let target = root.join(format!("target-{index}.db"));
+        let target_key = local.write_backup_snapshot(&target)?;
+        let merged = BackupDatabase::open(&target, &target_key.key)?;
+        let result = merged.check_backup_pins(&incoming, &saved.key);
+        assert_eq!(result.is_ok(), index == 3, "reserved backup case {index}");
+        let rows:u64 = merged.db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'directory/conversation/dm:%'",[],|row|row.get(0))?;
+        assert_eq!(rows, 0, "admission must be read-only");
+    }
+    let foreign_scope = ramflux_protocol::message::dm_scope::derive(&second, &third)?;
+    source.persist_client_record(
+        "conversation",
+        &foreign_scope,
+        &serde_json::json!({"kind":"direct","group_id":null,"participant_roots":[second,third]}),
+    )?;
+    let incoming = root.join("foreign-scope.db");
+    let saved = source.write_backup_snapshot(&incoming)?;
+    let target = root.join("foreign-target.db");
+    let target_key = local.write_backup_snapshot(&target)?;
+    let merged = BackupDatabase::open(&target, &target_key.key)?;
+    assert!(
+        merged.check_backup_pins(&incoming, &saved.key).is_err(),
+        "cannot restore another root pair's scope into this account"
+    );
+    drop(merged);
+    drop(source);
+    drop(local);
+    drop(si);
+    drop(li);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -52,11 +52,18 @@ impl RamfluxClient {
             return Ok(None);
         };
         let Tombstone { link, decided_at } = ramflux_protocol::parse_i_json(raw)?;
+        self.apply_own_contact_tombstone(&link, decided_at, mode).map(Some)
+    }
+
+    pub(super) fn validate_own_contact_tombstone(
+        &self,
+        link: &ramflux_storage::FriendLinkRecord,
+    ) -> Result<Option<ramflux_storage::FriendLinkRecord>, SdkError> {
         let own = self.owned_device_identity()?;
-        let peer = contact_peer(&link, own.root_commitment()).ok_or_else(|| {
+        let peer = contact_peer(link, own.root_commitment()).ok_or_else(|| {
             SdkError::InboundRejected("own contact tombstone ownership mismatch".into())
         })?;
-        if !is_restricted(&link)
+        if !is_restricted(link)
             || peer == own.root_commitment()
             || ramflux_protocol::decode_base64url(peer).map_or(true, |v| v.len() != 32)
         {
@@ -69,18 +76,29 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("own contact tombstone link collision".into()));
         }
+        Ok(existing)
+    }
+
+    pub(super) fn apply_own_contact_tombstone(
+        &self,
+        link: &ramflux_storage::FriendLinkRecord,
+        decided_at: Option<i64>,
+        mode: OwnContactReceiveMode,
+    ) -> Result<OwnContactReceiveOutcome, SdkError> {
+        let existing = self.validate_own_contact_tombstone(link)?;
+        let db = self.account_db()?;
         if mode == OwnContactReceiveMode::BackupRestore
             && db
                 .contact_link_decision(&link.link_id)?
                 .is_some_and(|local| decided_at.is_none_or(|source| source < local.decided_at))
         {
-            return Ok(Some(OwnContactReceiveOutcome::TombstoneSkippedOlder));
+            return Ok(OwnContactReceiveOutcome::TombstoneSkippedOlder);
         }
         if existing.as_ref().is_some_and(|existing| {
             existing.blocked == link.blocked
                 && (link.blocked || existing.state == "removed" && link.state == "removed")
         }) {
-            return Ok(Some(OwnContactReceiveOutcome::AlreadyPresent));
+            return Ok(OwnContactReceiveOutcome::AlreadyPresent);
         }
         if existing.is_none() {
             db.establish_friend_link(&link.link_id, &link.requester_id, &link.target_id)?;
@@ -93,6 +111,6 @@ impl RamfluxClient {
                 link.remove_scope.as_deref().unwrap_or("own_devices"),
             )?;
         }
-        Ok(Some(OwnContactReceiveOutcome::TombstoneApplied))
+        Ok(OwnContactReceiveOutcome::TombstoneApplied)
     }
 }

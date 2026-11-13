@@ -24,8 +24,9 @@ impl Delivery {
         Self { routing: Some(receipt.routing), plaintext, call_control, pair_reply: None }
     }
     fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
-        let call_control =
-            opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX);
+        let call_control = (opened.routing.kind == Kind::Control
+            && crate::client::call::is_call_body(body))
+            || super::generated_receive::mutation_erasure_targets(body).0;
         Self { routing: Some(opened.routing), plaintext, call_control, pair_reply: None }
     }
 }
@@ -191,7 +192,23 @@ impl RamfluxClient {
             .await?;
         }
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+        let generated_id = if crate::client::target_selection::schema_v1_selected() {
+            use prost::Message as _;
+            ramflux_protocol::message::Inner::decode(opened.body.as_slice())
+                .ok()
+                .and_then(|inner| inner.identity)
+                .map(|identity| ramflux_protocol::encode_base64url(identity.id))
+        } else {
+            None
+        };
+        if let Some(id) = generated_id {
+            if opened.routing.message_id != id {
+                return Err(SdkError::GeneratedRefused {
+                    code: crate::GeneratedRefusalCode::Identity,
+                    reason: "route and generated id disagree".into(),
+                });
+            }
+        } else if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
         }
         self.confirm_routed_context(&opened.routing, entry)?;
@@ -202,6 +219,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Delivery>, SdkError> {
+        super::validate_routed_ciphertext(entry)?;
         let Some((_, payload_hash)) = self.routed_seen_marker(entry)? else { return Ok(None) };
         if payload_hash != entry.envelope.payload_hash {
             return Err(SdkError::ReplayMismatch);
@@ -245,14 +263,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, false>(
+        let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments, prepared: None },
             Self::legacy_persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     pub(crate) async fn apply_routed_prepared_entry(
@@ -262,14 +282,16 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Result<super::PreparedInbound, SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, false>(
+        let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments: false, prepared: Some(prepared) },
             Self::legacy_persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     /// Same prepare/open as live apply; persist joins the caller's receive transaction.
@@ -281,14 +303,16 @@ impl RamfluxClient {
         prepared: Option<Result<super::PreparedInbound, SdkError>>,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true, true>(
+        let apply = self.apply_routed_entry_with_source::<true, true>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments: false, prepared },
             persist,
-        )
-        .await
+        );
+        #[cfg(feature = "itest-rfd-fault")]
+        let apply = Box::pin(apply);
+        apply.await
     }
 
     fn legacy_persist(
@@ -378,6 +402,10 @@ impl RamfluxClient {
         opts: ApplyOpts,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
+        #[cfg(feature = "itest-rfd-fault")]
+        let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
+        #[cfg(feature = "itest-rfd-fault")]
+        let entry = fault_entry.as_deref().unwrap_or(entry);
         let consume_erased = CONSUME_ERASED;
         let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
@@ -452,6 +480,7 @@ impl RamfluxClient {
                 contact_held: held,
             }),
         )?;
+        self.finish_routed_volatile(&opened, &body, plaintext.is_some());
         if JOINING {
             self.finish_pair_retirement()?;
         }
@@ -465,6 +494,25 @@ impl RamfluxClient {
             Finish { opened, body, plaintext, refs, import, background, consume_erased },
         )
         .await
+    }
+
+    // Both persist callbacks complete their outer writer before this hook. Volatile
+    // changes must not survive a failed SQLite commit.
+    fn finish_routed_volatile(&self, opened: &Opened, body: &[u8], projected: bool) {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return;
+        }
+        self.typing_sender.borrow_mut().received(opened.remote_device.storage_key());
+        if projected
+            && Self::decode_generated_inner(body).is_ok_and(|(_, content)| {
+                matches!(content.value, Some(ramflux_protocol::message::content::Value::Message(_)))
+            })
+        {
+            self.typing_receiver.borrow_mut().clear_author(
+                opened.remote_device.root_commitment(),
+                &opened.routing.conversation_id,
+            );
+        }
     }
 
     fn routed_attachment_refs<'a>(
@@ -622,6 +670,18 @@ impl RamfluxClient {
         route: &Routing,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        if matches!(route.kind, Kind::GroupMessage | Kind::GroupControl) {
+            ramflux_protocol::message::dm_scope::validate_group(&route.conversation_id)
+                .map_err(|_| invalid("group uses reserved DM namespace"))?;
+        } else if route.kind == Kind::Direct && route.conversation_id.starts_with("dm:") {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            ramflux_protocol::message::dm_scope::validate_direct(
+                &route.conversation_id,
+                &self.own_account_anchor()?,
+                source.root_commitment(),
+            )
+            .map_err(|_| invalid("reserved DM root pair mismatch"))?;
+        }
         let context = self.account_db()?.client_record("conversation", &route.conversation_id)?;
         if route.kind == Kind::Direct
             && context.is_none()
@@ -691,7 +751,13 @@ impl RamfluxClient {
             }
             _ => self.prepare_shared_group_receive(engine, opened, entry, body).await?,
         };
-        let legacy = if opened.routing.kind == Kind::GroupControl && shared.is_none() {
+        let generated_control = shared.is_none()
+            && (super::generated_receive::is_group_key_control(body)
+                || self.authorize_generated_group_control_body(entry, &opened.routing, body)?);
+        let legacy = if opened.routing.kind == Kind::GroupControl
+            && shared.is_none()
+            && !generated_control
+        {
             if let Some(super::ReceiveGroupDirectory::Legacy(evidence)) = directory {
                 self.prepare_legacy_group_with_directory(engine.config(), opened, entry, evidence)?
             } else {
@@ -842,6 +908,34 @@ impl RamfluxClient {
             pair_reply: None,
         })
     }
+    /// A content refusal still consumes its authenticated pair ciphertext. This joins the
+    /// terminal receive transaction so a refused first packet cannot strand its successor.
+    pub(crate) fn commit_generated_refusal_pair(
+        &self,
+        entry: &GatewayInboxEntry,
+        local: &str,
+        code: &str,
+    ) -> Result<(), SdkError> {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Ok(());
+        }
+        if matches!(code, "authentication_failed" | "schema_invalid" | "routing_rejected") {
+            return match self.commit_authenticated_refused_transport(entry, local) {
+                Err(error @ SdkError::Storage(_)) => Err(error),
+                _ => Ok(()),
+            };
+        }
+        if !code.starts_with("generated_") && code != "typing_durable" {
+            return Ok(());
+        }
+        let opened = match self.open_routed(entry, local) {
+            Ok(opened) => opened,
+            Err(error @ SdkError::Storage(_)) => return Err(error),
+            Err(_) => return Ok(()), // No authenticated, C-checked transport state to commit.
+        };
+        self.commit_routed_pair_context(&opened, entry, &opened.body)
+    }
+
     fn commit_routed_pair_context(
         &self,
         opened: &Opened,
@@ -876,6 +970,22 @@ impl RamfluxClient {
                 &opened.session,
                 reset,
                 decode(&entry.envelope)?.x3dh.is_some(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn remember_typing_conversation(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if opened.routing.kind == Kind::Direct
+            && let Some(tag) = &entry.envelope.collapse_tag
+        {
+            self.account_db()?.persist_actor_state(
+                &format!("dm-pair/collapse-scope/{}/{tag}", opened.session.session_id),
+                &opened.routing.conversation_id,
             )?;
         }
         Ok(())
@@ -925,11 +1035,9 @@ impl RamfluxClient {
             return Ok((None, Vec::new(), false));
         }
         let mut admitted = Vec::new();
-        if let Some(shared) = shared_group {
-            self.apply_prepared_shared_group(
-                shared,
-                local_target.ok_or_else(|| invalid("group receive target is absent"))?,
-            )?;
+        let deferred_group = deferred_generated_group(shared_group, body);
+        if let Some(shared) = shared_group.filter(|_| deferred_group.is_none()) {
+            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
         }
         if let Some((event, key)) = membership {
             self.apply_bootstrap_group_member_join_event(
@@ -980,7 +1088,14 @@ impl RamfluxClient {
             }
             self.project_routed(opened, entry, body, metadata)?
         };
+        // Generated control origin/identity/route authority precedes its native effect.
+        if let Some(shared) = deferred_group {
+            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
+        }
+        self.finish_generated_projection(opened, entry)?;
         self.commit_routed_pair_context(opened, entry, body)?;
+        self.remember_typing_conversation(opened, entry)?;
+
         for slot in slots {
             self.persist_message_slot_receipt(&opened.routing.message_id, slot)?;
         }
@@ -1002,6 +1117,21 @@ impl RamfluxClient {
         Ok((plaintext, admitted, pending))
     }
 
+    fn apply_authorized_prepared_shared_group(
+        &self,
+        shared: &crate::client::shared_group::PreparedSharedGroup,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        local_target: Option<&str>,
+    ) -> Result<(), SdkError> {
+        self.authorize_prepared_shared_group(shared, entry, &opened.routing)?;
+        self.apply_prepared_shared_group(
+            shared,
+            local_target.ok_or_else(|| invalid("group receive target is absent"))?,
+        )?;
+        Ok(())
+    }
+
     fn persist_routed_marker(
         &self,
         opened: &Opened,
@@ -1016,20 +1146,74 @@ impl RamfluxClient {
             &receipt,
         )?;
         let mut retained = entry.clone();
-        if opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX) {
+        let (delete_control, mut erasure_targets) =
+            super::generated_receive::mutation_erasure_targets(body);
+        let erased_reference = erasure_targets.iter().try_fold(false, |erased, target| {
+            let db = self.account_db()?;
+            let retired = db
+                .load_actor_state::<bool>(&format!(
+                    "routed/report-opening-retired/{}",
+                    target.message_id
+                ))?
+                .unwrap_or(false);
+            Ok::<_, SdkError>(erased || retired || db.message_is_deleted(&target.message_id)?)
+        })?;
+        let call = opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
+        let retired_original = self
+            .account_db()?
+            .load_actor_state::<bool>(&format!(
+                "routed/report-opening-retired/{}",
+                opened.routing.message_id
+            ))?
+            .unwrap_or(false);
+        let self_sync = crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body)
+                .is_ok_and(|scanned| scanned.kind == 12);
+        if call
+            || delete_control
+            || erased_reference
+            || retired_original
+            || self_sync
+            || self.generated_edit_reference_erased(body)?
+        {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
-            // call ciphertext alongside them: committed replay needs only attribution/hash.
+            // sensitive ciphertext alongside them, including enclosing copies whose nested
+            // original has been retired: committed replay needs only attribution/hash.
             retained.envelope.encrypted_payload.clear();
-            self.append_event(&entry.envelope.envelope_id, "call.control.committed", &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
+            erasure_targets.clear();
+            self.append_event(&entry.envelope.envelope_id, if call { "call.control.committed" } else { "message.control.committed" }, &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
         } else {
             self.append_gateway_delivery(entry)?;
+            for target in &erasure_targets {
+                self.account_db()?.bind_message_event_reference(
+                    &target.message_id,
+                    &format!("gateway/delivery/v2/{receipt}"),
+                )?;
+                self.account_db()?.bind_message_container_reference(&target.message_id, receipt)?;
+            }
         }
         self.account_db()?.persist_actor_state(
             receipt,
-            &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
+            &Committed {
+                routing: opened.routing.clone(),
+                entry: retained,
+                projected: false,
+                erasure_targets,
+            },
         )?;
         self.persist_routed_seen(entry)
     }
+}
+
+fn deferred_generated_group<'a>(
+    shared: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
+    body: &[u8],
+) -> Option<&'a crate::client::shared_group::PreparedSharedGroup> {
+    shared.filter(|_| {
+        crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body)
+                .is_ok_and(|scanned| scanned.kind == 8)
+    })
 }
 
 fn routed_message_metadata(

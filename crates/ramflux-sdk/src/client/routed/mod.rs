@@ -21,12 +21,15 @@ mod native_contact_tests;
 mod object_slot;
 mod own_history;
 pub(crate) use object_slot::PairObjectSlotRequest;
+pub(crate) mod generated_receive;
 mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 pub(crate) mod group_directory;
 mod legacy;
+mod native_control;
 pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
+mod refused_pair;
 mod report;
 pub(crate) use receive::{Delivery, JoinedW1};
 pub(crate) use report::{SealedRouted, refuse_a0_mismatch};
@@ -40,8 +43,12 @@ mod reset_work;
 #[cfg(test)]
 pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
+mod ephemeral_content;
+mod generated_transport;
 mod send_candidate;
 mod session;
+mod typing;
+pub(crate) use ephemeral_content::EphemeralContent;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -385,6 +392,62 @@ fn cryptobox_sender_envelope(
 }
 
 impl RamfluxClient {
+    /// Prepare a durable same-root `SelfSync` delivery. Submit the returned envelope unchanged.
+    /// Allocate once with `change_self_sync`, then pass that same value to every sibling.
+    /// This transport preparation never increments the revision or consumes the message stream.
+    /// # Errors
+    /// Refuses a foreign or unauthorized device, invalid update, or persistence failure.
+    pub async fn prepare_self_sync_delivery(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        value: ramflux_protocol::message::SelfSync,
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        use crate::client::identity_authority::NativeOperation;
+        use ramflux_protocol::message as g;
+        Self::require_self_sync_floor_bootstrap()?;
+        let recipient = Self::qualified_recipient(message)?;
+        let remote = self.device_identity(&recipient)?;
+        let local = self.owned_device_identity()?;
+        if remote.root_commitment() != local.root_commitment() {
+            return Err(SdkError::InboundRejected("self sync: foreign recipient root".into()));
+        }
+        self.require_native_operation(&remote, NativeOperation::Sync)?;
+        let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
+        self.account_db()?.write_transaction(|| {
+            self.authorize_self_sync(&local, &message.conversation_id)?;
+            g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
+            self.require_native_operation(&remote, NativeOperation::Sync)?;
+            let inner = self.self_sync_publication_inner(&message.conversation_id, &value)?;
+            let identity = <g::Inner as prost::Message>::decode(inner.as_slice())
+                .map_err(|_| invalid("SelfSync publication identity missing"))?
+                .identity
+                .ok_or_else(|| invalid("SelfSync publication identity missing"))?;
+            let mut message = message.clone();
+            message.message_id = ramflux_protocol::encode_base64url(&identity.id);
+            let sealed = self.seal_routed_with_route(
+                &message,
+                &inner,
+                Route::control(),
+                SealPair {
+                    local: &engine.config().device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
+            )?;
+            let envelope = crate::dm::gateway_envelope_from_sealed(
+                engine.config(),
+                &mut message,
+                sealed,
+                None,
+            )?;
+            self.persist_self_sync_delivery(&message.conversation_id, &value, &envelope)?;
+            Ok(envelope)
+        })
+    }
+
     pub(crate) async fn seal_routed_as(
         &self,
         engine: &mut impl GatewaySessionAccess,
@@ -397,23 +460,28 @@ impl RamfluxClient {
         }
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
-        self.bind_outgoing_delivery(
-            &self.local_device_identity(&engine.config().device_id)?,
-            message,
-            &route.kind,
-        )?;
-        self.seal_routed_with_route(
-            message,
-            body,
-            route,
-            SealPair {
-                local: &engine.config().device_id,
-                remote: &recipient,
-                session: &mut session,
-                header,
-                bundle,
-            },
-        )
+        self.account_db()?.write_transaction(|| {
+            if route.kind == Kind::Direct {
+                self.capture_own_authored_direct(message, body)?;
+            }
+            self.bind_outgoing_delivery(
+                &self.local_device_identity(&engine.config().device_id)?,
+                message,
+                &route.kind,
+            )?;
+            self.seal_routed_with_route(
+                message,
+                body,
+                route,
+                SealPair {
+                    local: &engine.config().device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
+            )
+        })
     }
 
     pub(crate) fn seal_routed_federated_as(
@@ -456,36 +524,42 @@ impl RamfluxClient {
         route: Route,
         pair: SealPair<'_>,
     ) -> Result<SealedRouted, SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.seal_routed_with_route_in(message, body, route, pair, None))
+    }
+
+    fn seal_routed_with_route_in(
+        &self,
+        message: &GatewayDirectMessage,
+        body: &[u8],
+        route: Route,
+        pair: SealPair<'_>,
+        outer_profile: Option<(&'static str, u32)>,
+    ) -> Result<SealedRouted, SdkError> {
         self.require_backup_outbound_ready()?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
         let wire_remote =
             crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
-        let mut route = routing(message, route);
-        if route.kind == Kind::GroupMessage {
-            route.group_message_id = Some(
-                self.outgoing_group_logical_id(&message.message_id)?
-                    .unwrap_or_else(|| message.message_id.clone()),
-            );
-        }
-        if route.kind == Kind::GroupControl
-            && let Some(group) = route.group_id.as_deref()
-            && let Some(link) = self.account_db()?.client_record("group", group)?
-            && let Some(conversation) =
-                link.get("conversation_id").and_then(serde_json::Value::as_str)
-        {
-            conversation.clone_into(&mut route.conversation_id);
-        }
-        let inner = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
-            routing: route.clone(),
-            body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
-        })?);
-        let report = if route.kind == Kind::Direct
-            && crate::client::target_selection::schema_v1_selected()
+        let route = self.prepare_seal_routing(message, body, route)?;
+        let inner = generated_transport::seal_plaintext(body, &route)?;
+        let report = if crate::client::target_selection::schema_v1_selected()
             && !report::omit_direct_report()
         {
             let recipient = self.device_identity(&remote)?;
-            Some(report::assemble_direct_report(self, message, session, &inner, local, &recipient)?)
+            Some(report::assemble_report_with_policy(
+                self,
+                message,
+                session,
+                &inner,
+                &recipient,
+                &report::ReportPolicy {
+                    local_device_id: local,
+                    mode: "durable",
+                    priority: ramflux_protocol::Priority::Normal,
+                    outer_profile,
+                },
+            )?)
         } else {
             None
         };
@@ -545,7 +619,37 @@ impl RamfluxClient {
                 report_commitment,
             },
             committed_a0: report.map(|sealed| sealed.a0_bytes),
+            metadata_commitment: report::message_metadata_commitment(
+                body,
+                message.created_at,
+                message.ttl,
+            )?,
         })
+    }
+
+    fn prepare_seal_routing(
+        &self,
+        message: &GatewayDirectMessage,
+        body: &[u8],
+        route: Route,
+    ) -> Result<Routing, SdkError> {
+        let mut route = routing(message, route);
+        if route.kind == Kind::GroupMessage {
+            route.group_message_id = Some(
+                self.outgoing_group_logical_id(&message.message_id)?
+                    .unwrap_or_else(|| message.message_id.clone()),
+            );
+        }
+        if route.kind == Kind::GroupControl
+            && let Some(group) = route.group_id.as_deref()
+            && let Some(link) = self.account_db()?.client_record("group", group)?
+            && let Some(conversation) =
+                link.get("conversation_id").and_then(serde_json::Value::as_str)
+        {
+            conversation.clone_into(&mut route.conversation_id);
+        }
+        bind_generated_route_identity(&mut route, body);
+        Ok(route)
     }
 
     pub(crate) fn open_routed(
@@ -575,7 +679,13 @@ impl RamfluxClient {
             session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
         );
         let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
-        let plaintext: Plaintext = serde_json::from_slice(&inner)?;
+        let plaintext: Plaintext = if crate::client::target_selection::schema_v1_selected()
+            && generated_transport::identified_inner(&inner).is_some()
+        {
+            generated_transport::generated_plaintext(&inner)?
+        } else {
+            serde_json::from_slice(&inner)?
+        };
         report::refuse_direct_candidate_opening(
             &entry.envelope,
             &session,
@@ -584,8 +694,26 @@ impl RamfluxClient {
         if plaintext.routing.attachments && plaintext.routing.kind != Kind::Direct {
             return Err(invalid("attachment flag requires a direct route"));
         }
+        let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
+            .map_err(|_| invalid("invalid routed body"))?;
+        if crate::client::target_selection::schema_v1_selected()
+            && generated_transport::identified_inner(&body).is_some()
+            && inner.as_slice() != body.as_slice()
+        {
+            return Err(invalid("generated Inner cannot use the routed JSON carrier"));
+        }
+        let logical_id = if crate::client::target_selection::schema_v1_selected() {
+            use prost::Message as _;
+            ramflux_protocol::message::Inner::decode(body.as_slice())
+                .ok()
+                .and_then(|inner| inner.identity)
+                .map(|identity| ramflux_protocol::encode_base64url(identity.id))
+        } else {
+            None
+        };
         if plaintext.routing.conversation_id.is_empty()
-            || plaintext.routing.message_id != entry.envelope.envelope_id
+            || plaintext.routing.message_id
+                != logical_id.as_deref().unwrap_or(&entry.envelope.envelope_id)
         {
             return Err(invalid("invalid authenticated routing header"));
         }
@@ -602,8 +730,6 @@ impl RamfluxClient {
         {
             return Err(invalid("invalid authenticated group message id"));
         }
-        let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
-            .map_err(|_| invalid("invalid routed body"))?;
         Ok(Opened {
             routing: plaintext.routing,
             body: zeroize::Zeroizing::new(body),
@@ -653,6 +779,20 @@ pub(crate) fn decode(
     }
     Ok(decoded)
 }
+fn bind_generated_route_identity(route: &mut Routing, body: &[u8]) {
+    if crate::client::target_selection::schema_v1_selected() {
+        use prost::Message as _;
+        if let Ok(inner) = ramflux_protocol::message::Inner::decode(body)
+            && let Some(identity) = inner.identity
+        {
+            route.message_id = ramflux_protocol::encode_base64url(identity.id);
+            if route.kind == Kind::GroupMessage {
+                route.group_message_id = Some(route.message_id.clone());
+            }
+        }
+    }
+}
+
 fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(message.to_owned())
 }
@@ -665,3 +805,31 @@ pub(in crate::client) use tests::legacy_selector::import_entry as observe_legacy
 
 #[cfg(test)]
 pub(in crate::client) use tests::legacy_selector::registered as observe_legacy_registration;
+
+/// Validate ciphertext binding before any incoming v2 cache or replay shortcut.
+pub(crate) fn validate_routed_ciphertext(entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    if entry.envelope.schema == "ramflux.envelope.v2"
+        || ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION == 1
+    {
+        ramflux_protocol::sender_signed_transcript(
+            &entry.envelope,
+            ramflux_protocol::SenderTranscriptMode::WithCiphertext,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn native_typing_pair_fixture() -> crate::client::native_test_support::TestResult<
+    (crate::client::native_test_support::Fixture, crate::client::native_test_support::Fixture),
+> {
+    Box::pin(tests::candidate_ephemeral::native_pair()).await
+}
+
+#[cfg(test)]
+pub(crate) fn native_typing_delivery_fixture(
+    a: &crate::client::native_test_support::Fixture,
+    b: &crate::client::native_test_support::Fixture,
+) -> crate::client::native_test_support::TestResult<(ramflux_protocol::Envelope, Vec<String>)> {
+    tests::candidate_ephemeral::native_typing_delivery(a, b)
+}

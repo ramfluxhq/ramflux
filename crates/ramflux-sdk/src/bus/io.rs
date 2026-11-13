@@ -56,6 +56,7 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
         sdk_api: request.sdk_api.clone(),
         method: request.method.clone(),
         body: match error {
+            SdkError::GeneratedApi(error) => serde_json::json!(error),
             SdkError::LocalBusRefused { body, .. } => (**body).clone(),
             _ => serde_json::Value::Null,
         },
@@ -70,6 +71,9 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
 }
 
 pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
+    if let SdkError::GeneratedApi(error) = error {
+        return generated_error_body(error);
+    }
     if let SdkError::DirectoryAuthorityUnavailable { source, .. } = error {
         return local_bus_error_body(source);
     }
@@ -169,6 +173,17 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
 }
 
+fn generated_error_body(error: &crate::bindings::AdapterError) -> LocalBusErrorBody {
+    LocalBusErrorBody {
+        details: Some(Box::new(serde_json::json!(error.details))),
+        reason_code: None,
+        code: error.name.to_owned(),
+        message: error.message.clone(),
+        retry_after_ms: None,
+        cause: None,
+    }
+}
+
 fn vault_reason_details(reason: crate::custody::CustodyVaultReason) -> serde_json::Value {
     let mut details = serde_json::json!({"retryable": reason.retryable()});
     if let Some(remedy) = reason.remedy() {
@@ -198,6 +213,8 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return code;
     }
     match error {
+        SdkError::GeneratedApi(error) => error.name,
+        SdkError::EditConflict { .. } => "EditConflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
         SdkError::DataRootInUse => "DataRootInUse",
         SdkError::CustodyForkFenced => "CustodyForkFenced",
@@ -206,7 +223,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::Storage(StorageError::ObjectOwnershipUnverified { .. }) => {
             "ObjectOwnershipUnverified"
         }
-        SdkError::Storage(StorageError::SchemaResetRequired { .. }) => "SchemaResetRequired",
+        SdkError::Storage(
+            StorageError::SchemaResetRequired { .. } | StorageError::RawWireResetRequired,
+        ) => "SchemaResetRequired",
         SdkError::Storage(StorageError::AccountSchemaTooNew { .. }) => "AccountSchemaTooNew",
         SdkError::AttachmentDeleted => "AttachmentDeleted",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
@@ -286,7 +305,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         E::ObjectErased => "ObjectErased",
         E::ObjectIdentityConflict => "ObjectIdentityConflict",
         E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",
-        E::SchemaResetRequired { .. } => "SchemaResetRequired",
+        E::SchemaResetRequired { .. } | E::RawWireResetRequired => "SchemaResetRequired",
         E::AccountSchemaTooNew { .. } => "AccountSchemaTooNew",
         E::Io(_) | E::Sqlite(_) => "storage_unavailable",
         E::Integrity(_)
@@ -665,5 +684,30 @@ mod object_erasure_tests {
     #[test]
     fn object_erasure_has_a_stable_nonfatal_bus_code() {
         assert_eq!(super::local_bus_error_code(&crate::SdkError::ObjectErased), "ObjectErased");
+    }
+}
+
+#[cfg(test)]
+mod generated_error_tests {
+    #[test]
+    fn generated_bus_error_retains_numeric_payload_and_typed_resync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = super::LocalBusFrame::request(
+            "request",
+            Some("account".into()),
+            "ramflux.sdk.v1",
+            "message.request",
+            serde_json::json!({}),
+        );
+        let error = crate::bindings::AdapterError::resync(2, 4, 8);
+        let frame = super::local_bus_error(&request, &crate::SdkError::from(error.clone()));
+        assert_eq!(frame.body, serde_json::to_value(error)?);
+        let wrapper = frame.error.ok_or("error wrapper missing")?;
+        assert_eq!(wrapper.code, "resync_required");
+        assert_eq!(
+            wrapper.details,
+            Some(Box::new(serde_json::json!({"cursor":2,"floor":4,"head":8})))
+        );
+        Ok(())
     }
 }

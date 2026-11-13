@@ -115,3 +115,68 @@ impl RamfluxClient {
         )
     }
 }
+
+impl RamfluxClient {
+    /// Exact generated durable carrier, kept behind the inactive profile until module activation.
+    /// It has one schema, raw I, and native authority; no alternate carrier is selected on failure.
+    pub(crate) fn seal_generated_routed_prepared(
+        &self,
+        config: &GatewaySessionConfig,
+        message: &GatewayDirectMessage,
+        body: &[u8],
+        route: Route,
+        material: SendMaterial,
+    ) -> Result<super::SealedRouted, SdkError> {
+        use prost::Message as _;
+        use ramflux_protocol::message as g;
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Err(invalid("generated durable profile is not selected"));
+        }
+        let local = self.owned_device_identity()?;
+        self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
+            .ok_or(SdkError::NetworkingPending)?;
+        let parsed = super::generated_transport::generated_plaintext(body)?;
+        if parsed.routing.kind != route.kind
+            || parsed.routing.conversation_id != message.conversation_id
+            || parsed.routing.group_id != route.group_id
+        {
+            return Err(invalid("generated send route differs from exact Inner"));
+        }
+        let inner = g::Inner::decode(body).map_err(|_| invalid("generated Inner malformed"))?;
+        if inner.kind == 12 {
+            Self::require_self_sync_floor_bootstrap()?;
+        }
+        if inner.kind == 8
+            && g::Control::decode(inner.body.as_slice())
+                .is_ok_and(|control| control.operation == 11)
+        {
+            Self::require_a2i_binding_authority()?;
+        }
+        self.account_db()?.write_transaction(|| {
+            let (mut session, header, bundle) = self.prepared_send_pair(
+                config,
+                message,
+                material,
+                crate::client::target_selection::kind_id_for_route(&route.kind),
+            )?;
+            if route.kind == super::Kind::Direct {
+                self.capture_own_authored_direct(message, body)?;
+            }
+            let recipient = Self::qualified_recipient(message)?;
+            self.bind_outgoing_delivery(&local, message, &route.kind)?;
+            self.seal_routed_with_route_in(
+                message,
+                body,
+                route,
+                SealPair {
+                    local: &config.device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
+                Some((g::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
+            )
+        })
+    }
+}

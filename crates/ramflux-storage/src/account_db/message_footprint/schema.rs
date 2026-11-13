@@ -357,6 +357,11 @@ fn journal_copy(db: &Connection) -> rusqlite::Result<()> {
            json_extract(CAST(NEW.body_json AS TEXT),'$.envelope.payload_hash'))) p
           LEFT JOIN message_copy_binding b ON b.copy_id='payload:'||p.value
           WHERE p.type='text' ON CONFLICT DO NOTHING;
+          INSERT INTO runtime_message_sequence(message_id,seq)
+          SELECT f.message_id,NEW.seq FROM message_footprint f
+          JOIN direct_message_projection m ON m.message_id=f.message_id
+          WHERE f.kind='journal' AND f.locator=CAST(NEW.seq AS TEXT)
+          ON CONFLICT(message_id) DO UPDATE SET seq=max(seq,excluded.seq);
           UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
            (SELECT message_id FROM message_footprint WHERE kind='journal' AND locator=CAST(NEW.seq AS TEXT));
           DELETE FROM message_footprint_journal_stage WHERE rowid=NEW.rowid;

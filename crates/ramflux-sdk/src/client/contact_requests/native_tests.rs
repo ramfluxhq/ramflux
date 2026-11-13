@@ -57,7 +57,7 @@ pub(crate) async fn request_entry(
             &sender.manifest.principal_commitment,
             &target.principal_commitment,
         )?,
-        message_id: "autonomous-contact".into(),
+        message_id: super::generated::message_id(&body, "autonomous-contact")?,
         envelope_id: "autonomous-contact".into(),
         source_principal_id: sender.config.principal_id.clone(),
         sender_id: sender.config.device_id.clone(),
@@ -79,12 +79,13 @@ pub(crate) async fn request_entry(
         },
     )?;
     packet.packet.schema = super::ENVELOPE_SCHEMA.into();
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, packet, None)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+        envelope,
     })
 }
 
@@ -398,4 +399,99 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
         Ok(())
     })
     .await?
+}
+
+#[tokio::test]
+async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity() -> TestResult {
+    use prost::Message as _;
+    use ramflux_protocol::message as g;
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let sender = Box::pin(Fixture::new("generated-native-contact-sender")).await?;
+    let target = Box::pin(Fixture::new("generated-native-contact-target")).await?;
+    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    let mut pending = intent(&sender, &target)?;
+    let bytes = super::native_delivery::approve(
+        &sender.client,
+        &sender.config,
+        &mut pending,
+        &sender.manifest,
+    )
+    .await?;
+    let identity = g::Inner::decode(bytes.as_slice())?.identity.ok_or("identity")?;
+    g::identity::verify(&identity)?;
+    assert_eq!(identity.device_sequence & (1 << 63), 0);
+    sender.vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let retry = super::native_delivery::approve(
+        &sender.client,
+        &sender.config,
+        &mut pending,
+        &sender.manifest,
+    )
+    .await?;
+    assert_eq!(
+        bytes.as_slice(),
+        retry.as_slice(),
+        "one generated identity across primary-free retries"
+    );
+    sender.vault.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    // This fixture uses real native pair encryption and source signature; no router is involved.
+    let entry = request_entry(&sender, &target.manifest).await?;
+    let opened =
+        target.client.open_routed(&entry, target.client.owned_device_identity()?.device_id())?;
+    target
+        .client
+        .prepare_native_contact_control(
+            &target.config,
+            &entry,
+            &opened.routing,
+            &opened.body,
+            Some(&sender.manifest),
+        )
+        .await?;
+    let consent = super::generated::decode(&opened.body)?.ok_or("native consent")?;
+    assert_eq!(consent.body.actor_root, sender.client.own_account_anchor()?);
+    assert!(
+        target
+            .client
+            .account_db()?
+            .contact_request(&sender.client.own_account_anchor()?, "inbound")?
+            .is_none()
+    );
+    let mut inner = g::Inner::decode(opened.body.as_slice())?;
+    let mut control = g::Control::decode(inner.body.as_slice())?;
+    let Some(g::control::Payload::ContactControl(payload)) = control.payload.as_mut() else {
+        return Err("contact".into());
+    };
+    let leaf = payload.consent.as_mut().ok_or("consent")?;
+    leaf.canonical.push(b' ');
+    inner.body = control.encode_to_vec();
+    assert!(
+        super::generated::decode(&inner.encode_to_vec()).is_err(),
+        "fixed native leaf cannot normalize signed bytes"
+    );
+    let mut tampered = consent.clone();
+    tampered.body.note = Some("changed without primary consent".into());
+    let Some(g::control::Payload::ContactControl(payload)) = control.payload.as_mut() else {
+        return Err("contact".into());
+    };
+    payload.consent.as_mut().ok_or("consent")?.canonical =
+        ramflux_protocol::canonical_json_bytes(&tampered)?;
+    inner.body = control.encode_to_vec();
+    assert!(
+        target
+            .client
+            .verify_contact_control(&entry, &opened.routing, &inner.encode_to_vec())
+            .is_err()
+    );
+    target.client.receive_generated_contact_control(&entry, &opened.routing, &opened.body)?;
+    let request = target
+        .client
+        .account_db()?
+        .contact_request(&sender.client.own_account_anchor()?, "inbound")?
+        .ok_or("native pending request")?;
+    assert_eq!(request.state, "pending");
+    let links = target.client.friend_links()?;
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].state, "pending", "receiving a request never accepts it");
+    Ok(())
 }

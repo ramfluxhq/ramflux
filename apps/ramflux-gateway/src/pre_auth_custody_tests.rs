@@ -65,7 +65,7 @@ async fn custody_exchange(
         tokio::time::timeout(Duration::from_secs(15), client.stream.recv_custody_frame()).await??;
     Ok(serde_json::from_slice(&bytes)?)
 }
-async fn handoff(
+pub(super) async fn handoff(
     gateway: &Gateway,
     route: Route,
     peer: &str,

@@ -101,22 +101,6 @@ pub(crate) const SITES: &[WriterSite] = &[
         count: 4,
     },
     WriterSite {
-        file: "src/client/a2i.rs",
-        symbol: "ack_gateway_entry",
-        class: WriterClass::ProductionLegacy,
-        executor: "send_ack_in (WA token); finish_a2i_receive",
-        hook: "outgoing ACK",
-        count: 2,
-    },
-    WriterSite {
-        file: "src/client/a2i.rs",
-        symbol: "persist_gateway_receive_cursor",
-        class: WriterClass::ProductionLegacy,
-        executor: "cover_in / persist_receive_checkpoint_in",
-        hook: "SQL receive-checkpoint",
-        count: 3,
-    },
-    WriterSite {
         file: "src/client/dm/legacy_receive.rs",
         symbol: "persist_gateway_receive_cursor",
         class: WriterClass::ProductionLegacy,
@@ -154,14 +138,6 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "send_ack_in (WA token)",
         hook: "outgoing ACK",
-        count: 1,
-    },
-    WriterSite {
-        file: "src/bus/dispatch/a2i_a2ui.rs",
-        symbol: "a2i.list",
-        class: WriterClass::ProductionLegacy,
-        executor: "request_inbox_in (coalesced catch-up)",
-        hook: "inbox-request",
         count: 1,
     },
     WriterSite {

@@ -58,7 +58,7 @@ fn core_body(snapshot: &GroupStateSnapshot) -> Value {
         "previous_hash":snapshot.previous_hash,"state":state,"issued_at":snapshot.issued_at})
 }
 fn root_body(snapshot: &GroupStateSnapshot) -> Value {
-    json!({"domain":"ramflux.group_state.creator_signature.v2","content":core_body(snapshot),"state_hash":snapshot.state_hash})
+    json!({"domain":ramflux_protocol::group_state::GROUP_STATE_CREATOR_SIGNATURE_DOMAIN,"content":core_body(snapshot),"state_hash":snapshot.state_hash})
 }
 pub(super) fn signer_key(snapshot: &GroupStateSnapshot) -> Result<&str, CryptoError> {
     let mut expected = snapshot.genesis.actor.root_public_key.as_str();
@@ -143,7 +143,7 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
     transition::initial(&snapshot.genesis, None)?;
     verify_roster(snapshot)?;
     let hash = crate::blake3_256_base64url(
-        "ramflux.group_state.content.v2",
+        ramflux_protocol::group_state::GROUP_STATE_CONTENT_HASH_DOMAIN,
         &canonical_json_bytes(&core_body(snapshot))?,
     );
     if snapshot.state_hash != hash || snapshot.state.head_hash != hash {
@@ -316,7 +316,7 @@ fn sign_with_signer(
         (&a.root_commitment, &a.device_id).cmp(&(&b.root_commitment, &b.device_id))
     });
     snapshot.state_hash = crate::blake3_256_base64url(
-        "ramflux.group_state.content.v2",
+        ramflux_protocol::group_state::GROUP_STATE_CONTENT_HASH_DOMAIN,
         &canonical_json_bytes(&core_body(&snapshot))?,
     );
     snapshot.state.head_hash.clone_from(&snapshot.state_hash);

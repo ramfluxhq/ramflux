@@ -152,6 +152,8 @@ message Message {
   repeated MediaRef media = 5;
   reserved 6 to 15;
   GroupSealedContent sealed_group = 16;
+  // Private entropy for erased-revision digests; never part of a public update/header.
+  bytes erasure_nonce = 17;
 }
 message GroupSealedContent {
   string group_id = 1;
@@ -326,11 +328,29 @@ message HistoryItem {
   reserved "origin_evidence";
   HistoryOriginEvidence source_evidence = 16;
   optional Delete tombstone = 3;
+  bytes exact_original_identity = 4;
+  HistoryOriginalMetadataEvidence original_metadata_evidence = 5;
+}
+message HistoryOriginalMetadataEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
+  optional OriginalGroupBinding group_binding = 4;
+  uint32 layer = 5; // Original Message layer preimage; never inferred from the Edit.
+}
+message OriginalGroupBinding {
+  string group_id = 1;
+  QualifiedDevice author = 2;
+  uint64 key_epoch = 3;
+  bytes group_state_hash = 4;
 }
 message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
   optional NativeGroupSnapshot group_membership = 3;
+  bytes report_opening = 4;
+  bytes group_plaintext = 5;
+  bytes group_opening = 6;
 }
 message HistoryPage {
   bytes transfer_id = 1;
@@ -1060,12 +1080,17 @@ message GroupControlBodyDeviceSet {
 message GroupControlBodyTransfer {
   TransferControl control = 1;
 }
+message GroupControlBodySnapshot {
+  NativeGroupSnapshot snapshot = 1;
+  optional GroupKeyDistribution distribution = 2;
+}
 message GroupControlBody {
   oneof value {
     GroupControlBodyRequest request = 1;
     GroupControlBodyResult result = 2;
     GroupControlBodyDeviceSet device_set = 3;
     GroupControlBodyTransfer transfer = 4;
+    GroupControlBodySnapshot snapshot = 5;
   }
 }
 message TransferDevice {

@@ -12,13 +12,29 @@
 mod generated;
 pub use generated::*;
 mod canonical;
+pub mod client_class;
+pub mod exact_content;
+pub mod history_chain;
+pub mod identity;
+pub mod original_header;
+pub mod private_revision;
+pub use client_class::{
+    ClientDeliveryClass, ProviderPush, client_class_from_delivery, client_class_from_notification,
+    provider_push,
+};
+pub mod dm_scope;
 pub mod outer;
 mod protojson;
 pub mod registry;
 mod scanner;
+pub mod self_sync;
+pub mod unsupported;
 pub mod validation;
 mod wire;
 pub use protojson::from_protojson;
+
+/// Native local-bus Typing updates; never a durable journal topic or cursor.
+pub const TRANSIENT_TOPIC: &str = "message.transient";
 
 /// Exact descriptor shared by protobuf, `ProtoJSON` and binding generators.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor.bin");

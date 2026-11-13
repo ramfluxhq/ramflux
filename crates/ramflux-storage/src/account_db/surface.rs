@@ -186,3 +186,25 @@ impl AccountDb {
         Ok(())
     }
 }
+
+impl AccountDb {
+    /// Replace both current-message stores and retire the replaced report opening atomically.
+    /// # Errors
+    /// Refuses a missing/deleted target or a conversation mismatch; returns SQL failures.
+    pub fn replace_generated_message_content(
+        &self,
+        conversation: &str,
+        message: &str,
+        body: &[u8],
+        metadata: &crate::MessageMetadata,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            let changed = self.connection.execute("UPDATE direct_message_projection SET encrypted_body=?3,metadata_json=?4 WHERE conversation_id=?1 AND message_id=?2 AND deleted=0", params![conversation,message,body,serde_json::to_vec(metadata)?])?;
+            if changed != 1 { return Err(StorageError::AuthorizationRejected); }
+            self.replace_surface_message_content(conversation, message, body)?;
+            self.connection.execute("DELETE FROM raw_inner_evidence WHERE message_id=?1", params![message])?;
+            self.connection.execute("UPDATE runtime_privacy_maintenance SET erasure_pending=1 WHERE singleton=1", [])?;
+            Ok(())
+        })
+    }
+}

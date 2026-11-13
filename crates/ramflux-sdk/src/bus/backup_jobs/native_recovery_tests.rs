@@ -258,6 +258,10 @@ fn assert_restored_group_history(
         reader.account_db()?.shared_group_state("restore-group")?.ok_or("reader signed group")?;
     assert_eq!(*state.snapshot(), *expected);
     assert_eq!(reader.groups()?.len(), 1);
+    assert!(
+        matches!(reader.shared_group_selected_devices(&state), Err(SdkError::InboundPending(_))),
+        "historical display must not supply current roster authority"
+    );
     let rows = reader.direct_messages("restore-group-thread")?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].message_id, "group-history");
@@ -354,6 +358,83 @@ fn history_manifest(
     Ok(manifest)
 }
 
+async fn source_group_history(
+    data: &RamfluxClient,
+    account: &crate::custody::BornAccount,
+    vault: &TestVault,
+) -> TestResult<ramflux_protocol::GroupStateSnapshot> {
+    let owner = data.owned_device_identity()?;
+    let primary = account.group_primary(vault)?;
+    let peer = crate::client::native_test_support::Fixture::with_device(
+        "restore-group-peer",
+        "peer-device",
+    )
+    .await?;
+    data.persist_fetched_identity_directory(&peer.manifest)
+        .map_err(|error| format!("cache peer authority: {error}"))?;
+    let owner_manifest = history_manifest(data, account)
+        .map_err(|error| format!("source own authority: {error}"))?;
+    data.persist_fetched_identity_directory(&owner_manifest)
+        .map_err(|error| format!("cache own authority: {error}"))?;
+    peer.client
+        .persist_fetched_identity_directory(&owner_manifest)
+        .map_err(|error| format!("cache owner at peer: {error}"))?;
+    data.shared_group_create_with_primary(
+        "restore-group",
+        "restore-group-thread",
+        Some("Restored group".into()),
+        owner.storage_key(),
+        Some(&primary),
+    )
+    .map_err(|error| format!("construct source group: {error}"))?;
+    let member = peer.client.owned_device_identity()?;
+    let group = data
+        .shared_group_change_with_primary(
+            "restore-group",
+            owner.storage_key(),
+            ramflux_protocol::GroupStateChange::Add {
+                member: peer.client.owned_group_actor(member.storage_key())?.identity,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+            Some(&primary),
+        )
+        .map_err(|error| format!("construct source group: {error}"))?;
+    peer.client
+        .accept_shared_group_state(&group, member.storage_key())
+        .map_err(|error| format!("accept group snapshot: {error}"))?;
+    let distribution = zeroize::Zeroizing::new(
+        peer.client
+            .export_group_sender_key_distribution("restore-group", member.device_id())
+            .map_err(|error| format!("export peer group key: {error}"))?,
+    );
+    data.import_group_sender_key_distribution(&distribution)
+        .map_err(|error| format!("import sender key: {error}"))?;
+    let encrypted = peer
+        .client
+        .encrypt_group_message("restore-group", member.device_id(), b"restored group history")
+        .map_err(|error| format!("encrypt source group history: {error}"))?;
+    data.send_direct_message(
+        "restore-group-thread",
+        "group-history",
+        member.storage_key(),
+        &encrypted,
+    )?;
+    assert_eq!(
+        data.decrypt_group_message("restore-group-thread", "group-history")
+            .map_err(|error| format!("decrypt source group history: {error}"))?,
+        b"restored group history"
+    );
+    data.account_db()?.store_message_content(
+        "restore-group-thread",
+        "group-history",
+        b"restored group history",
+    )?;
+    persist_group_driver_progress(data)?;
+    persist_outbound_history(data, owner.storage_key())
+        .map_err(|error| format!("capture outbound fixture: {error}"))?;
+    Ok(group.snapshot().clone())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account() -> TestResult {
     LocalSet::new()
@@ -367,78 +448,27 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
             data.unlock_account("account", LOCAL_SECRET.as_bytes())?;
             data.initialize_born_v3_branch(account.local_device_id()?, source_vault.clone())
                 .await?;
-            let owner = data.owned_device_identity()?;
-            let primary = account.group_primary(source_vault.as_ref())?;
-            let peer = crate::client::native_test_support::Fixture::with_device(
-                "restore-group-peer",
-                "peer-device",
-            )
-            .await?;
-            data.persist_fetched_identity_directory(&peer.manifest)?;
-            let owner_manifest = history_manifest(&data, &account)?;
-            data.persist_fetched_identity_directory(&owner_manifest)?;
-            peer.client.persist_fetched_identity_directory(&owner_manifest)?;
-            data.shared_group_create_with_primary(
-                "restore-group",
-                "restore-group-thread",
-                Some("Restored group".into()),
-                owner.storage_key(),
-                Some(&primary),
-            )?;
-            let member = peer.client.owned_device_identity()?;
-            let group = data.shared_group_change_with_primary(
-                "restore-group",
-                owner.storage_key(),
-                ramflux_protocol::GroupStateChange::Add {
-                    member: peer.client.owned_group_actor(member.storage_key())?.identity,
-                    role: ramflux_protocol::SharedGroupRole::Member,
-                },
-                Some(&primary),
-            )?;
-            peer.client.accept_shared_group_state(&group, member.storage_key())?;
-            let distribution = zeroize::Zeroizing::new(
-                peer.client
-                    .export_group_sender_key_distribution("restore-group", member.device_id())?,
-            );
-            data.import_group_sender_key_distribution(&distribution)?;
-            let encrypted = peer.client.encrypt_group_message(
-                "restore-group",
-                member.device_id(),
-                b"restored group history",
-            )?;
-            data.send_direct_message(
-                "restore-group-thread",
-                "group-history",
-                member.storage_key(),
-                &encrypted,
-            )?;
-            assert_eq!(
-                data.decrypt_group_message("restore-group-thread", "group-history")?,
-                b"restored group history"
-            );
-            data.account_db()?.store_message_content(
-                "restore-group-thread",
-                "group-history",
-                b"restored group history",
-            )?;
-            persist_group_driver_progress(&data)?;
-            persist_outbound_history(&data, owner.storage_key())?;
-            let expected_group = group.snapshot().clone();
+            let expected_group =
+                Box::pin(source_group_history(&data, &account, source_vault.as_ref())).await?;
             drop(data);
             // A distinct empty vault has no source signing credential and no configured node.
             let target_vault = Arc::new(TestVault::default());
-            let id = install_archive(&source.0, &target.0, target_vault.clone()).await?;
+            let id = install_archive(&source.0, &target.0, target_vault.clone())
+                .await
+                .map_err(|error| format!("install archive: {error}"))?;
             assert_restored_history(&target.0, &id)?;
             let mut restored = RamfluxClient::new();
             restored.open_account_index(&target.0)?;
             restored.unlock_account(&id, LOCAL_SECRET.as_bytes())?;
-            assert_restored_group_history(&restored, &expected_group)?;
+            assert_restored_group_history(&restored, &expected_group)
+                .map_err(|error| format!("read restored group: {error}"))?;
             let pending =
                 crate::custody::load_account(&target.0, &id, crate::custody::network_now()?)?;
             assert!(pending.branch_pending());
             assert_eq!(pending.state(), CreationState::NetworkingPending);
             recover_group_read_projection(&target.0, &id, &phrase, target_vault, &mut restored)
-                .await?;
+                .await
+                .map_err(|error| format!("recover read projection: {error}"))?;
             Ok(())
         }))
         .await

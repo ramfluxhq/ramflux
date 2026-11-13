@@ -408,7 +408,7 @@ jobs:
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -453,6 +453,9 @@ jobs:
           python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
+          # Unified rows explicitly report dormancy until the separately audited activation.
+          cargo build -p ramflux-rf --bin rf --features itest-memory-vault,itest-rfd-fault
+          python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
 
       - name: Upload CLI JUnit
         if: always()
@@ -466,7 +469,7 @@ jobs:
   cli-e2e-b7:
     name: CLI e2e (Demo B B7, GitHub-hosted)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -1011,8 +1014,8 @@ jobs:
       - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
         if: ${{ !cancelled() }}
         run: |
-          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media)'
-          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media)'
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'

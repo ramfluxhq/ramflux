@@ -53,10 +53,11 @@ fn receiver_pair_snapshot(receiver: &Fixture, sender: &Fixture) -> Result<Vec<u8
 
 fn verify_failed(result: Result<Opened, SdkError>) -> Result<(), SdkError> {
     match result {
-        Err(SdkError::Crypto(CryptoError::VerifyFailed)) => {
+        Err(SdkError::Protocol(ramflux_protocol::ProtocolError::SignatureVerificationFailed)) => {
             assert_eq!(
-                SdkError::Crypto(CryptoError::VerifyFailed).to_string(),
-                "crypto error: ed25519 verification failed"
+                SdkError::Protocol(ramflux_protocol::ProtocolError::SignatureVerificationFailed)
+                    .to_string(),
+                "protocol error: ed25519 verification failed"
             );
             Ok(())
         }

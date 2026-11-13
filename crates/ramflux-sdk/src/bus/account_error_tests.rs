@@ -140,13 +140,13 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
 
 #[tokio::test(flavor = "current_thread")]
 async fn account_surfaces_report_real_process_contention_as_retryable_busy() -> TestResult {
-    check_account_surfaces(Fault::Busy).await
+    Box::pin(check_account_surfaces(Fault::Busy)).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn account_surfaces_report_real_lock_open_failure_as_storage_unavailable() -> TestResult {
-    check_account_surfaces(Fault::Io).await
+    Box::pin(check_account_surfaces(Fault::Io)).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn account_surfaces_preserve_integrity_failure_code_for_corrupted_mac() -> TestResult {
-    check_account_surfaces(Fault::Integrity).await
+    Box::pin(check_account_surfaces(Fault::Integrity)).await
 }

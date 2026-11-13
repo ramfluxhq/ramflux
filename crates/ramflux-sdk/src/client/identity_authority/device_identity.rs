@@ -49,7 +49,9 @@ impl RamfluxClient {
                 Some(_) => return Err(invalid("own account device root mismatch")),
                 None => selector.to_owned(),
             };
-            return self.own_custody_device(&device)?.ok_or(SdkError::IdentityRootMissing);
+            // Siblings are named from the current verified roster, never from the
+            // roster loaded at unlock (see `device_identity_for_root`).
+            return self.device_identity_for_root(&account.record().body.account_anchor, &device);
         }
         if let Some(reader) = &self.reader_device_identity {
             let device = match ramflux_protocol::parse_qualified_device_id(selector)? {
@@ -134,6 +136,13 @@ impl RamfluxClient {
         device: &str,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
         if self.born_v3_account.as_ref().is_some_and(|a| a.record().body.account_anchor == root) {
+            // Enrollment and scope changes can advance the verified directory beyond
+            // the account loaded at unlock. Never name siblings from that stale roster.
+            if let Some(authority) =
+                self.current_custody_authority(root, crate::custody::network_now()?)?
+            {
+                return Ok(RootQualifiedDeviceRef::from_custody_record(&authority, device)?);
+            }
             return self.own_custody_device(device)?.ok_or(SdkError::IdentityRootMissing);
         }
         if let (Some(own), Some(branch)) = (&self.identity_root, &self.device_branch)

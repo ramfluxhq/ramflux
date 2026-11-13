@@ -438,7 +438,9 @@ async fn prepare_entry(
     let EntryInput { entry, source: prepared_source } = input;
     let PageContext { replay, defer_controls, now, retry_keys } = context;
     let mut replies = Vec::new();
-    let already_seen = account.client.routed_seen_marker(&entry)?.is_some();
+    let checked_ciphertext = crate::client::routed::validate_routed_ciphertext(&entry);
+    let already_seen =
+        checked_ciphertext.is_ok() && account.client.routed_seen_marker(&entry)?.is_some();
     let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
     if !head_inbound::eligible(account, &key)
         && !account.client.account_db()?.inbox_retry_ready(&key, now)?
@@ -451,7 +453,7 @@ async fn prepare_entry(
     }
     head_inbound::consume(account, &key);
     let expires = entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl));
-    let outcome = match committed_retry {
+    let outcome = match checked_ciphertext.and(committed_retry) {
         Err(error) => Err(error),
         Ok(true) => Ok(Processed::control()),
         Ok(false) => {
@@ -498,10 +500,7 @@ async fn prepare_entry(
                 }
                 return Ok(None);
             }
-            if matches!(error, SdkError::ContactRequestCapacity(_)) {
-                error =
-                    SdkError::InboundRejected("deferred contact root capacity exhausted".into());
-            }
+            error = contact_capacity_refusal(error);
             if !quarantine_failure(
                 &account.client,
                 &engine.config().device_id,
@@ -594,6 +593,7 @@ async fn process_with_prepared_source(
     defer_controls: bool,
     prepared_source: source::PreparedSource,
 ) -> Result<Processed, SdkError> {
+    crate::client::routed::validate_routed_ciphertext(entry)?;
     if account.client.routed_seen_marker(entry)?.is_some() {
         return Ok(Processed::control());
     }
@@ -680,6 +680,14 @@ fn log_unrouted_hold(entry: &GatewayInboxEntry, reason: &str) {
         reason, "gateway inbound entry held");
 }
 
+fn contact_capacity_refusal(error: SdkError) -> SdkError {
+    if matches!(error, SdkError::ContactRequestCapacity(_)) {
+        SdkError::InboundRejected("deferred contact root capacity exhausted".into())
+    } else {
+        error
+    }
+}
+
 pub(super) fn quarantine_failure(
     client: &RamfluxClient,
     device: &str,
@@ -713,28 +721,32 @@ pub(super) fn quarantine_failure(
         "retry_exhausted"
     };
     let db = client.account_db()?;
-    db.remove_inbox_retry(key)?;
-    db.remove_unrouted(key)?;
-    if matches!(error, SdkError::ReplayMismatch)
-        || db.message_is_deleted(&entry.envelope.envelope_id)?
-    {
-        db.dead_letter_routed(
-            &ramflux_protocol::canonical_json_bytes(&entry.envelope)?,
-            code,
-            now,
-        )?;
-    } else {
-        db.dead_letter_inbox(
-            key,
-            &serde_json::to_vec(entry)?,
-            &json!({
-                "envelope_id": entry.envelope.envelope_id,
-                "claimed_source_device_id": entry.envelope.source_device_id,
-                "error_code": code,
-            }),
-            now,
-        )?;
-    }
+    db.write_transaction(|| -> Result<(), SdkError> {
+        client.commit_generated_refusal_pair(entry, device, code)?;
+        db.remove_inbox_retry(key)?;
+        db.remove_unrouted(key)?;
+        if matches!(error, SdkError::ReplayMismatch)
+            || db.message_is_deleted(&entry.envelope.envelope_id)?
+        {
+            db.dead_letter_routed(
+                &ramflux_protocol::canonical_json_bytes(&entry.envelope)?,
+                code,
+                now,
+            )?;
+        } else {
+            db.dead_letter_inbox(
+                key,
+                &serde_json::to_vec(entry)?,
+                &json!({
+                    "envelope_id": entry.envelope.envelope_id,
+                    "claimed_source_device_id": entry.envelope.source_device_id,
+                    "error_code": code,
+                }),
+                now,
+            )?;
+        }
+        Ok(())
+    })?;
     tracing::warn!(inbox_seq = entry.inbox_seq, kind,
         envelope_id = %entry.envelope.envelope_id,
         source_device_id = %entry.envelope.source_device_id,
@@ -813,6 +825,13 @@ pub(crate) fn maintain_local(account: &mut LocalBusAccountState) -> Result<usize
         tracing::warn!(%error, "receipt retention failed; continuing sync");
     }
     account.client.finish_pair_retirement()?;
+    // The account actor is the sole worker; restore installation owns an exclusive writer
+    // lease and cannot overlap this client. Local decoder failure never stalls receive.
+    if !account.activation_pending
+        && let Err(error) = account.client.maintain_raw_inner_reparse()
+    {
+        tracing::warn!(%error,"retained-content reparse page failed; continuing receive");
+    }
     super::dispatch::call::expire_due(account)?;
     account.client.retry_pending_tasks(now_unix_timestamp())
 }

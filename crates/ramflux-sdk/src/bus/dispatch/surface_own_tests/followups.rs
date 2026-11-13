@@ -232,10 +232,19 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
     source
         .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     let create = super::super::dm_tests::create_carrier(&source.client)?;
-    assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
+    assert_eq!(
+        send(&mut source, &create).await.map_err(|error| format!("send own copy: {error:?}"))?["own_device_copy_state"],
+        "submitted"
+    );
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
     let incoming = entry(envelope.clone(), 1);
-    assert!(sibling.client.receive_own_device_message(&receiver, &incoming).await?);
+    assert!(
+        sibling
+            .client
+            .receive_own_device_message(&receiver, &incoming)
+            .await
+            .map_err(|error| format!("first receive: {error:?}"))?
+    );
     let before = sibling.client.surface_get("surface", 0, None)?;
     let db = sibling.client.account_db()?;
     let receipt_key = db.actor_state_key_page("own-device/message-receipt/", 1)?.remove(0);
@@ -259,50 +268,31 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
     let mut gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     gateway.ack_target = "sibling".into();
     let mut engine = GatewaySessionEngine::with_test_transport(receiver.clone(), Box::new(gateway));
-    sibling.client.ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp()).await?;
+    sibling
+        .client
+        .ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp())
+        .await
+        .map_err(|error| format!("ack receipt: {error:?}"))?;
     assert_eq!(db.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"], true);
     db.retain_delivery_actor_states("own-device/message-receipt/", now_unix_timestamp(), 0)?;
     assert!(!db.actor_state_exists(&receipt_key)?);
     assert_eq!(db.actor_state_usage("own-device/committed-packet/")?.0, 1);
     assert!(
-        sibling.client.receive_own_device_message(&receiver, &entry(envelope.clone(), 2)).await?
+        sibling
+            .client
+            .receive_own_device_message(&receiver, &entry(envelope.clone(), 2))
+            .await
+            .map_err(|error| format!("receive after receipt eviction: {error:?}"))?
     );
     assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
-    let mut forged = envelope;
-    let bytes = ramflux_protocol::decode_base64url(&forged.encrypted_payload)?;
-    let raw = bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet prefix")?;
-    let mut packet: Value = serde_json::from_slice(raw)?;
-    assert!(packet.get("context_delivery").is_none());
-    let mut unsigned_local = packet.clone();
-    unsigned_local["context_delivery"] = json!({"included":true});
-    assert!(
-        serde_json::from_value::<crate::client::own_device_copy::OwnDeviceMessage>(unsigned_local)
-            .is_err()
-    );
-    let mut ciphertext = packet["ciphertext"].as_str().ok_or("ciphertext")?.as_bytes().to_vec();
-    let first = ciphertext.first_mut().ok_or("ciphertext bytes")?;
-    *first = if *first == b'A' { b'B' } else { b'A' };
-    packet["ciphertext"] = json!(String::from_utf8(ciphertext)?);
-    let mut changed = crate::client::own_device_copy::PREFIX.to_vec();
-    changed.extend(serde_json::to_vec(&packet)?);
-    forged.encrypted_payload = ramflux_protocol::encode_base64url(changed);
+    let forged = conflicting_own_packet(&source.client, envelope)?;
     assert!(matches!(
         sibling.client.receive_own_device_message(&receiver, &entry(forged, 3)).await,
         Err(SdkError::InboundRejected(reason)) if reason == "own-device message id conflict"
     ));
     assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
     assert!(db.latest_journal_event("message.undeliverable")?.is_none());
-    let reader = db.open_reader()?;
-    let marker = reader.actor_state_key_page("own-device/committed-packet/", 1)?.remove(0);
-    assert_eq!(
-        marker.strip_prefix("own-device/committed-packet/").ok_or("marker prefix")?.len(),
-        43
-    );
-    let proof: Value = reader.load_actor_state(&marker)?.ok_or("durable replay proof")?;
-    assert_eq!(proof["acknowledged"], true);
-    assert_eq!(proof.as_object().ok_or("proof object")?.len(), 4);
-    assert_eq!(proof["fingerprint"].as_str().ok_or("private fingerprint")?.len(), 43);
-    drop(reader);
+    assert_durable_acknowledged_proof(db)?;
     directory.abort();
     drop(sibling);
     drop(source);
@@ -398,4 +388,59 @@ async fn a_slow_failure_parks_the_target_from_completion_instead_of_attempt_star
     drop(source);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn assert_durable_acknowledged_proof(db: &ramflux_storage::AccountDb) -> TestResult {
+    let reader = db.open_reader()?;
+    let marker = reader.actor_state_key_page("own-device/committed-packet/", 1)?.remove(0);
+    assert_eq!(
+        marker.strip_prefix("own-device/committed-packet/").ok_or("marker prefix")?.len(),
+        43
+    );
+    let proof: Value = reader.load_actor_state(&marker)?.ok_or("durable replay proof")?;
+    assert_eq!(proof["acknowledged"], true);
+    assert_eq!(proof.as_object().ok_or("proof object")?.len(), 4);
+    assert_eq!(proof["fingerprint"].as_str().ok_or("private fingerprint")?.len(), 43);
+    drop(reader);
+    Ok(())
+}
+
+fn conflicting_own_packet(
+    source: &RamfluxClient,
+    mut forged: ramflux_protocol::Envelope,
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let bytes = ramflux_protocol::decode_base64url(&forged.encrypted_payload)?;
+    let raw = bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet prefix")?;
+    let mut packet: Value = serde_json::from_slice(raw)?;
+    assert!(packet.get("context_delivery").is_none());
+    let mut unsigned_local = packet.clone();
+    unsigned_local["context_delivery"] = json!({"included":true});
+    assert!(
+        serde_json::from_value::<crate::client::own_device_copy::OwnDeviceMessage>(unsigned_local)
+            .is_err()
+    );
+    let mut ciphertext = packet["ciphertext"].as_str().ok_or("ciphertext")?.as_bytes().to_vec();
+    let first = ciphertext.first_mut().ok_or("ciphertext bytes")?;
+    *first = if *first == b'A' { b'B' } else { b'A' };
+    packet["ciphertext"] = json!(String::from_utf8(ciphertext)?);
+    let branch = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    packet
+        .as_object_mut()
+        .ok_or_else(|| SdkError::LocalBus("packet object".into()))?
+        .remove("signature");
+    let signature = ramflux_crypto::sign_with_device_branch(
+        branch,
+        &json!({"domain":crate::client::own_device_copy::DOMAIN,"body":packet}),
+    )?;
+    packet["signature"] = json!(signature);
+    let mut signed = crate::client::own_device_copy::PREFIX.to_vec();
+    signed.extend(serde_json::to_vec(&packet)?);
+    forged.encrypted_payload = ramflux_protocol::encode_base64url(signed);
+    forged.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        forged.encrypted_payload.as_bytes(),
+    );
+    forged.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &forged)?;
+    Ok(forged)
 }

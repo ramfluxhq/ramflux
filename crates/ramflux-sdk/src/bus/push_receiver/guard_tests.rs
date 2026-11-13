@@ -214,7 +214,13 @@ fn assert_inventory_scan() {
             .any(|site| site.file == "src/bus/dispatch/message.rs"
                 && site.symbol == "message.receive")
     );
-    assert!(SITES.iter().any(|site| site.file == "src/client/a2i.rs" && site.count >= 1));
+    assert!(
+        !SITES
+            .iter()
+            .any(|site| site.file == "src/client/a2i.rs"
+                || site.file == "src/bus/dispatch/a2i_a2ui.rs"),
+        "closed A2I endpoints have no receive writers"
+    );
     assert!(
         SITES.iter().any(|site| site.file == "src/client/account.rs"
             && site.symbol == "set_projection_checkpoint")

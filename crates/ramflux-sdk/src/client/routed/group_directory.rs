@@ -66,6 +66,11 @@ impl RamfluxClient {
         body: &[u8],
         local: &str,
     ) -> Result<LegacyGroupRequest, SdkError> {
+        if crate::client::target_selection::schema_v1_selected()
+            && super::generated_receive::is_group_key_control(body)
+        {
+            return Ok(LegacyGroupRequest::Other);
+        }
         if route.kind != Kind::GroupControl {
             return Ok(LegacyGroupRequest::Other);
         }

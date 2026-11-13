@@ -5,6 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
+#[path = "dm/unified.rs"]
+pub(crate) mod unified;
 #[path = "dm/wait.rs"]
 mod wait;
 
@@ -59,9 +61,20 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
             )
         }
         DmAction::Delete(delete) => {
+            let everyone = matches!(delete.scope.as_str(), "everyone" | "all");
+            let generated = bindings::cli::delete_message(
+                delete.tombstone.as_deref().unwrap_or(&delete.message),
+                &delete.account,
+                &delete.conversation,
+                delete.message.as_bytes(),
+                everyone,
+                delete.tombstone.as_deref().map(str::as_bytes),
+            )?;
+            let (conversation_id, message_id) = bindings::cli::delete_payload(&generated)?;
             let request = LocalBusMessageDeleteRequest {
-                conversation_id: delete.conversation,
-                message_id: delete.message,
+                conversation_id,
+                message_id: String::from_utf8(message_id)
+                    .map_err(|err| RfError::Message(err.to_string()))?,
                 delete_scope: delete.scope,
                 tombstone_id: delete.tombstone,
             };
@@ -85,6 +98,17 @@ async fn handle_dm_list(
     bus: &mut LocalBusClient,
     selector: ConversationSelector,
 ) -> Result<(), RfError> {
+    let query = unified::Query {
+        account: selector.account.clone(),
+        conversation: selector.conversation.clone(),
+        limit: selector.limit,
+        before: selector.before.clone(),
+        after_seq: selector.after_seq,
+        message: selector.message.clone(),
+    };
+    if unified::selected(&query)? {
+        return unified::print(bus, &query, false).await;
+    }
     let request = LocalBusConversationRequest { conversation_id: selector.conversation };
     let received = bus
         .request(
@@ -111,6 +135,17 @@ async fn handle_dm_list(
 }
 
 async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), RfError> {
+    let query = unified::Query {
+        account: read.account.clone(),
+        conversation: read.conversation.clone(),
+        limit: read.limit,
+        before: read.before.clone(),
+        after_seq: read.after_seq,
+        message: read.message.clone(),
+    };
+    if unified::selected(&query)? {
+        return unified::print(bus, &query, true).await;
+    }
     let request = LocalBusConversationRequest { conversation_id: read.conversation };
     let received = wait::receive(std::time::Duration::from_secs(read.wait), async || {
         Ok(bus

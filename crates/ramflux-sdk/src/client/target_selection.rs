@@ -14,7 +14,7 @@ use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
 use ramflux_protocol::schema_profile::schema_v1_live;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Send fan-out that applies the same fresh-cohort rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +166,17 @@ pub(crate) struct SelectionPlan {
 #[must_use]
 pub(crate) fn schema_v1_selected() -> bool {
     schema_v1_live()
+}
+
+/// Refuse effectful generated entry points before any local allocation or write.
+pub(crate) fn require_schema_v1() -> Result<(), SdkError> {
+    if !schema_v1_selected() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::error::GeneratedRefusalCode::Content,
+            reason: "generated profile is not selected".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Map a kind onto an admitted layer. Never substitutes text for a control.
@@ -347,6 +358,24 @@ fn select_with_current_membership(
     recheck(&plan, &build()?)
 }
 
+/// Source-qualified group event id (OV-P05-L1). Never `group_id`: that key collapses
+/// every message in the group onto one fresh-cohort event.
+pub(crate) fn group_logical_event_id(
+    group_id: &str,
+    message_id: Option<&str>,
+) -> Result<String, SdkError> {
+    let id = match message_id {
+        Some(id) if !id.is_empty() => id.to_owned(),
+        _ => crate::new_surface_message_id()?,
+    };
+    if id == group_id {
+        return Err(SdkError::LocalBus(
+            "group logical_event_id must be the message id, not group_id".into(),
+        ));
+    }
+    Ok(id)
+}
+
 impl RamfluxClient {
     /// Run candidate selection only when the live profile is message schema v1.
     ///
@@ -466,7 +495,7 @@ impl RamfluxClient {
         Ok(TargetDevice::from_verified_roster(root, device_id, self.cached_roster(root)?.as_ref()))
     }
 
-    /// One member's refused cache is stale for that member; it does not fail the send.
+    /// A refused cache is stale for that member's layer plan.
     fn cached_roster(&self, root: &str) -> Result<Option<VerifiedLayerRoster>, SdkError> {
         roster_from_authority_result(self.current_custody_authority(root, unix_now()?))
     }
@@ -480,19 +509,45 @@ impl RamfluxClient {
         state: &ramflux_crypto::VerifiedGroupState,
     ) -> Result<SelectionRequest, SdkError> {
         let sender = self.local_device_identity(sender_id)?;
-        let selected = self.shared_group_selected_devices(state)?;
+        let now = unix_now()?;
+        let mut rosters = BTreeMap::new();
+        let mut manifests = BTreeMap::new();
+        for root in state
+            .view()
+            .members
+            .iter()
+            .map(|member| member.identity.root_commitment.as_str())
+            .collect::<BTreeSet<_>>()
+        {
+            let roster = self.cached_roster(root)?;
+            if let Some(roster) = roster.as_ref() {
+                manifests.insert(root.to_owned(), roster.group_devices(now));
+            } else if !self.custody_mode_observed(root)?
+                && let Some(legacy) = self.observed_device_set(root)?
+            {
+                manifests.insert(
+                    root.to_owned(),
+                    legacy
+                        .devices
+                        .iter()
+                        .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+                        .map(|device| device.device_id.clone())
+                        .collect(),
+                );
+            }
+            rosters.insert(root.to_owned(), roster);
+        }
+        // A refused cache retains only explicit signed members as stale layer targets.
+        // Native routing and sealing keep their independent current-authority checks.
+        let selected = crate::client::shared_group::select_layer_devices(state.view(), &manifests);
         let mut targets = Vec::new();
         for (root, devices) in selected {
-            let roster = self.cached_roster(&root)?;
+            let roster = rosters.get(&root).and_then(Option::as_ref);
             for device_id in devices {
                 if root == sender.root_commitment() && device_id == sender.device_id() {
                     continue;
                 }
-                targets.push(TargetDevice::from_verified_roster(
-                    &root,
-                    &device_id,
-                    roster.as_ref(),
-                ));
+                targets.push(TargetDevice::from_verified_roster(&root, &device_id, roster));
             }
         }
         let source = self.cached_target(sender.root_commitment(), sender.device_id())?;

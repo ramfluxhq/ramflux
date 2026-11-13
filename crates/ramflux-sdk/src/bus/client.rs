@@ -327,6 +327,13 @@ fn route_received(
         return false;
     }
     if frame.kind == LocalBusFrameKind::Event {
+        if super::events::is_transient(&frame) && !events.is_closed() {
+            // A transient drop never disconnects a durable subscription or changes its cursor.
+            if events.capacity() > 1 {
+                let _ = events.try_send(frame);
+            }
+            return true;
+        }
         if events.capacity() <= 1 {
             let request = LocalBusFrame::request(
                 "client-lagged",
@@ -445,3 +452,41 @@ mod contact_error_tests;
 #[cfg(test)]
 #[path = "client_stream_error_tests.rs"]
 mod stream_error_tests;
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+    #[test]
+    fn transient_events_never_advance_cursor_or_disconnect_on_overflow() -> Result<(), SdkError> {
+        let (tx, mut rx) = mpsc::channel(3);
+        let pending = Arc::new(PendingMutex::new(BTreeMap::new()));
+        let connected = AtomicBool::new(true);
+        let mut last = 40;
+        let mut frame = LocalBusFrame::request(
+            "",
+            Some("a".into()),
+            "message",
+            ramflux_protocol::message::TRANSIENT_TOPIC,
+            serde_json::json!({}),
+        );
+        frame.kind = LocalBusFrameKind::Event;
+        frame.seq = Some(0);
+        for _ in 0..4 {
+            assert!(route_received(frame.clone(), &tx, &pending, &connected, &mut last));
+        }
+        assert_eq!(last, 40, "transient event changed the durable cursor");
+        assert!(connected.load(Ordering::Acquire));
+        for _ in 0..2 {
+            let event = rx.try_recv().map_err(|_| closed())?;
+            assert_eq!(event.method, ramflux_protocol::message::TRANSIENT_TOPIC);
+            assert_eq!(event.seq, Some(0));
+        }
+        assert!(rx.try_recv().is_err());
+        frame.method = "message.received".into();
+        frame.seq = Some(90);
+        assert!(route_received(frame, &tx, &pending, &connected, &mut last));
+        assert_eq!(last, 90);
+        assert_eq!(rx.try_recv().map_err(|_| closed())?.seq, Some(90));
+        Ok(())
+    }
+}
