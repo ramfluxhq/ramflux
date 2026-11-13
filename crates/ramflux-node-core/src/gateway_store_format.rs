@@ -8,6 +8,10 @@ use redb::{ReadableDatabase, ReadableTable};
 use std::path::Path;
 
 pub(super) const FORMAT: &str = "gateway_state_format";
+// Public database paths may never enter this exclusively reserved directory.
+const STAGING_DIRECTORY: &str = ".ramflux-gateway-staging-v1";
+const STAGING_PREFIX: &str = ".gateway-init-";
+const STAGING_RANDOM_LENGTH: usize = 16;
 pub(super) fn open(path: impl AsRef<Path>) -> Result<redb::Database, NodeCoreError> {
     open_with(path.as_ref(), |_| {})
 }
@@ -20,8 +24,12 @@ fn open_with(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    // Serialize cleanup and publication, including creators of other stores in this directory.
-    // Holding the lock makes every earlier staging file an abandoned initializer, never live work.
+    refuse_reserved_path(path)?;
+    refuse_reserved_path(&directory.canonicalize().map_err(redb_error)?)?;
+    if path.try_exists().map_err(redb_error)? {
+        refuse_reserved_path(&path.canonicalize().map_err(redb_error)?)?;
+    }
+    // Serialize cleanup and publication across all stores sharing the reserved namespace.
     let initialization = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -29,7 +37,18 @@ fn open_with(
         .open(directory.join(".gateway-init.lock"))
         .map_err(redb_error)?;
     fs2::FileExt::lock_exclusive(&initialization).map_err(redb_error)?;
-    sweep_abandoned_stages(directory, path, std::time::SystemTime::now())?;
+    let staging_directory = directory.join(STAGING_DIRECTORY);
+    match std::fs::create_dir(&staging_directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(redb_error(error)),
+    }
+    let metadata = std::fs::symlink_metadata(&staging_directory).map_err(redb_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(NodeCoreError::GatewayStateReservedPath);
+    }
+    // Cleanup precedes creation/publication and never scans the public directory.
+    sweep_abandoned_stages(&staging_directory, path, std::time::SystemTime::now())?;
     let mut builder = redb::Database::builder();
     builder.set_cache_size(super::GATEWAY_REPLAY_PAGE_CACHE_BYTES);
     if !path.try_exists().map_err(redb_error)? {
@@ -40,8 +59,9 @@ fn open_with(
         // Only a fully committed v3 database can acquire the public name. An interrupted
         // creator leaves an unpublished temporary file; old public files remain refused.
         let stage = tempfile::Builder::new()
-            .prefix(".gateway-init-")
-            .tempfile_in(directory)
+            .prefix(STAGING_PREFIX)
+            .rand_bytes(STAGING_RANDOM_LENGTH)
+            .tempfile_in(&staging_directory)
             .map_err(redb_error)?;
         let db = builder.create(stage.path()).map_err(redb_error)?;
         initialized(false);
@@ -78,23 +98,50 @@ fn open_with(
     }
     Ok(db)
 }
+fn refuse_reserved_path(path: &Path) -> Result<(), NodeCoreError> {
+    if path.components().any(|part| part.as_os_str() == STAGING_DIRECTORY) {
+        return Err(NodeCoreError::GatewayStateReservedPath);
+    }
+    Ok(())
+}
+
+fn is_stage_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().and_then(|name| name.strip_prefix(STAGING_PREFIX)).is_some_and(|suffix| {
+        suffix.len() == STAGING_RANDOM_LENGTH
+            && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
+}
+
 fn sweep_abandoned_stages(
     directory: &Path,
     public_path: &Path,
     before: std::time::SystemTime,
 ) -> Result<(), NodeCoreError> {
+    let published = match std::fs::metadata(public_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(redb_error(error)),
+    };
     for entry in std::fs::read_dir(directory).map_err(redb_error)? {
         let entry = entry.map_err(redb_error)?;
-        if Some(entry.file_name().as_os_str()) == public_path.file_name()
-            || !entry.file_name().to_string_lossy().starts_with(".gateway-init-")
-        {
+        if !is_stage_name(&entry.file_name()) || entry.path() == public_path {
             continue;
         }
-        let metadata = entry.metadata().map_err(redb_error)?;
-        if metadata.is_file()
-            && !entry.file_type().map_err(redb_error)?.is_symlink()
-            && metadata.modified().map_err(redb_error)? < before
-        {
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(redb_error)?;
+        // A leftover hard-link to the published inode is committed state, not an orphan.
+        #[cfg(unix)]
+        if published.as_ref().is_some_and(|published| {
+            use std::os::unix::fs::MetadataExt;
+            published.dev() == metadata.dev() && published.ino() == metadata.ino()
+        }) {
+            continue;
+        }
+        // Without a portable file-identity check, retain stages when a public DB exists.
+        #[cfg(not(unix))]
+        if published.is_some() {
+            continue;
+        }
+        if metadata.is_file() && metadata.modified().map_err(redb_error)? < before {
             std::fs::remove_file(entry.path()).map_err(redb_error)?;
         }
     }
@@ -165,7 +212,9 @@ mod tests {
     fn staging_cleanup_preserves_public_database_with_reserved_prefix()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
-        let path = directory.path().join(".gateway-init-public.redb");
+        // This also matches the exact stage-name grammar, but is a PUBLIC path.
+        let path = directory.path().join(".gateway-init-0123456789abcdef");
+        let other = directory.path().join("gateway.redb");
         let store = crate::GatewayRedbStore::open(&path)?;
         let mut state = crate::GatewayState::new();
         state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig {
@@ -173,7 +222,22 @@ mod tests {
             ..Default::default()
         })?;
         store.save_state(&state)?;
+        let other_store = crate::GatewayRedbStore::open(&other)?;
+        assert!(path.try_exists()?, "opening B must preserve active public A");
+        assert_eq!(
+            store
+                .load_state()?
+                .ok_or("test: active A snapshot lost")?
+                .pre_auth_policy()
+                .per_source_ip_handshake_rate,
+            7,
+            "opening B must preserve active A state"
+        );
+        drop(other_store);
         drop(store);
+        let image = std::fs::read(&path)?;
+        drop(crate::GatewayRedbStore::open(&other)?);
+        assert_eq!(std::fs::read(&path)?, image, "opening B must not modify closed public A");
         let reopened = crate::GatewayRedbStore::open(&path)?;
         assert_eq!(
             reopened
@@ -215,6 +279,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_database_survives_crash_and_staging_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_PATH: &str = "RAMFLUX_TEST_GATEWAY_PUBLISHED_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let path = Path::new(&path);
+            let store = crate::GatewayRedbStore::open(path)?;
+            let mut state = crate::GatewayState::new();
+            state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig {
+                per_source_ip_handshake_rate: 11,
+                ..Default::default()
+            })?;
+            store.save_state(&state)?;
+            // Abrupt death after publication and a real committed write: no Drop cleanup.
+            std::process::exit(92);
+        }
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join(".gateway-init-0123456789abcdef");
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command.args(["--exact", "gateway_state::store_format::tests::published_database_survives_crash_and_staging_cleanup"])
+            .env(CHILD_PATH, &path).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).kill_on_drop(true);
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(10), command.status()).await??;
+        assert_eq!(status.code(), Some(92), "child must crash after its committed public write");
+        let staging = directory.path().join(STAGING_DIRECTORY);
+        let orphan = staging.join(".gateway-init-abcdefghijklmnop");
+        drop(redb::Database::create(&orphan)?);
+        let ambiguous = staging.join(".gateway-init-public.redb");
+        std::fs::write(&ambiguous, b"not a recognized stage")?;
+        let alias = staging.join(".gateway-init-ABCDEFGHIJKLMNOP");
+        std::fs::hard_link(&path, &alias)?;
+        assert!(
+            matches!(open(&orphan), Err(NodeCoreError::GatewayStateReservedPath)),
+            "public stores must never use the cleanup namespace"
+        );
+        let store = crate::GatewayRedbStore::open(&path)?;
+        assert_eq!(
+            store
+                .load_state()?
+                .ok_or("test: crash lost published state")?
+                .pre_auth_policy()
+                .per_source_ip_handshake_rate,
+            11,
+            "restart must retain the exact committed public state"
+        );
+        assert!(!orphan.try_exists()?, "restart must remove a real orphaned stage");
+        assert!(ambiguous.try_exists()?, "non-stage names must not be swept");
+        assert!(alias.try_exists()?, "published inode aliases must not be swept");
+        drop(store);
+        drop(crate::GatewayRedbStore::open(&path)?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn initial_creation_crash_never_publishes_unmarked_database()
     -> Result<(), Box<dyn std::error::Error>> {
         const CHILD_PATH: &str = "RAMFLUX_TEST_GATEWAY_INIT_PATH";
@@ -250,10 +368,8 @@ mod tests {
             let store = crate::GatewayRedbStore::open(&path)?;
             drop(store);
             assert!(
-                std::fs::read_dir(directory.path())?.all(|entry| entry.is_ok_and(|entry| !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".gateway-init-"))),
+                std::fs::read_dir(directory.path().join(STAGING_DIRECTORY))?
+                    .all(|entry| entry.is_ok_and(|entry| !is_stage_name(&entry.file_name()))),
                 "restart must sweep staging files abandoned at either crash boundary"
             );
             let db = open(&path)?;
