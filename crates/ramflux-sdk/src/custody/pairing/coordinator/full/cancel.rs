@@ -14,6 +14,7 @@ mod local_jobs;
 #[derive(Default)]
 pub(crate) struct FullRuntimeCancel {
     stopped: AtomicBool,
+    stopped_signal: tokio::sync::Notify,
     local_workers: Mutex<usize>,
     local_jobs: Mutex<Vec<local_jobs::LocalJob>>,
     idle: Condvar,
@@ -47,6 +48,17 @@ impl FullRuntimeCancel {
         self.idle.notify_all();
         while *workers != 0 {
             workers = self.idle.wait(workers).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            let notified = self.stopped_signal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
         }
     }
     pub(crate) fn require_live(&self) -> Result<(), SdkError> {
@@ -94,6 +106,7 @@ impl FullRuntimeCancel {
     }
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
+        self.stopped_signal.notify_waiters();
         if let Some(job) = self.job.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {
             job.abort();

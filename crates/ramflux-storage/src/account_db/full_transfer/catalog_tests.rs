@@ -213,7 +213,11 @@ fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_
         rusqlite::params!["full-transfer-unimplemented-owner", "{}"],
     )?;
     let rules = full_transfer_catalog();
-    assert_eq!(rules.len(), 163);
+    assert_eq!(
+        rules.len(),
+        164,
+        "test: cleanup ledger exclusion is missing from the declared census"
+    );
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
         Err(error) => {
@@ -233,7 +237,7 @@ fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_
             FamilySelector::ActorPrefix(_) => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(tables.len(), 157);
+    assert_eq!(tables.len(), 158, "test: cleanup ledger table is absent from schema coverage");
     assert!(
         matches!(
             census.require_typed_owners(rules),
@@ -281,8 +285,16 @@ fn pairing_full_baseline_catalog_rule_and_census_hashes_match_independent_vector
         "../../../../ramflux-protocol/fixtures/full_transfer/catalog-baseline-vectors.json"
     ))?;
     let rules = super::catalog::full_transfer_catalog();
-    assert_eq!(declarations.as_array().ok_or("declarations")?.len(), rules.len());
-    assert_eq!(vectors["rule_hashes"].as_array().ok_or("hashes")?.len(), rules.len());
+    assert_eq!(
+        declarations.as_array().ok_or("declarations")?.len(),
+        rules.len(),
+        "test: independent catalog declaration count drifted"
+    );
+    assert_eq!(
+        vectors["rule_hashes"].as_array().ok_or("hashes")?.len(),
+        rules.len(),
+        "test: independent catalog hash count drifted"
+    );
     for (index, rule) in rules.iter().enumerate() {
         assert_eq!(
             serde_json::to_value(rule)?,

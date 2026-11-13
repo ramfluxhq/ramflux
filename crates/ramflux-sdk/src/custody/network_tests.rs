@@ -262,3 +262,5 @@ async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict()
     result?;
     Ok(())
 }
+
+mod pairing_discovery;

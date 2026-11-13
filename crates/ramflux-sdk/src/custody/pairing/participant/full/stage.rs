@@ -54,10 +54,26 @@ impl LocalPairingParticipant {
     /// No SAS approval, epoch token/key, native authority or candidate is restored by this link.
     /// # Errors
     /// Refuses stale local scope/generation/descriptor, a foreign trust/base or failed I/O.
+    #[cfg(test)]
     pub(crate) fn retain_full_data_stage(
         &self,
         operation: &str,
         generation: u64,
+        trust: &ramflux_crypto::custody::pairing::FullResumeTrust,
+        base: &ramflux_crypto::custody::VerifiedRecord,
+        source: Option<(
+            &PreparedFullSource,
+            &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+        )>,
+    ) -> Result<ramflux_storage::FullStageIoCancel, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.retain_full_data_stage_in(db, (operation, generation), trust, base, source)
+    }
+    pub(crate) fn retain_full_data_stage_in(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        (operation, generation): (&str, u64),
         trust: &ramflux_crypto::custody::pairing::FullResumeTrust,
         base: &ramflux_crypto::custody::VerifiedRecord,
         source: Option<(
@@ -70,8 +86,6 @@ impl LocalPairingParticipant {
         let saved = trust.local_stage_record()?;
         let context = TranscriptV3::from_wire_bytes(&saved.transcript)
             .map_err(|error| crate::custody::pairing::transport::wire(&error))?;
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, Some(&context.initiator.common.account_anchor))?;
         let mut row = db
             .pairing_live_rows()?

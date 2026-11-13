@@ -238,6 +238,19 @@ impl PairingActor {
         })?;
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let runtime = self.full_runtime.clone();
+        if let Some(writer) = &self.local_writer {
+            return writer
+                .request(move |db| {
+                    participant.prepare_affirmed_source_submission_in(
+                        db,
+                        (scope, approved.observation),
+                        runtime,
+                        cancelled,
+                        approved.preservation,
+                    )
+                })
+                .await;
+        }
         self.full_runtime
             .clone()
             .run_blocking(move || {

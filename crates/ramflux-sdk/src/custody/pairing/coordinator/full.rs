@@ -338,6 +338,16 @@ impl PairingActor {
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         let participant =
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
+        if let Some(writer) = &self.local_writer {
+            let runtime = self.full_runtime.clone();
+            return writer
+                .request(move |db| {
+                    participant.prepare_full_source_with_cancel_in(db, |cancel| {
+                        runtime.register_preparation(cancel)
+                    })
+                })
+                .await;
+        }
         // Complete source census/typed encoding before any Issue/Create allocation.
         let runtime = self.full_runtime.clone();
         let source = self
@@ -409,17 +419,7 @@ impl PairingActor {
         let invite_envelope = created.invitation.clone();
         let expires_at = invitation.expires_at;
         let keys = self.load_public_keys(self.identity.local_ref.clone()).await?;
-        if let Some(participant) = self.participant.clone() {
-            let invitation = invite_envelope.clone();
-            let runtime = self.full_runtime.clone();
-            self.full_runtime
-                .clone()
-                .run_blocking(move || {
-                    let _local = runtime.local_work()?;
-                    participant.record_invitation(&invitation, generation)
-                })
-                .await?;
-        }
+        self.record_local_invitation(invite_envelope.clone(), generation).await?;
         let mut ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: request_id.clone(),
             generation,

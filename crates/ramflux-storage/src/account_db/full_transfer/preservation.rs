@@ -238,9 +238,9 @@ impl FullTransferStage<'_> {
             || body.manifest_chain_hash != proof.manifest_chain_hash()
             || body.data_verified_hash != proof.data_verified_hash()
             || body.target_restrictions_root != proof.target_restrictions_root()
-            || (matches!(validity, ApprovalTime::BeforePublish) && body.expires_at <= now)
+            || (matches!(validity, ApprovalTime::BeforePublish)
+                && (body.expires_at <= now || body.expires_at > now.saturating_add(300)))
             || body.expires_at > proof.expires_at()
-            || body.expires_at > now.saturating_add(300)
         {
             return Err(wrong());
         }

@@ -79,6 +79,36 @@ pub(super) fn fields() -> ramflux_protocol::SignedFields {
     }
 }
 impl CustodyConnection<GatewayTcpTlsStream> {
+    /// Read this independently configured receiving node's signed identity over a fresh
+    /// bounded TLS connection. No account, vault, proof or ordinary session is opened.
+    /// Existing durable node pins and predecessor checks still apply.
+    /// # Errors
+    /// Refuses TLS/pin/identity/binding disagreement, malformed frames or a ten-second timeout.
+    pub async fn discover_pairing_node(
+        config: CustodyNetworkConfig,
+    ) -> Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            if config.binding_mode == BindingMode::NoChannelBinding {
+                return Err(CustodyRefusal::BindingRefused.into());
+            }
+            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                "0.0.0.0:0".parse().map_err(|_| invalid())?,
+                config.gateway_address,
+                &config.server_name,
+                &config.ca_certificate,
+                config.timeout,
+            )
+            .await?;
+            let opened = Self::open_stream(&config, tls.into_tls_stream()).await?;
+            let pins = opened.pins;
+            drop(opened.stream);
+            tokio::task::spawn_blocking(move || pins.current_record(now()?))
+                .await
+                .map_err(|_| invalid())?
+        })
+        .await
+        .map_err(|_| SdkError::PairingCode("ResumeRequired"))?
+    }
     /// Publish, register and establish a session using the current locally verified v3 record.
     /// # Errors
     /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and

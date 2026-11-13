@@ -125,6 +125,11 @@ impl LocalPairingParticipant {
         })
     }
 
+    pub(crate) fn next_generation_in(&self, db: &AccountDb) -> Result<u64, SdkError> {
+        self.full_selected_db(db, None)?;
+        Ok(db.pairing_floor()?.map_or(1, |row| row.next_generation))
+    }
+
     pub(crate) fn finish_install(
         &self,
         operation_id: &str,
@@ -257,6 +262,23 @@ impl LocalPairingParticipant {
         &self,
         authorization: &super::FullGrantSigningRequest<'_>,
     ) -> Result<String, SdkError> {
+        self.sign_full_grant_owned(authorization, None)
+    }
+    pub(in crate::custody::pairing) fn sign_full_grant_off_loan(
+        &self,
+        authorization: &super::FullGrantSigningRequest<'_>,
+        unlocked: &ramflux_storage::FullLocalUnlockGuard,
+    ) -> Result<String, SdkError> {
+        unlocked.require_unlocked()?;
+        let signature = self.sign_full_grant_owned(authorization, Some(unlocked))?;
+        unlocked.require_unlocked()?;
+        Ok(signature)
+    }
+    fn sign_full_grant_owned(
+        &self,
+        authorization: &super::FullGrantSigningRequest<'_>,
+        unlocked: Option<&ramflux_storage::FullLocalUnlockGuard>,
+    ) -> Result<String, SdkError> {
         let request = authorization.request();
         let context = authorization.context();
         request
@@ -270,11 +292,17 @@ impl LocalPairingParticipant {
         let bytes = request
             .signing_bytes(authorization.role())
             .map_err(|error| super::transport::wire(&error))?;
-        self.with_full_branch(&local.device_ref, &local.branch_key, |branch| {
+        let sign = |branch: &custody::BranchCredentials| {
             Ok(ramflux_protocol::encode_base64url(
                 branch.signing.signing_key.sign(&bytes).to_bytes(),
             ))
-        })
+        };
+        if let Some(unlocked) = unlocked {
+            unlocked.require_unlocked()?;
+            self.with_full_branch_vault(&local.device_ref, &local.branch_key, sign)
+        } else {
+            self.with_full_branch(&local.device_ref, &local.branch_key, sign)
+        }
     }
 
     pub(crate) fn record_invitation(
@@ -284,6 +312,15 @@ impl LocalPairingParticipant {
     ) -> Result<(), SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.record_invitation_in(db, invitation, generation)
+    }
+    pub(crate) fn record_invitation_in(
+        &self,
+        db: &AccountDb,
+        invitation: &Envelope<Invitation>,
+        generation: u64,
+    ) -> Result<(), SdkError> {
+        self.full_selected_db(db, Some(&invitation.body.account_anchor))?;
         if db.pairing_live_rows()?.iter().any(|row| row.operation_id == invitation.body.request_id)
         {
             return Ok(());

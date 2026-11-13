@@ -1751,3 +1751,5 @@ async fn settle_stream_work(rig: &Rig) {
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(500)).await;
 }
+
+mod frontend_writer;
