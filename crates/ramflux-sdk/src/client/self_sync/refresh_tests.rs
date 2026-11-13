@@ -259,7 +259,8 @@ async fn self_sync_same_epoch_head_disagreement_is_not_a_refresh() -> TestResult
     let own = Fixture::new("self-sync-refresh-fork").await?;
     mute(&own.client)?;
     queue_rows(&own.client, "fork-held", true)?;
-    own.client.force_self_sync_refresh_barrier(|_, head, _| *head = "another-same-epoch-head".into())?;
+    own.client
+        .force_self_sync_refresh_barrier(|_, head, _| *head = "another-same-epoch-head".into())?;
     assert!(matches!(own.client.enter_self_sync_refresh(), Err(SdkError::InboundPending(_))));
     assert!(matches!(mute(&own.client), Err(SdkError::InboundPending(_))));
     assert!(own.client.account_db()?.actor_state_exists("self-sync/pending/fork-held/register")?);

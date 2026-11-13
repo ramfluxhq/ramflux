@@ -169,15 +169,30 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
     let mut source = Fixture::new("floor-erased-source").await?;
     let _second = source.enroll_sibling("floor-second", "second").await?;
     let third = source.enroll_sibling("floor-third", "third").await?;
-    let draft = g::SelfSync { operation: 2, revision: 1, draft: Some(g::Message { text: "stale draft".into(), ..Default::default() }), ..Default::default() };
+    let draft = g::SelfSync {
+        operation: 2,
+        revision: 1,
+        draft: Some(g::Message { text: "stale draft".into(), ..Default::default() }),
+        ..Default::default()
+    };
     let value = source.client.change_self_sync("floor-thread", draft)?;
     source.client.erase_self_sync_conversation("floor-thread")?;
     assert_eq!(source.client.account_db()?.actor_state_keys("self-sync/state/")?.len(), 0);
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    assert!(matches!(source.client.bootstrap_self_sync(&third.client.owned_device_identity()?), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        source.client.bootstrap_self_sync(&third.client.owned_device_identity()?),
+        Err(SdkError::InboundPending(_))
+    ));
     let mut old = value;
     old.revision = u64::MAX - 2;
-    assert!(matches!(third.client.account_db()?.write_transaction(|| third.client.apply_self_sync_in(&source.client.owned_device_identity()?, "floor-thread", &old)), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        third.client.account_db()?.write_transaction(|| third.client.apply_self_sync_in(
+            &source.client.owned_device_identity()?,
+            "floor-thread",
+            &old
+        )),
+        Err(SdkError::InboundPending(_))
+    ));
     assert!(third.client.self_sync_state("floor-thread", &old)?.is_none());
     assert_eq!(third.client.account_db()?.actor_state_keys("self-sync/bootstrap/")?.len(), 0);
     Ok(())
