@@ -1442,12 +1442,6 @@ mod tests {
     const DEVICE_ID: &str = "device_mcp_test";
     const FUTURE_EXPIRES_AT: i64 = 4_000_000_000;
 
-    fn temp_root(test_name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-mcp-{test_name}-{}-{nanos}", std::process::id()))
-    }
-
     fn gateway_config() -> GatewaySessionConfig {
         GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().expect("valid bind addr"),
@@ -1471,8 +1465,12 @@ mod tests {
         client
     }
 
-    fn test_state_named(test_name: &str) -> (LocalBusDaemonState, PathBuf) {
-        let root = temp_root(test_name);
+    fn test_state_named(test_name: &str) -> (tempfile::TempDir, LocalBusDaemonState) {
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("ramflux-sdk-mcp-{test_name}-"))
+            .tempdir()
+            .expect("test: create MCP directory");
+        let root = temp.path().to_path_buf();
         let mut client = RamfluxClient::new();
         client.create_identity_root(PRINCIPAL_ID, [0x11; 32]);
         client.create_device_branch(PRINCIPAL_ID, DEVICE_ID, 1, [0x12; 32]);
@@ -1484,6 +1482,7 @@ mod tests {
         let account =
             LocalBusAccountState::disconnected(client, gateway, "principal_mcp_test".to_owned());
         (
+            temp,
             LocalBusDaemonState {
                 account_index: None,
                 nodes: crate::node::NodeStore::default(),
@@ -1493,12 +1492,11 @@ mod tests {
                 attended_accounts: BTreeSet::from([ACCOUNT_ID.to_owned()]),
                 subscribers: BTreeMap::new(),
             },
-            root,
         )
     }
 
-    fn test_state() -> LocalBusDaemonState {
-        test_state_named("grant-mcp").0
+    fn test_state() -> (tempfile::TempDir, LocalBusDaemonState) {
+        test_state_named("grant-mcp")
     }
 
     fn test_connection(connection_id: u64) -> LocalBusConnectionState {
@@ -1543,7 +1541,7 @@ mod tests {
 
     #[test]
     fn mcp_approval_request_event_and_audit_are_canonical() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -1591,7 +1589,7 @@ mod tests {
 
     #[test]
     fn mcp_approval_granted_and_denied_events_are_canonical() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -1661,7 +1659,8 @@ mod tests {
 
     #[test]
     fn mcp_registry_grant_and_audit_survive_account_reload() {
-        let (mut state, root) = test_state_named("mcp-reload");
+        let (temp, mut state) = test_state_named("mcp-reload");
+        let root = temp.path().to_path_buf();
         install_tool(
             &mut state,
             "srv",
@@ -1738,7 +1737,8 @@ mod tests {
 
     #[test]
     fn mcp_standing_auto_approval_allows_low_risk_and_survives_reload() {
-        let (mut state, root) = test_state_named("mcp-standing");
+        let (temp, mut state) = test_state_named("mcp-standing");
+        let root = temp.path().to_path_buf();
         install_tool(
             &mut state,
             "srv",
@@ -1813,7 +1813,7 @@ mod tests {
 
     #[test]
     fn mcp_standing_auto_approval_respects_risk_floor_revoke_and_expiry() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -1918,7 +1918,7 @@ mod tests {
 
     #[test]
     fn high_and_critical_mcp_grants_are_single_use_remote_app_confirmations() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -2047,7 +2047,7 @@ mod tests {
 
     #[test]
     fn mcp_grant_signature_uses_stored_approval_expiry() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -2094,7 +2094,7 @@ mod tests {
 
     #[test]
     fn expired_mcp_grant_is_rejected_even_with_valid_signature() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -2162,7 +2162,7 @@ mod tests {
 
     #[test]
     fn mcp_tool_started_completed_and_failed_events_are_canonical() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -2299,7 +2299,7 @@ mod tests {
 
     #[test]
     fn mcp_valid_grant_wins_over_stale_grant_for_same_capability() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",
@@ -2360,7 +2360,7 @@ mod tests {
 
     #[test]
     fn mcp_server_add_clamps_low_risk_override_for_high_default_capability() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(&mut state, "srv", "shell", McpCapability::RunShell, None, RiskLevel::Low);
         let manifest = account(&state)
             .mcp_registry
@@ -2374,7 +2374,7 @@ mod tests {
 
     #[test]
     fn mcp_grant_scope_does_not_cover_other_tool_with_same_capability() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv_a",
@@ -2434,7 +2434,7 @@ mod tests {
 
     #[test]
     fn mcp_grant_scope_is_covered_by_device_signature() {
-        let mut state = test_state();
+        let (_temp, mut state) = test_state();
         install_tool(
             &mut state,
             "srv",

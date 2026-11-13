@@ -11,10 +11,13 @@ pub(super) struct Pair {
     pub(super) source: AccountDb,
     pub(super) local: AccountDb,
     pub(super) bundle: String,
+    // Drop databases before removing their files (including on Windows).
+    _temp: tempfile::TempDir,
 }
 
 pub(super) fn pair(name: &str) -> Result<Pair, StorageError> {
-    let root = crate::tests::temp_root(name);
+    let temp = tempfile::Builder::new().prefix(&format!("ramflux-storage-{name}-")).tempdir()?;
+    let root = temp.path().to_path_buf();
     let source_index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
     source_index.create_account("account", "root")?;
@@ -23,7 +26,7 @@ pub(super) fn pair(name: &str) -> Result<Pair, StorageError> {
     let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
     let bundle =
         local.connection.query_row("SELECT bundle_id FROM account_mac_bundle", [], |r| r.get(0))?;
-    Ok(Pair { root, source, local, bundle })
+    Ok(Pair { root, source, local, bundle, _temp: temp })
 }
 
 fn put(db: &AccountDb, selector: &str, bundle: &str, expires_at: i64) -> Result<(), StorageError> {

@@ -54,12 +54,6 @@ struct Rig {
     _store: RelayRedbStore,
 }
 
-/// A unique directory per test, so parallel tests never share a database.
-fn unique() -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    root().join(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string())
-}
-
 fn files(dir: &std::path::Path) -> PathBuf {
     dir.join("files")
 }
@@ -179,7 +173,8 @@ fn assert_refused_everywhere(rig: &Rig, case: &Case, spec: &BackendSegment) {
 
 #[test]
 fn large_terminal_object_id_never_reused_and_fresh_id_commits() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let old = case(0);
     let fresh = case(1);
@@ -246,7 +241,8 @@ fn large_terminal_object_id_never_reused_and_fresh_id_commits() {
 
 #[test]
 fn existing_owner_completes_cycle_at_owner_saturation() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let policy = AttachmentPolicy { max_terminal_owners: 2, ..Default::default() };
     let (a, b) = (case(0), case(1));
@@ -282,7 +278,8 @@ fn existing_owner_completes_cycle_at_owner_saturation() {
 
 #[test]
 fn lowered_cap_reopen_lets_existing_owners_finish_with_real_backend() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let (a, b) = (case(0), case(1));
     let spec_a;
@@ -330,7 +327,8 @@ fn lowered_cap_reopen_lets_existing_owners_finish_with_real_backend() {
 #[test]
 fn corrupted_terminal_counter_or_sum_fails_closed_with_real_backend() {
     for case_index in 0..2 {
-        let dir = unique();
+        let temp = root();
+        let dir = temp.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         {
             let rig = open(&dir, AttachmentPolicy::default()).unwrap();
@@ -353,7 +351,8 @@ fn corrupted_terminal_counter_or_sum_fails_closed_with_real_backend() {
 
 #[test]
 fn reopen_with_caps_below_real_usage_keeps_existing_payloads_cleanable() {
-    let dir = unique();
+    let temp = root();
+    let dir = temp.path().to_path_buf();
     fs::create_dir_all(&dir).unwrap();
     let cases = [case(0), case(1), case(6)];
     let mut specs = Vec::new();

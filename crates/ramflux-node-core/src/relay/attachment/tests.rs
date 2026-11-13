@@ -8,13 +8,12 @@ mod lifecycle;
 use crate::RelayRedbStore;
 use ramflux_protocol::large_attachment::ContentManifest;
 use redb::ReadableTableMetadata;
-use std::{fs, path::PathBuf};
-pub(super) fn root() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "rf-native-ledger-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ))
+use std::fs;
+pub(super) fn root() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("rf-native-ledger-")
+        .tempdir()
+        .expect("test: create ledger directory")
 }
 pub(super) fn fixture() -> ramflux_protocol::large_attachment::VerifiedContentManifest {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
@@ -64,7 +63,8 @@ fn occupied(ledger: &AttachmentLedger, owner: &str) -> u64 {
 }
 #[test]
 fn large_account_quota_includes_concurrent_reservations() {
-    let root = root();
+    let temp = root();
+    let root = temp.path().to_path_buf();
     fs::create_dir_all(&root).unwrap();
     let store = RelayRedbStore::open(root.join("relay.redb")).unwrap();
     let policy = AttachmentPolicy { quota_bytes: 48, ..Default::default() };
@@ -148,7 +148,6 @@ fn large_account_quota_includes_concurrent_reservations() {
     assert!(ledger.commit(&owner, &[successful; 32], 1, 105).is_err());
     drop(ledger);
     drop(store);
-    fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn large_retention_defaults_and_operator_override_survive_restart() {
@@ -157,7 +156,8 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     assert_eq!(policy.retention_seconds, 604_800);
     assert_eq!(policy.pending_lease_seconds, 3600);
     assert_eq!(policy.pending_max_seconds, 86_400);
-    let root = root();
+    let temp = root();
+    let root = temp.path().to_path_buf();
     fs::create_dir_all(&root).unwrap();
     let native = fixture();
     let owner = AttachmentOwner::from_authenticated_session("owner-anchor").unwrap();
@@ -261,7 +261,6 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     assert!(ledger.reserve(&owner, req, 200 + 14 * 86_400 + 1).is_err());
     drop(ledger);
     drop(store);
-    fs::remove_dir_all(root).unwrap();
 }
 
 pub(super) fn memory_ledger(policy: AttachmentPolicy) -> AttachmentLedger {
@@ -324,7 +323,8 @@ fn released_records_free_live_capacity_and_compact_expiring_identity_fences() {
 }
 #[test]
 fn global_debt_page_recovers_cleanup_after_gc_worker_restart() {
-    let root = root();
+    let temp = root();
+    let root = temp.path().to_path_buf();
     fs::create_dir_all(&root).unwrap();
     let path = root.join("relay.redb");
     // Historical relay DB has the old tables but none of the native tables.
@@ -371,7 +371,6 @@ fn global_debt_page_recovers_cleanup_after_gc_worker_restart() {
     assert!(ledger.debt_page(Some(&[1; 500]), 1).is_err());
     drop(ledger);
     drop(store);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

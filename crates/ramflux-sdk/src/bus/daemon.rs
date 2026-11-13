@@ -342,14 +342,12 @@ mod tests {
         accept as serve_local_bus_accept_loop, handle as handle_local_bus_connection,
     };
 
-    fn temp_root(test_name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-bus-{test_name}-{}-{nanos}", std::process::id()))
-    }
-
-    fn test_state() -> Rc<crate::bus::supervisor::Supervisor> {
-        let root = temp_root("fanout");
+    fn test_state() -> (tempfile::TempDir, Rc<crate::bus::supervisor::Supervisor>) {
+        let temp = tempfile::Builder::new()
+            .prefix("ramflux-sdk-bus-fanout-")
+            .tempdir()
+            .expect("test: create fanout directory");
+        let root = temp.path().to_path_buf();
         let config = LocalBusConfig::new(root.join("bus.sock"), &root);
         let initialize: crate::bus::actor::AccountInitializer = Box::new(move |index| {
             let mut client = RamfluxClient::new();
@@ -381,12 +379,13 @@ mod tests {
                 "principal_fanout_test".to_owned(),
             ))
         });
-        crate::bus::supervisor::Supervisor::from_initializers(
+        let supervisor = crate::bus::supervisor::Supervisor::from_initializers(
             &config,
             vec![("acct".to_owned(), initialize)],
             Some("acct".to_owned()),
         )
-        .expect("start test supervisor")
+        .expect("start test supervisor");
+        (temp, supervisor)
     }
 
     fn request(request_id: &str, method: &str, body: serde_json::Value) -> LocalBusFrame {
@@ -413,7 +412,7 @@ mod tests {
     async fn local_bus_fanout_pushes_mcp_approval_to_other_connection() {
         LocalSet::new()
             .run_until(async {
-                let state = test_state();
+                let (_temp, state) = test_state();
                 let (mut client_a, server_a) = UnixStream::pair().expect("pair a");
                 let (mut client_b, server_b) = UnixStream::pair().expect("pair b");
                 let task_a = tokio::task::spawn_local(handle_local_bus_connection(
@@ -494,14 +493,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_bus_daemon_accept_loop_fans_out_mcp_approval_to_second_socket_client() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "rfmf_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time after epoch")
-                .as_nanos()
-        ));
+        let temp = tempfile::Builder::new()
+            .prefix("rf-bus-")
+            .tempdir()
+            .expect("test: create bus directory");
+        let temp_root = temp.path().to_path_buf();
         let socket_path = temp_root.join("rfd.sock");
         std::fs::create_dir_all(&temp_root).expect("create temp root");
         let listener = UnixListener::bind(&socket_path).expect("bind test local bus socket");
@@ -512,12 +508,9 @@ mod tests {
         let peer = listener.owner().expect("socket owner");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let local_set = LocalSet::new();
-        let server = local_set.run_until(serve_local_bus_accept_loop(
-            listener,
-            peer,
-            test_state(),
-            shutdown_rx,
-        ));
+        let (_state_temp, state) = test_state();
+        let server =
+            local_set.run_until(serve_local_bus_accept_loop(listener, peer, state, shutdown_rx));
         let client_flow = async {
             let mut subscriber = connect_test_client(&socket_path).await;
             let mut actor = connect_test_client(&socket_path).await;
@@ -586,20 +579,16 @@ mod tests {
             server_result.expect("server result");
         })
         .await;
-        let _ = std::fs::remove_dir_all(&temp_root);
         result.expect("daemon accept-loop MCP fanout flow timed out");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_bus_public_entry_runs_on_dedicated_local_runtime_thread() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "rfle_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time after epoch")
-                .as_nanos()
-        ));
+        let temp = tempfile::Builder::new()
+            .prefix("rf-bus-")
+            .tempdir()
+            .expect("test: create bus directory");
+        let temp_root = temp.path().to_path_buf();
         let socket_path = temp_root.join("rfd.sock");
         let data_root = temp_root.join("data");
         std::fs::create_dir_all(&temp_root).expect("create temp root");
@@ -625,7 +614,6 @@ mod tests {
             server_result.expect("server result");
         })
         .await;
-        let _ = std::fs::remove_dir_all(&temp_root);
         result.expect("public local bus entry flow timed out");
     }
 
