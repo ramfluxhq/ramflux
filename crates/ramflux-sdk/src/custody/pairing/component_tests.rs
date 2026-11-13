@@ -25,6 +25,7 @@ struct Node {
     disk: RouterRedbStore,
     lose_next_reply: std::sync::atomic::AtomicBool,
     persist_calls: std::sync::atomic::AtomicUsize,
+    query_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl NodeHeadPersist for Node {
@@ -50,6 +51,7 @@ impl NodeHeadPersist for Node {
 
 impl PairingAuthorityQuery for Node {
     fn current_authority(&self, anchor: &str) -> Result<CustodyAuthority, SdkError> {
+        self.query_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let publication = self
             .core
             .custody_record(anchor, crate::custody::network_now()?)
@@ -189,6 +191,7 @@ impl Rig {
             core: RouterCore::new(),
             lose_next_reply: std::sync::atomic::AtomicBool::new(false),
             persist_calls: std::sync::atomic::AtomicUsize::new(0),
+            query_calls: std::sync::atomic::AtomicUsize::new(0),
             disk: RouterRedbStore::open_without_wal(node_root.path().join("authority.redb"))?,
         });
         let source_account = crate::custody::load_account(&source.root.0, "component-source", now)?;
@@ -555,7 +558,7 @@ async fn pairing_full_actor_bootstrap_commits_data_only_stages_before_a3() -> Te
 }
 
 async fn bootstrap_full_rig() -> Result<(Rig, String, String), Box<dyn std::error::Error>> {
-    let mut rig = Rig::open_profile(true).await?;
+    let mut rig = Box::pin(Rig::open_profile(true)).await?;
     assert_declared_full_source(&rig.participant_a)?;
     let result = rig.primary.begin_full(full_begin(rig.now)).await?;
     let Outcome::Begin { value: begun } = result.outcome else { return Err("full begin".into()) };

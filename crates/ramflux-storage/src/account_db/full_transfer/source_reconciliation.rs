@@ -81,7 +81,14 @@ impl AccountDb {
         )?);
         let snapshot =
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32().map_err(|_| pending())?);
-        drop(self.commit_full_ack_tail(&head, &stage.reference().stage_id, &snapshot, true)?);
+        let owner = stage.source_primary_owner()?.ok_or_else(pending)?;
+        drop(self.commit_full_ack_tail(
+            &head,
+            &stage.reference().stage_id,
+            &snapshot,
+            true,
+            &owner,
+        )?);
         Ok(())
     }
 }

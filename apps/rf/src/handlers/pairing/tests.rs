@@ -225,7 +225,7 @@ async fn pairing_cli_invitation_cleanup_uses_owned_registry() -> TestResult {
         (3, "status", "cancelled", true, 1),
         (4, "join", "commitments", false, 0),
     ] {
-        let operation = ramflux_protocol::encode_base64url([index; 32]);
+        let operation = if action=="join" {join.token.invitation.body.request_id.clone()} else {ramflux_protocol::encode_base64url([index;32])};
         let file = root.join(format!("invitation-{index}"));
         let mut output = InvitationOutput::create(file.clone())?;
         output.commit(&token)?;

@@ -1545,6 +1545,7 @@ pub async fn handle_bus(
         "device.pair.status" => Box::pin(actor.status(&bus_body(body)?)).await,
         "device.transfer.begin" => Box::pin(actor.begin_full(bus_body(body)?)).await,
         "device.transfer.prepare" => Box::pin(actor.prepare_full_transfer(&bus_body(body)?)).await,
+        "device.transfer.affirm" => Box::pin(actor.affirm_full_transfer(&bus_body(body)?)).await,
         "device.transfer.status" => Box::pin(actor.transfer_status(&bus_body(body)?)).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
     };

@@ -26,6 +26,7 @@ impl AccountDb {
         stage_id: &str,
         snapshot_id: &str,
         abandon: bool,
+        owner: &crate::FullSourcePrimaryOwner,
     ) -> Result<FullTransferCut, StorageError> {
         crate::account_db::pairing::journal::decode_head(head)?;
         if head.account_id != self.local_account_id
@@ -34,6 +35,10 @@ impl AccountDb {
         {
             return Err(wrong());
         }
+        b32(owner.reference())?;
+        b32(owner.public_key())?;
+        let primary_ref = owner.reference().to_owned();
+        let old_self_key = owner.public_key().to_owned();
         b32(stage_id)?;
         b32(snapshot_id)?;
         self.require_selected_transfer_source()?;
@@ -67,6 +72,9 @@ impl AccountDb {
                 if tx.execute("UPDATE pairing_head SET state='acknowledged',ack=?1 WHERE account_id=?2 AND operation_id=?3 AND candidate_hash=?4 AND state='submitted'",params![head.ack,head.account_id,head.operation_id,head.candidate_hash])?!=1 {return Err(wrong());}
                 tx.execute("UPDATE pairing_live SET phase=CASE WHEN ?4 THEN CASE WHEN phase IN ('cancelled','expired','rejected','completed') THEN phase ELSE 'cancelled' END ELSE 'acknowledged' END,candidate_id=?1,proposal_hash=COALESCE(proposal_hash,?2) WHERE account_id=?3 AND operation_id=?1",params![head.operation_id,head.candidate_hash,head.account_id,abandon])?;
                 if tx.execute("INSERT INTO pairing_full_tail VALUES(?1,?2,?3,?4,?5,?6,'pinned') ON CONFLICT(account_id) DO UPDATE SET operation_id=excluded.operation_id,stage_id=excluded.stage_id,snapshot_id=excluded.snapshot_id,record_hash=excluded.record_hash,tail_status=excluded.tail_status,cut_state='pinned' WHERE pairing_full_tail.tail_status!='pending'",params![head.account_id,head.operation_id,stage_id,snapshot_id,head.candidate_hash,if abandon {"abandoned"} else {"pending"}])? != 1 { return Err(wrong()); }
+                let owners:u64=tx.query_row("SELECT count(*) FROM pairing_source_cleanup",[],|row|row.get(0))?;
+                if owners>=128 {return Err(StorageError::PairingField("LocalQuotaExceeded"));}
+                tx.execute("INSERT INTO pairing_source_cleanup VALUES(?1,?2,?3,?4,?5,?6)",params![head.account_id,head.operation_id,head.candidate_hash,head.publisher_ref,primary_ref,old_self_key])?;
                 if Instant::now()>=deadline {return Err(busy());}
                 tx.commit()?;
                 Ok(FullTransferCut {reader,unlocked_owner})

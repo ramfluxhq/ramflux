@@ -12,8 +12,8 @@ fn wrong() -> StorageError {
 }
 /// Local reference only. Never a signing key or authority/recovery credential.
 pub struct FullSourcePrimaryOwner {
-    reference: String,
-    public_key: String,
+    pub(in crate::account_db) reference: String,
+    pub(in crate::account_db) public_key: String,
 }
 impl FullSourcePrimaryOwner {
     #[must_use]
@@ -99,56 +99,24 @@ impl crate::AccountDb {
         hash: &str,
         now: u64,
     ) -> Result<FullSourcePrimaryOwner, StorageError> {
-        let live = self
-            .pairing_live_rows()?
-            .into_iter()
-            .find(|row| row.operation_id == operation)
-            .ok_or_else(wrong)?;
-        if live.role != "initiator" {
-            return Err(wrong());
-        }
-        if let Some(head) = self.pairing_head()? {
-            if head.operation_id != operation
-                || head.kind != "transfer"
-                || head.state != "acknowledged"
-                || head.candidate_hash != hash
-            {
-                return Err(wrong());
-            }
-        } else {
-            let adoption = self.pairing_adoption()?.ok_or_else(wrong)?;
-            let reference = live.full_stage_reference()?.ok_or_else(wrong)?;
-            let retained: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND record_hash=?4)",rusqlite::params![self.local_account_id,operation,reference.stage_id,hash],|row|row.get(0))?;
-            if adoption.account_id != self.local_account_id
-                || adoption.local_role != "secondary"
-                || adoption.primary_vault_ref.is_some()
-                || !retained
-            {
-                return Err(wrong());
-            }
-        }
-        let stage = self.open_full_stage_reference_inner(
-            live.full_stage_reference()?.ok_or_else(wrong)?,
-            ramflux_crypto::custody::pairing::PairingRole::Initiator,
-            now,
-            true,
+        self.require_full_stage_unlock()?;
+        let _ = now;
+        super::stage::raw32(operation)?;
+        super::stage::raw32(hash)?;
+        let (source, owner): (Vec<u8>, FullSourcePrimaryOwner) = self.connection.query_row(
+            "SELECT source_ref,primary_ref,old_self_key FROM pairing_source_cleanup WHERE account_id=?1 AND operation_id=?2 AND record_hash=?3",
+            rusqlite::params![self.local_account_id,operation,hash],
+            |row| Ok((row.get(0)?, FullSourcePrimaryOwner {reference:row.get(1)?,public_key:row.get(2)?})),
         )?;
-        if stage.source_published_candidate_hash()? != hash {
-            return Err(wrong());
-        }
-        if self.pairing_head()?.is_none() {
-            let adoption = self.pairing_adoption()?.ok_or_else(wrong)?;
-            if adoption.local_ref
-                != ramflux_protocol::canonical_json_bytes(&stage.resume_record()?.grant.source_ref)?
-            {
+        super::stage::raw32(&owner.reference)?;
+        super::stage::raw32(&owner.public_key)?;
+        let source: ramflux_protocol::custody::DeviceRef = ramflux_protocol::parse_i_json(&source)?;
+        if let Some(adoption) = self.pairing_adoption()? {
+            let local: ramflux_protocol::custody::DeviceRef =
+                ramflux_protocol::parse_i_json(&adoption.local_ref)?;
+            if local != source {
                 return Err(wrong());
             }
-        }
-        let owner = stage.source_primary_owner()?.ok_or_else(wrong)?;
-        let bytes:Vec<u8>=stage.connection.query_row("SELECT base_record FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288",[],|row|row.get(0))?;
-        let base: Envelope<DeviceSet> = ramflux_protocol::parse_i_json(&bytes)?;
-        if owner.public_key != base.body.master_certificate.body.self_signing_public_key {
-            return Err(wrong());
         }
         Ok(owner)
     }

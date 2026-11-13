@@ -16,6 +16,7 @@ use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
 mod private_input;
 mod recipient_cancel;
 mod refresh;
+mod source_affirm;
 mod source_cancel;
 mod source_tail;
 
@@ -24,6 +25,12 @@ struct Prepared {
     install: Install,
     head: HeadRow,
     source_submission: crate::custody::pairing::FullSourceSubmission,
+}
+
+struct RecipientPrepared {
+    publication: ramflux_protocol::custody::Publication,
+    install: Install,
+    head: HeadRow,
 }
 
 struct Published {
@@ -101,10 +108,10 @@ fn install_live_generation(rig: &Rig, operation: &str, published: Published) -> 
     Ok(())
 }
 
-async fn prepare_candidate(
+async fn prepare_recipient_candidate(
     rig: &mut Rig,
     operation: &str,
-) -> Result<Prepared, Box<dyn std::error::Error>> {
+) -> Result<RecipientPrepared, Box<dyn std::error::Error>> {
     let request = {
         let slot = rig.participant_b.db.lock().map_err(|_| "B prepare owner")?;
         let db = slot.as_ref().ok_or("B prepare writer")?;
@@ -168,6 +175,15 @@ async fn prepare_candidate(
         .ok_or("B durable prepared head")?;
     assert_eq!(head.candidate, canonical_json_bytes(&publication)?);
     assert_eq!(head.state, "prepared");
+    Ok(RecipientPrepared { publication, install, head })
+}
+
+async fn prepare_candidate(
+    rig: &mut Rig,
+    operation: &str,
+) -> Result<Prepared, Box<dyn std::error::Error>> {
+    let RecipientPrepared { publication, install, head } =
+        Box::pin(prepare_recipient_candidate(rig, operation)).await?;
     prove_source_preservation(rig, &publication, &install).await?;
     let observation = rig.primary.observe_full_source_candidate(publication.clone()).await?;
     rig.participant_a.take_client(&mut rig.source.client)?;

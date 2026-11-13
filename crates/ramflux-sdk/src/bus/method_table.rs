@@ -75,6 +75,7 @@ methods! {
         "conversation.mute",
         "device.pair.cancel",
         "device.pair.confirm",
+        "device.transfer.affirm",
         "grant.approve",
         "grant.create_standing_approval",
         "grant.deny",

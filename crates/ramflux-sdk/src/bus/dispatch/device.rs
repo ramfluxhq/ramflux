@@ -39,6 +39,7 @@ pub(crate) async fn dispatch_device_bus_request(
         | "device.pair.confirm"
         | "device.pair.approve"
         | "device.pair.cancel"
+        | "device.transfer.affirm"
         | "device.transfer.status"
         | "device.pair.status" => dispatch_device_pair(request, state).await,
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),

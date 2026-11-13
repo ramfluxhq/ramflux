@@ -19,6 +19,15 @@ impl PairingActor {
         self.require_open()?;
         self.full_runtime.require_live()?;
         let scope = self.full_source_approval_scope()?;
+        self.observe_source_candidate(candidate, scope).await
+    }
+    pub(super) async fn observe_source_candidate(
+        &self,
+        candidate: Publication,
+        scope: (String, u64, [u8; 32]),
+    ) -> Result<FullSourceCandidateObservation, SdkError> {
+        self.require_open()?;
+        self.full_runtime.require_live()?;
         let participant = self.participant.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?;
         if participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?.is_some() {
             return Err(SdkError::PairingCode("Busy"));

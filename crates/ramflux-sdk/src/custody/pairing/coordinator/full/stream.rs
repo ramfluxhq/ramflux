@@ -134,6 +134,15 @@ impl PairingActor {
         db: &ramflux_storage::AccountDb,
     ) -> Result<bool, SdkError> {
         self.full_runtime.require_live()?;
+        if self
+            .ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .is_some_and(|full| full.pending_affirmation.is_some())
+        {
+            self.finish_full_source_affirmation(db)?;
+            return Ok(true);
+        }
         let Some(full) = self.ceremony.as_ref().and_then(|c| c.full.as_ref()) else {
             return Ok(false);
         };
