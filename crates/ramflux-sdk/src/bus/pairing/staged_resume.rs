@@ -19,7 +19,7 @@ pub(super) fn has_pending(
     request: &StatusRequest,
 ) -> Result<bool, SdkError> {
     request.validate().map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-    if crate::custody::store::authority_exists(root, account)? {
+    if crate::custody::authority_exists(root, account)? {
         return Ok(false);
     }
     Ok(crate::custody::pairing::install_store::list_pending(root, account)?.iter().any(|row| {

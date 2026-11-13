@@ -28,7 +28,7 @@ impl LocalWriterPort {
             Box::new(Work {
                 action: move |db: &ramflux_storage::AccountDb| {
                     #[cfg(test)]
-                    if let Ok(remaining) = scope.install_races.fetch_update(
+                    if let Ok(remaining) = scope.install_races.try_update(
                         std::sync::atomic::Ordering::AcqRel,
                         std::sync::atomic::Ordering::Acquire,
                         |value| value.checked_sub(1),

@@ -83,6 +83,8 @@ mod transport_security_tests;
 
 mod own_contact_backfill;
 mod pairing;
+#[cfg(test)]
+pub(crate) use pairing::unlock_for_test;
 
 pub(crate) mod contact_backpressure;
 

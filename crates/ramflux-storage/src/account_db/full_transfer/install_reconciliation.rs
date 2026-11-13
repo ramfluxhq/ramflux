@@ -21,8 +21,8 @@ fn wrong() -> StorageError {
 /// Installation-only view of retained B data. Deliberately has no `Deref`, stage/lease/key
 /// getter, packet/manifest retention, signing request, cancellation reset or relay operation.
 pub struct FullRecipientInstallStage<'a> {
-    stage: FullTransferStage<'a>,
-    historical_time: u64,
+    pub(super) stage: FullTransferStage<'a>,
+    pub(super) historical_time: u64,
 }
 impl AccountDb {
     /// Persist this pending endpoint's own verified native floor even when its candidate
@@ -95,7 +95,7 @@ impl AccountDb {
         let record = stage.resume_record()?;
         if current.envelope().body.master_certificate.body.primary_device_ref
             != record.grant.destination_ref
-            || head.base_record_hash != record.base_record_hash
+            || head.base_record_hash != stage.full_prepublication_record_hash()?
             || head.recipient_ref.as_deref()
                 != Some(canonical_json_bytes(&record.grant.destination_ref)?.as_slice())
             || head.publisher_ref != canonical_json_bytes(&record.grant.source_ref)?

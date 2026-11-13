@@ -49,6 +49,45 @@ impl FullGenerationDirectory {
         std::fs::File::open(&parent)?.sync_all()?;
         Ok(Self { guard, index, root, account: account.into(), _lease: lease, _writer: writer })
     }
+    pub(crate) fn recover_selected(
+        root: &Path,
+        install: &crate::custody::pairing::install_store::Install,
+    ) -> Result<Self, SdkError> {
+        install.validate()?;
+        let root = std::fs::canonicalize(root)?;
+        let index = AccountIndex::open(&root)?;
+        let account = install.account_id.clone();
+        let full =
+            install.full_transfer.as_ref().ok_or(SdkError::PairingCode("PublicationPending"))?;
+        let selected = index.account(&account)?;
+        let database = root.join(&full.db_relative_path);
+        let path = database.parent().ok_or(SdkError::PairingCode("PublicationPending"))?.to_owned();
+        let nonce = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.strip_prefix("generation_"))
+            .ok_or(SdkError::PairingCode("PublicationPending"))?;
+        if ramflux_protocol::decode_base64url(nonce)
+            .map_err(|_| SdkError::PairingCode("PublicationPending"))?
+            .len()
+            != 32
+            || path.parent() != Some(root.join("accounts").join(&account).as_path())
+            || std::fs::canonicalize(&path)? != path
+            || std::fs::canonicalize(&database)? != database
+            || database.file_name().and_then(|value| value.to_str()) != Some("account.db")
+            || selected.db_relative_path != full.db_relative_path
+            || selected.object_dir_relative_path != full.object_relative_path
+            || root.join(&full.object_relative_path) != path.join("objects")
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        let writer = index.acquire_account_writer(&account)?;
+        let locks = GenerationLocks::for_root(&root)?;
+        let lease = locks.try_acquire(&account)?.ok_or(SdkError::PairingCode("Busy"))?;
+        // A positively selected generation is never removed by an interrupted recovery.
+        let guard = PrivateDirectory { path, transferred: true };
+        Ok(Self { guard, index, root, account, _lease: lease, _writer: writer })
+    }
     pub(crate) fn path(&self) -> &Path {
         &self.guard.path
     }
