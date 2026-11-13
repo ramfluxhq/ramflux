@@ -251,7 +251,16 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
     assert_activated(ack_delivery.as_ref().expect_err("legacy ack_gateway_delivery"));
 
     let a2i = fixture.client.receive_a2i_control_events(&mut engine, 8).await;
-    assert_activated(a2i.as_ref().expect_err("legacy a2i"));
+    assert!(
+        matches!(
+            &a2i,
+            Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                ..
+            })
+        ),
+        "A2I authority refusal precedes legacy-ledger dispatch: {a2i:?}"
+    );
 
     let mut account = LocalBusAccountState::disconnected(
         fixture.client,

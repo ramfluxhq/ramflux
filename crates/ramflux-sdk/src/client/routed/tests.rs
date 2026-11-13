@@ -3,6 +3,20 @@
 
 use super::*;
 use crate::client::identity_authority::HeadUse;
+fn assert_a2i_authority_refused<T>(result: Result<T, SdkError>) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Authority,
+                ..
+            })
+        ),
+        "A2I authority refusal missing: {error:?}"
+    );
+}
+
 struct Fixture {
     root: PathBuf,
     client: RamfluxClient,

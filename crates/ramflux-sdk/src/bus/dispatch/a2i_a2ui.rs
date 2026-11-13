@@ -5,104 +5,15 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
-pub(crate) async fn dispatch_a2i_bus_request(
-    request: &LocalBusFrame,
-    state: &mut LocalBusDaemonState,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    let account_id = request_account_id(request)?;
-    let account = local_bus_account_mut(state, account_id)?;
-    match request.method.as_str() {
-        "a2i.append" => {
-            let body: LocalBusA2iAppendRequest = serde_json::from_value(request.body.clone())?;
-            let mut event = A2iControlEvent {
-                source_principal_id: None,
-                source_principal_commitment: None,
-                event_id: body.event_id,
-                event_type: body.event_type,
-                source_device_id: body.source_device_id,
-                target_device_id: body.target_device_id,
-                control_domain: body.control_domain,
-                action: body.action,
-                subject_base64: body.subject_base64,
-                created_at: body.created_at,
-                acknowledged: false,
-            };
-            account.client.bind_owned_a2i_event(&mut event)?;
-            let mut engine = account.session_client().await?;
-            let entry = account
-                .client
-                .send_a2i_control_event_via_gateway(&mut engine, &event, body.target_delivery_id)
-                .await;
-            account.apply_session_metadata(engine);
-            let entry = entry?;
-            Ok(local_bus_ok(serde_json::json!({
-                "event": event,
-                "submitted": entry,
-            })))
-        }
-        "a2i.list" | "a2i.list_pending" => {
-            if !crate::bus::push_receiver::apply_w1::account_is_active(account)? {
-                let mut engine = account.session_client().await?;
-                let received = account.client.receive_a2i_control_events(&mut engine, 100).await;
-                account.apply_session_metadata(engine);
-                let received = received?;
-                for event in received {
-                    let key = crate::client::routed::control::a2i_key(
-                        &account.client.a2i_event_identity(&event)?,
-                        &event.event_id,
-                    )?;
-                    account.pending_a2i.entry(key).or_insert(event);
-                }
-            }
-            restore_a2i_cache(account)?;
-            let events = account
-                .pending_a2i
-                .values()
-                .filter(|event| request.method != "a2i.list_pending" || !event.acknowledged)
-                .map(|event| -> Result<serde_json::Value, SdkError> {
-                    let mut row = serde_json::to_value(event)?;
-                    row["acknowledge_id"] =
-                        serde_json::json!(crate::client::routed::control::a2i_key(
-                            &account.client.a2i_event_identity(event)?,
-                            &event.event_id
-                        )?);
-                    Ok(row)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(local_bus_ok(serde_json::json!({"events":events})))
-        }
-        "a2i.acknowledge" => {
-            let body: LocalBusA2iAcknowledgeRequest = serde_json::from_value(request.body.clone())?;
-            restore_a2i_cache(account)?;
-            let matches = account
-                .pending_a2i
-                .iter()
-                .filter(|(key, event)| **key == body.event_id || event.event_id == body.event_id)
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            if matches.len() != 1 {
-                return Err(SdkError::LocalBus(
-                    "a2i event selector missing or ambiguous; use the sender-scoped key".to_owned(),
-                ));
-            }
-            let event = account
-                .pending_a2i
-                .get_mut(&matches[0])
-                .ok_or_else(|| SdkError::LocalBus("a2i event missing".to_owned()))?;
-            let mut acknowledged = event.clone();
-            acknowledged.acknowledged = true;
-            account.client.account_db()?.persist_actor_state(
-                &crate::client::routed::control::a2i_key(
-                    &account.client.a2i_event_identity(event)?,
-                    &event.event_id,
-                )?,
-                &acknowledged,
-            )?;
-            *event = acknowledged;
-            Ok(local_bus_ok(serde_json::to_value(event)?))
-        }
-        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
-    }
+pub(crate) fn dispatch_a2i_bus_request(
+    _request: &LocalBusFrame,
+    _state: &mut LocalBusDaemonState,
+) -> impl std::future::Future<Output = Result<LocalBusDispatchResult, SdkError>> {
+    // Retained legacy rows cannot supply the missing native binding/grant authority.
+    std::future::ready(
+        RamfluxClient::require_a2i_binding_authority()
+            .map(|()| unreachable!("native A2I grant authority is closed")),
+    )
 }
 
 pub(crate) fn dispatch_a2ui_bus_request(
@@ -210,20 +121,6 @@ fn a2ui_action_result_event_body(action: &A2uiAction, accepted: bool) -> serde_j
     })
 }
 
-fn restore_a2i_cache(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
-    account.pending_a2i.clear();
-    for event in account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")? {
-        // Unattributed legacy records remain read-only and cannot satisfy a qualified lookup.
-        if event.source_principal_commitment.is_none() || event.source_principal_id.is_none() {
-            continue;
-        }
-        let source = account.client.a2i_event_identity(&event)?;
-        let key = crate::client::routed::control::a2i_key(&source, &event.event_id)?;
-        account.pending_a2i.insert(key, event);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -259,6 +156,28 @@ mod tests {
             active_account_id: Some("acct".to_owned()),
             attended_accounts: BTreeSet::new(),
             subscribers: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a2i_bus_methods_refuse_before_account_or_gateway_access() {
+        let mut state = test_state();
+        for method in ["a2i.append", "a2i.list", "a2i.list_pending", "a2i.acknowledge"] {
+            let request = LocalBusFrame::request(
+                "refused",
+                Some("acct".into()),
+                "a2i",
+                method,
+                serde_json::json!({"event_id":"old-event"}),
+            );
+            assert!(matches!(
+                dispatch_a2i_bus_request(&request, &mut state).await,
+                Err(SdkError::GeneratedRefused {
+                    code: crate::error::GeneratedRefusalCode::Authority,
+                    ..
+                })
+            ));
+            assert_eq!(state.accounts.get("acct").expect("fixture account").pending_a2i.len(), 0);
         }
     }
 

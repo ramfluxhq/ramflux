@@ -59,7 +59,7 @@ fn a2i(device: &str, target: &str) -> A2iControlEvent {
     }
 }
 #[tokio::test]
-async fn copied_name_controls_have_independent_keys_and_cannot_forge_bobs_attribution()
+async fn copied_name_controls_keep_independent_keys_but_require_native_authority()
 -> Result<(), SdkError> {
     let mut alice = Fixture::new("alice", 11)?;
     let bob = Fixture::owned("bob", "bob", 31, 32)?;
@@ -68,6 +68,7 @@ async fn copied_name_controls_have_independent_keys_and_cannot_forge_bobs_attrib
     trust(&alice, &mallory)?;
     let mut engine =
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
+    let mut keys = std::collections::BTreeSet::new();
     for sender in [&mallory, &bob] {
         let event = a2i("bob", "alice");
         let entry = seal_as(
@@ -77,13 +78,16 @@ async fn copied_name_controls_have_independent_keys_and_cannot_forge_bobs_attrib
             &serde_json::to_vec(&event)?,
             Route::control(),
         )?;
-        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+        let source =
+            alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
+        keys.insert(crate::client::routed::control::a2i_key(&source, &event.event_id)?);
+        assert_a2i_authority_refused(
+            alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await,
+        );
     }
     let before = alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?;
-    assert_eq!(before.len(), 2);
-    assert!(before.iter().any(|event| event.source_principal_id.as_deref() == Some("bob")));
-    assert!(before.iter().any(|event| event.source_principal_id.as_deref() == Some("mallory")));
-    assert_ne!(before[0].source_principal_commitment, before[1].source_principal_commitment);
+    assert_eq!(keys.len(), 2, "authenticated roots still have independent private selectors");
+    assert_eq!(before.len(), 0, "neither root has installed native grant authority");
     let mut forged = a2i("bob", "alice");
     forged.source_principal_id = Some("bob".into());
     forged.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
@@ -122,7 +126,7 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
         .await
         .err()
         .ok_or_else(|| invalid("forged source was submitted"))?;
-    assert!(error.to_string().contains("A2I source attribution"), "{error}");
+    assert_a2i_authority_refused::<()>(Err(error));
     event.source_principal_id = None;
     let mut config = alice.config()?;
     config.principal_id = "mallory".into();
@@ -133,7 +137,7 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
         .await
         .err()
         .ok_or_else(|| invalid("foreign engine principal was submitted"))?;
-    assert!(error.to_string().contains("A2I source engine mismatch"), "{error}");
+    assert_a2i_authority_refused::<()>(Err(error));
     assert_eq!(alice.client.account_db()?.actor_state_keys("a2i/")?, Vec::<String>::new());
     Ok(())
 }

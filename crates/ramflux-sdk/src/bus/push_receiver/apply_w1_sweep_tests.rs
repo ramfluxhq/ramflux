@@ -391,7 +391,6 @@ fn receive_from_inbox(row: &InboxEntry) -> ReceiveEntry {
 enum Sweep {
     OwnCopy,
     LegacyHold,
-    A2i,
     Failure,
     Projection,
     LegacyDm,
@@ -405,7 +404,6 @@ fn arm_sweep(
     match sweep {
         Sweep::OwnCopy => queue_own_copy(),
         Sweep::LegacyHold => queue_legacy_hold(std::iter::repeat_n(true, 8)),
-        Sweep::A2i => queue_unbound_answers(std::iter::repeat_n(true, 8)),
         Sweep::Failure => queue_policy_kind(ReceiveFailureKind::Deterministic),
         Sweep::Projection => {
             persist_projection_receipt(account, &entry.entry, "authenticated-projection-key")?;
@@ -514,14 +512,6 @@ fn expected_ledger(sweep: Sweep) -> Ledger {
             state: (Some("held".into()), 1),
             cursor: 1,
             journals: 1,
-            holds: 1,
-            work: 1,
-            intents: Vec::new(),
-        },
-        Sweep::A2i => Ledger {
-            state: (Some("held".into()), 1),
-            cursor: 1,
-            journals: 0,
             holds: 1,
             work: 1,
             intents: Vec::new(),
@@ -660,8 +650,57 @@ async fn legacy_hold_w1_commit_sweep() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a2i_w1_commit_sweep() -> Result<(), SdkError> {
-    sweep_kind(Sweep::A2i).await
+async fn a2i_w1_refuses_before_effects_across_restart() -> Result<(), SdkError> {
+    for mode in [Mode::Wal, Mode::RedbOnly] {
+        let mut harness = open()?;
+        let sends = attach_counter(&mut harness.account);
+        let entry = own_dummy(&harness.account);
+        let path = router_path(harness.root.path());
+        let store = open_router(&path, mode)?;
+        seed_router_row(&store, &entry.entry)?;
+        pin_mode(&path, mode);
+        let mut before_restart = None;
+        for restart in [false, true] {
+            if restart {
+                reopen(&mut harness.account)?;
+            }
+            queue_unbound_answers(std::iter::repeat_n(true, 8));
+            let result = drive(&mut harness.account, entry.clone(), || 1).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(SdkError::GeneratedRefused {
+                        code: crate::error::GeneratedRefusalCode::Authority,
+                        ..
+                    })
+                ),
+                "refused A2I must never reach a legacy effect"
+            );
+            let current = ledger(&harness.account)?;
+            assert_eq!(current.state, (Some("staged".into()), 1));
+            assert_eq!(current.cursor, 0);
+            assert_eq!(current.journals, 0);
+            assert_eq!(current.holds, 0);
+            assert_eq!(current.intents, Vec::<u64>::new());
+            assert_eq!(sends.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                harness
+                    .account
+                    .client
+                    .account_db()?
+                    .list_actor_states::<A2iControlEvent>("a2i/scoped/")?
+                    .len(),
+                0
+            );
+            if let Some(before) = &before_restart {
+                assert_eq!(&current, before);
+            }
+            before_restart = Some(current);
+        }
+        let (_store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
+        assert_eq!(rows.len(), 1, "refusal must not acknowledge the router row");
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
