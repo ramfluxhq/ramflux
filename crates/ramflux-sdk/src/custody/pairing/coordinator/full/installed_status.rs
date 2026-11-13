@@ -81,21 +81,7 @@ impl PairingActor {
                     &current,
                     now,
                 )?;
-                Ok(
-                    match ramflux_crypto::custody::pairing::verify_full_tail_authority(
-                        &scope.grant,
-                        &current,
-                        now,
-                    ) {
-                        Ok(()) => {
-                            (now >= scope.lease_expires_at).then_some(FullError::LeaseExpired)
-                        }
-                        Err(ramflux_crypto::CryptoError::Pairing("LeaseExpired")) => {
-                            Some(FullError::LeaseExpired)
-                        }
-                        Err(_) => Some(FullError::HeadChanged),
-                    },
-                )
+                Ok(installed_authority_result(&scope.grant, &current, now, scope.lease_expires_at))
             })
             .await?;
         // These are public progress totals only. Neither the historic installed marker
@@ -136,5 +122,18 @@ pub(super) fn installed_progress(
         role: "responder".into(),
         stage: FullStatusStage::Installed,
         tail_status: FullTailStatus::Pending,
+    }
+}
+
+fn installed_authority_result(
+    grant: &ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+    current: &ramflux_crypto::custody::VerifiedRecord,
+    now: u64,
+    expires: u64,
+) -> Option<FullError> {
+    match ramflux_crypto::custody::pairing::verify_full_tail_authority(grant, current, now) {
+        Ok(()) => (now >= expires).then_some(FullError::LeaseExpired),
+        Err(ramflux_crypto::CryptoError::Pairing("LeaseExpired")) => Some(FullError::LeaseExpired),
+        Err(_) => Some(FullError::HeadChanged),
     }
 }

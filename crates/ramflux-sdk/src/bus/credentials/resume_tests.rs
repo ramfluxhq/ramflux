@@ -69,7 +69,7 @@ async fn run() -> TestResult {
                 .any(|bytes| bytes == b"cold-resume-private-canary"),
             "test: resume public JSON contained the private credential"
         );
-        serve(root.path(), &mut stream, parent, metadata).await
+        serve(root.path(), &mut stream, parent, metadata, serde_json::json!({"resumed":true})).await
     };
     let (frontend, daemon) = tokio::join!(frontend, daemon);
     frontend?;
@@ -81,11 +81,12 @@ async fn run() -> TestResult {
     );
     Ok(())
 }
-async fn serve(
+pub(crate) async fn serve(
     root: &Path,
     stream: &mut crate::platform::fs::LocalSocketStream,
     parent: LocalBusFrame,
     metadata: ramflux_protocol::custody::pairing::local_dto::CredentialRequest,
+    response: serde_json::Value,
 ) -> TestResult {
     let (outbound, mut prompts) = mpsc::channel(1);
     let input = connection(root.into(), 91, outbound.clone());
@@ -126,11 +127,7 @@ async fn serve(
     drop(passphrase);
     crate::bus::io::write_local_bus_frame(
         stream,
-        &LocalBusFrame {
-            kind: crate::LocalBusFrameKind::Response,
-            body: serde_json::json!({"resumed":true}),
-            ..parent
-        },
+        &LocalBusFrame { kind: crate::LocalBusFrameKind::Response, body: response, ..parent },
     )
     .await?;
     Ok(())
