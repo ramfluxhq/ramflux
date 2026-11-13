@@ -106,9 +106,20 @@ impl FullPreparedReceiverDatabase {
 /// and the original root cancellation fence remains one-way across writer replacement.
 /// It supplies no native authority, installed-file agreement or network admission.
 pub struct FullSelectedReceiverGeneration {
-    prepared: FullPreparedReceiverDatabase,
+    materialization: Materialization,
     index: std::sync::Arc<crate::AccountIndex>,
     marker: zeroize::Zeroizing<Vec<u8>>,
+}
+mod recovery;
+enum Materialization {
+    Prepared(Box<FullPreparedReceiverDatabase>),
+    Recovered(Box<recovery::Recovered>),
+}
+struct SelectedDatabase<'a> {
+    path: &'a std::path::Path,
+    key: &'a crate::AccountDbKey,
+    adoption: &'a crate::AdoptionRow,
+    cancelled: &'a std::sync::atomic::AtomicBool,
 }
 impl FullPreparedReceiverDatabase {
     /// Select the verified G1 and issue a data-only owner for the exact new generation.
@@ -124,23 +135,42 @@ impl FullPreparedReceiverDatabase {
         let index = stage.db.account_index.clone();
         self.commit_index_selection(stage, install, now)?;
         Ok(FullSelectedReceiverGeneration {
-            prepared: self,
+            materialization: Materialization::Prepared(Box::new(self)),
             index,
             marker: zeroize::Zeroizing::new(install.manifest_json.to_vec()),
         })
     }
 }
 impl FullSelectedReceiverGeneration {
+    fn database(&self) -> SelectedDatabase<'_> {
+        match &self.materialization {
+            Materialization::Prepared(prepared) => SelectedDatabase {
+                path: &prepared.0.path,
+                key: &prepared.0.key,
+                adoption: &prepared.0.adoption,
+                cancelled: &prepared.0.cancelled,
+            },
+            Materialization::Recovered(recovered) => SelectedDatabase {
+                path: &recovered.path,
+                key: &recovered.key,
+                adoption: &recovered.adoption,
+                cancelled: &recovered.cancelled,
+            },
+        }
+    }
     fn require_selected(&self) -> Result<(), StorageError> {
-        if self.prepared.0.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        if let Materialization::Recovered(recovered) = &self.materialization {
+            recovered.unlock.require_unlocked()?;
+        }
+        let data = self.database();
+        if data.cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(StorageError::AuthorizationRejected);
         }
-        let selected =
-            self.index.account_generation_selection(&self.prepared.0.adoption.account_id)?;
+        let selected = self.index.account_generation_selection(&data.adoption.account_id)?;
         if selected.account.account_state != "active"
-            || self.index.root().join(&selected.account.db_relative_path) != self.prepared.0.path
+            || self.index.root().join(&selected.account.db_relative_path) != data.path
             || self.index.root().join(&selected.account.object_dir_relative_path)
-                != self.prepared.0.path.parent().ok_or_else(wrong)?.join("objects")
+                != data.path.parent().ok_or_else(wrong)?.join("objects")
             || selected.manifest_json.as_deref() != Some(self.marker.as_slice())
         {
             return Err(StorageError::PairingField("InstallPending"));
@@ -153,11 +183,8 @@ impl FullSelectedReceiverGeneration {
     /// Refuses root lock/cancel, changed selection/marker, wrong adoption or key/schema errors.
     pub fn open(&self) -> Result<crate::AccountDb, StorageError> {
         self.require_selected()?;
-        let db = crate::AccountDb::open(
-            &self.index,
-            &self.prepared.0.adoption.account_id,
-            &self.prepared.0.key,
-        )?;
+        let data = self.database();
+        let db = crate::AccountDb::open(&self.index, &data.adoption.account_id, data.key)?;
         self.require_database(&db)?;
         Ok(db)
     }
@@ -166,13 +193,14 @@ impl FullSelectedReceiverGeneration {
     /// Refuses lock, stale/replaced writers, foreign path/key or changed adoption metadata.
     pub fn require_database(&self, db: &crate::AccountDb) -> Result<(), StorageError> {
         self.require_selected()?;
-        if db.path != self.prepared.0.path
-            || db.local_account_id != self.prepared.0.adoption.account_id
-            || db.pairing_adoption()?.as_ref() != Some(&self.prepared.0.adoption)
+        let data = self.database();
+        if db.path != data.path
+            || db.local_account_id != data.adoption.account_id
+            || db.pairing_adoption()?.as_ref() != Some(data.adoption)
         {
             return Err(wrong());
         }
-        db.verify_key(&self.prepared.0.key)?;
+        db.verify_key(data.key)?;
         db.full_local_unlock_guard()?.require_unlocked()?;
         self.require_selected()
     }

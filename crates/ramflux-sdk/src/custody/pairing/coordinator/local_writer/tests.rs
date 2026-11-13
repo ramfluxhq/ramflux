@@ -28,6 +28,7 @@ fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         unlock: db.full_local_unlock_guard()?,
         runtime: Arc::new(FullRuntimeCancel::default()),
         work: Arc::new(tokio::sync::Notify::new()),
+        install_races: std::sync::atomic::AtomicU8::new(0),
     });
     scope.require_db(&db)?;
     let (sender, receiver) = mpsc::channel(1);

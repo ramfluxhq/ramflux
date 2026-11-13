@@ -167,7 +167,20 @@ pub fn ordinary_networking_allowed(root: &Path, account_id: &str) -> Result<bool
 pub fn unadmitted_data_unlock(root: &Path, account_id: &str) -> Result<bool, SdkError> {
     Ok(install_store::list_pending(root, account_id)?
         .iter()
-        .any(|row| matches!(row.state.as_str(), "reserved" | "vault_durable")))
+        .any(|row| matches!(row.state.as_str(), "reserved" | "vault_durable"))
+        || full_install_data_unlock(root, account_id)?)
+}
+
+pub(crate) fn full_install_data_unlock(root: &Path, account_id: &str) -> Result<bool, SdkError> {
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    let selected = index.account(account_id)?;
+    Ok(install_store::list_pending(root, account_id)?.iter().any(|row| {
+        row.full_transfer.is_some()
+            && row.install_purpose == "transfer_destination"
+            && row.account_anchor == selected.principal_commitment
+            && row.record_hash.is_some()
+            && matches!(row.state.as_str(), "adopt_prepared" | "authority_durable")
+    }))
 }
 
 /// Session admission used by `native_account::unlock` after the data store is open.

@@ -226,6 +226,31 @@ impl FullGenerationPrepared {
     }
 }
 impl FullGenerationCommitted {
+    /// Reconstruct the exact already selected G2 from its encrypted application ledger.
+    /// Native observation must finish before this local installation-only operation.
+    /// # Errors
+    /// Refuses a foreign G2/receipt/union, unavailable original local keys or wrong native head.
+    pub fn recover(
+        local: &Installation<'_>,
+        stage: &ramflux_storage::FullRecipientInstallStage<'_>,
+        install: Install,
+        authority: &CustodyAuthority,
+    ) -> Result<Self, SdkError> {
+        acknowledged(local, &install, authority)?;
+        stage.require_preservation_after_native_ack(&authority.publication.record)?;
+        let adoption = super::super::activate::adoption(&install)?;
+        require_selected_full_generation(local.root, &install, &adoption)?;
+        if install_store::read_pending(local.root, &install.account_id, &install.operation_id)?
+            .as_ref()
+            != Some(&install)
+        {
+            return Err(pending());
+        }
+        let directory = FullGenerationDirectory::recover_selected(local.root, &install)?;
+        let marker = FullGenerationManifest::for_install(&install)?.encode()?;
+        let data = stage.recover_selected_generation(&marker, &adoption)?;
+        Ok(Self { data, directory, install })
+    }
     /// Open the exact selected generation while ordinary network admission stays closed.
     /// # Errors
     /// Refuses root lock/cancel, replaced selection, bad key/schema or adoption disagreement.

@@ -30,7 +30,7 @@ mod tests {
         rig.secondary.lock().await?;
         let wrong = crate::custody::pairing::recipient::tests::Phrase::setup(b"wrong-password");
         assert!(
-            crate::bus::pairing::unlock_for_test(
+            crate::bus::unlock_for_test(
                 &rig.participant_b.root,
                 &rig.participant_b.account_id,
                 &request,
@@ -39,7 +39,7 @@ mod tests {
             .is_err(),
             "test: wrong private password reopened the DATA-only stage"
         );
-        let db = crate::bus::pairing::unlock_for_test(
+        let db = crate::bus::unlock_for_test(
             &rig.participant_b.root,
             &rig.participant_b.account_id,
             &request,

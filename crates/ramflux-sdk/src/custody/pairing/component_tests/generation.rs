@@ -15,6 +15,7 @@ use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_b
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
 mod private_input;
 mod recipient_cancel;
+mod recovery;
 mod refresh;
 mod source_affirm;
 mod source_cancel;
@@ -55,6 +56,14 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
 }
 
 fn install_live_generation(rig: &Rig, operation: &str, published: Published) -> TestResult {
+    install_generation_case(rig, operation, published, false)
+}
+fn install_generation_case(
+    rig: &Rig,
+    operation: &str,
+    published: Published,
+    recover: bool,
+) -> TestResult {
     refuses_before_j6_or_with_wrong_primary(rig, &published, false)?;
     let pinned = pin_published_target(rig, &published)?;
     refuses_before_j6_or_with_wrong_primary(rig, &published, true)?;
@@ -102,7 +111,11 @@ fn install_live_generation(rig: &Rig, operation: &str, published: Published) -> 
             &published.authority,
         )?
     };
-    let selected = finish_installed(rig, committed, &install, &published.authority)?;
+    let selected = if recover {
+        recovery::finish_after_g2_restart(rig, committed, &install, &published.authority)?
+    } else {
+        finish_installed(rig, committed, &install, &published.authority)?
+    };
     let old = rig.participant_b.db.lock().map_err(|_| "B handback")?.replace(selected);
     drop(old);
     Ok(())
