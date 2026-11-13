@@ -1,7 +1,7 @@
 # ramflux-card
 
 A dormant interpreter-only card renderer, with no SDK dependency, network,
-storage or approval authority. `rf-card/v1` is a local closed form profile; it
+storage or approval authority. `rf-card/v1` is a local closed component profile; it
 activates no wire catalog. Native hosts retain identity, Surface/hash binding,
 permission checks, signing, delivery and receipts.
 
@@ -26,11 +26,12 @@ to Rust. Engine objects never cross a thread or await.
 Project modules export synchronous `render(inputJson)` and must commit exactly
 once. Rust validates the whole tree before producing any mutation. Unknown
 controls/props, duplicate keys, wrong values/bindings and security chrome fail
-closed. Input is capped at 16 KiB, 32 forms, a 4 KiB string model, and **16 JSON
+closed. Input is capped at 16 KiB, 32 components, a 4 KiB typed scalar model, and **16 JSON
 nesting levels** (wrapper objects and children arrays count). A separate semantic
 node-depth ceiling is 16; the JSON ceiling currently admits fewer node levels.
-Expanded output is capped at 256 nodes / 64 KiB. Each form owns one local text
-binding; submit returns a declarative intent containing that form's field only.
+Expanded output is capped at 256 nodes / 64 KiB. Forms own unique local text/number/select/toggle bindings; submit returns only
+the enabled fields of that form, preserving scalar types. Required/error/disabled
+checks happen in Rust; validation failure emits a non-actionable validation batch.
 The host SDK must independently authorize any operation.
 
 Every accepted update, edit, submit, suspend and resume advances a monotonic token
@@ -47,7 +48,8 @@ A suspend clears the tree and queue; the next resume mounts a complete tree.
 
 Enable `compiler` only for offline build tooling. Run `npm ci && npm test && npm
 run typecheck && npm run build && npm run check` in `library/`. Source and bundled
-AST checks reject eval/Function, imports, ambient APIs, reflection/prototype
+AST checks reject eval/Function, unapproved source imports, all bundled imports,
+ambient APIs, reflection/prototype
 mutation and intrinsic aliasing; permitted globals are narrowly used
 `Object.freeze`, `JSON.parse`, `JSON.stringify`, and `__rf_commit`. Runtime
 hardening enforces the boundary independently of lint.
@@ -78,11 +80,12 @@ The current catalog, host ABI, engine and bytecode digest must also match before
 received package. Applications persist/pin their own rollback policy. Engine or
 host-contract changes regenerate packages and fixtures.
 
-## Optional C bridge (`c-abi`, standalone ABI major 2)
+## Optional C bridge (`c-abi`, standalone ABI major 3)
 
 `include/ramflux_card.h` defines open/update/event/suspend/resume/dispose plus a
-version query. ABI 2 adds separate descriptor and application-pinned policy spans
-to open. The SDK lane links this rlib into its existing core static/dynamic library;
+version query. ABI 2 added descriptor and application-pinned policy spans
+to open. ABI 3 introduces typed fields/events, expanded semantic attributes and
+`host_slots` outside the tree. Hosts must negotiate version 3 before calling. The SDK lane links this rlib into its existing core static/dynamic library;
 do not create a second Rust static runtime or infer SDK ABI numbers from this ABI.
 All calls run synchronously on the creating renderer thread. There is no detached
 work or cancellation handle. Up to 32 logical sessions may be retained per thread.
@@ -95,9 +98,9 @@ Success invokes exactly one callback; errors invoke none. Open zeros its output
 on failure. Serialization/output-cap failure disposes the handle; discard that
 native view. Other input/admission errors preserve valid session state as above.
 
-Events use `{token:{session,version,key},event:{kind:"text",value:"..."}}` or
+Events use `{token:{session,version,key},event:{kind:"text",value:"..."}}` or number/select/toggle events with a matching scalar `value`, or
 `{token:{session,version,key},event:{kind:"submit"}}`. Outputs are mutation batches,
-stale drops, edits or submit intents. Upserts are shallow; removals precede
+stale drops, edits, validation errors or submit intents. Upserts are shallow; removals precede
 parent-before-child upserts. Removing a parent removes its native subtree;
 reparenting re-emits retained descendants. Apply the batch's `previous_version`
 to the last mounted version and refresh all tokens even for an empty mutation
@@ -105,6 +108,61 @@ list. Statuses: 0 success, 1 invalid input/JSON, 2 resource limit (including
 memory/stack), 3 signature/policy, 4 script/engine/hardening, 5 budget, 6 inactive,
 7 stale/foreign-thread handle, 8 reentry/busy. Engine memory/stack classification
 uses exact messages from the pinned engine; these diagnostics confer no authority.
+
+## Signed component library
+
+The library consumes manifest-owned BSD presentation components and light/dark
+Palettes through project-owned `@rf/card` semantic primitives. Hosts select theme;
+peer input cannot supply styles. The generated token/component files are read-only.
+`form.tsx` is the package entry point for all four components:
+
+- `rf.form`: 1–16 typed fields, each with unique id/binding, optional required/error/
+  disabled state; select has 1–16 closed choices; number uses safe integers and
+  optional inclusive bounds. Legacy one-text-field input remains accepted.
+- `rf.task`: reported requester/owner, closed status, optional 0–100 progress and
+  up to 16 steps. All labels describe untrusted presentation, never authority.
+- `rf.chart`: line/bar, 1–2 aligned series of 1–16 safe-integer points, integer
+  scale 1–1,000,000, unit text and complete table alternative. **Design pending:**
+  the token-based plot has no approved chart artboard.
+- `rf.approval`: untrusted explanation only. `request_ref` and optional
+  `task_binding` become host-slot metadata outside the semantic tree. The host
+  independently resolves facts, warnings, Deny/Allow and confirmation/hold;
+  the card has no security controls or approval events.
+
+Every component has JSON/tree/mount/edit fixtures, theme/stale-event tests and
+component-specific over-limit/loop/recursion rejection tests. Generated styles are
+validated separately from exact Rust business-semantic projection.
+
+## Dedicated web worker
+
+Feature `web` exposes the same Rust validation/session/runtime through wasm-bindgen
+0.2.126. `web/worker.ts` runs it in a dedicated Worker and accepts one private
+MessagePort. Only selected card JSON, versioned events and mutation results cross
+that port. The Worker has public release material and no SDK, private signing key,
+account keys or storage. The application must keep the worker URL app-owned and
+apply its existing CSP; browser hosting trust is unchanged.
+
+`web/adapter.ts` maps fixed semantic controls to DOM elements using `textContent`,
+never HTML. It keeps native input identity/focus, applies keyed mutations in
+order, bounds in-flight requests to 32, forwards declarative intents to the host,
+and exposes untrusted host-slot references through a separate callback. Mount the
+card root independently of host security chrome. Use `suspend` for offscreen cards
+and `dispose`/worker termination on teardown or host lock/revoke.
+
+Build on the same engine/toolchain used by the release packer:
+
+```sh
+cargo build -p ramflux-card --features web --lib --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir crates/ramflux-card/web/pkg \
+  target/wasm32-unknown-unknown/debug/ramflux_card.wasm
+node crates/ramflux-card/web/build-web.mjs /release/cards.v1 /release/host-policy.json
+```
+
+The build tool embeds only public `.qjb/.descriptor.json/.sig/.pub` artifacts and
+an **independently pinned** policy. It never reads a private seed. Serve `web/dist`
+from the app origin; `tests/web-host.html` is a development-only harness using
+synthetic signed release artifacts, not a shipping application. `npm run
+typecheck:web` checks the adapter/worker, and CI checks the WASM facade on Linux.
 
 ## Validation boundary
 

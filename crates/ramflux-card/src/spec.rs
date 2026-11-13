@@ -118,143 +118,10 @@ impl CardSpec {
                 return Err(CardError::Invalid("component identity"));
             }
             match component {
-                Component::Form(form) => {
-                    if form.title.len() > 256
-                        || !identifier(&form.submit)
-                        || (!form.fields.is_empty()
-                            && (!form.label.is_empty() || !form.binding.is_empty()))
-                    {
-                        return Err(CardError::Invalid("form properties"));
-                    }
-                    let fields = form.normalized_fields();
-                    if fields.is_empty() || fields.len() > MAX_FIELDS {
-                        return Err(CardError::Limit("fields"));
-                    }
-                    let mut field_ids = BTreeSet::new();
-                    for field in fields {
-                        if !identifier(&field.id)
-                            || field.id == "submit"
-                            || !field_ids.insert(field.id.clone())
-                            || field.label.len() > 256
-                            || field.error.as_ref().is_some_and(|e| e.is_empty() || e.len() > 256)
-                        {
-                            return Err(CardError::Invalid("field properties"));
-                        }
-                        let key = field
-                            .binding
-                            .strip_prefix('/')
-                            .ok_or(CardError::Invalid("local binding"))?;
-                        if !identifier(key) || !bindings.insert(key) {
-                            return Err(CardError::Invalid("binding ownership"));
-                        }
-                        let value =
-                            self.model.get(key).ok_or(CardError::Invalid("dangling binding"))?;
-                        let type_matches = matches!(
-                            (field.kind, value),
-                            (FieldKind::Input | FieldKind::Select, Scalar::Text(_))
-                                | (FieldKind::Number, Scalar::Number(_))
-                                | (FieldKind::Toggle, Scalar::Toggle(_))
-                        );
-                        if !type_matches {
-                            return Err(CardError::Invalid("field value type"));
-                        }
-                        if field.kind != FieldKind::Select && !field.options.is_empty() {
-                            return Err(CardError::Invalid("options belong to select"));
-                        }
-                        if field.kind == FieldKind::Select {
-                            let mut options = BTreeSet::new();
-                            if field.options.is_empty()
-                                || field.options.len() > MAX_FIELDS
-                                || field.options.iter().any(|v| {
-                                    !identifier(&v.id)
-                                        || v.label.len() > 256
-                                        || !options.insert(v.id.clone())
-                                })
-                            {
-                                return Err(CardError::Invalid("select options"));
-                            }
-                            if let Scalar::Text(selected) = value {
-                                if !field.options.iter().any(|v| v.id == *selected) {
-                                    return Err(CardError::Invalid("selected option"));
-                                }
-                            }
-                        }
-                        if field.kind != FieldKind::Number
-                            && (field.minimum.is_some() || field.maximum.is_some())
-                        {
-                            return Err(CardError::Invalid("number bounds"));
-                        }
-                        if let Scalar::Number(number) = value {
-                            if !safe_integer(*number)
-                                || field
-                                    .minimum
-                                    .is_some_and(|min| !safe_integer(min) || *number < min)
-                                || field
-                                    .maximum
-                                    .is_some_and(|max| !safe_integer(max) || *number > max)
-                                || matches!((field.minimum,field.maximum), (Some(a),Some(b)) if a>b)
-                            {
-                                return Err(CardError::Invalid("number range"));
-                            }
-                        }
-                    }
-                }
-                Component::Task(task) => {
-                    if !identifier(&task.task_ref)
-                        || task.title.len() > 256
-                        || task.requester.len() > 256
-                        || task.owner.len() > 256
-                        || task.progress.is_some_and(|v| v > 100)
-                        || task.steps.len() > MAX_FIELDS
-                    {
-                        return Err(CardError::Invalid("task projection"));
-                    }
-                    let mut steps = BTreeSet::new();
-                    if task
-                        .steps
-                        .iter()
-                        .any(|s| !identifier(&s.id) || s.text.len() > 256 || !steps.insert(&s.id))
-                    {
-                        return Err(CardError::Invalid("task steps"));
-                    }
-                }
-                Component::Chart(chart) => {
-                    if chart.title.len() > 256
-                        || chart.unit.len() > 32
-                        || chart.scale == 0
-                        || chart.scale > 1_000_000
-                        || chart.series.is_empty()
-                        || chart.series.len() > 2
-                    {
-                        return Err(CardError::Invalid("chart profile"));
-                    }
-                    let mut series = BTreeSet::new();
-                    for s in &chart.series {
-                        if !identifier(&s.id)
-                            || !series.insert(&s.id)
-                            || s.label.len() > 256
-                            || s.points.is_empty()
-                            || s.points.len() > MAX_FIELDS
-                            || s.points.iter().any(|p| p.label.len() > 64 || !safe_integer(p.value))
-                        {
-                            return Err(CardError::Invalid("chart series"));
-                        }
-                    }
-                    let first = chart.series.first().ok_or(CardError::Invalid("chart series"))?;
-                    if chart.series.iter().any(|s| {
-                        s.points.iter().map(|p| &p.label).ne(first.points.iter().map(|p| &p.label))
-                    }) {
-                        return Err(CardError::Invalid("chart labels"));
-                    }
-                }
-                Component::Approval(approval) => {
-                    if !identifier(&approval.request_ref)
-                        || approval.task_binding.as_ref().is_some_and(|s| !identifier(s))
-                        || approval.explanation.len() > 1024
-                    {
-                        return Err(CardError::Invalid("approval references"));
-                    }
-                }
+                Component::Form(form) => validate_form(form, &self.model, &mut bindings)?,
+                Component::Task(task) => validate_task(task)?,
+                Component::Chart(chart) => validate_chart(chart)?,
+                Component::Approval(approval) => validate_approval(approval)?,
             }
         }
         crate::projection::expected(self)?.check_limits()?;
@@ -302,6 +169,143 @@ impl CardSpec {
             .collect()
     }
 }
+fn validate_form(
+    form: &crate::Form,
+    model: &BTreeMap<String, Scalar>,
+    bindings: &mut BTreeSet<String>,
+) -> Result<(), CardError> {
+    if form.title.len() > 256
+        || !identifier(&form.submit)
+        || (!form.fields.is_empty() && (!form.label.is_empty() || !form.binding.is_empty()))
+    {
+        return Err(CardError::Invalid("form properties"));
+    }
+    let fields = form.normalized_fields();
+    if fields.is_empty() || fields.len() > MAX_FIELDS {
+        return Err(CardError::Limit("fields"));
+    }
+    let mut field_ids = BTreeSet::new();
+    for field in fields {
+        if !identifier(&field.id)
+            || field.id == "submit"
+            || !field_ids.insert(field.id.clone())
+            || field.label.len() > 256
+            || field.error.as_ref().is_some_and(|e| e.is_empty() || e.len() > 256)
+        {
+            return Err(CardError::Invalid("field properties"));
+        }
+        let key = field.binding.strip_prefix('/').ok_or(CardError::Invalid("local binding"))?;
+        if !identifier(key) || !bindings.insert(key.to_owned()) {
+            return Err(CardError::Invalid("binding ownership"));
+        }
+        let value = model.get(key).ok_or(CardError::Invalid("dangling binding"))?;
+        let type_matches = matches!(
+            (field.kind, value),
+            (FieldKind::Input | FieldKind::Select, Scalar::Text(_))
+                | (FieldKind::Number, Scalar::Number(_))
+                | (FieldKind::Toggle, Scalar::Toggle(_))
+        );
+        if !type_matches {
+            return Err(CardError::Invalid("field value type"));
+        }
+        if field.kind != FieldKind::Select && !field.options.is_empty() {
+            return Err(CardError::Invalid("options belong to select"));
+        }
+        if field.kind == FieldKind::Select {
+            let mut options = BTreeSet::new();
+            if field.options.is_empty()
+                || field.options.len() > MAX_FIELDS
+                || field.options.iter().any(|v| {
+                    !identifier(&v.id) || v.label.len() > 256 || !options.insert(v.id.clone())
+                })
+            {
+                return Err(CardError::Invalid("select options"));
+            }
+            if let Scalar::Text(selected) = value
+                && !field.options.iter().any(|v| v.id == *selected)
+            {
+                return Err(CardError::Invalid("selected option"));
+            }
+        }
+        if field.kind != FieldKind::Number && (field.minimum.is_some() || field.maximum.is_some()) {
+            return Err(CardError::Invalid("number bounds"));
+        }
+        if let Scalar::Number(number) = value
+            && (!safe_integer(*number)
+                || field.minimum.is_some_and(|min| !safe_integer(min) || *number < min)
+                || field.maximum.is_some_and(|max| !safe_integer(max) || *number > max)
+                || matches!((field.minimum,field.maximum), (Some(a),Some(b)) if a>b))
+        {
+            return Err(CardError::Invalid("number range"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_task(task: &crate::Task) -> Result<(), CardError> {
+    if !identifier(&task.task_ref)
+        || task.title.len() > 256
+        || task.requester.len() > 256
+        || task.owner.len() > 256
+        || task.progress.is_some_and(|v| v > 100)
+        || task.steps.len() > MAX_FIELDS
+    {
+        return Err(CardError::Invalid("task projection"));
+    }
+    let mut steps = BTreeSet::new();
+    if task.steps.iter().any(|s| !identifier(&s.id) || s.text.len() > 256 || !steps.insert(&s.id)) {
+        return Err(CardError::Invalid("task steps"));
+    }
+
+    Ok(())
+}
+
+fn validate_chart(chart: &crate::Chart) -> Result<(), CardError> {
+    if chart.title.len() > 256
+        || chart.unit.len() > 32
+        || chart.scale == 0
+        || chart.scale > 1_000_000
+        || chart.series.is_empty()
+        || chart.series.len() > 2
+    {
+        return Err(CardError::Invalid("chart profile"));
+    }
+    let mut series = BTreeSet::new();
+    for s in &chart.series {
+        if !identifier(&s.id)
+            || !series.insert(&s.id)
+            || s.label.len() > 256
+            || s.points.is_empty()
+            || s.points.len() > MAX_FIELDS
+            || s.points.iter().any(|p| p.label.len() > 64 || !safe_integer(p.value))
+        {
+            return Err(CardError::Invalid("chart series"));
+        }
+    }
+    let first = chart.series.first().ok_or(CardError::Invalid("chart series"))?;
+    if chart
+        .series
+        .iter()
+        .any(|s| s.points.iter().map(|p| &p.label).ne(first.points.iter().map(|p| &p.label)))
+    {
+        return Err(CardError::Invalid("chart labels"));
+    }
+
+    Ok(())
+}
+
+fn validate_approval(approval: &crate::Approval) -> Result<(), CardError> {
+    if !identifier(&approval.request_ref)
+        || approval.task_binding.as_ref().is_some_and(|s| !identifier(s))
+        || approval.explanation.len() > 1024
+    {
+        return Err(CardError::Invalid("approval references"));
+    }
+
+    Ok(())
+}
+
 fn safe_integer(value: i64) -> bool {
     (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value)
 }

@@ -11,9 +11,17 @@
     "jsxFactory": "h",
     "noUncheckedIndexedAccess": true,
     "noImplicitReturns": true,
-    "types": []
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "@rf/card": [
+        "./primitives.ts"
+      ]
+    },
+    "moduleResolution": "Bundler"
   },
   "files": [
-    "form.tsx"
+    "form.tsx",
+    "primitives.ts"
   ]
 }

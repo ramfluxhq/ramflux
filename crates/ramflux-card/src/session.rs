@@ -205,12 +205,12 @@ impl CardSession {
             if !errors.is_empty() {
                 let mut spec = self.spec.clone();
                 for c in &mut spec.components {
-                    if let Component::Form(candidate) = c {
-                        if candidate.id == form.id {
-                            for f in &mut candidate.fields {
-                                if let Some(error) = errors.get(&f.id) {
-                                    f.error = Some(error.clone());
-                                }
+                    if let Component::Form(candidate) = c
+                        && candidate.id == form.id
+                    {
+                        for f in &mut candidate.fields {
+                            if let Some(error) = errors.get(&f.id) {
+                                f.error = Some(error.clone());
                             }
                         }
                     }
@@ -240,12 +240,12 @@ impl CardSession {
         let mut spec = self.spec.clone();
         spec.model.insert(binding.into(), value);
         for c in &mut spec.components {
-            if let Component::Form(candidate) = c {
-                if candidate.id == form.id {
-                    for f in &mut candidate.fields {
-                        if f.id == field.id {
-                            f.error = None;
-                        }
+            if let Component::Form(candidate) = c
+                && candidate.id == form.id
+            {
+                for f in &mut candidate.fields {
+                    if f.id == field.id {
+                        f.error = None;
                     }
                 }
             }
@@ -315,7 +315,7 @@ mod tests {
             event: kind,
         }
     }
-    fn without_style(mut batch: MutationBatch) -> MutationBatch {
+    pub(super) fn without_style(mut batch: MutationBatch) -> MutationBatch {
         for mutation in &mut batch.mutations {
             if let Mutation::Upsert { node, .. } = mutation {
                 node.attrs.style = None;
@@ -431,16 +431,20 @@ mod regression_tests {
         let mut spec = fixture();
         spec.components = ids
             .iter()
-            .map(|id| Form {
-                id: (*id).into(),
-                component: "rf.form".into(),
-                title: format!("Form {id}"),
-                label: "Name".into(),
-                binding: format!("/{id}"),
-                submit: format!("save-{id}"),
+            .map(|id| {
+                Component::Form(Form {
+                    id: (*id).into(),
+                    title: format!("Form {id}"),
+                    label: "Name".into(),
+                    binding: format!("/{id}"),
+                    submit: format!("save-{id}"),
+                    fields: Vec::new(),
+                    disabled: false,
+                })
             })
             .collect();
-        spec.model = ids.iter().map(|id| ((*id).into(), format!("Value {id}"))).collect();
+        spec.model =
+            ids.iter().map(|id| ((*id).into(), Scalar::Text(format!("Value {id}")))).collect();
         spec
     }
     fn shallow(node: &Node) -> Node {
@@ -524,7 +528,7 @@ mod regression_tests {
         );
         let mut changed = spec(&["b", "a"]);
         changed.model.insert("a".into(), "Changed".into());
-        let batch = session.update(changed).expect("test: value edit");
+        let batch = super::tests::without_style(session.update(changed).expect("test: value edit"));
         assert_eq!(
             batch.mutations,
             vec![Mutation::Upsert {
@@ -536,7 +540,8 @@ mod regression_tests {
                     text: "Name".into(),
                     value: "Changed".into(),
                     action: None,
-                    children: Vec::new()
+                    children: Vec::new(),
+                    attrs: Box::default(),
                 }
             }],
             "value-only edits must not remount siblings or form containers"
@@ -545,7 +550,7 @@ mod regression_tests {
     #[test]
     fn replay_foreign_wrong_kind_and_oversized_events_do_not_corrupt_session() {
         const MODEL_BOUND: usize = 4096;
-        const KEY_BOUND: usize = 80;
+        const KEY_BOUND: usize = 160;
         let _guard = guard();
         let (mut session, _) = CardSession::open(fixture(), library()).expect("test: session");
         let submit = token(&session, "profile:submit", EventKind::Submit);

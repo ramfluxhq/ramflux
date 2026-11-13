@@ -9,12 +9,16 @@ mod engine_compiler;
 mod error;
 #[cfg(feature = "c-abi")]
 mod ffi;
+#[cfg(test)]
+mod library_tests;
 mod package;
 mod projection;
 mod runtime;
 mod session;
 mod spec;
 mod tree;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+mod web;
 
 pub use components::{
     Approval, Chart, ChartKind, Choice, Component, Field, FieldKind, Form, HostSecuritySlot, Point,

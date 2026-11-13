@@ -273,7 +273,14 @@ jobs:
           npm ci --ignore-scripts
           npm test
           npm run typecheck
+          npm run typecheck:web
           npm run check
+      - name: Check shared WASM worker core
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          CC_wasm32_unknown_unknown=clang cargo clippy -p ramflux-card --all-features --lib --target wasm32-unknown-unknown -- -D warnings
+          CC_wasm32_unknown_unknown=clang cargo build -p ramflux-card --features web --lib --target wasm32-unknown-unknown
 
   doctests:
     name: Doctests

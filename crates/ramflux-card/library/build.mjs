@@ -6,6 +6,7 @@ import { analyze } from "eslint-scope";
 import { fullAncestor } from "acorn-walk";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { resolve, relative } from "node:path";
 import assert from "node:assert/strict";
 
 const banned = new Set(["eval", "Function", "AsyncFunction", "GeneratorFunction", "fetch",
@@ -28,7 +29,7 @@ function lintSource(source) {
       if (!ts.isPropertyAccessExpression(parent) || parent.expression !== node || !allowed.includes(parent.name.text)) throw Error("intrinsic alias or member forbidden");
     }
     if (ts.isIdentifier(node) && banned.has(node.text)) throw Error(`forbidden source identifier: ${node.text}`);
-    if (ts.isImportDeclaration(node) || node.kind === ts.SyntaxKind.ImportKeyword ||
+    if ((ts.isImportDeclaration(node) && !["./primitives", "../../../src/generated/RFCardComponents", "../../../src/generated/rf-tokens", "@rf/card", "./rf-tokens"].includes(node.moduleSpecifier.text)) || node.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isExportDeclaration(node) && node.moduleSpecifier)) throw Error("source module loading forbidden");
     if (ts.isElementAccessExpression(node)) {
       const property = node.argumentExpression;
@@ -77,11 +78,16 @@ if (process.argv.includes("--test")) {
   console.log("LINT_TESTS_OK");
 } else {
   const base = new URL("./", import.meta.url);
-  lintSource(await readFile(new URL("form.tsx", base), "utf8"));
+
   const result = await build({ entryPoints: [fileURLToPath(new URL("form.tsx", base))],
     bundle: true, format: "esm", platform: "neutral", target: "es2020", jsxFactory: "h",
-    legalComments: "none", write: false, metafile: true });
-  if (Object.keys(result.metafile.inputs).length !== 1) throw Error("only the project component source is allowed");
+    alias: {"@rf/card":fileURLToPath(new URL("primitives.ts",base))}, legalComments: "none", write: false, metafile: true });
+  const allowedFiles=new Set(["form.tsx","primitives.ts","../../../src/generated/RFCardComponents.tsx","../../../src/generated/rf-tokens.ts"].map(p=>resolve(fileURLToPath(base),p)));
+  for(const input of Object.keys(result.metafile.inputs)) {
+    const path=resolve(input);
+    if(!allowedFiles.has(path))throw Error("only manifest-pinned generated and project sources are allowed: "+relative(fileURLToPath(base),path));
+    lintSource(await readFile(path,"utf8"));
+  }
   const code = "// SPDX-License-Identifier: BSD-3-Clause\n" + result.outputFiles[0].text;
   lint(code);
   const destination = new URL("form.js", base);
