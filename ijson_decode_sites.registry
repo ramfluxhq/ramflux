@@ -993,4 +993,3 @@ crates/ramflux-transport/src/mesh_authority.rs | post | 1 | E | excluded=bounded
 crates/ramflux-transport/src/mesh_authority.rs | post | 2 | E | excluded=bounded original-byte authority RPC response; outside Envelope/Ack/Nack containment closure
 crates/ramflux-transport/src/mesh_quic/control_ingress.rs | read_control_request_from_bi | 1 | B | strict=parse_i_json; admission=bounded notification control ingress
 crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | prepare_call_peer | 1 | E | excluded=bounded native fixture directory; no external signed envelope admission
-crates/ramflux-sdk/src/client/generated_call/native.rs | decode_start | 1 | E | excluded=bounded signed call authority proof; native call owner verifies signature and envelope binding before projection
