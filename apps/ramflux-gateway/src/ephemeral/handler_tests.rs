@@ -225,13 +225,10 @@ async fn ephemeral_ingress_source_failures() -> TestResult {
     let mut bad_envelope = submit(&runtime, "src-badsig", 5, |_| {})?;
     bad_envelope.envelope.signed.signature = "invalid".to_owned();
     bad_envelope.signed_request = signed_request_for(&runtime, &bad_envelope.envelope, now)?;
-    anyhow::ensure!(
-        crate::submit_source::bind_source(&runtime, &bad_envelope.envelope)
-            .err()
-            .map(|e| e.to_string())
-            .as_deref()
-            == Some("base64url decode failed: Invalid last symbol 100, offset 6.")
-    );
+    super::tests::expect_bad_envelope_signature(crate::submit_source::bind_source(
+        &runtime,
+        &bad_envelope.envelope,
+    ))?;
     expect_refused(
         "envelope signature",
         &drive(&runtime, now_ms(), &[bad_envelope]).await?,

@@ -23,6 +23,19 @@ pub(super) const DEADLINE_MS: u64 = 1_005_000;
 
 pub(super) type TestResult<T = ()> = anyhow::Result<T>;
 
+pub(super) fn expect_bad_envelope_signature(result: anyhow::Result<Envelope>) -> TestResult {
+    let error =
+        result.err().ok_or_else(|| anyhow::anyhow!("invalid envelope signature accepted"))?;
+    anyhow::ensure!(
+        matches!(
+            error.downcast_ref::<ramflux_protocol::ProtocolError>(),
+            Some(ramflux_protocol::ProtocolError::InvalidBase64Url { field: "signature", .. })
+        ),
+        "wrong envelope signature refusal: {error}"
+    );
+    Ok(())
+}
+
 pub(super) struct RouteRecorder {
     pub(super) calls: Vec<(String, u64)>,
     pub(super) decision: RouteDecision,
@@ -493,13 +506,7 @@ fn bind_source_mismatch_and_bad_signature() -> TestResult {
     );
     let mut bad_sig = envelope;
     bad_sig.signed.signature = "invalid".into();
-    anyhow::ensure!(
-        crate::submit_source::bind_source(&runtime, &bad_sig)
-            .err()
-            .map(|e| e.to_string())
-            .as_deref()
-            == Some("base64url decode failed: Invalid last symbol 100, offset 6.")
-    );
+    expect_bad_envelope_signature(crate::submit_source::bind_source(&runtime, &bad_sig))?;
     Ok(())
 }
 
