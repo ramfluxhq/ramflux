@@ -45,7 +45,7 @@ pub fn reopen(
         }
         _ => false,
     };
-    let restrictive = !pending.is_empty()
+    let restrictive = install_store::pending_blocks_network(&pending, installed.as_ref())
         || installed.as_ref().is_some_and(|row| row.state != "installed")
         || !files_and_db_agree
         || !authority_present;

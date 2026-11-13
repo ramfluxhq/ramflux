@@ -478,7 +478,7 @@ async fn process_incoming(context: &SessionContext, writer: &Writer) -> Result<b
                 if let Err(error) = client.process_group_request_with_primary(
                     &item.record.request,
                     &item.target,
-                    primary.as_ref(),
+                    primary.as_deref(),
                 ) {
                     tracing::debug!(%error,"group request processing deferred");
                 }

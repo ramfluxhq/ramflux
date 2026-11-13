@@ -128,7 +128,10 @@ pub(crate) fn require_completed_full_generation(
     adoption: &AdoptionRow,
 ) -> Result<(), SdkError> {
     if install.state != "installed"
-        || !super::install_store::list_pending(root, &install.account_id)?.is_empty()
+        || super::install_store::pending_blocks_network(
+            &super::install_store::list_pending(root, &install.account_id)?,
+            Some(install),
+        )
     {
         return Err(pending());
     }

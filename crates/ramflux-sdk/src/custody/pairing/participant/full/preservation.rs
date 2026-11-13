@@ -47,7 +47,7 @@ impl LocalPairingParticipant {
             .ok_or_else(wrong)?;
         if live.generation != generation
             || live.role != "initiator"
-            || live.phase != "mutually_confirmed"
+            || !matches!(live.phase.as_str(), "mutually_confirmed" | "prepared" | "submitted")
         {
             return Err(wrong());
         }
@@ -66,19 +66,8 @@ impl LocalPairingParticipant {
         }
         let context = TranscriptV3::from_wire_bytes(&record.transcript)
             .map_err(|error| super::super::super::transport::wire(&error))?;
-        let common = &context.initiator.common;
-        let destination = proposed.authorize(&record.grant.destination_ref, "register", now)?;
-        if destination.branch_signing_public_key != context.responder.branch_key
-            || destination.agreement_identity_public_key != context.responder.agreement_key
-            || (common.recipient_mode == "new"
-                && (destination.capabilities != common.capabilities
-                    || destination.not_before != common.lease_not_before
-                    || destination.expires_at != common.lease_expires_at))
-        {
-            return Err(wrong());
-        }
+        require_destination(&context, &proposed, &record.grant.destination_ref, now)?;
         let proof = stage.verified_duplex(now)?;
-        super::require_candidate_lease(proof.expires_at(), now)?;
         let account = custody::load_account(&self.root, &self.account_id, now)?;
         if object_hash(account.record())? != record.base_record_hash {
             return Err(wrong());
@@ -86,9 +75,19 @@ impl LocalPairingParticipant {
         if let Some(saved) =
             stage.retained_source_full_preservation(current.envelope(), &candidate.record, now)?
         {
+            require_original_owner(
+                &stage,
+                &account,
+                &current.envelope().body.master_certificate.body.self_signing_public_key,
+            )?;
             return Ok(saved);
         }
+        if live.phase != "mutually_confirmed" {
+            return Err(wrong());
+        }
+        super::require_candidate_lease(proof.expires_at(), now)?;
         let primary = account.group_primary(self.vault.as_ref())?;
+        stage.retain_source_primary_owner(account.primary_vault_ref(), current.envelope())?;
         let body = PreservationFull {
             schema: "ramflux.identity.transfer.preserve.full.v1".into(),
             version: 1,
@@ -113,4 +112,36 @@ impl LocalPairingParticipant {
         )?;
         Ok(signed)
     }
+}
+
+fn require_original_owner(
+    stage: &ramflux_storage::FullTransferStage,
+    account: &custody::BornAccount,
+    old_self_key: &str,
+) -> Result<(), SdkError> {
+    let owner = stage.source_primary_owner()?.ok_or_else(wrong)?;
+    if owner.reference() != account.primary_vault_ref() || owner.public_key() != old_self_key {
+        return Err(wrong());
+    }
+    Ok(())
+}
+
+fn require_destination(
+    context: &TranscriptV3,
+    proposed: &ramflux_crypto::custody::VerifiedRecord,
+    reference: &ramflux_protocol::custody::DeviceRef,
+    now: u64,
+) -> Result<(), SdkError> {
+    let common = &context.initiator.common;
+    let destination = proposed.authorize(reference, "register", now)?;
+    if destination.branch_signing_public_key != context.responder.branch_key
+        || destination.agreement_identity_public_key != context.responder.agreement_key
+        || (common.recipient_mode == "new"
+            && (destination.capabilities != common.capabilities
+                || destination.not_before != common.lease_not_before
+                || destination.expires_at != common.lease_expires_at))
+    {
+        return Err(wrong());
+    }
+    Ok(())
 }

@@ -170,7 +170,7 @@ async fn requested_change(
 
 async fn native_group_primary(
     account: &LocalBusAccountState,
-) -> Result<Option<ramflux_crypto::custody::SelfSigningKey>, SdkError> {
+) -> Result<Option<crate::custody::PrimarySigningLease>, SdkError> {
     let Some(native) = account.client.born_v3_account.as_deref().cloned() else {
         return Ok(None);
     };

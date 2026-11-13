@@ -328,6 +328,41 @@ pub fn list_pending(root: &Path, account_id: &str) -> Result<Vec<Install>, SdkEr
     Ok(rows)
 }
 
+/// A cleanup-only source latch cannot close its already installed secondary branch.
+/// Other pending owners remain restrictive, including incomplete role/file/DB updates.
+pub(crate) fn pending_blocks_network(pending: &[Install], installed: Option<&Install>) -> bool {
+    if pending.is_empty() {
+        return false;
+    }
+    let Some(installed) = installed else {
+        return true;
+    };
+    if installed.state != "installed"
+        || installed.install_purpose != "transfer_source"
+        || installed.primary_vault_ref.is_some()
+    {
+        return true;
+    }
+    pending.iter().any(|row| {
+        row.state != "cleanup_pending"
+            || row.install_purpose != "transfer_source"
+            || row.account_id != installed.account_id
+            || row.account_anchor != installed.account_anchor
+            || row.operation_id != installed.operation_id
+            || row.record_hash != installed.record_hash
+            || row.prior_record_hash != installed.prior_record_hash
+            || row.recipient_ref != installed.recipient_ref
+            || row.recipient_mode != installed.recipient_mode
+            || row.branch_vault_ref != installed.branch_vault_ref
+            || row.data_vault_ref != installed.data_vault_ref
+            || row.primary_vault_ref.is_some()
+            || row.cleanup_ref.is_none()
+            || row.cleanup_owner_ref.as_ref() != Some(&installed.recipient_ref)
+            || row.full_transfer.is_some()
+            || installed.full_transfer.is_some()
+    })
+}
+
 /// Remove one pending operation file and fsync the directory.
 ///
 /// # Errors

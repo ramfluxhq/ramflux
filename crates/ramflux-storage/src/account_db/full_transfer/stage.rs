@@ -168,6 +168,7 @@ impl AccountDb {
         connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
         connection.execute_batch(super::preservation::SCHEMA)?;
+        connection.execute_batch(super::source_primary_owner::SCHEMA)?;
         connection.execute_batch(super::data_terminal::SCHEMA)?;
         if !reconciliation
             && connection.query_row("SELECT EXISTS(SELECT 1 FROM data_terminal)", [], |row| {
@@ -376,6 +377,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::source_scalar::SCHEMA)?;
         tx.execute_batch(super::native_floor::SCHEMA)?;
         tx.execute_batch(super::preservation::SCHEMA)?;
+        tx.execute_batch(super::source_primary_owner::SCHEMA)?;
         tx.execute_batch(super::data_terminal::SCHEMA)?;
         tx.execute(
             "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",

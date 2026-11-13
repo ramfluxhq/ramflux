@@ -44,6 +44,16 @@ impl FullTransferStage<'_> {
     ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
         self.read_source_preservation(previous, candidate, now, ApprovalTime::AfterNativeAck)
     }
+    pub(super) fn source_published_candidate_hash(&self) -> Result<String, StorageError> {
+        let (base,candidate):(Vec<u8>,Vec<u8>)=self.connection.query_row("SELECT base_record,candidate FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288 AND length(candidate)<=524288",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        let base: Envelope<DeviceSet> = ramflux_protocol::parse_i_json(&base)?;
+        let candidate: Envelope<DeviceSet> = ramflux_protocol::parse_i_json(&candidate)?;
+        // Historical signed input is an integrity operand after publication, never
+        // a renewed wire lease or permission to construct another candidate.
+        let when = self.reference().lease_expires_at.0.saturating_sub(1);
+        self.retained_source_after_native_ack(&base, &candidate, when)?.ok_or_else(wrong)?;
+        Ok(object_hash(&candidate)?)
+    }
     fn read_source_preservation(
         &self,
         previous: &Envelope<DeviceSet>,

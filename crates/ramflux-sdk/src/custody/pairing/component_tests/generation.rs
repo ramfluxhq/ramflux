@@ -14,6 +14,7 @@ use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
 mod recipient_cancel;
+mod refresh;
 mod source_cancel;
 mod source_tail;
 
@@ -37,15 +38,23 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
     rig.participant_a.return_client(&mut rig.source.client)?;
     Box::pin(finish_owned_stream(&mut rig)).await?;
     let published = Box::pin(publication(&mut rig, &operation)).await?;
-    refuses_before_j6_or_with_wrong_primary(&rig, &published, false)?;
-    let pinned = pin_published_target(&rig, &published)?;
-    refuses_before_j6_or_with_wrong_primary(&rig, &published, true)?;
+    install_live_generation(&rig, &operation, published)?;
+    rig.primary.lock().await?;
+    rig.secondary.lock().await?;
+    hold.finish().await?;
+    Ok(())
+}
+
+fn install_live_generation(rig: &Rig, operation: &str, published: Published) -> TestResult {
+    refuses_before_j6_or_with_wrong_primary(rig, &published, false)?;
+    let pinned = pin_published_target(rig, &published)?;
+    refuses_before_j6_or_with_wrong_primary(rig, &published, true)?;
     let mut copy = pinned.copy()?; // No ordinary DB/stage loan crosses bulk G1 work.
     let preparation = {
         let slot = rig.participant_b.db.lock().map_err(|_| "B original owner")?;
         let db = slot.as_ref().ok_or("B writer")?;
         let stage = db.open_full_transfer_stage(
-            &operation,
+            operation,
             ramflux_crypto::custody::pairing::PairingRole::Responder,
             rig.now,
         )?;
@@ -69,7 +78,7 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
         let slot = rig.participant_b.db.lock().map_err(|_| "B original owner")?;
         let db = slot.as_ref().ok_or("B writer")?;
         let stage = db.open_full_transfer_stage(
-            &operation,
+            operation,
             ramflux_crypto::custody::pairing::PairingRole::Responder,
             rig.now,
         )?;
@@ -84,14 +93,12 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
             &published.authority,
         )?
     };
-    let selected = finish_installed(&rig, committed, &install, &published.authority)?;
+    let selected = finish_installed(rig, committed, &install, &published.authority)?;
     let old = rig.participant_b.db.lock().map_err(|_| "B handback")?.replace(selected);
     drop(old);
-    rig.primary.lock().await?;
-    rig.secondary.lock().await?;
-    hold.finish().await?;
     Ok(())
 }
+
 async fn prepare_candidate(
     rig: &mut Rig,
     operation: &str,
@@ -159,6 +166,18 @@ async fn prepare_candidate(
     rig.participant_a.take_client(&mut rig.source.client)?;
     let source_submission = rig.primary.prepare_full_source_submission(publication.clone()).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
+    let source =
+        custody::load_account(&rig.participant_a.root, &rig.participant_a.account_id, rig.now)?;
+    assert!(
+        matches!(
+            source.group_primary(&custody::NativePrimaryVault),
+            Err(crate::SdkError::PairingCode("Busy"))
+        ),
+        "Submitted source reached the old primary vault"
+    );
+    let branch =
+        source.credentials(rig.participant_a.vault.as_ref(), source.local_device_id()?, rig.now)?;
+    drop(branch); // Branch credentials remain available; no signing key crosses native I/O.
     // Actual SDK submission owns only public bytes/ports and weak writer liveness.
     assert!(rig.participant_a.db.lock().map_err(|_| "off-loan source")?.is_none());
     Ok(Prepared { publication, install, head, source_submission })
@@ -194,7 +213,7 @@ async fn publication(
     );
     let authority = rig.participant_b.query.current_authority(&install.account_anchor)?;
     assert_eq!(canonical_json_bytes(published.authority())?, canonical_json_bytes(&authority)?);
-    source_tail::acknowledge(rig, published)?;
+    source_tail::acknowledge(rig, &published)?;
     Ok(Published { authority, install, head })
 }
 async fn prove_source_preservation(

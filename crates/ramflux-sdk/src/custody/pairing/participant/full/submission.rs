@@ -97,12 +97,31 @@ impl FullSourcePublished {
         &self.authority
     }
 
+    /// Install this exact independently observed source role and retire only its old management key.
+    /// A cleanup failure retains a separate retry latch while ordinary secondary networking stays open.
+    /// # Errors
+    /// Refuses a root lock, missing own J6, another candidate/owner or discordant local native fields.
+    pub fn retire_source(
+        &self,
+        local: &crate::custody::pairing::Installation<'_>,
+    ) -> Result<super::FullSourceRetirementOutcome, SdkError> {
+        self.submission.runtime.require_live()?;
+        self.submission.unlock.require_unlocked()?;
+        let _local = self.submission.runtime.local_work()?;
+        super::retirement::install(
+            &self.submission.root,
+            &self.submission.head,
+            &self.authority,
+            local,
+        )
+    }
+
     /// Commit local J6 and its one immutable tail read view under the account writer fence.
     /// Return the database loan before performing bulk private snapshot copying.
     /// # Errors
     /// Refuses another root/writer/stage, a changed submitted candidate or an existing cut.
-    pub fn acknowledge(self, db: &AccountDb, now: u64) -> Result<FullSourceTailCut, SdkError> {
-        let work = self.submission;
+    pub fn acknowledge(&self, db: &AccountDb, now: u64) -> Result<FullSourceTailCut, SdkError> {
+        let work = &self.submission;
         work.require_live()?;
         let _local = work.runtime.local_work()?;
         if matches!(
@@ -137,6 +156,37 @@ impl FullSourcePublished {
     }
 }
 impl LocalPairingParticipant {
+    fn submitted_primary_fence(
+        &self,
+        head: &HeadRow,
+        source_ref: &ramflux_protocol::custody::DeviceRef,
+    ) -> Result<std::fs::File, SdkError> {
+        let account =
+            custody::load_data_account(&self.root, &self.account_id, custody::network_now()?)?;
+        if object_hash(account.record())? != head.base_record_hash
+            || account.record().body.master_certificate.body.primary_device_ref != *source_ref
+            || account.local_device_id()? != source_ref.device_id.as_str()
+        {
+            return Err(wrong());
+        }
+        crate::custody::primary_signing::retain_submitted(
+            &self.root.join("custody_accounts").join(&self.account_id),
+            &crate::custody::primary_signing::SubmittedPrimaryFence {
+                account_id: self.account_id.clone(),
+                operation_id: head.operation_id.clone(),
+                base_record_hash: head.base_record_hash.clone(),
+                candidate_hash: head.candidate_hash.clone(),
+                source_ref: source_ref.clone(),
+                old_self_key: account
+                    .record()
+                    .body
+                    .master_certificate
+                    .body
+                    .self_signing_public_key
+                    .clone(),
+            },
+        )
+    }
     pub(crate) fn prepare_full_source_submission(
         &self,
         scope: (String, u64, [u8; 32]),
@@ -191,13 +241,18 @@ impl LocalPairingParticipant {
             // An existing submitted intent must be reconciled, not replaced by a fresh ceremony.
             if saved.operation_id != head.operation_id
                 || saved.candidate != head.candidate
-                || saved.state != "prepared"
+                || !matches!(saved.state.as_str(), "prepared" | "submitted")
             {
                 return Err(SdkError::PairingCode("Busy"));
             }
             head = saved;
         } else {
             db.commit_pairing_head(&head)?;
+        }
+        let _primary_fence = self.submitted_primary_fence(&head, &record.grant.source_ref)?;
+        runtime.require_live()?;
+        if cancelled.is_cancelled() {
+            return Err(SdkError::PairingCode("Retired"));
         }
         let unlock = db.full_local_unlock_guard()?;
         head.state = "submitted".into();
