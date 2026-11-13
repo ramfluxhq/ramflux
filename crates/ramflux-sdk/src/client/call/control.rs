@@ -30,11 +30,15 @@ pub(crate) fn signing_bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8
 /// Owner terminal carried beside a callee submit. The caller cancel stays a signed intent.
 pub(crate) fn resolution_terminal(control: &CallControl) -> Option<String> {
     match &control.body {
-        ramflux_protocol::CallAction::Hangup => Some("end".to_owned()),
+        ramflux_protocol::CallAction::Hangup
+        | ramflux_protocol::CallAction::Timeout
+        | ramflux_protocol::CallAction::Failed => Some("end".to_owned()),
         ramflux_protocol::CallAction::Answer { .. } if control.sender != control.caller => {
             Some("answer".to_owned())
         }
-        ramflux_protocol::CallAction::Reject if control.sender != control.caller => {
+        ramflux_protocol::CallAction::Reject | ramflux_protocol::CallAction::Busy
+            if control.sender != control.caller =>
+        {
             Some("reject".to_owned())
         }
         _ => None,

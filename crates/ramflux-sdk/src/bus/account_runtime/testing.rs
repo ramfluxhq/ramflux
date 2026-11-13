@@ -304,6 +304,10 @@ impl AccountSessionHarness {
         match action {
             "answer" => call.answer(now)?,
             "reject" => call.end(true, now)?,
+            "busy" => call.busy(now)?,
+            "failed" => {
+                call.fail(ramflux_protocol::VoiceCallFailureReason::RelayUnavailable, now)?
+            }
             "end" => call.end(false, now)?,
             _ => return Err(SdkError::NetworkingPending),
         }

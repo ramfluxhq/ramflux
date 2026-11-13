@@ -438,7 +438,7 @@ async fn run(mode: ReplyMode, follow: Option<&'static str>) -> anyhow::Result<()
                 owner.stop().await;
             }
             let state=replies.lock().map_err(|_|anyhow::anyhow!("replies"))?;
-            let expected=match action {"answer"|"answer_missing"|"answer_foreign"=>ramflux_protocol::CallResolutionState::Answered,"reject"=>ramflux_protocol::CallResolutionState::Rejected,"cancel"=>ramflux_protocol::CallResolutionState::Cancelled,_=>ramflux_protocol::CallResolutionState::Ended};
+            let expected=match action {"answer"|"answer_missing"|"answer_foreign"=>ramflux_protocol::CallResolutionState::Answered,"reject"|"busy"=>ramflux_protocol::CallResolutionState::Rejected,"cancel"=>ramflux_protocol::CallResolutionState::Cancelled,_=>ramflux_protocol::CallResolutionState::Ended};
             assert!(state.decisions.iter().any(|(_,decision)|*decision==expected),"top-level gateway never committed the owner action");
         }
         host.stop().await;
@@ -488,4 +488,14 @@ async fn call_courier_native_owner_answer_missing_decision() -> anyhow::Result<(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn call_courier_native_owner_answer_foreign_decision() -> anyhow::Result<()> {
     run(ReplyMode::Positive, Some("answer_foreign")).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn call_courier_native_owner_busy() -> anyhow::Result<()> {
+    run(ReplyMode::Positive, Some("busy")).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn call_courier_native_owner_failure() -> anyhow::Result<()> {
+    run(ReplyMode::Positive, Some("failed")).await
 }
