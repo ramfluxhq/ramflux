@@ -65,6 +65,29 @@ fn install_generation_case(
     published: Published,
     recover: bool,
 ) -> TestResult {
+    let (committed, install, authority) = select_generation_case(rig, operation, published)?;
+    let selected = if recover {
+        recovery::finish_after_g2_restart(rig, committed, &install, &authority)?
+    } else {
+        finish_installed(rig, committed, &install, &authority)?
+    };
+    let old = rig.participant_b.db.lock().map_err(|_| "B handback")?.replace(selected);
+    drop(old);
+    Ok(())
+}
+
+fn select_generation_case(
+    rig: &Rig,
+    operation: &str,
+    published: Published,
+) -> Result<
+    (
+        crate::custody::pairing::full_generation::owner::FullGenerationCommitted,
+        Install,
+        CustodyAuthority,
+    ),
+    Box<dyn std::error::Error>,
+> {
     refuses_before_j6_or_with_wrong_primary(rig, &published, false)?;
     let pinned = pin_published_target(rig, &published)?;
     refuses_before_j6_or_with_wrong_primary(rig, &published, true)?;
@@ -112,14 +135,7 @@ fn install_generation_case(
             &published.authority,
         )?
     };
-    let selected = if recover {
-        recovery::finish_after_g2_restart(rig, committed, &install, &published.authority)?
-    } else {
-        finish_installed(rig, committed, &install, &published.authority)?
-    };
-    let old = rig.participant_b.db.lock().map_err(|_| "B handback")?.replace(selected);
-    drop(old);
-    Ok(())
+    Ok((committed, install, published.authority))
 }
 
 async fn prepare_recipient_candidate(

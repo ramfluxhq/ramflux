@@ -78,6 +78,167 @@ mod tests {
         hold.finish().await?;
         result
     }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_cold_status_recovers_selected_g2_without_approval() -> TestResult {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor())).await;
+        hold.finish().await?;
+        result
+    }
+    async fn run_actor() -> TestResult {
+        use ramflux_protocol::custody::pairing::local_dto::StatusRequest;
+        let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+        rig.primary.sync_relay().await?;
+        rig.participant_a.return_client(&mut rig.source.client)?;
+        Box::pin(finish_owned_stream(&mut rig)).await?;
+        let published = Box::pin(publication(&mut rig, &operation)).await?;
+        let (committed, install, authority) = select_generation_case(&rig, &operation, published)?;
+        drop(committed);
+        let mut relay = None;
+        rig.secondary.wrap_transport_for_test(|inner| {
+            relay = Some(inner.clone());
+            inner
+        });
+        rig.secondary.lock().await?;
+        let mut frontend = crate::RamfluxClient::new();
+        frontend.open_account_index(&rig.participant_b.root)?;
+        let authority_path = rig
+            .participant_b
+            .root
+            .join("custody_accounts")
+            .join(&rig.participant_b.account_id)
+            .join("authority.json");
+        std::io::Write::write_all(
+            &mut crate::platform::fs::create_new_owner_only(&authority_path)?,
+            b"{}",
+        )?;
+        assert!(
+            frontend
+                .unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")
+                .is_err(),
+            "test: pending G2 hid malformed native authority"
+        );
+        std::fs::remove_file(&authority_path)?;
+        let request = {
+            let pending = crate::custody::pairing::local_credential::load_reservation(
+                &rig.participant_b.root,
+                &rig.participant_b.account_id,
+            )?
+            .ok_or("test: reservation")?;
+            let generation = install_generation(
+                &rig.participant_b.root,
+                &rig.participant_b.account_id,
+                &operation,
+            )?;
+            assert!(pending.frontend_generation > 0, "test: lost credential scope");
+            StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: operation.clone(),
+                generation,
+            }
+        };
+        let db = crate::bus::unlock_for_test(
+            &rig.participant_b.root,
+            &rig.participant_b.account_id,
+            &request,
+            rig.participant_b.provider.as_ref(),
+        )?;
+        *rig.participant_b.db.lock().map_err(|_| "test: original B owner")? = Some(db);
+        Box::pin(exercise_recovered_actor(
+            &rig,
+            install,
+            authority,
+            request,
+            relay.ok_or("test: relay")?,
+            frontend,
+        ))
+        .await?;
+        rig.primary.lock().await?;
+        Ok(())
+    }
+    async fn exercise_recovered_actor(
+        rig: &Rig,
+        install: Install,
+        authority: CustodyAuthority,
+        request: ramflux_protocol::custody::pairing::local_dto::StatusRequest,
+        relay: std::sync::Arc<dyn crate::custody::pairing::PairingTransport>,
+        mut frontend: crate::RamfluxClient,
+    ) -> TestResult {
+        use crate::custody::pairing::{PairingActor, PairingConfig, PairingIdentity};
+        use ramflux_protocol::custody::pairing::local_dto::{FullStatusStage, Outcome};
+        let mut actor = PairingActor::new(
+            PairingIdentity {
+                account_id: rig.participant_b.account_id.clone(),
+                local_ref: install.recipient_ref.clone(),
+                master_public_key: Some(
+                    authority
+                        .publication
+                        .record
+                        .body
+                        .master_certificate
+                        .body
+                        .master_public_key
+                        .clone(),
+                ),
+                base_record_hash: ramflux_protocol::custody::object_hash(
+                    &authority.publication.record,
+                )?,
+                base_epoch: authority.publication.record.body.device_set_epoch,
+                is_primary: true,
+            },
+            None,
+            relay,
+            PairingConfig { enabled: true, extra_root_ca_pem: None },
+        );
+        actor.set_participant(rig.participant_b.clone());
+        let before = rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed);
+        let mut wrong = request.clone();
+        wrong.generation += 1;
+        assert!(
+            actor.recover_full_installation(&wrong).await.is_err(),
+            "test: stale generation recovered G3"
+        );
+        let result =
+            actor.recover_full_installation(&request).await?.ok_or("test: recovered status")?;
+        assert!(
+            matches!(result.outcome, Outcome::FullStatus { value } if value.stage == FullStatusStage::Installed),
+            "test: exact recovered G3 was not reported installed"
+        );
+        assert!(
+            rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed) >= before + 2,
+            "test: recovery did not reobserve native head around physical verification"
+        );
+        assert!(actor.displayed_proposal().is_err(), "test: recovery restored human approval");
+        rig.participant_b.return_client(&mut frontend)?;
+        assert!(
+            crate::custody::pairing::ordinary_session_admitted(&frontend, &install.account_id)?,
+            "test: recovered G3 kept exact ordinary owner fenced"
+        );
+        assert_eq!(
+            actor.transfer_status(&request).await?.version,
+            2,
+            "test: repeated status lost recovered installation"
+        );
+        actor.lock().await?;
+        Ok(())
+    }
+    fn install_generation(
+        root: &std::path::Path,
+        account: &str,
+        operation: &str,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut client = crate::RamfluxClient::new();
+        client.open_account_index(root)?;
+        client.unlock_account(account, b"component-recipient-passphrase")?;
+        client
+            .account_db()?
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .map(|row| row.generation)
+            .ok_or_else(|| "test: live operation".into())
+    }
     async fn run() -> TestResult {
         let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
         rig.primary.sync_relay().await?;

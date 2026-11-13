@@ -24,6 +24,7 @@ mod candidate_assembly;
 mod candidate_prepare;
 mod completion;
 mod epoch;
+pub(super) mod install_recovery;
 mod installation;
 mod management;
 mod publication;

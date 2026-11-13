@@ -24,16 +24,17 @@ pub(super) fn has_pending(
     request: &StatusRequest,
 ) -> Result<bool, SdkError> {
     request.validate().map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-    if crate::custody::authority_exists(root, account)? {
-        return Ok(false);
-    }
+    let authority_exists = crate::custody::authority_exists(root, account)?;
     Ok(crate::custody::pairing::install_store::list_pending(root, account)?.iter().any(|row| {
         row.operation_id == request.operation_id
             && row.recipient_mode == "new"
             && row.install_purpose == "transfer_destination"
-            && row.state == "vault_durable"
-            && row.record_hash.is_none()
             && row.prior_record_hash.is_none()
+            && ((!authority_exists && row.state == "vault_durable" && row.record_hash.is_none())
+                || (row.full_transfer.is_some()
+                    && row.record_hash.is_some()
+                    && row.primary_vault_ref.is_some()
+                    && matches!(row.state.as_str(), "adopt_prepared" | "authority_durable")))
     }) && load_reservation(root, account)?.is_some())
 }
 
@@ -62,7 +63,8 @@ impl Owner {
 }
 struct Unlocked {
     db: ramflux_storage::AccountDb,
-    record: ramflux_crypto::custody::pairing::FullResumeRecord,
+    grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+    base_record_hash: String,
     master_key: String,
     base_epoch: u64,
 }
@@ -100,11 +102,35 @@ fn unlock(
         .into_iter()
         .find(|row| row.operation_id == request.operation_id)
         .ok_or(SdkError::PairingCode("NotFound"))?;
-    if live.generation != request.generation
-        || live.role != "responder"
-        || live.phase != "mutually_confirmed"
-        || db.pairing_head()?.is_some()
-    {
+    if live.generation != request.generation || live.role != "responder" {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    if db.pairing_head()?.is_some() {
+        let identity = db.full_recipient_recovery_identity(
+            &request.operation_id,
+            request.generation,
+            crate::custody::network_now()?,
+        )?;
+        let pending = crate::custody::pairing::install_store::read_pending(
+            root,
+            account,
+            &request.operation_id,
+        )?
+        .ok_or(SdkError::PairingCode("NotFound"))?;
+        if pending.recipient_mode != "new"
+            || pending.recipient_ref != identity.grant.destination_ref
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        return Ok(Unlocked {
+            db,
+            grant: identity.grant,
+            base_record_hash: identity.base_record_hash,
+            master_key: identity.master_public_key,
+            base_epoch: identity.base_epoch,
+        });
+    }
+    if live.phase != "mutually_confirmed" {
         return Err(SdkError::PairingCode("WrongContext"));
     }
     let stage = db.open_full_transfer_stage(
@@ -121,7 +147,13 @@ fn unlock(
     let base_epoch = context.initiator.common.device_set_epoch;
     let master_key = context.initiator.common.master_public_key;
     drop(stage);
-    Ok(Unlocked { db, record, master_key, base_epoch })
+    Ok(Unlocked {
+        db,
+        grant: record.grant,
+        base_record_hash: record.base_record_hash,
+        master_key,
+        base_epoch,
+    })
 }
 
 pub(super) async fn install(
@@ -154,15 +186,13 @@ pub(super) async fn install(
         }));
     }
     let unlocked = receive.await.map_err(|_| SdkError::PairingCode("Retired"))??;
-    let profile = nodes
-        .selected(Some(&unlocked.record.grant.node_id), true)?
-        .ok_or(SdkError::NoNodeSelected)?;
-    if profile.node_id != unlocked.record.grant.node_id {
+    let profile =
+        nodes.selected(Some(&unlocked.grant.node_id), true)?.ok_or(SdkError::NoNodeSelected)?;
+    if profile.node_id != unlocked.grant.node_id {
         return Err(SdkError::PairingCode("WrongContext"));
     }
     let vault = super::super::custody_setup::primary_provider(&config);
-    let gateway =
-        gateway(&config, account, &profile, &unlocked.record.grant, vault.clone()).await?;
+    let gateway = gateway(&config, account, &profile, &unlocked.grant, vault.clone()).await?;
     let mut network = crate::gateway::proof_network_config(&gateway)?;
     network.gateway_address = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
     let node = crate::custody::CustodyConnection::discover_pairing_node(network.clone()).await?;
@@ -183,9 +213,9 @@ pub(super) async fn install(
     let mut actor = PairingActor::new(
         PairingIdentity {
             account_id: account.into(),
-            local_ref: unlocked.record.grant.destination_ref,
+            local_ref: unlocked.grant.destination_ref,
             master_public_key: Some(unlocked.master_key),
-            base_record_hash: unlocked.record.base_record_hash,
+            base_record_hash: unlocked.base_record_hash,
             base_epoch: unlocked.base_epoch,
             is_primary: false,
         },

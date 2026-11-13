@@ -134,7 +134,11 @@ async fn install_source(
         .get(account_id)
         .ok_or_else(|| SdkError::AccountNotOpen(account_id.into()))?;
     let root = &state.config.data_root;
-    let native = crate::custody::load_account(root, account_id, crate::custody::network_now()?)?;
+    let native = if resume.is_some() {
+        crate::custody::load_data_account(root, account_id, crate::custody::network_now()?)?
+    } else {
+        crate::custody::load_account(root, account_id, crate::custody::network_now()?)?
+    };
     let record = native.record();
     let device_id = native.local_device_id()?;
     let device = record
@@ -250,6 +254,25 @@ fn retained_data_role(
         .ok_or(SdkError::PairingCode("NotFound"))?;
     if row.generation != request.generation || row.full_stage_reference()?.is_none() {
         return Err(SdkError::PairingCode("WrongContext"));
+    }
+    if let Some(head) = db.pairing_head()? {
+        if row.role == "responder"
+            && head.operation_id == request.operation_id
+            && head.generation == request.generation
+            && head.kind == "transfer"
+            && matches!(head.state.as_str(), "prepared" | "acknowledged")
+        {
+            let identity = db.full_recipient_recovery_identity(
+                &request.operation_id,
+                request.generation,
+                crate::custody::network_now()?,
+            )?;
+            if identity.grant.destination_ref != *reference {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            return Ok(reference == &record.body.master_certificate.body.primary_device_ref);
+        }
+        return Err(SdkError::PairingCode("PublicationPending"));
     }
     if row.phase != "mutually_confirmed" || db.pairing_head()?.is_some() {
         return Err(SdkError::PairingCode("PublicationPending"));

@@ -237,6 +237,7 @@ pub(crate) fn take_installed_recipient(
         .as_ref()
         .and_then(|c| c.full.as_ref())
         .and_then(|full| full.node.as_ref())
+        .or(actor.full_node.as_ref())
         .map(|node| node.envelope().body.node_id.clone())
         .ok_or(SdkError::PairingCode("WrongContext"))?;
     let mut client = crate::RamfluxClient::new();

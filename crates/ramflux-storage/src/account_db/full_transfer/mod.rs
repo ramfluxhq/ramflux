@@ -65,7 +65,7 @@ mod stage_reader;
 mod stage_validation;
 mod tail;
 mod tail_capture;
-pub use install_reconciliation::FullRecipientInstallStage;
+pub use install_reconciliation::{FullRecipientInstallStage, FullRecipientRecoveryIdentity};
 pub use tail_capture::{FullSourceTailCut, FullSourceTailWork};
 mod target_observation;
 mod union_encoding;
