@@ -47,9 +47,9 @@ fn n1_persisted_predecessor_and_zero_retention_require_reset() -> TestResult {
 
 #[test]
 fn n1_cancel_horizon_survives_restart_and_bounded_cleanup() -> TestResult {
+    const CANCEL_COUNT: usize = 129;
     let temp = tempfile::TempDir::new()?;
     let path = temp.path().join("notify.redb");
-    const CANCEL_COUNT: usize = 129;
     let (until, earliest, latest) = {
         let store = NotifyRedbStore::open_without_wal(&path)?;
         let mut earliest = u64::MAX;
