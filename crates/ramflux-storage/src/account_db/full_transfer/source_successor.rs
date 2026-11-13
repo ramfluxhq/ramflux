@@ -44,10 +44,10 @@ pub struct FullSourceSuccessorWork {
 /// Exact locally encoded delta signing request. It contains no secret or signing authority.
 /// Restart must repeat the original-peer/native/unlock gates before any new signing request.
 pub struct FullSourceDeltaDraft {
-    manifest: Manifest,
-    digest: [u8; 32],
-    branch_key: String,
-    expires_at: u64,
+    pub(super) manifest: Manifest,
+    pub(super) digest: [u8; 32],
+    pub(super) branch_key: String,
+    pub(super) expires_at: u64,
 }
 impl FullSourceDeltaDraft {
     #[must_use]
@@ -203,21 +203,8 @@ impl FullSourceSuccessorWork {
             &self.snapshot_id,
             std::io::sink(),
         )?;
-        let mut manifest = self.parent.manifest.clone();
-        manifest.kind = ManifestKind::Delta;
-        manifest.snapshot_id = self.snapshot_id;
-        manifest.snapshot_cut = U64(cut);
-        manifest.previous_cut = Some(self.parent.manifest.snapshot_cut);
-        manifest.parent_manifest_hash =
-            Some(encode_base64url(manifest_hash(&self.parent).map_err(|_| wrong())?));
-        manifest.families = encoded.schema.families;
-        manifest.census_hash = encode_base64url(encoded.schema.census_hash);
-        manifest.storage_generation = U64(encoded.storage_generation);
-        manifest.source_erasure_generation = U64(encoded.source_erasure_generation);
-        manifest.total_bytes = U64(encoded.total_bytes);
-        manifest.chunk_count = U64(encoded.chunk_count);
-        manifest.chunks_root = encode_base64url(encoded.chunks_root);
-        manifest.validate().map_err(|_| wrong())?;
+        let manifest =
+            successor_manifest(&self.parent, self.snapshot_id, encoded, ManifestKind::Delta)?;
         self.guard.require()?;
         Ok(FullSourceDeltaDraft {
             manifest,
@@ -226,6 +213,31 @@ impl FullSourceSuccessorWork {
             expires_at: self.expires_at,
         })
     }
+}
+
+pub(super) fn successor_manifest(
+    parent: &SourceManifest,
+    snapshot_id: String,
+    encoded: super::FullBaseSourceEncoding,
+    kind: ManifestKind,
+) -> Result<Manifest, StorageError> {
+    let cut = parent.manifest.snapshot_cut.0 + 1;
+    let mut manifest = parent.manifest.clone();
+    manifest.kind = kind;
+    manifest.snapshot_id = snapshot_id;
+    manifest.snapshot_cut = U64(cut);
+    manifest.previous_cut = Some(parent.manifest.snapshot_cut);
+    manifest.parent_manifest_hash =
+        Some(encode_base64url(manifest_hash(parent).map_err(|_| wrong())?));
+    manifest.families = encoded.schema.families;
+    manifest.census_hash = encode_base64url(encoded.schema.census_hash);
+    manifest.storage_generation = U64(encoded.storage_generation);
+    manifest.source_erasure_generation = U64(encoded.source_erasure_generation);
+    manifest.total_bytes = U64(encoded.total_bytes);
+    manifest.chunk_count = U64(encoded.chunk_count);
+    manifest.chunks_root = encode_base64url(encoded.chunks_root);
+    manifest.validate().map_err(|_| wrong())?;
+    Ok(manifest)
 }
 
 #[cfg(test)]

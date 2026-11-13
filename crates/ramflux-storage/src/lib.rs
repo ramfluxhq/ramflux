@@ -98,10 +98,11 @@ pub use account_db::full_transfer::{
     FullScalarInputCounts, FullScalarSourceCounts, FullSelectedReceiverGeneration,
     FullSourceDeltaDraft, FullSourcePreparation, FullSourcePreparationCancel,
     FullSourcePreparationWork, FullSourcePrimaryOwner, FullSourceSuccessorWork, FullSourceTailCut,
-    FullSourceTailWork, FullStageIoCancel, FullStageKey, FullTargetObservation, FullTransferSchema,
-    FullTransferStage, FullUnionEncoding, FullUnionEncodingBuilder, FullValidatedReverseInput,
-    MergeRule, PreparedFullSource, StageDirection, VariantRule, WrappedFullStageKey,
-    copy_full_scalar_record, full_census_hash, full_transfer_catalog, write_full_scalar_sql_row,
+    FullSourceTailEncodingWork, FullSourceTailWork, FullStageIoCancel, FullStageKey,
+    FullTargetObservation, FullTransferSchema, FullTransferStage, FullUnionEncoding,
+    FullUnionEncodingBuilder, FullValidatedReverseInput, MergeRule, PreparedFullSource,
+    StageDirection, VariantRule, WrappedFullStageKey, copy_full_scalar_record, full_census_hash,
+    full_transfer_catalog, write_full_scalar_sql_row,
 };
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{

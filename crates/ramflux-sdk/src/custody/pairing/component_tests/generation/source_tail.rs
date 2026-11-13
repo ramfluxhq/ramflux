@@ -197,3 +197,123 @@ impl crate::custody::PrimaryVault for DeleteUnavailable<'_> {
         self.0.load_branch(reference, principal, device)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{ClockHold, bootstrap_full_rig, finish_owned_stream, publication};
+    use super::*;
+    use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::ManifestKind};
+
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_tail_encoder_uses_exact_j6_view_after_source_writes() -> TestResult {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await;
+        hold.finish().await?;
+        result
+    }
+    async fn run() -> TestResult {
+        let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+        rig.primary.sync_relay().await?;
+        rig.participant_a.return_client(&mut rig.source.client)?;
+        Box::pin(finish_owned_stream(&mut rig)).await?;
+        let before = rig
+            .participant_a
+            .query
+            .current_authority(&rig.source.client.account_db()?.principal_commitment)?;
+        let before = ramflux_crypto::custody::verify_publication(&before, rig.now)?;
+        assert!(
+            rig.source
+                .client
+                .account_db()?
+                .open_full_transfer_stage(
+                    &operation,
+                    ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                    rig.now,
+                )?
+                .into_source_tail_encoding_work(&before, rig.now)
+                .is_err(),
+            "test: a data receipt without native J6 admitted tail encoding"
+        );
+        let published = Box::pin(publication(&mut rig, &operation)).await?;
+        let now = rig.now + 301;
+        let current = ramflux_crypto::custody::verify_publication(&published.authority, now)?;
+        assert!(
+            rig.source
+                .client
+                .account_db()?
+                .open_full_transfer_stage(
+                    &operation,
+                    ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                    now,
+                )?
+                .into_source_tail_encoding_work(&before, now)
+                .is_err(),
+            "test: stale own native head with the original primary admitted a tail"
+        );
+        let prior = rig.source.client.account_db()?.privacy_erasure_generation()?;
+        let next = u64::try_from(prior)?.checked_add(1).ok_or("test: erasure overflow")?;
+        rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
+            "after-j6-tail-cut",
+            "after-j6-tail-manifest",
+            next,
+        )?;
+        assert_eq!(
+            rig.source.client.account_db()?.privacy_erasure_generation()?,
+            i64::try_from(next)?,
+            "test: late source write did not reach the actual writer"
+        );
+        verify_saved_tail(&mut rig, &operation, &current, prior, now)?;
+        rig.primary.lock().await?;
+        rig.secondary.lock().await?;
+        Ok(())
+    }
+    fn verify_saved_tail(
+        rig: &mut Rig,
+        operation: &str,
+        current: &ramflux_crypto::custody::VerifiedRecord,
+        prior: i64,
+        now: u64,
+    ) -> TestResult {
+        let mut encoded = None;
+        for _ in 0..2 {
+            rig.participant_a.take_client(&mut rig.source.client)?;
+            let work = {
+                let slot = rig.participant_a.db.lock().map_err(|_| "test: source tail owner")?;
+                let db = slot.as_ref().ok_or("test: source tail writer")?;
+                db.open_full_transfer_stage(
+                    operation,
+                    ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                    now,
+                )?
+                .into_source_tail_encoding_work(current, now)?
+            };
+            rig.participant_a.return_client(&mut rig.source.client)?;
+            let draft = work.encode()?;
+            let manifest = draft.manifest();
+            assert_eq!(
+                manifest.kind,
+                ManifestKind::Tail,
+                "test: J6 encoder emitted a prepublication delta"
+            );
+            assert_eq!(
+                manifest.source_erasure_generation.0,
+                u64::try_from(prior)?,
+                "test: tail encoder recut a later source view"
+            );
+            assert_ne!(
+                manifest.source_ref,
+                current.envelope().body.master_certificate.body.primary_device_ref,
+                "test: retired source tail was relabeled as new-primary data"
+            );
+            let bytes = manifest.to_wire_bytes()?;
+            if let Some(previous) = &encoded {
+                assert_eq!(
+                    &bytes, previous,
+                    "test: tail retry recut or rewrote its immutable manifest"
+                );
+            }
+            encoded = Some(bytes);
+        }
+        Ok(())
+    }
+}

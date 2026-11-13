@@ -57,7 +57,26 @@ impl SourceContext<'_> {
         current_snapshot: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
-        if !(1..=8).contains(&cut) || previous_snapshot == current_snapshot {
+        self.encode_delta(cut, previous_snapshot, current_snapshot, writer, false)
+    }
+    pub(super) fn encode_fixed_tail_source<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        previous_snapshot: &str,
+        current_snapshot: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.encode_delta(cut, previous_snapshot, current_snapshot, writer, true)
+    }
+    fn encode_delta<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        previous_snapshot: &str,
+        current_snapshot: &str,
+        writer: W,
+        tail: bool,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        if !(1..=if tail { 9 } else { 8 }).contains(&cut) || previous_snapshot == current_snapshot {
             return Err(StorageError::PairingField("WrongContext"));
         }
         let source = self;
@@ -93,6 +112,9 @@ impl SourceContext<'_> {
                 family.encoded_bytes = U64(counts.encoded_bytes);
                 total = total.checked_add(counts.encoded_bytes).ok_or_else(invalid)?;
             }
+        }
+        if tail && total > ramflux_protocol::custody::pairing::full_transfer::MAX_TAIL_BYTES {
+            return Err(StorageError::PairingField("NoSpace"));
         }
         let mut output =
             Rooted::new(writer, total)?.with_wire(source.wire_spool(cut, current_snapshot)?);

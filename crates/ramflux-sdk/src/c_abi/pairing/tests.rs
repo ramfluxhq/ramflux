@@ -95,7 +95,7 @@ async fn round_trip() -> TestResult {
                     bytes_total: U64(12),
                     cut: U64(1),
                     generation: 4,
-                    lease_expires_at: crate::custody::network_now()? + 604800,
+                    lease_expires_at: crate::custody::network_now()? + 604_800,
                     operation_id: ramflux_protocol::encode_base64url([32; 32]),
                     result: None,
                     role: "responder".into(),
