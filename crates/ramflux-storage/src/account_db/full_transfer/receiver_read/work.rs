@@ -78,6 +78,21 @@ impl FullTransferStage<'_> {
         hash: &str,
         now: u64,
     ) -> Result<OwnedReceiverInput, StorageError> {
+        self.pin_receiver_input(hash, now, false)
+    }
+    pub(in crate::account_db::full_transfer) fn pin_tail_read_input(
+        &self,
+        hash: &str,
+        now: u64,
+    ) -> Result<OwnedReceiverInput, StorageError> {
+        self.pin_receiver_input(hash, now, true)
+    }
+    fn pin_receiver_input(
+        &self,
+        hash: &str,
+        now: u64,
+        tail: bool,
+    ) -> Result<OwnedReceiverInput, StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Responder
@@ -88,18 +103,22 @@ impl FullTransferStage<'_> {
         }
         let current = self.forward_manifest(hash)?;
         let last = current.manifest.snapshot_cut.0;
-        if last > 8
-            || !matches!(
-                current.manifest.kind,
-                ramflux_protocol::custody::pairing::full_transfer::ManifestKind::Base
-                    | ramflux_protocol::custody::pairing::full_transfer::ManifestKind::Delta
-            )
+        use ramflux_protocol::custody::pairing::full_transfer::ManifestKind;
+        if last > if tail { 9 } else { 8 }
+            || if tail {
+                current.manifest.kind != ManifestKind::Tail
+            } else {
+                !matches!(current.manifest.kind, ManifestKind::Base | ManifestKind::Delta)
+            }
         {
             return Err(wrong());
         }
         let guard = SourceGuard::new(self.db, Some(self.source_cancelled.clone()));
         let mut manifests = Vec::new();
-        for cut in 0..=last {
+        // Tail validation needs only its one bounded authenticated stream; its
+        // prepublication chain/G3 are checked by the separate endpoint constructor.
+        let first = if tail { last } else { 0 };
+        for cut in first..=last {
             let hash: String = self.connection.query_row(
                 "SELECT manifest_hash FROM manifest WHERE direction=0 AND cut=?1 AND (verified=1 OR cut=?2)",
                 rusqlite::params![cut,last],

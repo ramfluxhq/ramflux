@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 /// One short original-endpoint loan. No stage/key getter, publication or signing authority.
 /// Drop it before any network wait and independently refresh native authority next time.
 pub struct FullTailEndpoint<'a> {
-    stage: FullTransferStage<'a>,
+    pub(super) stage: FullTransferStage<'a>,
     current: &'a VerifiedRecord,
     admitted_at: u64,
 }
@@ -87,7 +87,7 @@ impl AccountDb {
     }
 }
 impl FullTailEndpoint<'_> {
-    fn require_live(&self, now: u64) -> Result<(), StorageError> {
+    pub(super) fn require_live(&self, now: u64) -> Result<(), StorageError> {
         self.stage.require_io()?;
         if now < self.admitted_at {
             return Err(wrong());
@@ -98,7 +98,7 @@ impl FullTailEndpoint<'_> {
         verify_full_tail_authority(&self.stage.resume_record()?.grant, self.current, now)
             .map_err(|error| authority_error(&error))
     }
-    fn require_tail(&self, hash: &str, now: u64) -> Result<(), StorageError> {
+    pub(super) fn require_tail(&self, hash: &str, now: u64) -> Result<(), StorageError> {
         self.require_live(now)?;
         if self.stage.forward_manifest(hash)?.manifest.kind != ManifestKind::Tail {
             return Err(wrong());
