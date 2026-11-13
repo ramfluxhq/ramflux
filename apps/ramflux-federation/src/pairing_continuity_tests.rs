@@ -909,7 +909,10 @@ fn enroll_secondary(
 }
 
 pub(super) fn native_issue_refused_when_disabled() -> TestResult {
-    let node = spawn_node_mesh_at("https://relay.example:443".into(), None)?;
+    // This fixture owns an explicit relay for the mesh plumbing; the service under
+    // test below is separately built through the real environment-gated constructor.
+    let clock = ramflux_node_core::pairing_relay::TestPairingClock::new(wall()?);
+    let node = spawn_node_mesh_at("https://relay.example:443".into(), Some(clock))?;
     let mut prover = PrimaryProver::bootstrap(&node)?;
     prover.service = Arc::new(
         ramflux_node_core::CustodyService::new(

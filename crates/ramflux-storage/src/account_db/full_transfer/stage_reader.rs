@@ -11,13 +11,14 @@ use rusqlite::params;
 use std::io::{self, Read, Seek, SeekFrom};
 use zeroize::{Zeroize as _, Zeroizing};
 
-/// Reads at most one decrypted chunk at a time from this stage's forward stream.
+/// Reads at most one decrypted chunk at a time from an authenticated directional stream.
 /// Root verification is necessary for opening, but does not certify logical records,
 /// application, `DataVerified`, publication or endpoint tail admission.
 pub struct FullForwardReader<'stage, 'db> {
     stage: &'stage FullTransferStage<'db>,
     manifest: SourceManifest,
     hash: String,
+    direction: u8,
     position: u64,
     cached_index: Option<u64>,
     cache: Zeroizing<Vec<u8>>,
@@ -33,6 +34,26 @@ impl<'db> FullTransferStage<'db> {
             stage: self,
             manifest: self.forward_manifest(hash)?,
             hash: hash.into(),
+            direction: 0,
+            position: 0,
+            cached_index: None,
+            cache: Zeroizing::new(Vec::new()),
+            failed: false,
+        })
+    }
+}
+impl<'db> FullTransferStage<'db> {
+    /// Read the independently authenticated reverse stream with one bounded plaintext chunk.
+    /// This verifies bytes/root only; actual A union commit must precede any signed DV.
+    /// # Errors
+    /// Refuses incomplete/torn reverse slots, a changed local unlock or a foreign manifest.
+    pub fn reverse_reader(&self, hash: &str) -> Result<FullForwardReader<'_, 'db>, StorageError> {
+        self.verify_reverse_root(hash)?;
+        Ok(FullForwardReader {
+            stage: self,
+            manifest: self.reverse_manifest(hash)?,
+            hash: hash.into(),
+            direction: 1,
             position: 0,
             cached_index: None,
             cache: Zeroizing::new(Vec::new()),
@@ -60,12 +81,16 @@ impl FullForwardReader<'_, '_> {
         self.cache.zeroize();
         self.cached_index = None;
         let retained = self.stage.connection.query_row(
-            "SELECT length,digest FROM chunk WHERE direction=0 AND manifest_hash=?1 AND idx=?2",
-            params![self.hash, index],
+            "SELECT length,digest FROM chunk WHERE direction=?3 AND manifest_hash=?1 AND idx=?2",
+            params![self.hash, index, self.direction],
             |row| Ok((row.get::<_, u32>(0)?, row.get::<_, [u8; 32]>(1)?)),
         );
         let Ok((length, digest)) = retained else { return self.fail() };
-        let chunk = self.stage.read_forward_chunk(&self.manifest, &self.hash, index, length);
+        let chunk = if self.direction == 0 {
+            self.stage.read_forward_chunk(&self.manifest, &self.hash, index, length)
+        } else {
+            self.stage.read_reverse_chunk(&self.manifest, &self.hash, index, length)
+        };
         let Ok(chunk) = chunk else { return self.fail() };
         if !chunk_digest(index, &chunk).is_ok_and(|actual| actual == digest) {
             return self.fail();
