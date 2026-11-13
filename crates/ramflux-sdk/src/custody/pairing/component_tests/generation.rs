@@ -13,6 +13,7 @@ use crate::custody::{
 use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
+mod cooperative;
 mod install_cancel;
 mod private_input;
 mod recipient_cancel;

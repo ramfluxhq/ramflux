@@ -88,7 +88,7 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
 
 async fn begin_native(wire: &mut Continuity) -> TestResult<(String, u64)> {
     let mut request = begin_body()?;
-    request.capabilities = vec!["message".into(), "group".into(), "sync".into(), "register".into()];
+    request.capabilities = vec!["group".into(), "message".into(), "register".into(), "sync".into()];
     let begun = begin_result(wire.primary.begin(request).await?)?;
     let operation = begun.operation_id.clone();
     let generation = begun.generation;
