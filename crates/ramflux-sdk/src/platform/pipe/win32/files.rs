@@ -41,17 +41,17 @@ pub(crate) fn current_user() -> io::Result<Sid> {
 }
 
 /// Descriptor whose owner is the current user and whose protected access list holds only that
-/// user. `GA` is `GENERIC_ALL`: the access check maps it to read, write, and the standard
-/// rights, including the rights a later open of the same object requests. A directory has one
-/// entry for itself and one inherit-only entry, so a file created inside it receives the same
-/// list without the directory's own entry being inherit-only.
+/// user. `FA` is `FILE_ALL_ACCESS`: specific read, write, standard, and `SYNCHRONIZE` rights.
+/// `CreateFile` adds `SYNCHRONIZE` even to an owner open that asked only for `READ_CONTROL`,
+/// and the owner's implicit rights do not include it. A directory has one entry for itself and
+/// one inherit-only entry, so a file created inside it receives the same list.
 fn owner_descriptor(directory: bool) -> io::Result<(SecurityDescriptor, Sid)> {
     let user = current_user()?;
     let sid = user.to_sddl_string()?;
     let sddl = if directory {
-        format!("O:{sid}D:P(A;;GA;;;{sid})(A;OICIIO;GA;;;{sid})")
+        format!("O:{sid}D:P(A;;FA;;;{sid})(A;OICIIO;FA;;;{sid})")
     } else {
-        format!("O:{sid}D:P(A;;GA;;;{sid})")
+        format!("O:{sid}D:P(A;;FA;;;{sid})")
     };
     Ok((SecurityDescriptor::from_sddl(&sddl)?, user))
 }
