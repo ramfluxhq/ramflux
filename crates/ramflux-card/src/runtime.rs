@@ -77,7 +77,7 @@ impl CardRuntime {
             let bootstrap = load_bootstrap(ctx.clone()).map_err(|_| CardError::Hardening)?;
             let (_, done) = bootstrap.eval().map_err(|_| CardError::Hardening)?;
             done.result::<()>().ok_or(CardError::Hardening)?.map_err(|_| CardError::Hardening)?;
-            let module = load_verified(ctx.clone(), package)?;
+            let module = load_verified(&ctx, package)?;
             let (module, promise) = module.eval().map_err(|error| classify_error(&ctx, &error))?;
             promise
                 .result::<()>()
@@ -168,7 +168,7 @@ fn load_bootstrap(ctx: rquickjs::Ctx<'_>) -> Result<Module<'_>, CardError> {
 // Package bytecode is admitted only through the verified descriptor/policy type.
 #[allow(unsafe_code)]
 fn load_verified<'js>(
-    ctx: rquickjs::Ctx<'js>,
+    ctx: &rquickjs::Ctx<'js>,
     package: &SignedPackage,
 ) -> Result<Module<'js>, CardError> {
     // SAFETY: SignedPackage is constructed only after verifying a project trust key,
@@ -176,7 +176,7 @@ fn load_verified<'js>(
     // acceptance policy. The signer uses the same pinned little-endian compiler.
     // Bytecode is trusted executable code; a signature does not sanitize malicious code.
     unsafe { Module::load(ctx.clone(), &package.bytecode) }
-        .map_err(|error| classify_error(&ctx, &error))
+        .map_err(|error| classify_error(ctx, &error))
 }
 
 #[cfg(test)]
