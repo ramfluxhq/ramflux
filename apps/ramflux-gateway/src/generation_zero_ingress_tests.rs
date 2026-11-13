@@ -119,7 +119,7 @@ async fn run() -> Result {
         );
         assert_eq!(
             delivered.inbox_seq,
-            Some(number as u64 + 1),
+            Some(u64::try_from(number)? + 1),
             "only accepted legacy delivery may advance the cursor"
         );
         // Direct mesh submission returns delivery instructions to its caller; it does

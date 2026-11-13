@@ -6,7 +6,7 @@ use super::*;
 use crate::{GatewayInboxEntry, SdkError};
 use ramflux_protocol::message as g;
 
-fn actors(client: &RamfluxClient) -> TestResult<Vec<(String, Vec<u8>)>> {
+pub(super) fn actors(client: &RamfluxClient) -> TestResult<Vec<(String, Vec<u8>)>> {
     let db = client.account_db()?;
     db.actor_state_keys("")?
         .into_iter()
@@ -19,7 +19,7 @@ fn actors(client: &RamfluxClient) -> TestResult<Vec<(String, Vec<u8>)>> {
         .collect()
 }
 
-fn dormant<T>(result: Result<T, SdkError>) {
+pub(super) fn dormant<T>(result: Result<T, SdkError>) {
     assert!(
         matches!(result, Err(SdkError::GeneratedRefused { reason, .. })
         if reason == "generated profile is not selected"),
@@ -78,6 +78,7 @@ async fn generation_zero_generated_sdk_effects_are_inert_body() -> TestResult {
     dormant(own.client.bootstrap_self_sync(&sibling.client.owned_device_identity()?));
     dormant(own.client.start_generated_history_transfer(&sibling.config.device_id));
     dormant(own.client.start_generated_history_transfers());
+    dormant(own.client.pending_guardian_invites());
     dormant(own.client.encrypt_generated_group_message("group", "primary", &g::Message::default()));
     dormant(own.client.erase_self_sync_conversation("thread"));
     dormant(own.client.recreate_self_sync_conversation("thread"));

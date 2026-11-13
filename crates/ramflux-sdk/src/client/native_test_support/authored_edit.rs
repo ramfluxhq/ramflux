@@ -169,7 +169,7 @@ fn assert_pending(target: &Fixture, owner: &str, exact: &[u8]) -> TestResult {
     Ok(())
 }
 
-fn encoded_edit(
+pub(super) fn encoded_edit(
     source: &Fixture,
     original: &g::EventIdentity,
     message: &[u8],

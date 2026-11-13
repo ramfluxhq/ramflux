@@ -47,11 +47,11 @@ pub(super) fn populate(
         "group_id":snapshot.group_id, "epoch":snapshot.epoch, "previous_hash":snapshot.previous_hash,
         "state":core, "issued_at":snapshot.issued_at});
     snapshot.state_hash = ramflux_crypto::blake3_256_base64url(
-        "ramflux.group_state.content.v2",
+        ramflux_protocol::group_state::GROUP_STATE_CONTENT_HASH_DOMAIN,
         &ramflux_protocol::canonical_json_bytes(&content)?,
     );
     snapshot.state.head_hash.clone_from(&snapshot.state_hash);
-    let root_body = json!({"domain":"ramflux.group_state.creator_signature.v2",
+    let root_body = json!({"domain":ramflux_protocol::group_state::GROUP_STATE_CREATOR_SIGNATURE_DOMAIN,
         "content":content, "state_hash":snapshot.state_hash});
     snapshot.root_signature = ramflux_crypto::sign_canonical_bytes_with_seed(
         &ramflux_protocol::canonical_json_bytes(&root_body)?,

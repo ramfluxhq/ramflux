@@ -108,19 +108,6 @@ fn edited(item: &g::HistoryItem) -> Result<bool, SdkError> {
         || !item.exact_original_identity.is_empty())
 }
 
-// A refusal can deny dependent items but never supplies origin authority for them.
-fn claimed_edit_target(item: &g::HistoryItem) -> Option<Vec<u8>> {
-    let inner = g::validation::scan_inner(&item.exact_inner).ok()?;
-    if inner.kind != 3 || inner.outcome != g::validation::ScanOutcome::Supported {
-        return None;
-    }
-    let content = g::registry::decode_body(inner.kind, inner.body, inner.layer).ok()?;
-    let Some(g::content::Value::Edit(edit)) = content.value else {
-        return None;
-    };
-    Some(edit.target?.id)
-}
-
 fn item_refusal(error: SdkError) -> Result<crate::error::GeneratedRefusalCode, SdkError> {
     use crate::error::GeneratedRefusalCode as Code;
     use g::original_header::EvidenceError;
@@ -191,24 +178,15 @@ impl RamfluxClient {
             if !state.advance(&page, crate::time::now_unix_timestamp())? {
                 return Ok(());
             }
-            let mut refused_targets = std::collections::BTreeSet::new();
             for (index, item) in page.items.iter().enumerate() {
-                let target = claimed_edit_target(item);
-                let imported = if target.as_ref().is_some_and(|id| refused_targets.contains(id)) {
-                    Err(SdkError::GeneratedRefused {
-                        code: crate::error::GeneratedRefusalCode::OriginCommitmentMismatch,
-                        reason: "history item depends on a refused item".into(),
-                    })
-                } else {
-                    db.write_transaction(|| self.import_history_page_item(entry, &source, item))
-                };
+                // Each item carries its own origin proofs. Target equality is not a dependency,
+                // and an unverified claim must not deny a later independently valid item.
+                let imported =
+                    db.write_transaction(|| self.import_history_page_item(entry, &source, item));
                 let code = match imported {
                     Ok(()) => continue,
                     Err(error) => item_refusal(error)?,
                 };
-                if let Some(target) = target {
-                    refused_targets.insert(target);
-                }
                 if state.refusals.len() >= RETIRED_CAPACITY {
                     state.refusals.pop_front();
                 }

@@ -3,6 +3,8 @@
 
 //! Creator-root snapshots, bounded signed requests and root-qualified group membership.
 use serde::{Deserialize, Serialize};
+pub const GROUP_STATE_CONTENT_HASH_DOMAIN: &str = "ramflux.group_state.content.v2";
+pub const GROUP_STATE_CREATOR_SIGNATURE_DOMAIN: &str = "ramflux.group_state.creator_signature.v2";
 pub const GROUP_STATE_SNAPSHOT_DOMAIN: &str = "ramflux.group_state.snapshot.v2";
 pub const GROUP_CHANGE_REQUEST_DOMAIN: &str = "ramflux.group_state.request.v1";
 pub const GROUP_CHANGE_RESULT_DOMAIN: &str = "ramflux.group_state.result.v1";

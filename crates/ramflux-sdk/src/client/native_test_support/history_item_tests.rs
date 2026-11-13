@@ -46,28 +46,11 @@ async fn history_page_item_refusal_preserves_unrelated_import_and_chain_body() -
     let (second_id, second, _) = Box::pin(history::receive_first_hand(&mut source, &peer)).await?;
     let (next_id, next, _) = Box::pin(history::receive_first_hand(&mut source, &peer)).await?;
     let first_exact = first.exact_inner.clone();
-    let mut invalid = first.clone();
-    invalid.exact_original_identity = first_id.encode_to_vec();
-    let edit_identity = peer.client.allocate_generated_identity(&conversation, 1000, false)?;
-    invalid.exact_inner = RamfluxClient::encode_generated_inner(
-        edit_identity,
-        &g::Content {
-            value: Some(g::content::Value::Edit(g::Edit {
-                target: Some(g::MessageRef {
-                    id: first_id.id.clone(),
-                    conversation_id: conversation.clone(),
-                    author_anchor: peer.client.own_account_anchor()?,
-                }),
-                revision: 1,
-                previous_content_digest: vec![0; 32],
-                replacement: Some(g::Message {
-                    text: "must not import".into(),
-                    ..Default::default()
-                }),
-            })),
-        },
-    )?;
-    let first_page = page(0, &[0; 32], vec![first, invalid, second])?;
+    let (target_id, valid_edit) = Box::pin(receive_edited_history(&mut source, &peer)).await?;
+    let expected_edit = valid_edit.exact_inner.clone();
+    let mut invalid = valid_edit.clone();
+    invalid.original_metadata_evidence = None;
+    let first_page = page(0, &[0; 32], vec![first, invalid, valid_edit, second])?;
     let identity = source.client.allocate_generated_identity(&conversation, 1000, false)?;
     let envelope = source.seal_inner_to(&sibling, &page_inner(identity, first_page.clone()))?;
     sibling.receive(envelope.clone(), 1).await?;
@@ -101,12 +84,16 @@ async fn history_page_item_refusal_preserves_unrelated_import_and_chain_body() -
         state["refusals"][0]["code"], "OriginEvidenceMissing",
         "refusal must retain its type"
     );
+    assert!(
+        sibling.client.export_generated_history_item(&target_id.id)?.exact_inner == expected_edit,
+        "an invalid target claim must not suppress the next independently evidenced Edit"
+    );
     let second_page = page(1, &first_page.page_digest, vec![next])?;
     let identity = source.client.allocate_generated_identity(&conversation, 1001, false)?;
     sibling.receive(source.seal_inner_to(&sibling, &page_inner(identity, second_page))?, 2).await?;
     sibling.receive(envelope, 3).await?;
     let count = sibling.client.generated_message_view_page(&conversation, None, 10)?.messages.len();
-    assert_eq!(count, 3, "refused item must neither project nor block the next page or duplicate");
+    assert_eq!(count, 4, "refused item must neither project nor block the next page or duplicate");
     assert!(
         sibling
             .client
@@ -122,5 +109,52 @@ async fn history_page_item_refusal_preserves_unrelated_import_and_chain_body() -
         count,
         "unrelated imports and cursor must survive reopen"
     );
+    assert!(
+        sibling.client.export_generated_history_item(&target_id.id)?.exact_inner == expected_edit,
+        "the valid same-target Edit must survive duplicate delivery, next page and reopen"
+    );
     Ok(())
+}
+
+async fn receive_edited_history(
+    source: &mut Fixture,
+    peer: &Fixture,
+) -> TestResult<(g::EventIdentity, g::HistoryItem)> {
+    let (target, original_item, _) = Box::pin(history::receive_first_hand(source, peer)).await?;
+    let original = source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::client::generated_history::OriginalHeader>(&format!(
+            "routed/original-header/{}",
+            ramflux_protocol::encode_base64url(&target.id)
+        ))?
+        .ok_or("verified original header missing")?;
+    let exact = super::authored_edit::encoded_edit(peer, &target, &original_item.exact_inner)?;
+    let envelope = peer.seal_inner_to(source, &exact)?;
+    let entry = crate::GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 4,
+        target_delivery_id: source.config.target_delivery_id.clone(),
+        envelope: envelope.clone(),
+    };
+    let edit_origin = {
+        let opened = source.client.open_routed(&entry, &source.config.device_id)?;
+        source
+            .client
+            .capture_retained_origin(&opened, &entry)?
+            .ok_or("verified Edit origin missing")?
+    };
+    let item = g::HistoryItem {
+        exact_inner: exact,
+        source_evidence: Some(edit_origin.evidence.clone()),
+        exact_original_identity: original.exact_identity,
+        original_metadata_evidence: Some(original.evidence),
+        tombstone: None,
+    };
+    source
+        .client
+        .verify_generated_edited_history_item(&item)
+        .map_err(|error| format!("verify independent Edit evidence: {error}"))?;
+    source.receive(envelope, 4).await?;
+    Ok((target, item))
 }

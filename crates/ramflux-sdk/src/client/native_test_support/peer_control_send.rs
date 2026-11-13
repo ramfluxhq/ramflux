@@ -282,3 +282,68 @@ async fn native_guardian_accept_capture_keeps_colliding_owner_invite_ids_indepen
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_guardian_invites_refuses_generation_zero_without_expiry_writes() -> TestResult {
+    super::watchdog::within(pending_guardian_invites_expiry_body()).await?
+}
+
+async fn pending_guardian_invites_expiry_body() -> TestResult {
+    let owner = Fixture::new("pending-invite-owner").await?;
+    let mut guardian = Fixture::new("pending-invite-guardian").await?;
+    let expires_at;
+    {
+        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
+            local.client.persist_fetched_identity_directory(&remote.manifest)?;
+            local.client.establish_friend_link(
+                "pending-invite-link",
+                &owner.client.own_account_anchor()?,
+                &guardian.client.own_account_anchor()?,
+            )?;
+        }
+        let invitation = invite(&owner, &guardian)?;
+        expires_at = invitation.expires_at;
+        let mut outgoing = engine(&owner, &guardian, false)?;
+        let delivered = Box::pin(owner.client.send_guardian_invite_via_gateway(
+            &mut outgoing,
+            message(&owner, &guardian)?,
+            &invitation,
+        ))
+        .await?;
+        guardian.receive(delivered.envelope, 1).await?;
+        assert_eq!(
+            guardian.client.pending_guardian_invites()?.len(),
+            1,
+            "a genuine authenticated invitation must be pending before expiry"
+        );
+    }
+    let _clock = crate::time::FixedClock::set(expires_at.checked_add(1).ok_or("expiry overflow")?);
+    let before = super::generation_zero_tests::actors(&guardian.client)?;
+    super::generation_zero_tests::dormant(guardian.client.pending_guardian_invites());
+    assert!(
+        super::generation_zero_tests::actors(&guardian.client)? == before,
+        "generation-zero expiry lookup must preserve pending shares and all actor bytes"
+    );
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    assert!(
+        guardian.client.pending_guardian_invites()?.is_empty(),
+        "active-profile lookup must still erase expired invitations"
+    );
+    let retained: Vec<_> = before
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with("recovery/guardian-invite/"))
+        .collect();
+    assert!(
+        super::generation_zero_tests::actors(&guardian.client)? == retained,
+        "active expiry cleanup must remove only the expired pending invitation"
+    );
+    assert!(
+        guardian
+            .client
+            .guardian_recovery_shares_for_owner(&owner.manifest.principal_id)?
+            .is_empty(),
+        "expiry cleanup must not accept the pending share"
+    );
+    Ok(())
+}

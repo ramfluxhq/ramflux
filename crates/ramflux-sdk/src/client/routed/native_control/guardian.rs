@@ -308,8 +308,9 @@ impl RamfluxClient {
     /// Verified invites waiting for the local user's decision, in key order. An invite past its
     /// lifetime is erased here together with the share it carries.
     /// # Errors
-    /// Returns a storage error when the account database cannot be read or written.
+    /// Refuses an inactive profile, or returns a storage error when the database cannot be accessed.
     pub fn pending_guardian_invites(&self) -> Result<Vec<SdkPendingGuardianInvite>, SdkError> {
+        crate::client::target_selection::require_schema_v1()?;
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         let mut invites = Vec::new();
