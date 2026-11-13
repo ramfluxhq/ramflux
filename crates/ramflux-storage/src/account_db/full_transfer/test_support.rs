@@ -56,3 +56,15 @@ impl crate::AccountDb {
         Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2)", rusqlite::params![parent,child], |row| row.get(0))?)
     }
 }
+
+#[cfg(test)]
+pub(super) fn owned_source_test_db(
+    name: &str,
+) -> Result<(tempfile::TempDir, AccountDb), StorageError> {
+    let root = tempfile::Builder::new().prefix(&format!("ramflux-storage-{name}-")).tempdir()?;
+    let index = crate::AccountIndex::open(root.path())?;
+    index.create_account("acct", "principal")?;
+    let key = crate::AccountDbKey::derive("acct", b"storage-test-secret");
+    let db = AccountDb::open(&index, "acct", &key)?;
+    Ok((root, db))
+}

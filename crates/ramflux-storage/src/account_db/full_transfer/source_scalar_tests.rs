@@ -24,7 +24,9 @@ const FAMILY: &str = "sql/object_identity_replacement";
 
 #[test]
 fn pairing_full_fixed_source_spool_uses_immutable_cut_and_encoded_key_order() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-source-scalar-order")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-scalar-order",
+    )?;
     let mut expected = Vec::new();
     // Find differing SQL/text and base64-framed-key orders; never assume they agree.
     for value in u8::MIN..=u8::MAX {
@@ -43,7 +45,7 @@ fn pairing_full_fixed_source_spool_uses_immutable_cut_and_encoded_key_order() ->
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
     let snapshot_id = &manifest.manifest.snapshot_id;
-    let private = root.join("scalar-cut.db");
+    let private = root.path().join("scalar-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -71,7 +73,9 @@ fn pairing_full_fixed_source_spool_uses_immutable_cut_and_encoded_key_order() ->
 
 #[test]
 fn pairing_full_fixed_source_spool_rolls_back_invalid_family_without_ready_counts() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-source-scalar-rollback")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-scalar-rollback",
+    )?;
     let valid = ramflux_protocol::encode_base64url([0; 32]);
     let mut invalid = valid.clone().into_bytes();
     invalid[42] = b'B'; // Same physical TEXT width, invalid canonical base64 tail bits.
@@ -83,7 +87,7 @@ fn pairing_full_fixed_source_spool_rolls_back_invalid_family_without_ready_count
     )?;
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("invalid-scalar-cut.db");
+    let private = root.path().join("invalid-scalar-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -123,7 +127,9 @@ impl std::io::Write for ChangeGeneration {
 #[test]
 fn pairing_full_fixed_source_spool_rechecks_generation_before_each_output_row() -> TestResult {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let (root, db) = crate::tests::test_db("full-source-generation-guard")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-generation-guard",
+    )?;
     for value in [1, 2] {
         db.connection.execute(
             "INSERT INTO object_identity_replacement VALUES(?1)",
@@ -132,7 +138,7 @@ fn pairing_full_fixed_source_spool_rechecks_generation_before_each_output_row() 
     }
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("generation-guard-cut.db");
+    let private = root.path().join("generation-guard-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -156,7 +162,9 @@ fn pairing_full_fixed_source_spool_rechecks_generation_before_each_output_row() 
 
 #[test]
 fn pairing_full_fixed_source_spool_encodes_lookup_and_dependency_families() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-source-erasure-links")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-erasure-links",
+    )?;
     let lookup = ramflux_crypto::object_erasure_lookup("root", "wire");
     let commitment = ramflux_crypto::object_erasure_commitment("root", "wire", "manifest");
     db.connection.execute(
@@ -169,7 +177,7 @@ fn pairing_full_fixed_source_spool_encodes_lookup_and_dependency_families() -> T
     )?;
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("erasure-links-cut.db");
+    let private = root.path().join("erasure-links-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;

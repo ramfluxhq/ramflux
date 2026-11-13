@@ -11,6 +11,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+mod bounded;
+mod secrets;
 
 struct ShortSink(Sink);
 impl std::io::Write for ShortSink {
@@ -24,7 +26,9 @@ impl std::io::Write for ShortSink {
 
 #[test]
 fn pairing_full_base_source_fixed_owner_fixture_counts_order_and_root() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-base-source-encoding")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-base-source-encoding",
+    )?;
     // Real initialized AccountDb; MAC and local metadata remain present. This checks
     // implemented-owner composition, not unknown actor/union/SAS acceptance.
     let lookup = ramflux_crypto::object_erasure_lookup("root", "wire");
@@ -61,7 +65,7 @@ fn pairing_full_base_source_fixed_owner_fixture_counts_order_and_root() -> TestR
     })?;
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("complete-base-cut.db");
+    let private = root.path().join("complete-base-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -122,7 +126,9 @@ impl std::io::Write for Observed {
 }
 #[test]
 fn pairing_full_base_source_unknown_owner_refuses_before_spool_or_output() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-base-source-unknown-owner")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-base-source-unknown-owner",
+    )?;
     db.connection.execute_batch("DELETE FROM runtime_actor_state;")?;
     db.connection.execute(
         "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('identity/safety-verification-migration/v1/unknown',?1)",
@@ -130,7 +136,7 @@ fn pairing_full_base_source_unknown_owner_refuses_before_spool_or_output() -> Te
     )?;
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("unknown-base-cut.db");
+    let private = root.path().join("unknown-base-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -154,10 +160,12 @@ fn pairing_full_base_source_unknown_owner_refuses_before_spool_or_output() -> Te
 
 #[test]
 fn pairing_full_base_source_startup_local_marker_is_rebuilt_not_exported() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-base-source-startup-marker")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-base-source-startup-marker",
+    )?;
     let (mut record, manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
-    let private = root.join("startup-owner-cut.db");
+    let private = root.path().join("startup-owner-cut.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;

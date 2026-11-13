@@ -124,8 +124,10 @@ mod tests {
     #[test]
     fn pairing_full_interrupted_source_copy_reclaims_only_unkeyed_owned_aliases()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = crate::tests::temp_root("full-source-copy-reclaim");
-        std::fs::create_dir_all(&root)?;
+        let owner = tempfile::Builder::new()
+            .prefix("ramflux-storage-full-source-copy-reclaim-")
+            .tempdir()?;
+        let root = owner.path();
         let metadata = Connection::open(root.join("metadata.db"))?;
         metadata.execute_batch("CREATE TABLE source_cut(snapshot_id TEXT PRIMARY KEY)")?;
         let h = ramflux_protocol::encode_base64url([5; 32]);
@@ -135,18 +137,18 @@ mod tests {
         std::fs::hard_link(&pending, &alias)?;
         let keep = root.join("stage.key");
         std::fs::write(&keep, b"retained wrapped stage key")?;
-        reclaim(&root, &metadata)?;
+        reclaim(root, &metadata)?;
         assert!(!pending.exists() && !alias.exists(), "unkeyed interrupted adoption survived");
         assert!(keep.exists());
         let orphan =
             root.join(format!("source-2-{}.db", ramflux_protocol::encode_base64url([6; 32])));
         std::fs::write(&orphan, b"unkeyed alias after pending unlink")?;
-        reclaim(&root, &metadata)?;
+        reclaim(root, &metadata)?;
         assert!(!orphan.exists(), "unkeyed alias without its pending name survived");
         std::fs::write(&pending, b"keyed encrypted copy")?;
         std::fs::hard_link(&pending, &alias)?;
         metadata.execute("INSERT INTO source_cut VALUES(?1)", rusqlite::params![h])?;
-        reclaim(&root, &metadata)?;
+        reclaim(root, &metadata)?;
         assert!(
             !pending.exists() && alias.exists(),
             "reclamation removed a keyed immutable source cut"

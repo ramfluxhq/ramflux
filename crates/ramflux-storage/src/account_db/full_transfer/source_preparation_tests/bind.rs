@@ -82,7 +82,8 @@ fn operands(
 }
 #[test]
 fn pairing_full_source_binding_preserves_data_and_seeds_exact_resume_and_floor() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-source-bind")?;
+    let (_root, db) =
+        crate::account_db::full_transfer::test_support::owned_source_test_db("full-source-bind")?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot = ramflux_protocol::encode_base64url([41; 32]);
     owner.capture_base_cut(&snapshot)?;
@@ -119,7 +120,9 @@ fn pairing_full_source_binding_preserves_data_and_seeds_exact_resume_and_floor()
 #[test]
 fn pairing_full_source_binding_refuses_a_signed_root_not_matching_actual_preparation() -> TestResult
 {
-    let (_root, db) = crate::tests::test_db("full-source-bind-wrong-root")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-bind-wrong-root",
+    )?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot = ramflux_protocol::encode_base64url([42; 32]);
     owner.capture_base_cut(&snapshot)?;
@@ -174,7 +177,9 @@ fn pairing_full_source_wire_chunks_survive_binding_and_failed_reencode() -> Test
             Ok(())
         }
     }
-    let (_root, db) = crate::tests::test_db("full-source-wire-bind")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-wire-bind",
+    )?;
     db.connection.call(|db| {
         let tx = db.transaction()?;
         for index in 0..2048 {

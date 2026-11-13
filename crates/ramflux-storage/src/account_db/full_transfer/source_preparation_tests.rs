@@ -14,7 +14,9 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn pairing_full_source_preparation_encodes_without_any_resume_or_approval_record() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-source-preparation-no-trust")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-no-trust",
+    )?;
     let mut preparation = db.prepare_full_transfer_source()?;
     let id = preparation.preparation_id().to_owned();
     let snapshot_id = ramflux_protocol::encode_base64url([31; 32]);
@@ -48,10 +50,12 @@ impl Write for CancelOnWrite {
 }
 #[test]
 fn pairing_full_source_preparation_cancel_is_one_way_and_stops_before_next_row() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-source-preparation-cancel")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-cancel",
+    )?;
     let mut preparation = db.prepare_full_transfer_source()?;
     let snapshot_id = ramflux_protocol::encode_base64url([32; 32]);
-    let private = root.join("cancelled-pre-bootstrap.db");
+    let private = root.path().join("cancelled-pre-bootstrap.db");
     let snapshot = db
         .pin_full_transfer_cut()?
         .write_private_snapshot(&private, Arc::new(AtomicBool::new(false)))?;
@@ -75,7 +79,9 @@ fn pairing_full_source_preparation_cancel_is_one_way_and_stops_before_next_row()
 
 #[test]
 fn pairing_full_source_preparation_checkpoint_releases_owner_and_reopens_data_only() -> TestResult {
-    let (root, db) = crate::tests::test_db("full-source-preparation-checkpoint")?;
+    let (root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-checkpoint",
+    )?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot_id = ramflux_protocol::encode_base64url([33; 32]);
     owner.capture_base_cut(&snapshot_id)?;
@@ -86,7 +92,7 @@ fn pairing_full_source_preparation_checkpoint_releases_owner_and_reopens_data_on
     assert_eq!(ready.encoding().chunks_root, expected_root);
     assert_eq!(ready.snapshot_id(), snapshot_id);
     drop(db); // No borrowed account/key/connection is retained by the data-only checkpoint.
-    let index = crate::AccountIndex::open(&root)?;
+    let index = crate::AccountIndex::open(root.path())?;
     let db = crate::AccountDb::open(
         &index,
         "acct",
@@ -105,14 +111,19 @@ fn pairing_full_source_preparation_checkpoint_releases_owner_and_reopens_data_on
         0
     );
     drop(reopened);
-    let (_foreign_root, foreign) = crate::tests::test_db("full-source-preparation-foreign")?;
+    let (_foreign_root, foreign) =
+        crate::account_db::full_transfer::test_support::owned_source_test_db(
+            "full-source-preparation-foreign",
+        )?;
     assert!(foreign.open_full_source_preparation(&ready).is_err());
     Ok(())
 }
 
 #[test]
 fn pairing_full_source_preparation_checkpoint_cannot_revive_after_cancel() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-source-preparation-cancel-ready")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-cancel-ready",
+    )?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot_id = ramflux_protocol::encode_base64url([34; 32]);
     owner.capture_base_cut(&snapshot_id)?;
@@ -129,7 +140,9 @@ fn pairing_full_source_preparation_checkpoint_cannot_revive_after_cancel() -> Te
 
 #[test]
 fn pairing_full_source_preparation_checkpoint_refuses_changed_ready_digest() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-source-preparation-ready-digest")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-ready-digest",
+    )?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot_id = ramflux_protocol::encode_base64url([35; 32]);
     owner.capture_base_cut(&snapshot_id)?;
@@ -150,7 +163,9 @@ fn pairing_full_source_preparation_checkpoint_refuses_changed_ready_digest() -> 
 
 #[test]
 fn pairing_full_source_preparation_rejects_live_schema_change_after_cut() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-source-preparation-live-schema")?;
+    let (_root, db) = crate::account_db::full_transfer::test_support::owned_source_test_db(
+        "full-source-preparation-live-schema",
+    )?;
     let mut owner = db.prepare_full_transfer_source()?;
     let snapshot_id = ramflux_protocol::encode_base64url([36; 32]);
     owner.capture_base_cut(&snapshot_id)?;
