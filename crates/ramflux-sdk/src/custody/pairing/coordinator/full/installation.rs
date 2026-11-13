@@ -122,7 +122,7 @@ impl PairingActor {
             self.full_runtime.clone().run_blocking(move || preparation.prepare()).await?;
         Ok(prepared)
     }
-    async fn finish_linked_generation(
+    pub(super) async fn finish_linked_generation(
         &self,
         committed: crate::custody::pairing::full_generation::owner::FullGenerationCommitted,
         authority: CustodyAuthority,
@@ -143,7 +143,7 @@ impl PairingActor {
                     &native,
                 )?;
                 let mut slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-                if slot.is_some() {
+                if slot.as_ref().is_some_and(|prior| prior.full_local_unlock_guard().is_ok()) {
                     return Err(SdkError::PairingCode("WrongContext"));
                 }
                 *slot = Some(selected);
@@ -171,6 +171,11 @@ impl PairingActor {
                         && full.publication.destination_installed()
                 })
         });
+        let installed = installed
+            || self
+                .recovered_installation
+                .as_ref()
+                .is_some_and(|recovered| recovered.install.recipient_mode == "existing");
         if !installed {
             return Ok(false);
         }

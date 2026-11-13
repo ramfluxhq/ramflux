@@ -88,6 +88,38 @@ fn select_generation_case(
     ),
     Box<dyn std::error::Error>,
 > {
+    let (prepared, authority) = prepare_generation_case(rig, operation, published)?;
+    let install = prepared.install().clone();
+    let committed = {
+        let slot = rig.participant_b.db.lock().map_err(|_| "B original owner")?;
+        let db = slot.as_ref().ok_or("B writer")?;
+        let stage = db.open_full_transfer_stage(
+            operation,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            rig.now,
+        )?;
+        prepared.select(
+            &Installation {
+                root: &rig.participant_b.root,
+                db,
+                vault: rig.participant_b.vault.as_ref(),
+                now: rig.now,
+            },
+            &stage,
+            &authority,
+        )?
+    };
+    Ok((committed, install, authority))
+}
+
+fn prepare_generation_case(
+    rig: &Rig,
+    operation: &str,
+    published: Published,
+) -> Result<
+    (crate::custody::pairing::full_generation::owner::FullGenerationPrepared, CustodyAuthority),
+    Box<dyn std::error::Error>,
+> {
     refuses_before_j6_or_with_wrong_primary(rig, &published, false)?;
     let pinned = pin_published_target(rig, &published)?;
     refuses_before_j6_or_with_wrong_primary(rig, &published, true)?;
@@ -115,27 +147,7 @@ fn select_generation_case(
         )?
     };
     let prepared = preparation.prepare()?;
-    let install = prepared.install().clone();
-    let committed = {
-        let slot = rig.participant_b.db.lock().map_err(|_| "B original owner")?;
-        let db = slot.as_ref().ok_or("B writer")?;
-        let stage = db.open_full_transfer_stage(
-            operation,
-            ramflux_crypto::custody::pairing::PairingRole::Responder,
-            rig.now,
-        )?;
-        prepared.select(
-            &Installation {
-                root: &rig.participant_b.root,
-                db,
-                vault: rig.participant_b.vault.as_ref(),
-                now: rig.now,
-            },
-            &stage,
-            &published.authority,
-        )?
-    };
-    Ok((committed, install, published.authority))
+    Ok((prepared, published.authority))
 }
 
 async fn prepare_recipient_candidate(

@@ -49,32 +49,16 @@ impl PairingActor {
         if let Some(recovered) = &self.recovered_installation {
             return recovered.result(request).map(Some);
         }
-        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let pending = self.pending_selected_install(request).await?;
-        let Some((install, query)) = pending else { return Ok(None) };
+        let pending = self.pending_install(request).await?;
+        let Some((install, query, selected)) = pending else { return Ok(None) };
         let observation = self.full_runtime.clone().run_blocking(move || query.observe()).await?;
-        let native = observation.authority().clone();
-        let local = participant.clone();
-        let saved = install.clone();
-        let (preparation, cancel, expires) = self
-            .installation_loan(move |db| {
-                observation.acknowledge(db)?;
-                let now = crate::custody::network_now()?;
-                let verified = ramflux_crypto::custody::verify_publication(&native, now)?;
-                let stage =
-                    db.open_full_recipient_install_stage(&saved.operation_id, &verified, now)?;
-                let preparation = FullGenerationCommitted::pin_recovery(
-                    &Installation { root: &local.root, db, vault: local.vault.as_ref(), now },
-                    &stage,
-                    saved,
-                    &native,
-                )?;
-                Ok((preparation, stage.io_cancel_handle(), stage.reference().lease_expires_at.0))
-            })
-            .await?;
-        self.full_runtime.register_stage(cancel.clone())?;
-        let prepared = self.full_runtime.clone().run_blocking(move || preparation.verify()).await?;
-        let authority = self.finish_recovered_install(install.clone(), prepared, cancel).await?;
+        let (install, authority, expires) = if selected {
+            let authority = observation.authority().clone();
+            let expires = self.recover_selected_install(install.clone(), observation).await?;
+            (install, authority, expires)
+        } else {
+            self.rebuild_unselected_install(install, observation).await?
+        };
         self.identity.is_primary = true;
         self.identity.local_ref = install.recipient_ref.clone();
         self.identity.base_record_hash =
@@ -105,11 +89,45 @@ impl PairingActor {
             .result(request)
             .map(Some)
     }
-    async fn pending_selected_install(
+    async fn recover_selected_install(
+        &self,
+        install: install_store::Install,
+        observation: crate::custody::pairing::FullRecipientNativeObservation,
+    ) -> Result<u64, SdkError> {
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let native = observation.authority().clone();
+        let local = participant.clone();
+        let saved = install.clone();
+        let (preparation, cancel, expires) = self
+            .installation_loan(move |db| {
+                observation.acknowledge(db)?;
+                let now = crate::custody::network_now()?;
+                let verified = ramflux_crypto::custody::verify_publication(&native, now)?;
+                let stage =
+                    db.open_full_recipient_install_stage(&saved.operation_id, &verified, now)?;
+                let preparation = FullGenerationCommitted::pin_recovery(
+                    &Installation { root: &local.root, db, vault: local.vault.as_ref(), now },
+                    &stage,
+                    saved,
+                    &native,
+                )?;
+                Ok((preparation, stage.io_cancel_handle(), stage.reference().lease_expires_at.0))
+            })
+            .await?;
+        self.full_runtime.register_stage(cancel.clone())?;
+        let prepared = self.full_runtime.clone().run_blocking(move || preparation.verify()).await?;
+        self.finish_recovered_install(install, prepared, cancel).await?;
+        Ok(expires)
+    }
+    async fn pending_install(
         &self,
         request: &StatusRequest,
     ) -> Result<
-        Option<(install_store::Install, crate::custody::pairing::FullRecipientPublicationQuery)>,
+        Option<(
+            install_store::Install,
+            crate::custody::pairing::FullRecipientPublicationQuery,
+            bool,
+        )>,
         SdkError,
     > {
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
@@ -136,20 +154,28 @@ impl PairingActor {
                     &owned.operation_id,
                 )?
                 .ok_or(SdkError::PairingCode("PublicationPending"))?;
-                let full = install
-                    .full_transfer
-                    .as_ref()
-                    .ok_or(SdkError::PairingCode("PublicationPending"))?;
                 let selected =
                     ramflux_storage::AccountIndex::open(&local.root)?.account(&local.account_id)?;
-                if selected.db_relative_path != full.db_relative_path
-                    || selected.object_dir_relative_path != full.object_relative_path
-                {
-                    return Err(SdkError::PairingCode("ResumeRequired"));
-                }
+                let selected = if let Some(full) = &install.full_transfer {
+                    if selected.db_relative_path == full.db_relative_path
+                        && selected.object_dir_relative_path == full.object_relative_path
+                    {
+                        true
+                    } else if selected.db_relative_path
+                        == full.expected_prior_generation.db_relative_path
+                        && selected.object_dir_relative_path
+                            == full.expected_prior_generation.object_relative_path
+                    {
+                        false
+                    } else {
+                        return Err(SdkError::PairingCode("PublicationPending"));
+                    }
+                } else {
+                    false
+                };
                 let query =
                     local.full_recipient_publication_query_with_db(db, &owned.operation_id)?;
-                Ok(Some((install, query)))
+                Ok(Some((install, query, selected)))
             })
             .await?;
         Ok(pending)

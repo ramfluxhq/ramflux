@@ -133,6 +133,68 @@ impl FullGenerationDirectory {
         retained.state = "vault_durable".into();
         crate::custody::pairing::install_store::write_pending(&self.root, &retained)
     }
+    /// Abandon only an exact positively unselected crash-left G1, preserving publication keys.
+    pub(crate) fn discard_crashed_unselected(
+        root: &Path,
+        install: &crate::custody::pairing::install_store::Install,
+    ) -> Result<crate::custody::pairing::install_store::Install, SdkError> {
+        install.validate()?;
+        let Some(full) = &install.full_transfer else { return Ok(install.clone()) };
+        if install.state != "adopt_prepared" {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        let root = std::fs::canonicalize(root)?;
+        let index = AccountIndex::open(&root)?;
+        let _writer = index.acquire_account_writer(&install.account_id)?;
+        let locks = GenerationLocks::for_root(&root)?;
+        let _lease =
+            locks.try_acquire(&install.account_id)?.ok_or(SdkError::PairingCode("Busy"))?;
+        let selected = index.account(&install.account_id)?;
+        let database = root.join(&full.db_relative_path);
+        let path = database.parent().ok_or(SdkError::PairingCode("PublicationPending"))?;
+        let nonce = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.strip_prefix("generation_"))
+            .ok_or(SdkError::PairingCode("PublicationPending"))?;
+        if selected.db_relative_path != full.expected_prior_generation.db_relative_path
+            || selected.object_dir_relative_path
+                != full.expected_prior_generation.object_relative_path
+            || selected.principal_commitment != install.account_anchor
+            || path.parent() != Some(root.join("accounts").join(&install.account_id).as_path())
+            || database.file_name().and_then(|value| value.to_str()) != Some("account.db")
+            || root.join(&full.object_relative_path) != path.join("objects")
+            || !ramflux_protocol::decode_base64url(nonce).is_ok_and(|bytes| bytes.len() == 32)
+            || crate::custody::pairing::install_store::read_pending(
+                &root,
+                &install.account_id,
+                &install.operation_id,
+            )?
+            .as_ref()
+                != Some(install)
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        // An absent unselected directory is also a valid pre-G1 crash outcome.
+        if path.try_exists()? && std::fs::canonicalize(path)? != path {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        let mut retained = install.clone();
+        retained.schema = "ramflux.pairing.Install.v2".into();
+        retained.version = 2;
+        retained.full_transfer = None;
+        retained.state = "vault_durable".into();
+        crate::custody::pairing::install_store::write_pending(&root, &retained)?;
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => std::fs::File::open(
+                path.parent().ok_or(SdkError::PairingCode("PublicationPending"))?,
+            )?
+            .sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(retained)
+    }
     pub(crate) fn finish_g3(&mut self) -> Result<(), SdkError> {
         self.guard.transferred = true;
         if super::reclamation::complete(&self.guard.path, &self.root, &self.index, &self.account)? {
