@@ -3304,6 +3304,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ramflux-client-model"
+version = "0.1.0"
+
+[[package]]
 name = "ramflux-core"
 version = "0.1.0"
 dependencies = [

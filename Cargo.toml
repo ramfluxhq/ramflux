@@ -23,6 +23,7 @@ default-members = [
 ]
 members = [
     "tools/message-schema",
+    "crates/ramflux-client-model",
     "crates/ramflux-core",
     "crates/ramflux-protocol",
     "crates/ramflux-crypto",
