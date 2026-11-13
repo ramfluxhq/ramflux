@@ -342,12 +342,8 @@ mod tests {
         accept as serve_local_bus_accept_loop, handle as handle_local_bus_connection,
     };
 
-    fn test_state() -> (tempfile::TempDir, Rc<crate::bus::supervisor::Supervisor>) {
-        let temp = tempfile::Builder::new()
-            .prefix("ramflux-sdk-bus-fanout-")
-            .tempdir()
-            .expect("test: create fanout directory");
-        let root = temp.path().to_path_buf();
+    fn test_state(root: &Path) -> Rc<crate::bus::supervisor::Supervisor> {
+        let root = root.to_path_buf();
         let config = LocalBusConfig::new(root.join("bus.sock"), &root);
         let initialize: crate::bus::actor::AccountInitializer = Box::new(move |index| {
             let mut client = RamfluxClient::new();
@@ -379,13 +375,12 @@ mod tests {
                 "principal_fanout_test".to_owned(),
             ))
         });
-        let supervisor = crate::bus::supervisor::Supervisor::from_initializers(
+        crate::bus::supervisor::Supervisor::from_initializers(
             &config,
             vec![("acct".to_owned(), initialize)],
             Some("acct".to_owned()),
         )
-        .expect("start test supervisor");
-        (temp, supervisor)
+        .expect("start test supervisor")
     }
 
     fn request(request_id: &str, method: &str, body: serde_json::Value) -> LocalBusFrame {
@@ -410,9 +405,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_bus_fanout_pushes_mcp_approval_to_other_connection() {
+        // The directory outlives the LocalSet, including its actor tasks on failure.
+        let temp = tempfile::Builder::new()
+            .prefix("ramflux-sdk-bus-fanout-")
+            .tempdir()
+            .expect("test: create fanout directory");
         LocalSet::new()
             .run_until(async {
-                let (_temp, state) = test_state();
+                let state = test_state(temp.path());
                 let (mut client_a, server_a) = UnixStream::pair().expect("pair a");
                 let (mut client_b, server_b) = UnixStream::pair().expect("pair b");
                 let task_a = tokio::task::spawn_local(handle_local_bus_connection(
@@ -508,7 +508,7 @@ mod tests {
         let peer = listener.owner().expect("socket owner");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let local_set = LocalSet::new();
-        let (_state_temp, state) = test_state();
+        let state = test_state(&temp_root.join("data"));
         let server =
             local_set.run_until(serve_local_bus_accept_loop(listener, peer, state, shutdown_rx));
         let client_flow = async {
