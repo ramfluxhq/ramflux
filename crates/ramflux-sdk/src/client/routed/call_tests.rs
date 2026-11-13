@@ -393,6 +393,7 @@ async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
     let invite = signed(&alice, first.pending[0].clone())?;
     let packet = entry(&alice, &bob, &invite, "call-ack-retry", "direct-thread")?;
     apply(&mut bob, &packet).await?;
+    let envelope_id = packet.envelope.envelope_id.as_str();
 
     let key = bob.client.inbox_admission_key(&packet)?;
     let retained = crate::bus::sync_driver::retained_inbox_entry(&packet, true);
@@ -429,13 +430,16 @@ async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
             .lock()
             .map_err(|_| invalid("mutex"))?
             .iter()
-            .any(|v| v["frame_type"] == "ack" && v["ack"]["envelope_id"] == "call-ack-retry")
+            .any(|v| v["frame_type"] == "ack"
+                && v["ack"]["envelope_id"].as_str() == Some(envelope_id)),
+        "committed call retry was not ACKed under its immutable envelope identity"
     );
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
     let events = account.client.account_db()?.journal_after(0, 128)?;
     assert!(
         !events.iter().any(|event| {
-            event.topic == "message.undeliverable" && event.body["envelope_id"] == "call-ack-retry"
+            event.topic == "message.undeliverable"
+                && event.body["envelope_id"].as_str() == Some(envelope_id)
         }),
         "{}",
         serde_json::to_string(&events)?
