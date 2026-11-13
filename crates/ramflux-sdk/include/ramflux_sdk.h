@@ -240,10 +240,27 @@ int32_t ramflux_v2_event_poll(uint64_t handle,
 void ramflux_v2_buffer_free(struct RamfluxBuffer *buffer);
 
 /*
- Clear the latched event gap after the host re-reads its projections.
+ Clear the latched event gap only for the last successful subscription generation.
+ Pass 0 only before the first subscription. Stale generations return InvalidArgument=1.
  Reopen bus.subscribe using the snapshot's journal cursor after this call.
  */
-int32_t ramflux_v2_event_reset(uint64_t handle);
+int32_t ramflux_v2_event_reset(uint64_t handle, uint64_t subscription_generation);
+
+/*
+ Project shared conversation rows, bounded pages and unread/attention totals without opening a client.
+ Inputs are authoritative host snapshot facts; output buffers use `ramflux_v2_buffer_free`.
+ */
+int32_t ramflux_v2_conversation_project(const uint8_t *input_json,
+                                        size_t len,
+                                        struct RamfluxBuffer **out);
+
+/*
+ Present an authoritative receipt with the shared model; incoming receipts return JSON null.
+ This never upgrades acceptance to delivery/read or authorizes an uncertain retry.
+ */
+int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
+                                   size_t len,
+                                   struct RamfluxBuffer **out);
 
 #ifdef __cplusplus
 }  // extern "C"

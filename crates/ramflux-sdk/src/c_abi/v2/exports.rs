@@ -427,6 +427,15 @@ pub extern "C" fn ramflux_v2_event_poll(handle: u64, out: *mut *mut RamfluxBuffe
         let client = client(handle)?;
         let mut events = client.shared.events.lock().map_err(|_| internal())?;
         if events.resync {
+            super::super::write_json_buffer(
+                out,
+                &json!({
+                    "bus_protocol":"ramflux.local_bus.v1","frame_id":"c_abi_resync",
+                    "kind":"event","request_id":"","sdk_api":"bus","method":"stream.lagged",
+                    "account_id":events.account_id,"body":{"resync_required":true},
+                    "subscription_generation":events.generation.to_string(),
+                }),
+            )?;
             status = RamfluxV2Status::ResyncRequired as i32;
         } else if let Some(bytes) = events.queue.pop_front() {
             events.bytes = events.bytes.saturating_sub(bytes.len());
@@ -475,6 +484,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         "ObjectOwnershipUnverified" => E::ObjectOwnershipUnverified as i32,
         "CustodyForkFenced" => E::CustodyForkFenced as i32,
         "SchemaResetRequired" => E::SchemaResetRequired as i32,
+        "resync_required" => RamfluxV2Status::ResyncRequired as i32,
         _ => E::Internal as i32,
     }
 }
@@ -496,17 +506,59 @@ pub extern "C" fn ramflux_v2_buffer_free(buffer: *mut RamfluxBuffer) {
     }
 }
 
-/// Clear the latched event gap after the host re-reads its projections.
+/// Clear the latched event gap only for the last successful subscription generation.
+/// Pass 0 only before the first subscription. Stale generations return InvalidArgument=1.
 /// Reopen bus.subscribe using the snapshot's journal cursor after this call.
 #[unsafe(no_mangle)]
 #[must_use]
-pub extern "C" fn ramflux_v2_event_reset(handle: u64) -> i32 {
+pub extern "C" fn ramflux_v2_event_reset(handle: u64, subscription_generation: u64) -> i32 {
     call(|| {
         let client = client(handle)?;
         let mut events = client.shared.events.lock().map_err(|_| internal())?;
+        if events.generation != subscription_generation {
+            return Err(invalid("stale subscription generation"));
+        }
         events.queue.clear();
         events.bytes = 0;
         events.resync = false;
         Ok(())
+    })
+}
+
+/// Project shared conversation rows, bounded pages and unread/attention totals without opening a client.
+/// Inputs are authoritative host snapshot facts; output buffers use `ramflux_v2_buffer_free`.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_conversation_project(
+    input_json: *const u8,
+    len: usize,
+    out: *mut *mut RamfluxBuffer,
+) -> i32 {
+    call(|| {
+        super::super::clear_out_ptr(out)?;
+        let request: super::projection::Directory = input(input_json, len)?;
+        let mut value = super::projection::directory(&request)?;
+        let result = super::super::write_json_buffer(out, &value);
+        crate::bus::inprocess::erase_value(&mut value);
+        result
+    })
+}
+
+/// Present an authoritative receipt with the shared model; incoming receipts return JSON null.
+/// This never upgrades acceptance to delivery/read or authorizes an uncertain retry.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_receipt_present(
+    input_json: *const u8,
+    len: usize,
+    out: *mut *mut RamfluxBuffer,
+) -> i32 {
+    call(|| {
+        super::super::clear_out_ptr(out)?;
+        let request: super::projection::ReceiptRequest = input(input_json, len)?;
+        let mut value = super::projection::present(&request)?;
+        let result = super::super::write_json_buffer(out, &value);
+        crate::bus::inprocess::erase_value(&mut value);
+        result
     })
 }

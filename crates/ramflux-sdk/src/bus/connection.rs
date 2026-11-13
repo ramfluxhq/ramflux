@@ -105,21 +105,12 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
-    let (mut reader, writer) = stream.into_halves();
+    let generations = stream.subscription_generations();
+    let (reader, writer) = stream.into_halves();
     let (incoming, mut frames) = mpsc::channel(64);
     let (disconnect, mut disconnected) = watch::channel(false);
-    let reader_task = tokio::task::spawn_local(async move {
-        loop {
-            let frame =
-                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
-            let failed = frame.is_err();
-            if incoming.try_send(frame).is_err() || failed {
-                break;
-            }
-        }
-        let _ = disconnect.send(true);
-    });
-    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let reader_task = read_requests(reader, incoming, disconnect);
+    let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
     let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
     let writer_task = tokio::task::spawn_local(write_responses(
         writer,
@@ -181,7 +172,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     continue;
                 }
                 let context = LocalBusConnectionState {
-                    connection_id: id, outbound: outbound.clone(), topics: connection.topics.clone(),
+                    connection_id: id, outbound: connection.outbound.for_account(request.account_id.as_deref()), topics: connection.topics.clone(),
                     attended_account_id: connection.attended_account_id.clone(), pending_events: Vec::new(),
                 };
                 requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
@@ -202,6 +193,24 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+fn read_requests<R: AsyncRead + Unpin + 'static>(
+    mut reader: R,
+    incoming: mpsc::Sender<Result<super::custody_setup::Incoming, SdkError>>,
+    disconnect: watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        loop {
+            let frame =
+                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
+            let failed = frame.is_err();
+            if incoming.try_send(frame).is_err() || failed {
+                break;
+            }
+        }
+        let _ = disconnect.send(true);
+    })
 }
 
 async fn custody_response(
@@ -233,7 +242,7 @@ fn subscription_method(method: &str) -> bool {
         || (cfg!(feature = "c-abi") && method == "subscription.close")
 }
 
-async fn configure_subscription(
+pub(super) async fn configure_subscription(
     supervisor: &Supervisor,
     connection: &mut LocalBusConnectionState,
     request: &LocalBusFrame,
@@ -250,6 +259,7 @@ async fn configure_subscription(
             .map_err(|_| closed())?;
         return Ok(());
     }
+    connection.outbound = connection.outbound.subscribe(request.account_id.clone())?;
     if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         connection.attended_account_id.clone_from(&request.account_id);
     }
@@ -299,7 +309,7 @@ impl Drop for WriterStopped {
 
 async fn write_responses<W: AsyncWrite + Unpin>(
     mut writer: W,
-    mut receiver: mpsc::Receiver<LocalBusFrame>,
+    mut receiver: super::outbound::Receiver,
     mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
     supervisor: Rc<Supervisor>,
     id: u64,
@@ -317,9 +327,9 @@ async fn write_responses<W: AsyncWrite + Unpin>(
         let Some(frame) = frame else {
             break;
         };
-        write_local_bus_frame(&mut writer, &frame).await?;
-        if frame.method == "daemon.stop" {
-            supervisor.finish_stop_response(id, &frame.request_id);
+        super::outbound::write(&mut writer, &frame).await?;
+        if frame.frame.method == "daemon.stop" {
+            supervisor.finish_stop_response(id, &frame.frame.request_id);
         }
     }
     Ok(())

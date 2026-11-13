@@ -40,6 +40,8 @@ pub(super) struct Events {
     pub queue: VecDeque<Zeroizing<Vec<u8>>>,
     pub bytes: usize,
     pub resync: bool,
+    pub generation: u64,
+    pub account_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -80,7 +82,17 @@ impl Shared {
         );
     }
 
-    pub fn push_event(&self, bytes: Vec<u8>) {
+    pub fn activate_generation(&self, generation: u64, account_id: Option<String>) {
+        if let Ok(mut events) = self.events.lock() {
+            events.queue.clear();
+            events.bytes = 0;
+            events.resync = false;
+            events.generation = generation;
+            events.account_id = account_id;
+        }
+    }
+
+    pub fn push_event(&self, bytes: Vec<u8>, generation: u64) {
         let bytes = Zeroizing::new(bytes);
         let Ok(mut events) = self.events.lock() else { return };
         if events.resync {
@@ -89,6 +101,9 @@ impl Shared {
         if events.queue.len() >= MAX_EVENTS
             || bytes.len() > MAX_EVENT_BYTES.saturating_sub(events.bytes)
         {
+            if generation != events.generation {
+                return;
+            }
             events.queue.clear();
             events.bytes = 0;
             events.resync = true;

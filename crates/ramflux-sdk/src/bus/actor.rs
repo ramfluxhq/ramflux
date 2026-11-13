@@ -41,7 +41,7 @@ pub(super) struct AccountCommand {
     pub topics: BTreeSet<String>,
     pub attended: bool,
     pub nodes: Option<crate::node::NodeStore>,
-    pub outbound: mpsc::Sender<LocalBusFrame>,
+    pub outbound: super::outbound::LocalBusOutbound,
     pub reply: Option<oneshot::Sender<Result<ActorResponse, SdkError>>>,
 }
 
@@ -261,7 +261,7 @@ impl AccountActor {
                 topics: BTreeSet::new(),
                 attended: false,
                 nodes: None,
-                outbound,
+                outbound: outbound.into(),
                 reply: None,
             })
             .map_err(|_| stopped())?;
@@ -290,7 +290,7 @@ impl AccountActor {
                 topics: BTreeSet::new(),
                 attended: false,
                 nodes: None,
-                outbound,
+                outbound: outbound.into(),
                 reply: None,
             },
             lifecycle,

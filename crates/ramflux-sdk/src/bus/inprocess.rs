@@ -24,6 +24,10 @@ impl BusStream for MemoryStream {
         tokio::io::split(self.0)
     }
 
+    fn subscription_generations(&self) -> bool {
+        true
+    }
+
     fn matches_peer(&self, _expected: PeerCred) -> Result<(), SdkError> {
         // This stream can only be minted inside the host process; it has no listener.
         Ok(())

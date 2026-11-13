@@ -311,6 +311,10 @@ async fn read_responses(
         let legacy = frame.get("protocol").and_then(serde_json::Value::as_str)
             == Some("ramflux.local_bus.custody.v1");
         let kind = frame.get("kind").and_then(serde_json::Value::as_str);
+        let generation = frame
+            .get("subscription_generation")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok());
         let mut stop_requested = false;
         if legacy || matches!(kind, Some("response" | "error")) {
             if let Some(id) = frame
@@ -336,10 +340,36 @@ async fn read_responses(
                 stop_requested = code == 0
                     && frame.get("method").and_then(serde_json::Value::as_str)
                         == Some("daemon.stop");
-                shared.complete(id, serde_json::json!({"code":code,"response":frame}));
+                if code == 0
+                    && matches!(
+                        frame.get("method").and_then(serde_json::Value::as_str),
+                        Some("subscription.open" | "bus.subscribe")
+                    )
+                {
+                    let generation =
+                        generation.filter(|generation| *generation != 0).ok_or_else(|| {
+                            SdkError::LocalBus("subscription reply missing generation".into())
+                        })?;
+                    shared.activate_generation(
+                        generation,
+                        frame
+                            .get("account_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+                let completed = if let Some(generation) = generation {
+                    serde_json::json!({"code":code,"response":frame,"subscription_generation":generation.to_string()})
+                } else {
+                    serde_json::json!({"code":code,"response":frame})
+                };
+                shared.complete(id, completed);
             }
         } else {
-            shared.push_event(bytes.to_vec());
+            let generation = generation.ok_or_else(|| {
+                SdkError::LocalBus("event missing subscription generation".into())
+            })?;
+            shared.push_event(bytes.to_vec(), generation);
         }
         crate::bus::inprocess::erase_value(&mut frame);
         if stop_requested {

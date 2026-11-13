@@ -203,7 +203,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
             topics: BTreeSet::new(),
             attended: true,
             nodes: None,
-            outbound,
+            outbound: outbound.into(),
             reply: None,
         };
         let response =
@@ -236,7 +236,7 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         topics: BTreeSet::new(),
         attended: true,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     };
     assert!(

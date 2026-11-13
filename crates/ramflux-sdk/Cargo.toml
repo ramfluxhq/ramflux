@@ -19,7 +19,7 @@ test-support = []
 itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
-c-abi = []
+c-abi = ["dep:ramflux-client-model"]
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]
@@ -46,6 +46,7 @@ object-ipc-crash-seam = []
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
+ramflux-client-model = { path = "../ramflux-client-model", optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist

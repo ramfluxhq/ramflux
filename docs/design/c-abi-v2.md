@@ -142,9 +142,11 @@ still has unknown business effects.
 
 ## Events and errors
 
-The cbindgen header declares `int32_t ramflux_v2_event_reset(uint64_t handle)`.
-It clears the latched gap and buffered stale events after the host has rebuilt
-its projections. Cancel the old subscription, await an explicit
+The cbindgen header declares `int32_t ramflux_v2_event_reset(uint64_t handle, uint64_t subscription_generation)`.
+It clears the latched gap and buffered stale events for that generation after
+the host has rebuilt its projections. A stale generation returns
+InvalidArgument (1) and leaves the replacement queue intact. Use 0 only before
+the first successful subscription. Cancel the old subscription, await an explicit
 `subscription.close` acknowledgement, read the snapshot, reset, then subscribe
 from that snapshot's journal cursor. Reset does not fetch data or restore a
 subscription by itself.
@@ -152,10 +154,10 @@ subscription by itself.
 
 Open a subscription via `execute` using `subscription.open` or `bus.subscribe`.
 `event_poll` consumes one frame without blocking. It returns Pending (24),
-Closed (26), or ResyncRequired (27) with a null buffer when applicable. Event
+Closed (26) with a null buffer. ResyncRequired (27) includes an owned, generation-tagged gap event. Event
 credit is bounded to 64 frames and 4 MiB; a single frame is at most 1 MiB.
 Overflow clears stale events and latches ResyncRequired. Cancel the old subscription and read current projections, call
-`event_reset`, then subscribe from the snapshot's journal cursor; never treat
+`event_reset(handle, old_generation)`, then subscribe from the snapshot's journal cursor; never treat
 a gap as a continuous stream. The subscription operation token is its cancellation handle: cancel/release sends
 `subscription.close` through the shared dispatcher. Each client owns one active
 subscription; cancel it before opening another. Closing also cancels it.
@@ -170,3 +172,56 @@ error frame. Native code must inspect numeric codes, not diagnostic prose.
 Host pointers must be aligned and valid for their documented lengths. Null,
 invalid lengths, duplicate I-JSON members and invalid handles are rejected.
 Foreign callers must never pass dangling pointers or double-free buffers.
+
+## Subscription generations
+
+Each successful `subscription.open` / `bus.subscribe` completion carries
+`subscription_generation` both beside `code` and in its original response
+frame. Every event frame carries the same field. It is an exact decimal JSON
+string representing a nonzero u64. Allocation is process-wide, so each
+account's generations strictly increase across close/reopen (gaps are valid).
+Zero means there was no matching subscription and must never be presented.
+
+The dispatcher snapshots the generation into each outbound producer. Cloned
+old producers retain their old generation even if they enqueue after a newer
+open completes. All producers still share the original bounded 64-frame queue;
+there are no additional per-generation queues. **Hosts drop frames whose
+generation != current**, and still validate the expected account. Adopt a new
+generation only from a successful open completion. Reset carries the generation
+as its second C argument; an old callback cannot clear a newer subscription.
+
+A successful reopen discards old buffered events and the old overflow latch.
+Late old events remain tagged old. Overflow caused by a stale frame cannot
+invalidate the replacement stream. ResyncRequired (27) returns an owned,
+tagged `stream.lagged` event buffer; free it with `ramflux_v2_buffer_free` even
+though the status is nonzero. Pending/Closed return null buffers.
+
+`real_dispatcher_preserves_old_generation_after_close_and_reopen` opens the
+actual supervisor backup stream, closes/reopens it, then delivers through an
+old producer and the real wire writer/decoder. `stale_event_reset_cannot_clear_a_replacement_subscription`
+checks the C ABI open completions and rejects a stale reset after reopening.
+
+## Shared client projections
+
+`ramflux_v2_conversation_project(input, len, &out)` calls
+`ramflux-client-model::conversation::{page,totals}`. Input is a host-owned
+snapshot: `rows` (id, title, optional preview/pinned/latest_ms/unread/attention),
+`visible`, optional `query`, `offset` and `limit` (default 100). Output has the
+projected rows, `next_offset` and snapshot `totals`. Locked/inaccessible snapshots
+set `visible:false`; the shared model clears rows and totals. Its page limit is
+100, query limit 1024 bytes; the binding also bounds input to 4096 source rows
+and the common frame/value budget. List filtering remains a pure projection.
+
+`ramflux_v2_receipt_present(input, len, &out)` calls the shared receipt
+`present()`. Input has `outgoing`, `now_ms` and `receipt`, for example
+`{"outgoing":true,"now_ms":"123","receipt":{"state":"sent"}}`.
+States are sending, waiting_for_node (retry_at_ms), failed (retryable), sent,
+delivered, read. Output is null for incoming messages, otherwise receipt,
+manual_retry and remaining_ms. Acceptance never becomes delivery/read because
+of time; uncertain outcomes never gain retry permission.
+
+Clocks/offsets accept exact decimal strings (safe JSON numbers are also
+accepted); u64/i64 output quantities use decimal strings. Both entrypoints run
+without a client handle, use the common buffer ownership/error contract, and
+serialize confidential snapshot data. They retrieve no data and confer no SDK
+authority. Business models and policy stay in the shared crate.

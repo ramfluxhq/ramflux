@@ -126,7 +126,7 @@ async fn private_unlock(runtime: &mut AccountRuntime) -> Case {
         topics: BTreeSet::new(),
         attended: true,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     };
     assert!(!runtime.apply(command).await?);

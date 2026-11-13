@@ -167,7 +167,7 @@ fn event_overflow_is_explicit_and_cannot_consume_completion_credit() {
     let shared = state::Shared::default();
     shared.operations.lock().expect("test: operations").insert(1, Arc::new(Operation::default()));
     for _ in 0..=state::MAX_EVENTS {
-        shared.push_event(b"{}".to_vec());
+        shared.push_event(b"{}".to_vec(), 0);
     }
     shared.complete(1, json!({"code":0}));
     let events = shared.events.lock().expect("test: events");
@@ -527,5 +527,117 @@ fn daemon_stop_preserves_its_reply_before_releasing_the_supervisor() {
     assert_eq!(
         response["response"]["body"]["stopping"], true,
         "the stop acknowledgement must arrive before carrier disconnect"
+    );
+}
+
+#[test]
+fn stale_event_reset_cannot_clear_a_replacement_subscription() {
+    let fixture = Fixture::open();
+    let body = json!({"topics":["account.backup.job.changed"]});
+    let first = fixture.submit_body("subscription.open", &body, deadline());
+    let first_reply = fixture.result(first);
+    let first_generation = first_reply["subscription_generation"]
+        .as_str()
+        .expect("test: exact generation")
+        .parse::<u64>()
+        .expect("test: generation integer");
+    assert_eq!(ramflux_v2_operation_cancel(fixture.handle, first), 0, "cancel old stream");
+    let barrier = fixture.submit("subscription.close", deadline());
+    assert_eq!(fixture.result(barrier)["code"], 0, "real close barrier");
+    assert_eq!(
+        ramflux_v2_event_reset(fixture.handle, first_generation),
+        0,
+        "matching closed-generation reset"
+    );
+    let second = fixture.submit_body("subscription.open", &body, deadline());
+    let second_reply = fixture.result(second);
+    let second_generation = second_reply["subscription_generation"]
+        .as_str()
+        .expect("test: replacement generation")
+        .parse::<u64>()
+        .expect("test: generation integer");
+    assert!(
+        second_generation > first_generation,
+        "real dispatcher must advance the account generation"
+    );
+    assert_eq!(
+        ramflux_v2_event_reset(fixture.handle, first_generation),
+        1,
+        "stale reset cannot mutate the replacement queue"
+    );
+    assert_eq!(
+        ramflux_v2_event_reset(fixture.handle, second_generation),
+        0,
+        "current-generation reset remains valid"
+    );
+}
+
+#[test]
+fn shared_directory_projection_preserves_order_visibility_and_totals() {
+    let input = json!({"visible":true,"limit":"1","rows":[
+        {"id":"b","title":"Recent","latest_ms":"10","unread":2,"attention":1},
+        {"id":"p","title":"Pinned","pinned":true,"unread":3,"attention":0}
+    ]});
+    let encoded = serde_json::to_vec(&input).expect("test: authoritative row facts");
+    let mut buffer = std::ptr::null_mut();
+    assert_eq!(
+        ramflux_v2_conversation_project(encoded.as_ptr(), encoded.len(), &raw mut buffer),
+        0,
+        "shared projection must run without a client or I/O"
+    );
+    let projected = take_buffer(buffer);
+    assert_eq!(projected["rows"][0]["id"], "p", "the shared model orders pins before activity");
+    assert_eq!(projected["next_offset"], 1, "shared pagination retains the snapshot offset");
+    assert_eq!(
+        projected["totals"]["unread"], "5",
+        "navigation totals cover the entire visible snapshot"
+    );
+    let hidden = serde_json::to_vec(
+        &json!({"visible":false,"rows":[{"id":"secret","title":"Secret","unread":4}]}),
+    )
+    .expect("test: locked snapshot");
+    assert_eq!(
+        ramflux_v2_conversation_project(hidden.as_ptr(), hidden.len(), &raw mut buffer),
+        0,
+        "locked projection is a successful empty presentation"
+    );
+    let projected = take_buffer(buffer);
+    assert_eq!(projected["rows"], json!([]), "locked snapshots cannot expose cached rows");
+    assert_eq!(projected["totals"]["unread"], "0", "locked snapshots cannot expose cached counts");
+}
+
+#[test]
+fn shared_receipt_projection_never_invents_delivery_or_retry_permission() {
+    let input = serde_json::to_vec(
+        &json!({"outgoing":true,"receipt":{"state":"sent"},"now_ms":u64::MAX.to_string()}),
+    )
+    .expect("test: accepted receipt");
+    let mut buffer = std::ptr::null_mut();
+    assert_eq!(
+        ramflux_v2_receipt_present(input.as_ptr(), input.len(), &raw mut buffer),
+        0,
+        "full-range clocks must cross the exact integer binding"
+    );
+    let projected = take_buffer(buffer);
+    assert_eq!(
+        projected["receipt"]["state"], "sent",
+        "elapsed time cannot upgrade acceptance into delivery"
+    );
+    assert_eq!(
+        projected["manual_retry"], false,
+        "accepted operations cannot be manually duplicated"
+    );
+    let input =
+        serde_json::to_vec(&json!({"outgoing":false,"receipt":{"state":"read"},"now_ms":"0"}))
+            .expect("test: incoming receipt");
+    assert_eq!(
+        ramflux_v2_receipt_present(input.as_ptr(), input.len(), &raw mut buffer),
+        0,
+        "incoming receipt projection succeeds"
+    );
+    assert_eq!(
+        take_buffer(buffer),
+        Value::Null,
+        "incoming messages have no outgoing receipt presentation"
     );
 }

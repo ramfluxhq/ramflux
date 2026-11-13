@@ -3728,6 +3728,7 @@ dependencies = [
  "poly1305",
  "prost",
  "quinn",
+ "ramflux-client-model",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",

@@ -80,6 +80,8 @@ mod task_delivery;
 #[cfg(test)]
 mod transport_security_tests;
 
+pub(crate) mod outbound;
+
 mod own_contact_backfill;
 
 pub(crate) mod contact_backpressure;

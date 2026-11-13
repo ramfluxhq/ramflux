@@ -96,7 +96,7 @@ async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
         topics: BTreeSet::new(),
         attended: true,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     };
     let first = crate::bus::mutations::execute(&mut state, "alice", &command).await?.body;
