@@ -224,5 +224,5 @@ impl BornAccount {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

@@ -143,10 +143,10 @@ mod checkpoints {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "genesis/tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "genesis/flow_tests.rs"]
 mod flow_tests;

@@ -260,11 +260,17 @@ fn verify_server(pipe: &NamedPipeClient, expected: &Sid) -> Result<(), SdkError>
     if owner != *expected {
         return Err(SdkError::LocalBusPermissionDenied);
     }
-    // OPEN-VALUE: the design names only the owner SID. The server process token is checked as
-    // well, and a server whose token cannot be read is refused.
-    let server =
-        win32::server_process_user(pipe).map_err(|_| SdkError::LocalBusPermissionDenied)?;
-    if server == *expected { Ok(()) } else { Err(SdkError::LocalBusPermissionDenied) }
+    // The owner SID is required. Compare the server process token only when it
+    // can be read; an elevated daemon is often unreadable to a medium client.
+    let same_user = match win32::server_process_user(pipe) {
+        Ok(server) => Some(server == *expected),
+        Err(_) => None,
+    };
+    if crate::platform::server_token::server_token_acceptable(same_user) {
+        Ok(())
+    } else {
+        Err(SdkError::LocalBusPermissionDenied)
+    }
 }
 
 /// Open `name` at identification level and verify the server before returning the stream.
