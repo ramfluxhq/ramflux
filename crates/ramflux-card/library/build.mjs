@@ -75,6 +75,11 @@ if (process.argv.includes("--test")) {
     assert.throws(() => lint(sample), undefined, `build lint accepted ${sample}`);
     assert.throws(() => lintSource(`if(false){${sample}}`), undefined, `source lint accepted dead code ${sample}`);
   }
+  const generated="const style=rfCardStyles(theme)[`card_chart_${kind}_${density}`]";
+  assert.throws(()=>lintSource(generated),undefined,"project sources cannot use generated style lookups");
+  lintSource(generated,true);
+  for(const sample of ["rfCardStyles(theme)[key]","rfCardStyles(theme)['constructor']","foreign(theme)[`card_chart_${kind}_${density}`]","rfCardStyles(theme)[`constructor${kind}`]"])assert.throws(()=>lintSource(sample,true),undefined,"generated lookup exception must stay bounded");
+  assert.throws(()=>lint("function rfCardStyles(){return {}};export function render(){return rfCardStyles()[`card_chart_${kind}`]}"),undefined,"emitted computed access stays forbidden");
   lintSource("export {}; declare global { namespace JSX { interface IntrinsicElements {} } }");
   assert.throws(() => lint("unrecognizedAmbientAPI()"), undefined, "unknown ambient APIs must fail closed");
   lint("export function render(input){__rf_commit(JSON.stringify(JSON.parse(input)))}");
