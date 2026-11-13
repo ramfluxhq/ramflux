@@ -457,7 +457,7 @@ mod tests {
             drop(store);
             assert!(
                 std::fs::read_dir(directory.path().join(STAGING_DIRECTORY))?
-                    .all(|entry| entry.is_ok_and(|entry| !is_stage_name(&entry.file_name()))),
+                    .all(|entry| entry.is_ok_and(|entry| entry.file_name() == STAGING_OWNER_FILE)),
                 "restart must sweep staging files abandoned at either crash boundary"
             );
             let db = open(&path)?;
