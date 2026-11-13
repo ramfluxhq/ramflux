@@ -76,7 +76,9 @@ impl PairingActor {
                 authority.publication.record.body.master_certificate.body.master_public_key.clone(),
             );
             self.recovered_installation = Some(RecoveredInstallation {
-                status: super::installed_status::installed_progress(request, expires, 0, 0, None),
+                status: super::installed_status::installed_progress(
+                    request, expires, 0, 0, None, false,
+                ),
                 install,
             });
             self.recovered_installation

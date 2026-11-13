@@ -31,3 +31,28 @@ impl AccountDb {
         })
     }
 }
+
+impl crate::AccountDb {
+    /// Inspect one actual portable dependency in component fixtures without exposing SQL.
+    /// # Errors
+    /// Returns local database errors.
+    pub fn full_transfer_dependency_present_for_test(
+        &self,
+        parent_wire: &str,
+        parent_manifest: &str,
+        child_wire: &str,
+        child_manifest: &str,
+    ) -> Result<bool, crate::StorageError> {
+        let parent = ramflux_crypto::object_erasure_commitment(
+            &self.principal_commitment,
+            parent_wire,
+            parent_manifest,
+        );
+        let child = ramflux_crypto::object_erasure_commitment(
+            &self.principal_commitment,
+            child_wire,
+            child_manifest,
+        );
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2)", rusqlite::params![parent,child], |row| row.get(0))?)
+    }
+}

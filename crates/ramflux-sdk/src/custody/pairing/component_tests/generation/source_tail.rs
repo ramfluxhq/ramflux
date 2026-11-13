@@ -208,7 +208,8 @@ mod tests {
     use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::ManifestKind};
 
     #[tokio::test(start_paused = true)]
-    async fn pairing_full_tail_encoder_uses_exact_j6_view_after_source_writes() -> TestResult {
+    async fn pairing_full_tail_updates_source_contribution_without_overwriting_target() -> TestResult
+    {
         let hold = ClockHold::new();
         let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await;
         hold.finish().await?;
@@ -218,6 +219,7 @@ mod tests {
         let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
         rig.primary.sync_relay().await?;
         rig.participant_a.return_client(&mut rig.source.client)?;
+        prepare_source_dependencies(rig.source.client.account_db()?)?;
         Box::pin(finish_owned_stream(&mut rig)).await?;
         let anchor = crate::custody::load_account(
             &rig.participant_a.root,
@@ -243,6 +245,12 @@ mod tests {
                 .is_err(),
             "test: a data receipt without native J6 admitted tail encoding"
         );
+        for parent in ["tail-shared-parent", "tail-a-only-parent"] {
+            rig.source
+                .client
+                .account_db()?
+                .retire_transport_object(parent, "dependency-parent-manifest")?;
+        }
         let before_tail =
             u64::try_from(rig.source.client.account_db()?.privacy_erasure_generation()?)?;
         rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
@@ -279,6 +287,17 @@ mod tests {
             "test: late source write did not reach the actual writer"
         );
         install_live_generation(&rig, &operation, published)?;
+        {
+            let slot = rig.participant_b.db.lock().map_err(|_| "test: independent B writer")?;
+            retain_shared_b_dependency(slot.as_ref().ok_or("test: independent B absent")?)?;
+            slot.as_ref()
+                .ok_or("test: independent B absent")?
+                .seed_full_transfer_object_veto_for_test(
+                    "independent-b-tail-write",
+                    "independent-b-tail-manifest",
+                    next + 100,
+                )?;
+        }
         verify_saved_tail(&mut rig, &operation, &current, prior, now)?;
         rig.primary.lock().await?;
         rig.secondary.lock().await?;
@@ -292,7 +311,7 @@ mod tests {
         now: u64,
     ) -> TestResult {
         let mut encoded = None;
-        for _ in 0..2 {
+        for attempt in 0..2 {
             rig.participant_a.take_client(&mut rig.source.client)?;
             let work = {
                 let slot = rig.participant_a.db.lock().map_err(|_| "test: source tail owner")?;
@@ -326,7 +345,7 @@ mod tests {
                 manifest.total_bytes.0 > 0,
                 "test: tail omitted actual source writes between final delta and J6"
             );
-            exercise_tail_input(rig, operation, current, &draft, now)?;
+            exercise_tail_input(rig, operation, current, &draft, now, attempt == 0)?;
             let bytes = manifest.to_wire_bytes()?;
             if let Some(previous) = &encoded {
                 assert_eq!(
@@ -344,6 +363,7 @@ mod tests {
         current: &ramflux_crypto::custody::VerifiedRecord,
         draft: &ramflux_storage::FullSourceDeltaDraft,
         now: u64,
+        first: bool,
     ) -> TestResult {
         let account = crate::custody::load_account(
             &rig.participant_a.root,
@@ -398,14 +418,151 @@ mod tests {
         let slot = rig.participant_b.db.lock().map_err(|_| "test: tail input return")?;
         let db = slot.as_ref().ok_or("test: tail input writer absent")?;
         let endpoint = db.open_full_tail_endpoint(operation, 1, current, now)?;
-        endpoint.accept_validated_input(validated, now)?;
+        endpoint.accept_validated_input(&validated, now)?;
         drop(endpoint);
         let scope = db.full_installed_recipient_tail_scope(operation, 1, now)?;
-        assert_eq!(
-            Some(scope.cut),
-            signed.manifest.previous_cut.map(|cut| cut.0),
-            "test: validated input was reported as semantically merged tail data"
+        if first {
+            assert!(
+                !scope.merged,
+                "test: validated input was reported as semantically merged tail data"
+            );
+            assert_eq!(
+                Some(scope.cut),
+                signed.manifest.previous_cut.map(|cut| cut.0),
+                "test: unmerged input changed the installed progress cut"
+            );
+            let endpoint = db.open_full_tail_endpoint(operation, 1, current, now)?;
+            assert!(
+                endpoint.applied_receipt(&hash, now).is_err(),
+                "test: a durable input root released semantic DV before actual B application"
+            );
+        }
+        apply_and_check_tail(rig, db, operation, current, &hash, now)?;
+        Ok(())
+    }
+    fn apply_and_check_tail(
+        rig: &Rig,
+        db: &ramflux_storage::AccountDb,
+        operation: &str,
+        current: &ramflux_crypto::custody::VerifiedRecord,
+        hash: &str,
+        now: u64,
+    ) -> TestResult {
+        let before = db.privacy_erasure_generation()?;
+        let endpoint = db.open_full_tail_endpoint(operation, 1, current, now)?;
+        let mut complete = false;
+        for _ in 0..8 {
+            if endpoint.apply_recipient_batch(hash, 32, now)? {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "test: bounded tail batches did not finish both application passes");
+        assert!(
+            endpoint.apply_recipient_batch(hash, 32, now)?,
+            "test: completed tail did not replay idempotently"
         );
+        assert_eq!(
+            db.privacy_erasure_generation()?,
+            before,
+            "test: source tail rolled back independent B privacy state"
+        );
+        for (wire, manifest) in [
+            ("inside-j6-tail-cut", "inside-j6-tail-manifest"),
+            ("independent-b-tail-write", "independent-b-tail-manifest"),
+        ] {
+            assert!(
+                matches!(
+                    db.check_object_identity(wire, manifest),
+                    Err(ramflux_storage::StorageError::ObjectErased)
+                ),
+                "test: actual B did not retain source/B restrictive state for {wire}"
+            );
+        }
+        for (parent, retained) in [("tail-shared-parent", true), ("tail-a-only-parent", false)] {
+            assert_eq!(
+                db.full_transfer_dependency_present_for_test(
+                    parent,
+                    "dependency-parent-manifest",
+                    "tail-dependency-child",
+                    "dependency-child-manifest"
+                )?,
+                retained,
+                "test: A's absence changed independent B ownership for {parent}"
+            );
+        }
+        assert!(
+            db.check_object_identity("after-j6-tail-cut", "after-j6-tail-manifest").is_ok(),
+            "test: tail applied a source write made after its immutable J6 view"
+        );
+        let application = endpoint.applied_receipt(hash, now)?;
+        let account = crate::custody::load_account(
+            &rig.participant_b.root,
+            &rig.participant_b.account_id,
+            now,
+        )?;
+        let (_, branch) = account.credentials(
+            rig.participant_b.vault.as_ref(),
+            account.local_device_id()?,
+            now,
+        )?;
+        let signature = encode_base64url(
+            branch
+                .signing
+                .signing_key
+                .sign(&application.packet().data_verified_signing_bytes()?)
+                .to_bytes(),
+        );
+        drop(branch);
+        let packet = application.signed_packet(signature)?;
+        endpoint.record_applied_receipt(&application, &packet, now)?;
+        endpoint.record_applied_receipt(&application, &packet, now)?;
+        drop(endpoint);
+        let scope = db.full_installed_recipient_tail_scope(operation, 1, now)?;
+        assert!(
+            scope.merged,
+            "test: durable actual-B application/receipt did not report merged tail"
+        );
+        Ok(())
+    }
+    fn prepare_source_dependencies(db: &ramflux_storage::AccountDb) -> TestResult {
+        db.retain_object(
+            "tail-dependency-child",
+            "dependency-child-manifest",
+            ramflux_storage::ObjectRetention::Imported,
+        )?;
+        for parent in ["tail-shared-parent", "tail-a-only-parent"] {
+            db.retain_object(
+                parent,
+                "dependency-parent-manifest",
+                ramflux_storage::ObjectRetention::OwnDeviceTransport,
+            )?;
+            db.retain_transport_dependency(
+                parent,
+                "dependency-parent-manifest",
+                "tail-dependency-child",
+                "dependency-child-manifest",
+            )?;
+        }
+        Ok(())
+    }
+    fn retain_shared_b_dependency(db: &ramflux_storage::AccountDb) -> TestResult {
+        db.retain_object(
+            "tail-shared-parent",
+            "dependency-parent-manifest",
+            ramflux_storage::ObjectRetention::OwnDeviceTransport,
+        )?;
+        db.retain_object(
+            "tail-dependency-child",
+            "dependency-child-manifest",
+            ramflux_storage::ObjectRetention::Imported,
+        )?;
+        db.retain_transport_dependency(
+            "tail-shared-parent",
+            "dependency-parent-manifest",
+            "tail-dependency-child",
+            "dependency-child-manifest",
+        )?;
         Ok(())
     }
 }
