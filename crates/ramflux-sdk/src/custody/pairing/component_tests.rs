@@ -285,12 +285,15 @@ impl Rig {
 
 #[tokio::test(flavor = "current_thread")]
 async fn pairing_recipient_activates_only_exact_durable_publication() -> TestResult {
+    crate::bus::credentials::contract_tests::deadline(Box::pin(enrollment_admission())).await
+}
+async fn enrollment_admission() -> TestResult {
     let Rig {
         mut primary,
         mut secondary,
         clock,
         participant_b,
-        participant_a: _,
+        participant_a,
         node: _,
         full_hellos: _,
         recipient_root,
@@ -360,7 +363,7 @@ async fn pairing_recipient_activates_only_exact_durable_publication() -> TestRes
         .approve(&Approve {
             schema: "ramflux.pairing.Approve.v2".into(),
             version: 2,
-            operation_id,
+            operation_id: operation_id.clone(),
             generation: 1,
             transcript_hash: primary.displayed_transcript()?,
             proposal_hash: primary.displayed_proposal()?,
@@ -382,7 +385,43 @@ async fn pairing_recipient_activates_only_exact_durable_publication() -> TestRes
     let admitted = crate::custody::load_account(recipient_root.path(), "component-recipient", now)?;
     assert_retained_roster(&admitted, original_devices, participant_b.vault.as_ref());
     assert_adoption_refs(&target, participant_b.vault.as_ref())?;
+    assert_enrollment_own_sync(&participant_a, &target, &operation_id)?;
     assert_missing_marker_refuses(recipient_root.path(), now)?;
+    Ok(())
+}
+
+fn assert_enrollment_own_sync(
+    source: &LocalPairingParticipant,
+    target: &crate::RamfluxClient,
+    operation: &str,
+) -> TestResult {
+    let slot = source.db.lock().map_err(|_| "test: source writer")?;
+    let db = slot.as_ref().ok_or("test: source unlocked writer missing")?;
+    let before = db.pairing_adoption()?;
+    let job = db
+        .next_pairing_own_sync()?
+        .ok_or("test: completed enrollment did not schedule automatic history")?;
+    assert_eq!(job.operation_id, operation, "test: history job belongs to another ceremony");
+    let adopted = target.account_db()?.pairing_adoption()?.ok_or("test: target adoption")?;
+    let reference: ramflux_protocol::custody::DeviceRef =
+        ramflux_protocol::parse_i_json(&adopted.local_ref)?;
+    assert_eq!(job.target_ref, reference, "test: automatic history selected another enrolled Ref");
+    assert!(
+        target.account_db()?.next_pairing_own_sync()?.is_none(),
+        "test: recipient scheduled an export back to A"
+    );
+    assert!(db.claim_pairing_own_sync(&job)?, "test: first automatic history attempt was lost");
+    assert!(!db.claim_pairing_own_sync(&job)?, "test: automatic history ran twice");
+    db.finish_pairing_own_sync(&job, Some("NodeTimeout"))?;
+    assert!(
+        db.next_pairing_own_sync()?.is_none(),
+        "test: failed sync retried without manual export"
+    );
+    assert_eq!(
+        db.pairing_adoption()?,
+        before,
+        "test: failed history sync changed pairing authority"
+    );
     Ok(())
 }
 

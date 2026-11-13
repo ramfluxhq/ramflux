@@ -5,6 +5,7 @@
 pub(crate) mod admission;
 pub(crate) mod full_reference;
 pub(crate) mod journal;
+pub(crate) mod own_sync;
 pub(crate) mod privacy;
 pub(crate) mod recovery;
 pub(crate) mod schema;

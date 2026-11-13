@@ -83,3 +83,8 @@ credential calls and accepts only the handle's current operation and generation.
 Closing the handle drains that reader; locking the account ends its daemon
 subscription. Polling display events never requests a recovery phrase or a data
 passphrase.
+
+After enrollment, the approving device schedules one bounded history sync when
+its ordinary native session is available. A failed attempt does not undo pairing;
+use `rf device sync export` for a manual retry. A full-account transfer does not
+schedule this separate history export.

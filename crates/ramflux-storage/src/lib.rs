@@ -121,6 +121,7 @@ pub use account_db::object_retention::{
 pub use account_db::pairing::admission::PairingAdmissionReader;
 pub use account_db::pairing::full_reference::{FULL_STAGE_REFERENCE_KIND, FullStageReference};
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
+pub use account_db::pairing::own_sync::PairingOwnSyncJob;
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,
     RawInnerQuotaScope, RawInnerReparseRow,

@@ -191,6 +191,7 @@ impl AccountDb {
         let transaction = self.connection.immediate_transaction()?;
         self.put_pairing_adoption(adoption)?;
         self.require_terminal_cleanup(terminal)?;
+        self.queue_enrollment_own_sync(adoption, terminal)?;
         self.delete_live(&terminal.account_id, &terminal.operation_id)?;
         self.delete_head(&terminal.account_id, &terminal.operation_id)?;
         self.put_pairing_terminal(terminal)?;

@@ -15,6 +15,7 @@ pub(super) use transient::TransientHost;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
+mod pairing_own_sync;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -478,6 +479,7 @@ impl AccountRuntime {
 
     async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
+        self.maintain_pairing_own_sync().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };

@@ -47,6 +47,7 @@ impl AccountRuntime {
                 "pairing local data step deferred; account remains open"
             ),
         }
+        self.maintain_pairing_own_sync().await;
     }
     fn pairing_readers_stale(&self) -> bool {
         let selected = self.pairing_database_path();

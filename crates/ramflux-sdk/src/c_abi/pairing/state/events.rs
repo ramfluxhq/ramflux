@@ -66,7 +66,7 @@ impl State {
                 });
             }
             Err(error) => {
-                tracing::warn!(error_kind = ?error.kind(), "pairing event reader unavailable")
+                tracing::warn!(error_kind = ?error.kind(), "pairing event reader unavailable");
             }
         }
     }

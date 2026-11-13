@@ -55,6 +55,7 @@ impl AccountDb {
             self.connection
                 .execute_batch("ALTER TABLE runtime_operation ADD COLUMN operation_kind TEXT")?;
         }
+        self.connection.execute_batch("CREATE INDEX IF NOT EXISTS runtime_operation_kind ON runtime_operation(operation_kind,operation_id)")?;
         // This value comes from the supervisor account record, never from a contact directory.
         self.connection.execute(
             "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",

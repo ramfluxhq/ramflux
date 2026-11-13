@@ -34,7 +34,13 @@ impl TailJob {
         local_result(value)
     }
 }
-pub(super) fn local_result(value: FullStatus) -> Result<LocalResult, SdkError> {
+pub(super) fn local_result(mut value: FullStatus) -> Result<LocalResult, SdkError> {
+    if value.tail_status == FullTailStatus::Pending
+        && crate::custody::network_now()? >= value.lease_expires_at
+    {
+        value.result =
+            Some(ramflux_protocol::custody::pairing::full_transfer::FullError::LeaseExpired);
+    }
     value.validate().map_err(|_| wrong())?;
     Ok(LocalResult {
         schema: "ramflux.pairing.LocalResult.v2".into(),
