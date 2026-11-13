@@ -837,6 +837,14 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
     CAbiError::new(sdk_error_code(error), error.to_string())
 }
 
+fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErrorCode {
+    match crate::error_policy::transport_code(error) {
+        "Unavailable" => RamfluxErrorCode::TransportUnavailable,
+        "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,
+        _ => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
@@ -874,11 +882,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
         SdkError::Storage(error) => storage_error_code(error),
-        SdkError::Transport(error) => match crate::error_policy::transport_code(error) {
-            "Unavailable" => RamfluxErrorCode::TransportUnavailable,
-            "Unauthenticated" | "TransportSecurity" => RamfluxErrorCode::AuthFailed,
-            _ => RamfluxErrorCode::InvalidArgument,
-        },
+        SdkError::Transport(error) => transport_error_code(error),
         SdkError::ContactUnavailable(source)
             if crate::error_policy::security_code(source).is_some() =>
         {
