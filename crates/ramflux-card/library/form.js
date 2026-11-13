@@ -119,7 +119,7 @@ function RFCardChartFrame(props) {
     summary: props.summary,
     background: props.theme.surface_white,
     border: props.theme.line,
-    padding: 20
+    padding: 16
   }, ...props.content);
 }
 
@@ -131,6 +131,8 @@ var light = Object.freeze({
   badge: "#222224",
   bg: "#FCFBF9",
   bubble_max: 600,
+  chart_1: "#2A78D6",
+  chart_2: "#EB6834",
   column_max: 880,
   composer_min: 48,
   control: "#8E8E8E",
@@ -198,6 +200,7 @@ var light = Object.freeze({
   size_metric: 32,
   size_mobile_body: 17,
   size_mobile_caption: 11,
+  size_mobile_large_title: 32,
   size_page: 24,
   size_secondary: 13,
   size_subheading: 17,
@@ -218,6 +221,8 @@ var dark = Object.freeze({
   badge: "#EBEBEB",
   bg: "#171716",
   bubble_max: 600,
+  chart_1: "#3987E5",
+  chart_2: "#D95926",
   column_max: 880,
   composer_min: 48,
   control: "#7A7A7A",
@@ -285,6 +290,7 @@ var dark = Object.freeze({
   size_metric: 32,
   size_mobile_body: 17,
   size_mobile_caption: 11,
+  size_mobile_large_title: 32,
   size_page: 24,
   size_secondary: 13,
   size_subheading: 17,
@@ -357,7 +363,7 @@ function chart(c, theme) {
   const table = RFCardTable({ id: c.id + ":table", label: c.title + " \u2014 data table", columns, rows, theme });
   const design = RFCardText({ id: c.id + ":design", text: "Chart design pending \xB7 data table available", theme });
   const n = RFCardChartFrame({ id: c.id, title: c.title, summary: "Data table available", content: [design, table], theme });
-  n.attrs = { ...n.attrs, style: { ...n.attrs?.style, color: theme.primary }, plot: { kind: c.kind, unit: c.unit, scale: c.scale, series: c.series } };
+  n.attrs = { ...n.attrs, style: { ...n.attrs?.style, color: theme.chart_1 }, plot: { kind: c.kind, unit: c.unit, scale: c.scale, series: c.series } };
   return n;
 }
 function render(input) {
