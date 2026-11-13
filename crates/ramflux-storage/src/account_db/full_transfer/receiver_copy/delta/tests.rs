@@ -306,8 +306,7 @@ fn replay_off_loan_roundtrip<'db>(
         matches!(work.replay(), Err(StorageError::PairingField("Busy"))),
         "test: off-loan replay ignored an ordinary excluded-state B write"
     );
-    b.connection
-        .execute("UPDATE pairing_floor SET next_generation=7 WHERE account_id='acct'", [])?;
+    // Keep the real monotonic B write; a retry must copy generation 8, never roll it back.
     let stage = b.open_full_stage_reference(reference.clone(), PairingRole::Responder, 1000)?;
     let copy = stage.pin_receiver_base(&base)?.copy()?;
     let work = stage.into_receiver_replay_work(copy, 1000)?;
@@ -397,8 +396,8 @@ fn prepared_database(
             [],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
         )?,
-        (4, 7),
-        "G1 stripped B-local pairing state"
+        (4, 8),
+        "test: G1 lost the intervening monotonic B-local pairing floor"
     );
     private
         .db

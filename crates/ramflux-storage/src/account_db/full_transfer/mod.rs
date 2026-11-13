@@ -49,6 +49,8 @@ mod source_successor;
 pub use source_successor::{FullSourceDeltaDraft, FullSourceSuccessorWork};
 mod data_terminal;
 mod install_reconciliation;
+mod installed_tail;
+pub use installed_tail::FullInstalledTailScope;
 mod receiver_retirement;
 mod source_primary_owner;
 mod source_reconciliation;

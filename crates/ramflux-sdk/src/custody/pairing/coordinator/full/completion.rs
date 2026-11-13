@@ -9,10 +9,8 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 impl PairingActor {
-    pub(in crate::custody::pairing::coordinator) fn full_new_recipient_installed(&self) -> bool {
-        self.recovered_installation
-            .as_ref()
-            .is_some_and(|recovered| recovered.install.recipient_mode == "new")
+    pub(in crate::custody::pairing::coordinator) fn full_staged_recipient_installed(&self) -> bool {
+        self.recovered_installation.is_some()
             || self.ceremony.as_ref().is_some_and(|c| {
                 c.role == PairingRole::Responder
                     && matches!(c.phase.as_str(), "locally_installed" | "completed")

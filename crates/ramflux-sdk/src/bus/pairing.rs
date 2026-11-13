@@ -136,11 +136,7 @@ async fn install_source(
         .get(account_id)
         .ok_or_else(|| SdkError::AccountNotOpen(account_id.into()))?;
     let root = &state.config.data_root;
-    let native = if resume.is_some() {
-        crate::custody::load_data_account(root, account_id, crate::custody::network_now()?)?
-    } else {
-        crate::custody::load_account(root, account_id, crate::custody::network_now()?)?
-    };
+    let native = actor_authority(root, account_id, resume.is_some())?;
     let record = native.record();
     let device_id = native.local_device_id()?;
     let device = record
@@ -229,6 +225,19 @@ async fn install_source(
     install_actor_with_writer(root, account_id.into(), actor, Some(writer))
 }
 
+fn actor_authority(
+    root: &std::path::Path,
+    account: &str,
+    data_only: bool,
+) -> Result<crate::custody::BornAccount, SdkError> {
+    let now = crate::custody::network_now()?;
+    if data_only {
+        crate::custody::load_data_account(root, account, now)
+    } else {
+        crate::custody::load_account(root, account, now)
+    }
+}
+
 async fn verified_recipient_node(
     recipient: Option<&Join>,
     network: crate::custody::CustodyNetworkConfig,
@@ -276,6 +285,19 @@ fn retained_data_role(
         }
         return Err(SdkError::PairingCode("PublicationPending"));
     }
+    if row.role == "responder"
+        && db.pairing_adoption()?.is_some_and(|adoption| adoption.full_generation_nonce.is_some())
+    {
+        let scope = db.full_installed_recipient_tail_scope(
+            &request.operation_id,
+            request.generation,
+            crate::custody::network_now()?,
+        )?;
+        if scope.grant.destination_ref != *reference {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        return Ok(reference == &record.body.master_certificate.body.primary_device_ref);
+    }
     if row.phase != "mutually_confirmed" || db.pairing_head()?.is_some() {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
@@ -322,7 +344,7 @@ fn validated_join(request: &LocalBusFrame) -> Result<Join, SdkError> {
     Ok(join)
 }
 
-/// Only a new-recipient invitation may create an account actor without unlocking an account.
+/// Pairing invitations and retained transfer status can own a staging actor without a session.
 /// This grants neither an ordinary account nor session admission.
 pub(super) fn creates_recipient(
     config: &crate::LocalBusConfig,

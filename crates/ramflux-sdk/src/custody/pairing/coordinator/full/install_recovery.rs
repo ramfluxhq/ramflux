@@ -6,9 +6,8 @@ use super::{PairingActor, PairingWire, SdkError};
 use crate::custody::pairing::{
     Installation, full_generation::owner::FullGenerationCommitted, install_store,
 };
-use ramflux_protocol::custody::pairing::full_transfer::U64;
 use ramflux_protocol::custody::pairing::local_dto::{
-    FullStatus, FullStatusStage, FullTailStatus, LocalResult, Outcome, StatusRequest,
+    FullStatus, LocalResult, Outcome, StatusRequest,
 };
 
 pub(in crate::custody::pairing::coordinator) struct RecoveredInstallation {
@@ -53,6 +52,9 @@ impl PairingActor {
             if let Some(recovered) = &self.recovered_installation {
                 return recovered.result(request).map(Some);
             }
+            if let Some(result) = Box::pin(self.restore_installed_status(request)).await? {
+                return Ok(Some(result));
+            }
             let pending = self.pending_install(request).await?;
             let Some((install, query, selected)) = pending else { return Ok(None) };
             let observation =
@@ -74,19 +76,7 @@ impl PairingActor {
                 authority.publication.record.body.master_certificate.body.master_public_key.clone(),
             );
             self.recovered_installation = Some(RecoveredInstallation {
-                status: FullStatus {
-                    attachment_absent: U64(0),
-                    bytes_durable: U64(0),
-                    bytes_total: U64(0),
-                    cut: U64(0),
-                    generation: request.generation,
-                    lease_expires_at: expires,
-                    operation_id: request.operation_id.clone(),
-                    result: None,
-                    role: "responder".into(),
-                    stage: FullStatusStage::Installed,
-                    tail_status: FullTailStatus::Pending,
-                },
+                status: super::installed_status::installed_progress(request, expires, 0, 0, None),
                 install,
             });
             self.recovered_installation
@@ -222,7 +212,7 @@ impl PairingActor {
     }
 }
 impl RecoveredInstallation {
-    fn result(&self, request: &StatusRequest) -> Result<LocalResult, SdkError> {
+    pub(super) fn result(&self, request: &StatusRequest) -> Result<LocalResult, SdkError> {
         if request.operation_id != self.status.operation_id
             || request.generation != self.status.generation
         {

@@ -640,6 +640,7 @@ mod tests {
         password: &[u8],
         primary: bool,
     ) -> Result<PairingLocalWriterService, Box<dyn std::error::Error>> {
+        let retained = if primary { None } else { Some(resume_request(client)?) };
         let mut relay = None;
         actor.wrap_transport_for_test(|inner| {
             relay = Some(inner.clone());
@@ -647,7 +648,17 @@ mod tests {
         });
         actor.lock().await?;
         drop(client.active_account_db.take());
-        client.unlock_account(&participant.account_id, password)?;
+        if let Some(request) = retained {
+            let provider = crate::custody::pairing::recipient::tests::Phrase::setup(password);
+            client.active_account_db = Some(crate::bus::unlock_for_test(
+                &participant.root,
+                &participant.account_id,
+                &request,
+                &provider,
+            )?);
+        } else {
+            client.unlock_account(&participant.account_id, password)?;
+        }
         let now = crate::custody::network_now()?;
         let native = crate::custody::load_account(&participant.root, &participant.account_id, now)?;
         let id = native.local_device_id()?;
@@ -677,6 +688,7 @@ mod tests {
             relay.ok_or("test: retained relay")?,
             PairingConfig { enabled: true, extra_root_ca_pem: None },
         );
+        client.born_v3_account = Some(Box::new(native));
         reopened.set_participant(participant.clone());
         reopened.set_full_node(
             crate::custody::network_tests::node(now, ramflux_protocol::encode_base64url([29; 32]))

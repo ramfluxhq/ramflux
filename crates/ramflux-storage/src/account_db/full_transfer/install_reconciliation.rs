@@ -30,6 +30,7 @@ pub struct FullRecipientInstallStage<'a> {
 pub struct FullRecipientRecoveryIdentity {
     pub grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
     pub master_public_key: String,
+    pub recipient_mode: String,
     pub base_record_hash: String,
     pub base_epoch: u64,
 }
@@ -82,6 +83,7 @@ impl AccountDb {
         Ok(FullRecipientRecoveryIdentity {
             grant: record.grant,
             master_public_key: context.initiator.common.master_public_key,
+            recipient_mode: context.initiator.common.recipient_mode,
             base_epoch: context.initiator.common.device_set_epoch,
             base_record_hash: record.base_record_hash,
         })

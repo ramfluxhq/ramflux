@@ -27,6 +27,7 @@ mod epoch;
 mod install_rebuild;
 pub(super) mod install_recovery;
 mod installation;
+mod installed_status;
 mod management;
 mod publication;
 mod restore;
