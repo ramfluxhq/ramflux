@@ -1110,6 +1110,20 @@ impl PairingActor {
     }
 
     #[cfg(test)]
+    pub(crate) fn ordinary_peer_for_test(&self) -> Self {
+        let mut peer = Self::new(
+            self.identity.clone(),
+            self.native.clone(),
+            self.transport.clone(),
+            self.config.clone(),
+        );
+        if let Some(participant) = &self.participant {
+            peer.set_participant(participant.clone());
+        }
+        peer
+    }
+
+    #[cfg(test)]
     pub(crate) fn wrap_transport_for_test(
         &mut self,
         wrap: impl FnOnce(Arc<dyn PairingTransport>) -> Arc<dyn PairingTransport>,

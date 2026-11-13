@@ -105,7 +105,7 @@ fn finish_published(
     );
     install_live_generation(
         rig,
-        &operation,
+        operation,
         Published {
             source_cleanup: None,
             authority,

@@ -5,6 +5,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    mod head_change;
+    mod races;
     mod third;
     use crate::custody::pairing::{PairingIdentity, PairingLocalWriterService};
     use ramflux_protocol::custody::{DeviceRef, object_hash};
@@ -328,8 +330,24 @@ mod tests {
         Box::pin(run_data_in(Box::pin(open()).await?, rebind)).await
     }
     async fn run_data_in(
-        mut fixture: Linked,
+        fixture: Linked,
         rebind: bool,
+    ) -> Result<Linked, Box<dyn std::error::Error>> {
+        Box::pin(run_data_change(
+            fixture,
+            if rebind { NativeChange::Profile } else { NativeChange::None },
+        ))
+        .await
+    }
+    #[derive(Clone, Copy)]
+    enum NativeChange {
+        None,
+        Profile,
+        Enrollment,
+    }
+    async fn run_data_change(
+        mut fixture: Linked,
+        change: NativeChange,
     ) -> Result<Linked, Box<dyn std::error::Error>> {
         fixture.rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
             "source-veto",
@@ -356,14 +374,20 @@ mod tests {
         let mut revised = None;
         for _ in 0..256 {
             step(&mut fixture).await?;
-            if rebind
+            if !matches!(change, NativeChange::None)
                 && revised.is_none()
                 && fixture.rig.primary.full_base_stream_started_for_test()
                 && fixture.rig.secondary.full_base_stream_started_for_test()
                 && !(fixture.rig.primary.full_base_disk_complete_for_test()
                     && fixture.rig.secondary.full_base_disk_complete_for_test())
             {
-                revised = Some(advance_profile(&fixture)?);
+                revised = Some(match change {
+                    NativeChange::Profile => advance_profile(&fixture)?,
+                    NativeChange::Enrollment => {
+                        Box::pin(head_change::enroll_during_stream(&mut fixture)).await?
+                    }
+                    NativeChange::None => return Err("test: unexpected native change".into()),
+                });
             }
             if fixture.rig.primary.full_base_disk_complete_for_test()
                 && fixture.rig.secondary.full_base_disk_complete_for_test()
@@ -399,7 +423,7 @@ mod tests {
                 "test: linked data work parked an ordinary frontend DB"
             );
         }
-        if rebind {
+        if !matches!(change, NativeChange::None) {
             let expected =
                 revised.ok_or("test: profile did not change during the actual stream")?;
             verify_rebound_stages(&fixture, &expected)?;
@@ -495,7 +519,17 @@ mod tests {
         let fixture = Box::pin(run_data_with_change(rebind)).await?;
         Box::pin(finish_install(fixture, races)).await
     }
-    async fn finish_install(mut fixture: Linked, races: u8) -> TestResult {
+    async fn finish_install(fixture: Linked, races: u8) -> TestResult {
+        let mut fixture = Box::pin(install_in(fixture, races)).await?;
+        fixture.target.account_db()?.persist_actor_state("test/installed-linked-write", &1_u64)?;
+        fixture.rig.primary.lock().await?;
+        fixture.rig.secondary.lock().await?;
+        Ok(())
+    }
+    async fn install_in(
+        mut fixture: Linked,
+        races: u8,
+    ) -> Result<Linked, Box<dyn std::error::Error>> {
         fixture.rig.secondary.set_install_races_for_test(races)?;
         let original = fixture.target.account_db()?.path.clone();
         let native = crate::custody::load_account(
@@ -591,10 +625,7 @@ mod tests {
         if let Some(third) = &mut fixture.third {
             third::verify(&fixture.rig, &fixture.target, third).await?;
         }
-        fixture.target.account_db()?.persist_actor_state("test/installed-linked-write", &1_u64)?;
-        fixture.rig.primary.lock().await?;
-        fixture.rig.secondary.lock().await?;
-        Ok(())
+        Ok(fixture)
     }
     async fn poll_management(fixture: &mut Linked, primary: bool) -> TestResult {
         let Linked { rig, target, source_service, target_service, .. } = fixture;
