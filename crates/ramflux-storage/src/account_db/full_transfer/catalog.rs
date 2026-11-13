@@ -572,6 +572,7 @@ macro_rules! table_rule {
 
 mod cleanup_local;
 mod completion_local;
+mod own_sync_local;
 mod tables_0;
 mod tables_1;
 mod tables_2;
@@ -703,6 +704,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     TAIL_DEPENDENCIES,      // sql/pairing_full_tail_dependency
     tables_2::RULE_108,     // sql/pairing_head
     tables_2::RULE_109,     // sql/pairing_live
+    own_sync_local::RULE,   // sql/pairing_own_sync
     cleanup_local::RULE,    // sql/pairing_source_cleanup
     tables_2::RULE_110,     // sql/pairing_terminal
     tables_2::RULE_111,     // sql/pending_recovery_approval_projection

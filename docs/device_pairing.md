@@ -88,3 +88,5 @@ After enrollment, the approving device schedules one bounded history sync when
 its ordinary native session is available. A failed attempt does not undo pairing;
 use `rf device sync export` for a manual retry. A full-account transfer does not
 schedule this separate history export.
+
+Automatic enrollment history receipts are device-local excluded state in `pairing_own_sync`. They are never exported as history or imported as another device's pending work.

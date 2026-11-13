@@ -5,6 +5,7 @@
 use super::{FullReceiverBaseCopy, FullTransferStage, wrong};
 use crate::{AccountDbKey, AdoptionRow, BackupDatabase, StorageError};
 use rusqlite::params;
+mod incremental;
 mod objects;
 mod selection;
 mod tail;

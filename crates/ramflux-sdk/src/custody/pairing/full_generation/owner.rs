@@ -29,6 +29,10 @@ pub struct FullGenerationPrepared {
     directory: FullGenerationDirectory,
     install: Install,
 }
+pub(crate) enum FullGenerationAttempt {
+    Selected(Box<FullGenerationCommitted>),
+    Changed(Box<FullGenerationPrepared>),
+}
 /// Exact selected data generation, still fenced until native files and G3 agree.
 pub struct FullGenerationCommitted {
     data: FullSelectedReceiverGeneration,
@@ -161,6 +165,91 @@ impl FullGenerationPreparation {
     }
 }
 impl FullGenerationPrepared {
+    pub(crate) fn discard_changed(self) -> Result<(), SdkError> {
+        self.directory.discard_unselected(&self.install)
+    }
+    pub(crate) fn rebase_current_target(
+        &mut self,
+        local: &Installation<'_>,
+        stage: &FullTransferStage<'_>,
+        authority: &CustodyAuthority,
+    ) -> Result<(), SdkError> {
+        acknowledged(local, &self.install, authority)?;
+        stage.require_destination_preservation_after_native_ack(
+            &authority.publication.record,
+            local.now,
+        )?;
+        let union = match self.database.rebase_current_target(stage, local.now) {
+            Ok(union) => union,
+            Err(error) => {
+                if error.is_writer_busy() {
+                    self.directory.discard_unselected(&self.install)?;
+                }
+                return Err(error.into());
+            }
+        };
+        let full = self.install.full_transfer.as_mut().ok_or_else(pending)?;
+        full.initial_union_root = ramflux_protocol::encode_base64url(union.chunks_root);
+        full.expected_prior_privacy_epoch = ramflux_protocol::custody::pairing::full_transfer::U64(
+            u64::try_from(local.db.privacy_erasure_generation()?).map_err(|_| pending())?,
+        );
+        self.install.validate()?;
+        install_store::write_pending(local.root, &self.install)?;
+        Ok(())
+    }
+    pub(crate) fn select_linked(
+        self,
+        local: &Installation<'_>,
+        stage: &FullTransferStage<'_>,
+        authority: &CustodyAuthority,
+    ) -> Result<FullGenerationAttempt, SdkError> {
+        acknowledged(local, &self.install, authority)?;
+        stage.require_destination_preservation_after_native_ack(
+            &authority.publication.record,
+            local.now,
+        )?;
+        if install_store::read_pending(
+            local.root,
+            &self.install.account_id,
+            &self.install.operation_id,
+        )?
+        .as_ref()
+            != Some(&self.install)
+        {
+            return Err(pending());
+        }
+        let marker = FullGenerationManifest::for_install(&self.install)?.encode()?;
+        let full = self.install.full_transfer.as_ref().ok_or_else(pending)?;
+        let index = ramflux_storage::AccountIndex::open(local.root)?;
+        let wrapped = index.load_wrapped_db_key(&self.install.account_id)?.ok_or_else(pending)?;
+        let selected = self.database.select_preserving(
+            stage,
+            &ramflux_storage::BackupIndexInstall {
+                account_id: &self.install.account_id,
+                principal_commitment: &self.install.account_anchor,
+                db_relative_path: &full.db_relative_path,
+                object_relative_path: &full.object_relative_path,
+                manifest_json: &marker,
+                wrapped_key: &wrapped,
+            },
+            local.now,
+        );
+        match selected {
+            Ok(data) => Ok(FullGenerationAttempt::Selected(Box::new(FullGenerationCommitted {
+                data,
+                directory: self.directory,
+                install: self.install,
+            }))),
+            Err((database, error)) if error.is_writer_busy() => {
+                Ok(FullGenerationAttempt::Changed(Box::new(Self {
+                    database: *database,
+                    directory: self.directory,
+                    install: self.install,
+                })))
+            }
+            Err((_, error)) => Err(error.into()),
+        }
+    }
     #[must_use]
     pub const fn install(&self) -> &Install {
         &self.install

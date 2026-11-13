@@ -34,6 +34,26 @@ pub struct FullTargetObservation {
     version: Version,
 }
 impl FullTargetObservation {
+    pub(super) fn refresh_current(&self, db: &AccountDb) -> Result<Self, StorageError> {
+        db.require_selected_transfer_source()?;
+        let original =
+            self.worker.upgrade_account_writer().ok_or(StorageError::AuthorizationRejected)?;
+        let account = db.account_index.account(&db.local_account_id)?;
+        if !original.same_worker(&db.connection)
+            || self.root != db.account_index.root()
+            || account != self.account
+        {
+            return Err(busy());
+        }
+        let observed = Self {
+            account,
+            root: self.root.clone(),
+            worker: db.connection.downgrade(),
+            version: version(&db.connection)?,
+        };
+        observed.require_current(db)?;
+        Ok(observed)
+    }
     #[must_use]
     pub fn local_account_id(&self) -> &str {
         &self.account.local_account_id

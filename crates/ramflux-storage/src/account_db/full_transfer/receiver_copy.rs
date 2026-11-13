@@ -18,7 +18,9 @@ pub use generation::{
     FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
 };
 
+mod incremental;
 mod seal;
+mod sql_delta;
 
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")

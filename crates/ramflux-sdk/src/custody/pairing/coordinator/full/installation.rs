@@ -4,7 +4,9 @@
 //! Existing B retains its ordinary writer through copy/G1, then hands back only completed G3.
 use super::{PairingActor, SdkError};
 use crate::custody::pairing::{
-    Installation, full_generation::owner::FullGenerationPreparation, install_store::Install,
+    Installation,
+    full_generation::owner::{FullGenerationAttempt, FullGenerationPreparation},
+    install_store::Install,
 };
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::CustodyAuthority;
@@ -33,30 +35,34 @@ impl PairingActor {
         let authority = observation.authority().clone();
         writer.request(move |db| observation.acknowledge(db)).await?;
         let mut committed = None;
-        for _ in 0..3 {
-            let attempt = async {
-                let prepared =
-                    Box::pin(self.prepare_linked_generation(install.clone(), authority.clone()))
-                        .await?;
-                writer
-                    .select_full_generation(participant.clone(), prepared, authority.clone())
-                    .await
-            }
-            .await;
-            match attempt {
-                Ok(selected) => {
-                    committed = Some(selected);
+        let mut retained = None;
+        for attempt in 0..3 {
+            let prepared =
+                Box::pin(self.prepare_linked_generation(install.clone(), authority.clone()))
+                    .await?;
+            match writer
+                .select_full_generation(participant.clone(), prepared, authority.clone())
+                .await?
+            {
+                FullGenerationAttempt::Selected(selected) => {
+                    committed = Some(*selected);
                     break;
                 }
-                Err(error) if install_busy(&error) => {}
-                Err(error) => return Err(error),
+                FullGenerationAttempt::Changed(prepared) if attempt == 2 => {
+                    retained = Some(*prepared)
+                }
+                FullGenerationAttempt::Changed(prepared) => prepared.discard_changed()?,
             }
         }
         let committed = match committed {
             Some(selected) => selected,
             None => {
                 writer
-                    .rebase_full_generation(participant.clone(), install, authority.clone())
+                    .rebase_full_generation(
+                        participant.clone(),
+                        retained.ok_or(SdkError::PairingCode("Busy"))?,
+                        authority.clone(),
+                    )
                     .await?
             }
         };

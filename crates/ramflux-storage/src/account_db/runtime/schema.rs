@@ -55,7 +55,6 @@ impl AccountDb {
             self.connection
                 .execute_batch("ALTER TABLE runtime_operation ADD COLUMN operation_kind TEXT")?;
         }
-        self.connection.execute_batch("CREATE INDEX IF NOT EXISTS runtime_operation_kind ON runtime_operation(operation_kind,operation_id)")?;
         // This value comes from the supervisor account record, never from a contact directory.
         self.connection.execute(
             "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",
@@ -130,6 +129,7 @@ CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON r
             "pairing_full_tail_apply",
             "pairing_full_tail_dependency",
             "pairing_full_completion",
+            "pairing_own_sync",
             // Data-only source-qualified MAC verifiers have no domain rowid.
             "full_imported_mac_bundle",
         ] {
@@ -146,7 +146,7 @@ CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON r
         self.remove_local_bookkeeping_triggers()?;
         let mut statement = self.connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-             AND name NOT IN ('gateway_receive_receipt','gateway_receive_work','gateway_ack_intent','gateway_inbox_loss','gateway_receive_epoch','message_footprint_migration','receive_erased_input','raw_inner_owner','raw_inner_copy','raw_inner_evidence','pairing_floor','pairing_live','pairing_head','pairing_terminal','pairing_adoption','pairing_full_tail','pairing_source_cleanup','pairing_full_tail_apply','pairing_full_tail_dependency','pairing_full_completion','full_imported_mac_bundle') AND name NOT LIKE 'account_mac_%' AND name NOT LIKE 'object_segment_%' AND name NOT LIKE 'object_retention_%' AND name NOT LIKE 'object_erasure_%' AND name NOT LIKE 'object_reference_%' AND name NOT LIKE 'object_legacy_%' AND name NOT LIKE 'object_identity_%' AND name NOT LIKE 'object_payload_%' AND name NOT LIKE 'object_transport_%' AND name NOT IN ('object_message_reference','object_runtime_response','account_erasure_generation') AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_attachment_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT LIKE 'runtime_own_copy_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
+             AND name NOT IN ('gateway_receive_receipt','gateway_receive_work','gateway_ack_intent','gateway_inbox_loss','gateway_receive_epoch','message_footprint_migration','receive_erased_input','raw_inner_owner','raw_inner_copy','raw_inner_evidence','pairing_floor','pairing_live','pairing_head','pairing_terminal','pairing_adoption','pairing_full_tail','pairing_source_cleanup','pairing_full_tail_apply','pairing_full_tail_dependency','pairing_full_completion','pairing_own_sync','full_imported_mac_bundle') AND name NOT LIKE 'account_mac_%' AND name NOT LIKE 'object_segment_%' AND name NOT LIKE 'object_retention_%' AND name NOT LIKE 'object_erasure_%' AND name NOT LIKE 'object_reference_%' AND name NOT LIKE 'object_legacy_%' AND name NOT LIKE 'object_identity_%' AND name NOT LIKE 'object_payload_%' AND name NOT LIKE 'object_transport_%' AND name NOT IN ('object_message_reference','object_runtime_response','account_erasure_generation') AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_attachment_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT LIKE 'runtime_own_copy_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
         let tables = statement
             .query_map([], |row| row.get::<_, String>(0))?

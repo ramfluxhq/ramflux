@@ -21,10 +21,15 @@ use std::{
 use zeroize::{Zeroize as _, Zeroizing};
 
 mod delta;
+mod target;
 
 pub(super) struct Contributions {
     pub(super) nonce: [u8; 32],
     pub(super) owners: [String; 2],
+}
+pub(super) struct TargetRows<'a> {
+    pub(super) current: &'a BackupDatabase,
+    pub(super) schema: &'a super::FullTransferSchema,
 }
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")

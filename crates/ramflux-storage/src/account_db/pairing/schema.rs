@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const TABLES: [&str; 10] = [
+pub(crate) const TABLES: [&str; 11] = [
     "pairing_floor",
     "pairing_live",
     "pairing_head",
@@ -16,6 +16,7 @@ pub(crate) const TABLES: [&str; 10] = [
     "pairing_full_tail_apply",
     "pairing_full_tail_dependency",
     "pairing_full_completion",
+    "pairing_own_sync",
 ];
 
 pub(crate) const LIVE_CAP: i64 = 3;
@@ -159,6 +160,7 @@ pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
     }
     install_full_adoption_columns(db)?;
     db.execute_batch(super::tail::SCHEMA)?;
+    db.execute_batch(super::own_sync::SCHEMA)?;
     let _ = PHASES;
     Ok(())
 }

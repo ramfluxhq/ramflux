@@ -133,8 +133,21 @@ impl FullPreparedReceiverDatabase {
         install: &crate::BackupIndexInstall<'_>,
         now: u64,
     ) -> Result<FullSelectedReceiverGeneration, StorageError> {
+        self.select_preserving(stage, install, now).map_err(|(_, error)| error)
+    }
+    /// Keep the exact unselected attempt available when optimistic B observation changes.
+    /// # Errors
+    /// Returns the original owner with the selection error; uncertain G2 stays fenced.
+    pub fn select_preserving(
+        self,
+        stage: &FullTransferStage<'_>,
+        install: &crate::BackupIndexInstall<'_>,
+        now: u64,
+    ) -> Result<FullSelectedReceiverGeneration, (Box<Self>, StorageError)> {
         let index = stage.db.account_index.clone();
-        self.commit_index_selection(stage, install, now)?;
+        if let Err(error) = self.commit_index_selection(stage, install, now) {
+            return Err((Box::new(self), error));
+        }
         Ok(FullSelectedReceiverGeneration {
             materialization: Materialization::Prepared(Box::new(self)),
             index,

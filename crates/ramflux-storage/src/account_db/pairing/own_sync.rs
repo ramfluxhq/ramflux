@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Enrollment-only automatic history attempts, stored in the existing excluded local ledger.
+//! Enrollment-only automatic history attempts, stored in its excluded local ledger.
 use crate::{AccountDb, AdoptionRow, StorageError, TerminalRow};
 use ramflux_protocol::custody::{DeviceRef, Publication};
 use rusqlite::{OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
+pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pairing_own_sync(
+ operation_id TEXT NOT NULL PRIMARY KEY CHECK(length(operation_id) BETWEEN 1 AND 96),
+ fingerprint TEXT NOT NULL CHECK(length(fingerprint)=43),
+ response_json TEXT NOT NULL CHECK(length(CAST(response_json AS BLOB)) BETWEEN 1 AND 2048),
+ operation_kind TEXT NOT NULL CHECK(operation_kind='pairing_own_sync_v1')
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS pairing_own_sync_kind ON pairing_own_sync(operation_kind,operation_id);";
 const KIND: &str = "pairing_own_sync_v1";
 const LIMIT: usize = 2048;
 const CAPACITY: u64 = 128;
@@ -92,15 +99,14 @@ impl AccountDb {
         terminal: &TerminalRow,
     ) -> Result<(), StorageError> {
         self.connection.execute_batch("SAVEPOINT pairing_own_sync")?;
-        match self.queue_enrollment_own_sync_inner(adoption, terminal) {
-            Ok(()) => self.connection.execute_batch("RELEASE pairing_own_sync")?,
-            Err(_) => {
-                self.connection
-                    .execute_batch("ROLLBACK TO pairing_own_sync; RELEASE pairing_own_sync")?;
-                tracing::warn!(
-                    "pairing history synchronization could not be scheduled; retry with device sync export"
-                );
-            }
+        if let Ok(()) = self.queue_enrollment_own_sync_inner(adoption, terminal) {
+            self.connection.execute_batch("RELEASE pairing_own_sync")?;
+        } else {
+            self.connection
+                .execute_batch("ROLLBACK TO pairing_own_sync; RELEASE pairing_own_sync")?;
+            tracing::warn!(
+                "pairing history synchronization could not be scheduled; retry with device sync export"
+            );
         }
         Ok(())
     }
@@ -148,15 +154,15 @@ impl AccountDb {
         }
         let operation = key(&job.operation_id);
         if self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_operation WHERE operation_id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM pairing_own_sync WHERE operation_id=?1)",
             params![operation],
             |row| row.get::<_, bool>(0),
         )? {
             return Ok(());
         }
-        self.connection.execute("DELETE FROM runtime_operation WHERE operation_kind=?1 AND operation_id IN(SELECT operation_id FROM runtime_operation WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END!='queued' ORDER BY operation_id LIMIT max(0,(SELECT count(*) FROM runtime_operation WHERE operation_kind=?1)-127))",params![KIND])?;
+        self.connection.execute("DELETE FROM pairing_own_sync WHERE operation_kind=?1 AND operation_id IN(SELECT operation_id FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END!='queued' ORDER BY operation_id LIMIT max(0,(SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1)-127))",params![KIND])?;
         let count: u64 = self.connection.query_row(
-            "SELECT count(*) FROM runtime_operation WHERE operation_kind=?1",
+            "SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1",
             params![KIND],
             |row| row.get(0),
         )?;
@@ -166,7 +172,7 @@ impl AccountDb {
             );
             return Ok(());
         }
-        let queued: u64 = self.connection.query_row("SELECT count(*) FROM runtime_operation WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END='queued'",params![KIND],|row|row.get(0))?;
+        let queued: u64 = self.connection.query_row("SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END='queued'",params![KIND],|row|row.get(0))?;
         let stored = Stored {
             version: 1,
             job,
@@ -179,13 +185,13 @@ impl AccountDb {
             "ramflux.pairing.own_sync.v1",
             &ramflux_protocol::canonical_json_bytes(&stored.job)?,
         );
-        self.connection.execute("INSERT INTO runtime_operation(operation_id,fingerprint,response_json,operation_kind) VALUES(?1,?2,?3,?4)",params![operation,fingerprint,bytes,KIND])?;
+        self.connection.execute("INSERT INTO pairing_own_sync(operation_id,fingerprint,response_json,operation_kind) VALUES(?1,?2,?3,?4)",params![operation,fingerprint,bytes,KIND])?;
         Ok(())
     }
     fn own_sync_stored(&self, operation: &str) -> Result<Option<Stored>, StorageError> {
         hash(operation)?;
         let row: Option<(Option<String>,Option<String>)> = self.connection.query_row(
-            "SELECT CASE WHEN length(fingerprint)=43 THEN fingerprint END,CASE WHEN length(response_json)<=2048 THEN response_json END FROM runtime_operation WHERE operation_id=?1 AND operation_kind=?2",
+            "SELECT CASE WHEN length(fingerprint)=43 THEN fingerprint END,CASE WHEN length(response_json)<=2048 THEN response_json END FROM pairing_own_sync WHERE operation_id=?1 AND operation_kind=?2",
             params![key(operation),KIND],|row|Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
         let Some((fingerprint, bytes)) = row else { return Ok(None) };
@@ -210,7 +216,7 @@ impl AccountDb {
     /// Refuses malformed local receipts or a retired account generation.
     pub fn next_pairing_own_sync(&self) -> Result<Option<PairingOwnSyncJob>, StorageError> {
         let operation: Option<Option<String>> = self.connection.query_row(
-            "SELECT CASE WHEN length(operation_id)<=96 THEN operation_id END FROM runtime_operation WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END='queued' ORDER BY operation_id LIMIT 1",
+            "SELECT CASE WHEN length(operation_id)<=96 THEN operation_id END FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END='queued' ORDER BY operation_id LIMIT 1",
             params![KIND],|row|row.get(0),
         ).optional()?;
         let Some(operation) = operation else { return Ok(None) };
@@ -229,7 +235,7 @@ impl AccountDb {
             if value.job != *job { return Err(wrong()); }
             if value.phase != Phase::Queued { return Ok(false); }
             value.phase = Phase::Attempted;
-            self.connection.execute("UPDATE runtime_operation SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,key(&job.operation_id),KIND])?;
+            self.connection.execute("UPDATE pairing_own_sync SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,key(&job.operation_id),KIND])?;
             Ok(true)
         })
     }
@@ -249,7 +255,7 @@ impl AccountDb {
             if value.job != *job || value.phase != Phase::Attempted { return Err(wrong()); }
             value.phase = if error.is_some() {Phase::Failed}else{Phase::Done};
             value.result = error.map(str::to_owned);
-            self.connection.execute("UPDATE runtime_operation SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,key(&job.operation_id),KIND])?;
+            self.connection.execute("UPDATE pairing_own_sync SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,key(&job.operation_id),KIND])?;
             Ok(())
         })
     }
