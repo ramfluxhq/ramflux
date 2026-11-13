@@ -16,9 +16,9 @@ use tokio::sync::{oneshot, watch};
 
 pub(super) struct Started {
     pub actor: AccountActor,
-    pub root: PathBuf,
     pub router: tokio::task::JoinHandle<()>,
     peer: LocalBusAccountState,
+    pub root: ramflux_test_support::TestPath,
 }
 impl Started {
     pub(super) fn peer(&mut self) -> &mut LocalBusAccountState {
@@ -64,11 +64,10 @@ async fn case() -> Case {
         }
     })
     .await??;
-    let Started { actor, root, router, .. } = started;
+    let Started { root: _root, actor, router, .. } = started;
     actor.stop().await?;
     drop(actor);
     router.await?;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 pub(super) async fn controls(actor: &AccountActor) -> Case {
@@ -102,7 +101,7 @@ pub(super) async fn start(fixture: Fixture) -> Case<Started> {
     drop(source);
     let resume = ResumeConfig { config, commitment, relay_options };
     let (actor, router) = launch(&root, &resume, Some(engine)).await?;
-    Ok(Started { actor, root, router, peer })
+    Ok(Started { actor, router, peer, root })
 }
 #[derive(Clone)]
 struct ResumeConfig {
@@ -371,7 +370,6 @@ async fn cursor_error_case() -> Case {
     );
     let root = fixture.root.clone();
     drop(fixture);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -572,7 +570,6 @@ pub(super) async fn ack_fence() -> Case {
     ack_outcomes(&mut runtime, generation, &target).await?;
     let root = fixture.root.clone();
     drop(runtime);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

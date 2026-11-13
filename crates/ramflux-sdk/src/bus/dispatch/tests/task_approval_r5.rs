@@ -233,10 +233,10 @@ fn store_courier_ack(
 }
 
 struct CourierStarvationFixture {
-    root: PathBuf,
     agent: LocalBusAccountState,
     human: LocalBusAccountState,
     healthy_forward: String,
+    root: ramflux_test_support::TestPath,
 }
 
 fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
@@ -302,7 +302,7 @@ fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
             created_at: now_unix_timestamp(),
         },
     )?;
-    Ok(CourierStarvationFixture { root, agent, human, healthy_forward })
+    Ok(CourierStarvationFixture { agent, human, healthy_forward, root })
 }
 
 async fn exercise_courier_starvation(
