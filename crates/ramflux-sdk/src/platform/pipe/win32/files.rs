@@ -104,7 +104,7 @@ pub(crate) fn open_owner_only(
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
     // returned handle is owned by the `File`. The last-error value is read before any other
     // call can replace it.
-    let (file, existed) = unsafe {
+    let (file, existed) = super::assigning_owner(|| unsafe {
         SetLastError(0);
         let handle = CreateFileW(
             wide.as_ptr(),
@@ -119,8 +119,8 @@ pub(crate) fn open_owner_only(
             return Err(io::Error::last_os_error());
         }
         let existed = GetLastError() == ERROR_ALREADY_EXISTS;
-        (File::from_raw_handle(handle), existed)
-    };
+        Ok((File::from_raw_handle(handle), existed))
+    })?;
     if existed {
         if owner_of(file.as_raw_handle(), SE_FILE_OBJECT)? != user {
             return Err(io::ErrorKind::PermissionDenied.into());
@@ -215,10 +215,13 @@ pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
     let (descriptor, _) = owner_descriptor(true)?;
     let attributes = descriptor.attributes()?;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call.
-    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    super::assigning_owner(|| {
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
 }
 
 /// Owner SID of an existing file or directory, without following a final reparse point.

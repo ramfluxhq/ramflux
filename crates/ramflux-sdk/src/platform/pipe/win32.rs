@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Win32 calls for the named-pipe carrier: SIDs, token facts, security descriptors, pipe
-//! instances, and owner lookups. Every `unsafe` block of the carrier lives in this file.
+//! instances, owner lookups, and the privilege required to assign the user as owner. Every
+//! `unsafe` block of the carrier lives in this file.
 #![allow(unsafe_code)]
 
 use std::ffi::{OsStr, c_void};
@@ -11,20 +12,26 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
+use std::sync::Mutex;
 
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
 };
-use windows_sys::Win32::Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LUID,
+    LocalFree, SetLastError,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
 };
 use windows_sys::Win32::Security::{
-    CopySid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
-    TokenIntegrityLevel, TokenIsAppContainer, TokenUser,
+    AdjustTokenPrivileges, CopySid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
+    GetTokenInformation, IsValidSid, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SE_PRIVILEGE_ENABLED,
+    SE_RESTORE_NAME, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES, TOKEN_INFORMATION_CLASS,
+    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel,
+    TokenIsAppContainer, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, SECURITY_IDENTIFICATION,
@@ -281,6 +288,117 @@ fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// Run `body` while this process can assign its user SID as an object owner.
+///
+/// An elevated token's default owner is the Administrators group. A descriptor that names the
+/// user SID then fails with `ERROR_INVALID_OWNER` (1307) unless `SeRestorePrivilege` is enabled.
+/// A token that does not hold the privilege is left unchanged and still runs `body`. The
+/// privilege is process-wide, so callers must not re-enter this function.
+///
+/// # Errors
+/// Returns the OS error when the process token cannot be opened or the privilege cannot be
+/// adjusted. A token that simply lacks `SeRestorePrivilege` still runs `body`.
+pub(crate) fn assigning_owner<T>(body: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let privilege = RestorePrivilege::enable()?;
+    let result = body();
+    // Restore while the lock is still held so another thread cannot create in between.
+    drop(privilege);
+    drop(lock);
+    result
+}
+
+/// `SeRestorePrivilege` enabled for the current process, restored when dropped.
+struct RestorePrivilege {
+    token: OwnedHandle,
+    previous: TOKEN_PRIVILEGES,
+}
+
+impl RestorePrivilege {
+    fn enable() -> io::Result<Option<Self>> {
+        let mut raw: HANDLE = std::ptr::null_mut();
+        // SAFETY: the process pseudo-handle is always valid. On success `raw` is a live process
+        // token opened for privilege adjustment, which this function owns.
+        let opened = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &raw mut raw,
+            )
+        };
+        if opened == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `OpenProcessToken` succeeded, so `raw` is an open handle this function owns.
+        let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut luid = LUID::default();
+        // SAFETY: a null system name looks the privilege up on this machine. `SE_RESTORE_NAME`
+        // is a static NUL-terminated name, and `luid` is a writable out-parameter.
+        let looked_up = unsafe {
+            LookupPrivilegeValueW(std::ptr::null::<u16>(), SE_RESTORE_NAME, &raw mut luid)
+        };
+        if looked_up == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let requested = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+        };
+        let mut previous = TOKEN_PRIVILEGES::default();
+        let mut returned = 0_u32;
+        let length = u32::try_from(size_of::<TOKEN_PRIVILEGES>()).map_err(io::Error::other)?;
+        // SAFETY: `token` was opened with `TOKEN_ADJUST_PRIVILEGES`. `requested` names one
+        // privilege. `previous` has room for that privilege's prior state, and `returned`
+        // receives how many bytes were required. `Drop` writes `previous` back.
+        // `SetLastError` distinguishes "not held" from a real adjustment failure.
+        let adjusted = unsafe {
+            SetLastError(0);
+            AdjustTokenPrivileges(
+                token.as_raw_handle(),
+                0,
+                &raw const requested,
+                length,
+                &raw mut previous,
+                &raw mut returned,
+            )
+        };
+        if adjusted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: reads the status `AdjustTokenPrivileges` just stored. No pointers.
+        let last_error = unsafe { GetLastError() };
+        if last_error == ERROR_NOT_ALL_ASSIGNED {
+            // The privilege is absent, so nothing was changed. An unelevated token can already
+            // assign its user SID; an elevated token without the privilege still fails at create.
+            return Ok(None);
+        }
+        if returned > length {
+            return Err(io::Error::other("privilege state did not fit the previous-state buffer"));
+        }
+        Ok(Some(Self { token, previous }))
+    }
+}
+
+impl Drop for RestorePrivilege {
+    fn drop(&mut self) {
+        // SAFETY: `token` is the process token opened with `TOKEN_ADJUST_PRIVILEGES`. `previous`
+        // is the prior state of `SeRestorePrivilege`. The output pointers are null, so the
+        // length is ignored. A failed restore cannot be reported from `Drop`; the privilege
+        // then stays as this guard left it until process exit.
+        unsafe {
+            AdjustTokenPrivileges(
+                self.token.as_raw_handle(),
+                0,
+                &raw const self.previous,
+                0,
+                std::ptr::null_mut::<TOKEN_PRIVILEGES>(),
+                std::ptr::null_mut::<u32>(),
+            );
+        }
+    }
+}
+
 /// Create one byte-mode, duplex, local-only pipe instance with an explicit security descriptor.
 /// `first` requests `FILE_FLAG_FIRST_PIPE_INSTANCE`.
 ///
@@ -300,9 +418,9 @@ pub(super) fn create_instance(
         .access_inbound(true)
         .access_outbound(true);
     // SAFETY: `attributes` is a valid SECURITY_ATTRIBUTES whose descriptor outlives the call.
-    unsafe {
+    assigning_owner(|| unsafe {
         options.create_with_security_attributes_raw(name, (&raw mut attributes).cast::<c_void>())
-    }
+    })
 }
 
 /// Open the client end. The server may identify this process but not act as it:
@@ -393,7 +511,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
     let attributes = descriptor.attributes()?;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
     // returned handle is owned by the `File`.
-    unsafe {
+    assigning_owner(|| unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
             GENERIC_WRITE,
@@ -407,7 +525,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
             return Err(io::Error::last_os_error());
         }
         Ok(File::from_raw_handle(handle))
-    }
+    })
 }
 
 pub(crate) mod files;
