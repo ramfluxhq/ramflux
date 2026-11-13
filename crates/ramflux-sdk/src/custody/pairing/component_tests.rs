@@ -23,10 +23,13 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Node {
     core: RouterCore,
     disk: RouterRedbStore,
+    lose_next_reply: std::sync::atomic::AtomicBool,
+    persist_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl NodeHeadPersist for Node {
     fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError> {
+        self.persist_calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let record = self
             .core
             .publish_custody_record(
@@ -38,6 +41,9 @@ impl NodeHeadPersist for Node {
                 &self.disk,
             )
             .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        if self.lose_next_reply.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return Err(SdkError::LocalBus("native persisted before response loss".into()));
+        }
         Ok(object_hash(&record)?)
     }
 }
@@ -180,6 +186,8 @@ impl Rig {
         let node_root = tempfile::tempdir()?;
         let node = Arc::new(Node {
             core: RouterCore::new(),
+            lose_next_reply: std::sync::atomic::AtomicBool::new(false),
+            persist_calls: std::sync::atomic::AtomicUsize::new(0),
             disk: RouterRedbStore::open_without_wal(node_root.path().join("authority.redb"))?,
         });
         let source_account = crate::custody::load_account(&source.root.0, "component-source", now)?;

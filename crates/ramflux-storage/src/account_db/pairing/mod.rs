@@ -8,8 +8,9 @@ pub(crate) mod journal;
 pub(crate) mod privacy;
 pub(crate) mod recovery;
 pub(crate) mod schema;
+pub(crate) mod tail;
 #[cfg(test)]
-mod tests;
+pub(in crate::account_db) mod tests;
 
 pub(crate) use privacy::{merge_floor, sanitize_backup, skip_merge};
 pub(crate) use schema::install;

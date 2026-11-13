@@ -7,7 +7,8 @@ use super::schema::TABLES;
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-const STRIP: [&str; 4] = ["pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption"];
+const STRIP: [&str; 5] =
+    ["pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption", "pairing_full_tail"];
 
 /// True when a pairing table must not be row-merged from an incoming backup.
 #[must_use]

@@ -188,10 +188,10 @@ fn prepare_candidate(
         let _lock = super::activate::authority_lock(root, &write.account_id)?;
         refuse_foreign_head(db, &write.operation_id)?;
         if let Some(head) = journal(db, |db| Ok(db.pairing_head()?))? {
-            require_resume_primary(root, vault, write, &head)?;
             if head.kind != kind_label(write.kind) {
                 return Err(SdkError::PairingCode("Busy"));
             }
+            require_resume_primary(root, vault, write, &head)?;
             head
         } else {
             let account = load_account(root, &write.account_id, write.now)?;

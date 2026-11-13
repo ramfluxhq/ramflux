@@ -6,7 +6,7 @@ mod backup;
 mod codec;
 mod crash;
 mod full_reference;
-mod helpers;
+pub(in crate::account_db) mod helpers;
 mod schema;
 
 #[test]

@@ -42,7 +42,7 @@ pub(super) fn tables_and_indexes() -> TestResult {
         )?;
         assert_eq!(n, 1, "{table}");
     }
-    assert_eq!(TABLES.len(), 5);
+    assert_eq!(TABLES.len(), 6);
     for index in ["pairing_live_phase", "pairing_terminal_finished"] {
         let n: i64 = db.connection.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
@@ -59,7 +59,7 @@ pub(super) fn old_open_creates_tables() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-migrate")?;
     db.connection.execute_batch(
         "DROP TABLE pairing_live; DROP TABLE pairing_head; DROP TABLE pairing_terminal;
-         DROP TABLE pairing_adoption; DROP TABLE pairing_floor;",
+         DROP TABLE pairing_adoption; DROP TABLE pairing_floor; DROP TABLE pairing_full_tail;",
     )?;
     drop(db);
     let db = reopen(&root)?;

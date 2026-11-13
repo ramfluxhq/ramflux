@@ -651,6 +651,9 @@ async fn pairing_resume_refuses_kind_mismatch() -> TestResult {
     let mut profile = profile_write(&harness, "Renamed Human", now.saturating_add(1))?;
     profile.operation_id = seed.operation_id.clone();
     profile.invitation_id = seed.invitation_id.clone();
+    // A foreign writer kind must be rejected before touching primary credentials.
+    let reference = harness.account(now)?.primary_vault_ref().to_owned();
+    crate::custody::PrimaryVault::delete(harness.fixture.vault.as_ref(), &reference)?;
     assert_busy(&harness, &profile)?;
     Ok(())
 }

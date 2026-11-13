@@ -13,6 +13,8 @@ use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, Prep
 mod candidate;
 pub use candidate::FullPreparedTransferCandidate;
 mod preservation;
+mod submission;
+pub use submission::{FullSourcePublished, FullSourceSubmission};
 mod proof_signer;
 mod stage;
 pub(crate) use proof_signer::FullProofSigner;
@@ -355,3 +357,11 @@ impl LocalPairingParticipant {
 
 #[cfg(test)]
 mod tests;
+
+/// Adopted minimum time for the one post-publication tail; checked before either J3 approval.
+fn require_candidate_lease(expires_at: u64, now: u64) -> Result<(), SdkError> {
+    if expires_at.checked_sub(now).is_none_or(|remaining| remaining < 86_400) {
+        return Err(SdkError::PairingCode("LeaseExpired"));
+    }
+    Ok(())
+}

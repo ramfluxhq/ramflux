@@ -232,7 +232,7 @@ pub(super) fn publication_at(epoch: u64) -> TestResult<(Vec<u8>, String, u64)> {
     Ok((bytes, candidate_hash, epoch))
 }
 
-pub(super) fn head() -> TestResult<HeadRow> {
+pub(in crate::account_db) fn head() -> TestResult<HeadRow> {
     let (candidate, candidate_hash, _) = publication()?;
     Ok(HeadRow {
         account_id: "acct".into(),

@@ -8,13 +8,20 @@ use super::{
 };
 use crate::custody::{
     self,
-    pairing::{
-        Install, Installation, NodeHeadPersist, full_generation::owner::FullGenerationPreparation,
-    },
+    pairing::{Install, Installation, full_generation::owner::FullGenerationPreparation},
 };
 use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
+mod source_cancel;
+mod source_tail;
+
+struct Prepared {
+    publication: ramflux_protocol::custody::Publication,
+    install: Install,
+    head: HeadRow,
+    source_submission: crate::custody::pairing::FullSourceSubmission,
+}
 
 struct Published {
     authority: CustodyAuthority,
@@ -84,10 +91,10 @@ async fn pairing_full_generation_installer_requires_real_j6_keys_and_all_owner_g
     hold.finish().await?;
     Ok(())
 }
-async fn publication(
+async fn prepare_candidate(
     rig: &mut Rig,
     operation: &str,
-) -> Result<Published, Box<dyn std::error::Error>> {
+) -> Result<Prepared, Box<dyn std::error::Error>> {
     let request = {
         let slot = rig.participant_b.db.lock().map_err(|_| "B prepare owner")?;
         let db = slot.as_ref().ok_or("B prepare writer")?;
@@ -148,9 +155,45 @@ async fn publication(
     assert_eq!(head.candidate, canonical_json_bytes(&publication)?);
     assert_eq!(head.state, "prepared");
     prove_source_preservation(rig, &publication, &install).await?;
-    // Independent real native persistence remains outside every local DB loan.
-    assert_eq!(rig.node.persist_head(&publication, rig.now)?, head.candidate_hash);
+    rig.participant_a.take_client(&mut rig.source.client)?;
+    let source_submission = rig.primary.prepare_full_source_submission(publication.clone()).await?;
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    // Actual SDK submission owns only public bytes/ports and weak writer liveness.
+    assert!(rig.participant_a.db.lock().map_err(|_| "off-loan source")?.is_none());
+    Ok(Prepared { publication, install, head, source_submission })
+}
+async fn publication(
+    rig: &mut Rig,
+    operation: &str,
+) -> Result<Published, Box<dyn std::error::Error>> {
+    let Prepared { publication: _, install, head, source_submission } =
+        prepare_candidate(rig, operation).await?;
+    let before = rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire);
+    rig.node.lose_next_reply.store(true, std::sync::atomic::Ordering::Release);
+    assert!(source_submission.submit().is_err(), "lost native response became a local J6");
+    rig.participant_a.take_client(&mut rig.source.client)?;
+    assert_eq!(
+        rig.participant_a
+            .db
+            .lock()
+            .map_err(|_| "uncertain source")?
+            .as_ref()
+            .ok_or("source writer")?
+            .pairing_head()?
+            .ok_or("submitted intent")?
+            .state,
+        "submitted"
+    );
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    let published = source_submission.submit()?;
+    assert_eq!(
+        rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire),
+        before + 1,
+        "exact native observation retried persistence after response loss"
+    );
     let authority = rig.participant_b.query.current_authority(&install.account_anchor)?;
+    assert_eq!(canonical_json_bytes(published.authority())?, canonical_json_bytes(&authority)?);
+    source_tail::acknowledge(rig, published)?;
     Ok(Published { authority, install, head })
 }
 async fn prove_source_preservation(

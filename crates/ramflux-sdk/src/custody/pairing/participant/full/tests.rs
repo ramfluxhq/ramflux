@@ -95,3 +95,17 @@ impl LocalPairingParticipant {
         participant(root)
     }
 }
+
+#[test]
+fn pairing_full_candidate_requires_the_adopted_day_of_tail_margin() {
+    for remaining in [0, 1, 23 * 3600, 86_399] {
+        assert!(matches!(
+            require_candidate_lease(1000 + remaining, 1000),
+            Err(SdkError::PairingCode("LeaseExpired"))
+        ));
+    }
+    assert!(require_candidate_lease(1000, 1001).is_err());
+    for remaining in [86_400, 25 * 3600, 604_800] {
+        assert!(require_candidate_lease(1000 + remaining, 1000).is_ok());
+    }
+}

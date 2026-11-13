@@ -78,6 +78,7 @@ impl LocalPairingParticipant {
             return Err(wrong());
         }
         let proof = stage.verified_duplex(now)?;
+        super::require_candidate_lease(proof.expires_at(), now)?;
         let account = custody::load_account(&self.root, &self.account_id, now)?;
         if object_hash(account.record())? != record.base_record_hash {
             return Err(wrong());
