@@ -10,6 +10,13 @@ type Mutation={op:"remove";key:string}|{op:"upsert";parent:string|null;index:num
 type Batch={previous_version:number;version:number;mutations:Mutation[];host_slots?:HostSlot[]};
 type Reply={session:number;version:number;value:Batch|{result:string;batch?:Batch;action?:string;fields?:unknown}|null};
 type Pending={resolve:(value:Reply|null)=>void;reject:(reason:Error)=>void};
+// Each WASM instance has its own Rust resident counter. Bound worker instances
+// at the app adapter too, so separate heaps cannot bypass the two-VM policy.
+let workers=0;
+function createWorker(url:URL):Worker {
+  if(workers>=2)throw Error("Card renderer capacity");
+  const worker=new Worker(url,{type:"module",name:"card-renderer"});workers++;return worker;
+}
 export class CardView {
   private readonly worker:Worker;
   private readonly port:MessagePort;
@@ -20,12 +27,13 @@ export class CardView {
   private session=0;
   private version=0;
   private disposed=false;
+  private released=false;
   private readonly ready:Promise<void>;
   constructor(private readonly root:HTMLElement, workerURL:URL,
     private readonly intent:(action:string,fields:unknown)=>void,
     private readonly hostSlots:(slots:readonly HostSlot[])=>void,
     private readonly failure:(message:string)=>void) {
-    this.worker=new Worker(workerURL,{type:"module",name:"card-renderer"});
+    this.worker=createWorker(workerURL);this.root.inert=false;
     const channel=new MessageChannel();this.port=channel.port1;
     this.ready=new Promise((resolve,reject)=>{
       this.port.onmessage=event=>{
@@ -43,12 +51,15 @@ export class CardView {
   resume():Promise<Reply|null>{return this.request("resume")}
   dispose():void {
     if(this.disposed)return;this.disposed=true;
-    this.abort(Error("Card disposed"),false);this.port.close();this.worker.terminate();
+    this.abort(Error("Card disposed"),false);this.port.close();this.releaseWorker();
     this.nodes.clear();this.displayed.clear();this.root.replaceChildren();this.hostSlots([]);
+  }
+  private releaseWorker():void {
+    if(this.released)return;this.released=true;this.worker.terminate();workers--;
   }
   private abort(error:Error,notify=true):void {
     for(const pending of this.pending.values())pending.reject(error);this.pending.clear();
-    if(notify){this.root.inert=true;this.failure(error.message)}
+    if(notify){this.port.close();this.releaseWorker();this.root.inert=true;this.failure(error.message)}
   }
   private async request(op:string,json?:string):Promise<Reply|null> {
     if(this.disposed)throw Error("Card disposed");
