@@ -76,6 +76,19 @@ impl Budget {
 }
 
 #[cfg(test)]
+impl Budget {
+    pub(crate) fn deny_for_test(&mut self) {
+        self.recent.clear();
+        for _ in 0..MAX_ADMISSIONS {
+            self.recent.push_back((Instant::now(), Duration::ZERO));
+        }
+    }
+    pub(crate) fn reset_for_test(&mut self) {
+        self.recent.clear();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

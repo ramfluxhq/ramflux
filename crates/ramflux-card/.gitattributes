@@ -1,0 +1,12 @@
+*.rs text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.qjb -text
+*.sig -text
+*.pub -text

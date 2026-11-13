@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Offline release tool. Never linked into an application or exposed to peers.
-use ed25519_dalek::{Signer, SigningKey};
-use ramflux_card::ENGINE_ID;
-use rquickjs::{
-    Context, Module, Runtime,
-    module::{WriteOptions, WriteOptionsEndianness},
-};
+//! Offline project release tool; never exposed as an application/peer endpoint.
+use ed25519_dalek::SigningKey;
+use ramflux_card::compiler::{PackageRelease, compile_and_sign};
 use std::{
     fs::File,
     io::Read,
-    path::Path,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
 };
-
 fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     File::open(path)?.take(max + 1).read_to_end(&mut bytes)?;
@@ -21,44 +15,26 @@ fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, Box<dyn std::error::Er
     }
     Ok(bytes)
 }
+fn append(prefix: &Path, suffix: &str) -> PathBuf {
+    let mut path = prefix.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
-    let [source, seed, output] = args.as_slice() else {
-        return Err(
-            "usage: card-pack <linted-project-bundle.js> <32-byte-release-seed> <output-prefix>"
-                .into(),
-        );
+    let args: Vec<_> = std::env::args_os().skip(1).take(5).collect();
+    let [source, seed, release, output] = args.as_slice() else {
+        return Err("usage: card-pack <linted-bundle.js> <32-byte-release-seed> <release.json> <output-prefix>".into());
     };
     let source = read_bounded(Path::new(source), 64 * 1024)?;
     let secret: [u8; 32] =
         read_bounded(Path::new(seed), 32)?.try_into().map_err(|_| "expected 32-byte seed")?;
-    let key = SigningKey::from_bytes(&secret);
-    let rt = Runtime::new()?;
-    rt.set_memory_limit(32 * 1024 * 1024);
-    rt.set_max_stack_size(256 * 1024);
-    let start = Instant::now();
-    rt.set_interrupt_handler(Some(Box::new(move || start.elapsed() > Duration::from_millis(50))));
-    // Eval is present only in this offline compiler, never in CardRuntime.
-    let ctx = Context::full(&rt)?;
-    let bytecode = ctx.with(|ctx| {
-        Module::declare(ctx, "rf-library", source).and_then(|m| {
-            m.write(WriteOptions {
-                endianness: WriteOptionsEndianness::Little,
-                ..Default::default()
-            })
-        })
-    })?;
-    if bytecode.len() > 64 * 1024 {
-        return Err("compiled package limit exceeded".into());
-    }
-    let mut message = b"ramflux-card-signed-bytecode-v1\0".to_vec();
-    message.extend_from_slice(ENGINE_ID.as_bytes());
-    message.push(0);
-    message.extend_from_slice(&bytecode);
+    let release: PackageRelease = serde_json::from_slice(&read_bounded(Path::new(release), 4096)?)?;
+    let package = compile_and_sign(&source, &SigningKey::from_bytes(&secret), &release)?;
     let output = Path::new(output);
-    std::fs::write(output.with_extension("qjb"), bytecode)?;
-    std::fs::write(output.with_extension("sig"), key.sign(&message).to_bytes())?;
-    std::fs::write(output.with_extension("pub"), key.verifying_key().to_bytes())?;
-    println!("PACKAGE_OK {ENGINE_ID}");
+    std::fs::write(append(output, ".qjb"), package.bytecode)?;
+    std::fs::write(append(output, ".descriptor.json"), package.descriptor)?;
+    std::fs::write(append(output, ".sig"), package.signature)?;
+    std::fs::write(append(output, ".pub"), package.public_key)?;
+    println!("PACKAGE_OK {} {}:{}", release.package_id, release.security_epoch, release.version);
     Ok(())
 }

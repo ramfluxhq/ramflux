@@ -220,6 +220,58 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  card-runtime:
+    name: Card runtime (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --component clippy --target ${{ matrix.target }}
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: card-runtime
+      - name: Build C ABI and release compiler
+        run: cargo build -p ramflux-card --all-features --target ${{ matrix.target }}
+      - name: Check all card features and release compiler
+        run: cargo clippy -p ramflux-card --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+      - name: Test C ABI, runtime and release packer
+        run: cargo test -p ramflux-card --all-features --target ${{ matrix.target }} -- --test-threads=1
+      - name: Install pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20.19.2'
+          cache: npm
+          cache-dependency-path: crates/ramflux-card/library/package-lock.json
+      - name: Check component types, capability lint and bundled bytes
+        working-directory: crates/ramflux-card/library
+        run: |
+          npm ci --ignore-scripts
+          npm test
+          npm run typecheck
+          npm run check
+
   doctests:
     name: Doctests
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}

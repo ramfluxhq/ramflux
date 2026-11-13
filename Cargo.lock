@@ -3390,12 +3390,16 @@ name = "ramflux-card"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hex",
  "rquickjs",
  "rquickjs-core",
  "rquickjs-sys",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "web-time",
 ]
 

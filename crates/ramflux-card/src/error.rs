@@ -10,6 +10,16 @@ pub enum CardError {
     Json(#[from] serde_json::Error),
     #[error("package signature or engine mismatch")]
     Signature,
+    #[error("package admission rejected: {0}")]
+    Admission(&'static str),
+    #[error("script exception")]
+    Script,
+    #[error("interpreter memory exhausted")]
+    Memory,
+    #[error("interpreter stack exhausted")]
+    Stack,
+    #[error("intrinsic hardening failed")]
+    Hardening,
     #[error("interpreter failure")]
     Engine,
     #[error("evaluation budget exhausted")]
@@ -18,7 +28,10 @@ pub enum CardError {
     Inactive,
 }
 impl From<rquickjs::Error> for CardError {
-    fn from(_: rquickjs::Error) -> Self {
+    fn from(error: rquickjs::Error) -> Self {
+        if matches!(error, rquickjs::Error::Allocation) {
+            return Self::Memory;
+        }
         Self::Engine
     }
 }

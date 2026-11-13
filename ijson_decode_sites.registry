@@ -186,7 +186,10 @@ apps/rf/src/handlers/node_custody/operation_lock.rs | acquire | 1 | E | excluded
 apps/rf/src/handlers/object.rs | handle_object | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/keychain.rs | decode_keychain_secret | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/utils.rs | rf_http_post_json | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-card/examples/card-pack.rs | main | 1 | E | excluded=bounded offline project release metadata; not a peer or signed-envelope admission
 crates/ramflux-card/src/ffi.rs | ramflux_card_event | 1 | E | excluded=bounded native card event DTO; no Envelope/Ack/Nack or SDK admission
+crates/ramflux-card/src/ffi.rs | ramflux_card_open | 1 | E | excluded=bounded application-pinned card acceptance policy; no Envelope/Ack/Nack admission
+crates/ramflux-card/src/package.rs | verify | 1 | E | excluded=bounded canonical card descriptor authenticated by release key and host policy; no Envelope/Ack/Nack admission
 crates/ramflux-card/src/spec.rs | parse | 1 | E | excluded=bounded closed local card profile with duplicate-key rejection; no Envelope/Ack/Nack admission
 crates/ramflux-card/src/tree.rs | parse | 1 | E | excluded=bounded semantic tree from verified project interpreter; no Envelope/Ack/Nack admission
 crates/ramflux-crypto/src/backup_stream/mod.rs | read_header | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

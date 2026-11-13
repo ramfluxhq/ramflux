@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const MAX_TREE: usize = 64 * 1024;
 const MAX_EXPANDED_NODES: usize = 256;
+const MAX_NODE_DEPTH: usize = 16;
 /// Only native form controls. Approval, HTML and navigation are absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,24 +99,36 @@ impl Tree {
     ) -> MutationBatch {
         let before = old.map_or_else(Vec::new, |tree| flatten(&tree.root));
         let after = flatten(&self.root);
-        let before_map: BTreeMap<_, _> = before.iter().map(|m| (&m.2.key, m)).collect();
-        let after_keys: BTreeSet<_> = after.iter().map(|m| &m.2.key).collect();
+        let before_map: BTreeMap<_, _> = before.iter().map(|m| (&m.node.key, m)).collect();
+        let after_keys: BTreeSet<_> = after.iter().map(|m| &m.node.key).collect();
         let mut mutations = Vec::new();
-        for (_, _, node) in before.iter().rev() {
-            if !after_keys.contains(&node.key) {
-                mutations.push(Mutation::Remove { key: node.key.clone() });
+        for entry in before.iter().rev() {
+            if !after_keys.contains(&entry.node.key) {
+                mutations.push(Mutation::Remove { key: entry.node.key.clone() });
             }
         }
+        let mut reparented = BTreeSet::new();
         for entry in after {
-            if before_map.get(&entry.2.key).is_none_or(|old| **old != entry) {
-                mutations.push(Mutation::Upsert { parent: entry.0, index: entry.1, node: entry.2 });
+            let old = before_map.get(&entry.node.key);
+            let must_rebuild = old
+                .is_some_and(|old| old.parent != entry.parent || old.node.kind != entry.node.kind)
+                || entry.parent.as_ref().is_some_and(|parent| reparented.contains(parent));
+            if must_rebuild {
+                reparented.insert(entry.node.key.clone());
+            }
+            if must_rebuild || old.is_none_or(|old| **old != entry) {
+                mutations.push(Mutation::Upsert {
+                    parent: entry.parent,
+                    index: entry.index,
+                    node: entry.node,
+                });
             }
         }
         MutationBatch { previous_version, version, mutations }
     }
 }
 fn validate_node(node: &Node, depth: usize, keys: &mut BTreeSet<String>) -> Result<(), CardError> {
-    if depth > crate::spec::MAX_DEPTH || keys.len() >= MAX_EXPANDED_NODES {
+    if depth > MAX_NODE_DEPTH || keys.len() >= MAX_EXPANDED_NODES {
         return Err(CardError::Limit("expanded nodes or depth"));
     }
     if node.key.len() > 80
@@ -130,16 +143,17 @@ fn validate_node(node: &Node, depth: usize, keys: &mut BTreeSet<String>) -> Resu
     }
     Ok(())
 }
-fn flatten(root: &Node) -> Vec<(Option<String>, usize, Node)> {
-    fn visit(
-        node: &Node,
-        parent: Option<String>,
-        index: usize,
-        out: &mut Vec<(Option<String>, usize, Node)>,
-    ) {
+#[derive(PartialEq, Eq)]
+struct FlatNode {
+    parent: Option<String>,
+    index: usize,
+    node: Node,
+}
+fn flatten(root: &Node) -> Vec<FlatNode> {
+    fn visit(node: &Node, parent: Option<String>, index: usize, out: &mut Vec<FlatNode>) {
         let mut shallow = node.clone();
         shallow.children.clear();
-        out.push((parent, index, shallow));
+        out.push(FlatNode { parent, index, node: shallow });
         for (index, child) in node.children.iter().enumerate() {
             visit(child, Some(node.key.clone()), index, out);
         }
@@ -209,6 +223,66 @@ mod tests {
         assert!(
             tree.diff(Some(&tree), 1, 2).mutations.is_empty(),
             "unchanged keyed tree needs only a version advance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod depth_and_move_tests {
+    use super::*;
+    #[test]
+    fn eight_node_levels_hit_the_explicit_json_nesting_budget() {
+        const LEVELS: usize = 8;
+        let mut node = Node {
+            key: "leaf".into(),
+            kind: NodeKind::Column,
+            text: String::new(),
+            value: String::new(),
+            action: None,
+            children: Vec::new(),
+        };
+        for level in 1..LEVELS {
+            node = Node {
+                key: format!("node-{level}"),
+                kind: NodeKind::Column,
+                text: String::new(),
+                value: String::new(),
+                action: None,
+                children: vec![node],
+            };
+        }
+        let bytes = serde_json::to_vec(&Tree { root: node }).expect("test: bounded deep tree");
+        let spec =
+            CardSpec::parse(include_bytes!("../fixtures/form.json")).expect("test: card fixture");
+        assert!(
+            matches!(Tree::parse(&bytes, &spec), Err(CardError::Limit("JSON depth"))),
+            "JSON object/children nesting is distinct from the semantic node-depth cap"
+        );
+    }
+    #[test]
+    fn reparent_after_ancestor_removal_reemits_the_retained_subtree() {
+        let original: Tree = serde_json::from_str(include_str!("../fixtures/form.tree.json"))
+            .expect("test: tree fixture");
+        let mut old = original.clone();
+        let mut wrapper = original.root.clone();
+        wrapper.key = "wrapper".into();
+        old.root.children = vec![wrapper];
+        let batch = original.diff(Some(&old), 1, 2);
+        assert!(
+            matches!(batch.mutations.first(),Some(Mutation::Remove {key}) if key=="wrapper"),
+            "old ancestor must be removed first"
+        );
+        let upserts: Vec<_> = batch
+            .mutations
+            .iter()
+            .filter_map(|m| {
+                if let Mutation::Upsert { node, .. } = m { Some(node.key.as_str()) } else { None }
+            })
+            .collect();
+        assert_eq!(
+            upserts,
+            ["profile", "profile:field", "profile:submit"],
+            "reparenting must recreate unchanged descendants destroyed with their ancestor"
         );
     }
 }

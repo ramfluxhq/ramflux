@@ -8,7 +8,10 @@
     "strict": true,
     "noEmit": true,
     "jsx": "react",
-    "jsxFactory": "h"
+    "jsxFactory": "h",
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "types": []
   },
   "files": [
     "form.tsx"

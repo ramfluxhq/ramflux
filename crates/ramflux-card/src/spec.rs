@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const MAX_INPUT: usize = 16 * 1024;
 pub(crate) const MAX_MODEL: usize = 4096;
-pub(crate) const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_JSON_DEPTH: usize = 16;
 pub(crate) const MAX_COMPONENTS: usize = 32;
 const MAX_MODEL_FIELDS: usize = 32;
 
@@ -50,7 +50,7 @@ pub(crate) fn preflight(bytes: &[u8], max: usize) -> Result<(), CardError> {
                 b'"' => quoted = true,
                 b'{' | b'[' => {
                     depth += 1;
-                    if depth > MAX_DEPTH {
+                    if depth > MAX_JSON_DEPTH {
                         return Err(CardError::Limit("JSON depth"));
                     }
                 }
@@ -183,7 +183,7 @@ mod tests {
         spec.model.insert("name".into(), "x".repeat(MAX_MODEL));
         assert!(spec.validate().is_err(), "model serialization must fit 4 KiB");
         assert!(
-            preflight(&[b'['; MAX_DEPTH + 1], MAX_INPUT).is_err(),
+            preflight(&[b'['; MAX_JSON_DEPTH + 1], MAX_INPUT).is_err(),
             "depth preflight must stop recursive parsing"
         );
     }
