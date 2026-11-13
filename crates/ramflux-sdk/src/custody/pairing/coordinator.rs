@@ -106,6 +106,7 @@ pub struct PairingActor {
     actor_generation: u64,
     frontend_generation: u64,
     ceremony: Option<Ceremony>,
+    recovered_installation: Option<full::install_recovery::RecoveredInstallation>,
     unsolicited: u32,
     recipient_stage: Option<Arc<dyn super::recipient::RecipientKeyStaging>>,
     local_writer: Option<local_writer::LocalWriterPort>,
@@ -218,6 +219,7 @@ impl PairingActor {
             actor_generation: 1,
             frontend_generation: 1,
             ceremony: None,
+            recovered_installation: None,
             unsolicited: 0,
             recipient_stage: None,
             local_writer: None,
@@ -522,6 +524,9 @@ impl PairingActor {
     /// Transport, `Busy`, or protocol failure.
     pub async fn sync_relay(&mut self) -> Result<LocalResult, SdkError> {
         self.require_open()?;
+        if let Some(recovered) = &self.recovered_installation {
+            return recovered.local_result();
+        }
         self.expire_live().await;
         if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
             self.flush_send().await?;
@@ -572,6 +577,10 @@ impl PairingActor {
     /// # Errors
     /// No live ceremony.
     pub async fn lock(&mut self) -> Result<LocalResult, SdkError> {
+        if let Some(recovered) = self.recovered_installation.take() {
+            self.retire_owned_runtime().await;
+            return recovered.local_result();
+        }
         if let Some(participant) = &self.participant {
             participant.provider.cancel();
         }
@@ -1602,7 +1611,11 @@ pub async fn handle_bus(
         "device.transfer.status" => {
             let request = bus_body(body)?;
             if actor.ceremony.is_none() {
-                Box::pin(actor.resume_full_data(&request)).await
+                if let Some(result) = Box::pin(actor.recover_full_installation(&request)).await? {
+                    Ok(result)
+                } else {
+                    Box::pin(actor.resume_full_data(&request)).await
+                }
             } else {
                 Box::pin(actor.transfer_status(&request)).await
             }

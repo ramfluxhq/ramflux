@@ -139,19 +139,7 @@ impl RamfluxClient {
                         return Err(SdkError::NetworkingPending);
                     }
                 }
-                Err(error) => {
-                    // A possible full-generation publication may have only some native
-                    // files durable. Ordinary password unlock is data-only until exact
-                    // selected-byte/native/G3 reconciliation closes the existing latch.
-                    if crate::custody::pairing::recipient::full_install_data_unlock(
-                        &root,
-                        local_account_id,
-                    )? {
-                        None
-                    } else {
-                        return Err(error);
-                    }
-                }
+                Err(error) => return Err(error),
             }
         } else {
             None

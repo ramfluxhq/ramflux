@@ -38,6 +38,12 @@ impl PairingActor {
         request: &StatusRequest,
     ) -> Result<LocalResult, SdkError> {
         self.require_open()?;
+        if self.recovered_installation.is_some() {
+            return self
+                .recover_full_installation(request)
+                .await?
+                .ok_or(SdkError::PairingCode("WrongContext"));
+        }
         let legacy = self.status(request).await?;
         let Some(value) = self.current_full_status()? else { return Ok(legacy) };
         Ok(LocalResult {

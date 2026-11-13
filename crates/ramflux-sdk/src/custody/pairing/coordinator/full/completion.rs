@@ -10,13 +10,17 @@ fn wrong() -> SdkError {
 }
 impl PairingActor {
     pub(in crate::custody::pairing::coordinator) fn full_new_recipient_installed(&self) -> bool {
-        self.ceremony.as_ref().is_some_and(|c| {
-            c.role == PairingRole::Responder
-                && matches!(c.phase.as_str(), "locally_installed" | "completed")
-                && c.full.as_ref().is_some_and(|full| {
-                    full.common.recipient_mode == "new" && full.publication.destination_installed()
-                })
-        })
+        self.recovered_installation
+            .as_ref()
+            .is_some_and(|recovered| recovered.install.recipient_mode == "new")
+            || self.ceremony.as_ref().is_some_and(|c| {
+                c.role == PairingRole::Responder
+                    && matches!(c.phase.as_str(), "locally_installed" | "completed")
+                    && c.full.as_ref().is_some_and(|full| {
+                        full.common.recipient_mode == "new"
+                            && full.publication.destination_installed()
+                    })
+            })
     }
 
     pub(super) async fn accept_full_completion_control(

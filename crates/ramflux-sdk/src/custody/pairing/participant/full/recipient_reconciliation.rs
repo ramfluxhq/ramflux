@@ -91,10 +91,20 @@ impl FullRecipientNativeObservation {
         {
             return Err(wrong());
         }
-        head.state = "acknowledged".into();
-        head.ack = Some(canonical_json_bytes(
+        let acknowledgement = canonical_json_bytes(
             &serde_json::json!({"record_hash":head.candidate_hash,"device_set_epoch":self.authority.publication.record.body.device_set_epoch}),
-        )?);
+        )?;
+        // A repeated own-native observation must not mutate the selected database:
+        // its byte-verification observation spans this second independent query.
+        if head.state == "acknowledged" {
+            return if head.ack.as_deref() == Some(acknowledgement.as_slice()) {
+                Ok(())
+            } else {
+                Err(wrong())
+            };
+        }
+        head.state = "acknowledged".into();
+        head.ack = Some(acknowledgement);
         db.commit_pairing_head(&head)?;
         Ok(())
     }

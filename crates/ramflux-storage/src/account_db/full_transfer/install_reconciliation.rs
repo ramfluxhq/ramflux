@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{AccountDb, AdoptionRow, BackupIndexInstall, FullStageReference, StorageError};
 use ramflux_crypto::custody::{VerifiedRecord, pairing::PairingRole};
+use ramflux_protocol::custody::pairing::PairingWire as _;
 use ramflux_protocol::{
     canonical_json_bytes,
     custody::{DeviceRef, Publication, object_hash},
@@ -24,7 +25,67 @@ pub struct FullRecipientInstallStage<'a> {
     pub(super) stage: FullTransferStage<'a>,
     pub(super) historical_time: u64,
 }
+/// Public discovery/identity operands from an exact encrypted pending recipient journal.
+/// This carries no resume key owner, epoch, approval or native authority.
+pub struct FullRecipientRecoveryIdentity {
+    pub grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+    pub master_public_key: String,
+    pub base_record_hash: String,
+    pub base_epoch: u64,
+}
 impl AccountDb {
+    /// Read only the original discovery scope for a pending full recipient installation.
+    /// The caller must independently discover the pinned node and query exact native J6.
+    /// # Errors
+    /// Refuses foreign operations/generations, source roles, missing candidates or corrupt links.
+    pub fn full_recipient_recovery_identity(
+        &self,
+        operation: &str,
+        generation: u64,
+        now: u64,
+    ) -> Result<FullRecipientRecoveryIdentity, StorageError> {
+        let head = self.pairing_head()?.ok_or_else(wrong)?;
+        let live = self
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == operation)
+            .ok_or_else(wrong)?;
+        if head.operation_id != operation
+            || head.generation != generation
+            || live.generation != generation
+            || live.role != "responder"
+            || head.kind != "transfer"
+            || !matches!(head.state.as_str(), "prepared" | "acknowledged")
+        {
+            return Err(wrong());
+        }
+        let reference = live.full_stage_reference()?.ok_or_else(wrong)?;
+        let stage =
+            self.open_full_stage_reference_inner(reference, PairingRole::Responder, now, true)?;
+        let record = stage.resume_record()?;
+        let context =
+            ramflux_protocol::custody::pairing::context_v3::TranscriptV3::from_wire_bytes(
+                &record.transcript,
+            )
+            .map_err(|_| wrong())?;
+        let publication: Publication = parse_i_json(&head.candidate)?;
+        if head.candidate_hash != object_hash(&publication.record).map_err(|_| wrong())?
+            || publication.record.body.account_anchor != record.grant.destination_ref.account_anchor
+            || publication.record.body.master_certificate.body.primary_device_ref
+                != record.grant.destination_ref
+            || head.recipient_ref.as_deref()
+                != Some(canonical_json_bytes(&record.grant.destination_ref)?.as_slice())
+            || head.publisher_ref != canonical_json_bytes(&record.grant.source_ref)?
+        {
+            return Err(wrong());
+        }
+        Ok(FullRecipientRecoveryIdentity {
+            grant: record.grant,
+            master_public_key: context.initiator.common.master_public_key,
+            base_epoch: context.initiator.common.device_set_epoch,
+            base_record_hash: record.base_record_hash,
+        })
+    }
     /// Persist this pending endpoint's own verified native floor even when its candidate
     /// is absent. This cannot reopen terminal data state or acknowledge another candidate.
     /// # Errors
@@ -110,6 +171,30 @@ impl AccountDb {
     }
 }
 impl FullRecipientInstallStage<'_> {
+    /// One-way cancellation handle for installation I/O, carrying no data-session rights.
+    #[must_use]
+    pub fn io_cancel_handle(&self) -> super::FullStageIoCancel {
+        self.stage.io_cancel_handle()
+    }
+    /// Bind fresh installation loans to their root owner's existing cancellation fence.
+    /// # Errors
+    /// Refuses cancelled I/O or loss of the original local unlock.
+    pub fn bind_local_io_cancellation(
+        &mut self,
+        cancellation: &super::FullStageIoCancel,
+    ) -> Result<(), StorageError> {
+        self.stage.bind_local_io_cancellation(cancellation)
+    }
+    /// Pin authenticated retained input for off-loan G1 reconstruction after publication.
+    /// No data epoch, packet admission or signing capability is returned.
+    /// # Errors
+    /// Refuses changed B, selected G2 or incomplete/corrupt retained input.
+    pub fn into_receiver_replay_work(
+        self,
+        copy: FullReceiverBaseCopy,
+    ) -> Result<super::FullReceiverReplayWork, StorageError> {
+        self.stage.into_receiver_replay_work(copy, self.historical_time)
+    }
     /// Check B's retained source approval without reopening the terminal data opportunity.
     /// The SDK must separately supply its own exact independently verified native J6.
     /// # Errors
