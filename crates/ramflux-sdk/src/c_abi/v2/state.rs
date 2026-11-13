@@ -19,10 +19,17 @@ pub(super) struct Operation {
     pub state: Mutex<OperationState>,
 }
 
+#[derive(Default, PartialEq, Eq)]
+pub(super) enum OperationKind {
+    #[default]
+    Request,
+    Subscription,
+}
+
 #[derive(Default)]
 pub(super) struct OperationState {
     pub admitted: bool,
-    pub subscription: bool,
+    pub kind: OperationKind,
     pub cancelled: bool,
     pub detached: bool,
     pub result: Option<Zeroizing<Vec<u8>>>,
@@ -44,13 +51,16 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    pub fn complete(&self, id: u64, value: serde_json::Value) {
+    pub fn complete(&self, id: u64, mut value: serde_json::Value) {
+        let encoded =
+            Zeroizing::new(serde_json::to_vec(&value).unwrap_or_else(|_| {
+                br#"{"code":16,"message":"completion encoding failed"}"#.to_vec()
+            }));
+        crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
         let Some(operation) = operations.get(&id) else { return };
         let detached = if let Ok(mut state) = operation.state.lock() {
-            state.result = Some(Zeroizing::new(serde_json::to_vec(&value).unwrap_or_else(|_| {
-                br#"{"code":16,"message":"completion encoding failed"}"#.to_vec()
-            })));
+            state.result = Some(encoded);
             state.detached
         } else {
             false
@@ -71,6 +81,7 @@ impl Shared {
     }
 
     pub fn push_event(&self, bytes: Vec<u8>) {
+        let bytes = Zeroizing::new(bytes);
         let Ok(mut events) = self.events.lock() else { return };
         if events.resync {
             return;
@@ -84,7 +95,7 @@ impl Shared {
             return;
         }
         events.bytes += bytes.len();
-        events.queue.push_back(Zeroizing::new(bytes));
+        events.queue.push_back(bytes);
     }
 
     pub fn close(&self) {

@@ -61,17 +61,20 @@ pub(crate) async fn serve(
         1,
     ));
     let mut stopping = supervisor.stop_requested();
+    let mut connection_finished = false;
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = stopping.changed() => break,
-            _ = &mut connection => break,
+            _ = &mut connection => { connection_finished = true; break; },
             () = supervisor.reap_lifecycle_tasks() => {},
         }
     }
     supervisor.close_lifecycle_admission();
-    connection.abort();
-    let _ = connection.await;
+    if !connection_finished {
+        connection.abort();
+        let _ = connection.await;
+    }
     supervisor.disconnect(1);
     background.abort_all();
     while background.join_next().await.is_some() {}
@@ -84,7 +87,13 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         .map(|method| method.name)
         .filter(|name| !name.contains("itest"))
         .collect::<Vec<_>>();
+    names.extend(crate::backup::BACKUP_JOB_METHODS.iter().copied());
     names.extend([
+        "account.custody.begin",
+        "account.custody.show_once",
+        "account.custody.hidden_challenge",
+        "account.custody.confirm",
+        "account.custody.cancel",
         "account.create.begin",
         "account.create.show_once",
         "account.create.hidden_challenge",
@@ -105,4 +114,9 @@ pub(crate) fn encode_request(mut frame: crate::LocalBusFrame) -> Result<Vec<u8>,
     let result = super::io::encode_local_bus_frame(&frame);
     super::secrets::wipe(&mut frame.body);
     result
+}
+
+/// Erase temporary business values, including secret ceremony responses.
+pub(crate) fn erase_value(value: &mut serde_json::Value) {
+    super::secrets::wipe(value);
 }

@@ -1,0 +1,1301 @@
+{
+  "abi_major": 2,
+  "methods": [
+    {
+      "capability": "a2i",
+      "name": "a2i.acknowledge",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "a2i",
+      "name": "a2i.append",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "a2i",
+      "name": "a2i.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "a2i",
+      "name": "a2i.list_pending",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "a2ui",
+      "name": "a2ui.action",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "a2ui",
+      "name": "a2ui.render",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.backup.cancel",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.backup.create",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.backup.export",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.backup.import",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.backup.jobs",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.config.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.config.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create.cancel",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create.hidden_challenge",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.create.show_once",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": true
+    },
+    {
+      "capability": "account",
+      "name": "account.custody.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.custody.cancel",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.custody.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.custody.hidden_challenge",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.custody.show_once",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": true
+    },
+    {
+      "capability": "account",
+      "name": "account.export_agent_credentials",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.lock",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.passphrase.rotate",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.recover.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.recover.cancel",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.recover.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.restore.install",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.restore.verify",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.switch",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "account",
+      "name": "account.unlock",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "bot",
+      "name": "bot.install",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "bot",
+      "name": "bot.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "bot",
+      "name": "bot.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "bot",
+      "name": "bot.trust.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "bus",
+      "name": "bus.subscribe",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.answer",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.hangup",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.invite",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.media.session",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "call",
+      "name": "call.reject",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.accept",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.block",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.card.export",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.card.import",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.reject",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.rejected",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.remove",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.request",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.request.accept",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.request.block",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.request.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.requests.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.requests.policy.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.requests.policy.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.safety_number",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.unblock",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.verification.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "contact",
+      "name": "contact.verify",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.directory",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.disappearing.expire",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.disappearing.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.mute",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "daemon",
+      "name": "daemon.status",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "daemon",
+      "name": "daemon.stop",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.activate",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.authorize",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.migrate",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.approve",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.join",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.pair.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.push_route.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.refresh",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.sync.export",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "device",
+      "name": "device.sync.import",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.approve",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.create_standing_approval",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.deny",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.list_standing_approvals",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.request",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "grant",
+      "name": "grant.revoke_standing_approval",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.create",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.history",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.invitation.accept",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.invitation.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.invitations.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.invite.accept",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.invite.create",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.member.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.member.ban",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.member.kick",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.member.remove",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.members",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.message.delete",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.name.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.owner.transfer",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.receive",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.requests.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.role.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.send",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.sender_key.export",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "group",
+      "name": "group.sender_key.import",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "identity",
+      "name": "identity.directory",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.approval.denied",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.approval.granted",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.approval.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.audit.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.server.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.server.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.server.refresh",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.tool.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "mcp",
+      "name": "mcp.tool.started",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.ack",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.delete",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.franking_evidence",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.read",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.receipt.delivered",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.receipt.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.receive",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
+      "name": "message.submit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.add",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.confirm",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.list",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.probe",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.remove",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.set_default",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "node",
+      "name": "node.set_enabled",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.delete",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.directory",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.fetch",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.get",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.get.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.get.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.get.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.get.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.import",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.put",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.put.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.put.chunk",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.put.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.put.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.share",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.transfer.resume",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "object",
+      "name": "object.transfer.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "stream",
+      "name": "stream.read",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "subscription",
+      "name": "subscription.close",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "subscription",
+      "name": "subscription.open",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.action",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.request_resync",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.resync",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "surface",
+      "name": "surface.send",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "sync",
+      "name": "sync.status.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.accept",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.decision.prove",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.list",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.propose",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.resolve",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.start",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "task",
+      "name": "task.update",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    }
+  ],
+  "policy_version": 1
+}

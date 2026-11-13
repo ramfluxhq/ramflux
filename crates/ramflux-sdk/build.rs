@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#[path = "src/c_abi/v2/method_policy.rs"]
+mod method_policy;
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ramflux_release_profile)");
     if std::env::var("PROFILE").as_deref() == Ok("release") {
@@ -42,6 +45,7 @@ fn main() {
         return;
     }
     let config_path = std::path::Path::new(&manifest_dir).join("cbindgen.toml");
+    write_method_policy(&target_dir.join("ramflux_sdk_methods.json"));
     let output_path = target_dir.join("ramflux_sdk.h");
     let config = match cbindgen::Config::from_file(&config_path) {
         Ok(config) => config,
@@ -55,5 +59,20 @@ fn main() {
             let _written = bindings.write_to_file(output_path);
         }
         Err(error) => println!("cargo:warning=failed to generate cbindgen header: {error}"),
+    }
+}
+
+fn write_method_policy(output: &std::path::Path) {
+    let encoded = serde_json::to_vec_pretty(&method_policy::manifest()).map(|mut bytes| {
+        bytes.push(b'\n');
+        bytes
+    });
+    match encoded {
+        Ok(bytes) => {
+            if let Err(error) = std::fs::write(output, bytes) {
+                println!("cargo:warning=failed to write method policy: {error}");
+            }
+        }
+        Err(error) => println!("cargo:warning=failed to encode method policy: {error}"),
     }
 }

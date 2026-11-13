@@ -5,7 +5,7 @@
 
 use super::state::{MAX_OPERATIONS, Operation, Shared};
 use super::{RamfluxV2Status, failure};
-use crate::{LocalBusConfig, LocalBusFrame, LocalBusFrameKind, SdkError};
+use crate::{LocalBusConfig, SdkError};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
@@ -14,6 +14,7 @@ pub(super) struct Command {
     pub id: u64,
     pub bytes: Zeroizing<Vec<u8>>,
     pub operation: Arc<Operation>,
+    pub deadline_ms: Option<u64>,
 }
 
 pub(super) struct Client {
@@ -50,12 +51,11 @@ impl Client {
             worker_shared.close();
             let _ = done_tx.send(result);
         })?;
-        match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(result) => result?,
-            Err(_) => {
-                let _ = shutdown.send(true);
-                return Err(SdkError::LocalBus("supervisor startup timed out".into()));
-            }
+        if let Ok(result) = ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            result?;
+        } else {
+            let _ = shutdown.send(true);
+            return Err(SdkError::LocalBus("supervisor startup timed out".into()));
         }
         Ok(Arc::new(Self { commands, shared, shutdown, done: Mutex::new(done) }))
     }
@@ -78,7 +78,7 @@ impl Drop for Client {
 
 async fn run(
     config: LocalBusConfig,
-    mut commands: mpsc::Receiver<Command>,
+    commands: mpsc::Receiver<Command>,
     shutdown: watch::Receiver<bool>,
     stop: watch::Sender<bool>,
     ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
@@ -99,76 +99,124 @@ async fn run(
     if !started {
         return server.await.map_err(|e| SdkError::LocalBus(e.to_string()))?;
     }
-    let (mut reader, mut writer) = tokio::io::split(client_stream);
+    let (reader, writer) = tokio::io::split(client_stream);
     let write_shared = Arc::clone(&shared);
-    let mut writer_shutdown = shutdown.clone();
+    let writer_shutdown = shutdown.clone();
     let write_task = tokio::task::spawn_local(async move {
-        loop {
-            let command = tokio::select! {
-                _ = writer_shutdown.changed() => break,
-                command = commands.recv() => match command { Some(command) => command, None => break },
-            };
-            let cancelled = {
-                let mut state = command
-                    .operation
-                    .state
-                    .lock()
-                    .map_err(|_| SdkError::LocalBus("operation lock poisoned".into()))?;
-                if state.cancelled {
-                    true
-                } else {
-                    state.admitted = true;
-                    false
-                }
-            };
-            if cancelled {
-                write_shared.complete(
-                    command.id,
-                    failure(RamfluxV2Status::Cancelled, "cancelled before admission", "none"),
-                );
-                continue;
-            }
-            let sent = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                crate::bus::io::write_encoded_local_bus_frame(&mut writer, &command.bytes),
-            )
-            .await;
-            match sent {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    write_shared.failed(command.id, &error);
-                    return Err(error);
-                }
-                Err(_) => return Err(SdkError::LocalBus("carrier write timed out".into())),
-            }
-        }
-        Ok::<_, SdkError>(())
+        write_commands(commands, writer, writer_shutdown, &write_shared).await
     });
-    let mut reader_shutdown = shutdown;
-    let read_result = loop {
-        let frame: LocalBusFrame = tokio::select! {
-            _ = reader_shutdown.changed() => break Ok(()),
-            result = crate::bus::io::read_local_bus_frame(&mut reader) => match result {
-                Ok(frame) => frame, Err(error) => break Err(error),
-            },
-        };
-        match frame.kind {
-            LocalBusFrameKind::Response | LocalBusFrameKind::Error => {
-                if let Ok(id) = frame.request_id.parse::<u64>() {
-                    let code =
-                        frame.error.as_ref().map_or(0, |error| super::error_code(&error.code));
-                    shared.complete(id, serde_json::json!({"code":code,"response":frame}));
-                }
-            }
-            _ => match serde_json::to_vec(&frame) {
-                Ok(bytes) => shared.push_event(bytes),
-                Err(error) => break Err(SdkError::from(error)),
-            },
-        }
-    };
+    let read_result = read_responses(reader, shutdown, &shared).await;
     let _ = stop.send(true);
     write_task.abort();
     let _ = write_task.await;
     let stopped = server.await.map_err(|e| SdkError::LocalBus(e.to_string()))?;
     stopped.and(read_result)
+}
+
+async fn write_commands(
+    mut commands: mpsc::Receiver<Command>,
+    mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    mut shutdown: watch::Receiver<bool>,
+    shared: &Shared,
+) -> Result<(), SdkError> {
+    loop {
+        let command = tokio::select! {
+            _ = shutdown.changed() => break,
+            command = commands.recv() => match command { Some(command) => command, None => break },
+        };
+        let cancelled = {
+            let mut state = command
+                .operation
+                .state
+                .lock()
+                .map_err(|_| SdkError::LocalBus("operation lock poisoned".into()))?;
+            if state.cancelled {
+                true
+            } else if command
+                .deadline_ms
+                .is_some_and(|deadline| u128::from(deadline) <= super::super::current_millis())
+            {
+                drop(state);
+                shared.complete(command.id, serde_json::json!({
+                        "code":10,"message":"request deadline exceeded before admission","effects":"none"
+                    }));
+                continue;
+            } else {
+                state.admitted = true;
+                false
+            }
+        };
+        if cancelled {
+            shared.complete(
+                command.id,
+                failure(RamfluxV2Status::Cancelled, "cancelled before admission", "none"),
+            );
+            continue;
+        }
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::bus::io::write_encoded_local_bus_frame(&mut writer, &command.bytes),
+        )
+        .await;
+        match sent {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                shared.failed(command.id, &error);
+                return Err(error);
+            }
+            Err(_) => return Err(SdkError::LocalBus("carrier write timed out".into())),
+        }
+    }
+    Ok(())
+}
+
+async fn read_responses(
+    mut reader: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    mut shutdown: watch::Receiver<bool>,
+    shared: &Shared,
+) -> Result<(), SdkError> {
+    loop {
+        let bytes = tokio::select! {
+            _ = shutdown.changed() => break Ok(()),
+            result = crate::bus::io::read_encoded_local_bus_frame(&mut reader) => match result {
+                Ok(bytes) => bytes, Err(error) => break Err(error),
+            },
+        };
+        // The authenticated in-process server emits both ordinary bus and compatibility
+        // custody envelopes. Preserve either representation, including unknown business data.
+        let mut frame: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => break Err(SdkError::from(error)),
+        };
+        let legacy = frame.get("protocol").and_then(serde_json::Value::as_str)
+            == Some("ramflux.local_bus.custody.v1");
+        let kind = frame.get("kind").and_then(serde_json::Value::as_str);
+        if legacy || matches!(kind, Some("response" | "error")) {
+            if let Some(id) = frame
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| id.parse::<u64>().ok())
+            {
+                let error = if legacy {
+                    frame.get("result").and_then(|v| v.get("code"))
+                } else {
+                    frame.get("error").and_then(|v| v.get("code"))
+                };
+                let failed = kind == Some("error")
+                    || (legacy
+                        && frame
+                            .get("result")
+                            .and_then(|v| v.get("state"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("error"));
+                let code = error
+                    .and_then(serde_json::Value::as_str)
+                    .map_or(if failed { 16 } else { 0 }, super::error_code);
+                shared.complete(id, serde_json::json!({"code":code,"response":frame}));
+            }
+        } else {
+            shared.push_event(bytes.to_vec());
+        }
+        crate::bus::inprocess::erase_value(&mut frame);
+    }
 }

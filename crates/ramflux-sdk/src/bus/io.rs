@@ -455,6 +455,17 @@ pub(crate) async fn read_local_bus_frame<R>(reader: &mut R) -> Result<LocalBusFr
 where
     R: AsyncRead + Unpin,
 {
+    let body = read_encoded_local_bus_frame(reader).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// Read one bounded, zeroizing server envelope, including compatibility custody replies.
+pub(crate) async fn read_encoded_local_bus_frame<R>(
+    reader: &mut R,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut len_bytes = [0_u8; 4];
     reader.read_exact(&mut len_bytes).await?;
     let len = u32::from_be_bytes(len_bytes) as usize;
@@ -463,7 +474,7 @@ where
     }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
     reader.read_exact(&mut body).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(body)
 }
 
 #[cfg(test)]

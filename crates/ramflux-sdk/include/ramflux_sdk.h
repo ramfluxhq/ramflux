@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+
 #ifndef RAMFLUX_SDK_H
 #define RAMFLUX_SDK_H
 
@@ -8,6 +10,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#ifdef RAMFLUX_WITH_CARD_RUNTIME
+#include "ramflux_card.h"
+#endif
 
 enum RamfluxErrorCode
 #ifdef __cplusplus
@@ -47,7 +52,7 @@ typedef int32_t RamfluxErrorCode;
 #endif // __cplusplus
 
 /*
- Additional v2 transport statuses. Existing RamfluxErrorCode values 0..23 are unchanged.
+ Additional v2 transport statuses. Existing `RamfluxErrorCode` values 0..23 are unchanged.
  */
 enum RamfluxV2Status
 #ifdef __cplusplus
@@ -175,7 +180,7 @@ int32_t ramflux_client_put_object(struct RamfluxClient *client,
 int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxBuffer **out);
 
 /*
- Open one supervisor on a dedicated thread. Config is {data_root,builtin_nodes?}.
+ Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?}`.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */
 int32_t ramflux_v2_client_open(const uint8_t *config, size_t len, uint64_t *out_client);
@@ -188,7 +193,7 @@ int32_t ramflux_v2_client_close(uint64_t handle);
 
 /*
  Submit one request, copying input before return. Returns an explicit operation/cancel handle.
- deadline_ms is required; operation_id is supplied by the caller for lifecycle reconciliation.
+ `deadline_ms` is required; `operation_id` is supplied by the caller for lifecycle reconciliation.
  */
 int32_t ramflux_v2_execute(uint64_t handle,
                            const uint8_t *request,
@@ -198,7 +203,7 @@ int32_t ramflux_v2_execute(uint64_t handle,
 /*
  Poll a completion without blocking. Returns Pending=24 with a null buffer until terminal.
  A successful poll returns JSON {code,response?}; code is a stable numeric SDK error.
- Repeated polls return the same terminal value until operation_release.
+ Repeated polls return the same terminal value until `operation_release`.
  */
 int32_t ramflux_v2_operation_poll(uint64_t handle, uint64_t id, struct RamfluxBuffer **out);
 

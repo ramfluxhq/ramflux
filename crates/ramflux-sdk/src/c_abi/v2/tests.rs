@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use super::runtime::{Client, Command};
+use super::state::{self, MAX_FRAME_BYTES, MAX_OPERATIONS, Operation};
 use super::*;
+use crate::{LocalBusConfig, LocalBusFrame};
 use serde_json::Value;
+use serde_json::json;
 use std::time::{Duration, Instant};
 
 fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
@@ -17,29 +21,38 @@ fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
 }
 
 struct Fixture {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     handle: u64,
 }
 impl Fixture {
     fn open() -> Self {
+        Self::configured(false)
+    }
+    fn configured(with_node: bool) -> Self {
         let root = tempfile::tempdir().expect("test: isolated data root");
+        if with_node {
+            seed_node(root.path());
+        }
         let config = serde_json::to_vec(&json!({"data_root":root.path()})).expect("test: config");
         let mut handle = 0;
         assert_eq!(
-            ramflux_v2_client_open(config.as_ptr(), config.len(), &mut handle),
+            ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle),
             0,
             "real in-process supervisor must start"
         );
-        Self { _root: root, handle }
+        Self { root, handle }
     }
     fn submit(&self, method: &str, deadline: u64) -> u64 {
+        self.submit_body(method, &json!({}), deadline)
+    }
+    fn submit_body(&self, method: &str, body: &Value, deadline: u64) -> u64 {
         let request = serde_json::to_vec(&json!({
-            "sdk_api":"account","method":method,"body":{},"deadline_ms":deadline
+            "sdk_api":"account","method":method,"body":body,"deadline_ms":deadline
         }))
         .expect("test: request");
         let mut operation = 0;
         assert_eq!(
-            ramflux_v2_execute(self.handle, request.as_ptr(), request.len(), &mut operation),
+            ramflux_v2_execute(self.handle, request.as_ptr(), request.len(), &raw mut operation),
             0,
             "request admission should succeed"
         );
@@ -49,7 +62,7 @@ impl Fixture {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let mut buffer = std::ptr::null_mut();
-            let code = ramflux_v2_operation_poll(self.handle, operation, &mut buffer);
+            let code = ramflux_v2_operation_poll(self.handle, operation, &raw mut buffer);
             if code == 0 {
                 return take_buffer(buffer);
             }
@@ -78,7 +91,7 @@ fn deadline() -> u64 {
 fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
     assert_eq!(super::super::ramflux_sdk_abi_version_major(), 1, "v1 consumers retain their ABI");
     let mut buffer = std::ptr::null_mut();
-    assert_eq!(ramflux_v2_negotiate(2, 0, &mut buffer), 0, "ABI v2 negotiation");
+    assert_eq!(ramflux_v2_negotiate(2, 0, &raw mut buffer), 0, "ABI v2 negotiation");
     let metadata = take_buffer(buffer);
     let methods = metadata["methods"].as_array().expect("test: method inventory");
     for method in [
@@ -94,7 +107,7 @@ fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
     ] {
         assert!(methods.contains(&json!(method)), "missing shared supervisor method {method}");
     }
-    assert_eq!(ramflux_v2_negotiate(3, 0, &mut buffer), 3, "major mismatch is typed");
+    assert_eq!(ramflux_v2_negotiate(3, 0, &raw mut buffer), 3, "major mismatch is typed");
     assert!(buffer.is_null(), "failure must clear output");
 }
 
@@ -107,16 +120,16 @@ fn executes_real_supervisor_and_releases_writer_on_close() {
     assert_eq!(result["response"]["method"], "account.list", "correlation must be retained");
     assert_eq!(ramflux_v2_operation_release(fixture.handle, id), 0, "terminal handle released");
     let config =
-        serde_json::to_vec(&json!({"data_root":fixture._root.path()})).expect("test: config");
+        serde_json::to_vec(&json!({"data_root":fixture.root.path()})).expect("test: config");
     let mut duplicate = 0;
     assert_eq!(
-        ramflux_v2_client_open(config.as_ptr(), config.len(), &mut duplicate),
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut duplicate),
         18,
         "second ABI client must not acquire the same data-root writer"
     );
     assert_eq!(ramflux_v2_client_close(fixture.handle), 0, "first writer closes");
     assert_eq!(
-        ramflux_v2_client_open(config.as_ptr(), config.len(), &mut duplicate),
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut duplicate),
         0,
         "close must release all database and root-lock owners"
     );
@@ -124,12 +137,12 @@ fn executes_real_supervisor_and_releases_writer_on_close() {
 }
 
 #[test]
-fn expired_requests_use_real_dispatch_error_and_custody_is_reachable() {
+fn expired_requests_have_no_effects_and_real_custody_is_reachable() {
     let fixture = Fixture::open();
     let expired = fixture.submit("account.list", 1);
     let result = fixture.result(expired);
-    assert_ne!(result["code"], 0, "expired request cannot succeed");
-    assert_eq!(result["response"]["kind"], "error", "dispatch produces a typed error frame");
+    assert_eq!(result["code"], 10, "expired request must return typed Timeout");
+    assert_eq!(result["effects"], "none", "pre-admission expiry cannot have effects");
     assert_eq!(ramflux_v2_operation_release(fixture.handle, expired), 0, "release expiry");
     let custody = fixture.submit("account.create.show_once", deadline());
     let result = fixture.result(custody);
@@ -146,13 +159,13 @@ fn duplicate_json_and_oversized_inputs_are_rejected_before_admission() {
     let request = br#"{"sdk_api":"account","method":"account.list","body":{},"deadline_ms":1,"deadline_ms":2}"#;
     let mut id = 99;
     assert_eq!(
-        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &mut id),
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut id),
         1,
         "duplicate I-JSON keys must fail"
     );
     assert_eq!(id, 0, "failure cannot publish an operation handle");
     assert_eq!(
-        ramflux_v2_execute(fixture.handle, request.as_ptr(), MAX_FRAME_BYTES + 1, &mut id),
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), MAX_FRAME_BYTES + 1, &raw mut id),
         1,
         "oversized input must be rejected without dereferencing it"
     );
@@ -186,6 +199,7 @@ fn event_overflow_is_explicit_and_cannot_consume_completion_credit() {
 #[test]
 fn preadmission_cancel_never_reaches_the_supervisor() {
     let root = tempfile::tempdir().expect("test: isolated root");
+    seed_node(root.path());
     let client =
         Client::start(LocalBusConfig::new("", root.path())).expect("test: start supervisor");
     let operation = Arc::new(Operation::default());
@@ -197,6 +211,7 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
         .commands
         .try_send(Command {
             id: 1,
+            deadline_ms: None,
             bytes: zeroize::Zeroizing::new(bytes),
             operation: Arc::clone(&operation),
         })
@@ -217,4 +232,199 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
         std::thread::yield_now();
     }
     client.close().expect("test: close supervisor");
+    assert!(
+        crate::node::NodeStore::load(root.path(), &[])
+            .expect("test: durable nodes")
+            .profiles
+            .contains_key("test"),
+        "a cancelled pre-admission node removal must leave its durable node intact"
+    );
+}
+
+#[test]
+fn admitted_cancellation_preserves_the_supervisor_terminal_response() {
+    let fixture = Fixture::configured(true);
+    let id = fixture.submit_body("node.remove", &json!({"node_id":"test"}), deadline());
+    let before = fixture.result(id);
+    assert_eq!(before["code"], 0, "the admitted mutation must finish successfully");
+    assert!(
+        !crate::node::NodeStore::load(fixture.root.path(), &[])
+            .expect("test: durable nodes")
+            .profiles
+            .contains_key("test"),
+        "successful node removal must have real durable effects before cancellation"
+    );
+    assert_eq!(ramflux_v2_operation_cancel(fixture.handle, id), 0, "cancel an admitted waiter");
+    let after = fixture.result(id);
+    assert_eq!(
+        before, after,
+        "cancellation cannot turn an executed request into a no-effect result"
+    );
+    assert_eq!(ramflux_v2_operation_release(fixture.handle, id), 0, "release retained terminal");
+}
+
+#[test]
+fn completed_operations_retain_credit_until_explicit_release() {
+    let fixture = Fixture::open();
+    let mut ids = Vec::new();
+    for _ in 0..MAX_OPERATIONS {
+        let id = fixture.submit("account.list", deadline());
+        assert_eq!(fixture.result(id)["code"], 0, "real request completes while retaining credit");
+        ids.push(id);
+    }
+    let request = serde_json::to_vec(&json!({"sdk_api":"account","method":"account.list",
+        "body":{},"deadline_ms":deadline()}))
+    .expect("test: request");
+    let mut extra = 999;
+    assert_eq!(
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut extra),
+        15,
+        "a full terminal map must reject admission with RateLimited"
+    );
+    assert_eq!(extra, 0, "rejection cannot publish a cancel handle");
+    let first = ids.first().copied().expect("test: terminal handles");
+    assert_eq!(
+        ramflux_v2_operation_release(fixture.handle, first),
+        0,
+        "explicit release restores one credit"
+    );
+    let replacement = fixture.submit("account.list", deadline());
+    assert_eq!(fixture.result(replacement)["code"], 0, "new request reuses released capacity");
+}
+
+#[test]
+fn subscription_cancel_is_dispatched_and_allows_replacement() {
+    let fixture = Fixture::open();
+    let request = serde_json::to_vec(&json!({"sdk_api":"backup","method":"bus.subscribe",
+        "body":{"topics":["account.backup.job.changed"]},"deadline_ms":deadline()}))
+    .expect("test: backup subscription");
+    let mut subscription = 0;
+    assert_eq!(
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut subscription),
+        0,
+        "real daemon-scoped subscription must be admitted"
+    );
+    assert_eq!(
+        fixture.result(subscription)["response"]["body"]["subscribed"],
+        true,
+        "the shared backup stream must acknowledge subscription"
+    );
+    assert_eq!(
+        ramflux_v2_operation_cancel(fixture.handle, subscription),
+        0,
+        "subscription token must also be its cancellation handle"
+    );
+    let barrier = fixture.submit("subscription.close", deadline());
+    assert_eq!(
+        fixture.result(barrier)["response"]["body"]["subscribed"],
+        false,
+        "explicit close acknowledgement must follow the queued cancellation control"
+    );
+    assert_eq!(
+        ramflux_v2_operation_release(fixture.handle, subscription),
+        0,
+        "subscription terminal is independently released"
+    );
+    let mut replacement = 0;
+    assert_eq!(
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut replacement),
+        0,
+        "cancelled subscription cannot retain subscription credit"
+    );
+    assert_eq!(
+        fixture.result(replacement)["code"],
+        0,
+        "replacement subscription uses the real stream"
+    );
+}
+
+fn seed_node(root: &std::path::Path) {
+    let profile: crate::NodeProfile = serde_json::from_value(json!({
+        "node_id":"test","node_public_key":ramflux_crypto::public_key_base64url_from_seed([7;32]),
+        "pin_source":"tofu","ca_cert_pem":"test-only CA",
+        "gateway":{"quic_addr":"node.example.invalid:443","tcp_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
+        "relay":{"quic_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
+        "prekey_http_url":"https://node.example.invalid","discovered_at":1,"expires_at":2,
+        "enabled":true,"builtin":false
+    })).expect("test: bounded local node fixture");
+    let mut store = crate::node::NodeStore::default();
+    store.profiles.insert("test".to_owned(), profile);
+    store.save(root).expect("test: seed isolated durable node store");
+}
+
+#[test]
+fn compatibility_custody_envelopes_do_not_disconnect_the_bridge() {
+    let fixture = Fixture::open();
+    let id = fixture.submit("account.custody.cancel", deadline());
+    let response = fixture.result(id);
+    assert_eq!(response["code"], 0, "compatibility cancellation is a real SDK operation");
+    assert_eq!(
+        response["response"]["protocol"], "ramflux.local_bus.custody.v1",
+        "compatibility response must preserve its original typed envelope"
+    );
+    let next = fixture.submit("account.list", deadline());
+    assert_eq!(fixture.result(next)["code"], 0, "compatibility envelopes cannot close the carrier");
+}
+
+#[test]
+fn shared_error_classes_keep_the_binding_numeric_contract() {
+    for (error, expected) in [
+        (crate::SdkError::DataRootInUse, 18),
+        (crate::SdkError::NoNodeSelected, 9),
+        (crate::SdkError::Transport(ramflux_transport::TransportError::NotAuthenticated), 5),
+    ] {
+        let name = crate::bus::io::local_bus_error_code(&error);
+        assert_eq!(
+            error_code(name),
+            expected,
+            "shared SDK classification {name} lost its binding code"
+        );
+    }
+}
+
+#[test]
+fn every_operation_has_explicit_policy_and_generated_manifest_matches() {
+    let policies = super::method_policy::METHOD_POLICIES;
+    let classified =
+        policies.iter().map(|policy| policy.name).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        classified.len(),
+        policies.len(),
+        "duplicate classifications cannot hide an operation"
+    );
+    let supported = crate::bus::inprocess::method_names()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        supported, classified,
+        "every new SDK operation needs an explicit capability and secret policy"
+    );
+    for policy in policies {
+        assert!(!policy.capability.is_empty(), "{} has no capability classification", policy.name);
+        assert!(
+            !policy.show_once || policy.secret_output,
+            "{} cannot disclose a one-time value through an ordinary output",
+            policy.name
+        );
+    }
+    let checked: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/include/ramflux_sdk_methods.json"
+    )))
+    .expect("test: generated method policy JSON");
+    assert_eq!(
+        checked,
+        super::method_policy::manifest(),
+        "regenerate the checked method policy from SDK source"
+    );
+    for name in ["account.create.show_once", "account.custody.show_once"] {
+        let policy = policies
+            .iter()
+            .find(|policy| policy.name == name)
+            .expect("test: one-time disclosure policy");
+        assert!(
+            policy.show_once && policy.secret_output,
+            "{name} must remain a one-time secret disclosure"
+        );
+    }
 }
