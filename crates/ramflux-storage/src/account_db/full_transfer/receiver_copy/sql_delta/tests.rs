@@ -13,15 +13,15 @@ fn pairing_full_local_row_delta_preserves_nulls_rowids_and_no_trigger_side_effec
     let target = owner.path().join("target.db");
     let schema = "CREATE TABLE local_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,value BLOB,note TEXT); CREATE TABLE local_keys(name TEXT PRIMARY KEY,value BLOB) WITHOUT ROWID; CREATE TABLE effects(value TEXT); CREATE TRIGGER on_local_rows AFTER INSERT ON local_rows BEGIN INSERT INTO effects VALUES('unexpected'); END;";
     for path in [&source, &target] {
-        super::super::super::super::stage::create_file(path)?.sync_all()?;
+        crate::account_db::full_transfer::stage::create_file(path)?.sync_all()?;
         let db = open(path, &key)?;
         db.execute_batch(schema)?;
     }
     let source_db = open(&source, &key)?;
     source_db.execute_batch("INSERT INTO local_rows VALUES(9,NULL,'present'); INSERT INTO local_rows VALUES(100,x'0001',NULL); DELETE FROM local_rows WHERE id=100; INSERT INTO local_keys VALUES('one',NULL); DELETE FROM effects;")?;
-    let target_db = open(&target, &key)?;
+    let mut target_db = open(&target, &key)?;
     target_db.execute_batch("INSERT INTO local_rows VALUES(9,x'99','old'); INSERT INTO local_rows VALUES(10,NULL,NULL); INSERT INTO local_keys VALUES('two',x'0102'); DELETE FROM effects;")?;
-    attach(&target_db, &source, &key)?;
+    attach(&mut target_db, &source, &key)?;
     target_db.execute_batch("BEGIN IMMEDIATE")?;
     for name in ["local_rows", "local_keys"] {
         table(&target_db, name)?;

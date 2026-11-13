@@ -17,6 +17,7 @@ use ramflux_protocol::{
 use sha2::Digest as _;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use zeroize::Zeroizing;
+mod restart;
 const SCALAR_RULE: super::FamilyRule = super::FamilyRule {
     id: "sql/stage_fixture",
     selector: super::FamilySelector::Table("stage_fixture"),

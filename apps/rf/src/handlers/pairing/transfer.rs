@@ -9,7 +9,7 @@ use crate::{
 };
 use ramflux_protocol::custody::pairing::{
     PairingWire,
-    local_dto::{Outcome, StatusRequest, TransferAffirm},
+    local_dto::{Outcome, StatusRequest, TransferAffirm, Update},
 };
 use std::{path::PathBuf, sync::Arc};
 pub(super) async fn handle(socket: PathBuf, command: TransferCommand) -> Result<(), RfError> {
@@ -213,24 +213,36 @@ async fn execute(socket: PathBuf, command: TransferCommand) -> Result<(), RfErro
         let Outcome::Update { value } = current.outcome else {
             return Err(invalid());
         };
-        if value.operation_id != request.operation_id
-            || value.generation != request.generation
-            || value.transcript_hash.as_deref() != Some(request.transcript_hash.as_str())
-            || value.proposal_hash.as_deref() != Some(request.new_record_hash.as_str())
-            || value.phase != "proposal_pending"
-            || value.emoji_indices.is_some()
-        {
-            return Err(invalid());
-        }
-        let destination = value.peer_ref.ok_or_else(invalid)?;
-        let answer=terminal.line(&format!("Move primary to device {} at epoch {}.\nExact candidate: {}\nType affirm to approve; anything else rejects: ",
-            destination.device_id,destination.device_epoch,request.new_record_hash),false)?;
-        request.approved = answer.as_str() == "affirm";
+        attended_affirm(&mut request, &value, |prompt| terminal.line(prompt, false))?;
     }
     let result = invoke(&mut client, &command.account, "transfer.affirm", &request).await?;
     let exit = output::outcome(&result);
     output::print(&serde_json::to_value(result)?)?;
     if exit == 0 { Ok(()) } else { Err(RfError::PairingExit { code: exit }) }
+}
+
+pub(super) fn attended_affirm(
+    request: &mut TransferAffirm,
+    current: &Update,
+    answer: impl FnOnce(&str) -> Result<String, RfError>,
+) -> Result<(), RfError> {
+    request.approved = false;
+    if current.operation_id != request.operation_id
+        || current.generation != request.generation
+        || current.transcript_hash.as_deref() != Some(request.transcript_hash.as_str())
+        || current.proposal_hash.as_deref() != Some(request.new_record_hash.as_str())
+        || current.phase != "proposal_pending"
+        || current.emoji_indices.is_some()
+    {
+        return Err(invalid());
+    }
+    let destination = current.peer_ref.as_ref().ok_or_else(invalid)?;
+    let prompt = format!(
+        "Move primary to device {} at epoch {}.\nExact candidate: {}\nType affirm to approve; anything else rejects: ",
+        destination.device_id, destination.device_epoch, request.new_record_hash
+    );
+    request.approved = answer(&prompt)?.as_str() == "affirm";
+    Ok(())
 }
 
 #[cfg(test)]

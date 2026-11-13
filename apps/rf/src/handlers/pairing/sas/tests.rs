@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_SCRIPT_FRAME_BYTES: usize = 64 * 1024;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+mod resumed;
 struct Refuse;
 impl ramflux_sdk::custody::pairing::LocalCredentialProvider for Refuse {
     fn provide(

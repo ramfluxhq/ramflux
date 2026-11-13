@@ -19,7 +19,7 @@ fn bounded(error: rusqlite::Error) -> StorageError {
 }
 
 pub(super) fn attach(
-    target: &Connection,
+    target: &mut Connection,
     source: &Path,
     key: &AccountDbKey,
 ) -> Result<(), StorageError> {

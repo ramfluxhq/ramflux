@@ -33,7 +33,7 @@ impl FullReceiverBaseCopy {
             &self.scratch.path.join("private.db"),
             &self.key,
         )?;
-        sql_delta::attach(&private.db, &stage.db.path, &stage.db.current_key)?;
+        sql_delta::attach(&mut private.db, &stage.db.path, &stage.db.current_key)?;
         self.union = None;
         self.attested.lock().map_err(|_| wrong())?.take();
         private.db.execute_batch("BEGIN IMMEDIATE")?;

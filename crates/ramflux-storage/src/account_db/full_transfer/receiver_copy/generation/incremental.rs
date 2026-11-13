@@ -31,9 +31,9 @@ impl FullPreparedReceiverDatabase {
         };
         self.0.adoption.full_initial_union_root =
             Some(ramflux_protocol::encode_base64url(union.chunks_root));
-        let target = BackupDatabase::open_full_receiver_copy(&self.0.path, &self.0.key)?;
+        let mut target = BackupDatabase::open_full_receiver_copy(&self.0.path, &self.0.key)?;
         super::super::sql_delta::attach(
-            &target.db,
+            &mut target.db,
             &self.0.copy.scratch.path.join("private.db"),
             &self.0.copy.key,
         )?;
