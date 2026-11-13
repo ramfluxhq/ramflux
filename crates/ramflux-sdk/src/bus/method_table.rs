@@ -73,7 +73,15 @@ methods! {
         "conversation.disappearing.expire",
         "conversation.disappearing.set",
         "conversation.mute",
+        "device.pair.begin",
+        "device.pair.join",
+        "device.pair.approve",
         "device.pair.cancel",
+        "device.transfer.begin",
+        "device.transfer.join",
+        "device.transfer.confirm",
+        "device.transfer.cancel",
+        "device.transfer.prepare",
         "device.pair.confirm",
         "device.transfer.affirm",
         "grant.approve",
@@ -180,9 +188,6 @@ methods! {
         "device.activate",
         "device.authorize",
         "device.migrate",
-        "device.pair.approve",
-        "device.pair.begin",
-        "device.pair.join",
         "device.push_route.set",
         "device.refresh",
         "device.revoke",
@@ -304,10 +309,51 @@ mod pairing_tests {
     fn pairing_status_uses_coordinator_without_ordinary_network() -> Result<(), &'static str> {
         for name in ["device.pair.status", "device.transfer.status"] {
             let method = classify(name).ok_or("missing pairing status route")?;
-            assert_eq!(method.route, MethodRoute::Actor);
-            assert_eq!(method.class, MethodClass::LocalRead);
-            assert!(!requires_network(name, &serde_json::json!({}), true, None));
+            assert_eq!(
+                method.route,
+                MethodRoute::Actor,
+                "test: pairing status bypassed its coordinator actor"
+            );
+            assert_eq!(
+                method.class,
+                MethodClass::LocalRead,
+                "test: status was classified as a mutation"
+            );
+            assert!(
+                !requires_network(name, &serde_json::json!({}), true, None),
+                "test: pairing status opened an ordinary gateway session"
+            );
         }
+        for name in [
+            "device.pair.begin",
+            "device.pair.join",
+            "device.pair.approve",
+            "device.pair.confirm",
+            "device.pair.cancel",
+            "device.transfer.begin",
+            "device.transfer.join",
+            "device.transfer.confirm",
+            "device.transfer.prepare",
+            "device.transfer.affirm",
+            "device.transfer.cancel",
+        ] {
+            let method = classify(name).ok_or("test: missing attended pairing action")?;
+            assert_eq!(
+                method.route,
+                MethodRoute::Actor,
+                "test: attended pairing bypassed its account actor"
+            );
+            assert_eq!(
+                method.class,
+                MethodClass::LocalMutation,
+                "test: pairing action required an ordinary session before its separate proof flow"
+            );
+            assert!(
+                !requires_network(name, &serde_json::json!({}), true, None),
+                "test: pairing used the ordinary gateway connection prerequisite"
+            );
+        }
+
         Ok(())
     }
 }

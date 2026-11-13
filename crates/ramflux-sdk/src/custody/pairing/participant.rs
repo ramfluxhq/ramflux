@@ -535,6 +535,7 @@ impl LocalPairingParticipant {
 }
 
 mod full;
+pub(in crate::custody::pairing) use full::FullDestinationReady;
 pub(crate) use full::FullProofSigner;
 pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,

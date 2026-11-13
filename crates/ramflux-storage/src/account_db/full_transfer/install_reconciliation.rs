@@ -110,6 +110,18 @@ impl AccountDb {
     }
 }
 impl FullRecipientInstallStage<'_> {
+    /// Check B's retained source approval without reopening the terminal data opportunity.
+    /// The SDK must separately supply its own exact independently verified native J6.
+    /// # Errors
+    /// Refuses absent/corrupt source approval or another candidate/duplex.
+    pub fn require_preservation_after_native_ack(
+        &self,
+        candidate: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    ) -> Result<(), StorageError> {
+        self.stage
+            .require_destination_preservation_after_native_ack(candidate, self.historical_time)
+    }
+
     /// Public destination scope only; never a resume record or signing context.
     /// # Errors
     /// Refuses lost unlock or changed encrypted stage metadata.

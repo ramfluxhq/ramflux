@@ -14,8 +14,8 @@ use ramflux_protocol::custody::{
 };
 
 pub(super) struct AffirmedCandidate {
-    observation: FullSourceCandidateObservation,
-    preservation: Envelope<PreservationFull>,
+    pub(super) observation: FullSourceCandidateObservation,
+    pub(super) preservation: Envelope<PreservationFull>,
 }
 impl PairingActor {
     /// Inspect a public candidate after frontend handback. This verifies the exact native
@@ -97,12 +97,27 @@ impl PairingActor {
                 })
                 .await;
         }
+        self.queue_source_approval(scope, false).await
+    }
+    pub(super) async fn queue_original_source_approval(&mut self) -> Result<(), SdkError> {
+        let scope = self.full_source_approval_scope()?;
+        self.queue_source_approval(scope, true).await?;
+        Ok(())
+    }
+    async fn queue_source_approval(
+        &mut self,
+        scope: (String, u64, [u8; 32]),
+        original_sas: bool,
+    ) -> Result<LocalResult, SdkError> {
         let participant = self.participant.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?;
         if participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?.is_some() {
             return Err(SdkError::PairingCode("Busy"));
         }
         let observation = self.with_ceremony_mut(|c| {
             let full = c.full.as_mut().ok_or(SdkError::PairingCode("WrongContext"))?;
+            if full.affirmation_used {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
             full.affirmation_used = true;
             full.source_candidate.take().ok_or(SdkError::PairingCode("WrongContext"))
         })?;
@@ -112,7 +127,12 @@ impl PairingActor {
             self.observe_source_candidate(observation.candidate, scope.clone()).await?;
         let observation = self.validate_source_observation(observation).await?;
         self.full_runtime.require_live()?;
-        if self.full_source_data_scope()? != scope {
+        let current_scope = if original_sas {
+            self.full_source_approval_scope()?
+        } else {
+            self.full_source_data_scope()?
+        };
+        if current_scope != scope {
             return Err(SdkError::PairingCode("WrongContext"));
         }
         self.with_ceremony_mut(|c| {
@@ -175,6 +195,7 @@ impl PairingActor {
             c.phase = "prepared".into();
             Ok(())
         })?;
+        self.queue_source_ready()?;
         self.status_update()
     }
     /// The public artifact for the original source's encrypted management-control sender.

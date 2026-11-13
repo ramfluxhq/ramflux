@@ -49,7 +49,8 @@ fn local(update: &Update, role: &str) -> Result<Comparison, RfError> {
     })
 }
 pub(super) fn encode(update: &Update, role: &str) -> Result<Vec<u8>, RfError> {
-    let bytes = ramflux_protocol::canonical_json_bytes(&local(update, role)?)?;
+    let bytes =
+        ramflux_protocol::canonical_json_bytes(&local(update, role)?).map_err(|_| invalid())?;
     if bytes.len() > MAX_BYTES {
         return Err(invalid());
     }

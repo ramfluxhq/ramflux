@@ -12,7 +12,9 @@ use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, Prep
 
 mod candidate;
 pub use candidate::FullPreparedTransferCandidate;
+mod destination_preservation;
 mod preservation;
+pub(in crate::custody::pairing) use destination_preservation::FullDestinationReady;
 mod source_observation;
 mod source_reconciliation;
 pub use source_observation::FullSourceCandidateObservation;

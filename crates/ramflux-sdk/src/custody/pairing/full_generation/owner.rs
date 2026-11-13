@@ -122,6 +122,7 @@ impl FullGenerationPreparation {
         });
         install.validate()?;
         acknowledged(local, &install, authority)?;
+        stage.preservation(&authority.publication.record, local.now)?;
         let database = stage.prepare(
             copy,
             directory.path().join("account.db"),
@@ -175,6 +176,7 @@ impl FullGenerationPrepared {
         authority: &CustodyAuthority,
     ) -> Result<FullGenerationCommitted, SdkError> {
         acknowledged(local, &self.install, authority)?;
+        stage.preservation(&authority.publication.record, local.now)?;
         if install_store::read_pending(
             local.root,
             &self.install.account_id,

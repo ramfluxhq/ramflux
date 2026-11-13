@@ -138,6 +138,15 @@ impl PairingActor {
             .ceremony
             .as_ref()
             .and_then(|c| c.full.as_ref())
+            .is_some_and(|full| full.pending_ready.is_some())
+        {
+            self.finish_destination_ready(db)?;
+            return Ok(true);
+        }
+        if self
+            .ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
             .is_some_and(|full| full.pending_affirmation.is_some())
         {
             self.finish_full_source_affirmation(db)?;
