@@ -96,7 +96,7 @@ impl FullTransferStage<'_> {
     fn verified_forward_receipt(&self) -> Result<(DataPacket, [u8; 32]), StorageError> {
         let record = self.resume_record()?;
         let (hash, bytes): (String, Vec<u8>) = self.connection.query_row(
-            "SELECT manifest_hash,bytes FROM manifest WHERE direction=0 ORDER BY cut DESC LIMIT 1",
+            "SELECT manifest_hash,bytes FROM manifest WHERE direction=0 AND kind!='tail' ORDER BY cut DESC LIMIT 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;

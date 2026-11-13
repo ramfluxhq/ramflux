@@ -127,6 +127,14 @@ impl super::FullTransferStage<'_> {
         manifest_hash: &str,
         index: u64,
     ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+        self.read_source_wire_chunk_for_kind(manifest_hash, index, false)
+    }
+    pub(super) fn read_source_wire_chunk_for_kind(
+        &self,
+        manifest_hash: &str,
+        index: u64,
+        tail: bool,
+    ) -> Result<Zeroizing<Vec<u8>>, StorageError> {
         use ramflux_protocol::custody::pairing::full_transfer::{
             ManifestKind, manifest_hash as hash,
         };
@@ -135,7 +143,7 @@ impl super::FullTransferStage<'_> {
         let manifest = self.forward_manifest(manifest_hash)?;
         let record = self.resume_record()?;
         let body = &manifest.manifest;
-        if body.kind == ManifestKind::Tail
+        if (body.kind == ManifestKind::Tail) != tail
             || body.transfer_id != record.transfer_id
             || body.source_ref != record.grant.source_ref
             || body.destination_ref != record.grant.destination_ref

@@ -34,7 +34,7 @@ impl FullTransferStage<'_> {
     /// # Errors
     /// Refuses missing/invalidated J6, wrong native roles/keys, expiry or incomplete final DV.
     pub fn into_source_tail_encoding_work(
-        self,
+        mut self,
         current: &VerifiedRecord,
         now: u64,
     ) -> Result<FullSourceTailEncodingWork, StorageError> {

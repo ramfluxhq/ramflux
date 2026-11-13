@@ -200,8 +200,11 @@ impl crate::custody::PrimaryVault for DeleteUnavailable<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ClockHold, bootstrap_full_rig, finish_owned_stream, publication};
+    use super::super::{
+        ClockHold, bootstrap_full_rig, finish_owned_stream, install_live_generation, publication,
+    };
     use super::*;
+    use ed25519_dalek::Signer as _;
     use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::ManifestKind};
 
     #[tokio::test(start_paused = true)]
@@ -234,6 +237,13 @@ mod tests {
                 .is_err(),
             "test: a data receipt without native J6 admitted tail encoding"
         );
+        let before_tail =
+            u64::try_from(rig.source.client.account_db()?.privacy_erasure_generation()?)?;
+        rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
+            "inside-j6-tail-cut",
+            "inside-j6-tail-manifest",
+            before_tail + 1,
+        )?;
         let published = Box::pin(publication(&mut rig, &operation)).await?;
         let now = rig.now + 301;
         let current = ramflux_crypto::custody::verify_publication(&published.authority, now)?;
@@ -262,6 +272,7 @@ mod tests {
             i64::try_from(next)?,
             "test: late source write did not reach the actual writer"
         );
+        install_live_generation(&rig, &operation, published)?;
         verify_saved_tail(&mut rig, &operation, &current, prior, now)?;
         rig.primary.lock().await?;
         rig.secondary.lock().await?;
@@ -305,6 +316,11 @@ mod tests {
                 current.envelope().body.master_certificate.body.primary_device_ref,
                 "test: retired source tail was relabeled as new-primary data"
             );
+            assert!(
+                manifest.total_bytes.0 > 0,
+                "test: tail omitted actual source writes between final delta and J6"
+            );
+            exercise_tail_input(rig, operation, current, &draft, now)?;
             let bytes = manifest.to_wire_bytes()?;
             if let Some(previous) = &encoded {
                 assert_eq!(
@@ -313,6 +329,61 @@ mod tests {
                 );
             }
             encoded = Some(bytes);
+        }
+        Ok(())
+    }
+    fn exercise_tail_input(
+        rig: &mut Rig,
+        operation: &str,
+        current: &ramflux_crypto::custody::VerifiedRecord,
+        draft: &ramflux_storage::FullSourceDeltaDraft,
+        now: u64,
+    ) -> TestResult {
+        let account = crate::custody::load_account(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id,
+            now,
+        )?;
+        let branch = account.credentials(
+            rig.participant_a.vault.as_ref(),
+            account.local_device_id()?,
+            now,
+        )?;
+        let signature = encode_base64url(
+            branch.signing.signing_key.sign(&draft.manifest().signing_bytes()?).to_bytes(),
+        );
+        drop(branch);
+        let signed = draft.signed_manifest(signature)?;
+        let hash = encode_base64url(
+            ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&signed)?,
+        );
+        {
+            let mut ordinary = rig.source.client.account_db()?.open_full_transfer_stage(
+                operation,
+                ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                now,
+            )?;
+            assert!(
+                ordinary
+                    .retain_source_manifest(&signed, ramflux_storage::full_transfer_catalog())
+                    .is_err(),
+                "test: prepublication API accepted a tail without endpoint admission"
+            );
+        }
+        let mut source =
+            rig.source.client.account_db()?.open_full_tail_endpoint(operation, 1, current, now)?;
+        source.retain_source(draft, &signed, now)?;
+        let slot = rig.participant_b.db.lock().map_err(|_| "test: selected tail B")?;
+        let db = slot.as_ref().ok_or("test: selected tail B missing")?;
+        let mut target = db.open_full_tail_endpoint(operation, 1, current, now)?;
+        target.retain_recipient(&signed, now)?;
+        for index in 0..signed.manifest.chunk_count.0 {
+            let bytes = source.read_source_chunk(&hash, index, now)?;
+            target.retain_recipient_chunk(&hash, index, &bytes, now)?;
+            assert!(
+                !target.retain_recipient_chunk(&hash, index, &bytes, now)?,
+                "test: exact received tail retry rewrote a durable slot"
+            );
         }
         Ok(())
     }
