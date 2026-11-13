@@ -885,6 +885,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
             RamfluxErrorCode::AuthFailed
         }
         SdkError::ContactUnavailable(_)
+        | SdkError::GatewayWriterBusy
         | SdkError::NoNodeSelected
         | SdkError::NodeUnreachable { .. }
         | SdkError::NodeTimeout { .. }
