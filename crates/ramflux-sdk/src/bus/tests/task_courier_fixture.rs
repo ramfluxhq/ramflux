@@ -13,13 +13,13 @@ pub(super) type Case<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone)]
 pub(super) struct Hold {
-    pub entered: tokio::sync::mpsc::UnboundedSender<()>,
+    pub entered: tokio::sync::mpsc::Sender<()>,
     pub release: Arc<tokio::sync::Notify>,
 }
 impl Hold {
     async fn wait(&self) {
         let released = self.release.notified();
-        let _ = self.entered.send(());
+        let _ = self.entered.try_send(());
         released.await;
     }
 }
@@ -309,15 +309,17 @@ async fn serve(
     stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     shared: &Arc<Mutex<Gateway>>,
 ) -> Case {
+    const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
     let mut push = false;
+    let mut call_generation: Option<String> = None;
     let mut session_target = String::new();
     let mut session_incarnation = String::new();
     loop {
         let size = stream.read_u32().await?;
-        if size > 4 * 1024 * 1024 {
+        if size > MAX_FRAME_BYTES {
             return Err("oversized test frame".into());
         }
-        let mut bytes = vec![0; usize::try_from(size)?];
+        let mut bytes = vec![0; usize::try_from(size.min(MAX_FRAME_BYTES))?];
         stream.read_exact(&mut bytes).await?;
         let value: Value = serde_json::from_slice(&bytes)?;
         let response = if let Some(path) = value["path"].as_str() {
@@ -350,6 +352,14 @@ async fn serve(
                     continue;
                 }
                 GatewayClientFrame::Auth { auth } => {
+                    call_generation =
+                        if auth.device_proof.capability_scope.iter().any(|capability| {
+                            capability == ramflux_protocol::CALL_RESOLUTION_CAPABILITY
+                        }) {
+                            Some(ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?))
+                        } else {
+                            None
+                        };
                     let advertised = auth.device_proof.capability_scope.iter().any(|capability| {
                         capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
                     });
@@ -371,6 +381,7 @@ async fn serve(
                     let bytes = serde_json::to_vec(&established_session(
                         advertised,
                         incarnation.as_deref(),
+                        call_generation.as_deref(),
                     ))?;
                     stream.write_u32(u32::try_from(bytes.len())?).await?;
                     stream.write_all(&bytes).await?;
@@ -381,7 +392,7 @@ async fn serve(
                 GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
                     if let Some(hold) = hold {
-                        let _ = hold.entered.send(());
+                        let _ = hold.entered.try_send(());
                         hold.release.notified().await;
                     }
                     let mut gateway = shared.lock().map_err(|_| "gateway")?;
@@ -443,6 +454,7 @@ async fn serve(
                     } else {
                         shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
                         let routed = record_router_submit(shared, &submit.envelope).await?;
+                        refuse_fixture_call(stream, &submit, call_generation.as_deref()).await?;
                         if push {
                             let (_, inbox_seq) = routed.unwrap_or((session_incarnation.clone(), 1));
                             let incarnation_id = &session_incarnation;
@@ -767,8 +779,44 @@ fn ack_batch_response(
     }))
 }
 
+/// Scheduling tests admit the control but retain media hold without native call authority.
+async fn refuse_fixture_call(
+    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    submit: &GatewaySubmitFrame,
+    generation: Option<&str>,
+) -> Case {
+    let Some(context) = &submit.call_context else { return Ok(()) };
+    context.validate()?;
+    if generation != Some(context.session_generation.as_str())
+        || context.session_id != "courier-session"
+        || context.request_id != submit.request.request_id
+        || context.envelope_id != submit.envelope.envelope_id
+    {
+        return Err("test: call submit did not bind its authenticated scheduling session".into());
+    }
+    let frame = GatewayServerFrame::CallResolved {
+        context: context.clone(),
+        state: ramflux_protocol::CallResolutionState::Cancelled,
+        media_allowed: false,
+        wake_resolved: true,
+    };
+    let bytes = serde_json::to_vec(&frame)?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        stream.write_u32(u32::try_from(bytes.len())?).await?;
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await??;
+    Ok(())
+}
+
 /// Echo session-push on `session_established` only when Auth advertised the capability.
-fn established_session(advertised: bool, incarnation: Option<&str>) -> Value {
+fn established_session(
+    advertised: bool,
+    incarnation: Option<&str>,
+    call_generation: Option<&str>,
+) -> Value {
     let mut session = json!({
         "session_id": "courier-session",
         "gateway_id": "test-gateway",
@@ -776,6 +824,9 @@ fn established_session(advertised: bool, incarnation: Option<&str>) -> Value {
         "resume_token": "courier-resume",
         "resume_window_seconds": 60,
     });
+    if let Some(generation) = call_generation {
+        session["call_session_generation"] = json!(generation);
+    }
     if advertised {
         session["capabilities"] = json!([ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY]);
         session["inbox_incarnation_id"] =

@@ -5,12 +5,12 @@
 use super::*;
 use fixture::Hold;
 
-fn hold() -> (Hold, mpsc::UnboundedReceiver<()>) {
-    let (entered, observed) = mpsc::unbounded_channel();
+fn hold() -> (Hold, mpsc::Receiver<()>) {
+    let (entered, observed) = mpsc::channel(1);
     (Hold { entered, release: Arc::new(tokio::sync::Notify::new()) }, observed)
 }
 
-async fn entered(observed: &mut mpsc::UnboundedReceiver<()>) -> Case {
+async fn entered(observed: &mut mpsc::Receiver<()>) -> Case {
     // Yielding keeps paused time fixed while real loopback TLS reaches the held operation.
     // Wall time is only an outer guard, never the operation that resolves the race.
     let guard = std::time::Instant::now();
@@ -172,9 +172,9 @@ async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_secon
         .await
 }
 
-// Mutation: cap the independent call allowance at four seconds again.
+// The delay exceeds the receive allowance but stays inside the ten-second resolution window.
 #[tokio::test]
-async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Case {
+async fn call_signaling_delivers_within_resolution_window_without_retiring_the_session() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
             let mut f = Box::pin(Fixture::new("courier-call-budget-r2")).await?;
@@ -197,18 +197,35 @@ async fn ten_second_call_signaling_delivers_without_retiring_the_session() -> Ca
                 (account, sent)
             });
             entered(&mut observed).await?;
-            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::time::advance(Duration::from_secs(8)).await;
             tokio::task::yield_now().await;
             let still_waiting = !task.is_finished();
             released.notify_one();
             let (account, sent) = complete(task).await?;
-            assert!(still_waiting, "the submit allowance must survive a ten-second gateway reply");
-            assert!(sent?);
-            assert_eq!(account.client.voice_calls[&id].pending.len(), 0);
+            assert!(
+                still_waiting,
+                "the call allowance must survive an eight-second reply inside the resolution window"
+            );
+            assert!(sent?, "the correlated control was not admitted");
+            let call = account.client.voice_calls.get(&id).ok_or("test: outgoing call missing")?;
+            assert!(call.pending.is_empty(), "the accepted control remained queued");
+            assert!(call.media_held, "the scheduling peer's correlated refusal released media");
             assert!(account.has_pooled_engine(), "a valid slow submit must not force a reconnect");
-            assert_eq!(gateway.lock().map_err(|_| "gateway")?.sessions, before);
-            assert_eq!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 1);
-            assert_eq!(started.elapsed(), Duration::from_secs(10));
+            assert_eq!(
+                gateway.lock().map_err(|_| "gateway")?.sessions,
+                before,
+                "a reply inside the resolution window retired the established session"
+            );
+            assert_eq!(
+                gateway.lock().map_err(|_| "gateway")?.sent.len(),
+                1,
+                "the held call control was not delivered exactly once"
+            );
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(8),
+                "the held reply changed the explicit paused-time delay"
+            );
             Ok(())
         }))
         .await
