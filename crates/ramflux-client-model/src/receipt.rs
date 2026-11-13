@@ -5,6 +5,7 @@
 
 /// Semantic receipt facts supplied by the SDK adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Receipt {
     /// Awaiting acceptance.
     Sending,

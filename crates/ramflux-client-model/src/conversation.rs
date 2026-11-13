@@ -117,6 +117,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordering_paging_and_limit_vectors_match_native_adapters() {
+        let mut pin = Row::new("p", "Pinned");
+        pin.pinned = true;
+        let mut a = Row::new("a", "A");
+        a.latest_ms = Some(10);
+        let mut b = Row::new("b", "B");
+        b.latest_ms = Some(10);
+        let rows = [b, pin, a];
+        let all = page(&rows, true, "", 0, 100).expect("test: ordering vector");
+        assert_eq!(
+            all.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            ["p", "a", "b"],
+            "pins precede activity and equal activity breaks by stable identity"
+        );
+        let second = page(&rows, true, "", 1, 2).expect("test: second page vector");
+        assert_eq!(
+            second.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            ["a", "b"],
+            "offset pages preserve the same sorted snapshot"
+        );
+        assert_eq!(second.next_offset, None, "the final page must terminate");
+        assert_eq!(
+            page(&rows, true, "", 0, 0).expect("test: zero limit").rows.len(),
+            1,
+            "limit zero is clamped to one row"
+        );
+        assert!(
+            page(&rows, true, "", usize::MAX, 100)
+                .expect("test: overflowing offset")
+                .rows
+                .is_empty(),
+            "overflowing offsets cannot wrap back to visible data"
+        );
+        let many = vec![Row::new("same", "Same"); PAGE_LIMIT + 2];
+        let bounded = page(&many, true, "", 0, usize::MAX).expect("test: oversized limit");
+        assert_eq!(
+            bounded.rows.len(),
+            PAGE_LIMIT,
+            "untrusted page size cannot exceed the local cap"
+        );
+        assert_eq!(
+            bounded.next_offset,
+            Some(PAGE_LIMIT),
+            "capped pages preserve access to remaining data"
+        );
+    }
+
+    #[test]
     fn list_search_and_badges_preserve_snapshot_and_privacy() {
         let mut old = Row::new("old", "Pinned");
         old.pinned = true;
