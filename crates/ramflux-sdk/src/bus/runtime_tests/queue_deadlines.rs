@@ -99,7 +99,7 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
     .await?;
     let (connection, io, reader) = installed.await?;
     connection.require_live(held).await?;
-    Ok(Fixture { actor, connection, io, temp, reader, router })
+    Ok(Fixture { actor, connection, io, reader, router, temp })
 }
 
 #[tokio::test(start_paused = true)]
