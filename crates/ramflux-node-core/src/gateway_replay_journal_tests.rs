@@ -410,14 +410,14 @@ fn unfunded_configuration_refuses_before_any_root_or_fence_write()
         let config = crate::GatewayReplayConfig { storage_budget_bytes: bytes, ..config(1, 4) };
         assert!(matches!(
             store.configure_replay(config, 0),
-            Err(NodeCoreError::GatewayReplayUnfunded)
+            Err(NodeCoreError::GatewayReplayUnfunded { .. })
         ));
     }
     assert_eq!(root_count(&store)?, 0);
     assert!(store.db.begin_read()?.open_table(META)?.is_empty()?);
     assert!(matches!(
         store.save_auth_replay(&source(14)?, &request(0, 100), 0),
-        Err(NodeCoreError::GatewayReplayUnfunded)
+        Err(NodeCoreError::GatewayReplayUnfunded { .. })
     ));
     drop(store);
     std::fs::remove_file(path)?;

@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded account-owned signaling retries, ring timers and authenticated relay lease maintenance.
+#[path = "call_lease_outcome.rs"]
+pub(crate) mod lease_outcome;
+
 use super::{invalid, recover};
 #[cfg(test)]
 use crate::client::call;

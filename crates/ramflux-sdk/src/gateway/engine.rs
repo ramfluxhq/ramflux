@@ -175,6 +175,16 @@ pub(crate) fn build_gateway_signed_request(
     Ok(request)
 }
 
+pub(crate) fn decode_voice_reply(
+    frame: GatewayServerFrame,
+) -> Result<ramflux_protocol::VoiceLeaseResponse, SdkError> {
+    match frame {
+        GatewayServerFrame::VoiceLease { response } => Ok(*response),
+        GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
+        _ => Err(SdkError::GatewaySessionRejected("expected voice lease response".into())),
+    }
+}
+
 impl GatewaySessionEngine {
     /// # Errors
     /// Returns an error when the QUIC session cannot connect, authenticate, or receive
@@ -274,7 +284,7 @@ impl GatewaySessionEngine {
                 )
             }
             GatewayServerFrame::Nack { reason } => {
-                return Err(SdkError::GatewaySessionRejected(reason));
+                return Err(SdkError::gateway_nack(reason));
             }
             other => {
                 return Err(SdkError::GatewaySessionRejected(format!(
@@ -396,7 +406,7 @@ impl GatewaySessionEngine {
         self.write_frame(&GatewayClientFrame::Heartbeat { now: gateway_heartbeat_now() }).await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::Heartbeat).await? {
             GatewayServerFrame::Heartbeat { .. } => Ok(()),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected heartbeat frame, got {other:?}"
             ))),
@@ -486,7 +496,7 @@ impl GatewaySessionEngine {
                     {
                         return Ok(Err(refusal));
                     }
-                    return Err(SdkError::GatewaySessionRejected(reason));
+                    return Err(SdkError::gateway_nack(reason));
                 }
                 other => {
                     return Err(SdkError::GatewaySessionRejected(format!(
@@ -532,7 +542,7 @@ impl GatewaySessionEngine {
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
                 GatewayServerFrame::Nack { reason } => {
-                    return Err(SdkError::GatewaySessionRejected(reason));
+                    return Err(SdkError::gateway_nack(reason));
                 }
                 other => {
                     return Err(SdkError::GatewaySessionRejected(format!(
@@ -574,7 +584,7 @@ impl GatewaySessionEngine {
                 self.config.last_seen_inbox_seq = cursor.inbox_seq;
                 Ok(cursor)
             }
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => {
                 Err(SdkError::GatewaySessionRejected(format!("expected ack cursor, got {other:?}")))
             }
@@ -585,7 +595,7 @@ impl GatewaySessionEngine {
                 Ok(cursor)
             }
             GatewayServerFrame::Cursor { cursor: None } => Ok(ack_cursor),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected cursor after ack, got {other:?}"
             ))),
@@ -599,7 +609,7 @@ impl GatewaySessionEngine {
         self.write_frame(&GatewayClientFrame::Cursor { target_delivery_id }).await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::Cursor).await? {
             GatewayServerFrame::Cursor { cursor } => Ok(cursor),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected cursor frame, got {other:?}"
             ))),
@@ -634,7 +644,7 @@ impl GatewaySessionEngine {
                     return Ok(dedup_gateway_entries(delivered));
                 }
                 GatewayServerFrame::Nack { reason } => {
-                    return Err(SdkError::GatewaySessionRejected(reason));
+                    return Err(SdkError::gateway_nack(reason));
                 }
                 other => {
                     return Err(SdkError::GatewaySessionRejected(format!(
@@ -667,7 +677,7 @@ impl GatewaySessionEngine {
                 self.take_pending_deliveries();
                 Ok(dedup_gateway_entries(entries))
             }
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected resume frame, got {other:?}"
             ))),
@@ -692,7 +702,7 @@ impl GatewaySessionEngine {
             GatewayServerFrame::IdentityRegistrationRejected {
                 reason_code: ramflux_protocol::IdentityDirectoryReason::DeviceIdTaken,
             } => Err(crate::ContactReason::DeviceIdTaken.into()),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected identity_registered frame, got {other:?}"
             ))),
@@ -711,7 +721,7 @@ impl GatewaySessionEngine {
         self.write_frame(&GatewayClientFrame::PrekeyPublish { request }).await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::PublishPrekey).await? {
             GatewayServerFrame::PrekeyPublished { response } => Ok(response),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected prekey_published frame, got {other:?}"
             ))),
@@ -743,7 +753,7 @@ impl GatewaySessionEngine {
                 }
                 response.manifest.map(serde_json::from_value).transpose().map_err(SdkError::from)
             }
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected principal_manifest frame, got {other:?}"
             ))),
@@ -760,7 +770,7 @@ impl GatewaySessionEngine {
             .await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::Prekey).await? {
             GatewayServerFrame::Prekey { response } => Ok(response),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected prekey frame, got {other:?}"
             ))),
@@ -787,7 +797,7 @@ impl GatewaySessionEngine {
         self.write_frame(&GatewayClientFrame::RelayTokenIssue { request }).await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::RelayToken).await? {
             GatewayServerFrame::RelayTokenIssued { response } => Ok(response.relay_token),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected relay_token_issued frame, got {other:?}"
             ))),
@@ -815,7 +825,7 @@ impl GatewaySessionEngine {
             .await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::RelayTokenV3).await? {
             GatewayServerFrame::RelayTokenV3Issued { response } => Ok(response.relay_token),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected relay_token_v3_issued frame, got {other:?}"
             ))),
@@ -839,11 +849,7 @@ impl GatewaySessionEngine {
             body,
         };
         self.write_frame(&GatewayClientFrame::VoiceLease { request: Box::new(request) }).await?;
-        match self.read_reply(super::frame_dispatch::ExpectedReply::VoiceLease).await? {
-            GatewayServerFrame::VoiceLease { response } => Ok(*response),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
-            _ => Err(SdkError::GatewaySessionRejected("expected voice lease response".into())),
-        }
+        decode_voice_reply(self.read_reply(super::frame_dispatch::ExpectedReply::VoiceLease).await?)
     }
 
     /// # Errors
@@ -892,7 +898,7 @@ impl GatewaySessionEngine {
                 continue;
             }
             if let GatewayServerFrame::Nack { reason } = reply {
-                return Err(SdkError::GatewaySessionRejected(reason));
+                return Err(SdkError::gateway_nack(reason));
             }
             let bytes = serde_json::to_vec(&reply)
                 .map_err(|error| SdkError::GatewaySessionRejected(error.to_string()))?;

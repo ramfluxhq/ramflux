@@ -6,9 +6,14 @@ pub enum NodeCoreError {
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(
-        "gateway_replay_budget_unfunded: configure and provision replay storage before admission"
+        "gateway_replay_budget_unfunded: effective R={root_budget} S={per_root_share}, required budget={required_bytes} bytes, available={available_bytes} bytes; configure gateway.replay.root_budget, gateway.replay.per_root_share, gateway.replay.storage_budget_bytes and provision storage; existing live shares must not be reduced"
     )]
-    GatewayReplayUnfunded,
+    GatewayReplayUnfunded {
+        root_budget: u64,
+        per_root_share: u64,
+        required_bytes: u64,
+        available_bytes: u64,
+    },
     #[error("gateway_replay_capacity")]
     GatewayReplayCapacity,
     #[error(

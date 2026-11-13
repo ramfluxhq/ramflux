@@ -321,7 +321,14 @@ async fn handle_gateway_session_transport_inner(
         write_gateway_frame(
             &mut *send,
             &ramflux_node_core::GatewayServerFrame::Nack {
-                reason: format!("auth rejected: {error}"),
+                reason: if matches!(
+                    error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                    Some(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+                ) {
+                    error.to_string()
+                } else {
+                    format!("auth rejected: {error}")
+                },
             },
         )
         .await?;
@@ -437,7 +444,7 @@ async fn run_registered_gateway_session(
     result
 }
 
-async fn establish_gateway_session_or_reject(
+pub(crate) async fn establish_gateway_session_or_reject(
     send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
     context: &GatewayQuicContext,
     open: &ramflux_node_core::GatewayOpenFrame,
@@ -466,7 +473,14 @@ async fn establish_gateway_session_or_reject(
             write_gateway_frame(
                 send,
                 &ramflux_node_core::GatewayServerFrame::Nack {
-                    reason: "gateway_session_unavailable".into(),
+                    reason: if matches!(
+                        error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                        Some(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+                    ) {
+                        error.to_string()
+                    } else {
+                        "gateway_session_unavailable".into()
+                    },
                 },
             )
             .await?;

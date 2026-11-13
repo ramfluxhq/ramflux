@@ -103,8 +103,8 @@ not perform this deployment/reset itself.
 Gateway signed-request validity remains at most seven days (604800 seconds),
 with 120 seconds allowed future clock skew. Quotas apply to signed gateway
 requests only, never router envelope admission. Each admitted account ROOT owns a configured share S (default32768)
-across all devices. Configured root budget R defaults to4096; maximum live
-identities are R×S=134217728. Exhaustion returns typed `GatewayReplayCapacity`.
+across all devices. Configured root budget R defaults to256; maximum live
+identities are R×S=8388608. Exhaustion returns typed `GatewayReplayCapacity`.
 Live evidence is never evicted and accepted validity is never shortened.
 
 Reservations are allocated only with the first committed identity, and released
@@ -126,12 +126,20 @@ These **OPEN-VALUE** allocations retain the declared full-validity traffic profi
 two combined signed operations/minute for604800+120 seconds require20164 live
 identities, below32768. Higher profiles require corresponding share/storage
 increases. Default planning uses512 logical bytes/identity and256/root:
-64GiB+1MiB, with128GiB initial backing storage. These are planning allowances,
+4GiB+64KiB, with8GiB initial backing storage. These are planning allowances,
 not measured physical bounds. Startup rejects zero/overflowed/unfunded budgets,
 checks available filesystem capacity plus the existing store against the declared
 storage budget, and refuses a share reduction while roots remain live. Storage is
-not preallocated; operators must retain the configured backing capacity. A smaller
-profile R256/S32768 plans4GiB+64KiB and provisions8GiB. Explicit configuration:
+not preallocated; operators must retain the configured backing capacity. Omitting `[gateway.replay]` selects the small-node profile. Its complete configuration is:
+
+```toml
+[gateway.replay]
+root_budget = 256
+per_root_share = 32768
+storage_budget_bytes = 8589934592
+```
+
+The larger profile is explicit opt-in (64GiB+1MiB logical,128GiB backing):
 
 ```toml
 [gateway.replay]

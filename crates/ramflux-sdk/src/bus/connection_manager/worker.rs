@@ -356,6 +356,7 @@ fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
     tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
     update(handle, |snapshot| {
         snapshot.phase = ConnectionPhase::Backoff;
+        snapshot.gateway_writer_busy = error.gateway_writer_busy();
         snapshot.cause = super::super::native_account::networking_reason(error);
         let mapped = if matches!(error, SdkError::NodeTimeout { .. }) {
             "AttemptTimeout".to_owned()
@@ -494,6 +495,7 @@ fn announce_live(
     update(handle, |snapshot| {
         snapshot.state = NetworkingState::Live;
         snapshot.phase = ConnectionPhase::Live;
+        snapshot.gateway_writer_busy = false;
         snapshot.last_reason = None;
         snapshot.cause = None;
         snapshot.retry_after_ms = None;
@@ -568,6 +570,7 @@ mod tests {
             update(&handle, |snapshot| {
                 snapshot.state = NetworkingState::Live;
                 snapshot.phase = ConnectionPhase::Live;
+                snapshot.gateway_writer_busy = false;
                 snapshot.session_id = Some("retiring".into());
                 snapshot.retry_after_ms = Some(1000);
                 snapshot.next_retry_at_ms = Some(4242);

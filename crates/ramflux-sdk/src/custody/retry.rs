@@ -150,6 +150,9 @@ impl AdmissionRetry {
         }
         let random = u64::from_ne_bytes(bytes);
         let (reason, delay) = match error.custody_refusal() {
+            _ if error.gateway_writer_busy() => {
+                (RetryReason::Busy { hint: None }, Duration::from_secs(1))
+            }
             Some(CustodyRefusal::Busy) => (
                 RetryReason::Busy { hint },
                 hint.map_or_else(|| jitter(MAX_BACKOFF, random), |hint| hint_delay(hint, random)),

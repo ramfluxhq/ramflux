@@ -10,7 +10,7 @@ use std::sync::{
     mpsc,
 };
 
-fn signed_operation(index: usize, device: &str) -> anyhow::Result<GatewayClientFrame> {
+pub(super) fn signed_operation(index: usize, device: &str) -> anyhow::Result<GatewayClientFrame> {
     let now = ramflux_node_core::now_unix_seconds();
     // Issuer material is deliberately absent: a valid signed wrapper must commit first,
     // then return the ordinary business refusal. No token is issued by this fixture.
@@ -41,7 +41,7 @@ fn signed_operation(index: usize, device: &str) -> anyhow::Result<GatewayClientF
         request: Box::new(GatewayRelayTokenV3IssueRequest { signed_request, body }),
     })
 }
-async fn response(client: &mut support::Client) -> anyhow::Result<GatewayServerFrame> {
+pub(super) async fn response(client: &mut support::Client) -> anyhow::Result<GatewayServerFrame> {
     Ok(serde_json::from_slice(&client.stream.recv_frame().await?)?)
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

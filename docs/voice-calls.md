@@ -161,3 +161,10 @@ QA uses `RAMFLUX_ITEST_VOICE=1` and `docker-compose.itest.voice.yml`, named stac
 two daemons, CLI signaling, bidirectional synthetic Opus/RTP/SFrame, replay refusal,
 failed stolen-token rebinding and successful HMAC NAT rebinding. The realnet fixture
 requires `RAMFLUX_ITEST_REALNET=1 RAMFLUX_OBJECT_V3=1 RAMFLUX_CROSS_GATEWAY=1` too.
+
+A saturated gateway writer returns the retryable session NACK
+`gateway_writer_busy: retryable`, never a voice authority refusal. Both SDK call
+drivers retry within existing call and lease deadlines. An active allocation stays
+valid until its original expiry; initial media remains held until allocation or
+acceptance succeeds. Busy replies neither acknowledge a lease operation nor extend
+its expiry. Actual authority refusals remain terminal.

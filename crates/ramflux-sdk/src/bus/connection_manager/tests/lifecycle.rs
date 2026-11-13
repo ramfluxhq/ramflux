@@ -349,3 +349,20 @@ async fn sender_outcome_call_deadline_after_the_write_is_uncertain() -> Case {
     })
     .await
 }
+
+#[tokio::test(start_paused = true)]
+async fn gateway_writer_busy_establishment_survives_pending_adapter() -> Case {
+    let (handle, _) = fixture().await?;
+    {
+        let mut snapshot = handle.shared.snapshot.write().map_err(|_| "snapshot lock")?;
+        snapshot.gateway_writer_busy = true;
+    }
+    assert!(matches!(handle.pending(), SdkError::GatewayWriterBusy));
+    {
+        let mut snapshot = handle.shared.snapshot.write().map_err(|_| "snapshot lock")?;
+        snapshot.gateway_writer_busy = false;
+    }
+    assert!(matches!(handle.pending(), SdkError::NetworkingPendingContext { .. }));
+    handle.stop().await;
+    Ok(())
+}

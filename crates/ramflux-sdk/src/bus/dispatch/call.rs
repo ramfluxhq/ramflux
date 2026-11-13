@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned call RPCs and bounded pair-control delivery, without a parallel scheduler.
+#[cfg(feature = "test-support")]
+pub use driver::lease_outcome::VoiceAdmissionProbe;
+
 use crate::client::call::state::LiveCall;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;

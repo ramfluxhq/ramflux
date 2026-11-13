@@ -29,6 +29,18 @@ retention = "ramflux-retention:7443"
 [gateway]
 public_listen_addr = "0.0.0.0:443"
 
+# Default when omitted: small node, same full-validity share per root.
+# [gateway.replay]
+# root_budget = 256
+# per_root_share = 32768
+# storage_budget_bytes = 8589934592
+#
+# Explicit opt-in: large node. Enable only one replay block.
+# [gateway.replay]
+# root_budget = 4096
+# per_root_share = 32768
+# storage_budget_bytes = 137438953472
+
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"

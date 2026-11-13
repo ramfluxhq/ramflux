@@ -53,6 +53,8 @@ pub enum ReceiveEpochReconcileFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("gateway_writer_busy: retryable")]
+    GatewayWriterBusy,
     #[error("receive epoch reconciliation refused: {0}")]
     ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
     #[error("offline retention {0} is outside 3600..=604800 seconds")]
@@ -229,6 +231,21 @@ pub enum SdkError {
 }
 
 impl SdkError {
+    pub(crate) fn gateway_nack(reason: String) -> Self {
+        if reason == "gateway_writer_busy: retryable" {
+            Self::GatewayWriterBusy
+        } else {
+            Self::GatewaySessionRejected(reason)
+        }
+    }
+    pub(crate) fn gateway_writer_busy(&self) -> bool {
+        match self {
+            Self::GatewayWriterBusy => true,
+            Self::LifecycleShared(error) => error.gateway_writer_busy(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn without_directory_context(self) -> Self {
         match self {
             Self::DirectoryAuthorityUnavailable { source, .. } => {

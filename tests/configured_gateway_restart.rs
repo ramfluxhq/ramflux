@@ -79,3 +79,48 @@ pub fn crash_restart(binary: &str, enabled: bool) -> Result<(), Box<dyn std::err
     assert!(stderr.contains("clock_rollback"), "rollback was not typed: {stderr}");
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Invoked only by the gateway's explicitly selected filesystem proof.
+pub fn unconfigured_profile(binary: &str, funded: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new("ramflux-gateway")?;
+    let config = std::fs::read_to_string(&fixture.config)?;
+    let start = config.find("[gateway.replay]").ok_or("replay fixture block")?;
+    let end = config[start..].find("[signaling]").ok_or("signaling block")? + start;
+    std::fs::write(&fixture.config, format!("{}{}", &config[..start], &config[end..]))?;
+    let mut child =
+        ChildGuard(configured_command(binary, "ramflux-gateway", &fixture, "idle")?.spawn()?);
+    if funded {
+        let reader = spawn_shutdown_log_reader(child.0.stdout.take().ok_or("stdout")?);
+        wait_for_ready(&reader.receiver, "ramflux-gateway", Duration::from_secs(10))?;
+        assert!(TcpStream::connect(&fixture.probe_addr).is_ok());
+        let (status, _) = signal_and_wait(
+            &mut child.0,
+            "ramflux-gateway",
+            "idle",
+            Duration::from_secs(10),
+            None,
+        )?;
+        assert!(status.success());
+        reader.thread.join().map_err(|_| "reader panic")?;
+    } else {
+        let status = child.0.wait()?;
+        let mut stderr = String::new();
+        child.0.stderr.take().ok_or("stderr")?.read_to_string(&mut stderr)?;
+        assert_eq!(status.code(), Some(2), "{stderr}");
+        for required in [
+            "gateway_replay_budget_unfunded",
+            "R=256",
+            "S=32768",
+            "required budget=8589934592 bytes",
+            "available=",
+            "gateway.replay.root_budget",
+            "gateway.replay.per_root_share",
+            "gateway.replay.storage_budget_bytes",
+        ] {
+            assert!(stderr.contains(required), "missing {required}: {stderr}");
+        }
+        assert!(TcpStream::connect(&fixture.probe_addr).is_err());
+    }
+    Ok(())
+}

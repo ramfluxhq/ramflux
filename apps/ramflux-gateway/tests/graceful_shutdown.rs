@@ -198,3 +198,29 @@ fn crash_restart_waits_then_serves_in_disabled_mode() -> Result<(), Box<dyn std:
 fn crash_restart_waits_then_serves_in_enabled_mode() -> Result<(), Box<dyn std::error::Error>> {
     configured_shutdown::gateway_restart::crash_restart(env!("CARGO_BIN_EXE_ramflux-gateway"), true)
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires private user/mount namespaces; explicitly selected admission proof"]
+fn unconfigured_small_profile_starts_below_128gib_and_refuses_unfunded()
+-> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(size) = std::env::var("RAMFLUX_PROFILE_TEST_GIB") {
+        return configured_shutdown::gateway_restart::unconfigured_profile(
+            env!("CARGO_BIN_EXE_ramflux-gateway"),
+            size == "16",
+        );
+    }
+    let mountpoint =
+        std::env::temp_dir().join(format!("ramflux-profile-fs-{}", std::process::id()));
+    std::fs::create_dir(&mountpoint)?;
+    for size in ["16", "4"] {
+        let status = std::process::Command::new("unshare")
+            .args(["--user","--map-root-user","--mount","--fork","sh","-ec"])
+            .arg("mount --make-rprivate /; mount -t tmpfs -o size=\"${RAMFLUX_PROFILE_TEST_GIB}G\" tmpfs \"$1\"; export TMPDIR=\"$1\"; exec \"$2\" unconfigured_small_profile_starts_below_128gib_and_refuses_unfunded --ignored --exact --nocapture")
+            .arg("profile-proof").arg(&mountpoint).arg(std::env::current_exe()?)
+            .env("RAMFLUX_PROFILE_TEST_GIB",size).status()?;
+        assert!(status.success(), "private {size}GiB filesystem proof failed");
+    }
+    std::fs::remove_dir(&mountpoint)?;
+    Ok(())
+}

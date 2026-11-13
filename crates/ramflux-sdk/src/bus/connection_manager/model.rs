@@ -55,6 +55,8 @@ pub(crate) struct NetworkingSnapshot {
     pub attempt_started_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
     pub retry_after_ms: Option<u64>,
+    #[serde(skip)]
+    pub gateway_writer_busy: bool,
     pub last_reason: Option<String>,
     pub cause: Option<AccountNetworkingReason>,
     pub active_transport_kind: Option<GatewaySessionTransportKind>,
@@ -74,6 +76,7 @@ impl NetworkingSnapshot {
             attempt_started_at_ms: None,
             next_retry_at_ms: None,
             retry_after_ms: None,
+            gateway_writer_busy: false,
             last_reason: None,
             cause: None,
             active_transport_kind: None,

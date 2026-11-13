@@ -32,6 +32,14 @@ pub(crate) async fn handle(
         Ok(response) => {
             ramflux_node_core::GatewayServerFrame::VoiceLease { response: Box::new(response) }
         }
+        Err(error)
+            if matches!(
+                error.source.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                Some(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+            ) =>
+        {
+            ramflux_node_core::GatewayServerFrame::Nack { reason: error.source.to_string() }
+        }
         Err(error) => {
             tracing::warn!(
                 %error,

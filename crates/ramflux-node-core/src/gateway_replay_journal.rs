@@ -97,7 +97,7 @@ impl GatewayRedbStore {
             let mut meta = write.open_table(META).map_err(error)?;
             let old_share = meta.get("share").map_err(error)?.map_or(0, |raw| raw.value());
             if roots > config.root_budget || (roots > 0 && config.per_root_share < old_share) {
-                return Err(NodeCoreError::GatewayReplayUnfunded);
+                return Err(config.unfunded(fs2::available_space(&self.path).unwrap_or(0)));
             }
             meta.insert("share", config.per_root_share).map_err(error)?;
             meta.insert("root_budget", config.root_budget).map_err(error)?;
@@ -127,7 +127,7 @@ impl GatewayRedbStore {
             .replay_config
             .lock()
             .map_err(error)?
-            .ok_or(NodeCoreError::GatewayReplayUnfunded)?;
+            .ok_or_else(|| GatewayReplayConfig::default().unfunded(0))?;
         ramflux_protocol::ReplayGuard::new()
             .check_signed_request(source, request, now)
             .map_err(|error| NodeCoreError::ReplayGuard(error.to_string()))?;

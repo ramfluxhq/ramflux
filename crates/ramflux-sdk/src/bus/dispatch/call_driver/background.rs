@@ -17,7 +17,7 @@ use crate::client::{
 };
 use crate::prelude::*;
 use ramflux_protocol::{
-    CallAction, VoiceCallFailureReason, VoiceLeaseConsent, VoiceLeaseRequest, VoiceLeaseResponse,
+    VoiceCallFailureReason, VoiceLeaseConsent, VoiceLeaseRequest, VoiceLeaseResponse,
 };
 
 #[derive(Clone)]
@@ -252,48 +252,7 @@ async fn exchange_lease(
             }
             let now = now_unix_timestamp();
             let mut next = lease.next;
-            if next.local == next.callee {
-                match result {
-                    Ok(VoiceLeaseResponse::Allocation { allocation }) => next.accept_lease(
-                        allocation,
-                        lease.consent.ok_or_else(|| invalid("callee lease consent absent"))?,
-                        now,
-                    )?,
-                    Ok(VoiceLeaseResponse::Refused { reason }) => {
-                        next.lease_refused(reason, now)?;
-                    }
-                    _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
-                }
-            } else if next.row.state == "connecting" && next.receive_key.is_some() {
-                match result {
-                    Ok(VoiceLeaseResponse::Allocation { allocation }) => {
-                        next.activate(allocation, now)?;
-                    }
-                    Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
-                    _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
-                }
-            } else {
-                match result {
-                    Ok(VoiceLeaseResponse::Status { status }) => {
-                        if let Some(allocation) = next.allocation.as_mut() {
-                            allocation.expires_at = status.expires_at;
-                        }
-                        let allocation = next
-                            .allocation
-                            .as_ref()
-                            .ok_or_else(|| invalid("renewed lease missing"))?
-                            .for_callee();
-                        let ack = next
-                            .control(CallAction::Ack { allocation: Box::new(allocation) }, now)?;
-                        next.pending.push(ack);
-                        next.next_lease_refresh = now.saturating_add(20);
-                    }
-                    Ok(VoiceLeaseResponse::Refused { reason }) => {
-                        next.lease_refused(reason, now)?;
-                    }
-                    _ => next.next_lease_refresh = now.saturating_add(5),
-                }
-            }
+            super::lease_outcome::apply_result(&mut next, result, lease.consent, now)?;
             install(account, next)?;
             Ok(true)
         })

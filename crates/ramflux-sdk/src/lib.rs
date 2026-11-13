@@ -10,6 +10,9 @@
 pub use ramflux_protocol::message;
 pub use ramflux_protocol::message::{MessageRequest, MessageUpdate};
 
+#[cfg(feature = "test-support")]
+pub use bus::dispatch::call::VoiceAdmissionProbe;
+
 pub mod backup;
 #[cfg(all(feature = "itest-memory-vault", not(any(test, ramflux_itest))))]
 compile_error!(

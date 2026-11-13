@@ -225,6 +225,7 @@ async fn capacity_to_busy_same_hint_emits_networking_changed() -> TestResult {
 fn snapshot() -> super::super::connection_manager::NetworkingSnapshot {
     use super::super::connection_manager::{ConnectionPhase, NetworkingSnapshot, NetworkingState};
     NetworkingSnapshot {
+        gateway_writer_busy: false,
         state: NetworkingState::Live,
         phase: ConnectionPhase::Live,
         generation: 1,

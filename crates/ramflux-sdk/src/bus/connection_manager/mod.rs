@@ -702,6 +702,9 @@ impl ConnectionHandle {
     }
     pub(crate) fn pending(&self) -> SdkError {
         let snapshot = self.snapshot();
+        if snapshot.gateway_writer_busy {
+            return SdkError::GatewayWriterBusy;
+        }
         SdkError::NetworkingPendingContext {
             retry_after_ms: snapshot.retry_after_ms,
             networking: Box::new(serde_json::json!(snapshot)),

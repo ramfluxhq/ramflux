@@ -22,14 +22,19 @@ pub struct GatewayReplayConfig {
 }
 impl Default for GatewayReplayConfig {
     fn default() -> Self {
-        Self {
-            root_budget: 4096,
-            per_root_share: 32_768,
-            storage_budget_bytes: 128 * 1024 * 1024 * 1024,
-        }
+        Self::small_node()
     }
 }
 impl GatewayReplayConfig {
+    pub(super) const fn unfunded(self, available_bytes: u64) -> NodeCoreError {
+        NodeCoreError::GatewayReplayUnfunded {
+            root_budget: self.root_budget,
+            per_root_share: self.per_root_share,
+            required_bytes: self.storage_budget_bytes,
+            available_bytes,
+        }
+    }
+
     /// Smaller-node profile with the same per-root full-validity traffic allowance.
     #[must_use]
     pub const fn small_node() -> Self {
@@ -44,7 +49,7 @@ impl GatewayReplayConfig {
     /// Refuses zero, overflowing, or unfunded allocations.
     pub fn planned_logical_bytes(&self) -> Result<u64, NodeCoreError> {
         if self.root_budget == 0 || self.per_root_share == 0 {
-            return Err(NodeCoreError::GatewayReplayUnfunded);
+            return Err(self.unfunded(0));
         }
         let logical = self
             .root_budget
@@ -55,23 +60,23 @@ impl GatewayReplayConfig {
                     .checked_mul(PLANNED_ROOT_BYTES)
                     .and_then(|roots| bytes.checked_add(roots))
             })
-            .ok_or(NodeCoreError::GatewayReplayUnfunded)?;
+            .ok_or_else(|| self.unfunded(0))?;
         if logical
             .checked_add(WORKING_RESERVE_BYTES)
             .is_none_or(|required| required > self.storage_budget_bytes)
         {
-            return Err(NodeCoreError::GatewayReplayUnfunded);
+            return Err(self.unfunded(0));
         }
         Ok(logical)
     }
     pub(super) fn require_funded(&self, path: &Path) -> Result<(), NodeCoreError> {
-        self.planned_logical_bytes()?;
         let available =
             fs2::available_space(path).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
         let existing =
             std::fs::metadata(path).map_err(|error| NodeCoreError::Redb(error.to_string()))?.len();
+        self.planned_logical_bytes().map_err(|_| self.unfunded(available))?;
         if available.saturating_add(existing) < self.storage_budget_bytes {
-            return Err(NodeCoreError::GatewayReplayUnfunded);
+            return Err(self.unfunded(available));
         }
         Ok(())
     }
@@ -83,7 +88,7 @@ mod tests {
     #[test]
     fn replay_allocations_reject_unfunded_and_overflowing_budgets() -> Result<(), NodeCoreError> {
         let default = GatewayReplayConfig::default();
-        assert_eq!(default.planned_logical_bytes()?, 64 * 1024 * 1024 * 1024 + 1024 * 1024);
+        assert_eq!(default.planned_logical_bytes()?, 4 * 1024 * 1024 * 1024 + 64 * 1024);
         assert!(GatewayReplayConfig::small_node().planned_logical_bytes().is_ok());
         for config in [
             GatewayReplayConfig { storage_budget_bytes: 1, ..default },
@@ -92,7 +97,7 @@ mod tests {
         ] {
             assert!(matches!(
                 config.planned_logical_bytes(),
-                Err(NodeCoreError::GatewayReplayUnfunded)
+                Err(NodeCoreError::GatewayReplayUnfunded { .. })
             ));
         }
         Ok(())

@@ -361,6 +361,9 @@ pub(super) fn networking_reason(error: &SdkError) -> Option<AccountNetworkingRea
         };
     }
     match error {
+        SdkError::GatewayWriterBusy => {
+            Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 1000, capacity: None })
+        }
         SdkError::NoNodeSelected => Some(AccountNetworkingReason::NoNodeSelected),
         SdkError::NodeUnreachable { retry_after_ms, .. }
         | SdkError::NodeTimeout { retry_after_ms } => {

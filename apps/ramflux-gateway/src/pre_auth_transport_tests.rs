@@ -464,4 +464,5 @@ async fn gateway_transport_auth_does_not_snapshot_state() -> anyhow::Result<()> 
     .await?
 }
 
+mod voice_writer_outage;
 mod writer_outage;

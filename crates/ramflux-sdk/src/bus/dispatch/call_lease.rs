@@ -2,11 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Each account claims its own relay secrets; only public offers/consent travel to the peer.
+use super::lease_outcome::apply_result;
 use super::{invalid, scope};
 use crate::client::call::state::LiveCall;
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
-use ramflux_protocol::{CallAction, VoiceCallFailureReason, VoiceLeaseConsent};
+use ramflux_protocol::{VoiceCallFailureReason, VoiceLeaseConsent};
 use ramflux_protocol::{VoiceLeaseRequest, VoiceLeaseResponse};
 pub(super) async fn maintain_lease(
     account: &mut LocalBusAccountState,
@@ -61,14 +62,17 @@ pub(super) async fn maintain_lease(
         return claim_callee(account, next, now).await;
     }
     if next.row.state == "connecting" && next.receive_key.is_some() {
-        let mut engine = account.session_client().await?;
+        let mut engine = match account.session_client().await {
+            Ok(engine) => engine,
+            Err(error) if error.gateway_writer_busy() => {
+                apply_result(next, Err(error), None, now)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let result = engine.voice_lease(VoiceLeaseRequest::Allocate { scope: scope(next) }).await;
         account.apply_session_metadata(engine);
-        match result {
-            Ok(VoiceLeaseResponse::Allocation { allocation }) => next.activate(allocation, now)?,
-            Ok(VoiceLeaseResponse::Refused { reason }) => next.fail(reason, now)?,
-            _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
-        }
+        apply_result(next, result, None, now)?;
     } else if next.row.state == "active" {
         let Some(consent) = next.lease_consent.clone() else {
             next.next_lease_refresh = now.saturating_add(2);
@@ -76,32 +80,25 @@ pub(super) async fn maintain_lease(
         };
         #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
         super::refresh_barrier::wait().await?;
-        let mut engine = account.session_client().await?;
+        let mut engine = match account.session_client().await {
+            Ok(engine) => engine,
+            Err(error) if error.gateway_writer_busy() => {
+                apply_result(next, Err(error), None, now)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let result =
             engine.voice_lease(VoiceLeaseRequest::Renew { consent: Box::new(consent) }).await;
         account.apply_session_metadata(engine);
-        match result {
-            Ok(VoiceLeaseResponse::Status { status }) => {
-                if let Some(allocation) = next.allocation.as_mut() {
-                    allocation.expires_at = status.expires_at;
-                }
-                let allocation = next
-                    .allocation
-                    .as_ref()
-                    .ok_or_else(|| invalid("renewed lease missing"))?
-                    .for_callee();
-                let ack =
-                    next.control(CallAction::Ack { allocation: Box::new(allocation) }, now)?;
-                next.pending.push(ack);
-                next.next_lease_refresh = now.saturating_add(20);
-            }
-            Ok(VoiceLeaseResponse::Refused { reason }) => {
-                next.lease_refused(reason, now)?;
-                #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
-                super::refresh_barrier::refused().await?;
-            }
-            _ => next.next_lease_refresh = now.saturating_add(5),
+        let refused = matches!(result, Ok(VoiceLeaseResponse::Refused { .. }));
+        apply_result(next, result, None, now)?;
+        #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+        if refused {
+            super::refresh_barrier::refused().await?;
         }
+        #[cfg(not(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production))))]
+        let _ = refused;
     }
     Ok(())
 }
@@ -133,20 +130,24 @@ async fn claim_callee(
     if next.row.state == "active" {
         super::refresh_barrier::wait().await?;
     }
-    let mut engine = account.session_client().await?;
+    let mut engine = match account.session_client().await {
+        Ok(engine) => engine,
+        Err(error) if error.gateway_writer_busy() => {
+            apply_result(next, Err(error), None, now)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let result =
         engine.voice_lease(VoiceLeaseRequest::Accept { consent: Box::new(consent.clone()) }).await;
     account.apply_session_metadata(engine);
-    match result {
-        Ok(VoiceLeaseResponse::Allocation { allocation }) => {
-            next.accept_lease(allocation, consent, now)?;
-        }
-        Ok(VoiceLeaseResponse::Refused { reason }) => {
-            next.lease_refused(reason, now)?;
-            #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
-            super::refresh_barrier::refused().await?;
-        }
-        _ => next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?,
+    let refused = matches!(result, Ok(VoiceLeaseResponse::Refused { .. }));
+    apply_result(next, result, Some(consent), now)?;
+    #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
+    if refused {
+        super::refresh_barrier::refused().await?;
     }
+    #[cfg(not(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production))))]
+    let _ = refused;
     Ok(())
 }

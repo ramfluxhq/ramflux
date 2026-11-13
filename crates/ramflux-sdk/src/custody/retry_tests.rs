@@ -125,3 +125,12 @@ async fn admission_retry_records_last_reason_without_shortening_the_deadline()
     assert_eq!(retry.reason, Some(RetryReason::Timeout));
     Ok(())
 }
+
+#[test]
+fn gateway_writer_busy_reconnect_retry_keeps_its_bounded_floor() {
+    let mut retry = AdmissionRetry::default();
+    let now = Instant::now();
+    retry.record(&SdkError::GatewayWriterBusy, now);
+    assert_eq!(retry.not_before(), Some(now + Duration::from_secs(1)));
+    assert_eq!(retry.reason, Some(RetryReason::Busy { hint: None }));
+}
