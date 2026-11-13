@@ -16,6 +16,43 @@ pub struct FullSourceCandidateObservation {
     pub(in crate::custody::pairing) authority: CustodyAuthority,
 }
 impl super::LocalPairingParticipant {
+    pub(in crate::custody::pairing) fn validate_candidate_for_affirmation(
+        &self,
+        observation: &FullSourceCandidateObservation,
+        context: &ramflux_protocol::custody::pairing::context_v3::TranscriptV3,
+    ) -> Result<(), SdkError> {
+        self.require_source_observation(observation, &observation.scope)?;
+        let now = custody::network_now()?;
+        let current = ramflux_crypto::custody::verify_publication(&observation.authority, now)?;
+        if observation.candidate.compacted_ids != observation.authority.publication.compacted_ids
+            || ramflux_protocol::custody::object_hash(current.envelope())?
+                != context.initiator.common.record_hash
+            || current.envelope().body.master_certificate.body.primary_device_ref
+                != context.initiator.device_ref
+        {
+            return Err(super::wrong());
+        }
+        let proposed = ramflux_crypto::custody::verify_publication(
+            &CustodyAuthority {
+                publication: observation.candidate.clone(),
+                custodian_publication: observation.authority.custodian_publication.clone(),
+            },
+            now,
+        )?;
+        super::preservation::require_destination(
+            context,
+            &proposed,
+            &context.responder.device_ref,
+            now,
+        )?;
+        ramflux_crypto::custody::verify_cooperative_preservation(
+            &current,
+            &proposed,
+            &context.responder.device_ref,
+            context.initiator.common.recipient_mode == "new",
+        )?;
+        Ok(())
+    }
     pub(in crate::custody::pairing) fn require_source_observation(
         &self,
         observation: &FullSourceCandidateObservation,

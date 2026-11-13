@@ -82,7 +82,12 @@ impl FullTransferStage<'_> {
         if self.retained_source_after_native_ack(&previous, &candidate.record, now)?.is_none() {
             return Err(wrong());
         }
-        let cut = self.db.commit_full_ack_tail(head, &reference.stage_id, snapshot_id, false)?;
+        let owner = self.source_primary_owner()?.ok_or_else(wrong)?;
+        if owner.public_key() != previous.body.master_certificate.body.self_signing_public_key {
+            return Err(wrong());
+        }
+        let cut =
+            self.db.commit_full_ack_tail(head, &reference.stage_id, snapshot_id, false, &owner)?;
         Ok(FullSourceTailCut {
             cut,
             operation: head.operation_id.clone(),

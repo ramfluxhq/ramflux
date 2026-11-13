@@ -229,7 +229,7 @@ impl Registry {
     }
     fn save(&self, entry: &Entry) -> Result<(), RfError> {
         let operation = &entry.operation;
-        let bytes = serde_json::to_vec(&entry)?;
+        let bytes = serde_json::to_vec(entry)?;
         if u64::try_from(bytes.len()).map_err(|_| invalid())? > MAX_ENTRY {
             return Err(invalid());
         }

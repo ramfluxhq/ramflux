@@ -35,6 +35,13 @@ pub(super) fn preflight(
     }
     let needs_input =
         matches!(action, PairingAction::Confirm { matches: true, peer_sas_file: None, .. });
+    preflight_requirements(needs_output, needs_input, output)
+}
+pub(super) fn preflight_requirements(
+    needs_output: bool,
+    needs_input: bool,
+    output: Option<&Path>,
+) -> Result<Option<InvitationOutput>, RfError> {
     if ((needs_output && output.is_none()) || needs_input)
         && super::super::account_ceremony::Terminal::open().is_err()
     {

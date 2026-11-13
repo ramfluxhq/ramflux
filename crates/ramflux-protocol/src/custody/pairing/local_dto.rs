@@ -13,6 +13,8 @@ fn local_base(id: &str, generation: u64) -> Result<()> {
     integer(generation, "generation")?;
     require(generation >= 1, "generation")
 }
+mod affirm;
+pub use affirm::TransferAffirm;
 mod full;
 pub use full::FullTransferBegin;
 mod full_status;
@@ -393,6 +395,7 @@ impl LocalResult {
                         | "pair.cancel"
                         | "pair.status"
                         | "transfer.prepare"
+                        | "transfer.affirm"
                         | "transfer.confirm"
                         | "transfer.cancel"
                         | "transfer.status"

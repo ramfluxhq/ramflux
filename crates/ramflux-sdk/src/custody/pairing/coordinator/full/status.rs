@@ -91,7 +91,9 @@ impl PairingActor {
             role: c.role.as_str().into(),
             // The completed pre-J3 chain and original-A reverse DV await local preparation; no
             // candidate, publication or installation is implied by completed totals.
-            stage: if c.full.as_ref().is_some_and(|full| full.candidate.is_some()) {
+            stage: if c.full.as_ref().is_some_and(|full| {
+                full.candidate.is_some() || full.source_candidate.is_some() || full.affirmation_used
+            }) {
                 FullStatusStage::Candidate
             } else if state.stream.as_ref().is_some_and(|stream| stream.complete.is_some()) {
                 FullStatusStage::AwaitingPrepare

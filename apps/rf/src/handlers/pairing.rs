@@ -22,7 +22,14 @@ use zeroize::Zeroizing;
 mod output;
 mod registry;
 mod sas;
+mod transfer;
 
+pub(crate) async fn handle_transfer(
+    socket: PathBuf,
+    command: crate::cli::TransferCommand,
+) -> Result<(), RfError> {
+    transfer::handle(socket, command).await
+}
 pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(), RfError> {
     handle_attended(socket, command).await.map_err(output::failure)
 }
@@ -163,8 +170,18 @@ async fn join(
     path: &Path,
     display: &sas::Display<'_>,
 ) -> Result<(), RfError> {
+    join_request(bus, account, ("join", display_name), path, display).await
+}
+async fn join_request(
+    bus: &mut PairingBusClient,
+    account: &str,
+    (action, display_name): (&str, String),
+    path: &Path,
+    display: &sas::Display<'_>,
+) -> Result<(), RfError> {
     let owned = registry::JoinedFile::open(path)?;
     let token = read_invitation(path)?;
+    let expected_operation = token.invitation.body.request_id.clone();
     registry::Registry::open(display.socket)?.record_role(
         &token.invitation.body.request_id,
         account,
@@ -173,10 +190,14 @@ async fn join(
     let result = invoke(
         bus,
         account,
-        "join",
+        action,
         &Join { schema: "ramflux.pairing.Join.v2".into(), version: 2, token, display_name },
     )
     .await?;
+    if matches!(&result.outcome, Outcome::Update { value } if value.operation_id!=expected_operation)
+    {
+        return Err(invalid());
+    }
     if matches!(&result.outcome, Outcome::Update { value } if value.result.is_none()) {
         owned.remove()?;
     }
@@ -223,9 +244,19 @@ async fn begin(
     path: PathBuf,
     display: &sas::Display<'_>,
 ) -> Result<(), RfError> {
+    request.normalize();
+    begin_request(bus, account, ("begin", request), path, display).await
+}
+async fn begin_request<T: PairingWire + serde::Serialize>(
+    bus: &mut PairingBusClient,
+    account: &str,
+    (action, mut request): (&str, T),
+    path: PathBuf,
+    display: &sas::Display<'_>,
+) -> Result<(), RfError> {
     let mut output = InvitationOutput::create(path)?;
     request.normalize();
-    let result = invoke(bus, account, "begin", &request).await?;
+    let result = invoke(bus, account, action, &request).await?;
     let LocalResult { outcome: Outcome::Begin { value }, .. } = result else {
         return show(display, result);
     };
@@ -263,8 +294,8 @@ async fn invoke<T: PairingWire + serde::Serialize>(
     request: &T,
 ) -> Result<LocalResult, RfError> {
     request.validate().map_err(|_| invalid())?;
-    let method = if action == "transfer.status" {
-        "device.transfer.status".into()
+    let method = if action.starts_with("transfer.") {
+        format!("device.{action}")
     } else {
         format!("device.pair.{action}")
     };

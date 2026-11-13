@@ -17,6 +17,7 @@ use ramflux_protocol::custody::pairing::{
     local_dto::FullTransferBegin,
 };
 use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
+mod affirm;
 mod bootstrap;
 pub(super) mod cancel;
 mod epoch;
@@ -35,6 +36,10 @@ pub(super) struct FullCeremony {
     cancelled: Option<FullSourcePreparationCancel>,
     bootstrap: Option<bootstrap::BootstrapState>,
     candidate: Option<crate::custody::pairing::FullPreparedTransferCandidate>,
+    source_candidate: Option<Box<crate::custody::pairing::FullSourceCandidateObservation>>,
+    pending_affirmation: Option<Box<crate::custody::pairing::FullSourceCandidateObservation>>,
+    affirmed: Option<Box<affirm::AffirmedCandidate>>,
+    affirmation_used: bool,
 }
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
@@ -61,6 +66,10 @@ impl FullCeremony {
             cancelled,
             bootstrap: None,
             candidate: None,
+            source_candidate: None,
+            pending_affirmation: None,
+            affirmed: None,
+            affirmation_used: false,
         }
     }
 }
@@ -508,9 +517,20 @@ impl PairingActor {
 impl PairingActor {
     fn full_source_approval_scope(&self) -> Result<(String, u64, [u8; 32]), SdkError> {
         self.with_ceremony(|c| {
+            if !c.local_confirmed || !c.peer_mac_ok {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok(())
+        })?;
+        self.full_source_data_scope()
+    }
+    fn full_source_data_scope(&self) -> Result<(String, u64, [u8; 32]), SdkError> {
+        let now = crate::custody::network_now()?;
+        self.with_ceremony(|c| {
+            if c.expires_at <= now {
+                return Err(SdkError::PairingCode("LeaseExpired"));
+            }
             if c.role != PairingRole::Initiator
-                || !c.local_confirmed
-                || !c.peer_mac_ok
                 || c.full
                     .as_ref()
                     .and_then(|full| full.bootstrap.as_ref())
@@ -555,6 +575,7 @@ impl PairingActor {
                     observation,
                     runtime.clone(),
                     cancelled,
+                    None,
                 )
             })
             .await

@@ -16,6 +16,34 @@ impl LocalPairingParticipant {
         &self,
         observation: &super::FullSourceCandidateObservation,
     ) -> Result<Envelope<PreservationFull>, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.preserve_candidate(db, observation, true)
+    }
+    pub(in crate::custody::pairing) fn retained_full_candidate(
+        &self,
+        observation: &super::FullSourceCandidateObservation,
+    ) -> Result<Envelope<PreservationFull>, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.preserve_candidate(db, observation, false)
+    }
+    pub(in crate::custody::pairing) fn preserve_full_candidate_in(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        observation: &super::FullSourceCandidateObservation,
+    ) -> Result<Envelope<PreservationFull>, SdkError> {
+        if self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?.is_some() {
+            return Err(SdkError::PairingCode("Busy"));
+        }
+        self.preserve_candidate(db, observation, true)
+    }
+    fn preserve_candidate(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        observation: &super::FullSourceCandidateObservation,
+        allow_new_signature: bool,
+    ) -> Result<Envelope<PreservationFull>, SdkError> {
         let (operation, generation, th) = &observation.scope;
         self.require_source_observation(observation, &observation.scope)?;
         let candidate = &observation.candidate;
@@ -33,8 +61,6 @@ impl LocalPairingParticipant {
             },
             now,
         )?;
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, Some(anchor))?;
         let live = db
             .pairing_live_rows()?
@@ -79,7 +105,7 @@ impl LocalPairingParticipant {
             )?;
             return Ok(saved);
         }
-        if live.phase != "mutually_confirmed" {
+        if !allow_new_signature || live.phase != "mutually_confirmed" {
             return Err(wrong());
         }
         super::require_candidate_lease(proof.expires_at(), now)?;
@@ -123,7 +149,7 @@ fn require_original_owner(
     Ok(())
 }
 
-fn require_destination(
+pub(in crate::custody::pairing) fn require_destination(
     context: &TranscriptV3,
     proposed: &ramflux_crypto::custody::VerifiedRecord,
     reference: &ramflux_protocol::custody::DeviceRef,

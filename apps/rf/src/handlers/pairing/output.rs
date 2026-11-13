@@ -40,7 +40,7 @@ fn code_category(value: &str) -> i32 {
         "PrimaryRequired" => 5,
         "UpdateRequired" => 6,
         "VaultUnavailable" | "CustodyVaultUnavailable" => 7,
-        _ => 1,
+        _ => 2,
     }
 }
 

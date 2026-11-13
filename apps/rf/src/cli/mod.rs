@@ -35,6 +35,7 @@ pub(crate) use contact::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 mod pairing;
+mod transfer;
 pub(crate) use dm::*;
 pub(crate) use grant::*;
 pub(crate) use group::*;
@@ -42,6 +43,7 @@ pub(crate) use keychain::*;
 pub(crate) use mcp::*;
 pub(crate) use object::*;
 pub(crate) use pairing::*;
+pub(crate) use transfer::*;
 
 #[derive(Parser)]
 #[command(name = "rf", about = "Ramflux reference CLI over the local SDK bus")]
@@ -61,6 +63,8 @@ pub(crate) enum Command {
     Device(DeviceCommand),
     /// Native SAS pairing preview (default-off).
     Pairing(PairingCommand),
+    /// Full-account primary transfer preview (default-off).
+    Transfer(TransferCommand),
     Dm(DmCommand),
     Group(GroupCommand),
     Object(ObjectCommand),

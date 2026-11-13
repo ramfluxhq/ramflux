@@ -195,6 +195,11 @@ impl LocalPairingParticipant {
         observation: super::FullSourceCandidateObservation,
         runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
         cancelled: FullStageIoCancel,
+        affirmed: Option<
+            ramflux_protocol::custody::Envelope<
+                ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+            >,
+        >,
     ) -> Result<FullSourceSubmission, SdkError> {
         self.require_source_observation(&observation, &scope)?;
         let (operation, generation, th) = scope;
@@ -204,7 +209,15 @@ impl LocalPairingParticipant {
         }
         // Fresh native verification and actual primary preservation finish before intent.
         // The coordinator checks original local confirmations before reaching this owner.
-        let approval = self.preserve_full_candidate(&observation)?;
+        let approval = if let Some(affirmed) = affirmed {
+            let retained = self.retained_full_candidate(&observation)?;
+            if canonical_json_bytes(&retained)? != canonical_json_bytes(&affirmed)? {
+                return Err(wrong());
+            }
+            retained
+        } else {
+            self.preserve_full_candidate(&observation)?
+        };
         let publication = observation.candidate;
         runtime.require_live()?;
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
