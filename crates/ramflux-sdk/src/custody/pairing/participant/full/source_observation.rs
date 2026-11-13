@@ -25,8 +25,8 @@ impl super::LocalPairingParticipant {
         let now = custody::network_now()?;
         let current = ramflux_crypto::custody::verify_publication(&observation.authority, now)?;
         if observation.candidate.compacted_ids != observation.authority.publication.compacted_ids
-            || ramflux_protocol::custody::object_hash(current.envelope())?
-                != context.initiator.common.record_hash
+            || observation.candidate.record.body.previous_record_hash.as_deref()
+                != Some(ramflux_protocol::custody::object_hash(current.envelope())?.as_str())
             || current.envelope().body.master_certificate.body.primary_device_ref
                 != context.initiator.device_ref
         {

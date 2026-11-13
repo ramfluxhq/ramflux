@@ -21,6 +21,7 @@ mod affirm;
 mod bootstrap;
 pub(super) mod cancel;
 mod candidate_assembly;
+mod candidate_prepare;
 mod completion;
 mod epoch;
 mod installation;
@@ -628,21 +629,7 @@ impl PairingActor {
             }
             Ok(())
         })?;
-        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
-        let runtime = self.full_runtime.clone();
-        let request_owned = request.clone();
-        let frontend_generation = self.frontend_generation;
-        let prepared = self
-            .full_runtime
-            .clone()
-            .run_blocking(move || {
-                let _local = runtime.local_work()?;
-                let prepared = participant
-                    .prepare_full_transfer_candidate(&request_owned, frontend_generation)?;
-                runtime.require_live()?;
-                Ok(prepared)
-            })
-            .await?;
+        let prepared = Box::pin(self.prepare_attended_full_candidate(request.clone())).await?;
         let hash = ramflux_protocol::custody::object_hash(&prepared.publication().record)?;
         self.with_ceremony_mut(|c| {
             super::check_generation(c, &request.operation_id, request.generation)?;

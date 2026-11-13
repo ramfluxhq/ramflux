@@ -15,6 +15,7 @@ use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
 mod application;
+mod rebind;
 mod reverse;
 mod source_delta;
 pub use application::FullApplicationDraft;
@@ -32,6 +33,7 @@ struct FullLocalIoScope {
     role: PairingRole,
     digest: [u8; 32],
     transfer_id: String,
+    base_manifest_hash: String,
     destination_key: String,
     source_key: String,
     lease_expires_at: u64,
@@ -57,6 +59,7 @@ impl FullLocalIoScope {
             generation: operation.1,
             role: record.role,
             digest: record.stage_digest()?,
+            base_manifest_hash: record.base_manifest_hash,
             transfer_id: record.transfer_id,
             lease_expires_at: trust.lease_expires_at().min(record.grant.expires_at),
             destination_key: record.grant.branch_keys.destination,
@@ -115,6 +118,7 @@ struct FullLocalIoRequest {
     action: FullLocalAction,
 }
 enum FullLocalAction {
+    Rebind(rebind::Action),
     Reverse(reverse::Action),
     VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Action),
@@ -132,11 +136,12 @@ enum FullLocalAction {
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
+    Rebind(rebind::Applied),
     Reverse(reverse::Applied),
     Duplex(ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Applied),
     SourceDelta(source_delta::Applied),
-    NativeObserved,
+    NativeObserved { current_hash: String, bound_hash: String },
     SourceChunk(Zeroizing<Vec<u8>>),
     UnsignedReverse(Box<Manifest>),
     ReverseManifestRetained,
@@ -158,6 +163,7 @@ impl FullLocalIoRequest {
             &self.action,
             FullLocalAction::PrepareEmptyReverse
                 | FullLocalAction::Reverse(_)
+                | FullLocalAction::Rebind(_)
                 | FullLocalAction::SourceDelta(_)
                 | FullLocalAction::ProjectReceiverDelta { .. }
                 | FullLocalAction::Semantic(
@@ -193,6 +199,9 @@ fn apply_action(
     mut stage: FullTransferStage<'_>,
 ) -> Result<FullLocalResult, SdkError> {
     Ok(match action {
+        FullLocalAction::Rebind(action) => {
+            FullLocalResult::Rebind(rebind::apply(action, scope, &mut stage)?)
+        }
         FullLocalAction::Reverse(action) => {
             FullLocalResult::Reverse(reverse::apply(action, scope, stage)?)
         }
@@ -227,7 +236,10 @@ fn apply_action(
                 &current,
                 custody::network_now()?,
             )?;
-            FullLocalResult::NativeObserved
+            FullLocalResult::NativeObserved {
+                current_hash: ramflux_protocol::custody::object_hash(current.envelope())?,
+                bound_hash: stage.full_prepublication_record_hash()?,
+            }
         }
         FullLocalAction::PrepareEmptyReverse => {
             if scope.role != PairingRole::Responder {

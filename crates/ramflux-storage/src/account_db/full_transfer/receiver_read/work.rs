@@ -12,7 +12,7 @@ use crate::account_db::full_transfer::{
     read_work::{Inputs, Reader},
 };
 use std::sync::Arc;
-struct Manifest {
+struct RetainedCut {
     hash: String,
     manifest: SourceManifest,
     key: Arc<FullChunkReadKey>,
@@ -23,7 +23,7 @@ struct Input {
     directory: std::path::PathBuf,
     record: FullResumeRecord,
     guard: SourceGuard,
-    manifests: Vec<Manifest>,
+    manifests: Vec<RetainedCut>,
 }
 /// Root-drained private projection with at most nine retained input manifests.
 /// No original writer, database key, signer or publication permission is retained.
@@ -74,7 +74,7 @@ impl FullTransferStage<'_> {
                 StageDirection::Forward,
                 guard.clone(),
             )?;
-            manifests.push(Manifest { hash, manifest, key: Arc::new(key) });
+            manifests.push(RetainedCut { hash, manifest, key: Arc::new(key) });
         }
         guard.require()?;
         Ok(FullReceiverReplayWork {

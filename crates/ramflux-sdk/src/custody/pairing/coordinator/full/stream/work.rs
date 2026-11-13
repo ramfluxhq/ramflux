@@ -12,6 +12,7 @@ use ramflux_protocol::{
 };
 use tokio::time::Duration;
 mod catchup;
+mod rebind;
 mod reverse;
 
 fn mismatch() -> SdkError {
@@ -27,33 +28,16 @@ impl FullStreamWork {
         Ok(())
     }
 
-    async fn fresh(&mut self) -> Result<(), SdkError> {
-        self.runtime.require_live()?;
-        let participant = self.participant.clone();
-        let anchor = self.anchor.clone();
-        let target = self.new_target.clone();
-        // This endpoint's own query persists its installed pins before any base refusal.
-        // The local service then persists the additional encrypted job floor BEFORE its
-        // grant role/key predicate. Neither query nor writer loan overlaps relay waits.
-        let current = self
-            .runtime
-            .clone()
-            .run_blocking(move || {
-                participant.full_native_stream_head(
-                    &anchor,
-                    target.as_ref().map(|(operation, reference)| (operation.as_str(), reference)),
-                )
-            })
-            .await?;
-        self.io.observe_prepublication_head(current).await?;
-        self.runtime.require_live()
-    }
     async fn receive(&mut self) -> Result<DataPacket, SdkError> {
         loop {
             self.runtime.require_live()?;
             if let Some(packet) = self.packet.poll(self.relay.as_ref(), &self.origin).await? {
                 self.runtime.require_live()?;
                 if let Some(data) = self.packet.open_packet(&packet)? {
+                    if matches!(data, DataPacket::Rebind { .. }) {
+                        Box::pin(self.accept_rebind(data)).await?;
+                        continue;
+                    }
                     return Ok(data);
                 }
             }
@@ -63,14 +47,10 @@ impl FullStreamWork {
     async fn receive_manifest(&mut self) -> Result<SourceManifest, SdkError> {
         let mut assembler = ManifestAssembler::default();
         loop {
-            self.runtime.require_live()?;
-            if let Some(manifest) =
-                self.packet.poll_manifest(self.relay.as_ref(), &self.origin, &mut assembler).await?
-            {
-                self.runtime.require_live()?;
+            let packet = self.receive().await?;
+            if let Some(manifest) = assembler.push(&packet).map_err(|error| wire(&error))? {
                 return Ok(manifest);
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
     async fn receipt(&mut self, hash: &str, prefix: Option<u64>) -> Result<(), SdkError> {
@@ -86,7 +66,7 @@ impl FullStreamWork {
         mut manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
         self.fresh().await?;
-        self.packet.send_manifest(self.relay.as_ref(), &self.origin, &manifest).await?;
+        self.send_manifest(&manifest).await?;
         // The responder's first data object MUST be its actual restrictive manifest,
         // even for a new empty target. A receipt cannot replace that position.
         let reverse = self.receive_manifest().await?;
@@ -113,7 +93,7 @@ impl FullStreamWork {
                 break;
             }
             manifest = self.next_source_manifest().await?;
-            self.packet.send_manifest(self.relay.as_ref(), &self.origin, &manifest).await?;
+            self.send_manifest(&manifest).await?;
         }
         self.fresh().await?;
         let (proof, _) = self.io.verify_duplex(None).await?;
@@ -128,7 +108,7 @@ impl FullStreamWork {
         let reverse = self.prepare_own_reverse().await?;
         self.io.retain_reverse_manifest(&reverse).await?;
         self.fresh().await?;
-        self.packet.send_manifest(self.relay.as_ref(), &self.origin, &reverse).await?;
+        self.send_manifest(&reverse).await?;
         self.send_reverse_input(&reverse).await?;
         let mut receiver = None;
         loop {

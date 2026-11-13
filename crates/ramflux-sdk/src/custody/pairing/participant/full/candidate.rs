@@ -24,7 +24,8 @@ use ramflux_protocol::{
     },
     encode_base64url,
 };
-use ramflux_storage::{FullDuplexReceipt, HeadRow, LiveRow};
+use ramflux_storage::{AccountDb, FullDuplexReceipt, HeadRow, LiveRow};
+mod frontend;
 
 /// Frozen candidate and B-local owners. No source preservation or publication approval.
 pub struct FullPreparedTransferCandidate {
@@ -47,16 +48,21 @@ impl FullPreparedTransferCandidate {
     }
 }
 struct Scope {
+    bound_hash: String,
+    bound_epoch: u64,
     context: TranscriptV3,
     live: LiveRow,
     install: Install,
     duplex: FullDuplexReceipt,
 }
 impl LocalPairingParticipant {
-    fn candidate_scope(&self, request: &Prepare, now: u64) -> Result<Scope, SdkError> {
+    fn candidate_scope_in(
+        &self,
+        db: &AccountDb,
+        request: &Prepare,
+        now: u64,
+    ) -> Result<Scope, SdkError> {
         request.validate().map_err(|error| super::super::super::transport::wire(&error))?;
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, None)?;
         let live = db
             .pairing_live_rows()?
@@ -98,7 +104,14 @@ impl LocalPairingParticipant {
         {
             return Err(wrong());
         }
-        Ok(Scope { context, live, install, duplex })
+        Ok(Scope {
+            bound_hash: stage.full_prepublication_record_hash()?,
+            bound_epoch: stage.full_prepublication_record_epoch()?,
+            context,
+            live,
+            install,
+            duplex,
+        })
     }
     /// Explicit attended prepare. Reads and native queries release the actual DB loan
     /// before invoking the private provider. This is never a recovery ceremony.
@@ -110,83 +123,14 @@ impl LocalPairingParticipant {
         request: &Prepare,
         frontend_generation: u64,
     ) -> Result<FullPreparedTransferCandidate, SdkError> {
-        let now = custody::network_now()?;
-        let scope = self.candidate_scope(request, now)?;
-        let common = &scope.context.initiator.common;
-        let current = self.full_native_stream_head(
-            &common.account_anchor,
-            Some((&request.operation_id, &scope.install.recipient_ref)),
-        )?;
-        if object_hash(current.envelope())? != common.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
-        }
-        let stored =
-            local_credential::load_reservation(&self.root, &self.account_id)?.ok_or_else(wrong)?;
-        if stored.frontend_generation != frontend_generation {
-            return Err(wrong());
-        }
-        let expected = CredentialRequest {
-            local_account_id: self.account_id.clone(),
-            reservation_id: stored.reservation_id.clone(),
-            frontend_generation,
-            action: "phrase".into(),
+        let work = {
+            let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+            let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+            self.prepare_full_candidate_work(db, request.clone(), frontend_generation)?
         };
-        let binding = crate::custody::pairing::private_credential::PrivateCredentialScope::phrase(
-            expected.clone(),
-            request.operation_id.clone(),
-            None,
-            &scope.live.role,
-            "awaiting_prepare",
-        )?;
-        let provider = local_credential::scoped(self.provider.as_ref(), binding);
-        let secret = local_credential::acquire_phrase(&self.root, &expected, &provider, &stored)?;
-        let phrase =
-            RecoveryPhrase::parse(std::str::from_utf8(secret.as_bytes()).map_err(|_| wrong())?)?;
-        let master = MasterKey::from_phrase(&phrase)?;
-        drop(phrase);
-        drop(secret);
-        if master.public_key() != common.master_public_key {
-            return Err(wrong());
-        }
-        // A provider may have blocked while local/native state changed. No owner
-        // captured before that callback can authorize release without fresh checks.
-        let fresh = self.candidate_scope(request, custody::network_now()?)?;
-        if fresh.install != scope.install || fresh.context != scope.context {
-            return Err(wrong());
-        }
-        let primary = SelfSigningKey::generate()?;
-        let mut publication =
-            self.full_candidate_publication(&scope, &current, &master, &primary, now)?;
-        drop(master);
-        let latest = self.full_native_stream_head(
-            &common.account_anchor,
-            Some((&request.operation_id, &scope.install.recipient_ref)),
-        )?;
-        if object_hash(latest.envelope())? != common.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
-        }
-        let authority = self.query.current_authority(&common.account_anchor)?;
-        let verified =
-            ramflux_crypto::custody::verify_publication(&authority, custody::network_now()?)?;
-        if object_hash(verified.envelope())? != common.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
-        }
-        publication.compacted_ids = authority.publication.compacted_ids;
-        ramflux_crypto::custody::verify_publication(
-            &ramflux_protocol::custody::CustodyAuthority {
-                publication: publication.clone(),
-                custodian_publication: None,
-            },
-            custody::network_now()?,
-        )?;
-        let mut install = scope.install.clone();
-        let reference = install.primary_vault_ref.clone().ok_or_else(wrong)?;
-        self.vault.store_new(&reference, &primary)?;
-        install.primary_vault_ref = Some(reference);
-        install.record_hash = Some(object_hash(&publication.record)?);
-        install_store::write_pending(&self.root, &install)?;
-        self.retain_full_candidate(request, &scope, &publication, custody::network_now()?)?;
-        Ok(FullPreparedTransferCandidate { publication, install, duplex: scope.duplex })
+        let draft = work.prepare(self)?;
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        draft.finish(self, slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?)
     }
     fn full_candidate_publication(
         &self,
@@ -245,15 +189,14 @@ impl LocalPairingParticipant {
         )?;
         Ok(Publication { record, compacted_ids: None })
     }
-    fn retain_full_candidate(
+    fn retain_full_candidate_in(
         &self,
+        db: &AccountDb,
         request: &Prepare,
         scope: &Scope,
         publication: &Publication,
         now: u64,
     ) -> Result<(), SdkError> {
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, Some(&scope.install.account_anchor))?;
         let stage = db.open_full_transfer_stage(
             &request.operation_id,
@@ -261,7 +204,9 @@ impl LocalPairingParticipant {
             now,
         )?;
         let proof = stage.verified_duplex(now)?;
-        if proof.manifest_chain_hash() != scope.duplex.manifest_chain_hash()
+        if stage.full_prepublication_record_hash()? != scope.bound_hash
+            || stage.full_prepublication_record_epoch()? != scope.bound_epoch
+            || proof.manifest_chain_hash() != scope.duplex.manifest_chain_hash()
             || proof.data_verified_hash() != scope.duplex.data_verified_hash()
             || encode_base64url(stage.resume_record()?.th) != request.transcript_hash
         {
@@ -273,8 +218,8 @@ impl LocalPairingParticipant {
             invitation_id: Some(scope.live.invitation_id.clone()),
             generation: request.generation,
             kind: "transfer".into(),
-            base_record_hash: scope.context.initiator.common.record_hash.clone(),
-            base_epoch: scope.context.initiator.common.device_set_epoch,
+            base_record_hash: scope.bound_hash.clone(),
+            base_epoch: scope.bound_epoch,
             publisher_ref: canonical_json_bytes(&scope.context.initiator.device_ref)?,
             candidate: canonical_json_bytes(publication)?,
             candidate_hash: object_hash(&publication.record)?,

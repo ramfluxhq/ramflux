@@ -82,6 +82,9 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 struct FullStreamWork {
+    role: PairingRole,
+    forward_started: bool,
+    pending_rebind: Option<ramflux_protocol::custody::pairing::full_transfer::DataPacket>,
     packet: FullPacketEpoch,
     progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
     io: FullLocalIoPort,
@@ -207,6 +210,9 @@ impl PairingActor {
             })?,
         ));
         let work = FullStreamWork {
+            role,
+            forward_started: false,
+            pending_rebind: None,
             progress: progress.clone(),
             packet,
             io,

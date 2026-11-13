@@ -275,13 +275,10 @@ impl FullLocalIoPort {
         &mut self,
         current: ramflux_crypto::custody::VerifiedRecord,
     ) -> Result<(), SdkError> {
-        let FullLocalResult::NativeObserved =
-            self.request(FullLocalAction::ObservePrepublication(Box::new(current))).await?
-        else {
-            return Err(wrong());
-        };
+        self.observe_prepublication_binding(current).await?;
         Ok(())
     }
+
     pub(crate) async fn verify_duplex(
         &mut self,
         copy: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
