@@ -28,7 +28,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn noisy_root_and_unverified_saturation_leave_another_root_able_to_commit()
