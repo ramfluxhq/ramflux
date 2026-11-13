@@ -147,6 +147,8 @@ pub(crate) fn prepare(
             }
             _ => {}
         }
+        g::validation::validate_content(&content)
+            .map_err(|_| refused(Code::InvalidArgument, "invalid finalized mutation content"))?;
         let exact = RamfluxClient::encode_generated_inner(identity.clone(), &content)?;
         let wire = if identity.group_id.is_some() && request.method == "conversation.reply" {
             client.wrap_conversation_group_reply(&identity, &exact)?

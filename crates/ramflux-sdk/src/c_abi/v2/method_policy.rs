@@ -215,12 +215,20 @@ policies! {
     "task.update" => ("task", true, true, false),
 }
 
+pub(super) const DENIED_METHODS: &[&str] = &["daemon.stop"];
+
+pub(super) fn allowed(name: &str) -> bool {
+    !DENIED_METHODS.contains(&name)
+        && !name.contains("itest")
+        && METHOD_POLICIES.iter().any(|row| row.name == name)
+}
+
 pub(super) fn manifest() -> serde_json::Value {
     let methods = METHOD_POLICIES
         .iter()
         .map(|policy| {
             serde_json::json!({
-                "name":policy.name,"capability":policy.capability,
+                "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
                 "secret_input":policy.secret_input,"secret_output":policy.secret_output,
                 "show_once":policy.show_once,
             })

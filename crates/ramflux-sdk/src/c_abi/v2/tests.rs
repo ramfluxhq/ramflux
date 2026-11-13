@@ -11,7 +11,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
+pub(super) fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
     assert!(!ptr.is_null(), "successful bridge call must allocate its output");
     // SAFETY: the bridge returned a live uniquely owned buffer; read before releasing it.
     let buffer = unsafe { &*ptr };
@@ -22,12 +22,12 @@ fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
     value
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     root: tempfile::TempDir,
-    handle: u64,
+    pub(super) handle: u64,
 }
 impl Fixture {
-    fn open() -> Self {
+    pub(super) fn open() -> Self {
         Self::configured(false)
     }
     fn configured(with_node: bool) -> Self {
@@ -44,10 +44,10 @@ impl Fixture {
         );
         Self { root, handle }
     }
-    fn submit(&self, method: &str, deadline: u64) -> u64 {
+    pub(super) fn submit(&self, method: &str, deadline: u64) -> u64 {
         self.submit_body(method, &json!({}), deadline)
     }
-    fn submit_body(&self, method: &str, body: &Value, deadline: u64) -> u64 {
+    pub(super) fn submit_body(&self, method: &str, body: &Value, deadline: u64) -> u64 {
         let request = serde_json::to_vec(&json!({
             "sdk_api":"account","method":method,"body":body,"deadline_ms":deadline
         }))
@@ -60,7 +60,7 @@ impl Fixture {
         );
         operation
     }
-    fn result(&self, operation: u64) -> Value {
+    pub(super) fn result(&self, operation: u64) -> Value {
         wait_result(self.handle, operation)
     }
 }
@@ -182,8 +182,9 @@ fn duplicate_json_and_oversized_inputs_are_rejected_before_admission() {
 fn event_overflow_is_explicit_and_cannot_consume_completion_credit() {
     let shared = state::Shared::default();
     shared.operations.lock().expect("test: operations").insert(1, Arc::new(Operation::default()));
+    shared.activate_generation(1, None);
     for _ in 0..=state::MAX_EVENTS {
-        shared.push_event(b"{}".to_vec(), 0);
+        shared.push_event(b"{}".to_vec(), 1);
     }
     shared.complete(1, json!({"code":0}));
     let events = shared.events.lock().expect("test: events");
@@ -484,6 +485,21 @@ fn close_timeout_retains_handle_until_real_supervisor_releases_writer() {
         "pending close must retain the operation's completed response"
     );
     assert_eq!(ramflux_v2_client_release(handle), 24, "a pending shutdown cannot be discarded");
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let (result, waiter) = client.test_holding_close_lock(|| {
+        let waiter = std::thread::spawn(move || {
+            let result = (ramflux_v2_client_close(handle), ramflux_v2_client_release(handle));
+            let _ = sent.send(result);
+        });
+        (received.recv_timeout(Duration::from_secs(5)), waiter)
+    });
+    waiter.join().expect("test: poll worker");
+    assert_eq!(
+        result.expect("test: polling must not wait for the held mutex"),
+        (24, 24),
+        "both retry and release are nonblocking while another close owns completion state"
+    );
+
     let config =
         serde_json::to_vec(&json!({"data_root":root.path()})).expect("test: replacement config");
     let mut replacement = 0;
@@ -535,14 +551,23 @@ pub(super) fn wait_result(handle: u64, operation: u64) -> Value {
 }
 
 #[test]
-fn daemon_stop_preserves_its_reply_before_releasing_the_supervisor() {
+fn daemon_stop_is_refused_before_supervisor_admission() {
     let fixture = Fixture::open();
-    let id = fixture.submit("daemon.stop", deadline());
-    let response = fixture.result(id);
-    assert_eq!(response["code"], 0, "shared daemon stop must retain its terminal response");
+    let request = serde_json::to_vec(
+        &json!({"sdk_api":"daemon","method":"daemon.stop","body":{},"deadline_ms":deadline()}),
+    )
+    .expect("test: stop request");
+    let mut id = 9;
     assert_eq!(
-        response["response"]["body"]["stopping"], true,
-        "the stop acknowledgement must arrive before carrier disconnect"
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut id),
+        12,
+        "native hosts close the supervisor with client_close"
+    );
+    assert_eq!(id, 0, "denied method allocates no operation");
+    assert_eq!(
+        fixture.result(fixture.submit("account.list", deadline()))["code"],
+        0,
+        "denied stop leaves the supervisor running"
     );
 }
 
@@ -721,6 +746,29 @@ fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dy
     for presentation in index["presentations"].as_object().ok_or("presentations")?.values() {
         ramflux_card::Presentation::parse(&serde_json::to_vec(presentation)?)?;
     }
+    for (epoch, version) in
+        [(policy.minimum_epoch + 1, 1), (policy.minimum_epoch, policy.minimum_version + 1)]
+    {
+        let stricter = ramflux_card::AcceptancePolicy {
+            minimum_epoch: epoch,
+            minimum_version: version,
+            ..policy.clone()
+        };
+        assert!(
+            ramflux_card::SignedPackage::verify(&bytecode, descriptor, &signature, &key, &stricter)
+                .is_err(),
+            "authentic lower epoch/version must fail the host release floor"
+        );
+    }
+    let wrong_digest = ramflux_card::AcceptancePolicy {
+        exact_descriptor_sha256: Some("00".repeat(32)),
+        ..policy.clone()
+    };
+    assert!(
+        ramflux_card::SignedPackage::verify(&bytecode, descriptor, &signature, &key, &wrong_digest)
+            .is_err(),
+        "authentic package must match the exact pinned descriptor"
+    );
     let mut tampered = bytecode;
     let first = tampered.first_mut().ok_or("bytecode")?;
     *first ^= 1;

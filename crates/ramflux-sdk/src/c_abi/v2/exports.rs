@@ -10,7 +10,7 @@ use super::state::{self, MAX_FRAME_BYTES, MAX_OPERATIONS, Operation, OperationKi
 use crate::{LocalBusConfig, LocalBusFrame};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// Additional v2 transport statuses. Existing `RamfluxErrorCode` values 0..23 are unchanged.
@@ -30,7 +30,7 @@ pub enum RamfluxV2Status {
 #[derive(Default)]
 struct Registry {
     next: u64,
-    opening: usize,
+    opening: BTreeSet<std::path::PathBuf>,
     clients: BTreeMap<u64, Arc<Client>>,
 }
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
@@ -40,6 +40,8 @@ static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registr
 struct Config {
     #[serde(default)]
     allow_raw_messages: bool,
+    #[serde(default)]
+    allow_secret_exports: bool,
     data_root: std::path::PathBuf,
     #[serde(default)]
     builtin_nodes: Vec<crate::NodeProfile>,
@@ -95,10 +97,23 @@ fn operation(client: &Client, id: u64) -> Result<Arc<Operation>, CAbiError> {
         .cloned()
         .ok_or_else(|| invalid("unknown operation handle"))
 }
-fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
-    match action() {
-        Ok(()) => 0,
-        Err(error) => error.code as i32,
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Native FFI unwind containment; abort profiles are refused"
+)]
+pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        super::review_tests::maybe_panic();
+        action()
+    })) {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => error.code as i32,
+        Err(payload) => {
+            // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
+            std::mem::forget(payload);
+            RamfluxErrorCode::PanicAborted as i32
+        }
     }
 }
 fn write_handle(out: *mut u64, value: u64) -> Result<(), CAbiError> {
@@ -150,7 +165,7 @@ pub extern "C" fn ramflux_v2_negotiate(
         if major != 2 || min_minor > 0 {
             return Err(CAbiError::new(RamfluxErrorCode::UnsupportedVersion, "unsupported ABI"));
         }
-        super::super::write_json_buffer(
+        super::buffer::write_json_buffer(
             out,
             &json!({
                 "abi_major":2,"abi_minor":0,"bus_protocol":"ramflux.local_bus.v1",
@@ -158,7 +173,7 @@ pub extern "C" fn ramflux_v2_negotiate(
                 "message_descriptor_blake3":blake3::hash(crate::message::FILE_DESCRIPTOR_SET).to_hex().to_string(),
                 "max_frame_bytes":MAX_FRAME_BYTES,"max_operations":MAX_OPERATIONS,
                 "max_events":state::MAX_EVENTS,"max_event_bytes":state::MAX_EVENT_BYTES,
-                "methods":crate::bus::inprocess::method_names(),
+                "methods":crate::bus::inprocess::method_names().into_iter().filter(|name| super::method_policy::allowed(name)).collect::<Vec<_>>(),
             "method_policy":super::method_policy::manifest(),
                 "card_runtime":super::card::metadata(),
             }),
@@ -166,7 +181,7 @@ pub extern "C" fn ramflux_v2_negotiate(
     })
 }
 
-/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?}`.
+/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
 /// This may block during startup; invoke off the UI thread. Output is zero on failure.
 #[unsafe(no_mangle)]
 #[must_use]
@@ -189,24 +204,17 @@ pub extern "C" fn ramflux_v2_client_open_with_custody(
     provider: *const super::custody::RamfluxV2CustodyProvider,
     out_client: *mut u64,
 ) -> i32 {
-    if provider.is_null() {
-        return call(|| {
-            write_handle(out_client, 0)?;
-            Err(invalid("null custody provider"))
-        });
-    }
-    // SAFETY: the host supplies one valid aligned provider table during this call.
-    let table = unsafe { provider.read() };
-    let vault = match super::custody::HostVault::new(table) {
-        Ok(vault) => vault,
-        Err(error) => {
-            return call(|| {
-                write_handle(out_client, 0)?;
-                Err(super::super::map_sdk_error(&error))
-            });
+    call(|| {
+        write_handle(out_client, 0)?;
+        if provider.is_null() {
+            return Err(invalid("provider"));
         }
-    };
-    open(config, len, out_client, Some(vault))
+        // SAFETY: the host supplies one valid aligned provider table during this call.
+        let table = unsafe { provider.read() };
+        let vault = super::custody::HostVault::new(table)
+            .map_err(|error| super::super::map_sdk_error(&error))?;
+        open_inner(config, len, out_client, Some(vault))
+    })
 }
 
 fn open(
@@ -215,47 +223,69 @@ fn open(
     out_client: *mut u64,
     vault: Option<Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
 ) -> i32 {
-    call(|| {
-        write_handle(out_client, 0)?;
-        let config: Config = input(config, len)?;
-        if config.data_root.as_os_str().is_empty() || !config.data_root.is_absolute() {
-            return Err(invalid("data_root must be absolute"));
+    call(|| open_inner(config, len, out_client, vault))
+}
+
+struct Opening(std::path::PathBuf);
+impl Drop for Opening {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = REGISTRY.lock() {
+            registry.opening.remove(&self.0);
         }
-        let candidate_root = std::fs::canonicalize(&config.data_root).ok();
-        // A registered root remains reserved until shutdown is acknowledged, even if
-        // its OS lease is released just before the worker publishes completion.
-        // No bridge registry lock spans filesystem I/O.
-        let id = {
-            let mut registry = REGISTRY.lock().map_err(|_| internal())?;
-            if candidate_root.as_ref().is_some_and(|root| {
-                registry.clients.values().any(|client| &client.data_root == root)
-            }) {
-                return Err(CAbiError::new(
-                    RamfluxErrorCode::AccountBusy,
-                    "data root has a registered client",
-                ));
-            }
-            if registry.clients.len().saturating_add(registry.opening) >= 16 {
-                return Err(busy());
-            }
-            let id = next_id(&mut registry)?;
-            registry.opening += 1;
-            id
-        };
-        let mut bus = LocalBusConfig::new(std::path::PathBuf::new(), config.data_root);
-        bus.builtin_nodes = config.builtin_nodes;
-        bus.custody_vault = vault;
-        let started = Client::start(bus);
+    }
+}
+
+fn open_inner(
+    config: *const u8,
+    len: usize,
+    out_client: *mut u64,
+    vault: Option<Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
+) -> Result<(), CAbiError> {
+    write_handle(out_client, 0)?;
+    let config: Config = input(config, len)?;
+    if config.data_root.as_os_str().is_empty() || !config.data_root.is_absolute() {
+        return Err(invalid("data_root must be absolute"));
+    }
+    std::fs::create_dir_all(&config.data_root).map_err(|_| invalid("data_root"))?;
+    let candidate_root =
+        std::fs::canonicalize(&config.data_root).map_err(|_| invalid("data_root"))?;
+    // A registered root remains reserved until shutdown is acknowledged, even if
+    // its OS lease is released just before the worker publishes completion.
+    // No bridge registry lock spans filesystem I/O.
+    let id = {
         let mut registry = REGISTRY.lock().map_err(|_| internal())?;
-        registry.opening = registry.opening.saturating_sub(1);
-        let client = started.map_err(|error| super::super::map_sdk_error(&error))?;
-        client
-            .shared
-            .allow_raw_messages
-            .store(config.allow_raw_messages, std::sync::atomic::Ordering::Release);
-        registry.clients.insert(id, client);
-        write_handle(out_client, id)
-    })
+        if registry.opening.contains(&candidate_root)
+            || registry.clients.values().any(|client| client.data_root == candidate_root)
+        {
+            return Err(CAbiError::new(
+                RamfluxErrorCode::AccountBusy,
+                "data root has a registered client",
+            ));
+        }
+        if registry.clients.len().saturating_add(registry.opening.len()) >= 16 {
+            return Err(busy());
+        }
+        let id = next_id(&mut registry)?;
+        registry.opening.insert(candidate_root.clone());
+        id
+    };
+    let _opening = Opening(candidate_root);
+    let mut bus = LocalBusConfig::new(std::path::PathBuf::new(), config.data_root);
+    bus.builtin_nodes = config.builtin_nodes;
+    bus.custody_vault = vault;
+    let started = Client::start(bus);
+    let mut registry = REGISTRY.lock().map_err(|_| internal())?;
+    let client = started.map_err(|error| super::super::map_sdk_error(&error))?;
+    client
+        .shared
+        .allow_raw_messages
+        .store(config.allow_raw_messages, std::sync::atomic::Ordering::Release);
+    client
+        .shared
+        .allow_secret_exports
+        .store(config.allow_secret_exports, std::sync::atomic::Ordering::Release);
+    registry.clients.insert(id, client);
+    write_handle(out_client, id)
 }
 
 /// Stop the supervisor and release its writer lease. Call off the UI thread.
@@ -320,7 +350,7 @@ pub extern "C" fn ramflux_v2_execute(
     len: usize,
     out_operation: *mut u64,
 ) -> i32 {
-    call(|| {
+    let status = call(|| {
         write_handle(out_operation, 0)?;
         let mut request: Request = input(request, len)?;
         if request.method.contains("itest")
@@ -328,10 +358,21 @@ pub extern "C" fn ramflux_v2_execute(
             || request.method.len() > 128
             || request.sdk_api.len() > 128
             || request.account_id.as_ref().is_some_and(|id| id.len() > 128)
+            || request.operation_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 256)
         {
             return Err(invalid("invalid method"));
         }
+        if !super::method_policy::allowed(&request.method) {
+            return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "method"));
+        }
         let client = client(handle)?;
+        if matches!(
+            request.method.as_str(),
+            "account.export_agent_credentials" | "account.backup.export"
+        ) && !client.shared.allow_secret_exports.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "secret_export"));
+        }
         if request.method == "message.submit"
             && !client.shared.allow_raw_messages.load(std::sync::atomic::Ordering::Acquire)
         {
@@ -347,6 +388,7 @@ pub extern "C" fn ramflux_v2_execute(
         }
         let subscription = matches!(request.method.as_str(), "subscription.open" | "bus.subscribe");
         let id = next_id(&mut *REGISTRY.lock().map_err(|_| internal())?)?;
+        let frame_method_close = request.method == "subscription.close";
         let deadline_ms = Some(request.deadline_ms);
         let mut frame = LocalBusFrame::request(
             id.to_string(),
@@ -361,8 +403,13 @@ pub extern "C" fn ramflux_v2_execute(
         let bytes =
             zeroize::Zeroizing::new(bytes.map_err(|error| super::super::map_sdk_error(&error))?);
         let operation = Arc::new(Operation::default());
-        operation.state.lock().map_err(|_| internal())?.kind =
-            if subscription { OperationKind::Subscription } else { OperationKind::Request };
+        operation.state.lock().map_err(|_| internal())?.kind = if subscription {
+            OperationKind::Subscription
+        } else if frame_method_close {
+            OperationKind::SubscriptionClose
+        } else {
+            OperationKind::Request
+        };
         let mut operations = client.shared.operations.lock().map_err(|_| internal())?;
         if operations.len() >= MAX_OPERATIONS {
             return Err(busy());
@@ -372,15 +419,30 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(busy());
         }
         operations.insert(id, Arc::clone(&operation));
-        if client.commands.try_send(Command { id, bytes, operation, deadline_ms }).is_err() {
+        if let Err(error) = client.commands.try_send(Command { id, bytes, operation, deadline_ms })
+        {
             operations.remove(&id);
-            return Err(busy());
+            return Err(
+                if matches!(error, tokio::sync::mpsc::error::TrySendError::Closed(_))
+                    || client.closing.load(std::sync::atomic::Ordering::Acquire)
+                    || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    CAbiError::new(RamfluxErrorCode::TransportUnavailable, "closed")
+                } else {
+                    busy()
+                },
+            );
         }
         if subscription {
             *subscribed = Some(id);
         }
         write_handle(out_operation, id)
-    })
+    });
+    if status == RamfluxErrorCode::TransportUnavailable as i32 {
+        RamfluxV2Status::Closed as i32
+    } else {
+        status
+    }
 }
 
 /// Poll a completion without blocking. Returns Pending=24 with a null buffer until terminal.
@@ -400,7 +462,7 @@ pub extern "C" fn ramflux_v2_operation_poll(
         let operation = operation(&client, id)?;
         let state = operation.state.lock().map_err(|_| internal())?;
         if let Some(bytes) = &state.result {
-            super::super::write_buffer(out, bytes.to_vec())?;
+            super::buffer::write_buffer(out, bytes.to_vec())?;
         } else {
             pending = true;
         }
@@ -440,6 +502,7 @@ pub extern "C" fn ramflux_v2_operation_cancel(handle: u64, id: u64) -> i32 {
                     .map_err(|_| busy())?;
             }
             *subscribed = None;
+            client.shared.deactivate_generation();
         }
         state.cancelled = true;
         Ok(())
@@ -483,8 +546,15 @@ pub extern "C" fn ramflux_v2_event_poll(handle: u64, out: *mut *mut RamfluxBuffe
         super::super::clear_out_ptr(out)?;
         let client = client(handle)?;
         let mut events = client.shared.events.lock().map_err(|_| internal())?;
-        if events.resync {
-            super::super::write_json_buffer(
+        while events.queue.front().is_some_and(|event| {
+            !events.active || event.generation == 0 || event.generation != events.generation
+        }) {
+            if let Some(event) = events.queue.pop_front() {
+                events.bytes = events.bytes.saturating_sub(event.bytes.len());
+            }
+        }
+        if events.resync && events.active && events.generation != 0 {
+            super::buffer::write_json_buffer(
                 out,
                 &json!({
                     "bus_protocol":"ramflux.local_bus.v1","frame_id":"c_abi_resync",
@@ -494,9 +564,9 @@ pub extern "C" fn ramflux_v2_event_poll(handle: u64, out: *mut *mut RamfluxBuffe
                 }),
             )?;
             status = RamfluxV2Status::ResyncRequired as i32;
-        } else if let Some(bytes) = events.queue.pop_front() {
-            events.bytes = events.bytes.saturating_sub(bytes.len());
-            super::super::write_buffer(out, bytes.to_vec())?;
+        } else if let Some(event) = events.queue.pop_front() {
+            events.bytes = events.bytes.saturating_sub(event.bytes.len());
+            super::buffer::write_buffer(out, event.bytes.to_vec())?;
         } else if client.shared.closed.load(std::sync::atomic::Ordering::Acquire) {
             status = RamfluxV2Status::Closed as i32;
         } else {
@@ -507,8 +577,8 @@ pub extern "C" fn ramflux_v2_event_poll(handle: u64, out: *mut *mut RamfluxBuffe
     if code == 0 { status } else { code }
 }
 
-pub(super) fn failure(status: RamfluxV2Status, message: &str, effects: &str) -> serde_json::Value {
-    json!({"code":status as i32,"message":message,"effects":effects})
+pub(super) fn failure(status: RamfluxV2Status, effects: &str) -> serde_json::Value {
+    json!({"code":status as i32,"effects":effects})
 }
 
 pub(super) fn error_code(name: &str) -> i32 {
@@ -562,19 +632,23 @@ pub(super) fn error_code(name: &str) -> i32 {
 
 /// Erase and release a v2 output buffer exactly once. Null is accepted.
 /// All v2 output buffers, including secret ceremony responses, must use this function.
+/// Never use the v1 `ramflux_buffer_free`: it does not erase secret bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_v2_buffer_free(buffer: *mut RamfluxBuffer) {
-    if buffer.is_null() {
-        return;
-    }
-    // SAFETY: callers transfer a live uniquely owned bridge buffer exactly once.
-    let buffer = unsafe { Box::from_raw(buffer) };
-    if !buffer.ptr.is_null() {
-        let raw = std::ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
-        // SAFETY: write_buffer allocated this exact boxed slice, including its length.
-        let mut bytes = unsafe { Box::from_raw(raw) };
-        zeroize::Zeroize::zeroize(bytes.as_mut());
-    }
+    let _ = call(|| {
+        if buffer.is_null() {
+            return Ok(());
+        }
+        // SAFETY: callers transfer a live uniquely owned bridge buffer exactly once.
+        let buffer = unsafe { Box::from_raw(buffer) };
+        if !buffer.ptr.is_null() {
+            let raw = std::ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
+            // SAFETY: write_buffer allocated this exact boxed slice, including its length.
+            let mut bytes = unsafe { Box::from_raw(raw) };
+            zeroize::Zeroize::zeroize(bytes.as_mut());
+        }
+        Ok(())
+    });
 }
 
 /// Clear the latched event gap only for the last successful subscription generation.
@@ -609,7 +683,7 @@ pub extern "C" fn ramflux_v2_conversation_project(
         super::super::clear_out_ptr(out)?;
         let request: super::projection::Directory = input(input_json, len)?;
         let mut value = super::projection::directory(&request)?;
-        let result = super::super::write_json_buffer(out, &value);
+        let result = super::buffer::write_json_buffer(out, &value);
         crate::bus::inprocess::erase_value(&mut value);
         result
     })
@@ -628,7 +702,7 @@ pub extern "C" fn ramflux_v2_receipt_present(
         super::super::clear_out_ptr(out)?;
         let request: super::projection::ReceiptRequest = input(input_json, len)?;
         let mut value = super::projection::present(&request)?;
-        let result = super::super::write_json_buffer(out, &value);
+        let result = super::buffer::write_json_buffer(out, &value);
         crate::bus::inprocess::erase_value(&mut value);
         result
     })
@@ -644,6 +718,11 @@ pub extern "C" fn ramflux_v2_card_trust_package(out: *mut *mut RamfluxBuffer) ->
         super::super::clear_out_ptr(out)?;
         let value =
             super::card::trust_package().map_err(|error| super::super::map_sdk_error(&error))?;
-        super::super::write_json_buffer(out, &value)
+        super::buffer::write_json_buffer(out, &value)
     })
+}
+
+#[cfg(test)]
+pub(super) fn test_shared(handle: u64) -> Arc<super::state::Shared> {
+    Arc::clone(&client(handle).expect("test: live client").shared)
 }

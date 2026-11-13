@@ -281,7 +281,7 @@ int32_t ramflux_client_put_object(struct RamfluxClient *client,
 int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxBuffer **out);
 
 /*
- Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?}`.
+ Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */
 int32_t ramflux_v2_client_open(const uint8_t *config,
@@ -349,6 +349,7 @@ int32_t ramflux_v2_event_poll(uint64_t handle,
 /*
  Erase and release a v2 output buffer exactly once. Null is accepted.
  All v2 output buffers, including secret ceremony responses, must use this function.
+ Never use the v1 `ramflux_buffer_free`: it does not erase secret bytes.
  */
 void ramflux_v2_buffer_free(struct RamfluxBuffer *buffer);
 

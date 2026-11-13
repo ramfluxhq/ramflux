@@ -24,6 +24,7 @@ pub(super) enum OperationKind {
     #[default]
     Request,
     Subscription,
+    SubscriptionClose,
 }
 
 #[derive(Default)]
@@ -35,17 +36,24 @@ pub(super) struct OperationState {
     pub result: Option<Zeroizing<Vec<u8>>>,
 }
 
+pub(super) struct Event {
+    pub generation: u64,
+    pub bytes: Zeroizing<Vec<u8>>,
+}
+
 #[derive(Default)]
 pub(super) struct Events {
-    pub queue: VecDeque<Zeroizing<Vec<u8>>>,
+    pub queue: VecDeque<Event>,
     pub bytes: usize,
     pub resync: bool,
     pub generation: u64,
+    pub active: bool,
     pub account_id: Option<String>,
 }
 
 #[derive(Default)]
 pub(super) struct Shared {
+    pub allow_secret_exports: std::sync::atomic::AtomicBool,
     pub allow_raw_messages: std::sync::atomic::AtomicBool,
     pub operations: Mutex<BTreeMap<u64, Arc<Operation>>>,
     pub events: Mutex<Events>,
@@ -55,14 +63,30 @@ pub(super) struct Shared {
 
 impl Shared {
     pub fn complete(&self, id: u64, mut value: serde_json::Value) {
-        let encoded =
-            Zeroizing::new(serde_json::to_vec(&value).unwrap_or_else(|_| {
-                br#"{"code":16,"message":"completion encoding failed"}"#.to_vec()
-            }));
+        if let Some(map) = value.as_object_mut()
+            && let Some(mut prose) = map.remove("message")
+        {
+            crate::bus::inprocess::erase_value(&mut prose);
+        }
+        scrub_errors(&mut value);
+        let success = value.get("code").and_then(serde_json::Value::as_i64) == Some(0);
+        let encoded = Zeroizing::new(
+            serde_json::to_vec(&value)
+                .unwrap_or_else(|_| br#"{"code":16,"effects":"unknown"}"#.to_vec()),
+        );
         crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
         let Some(operation) = operations.get(&id) else { return };
+        let Ok(mut subscription) = self.subscription.lock() else { return };
         let detached = if let Ok(mut state) = operation.state.lock() {
+            if (state.kind == OperationKind::SubscriptionClose && success)
+                || (state.kind == OperationKind::Subscription
+                    && !success
+                    && *subscription == Some(id))
+            {
+                *subscription = None;
+                self.deactivate_generation();
+            }
             state.result = Some(encoded);
             state.detached
         } else {
@@ -78,7 +102,7 @@ impl Shared {
             id,
             serde_json::json!({
                 "code": super::super::sdk_error_code(error) as i32,
-                "message": error.to_string(), "effects": "unknown"
+                "effects": "unknown"
             }),
         );
     }
@@ -89,14 +113,24 @@ impl Shared {
             events.bytes = 0;
             events.resync = false;
             events.generation = generation;
+            events.active = generation != 0;
             events.account_id = account_id;
+        }
+    }
+
+    pub fn deactivate_generation(&self) {
+        if let Ok(mut events) = self.events.lock() {
+            events.active = false;
+            events.queue.clear();
+            events.bytes = 0;
+            events.resync = false;
         }
     }
 
     pub fn push_event(&self, bytes: Vec<u8>, generation: u64) {
         let bytes = Zeroizing::new(bytes);
         let Ok(mut events) = self.events.lock() else { return };
-        if events.resync {
+        if !events.active || generation == 0 || generation != events.generation || events.resync {
             return;
         }
         if events.queue.len() >= MAX_EVENTS
@@ -111,7 +145,7 @@ impl Shared {
             return;
         }
         events.bytes += bytes.len();
-        events.queue.push_back(bytes);
+        events.queue.push_back(Event { generation, bytes });
     }
 
     pub fn close(&self) {
@@ -129,8 +163,50 @@ impl Shared {
                 .and_then(|ops| ops.get(&id).cloned())
                 .is_some_and(|op| op.state.lock().is_ok_and(|state| state.result.is_none()));
             if unfinished {
-                self.complete(id, failure(RamfluxV2Status::Closed, "carrier closed", "unknown"));
+                self.complete(id, failure(RamfluxV2Status::Closed, "unknown"));
             }
         }
+    }
+}
+
+/// Error messages are internal diagnostics; preserve machine fields and user payloads.
+pub(super) fn scrub_errors(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("code")
+                && (map.contains_key("effects")
+                    || map.contains_key("name")
+                    || map.contains_key("retry_after_ms")
+                    || map.get("state").and_then(serde_json::Value::as_str) == Some("error"))
+                && let Some(mut prose) = map.remove("message")
+            {
+                crate::bus::inprocess::erase_value(&mut prose);
+            }
+            // SDK event errors can contain only code/message (for example MCP failures).
+            if let Some(serde_json::Value::Object(error)) = map.get_mut("error")
+                && let Some(mut prose) = error.remove("message")
+            {
+                crate::bus::inprocess::erase_value(&mut prose);
+            }
+            // Reconciliation records retain Display diagnostics internally; native hosts
+            // receive state/retry facts and a conservative typed failure instead.
+            if (map.contains_key("transfer_state")
+                || (map.contains_key("object_id") && map.contains_key("operation_id")))
+                && map.get("last_error").is_some_and(|value| !value.is_null())
+                && let Some(mut prose) = map.insert("last_error".into(), serde_json::Value::Null)
+            {
+                crate::bus::inprocess::erase_value(&mut prose);
+                map.insert("last_error_code".into(), serde_json::json!(16));
+            }
+            for child in map.values_mut() {
+                scrub_errors(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                scrub_errors(child);
+            }
+        }
+        _ => {}
     }
 }

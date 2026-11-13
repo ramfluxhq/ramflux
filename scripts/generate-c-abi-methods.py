@@ -19,10 +19,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    rows = ROW.findall(SOURCE.read_text(encoding="utf-8"))
+    source = SOURCE.read_text(encoding="utf-8")
+    denied_match = re.search(r'DENIED_METHODS:[^=]+?=\s*&\[(.*?)\];', source, re.DOTALL)
+    if denied_match is None:
+        raise SystemExit("missing native admission policy")
+    denied = set(re.findall(r'"([^\"]+)"', denied_match[1]))
+    rows = ROW.findall(source)
     if not rows or len({row[0] for row in rows}) != len(rows):
         raise SystemExit("missing or duplicate SDK method policy rows")
-    methods = [dict(name=name, capability=capability, secret_input=inp == "true",
+    methods = [dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
                     secret_output=out == "true", show_once=once == "true")
                for name, capability, inp, out, once in rows]
     data = dict(abi_major=2, policy_version=1, methods=methods)

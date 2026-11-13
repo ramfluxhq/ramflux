@@ -390,3 +390,42 @@ library, with a private seed outside the repository. Then run
 `scripts/generate-c-abi-card-trust.py` to generate the independently configured
 policy and public index; `--check` rejects artifact/catalog/index drift. Never put
 a private seed in the package or derive release policy from runtime peer data.
+
+
+## Native panic and admission contract
+
+Build native libraries with `cargo build --profile ffi-release -p ramflux-sdk
+--features card-runtime` (or `c-abi` without cards). This profile inherits release
+optimization and uses `panic=unwind`. V2 refuses `panic=abort` builds at compile
+time. Existing packaging paths may instead set `CARGO_PROFILE_RELEASE_PANIC=unwind`
+with `--release`. Every v2 C entry point contains Rust unwinds; fallible calls report code 17.
+Void buffer destruction contains unwinds but cannot report a status. Normal errors
+remain typed Results; no production error path intentionally panics. This boundary
+does not make invalid host pointers or foreign callback unwinds valid.
+
+The native bridge admits only explicitly classified SDK methods. `daemon.stop`
+and test-only methods are denied; use `client_close` to shut down. Negotiation
+omits denied methods, and method policy rows expose `bridge_allowed`. Raw routing
+still requires `allow_raw_messages:true`. Credential and backup-byte exports
+require the explicit trusted-host config capability `allow_secret_exports:true`;
+SDK authorization and custody checks apply independently. An operation key is
+nonempty and at most 256 UTF-8 bytes. Conversation send persists an intent
+fingerprint in account operation metadata before routing; changed conversation,
+text or attachments cannot reuse a key, including across restart or message erasure.
+No plaintext send content is retained in that fingerprint record.
+
+Subscription close acknowledgement releases the bridge slot. Failed opens release
+the slot too. The C layer discards generation-zero, inactive and stale-generation
+events both on enqueue and poll; bindings still compare generations defensively.
+Close retries and release use nonblocking completion-state locks; only the initial
+close waits for its documented deadline.
+
+Native error envelopes contain codes, effects and structured details without
+English diagnostic messages or SDK Display strings. User message/card content is
+preserved. Hosts own localization. V2 outputs allocate their final boxed storage
+before copying secrets and zeroize temporary buffers. Always free them using
+`ramflux_v2_buffer_free`; v1's `ramflux_buffer_free` does not erase secret bytes.
+
+PR CI executes the real supervisor and generation tests under both `c-abi` and
+`card-runtime`, including signed Card rollback/exact-digest refusals, conversation
+retry/crypto regressions and both generated-manifest freshness checks.

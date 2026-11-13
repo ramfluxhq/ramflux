@@ -168,17 +168,39 @@ impl Client {
     pub fn close(&self) -> Result<CloseResult, Arc<SdkError>> {
         let first = !self.closing.swap(true, Ordering::AcqRel);
         let _ = self.shutdown.send(true);
-        self.done
-            .lock()
-            .map_err(|_| Arc::new(SdkError::LocalBus("close lock poisoned".into())))?
-            .wait(first, self.close_wait)
+        let mut done = if first {
+            self.done
+                .lock()
+                .map_err(|_| Arc::new(SdkError::LocalBus("close lock poisoned".into())))?
+        } else {
+            match self.done.try_lock() {
+                Ok(done) => done,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(CloseResult::Pending),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(Arc::new(SdkError::LocalBus("close lock poisoned".into())));
+                }
+            }
+        };
+        done.wait(first, self.close_wait)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_holding_close_lock<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _guard = self.done.lock().expect("test: hold the real close mutex");
+        action()
     }
 
     pub fn shutdown_confirmed(&self) -> Result<bool, SdkError> {
-        self.done
-            .lock()
-            .map(|state| state.terminal.is_some())
-            .map_err(|_| SdkError::LocalBus("close lock poisoned".into()))
+        match self.done.try_lock() {
+            Ok(mut state) => {
+                let _ = state.wait(false, Duration::ZERO);
+                Ok(state.terminal.is_some())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(SdkError::LocalBus("close lock poisoned".into()))
+            }
+        }
     }
 }
 
@@ -255,9 +277,12 @@ async fn write_commands(
                 .is_some_and(|deadline| u128::from(deadline) <= super::super::current_millis())
             {
                 drop(state);
-                shared.complete(command.id, serde_json::json!({
-                        "code":10,"message":"request deadline exceeded before admission","effects":"none"
-                    }));
+                shared.complete(
+                    command.id,
+                    serde_json::json!({
+                        "code":10,"effects":"none"
+                    }),
+                );
                 continue;
             } else {
                 state.admitted = true;
@@ -265,10 +290,7 @@ async fn write_commands(
             }
         };
         if cancelled {
-            shared.complete(
-                command.id,
-                failure(RamfluxV2Status::Cancelled, "cancelled before admission", "none"),
-            );
+            shared.complete(command.id, failure(RamfluxV2Status::Cancelled, "none"));
             continue;
         }
         let sent = tokio::time::timeout(
@@ -350,13 +372,20 @@ async fn read_responses(
                         generation.filter(|generation| *generation != 0).ok_or_else(|| {
                             SdkError::LocalBus("subscription reply missing generation".into())
                         })?;
-                    shared.activate_generation(
-                        generation,
-                        frame
-                            .get("account_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned),
-                    );
+                    let current = shared
+                        .subscription
+                        .lock()
+                        .map_err(|_| SdkError::LocalBus("subscription lock poisoned".into()))?;
+                    // Keep admission and activation atomic with cancellation (subscription -> events).
+                    if *current == Some(id) {
+                        shared.activate_generation(
+                            generation,
+                            frame
+                                .get("account_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                        );
+                    }
                 }
                 let completed = if let Some(generation) = generation {
                     serde_json::json!({"code":code,"response":frame,"subscription_generation":generation.to_string()})
@@ -369,7 +398,8 @@ async fn read_responses(
             let generation = generation.ok_or_else(|| {
                 SdkError::LocalBus("event missing subscription generation".into())
             })?;
-            shared.push_event(bytes.to_vec(), generation);
+            super::state::scrub_errors(&mut frame);
+            shared.push_event(serde_json::to_vec(&frame)?, generation);
         }
         crate::bus::inprocess::erase_value(&mut frame);
         if stop_requested {

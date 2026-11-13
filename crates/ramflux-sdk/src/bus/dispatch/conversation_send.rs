@@ -21,7 +21,11 @@ impl Drop for Intent {
     }
 }
 fn invalid(message: &str) -> SdkError {
-    SdkError::LocalBus(message.into())
+    crate::bindings::AdapterError::new(
+        crate::bindings::GeneratedErrorCode::InvalidArgument,
+        message,
+    )
+    .into()
 }
 
 pub(super) async fn send(
@@ -63,6 +67,7 @@ pub(in crate::bus) async fn send_account(
     } else {
         message_id
     };
+    reserve_intent(&account.client, operation, &request.body)?;
     let deliveries = if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
         if !intent.attachments.is_empty() {
             return Err(invalid("group attachments are unsupported"));
@@ -173,5 +178,74 @@ fn delivery(target: &str, result: Result<LocalBusDispatchResult, SdkError>) -> V
         Err(error) => {
             json!({"target":target,"state":"failed", "error_code":super::super::io::local_bus_error_code(&error)})
         }
+    }
+}
+
+fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
+    let key = format!(
+        "conversation-send/{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.conversation.send.operation.v1",
+            operation.as_bytes()
+        )
+    );
+    let canonical = zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(body)?);
+    let fingerprint =
+        ramflux_crypto::blake3_256_base64url("ramflux.conversation.send.intent.v1", &canonical);
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        if let Some(existing) = db.load_actor_state::<String>(&key)? {
+            if existing != fingerprint {
+                return Err(crate::bindings::AdapterError::new(
+                    crate::bindings::GeneratedErrorCode::InvalidArgument,
+                    "operation_id reused",
+                )
+                .into());
+            }
+            return Ok(());
+        }
+        db.persist_actor_state(&key, &fingerprint)?;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_intent_fingerprint_survives_account_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let root = tempfile::tempdir()?;
+            let make = || {
+                crate::bus::runtime_tests::account(
+                    root.path(),
+                    "sender",
+                    None,
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+            };
+            let account = make()?;
+            let body = json!({"conversation_id":"thread","text":"exact"});
+            reserve_intent(&account.client, "operation", &body)?;
+            drop(account);
+            let account = make()?;
+            reserve_intent(&account.client, "operation", &body)?;
+            // The retry fence is account-owned metadata, independent of private message copies.
+            let error = reserve_intent(
+                &account.client,
+                "operation",
+                &json!({"conversation_id":"other","text":"changed"}),
+            )
+            .expect_err("test: durable retry fence");
+            assert_eq!(
+                crate::bindings::AdapterError::from_sdk(&error).code,
+                crate::bindings::GeneratedErrorCode::InvalidArgument as i32,
+                "reopened account must refuse changed intent"
+            );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await?
     }
 }

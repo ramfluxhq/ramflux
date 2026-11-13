@@ -4,6 +4,10 @@
 //! Version 2: bounded asynchronous requests through the process supervisor.
 //! See docs/design/c-abi-v2.md for ownership, cancellation and wire contracts.
 
+#[cfg(panic = "abort")]
+compile_error!("C ABI v2 requires panic=unwind; build with --profile ffi-release");
+
+mod buffer;
 mod card;
 mod custody;
 #[cfg(test)]
@@ -11,6 +15,8 @@ mod custody_tests;
 mod exports;
 mod method_policy;
 mod projection;
+#[cfg(test)]
+mod review_tests;
 mod runtime;
 mod state;
 #[cfg(test)]

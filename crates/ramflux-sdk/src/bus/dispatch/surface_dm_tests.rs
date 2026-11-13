@@ -52,6 +52,23 @@ async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_devi
             1,
             "fan-out must retain one logical local message"
         );
+        let retry = crate::bus::dispatch::conversation_send::send_account(&request, &mut source).await?;
+        assert_eq!(retry.response_body["message_id"], response.response_body["message_id"], "exact retry keeps its logical identity");
+        assert_eq!(retry.response_body["delivery_state"], "submitted", "exact intent retry remains valid");
+        let baseline = captured.lock().map_err(|_| "capture poisoned")?.len();
+        let original = request.body.clone();
+        source.client.account_db()?.persist_client_record("conversation", "other-thread", &json!({"kind":"direct","participants":["sender","peer"]}))?;
+        for changed in [
+            json!({"conversation_id":"thread","text":"Changed text"}),
+            json!({"conversation_id":"other-thread","text":"Native text"}),
+            json!({"conversation_id":"thread","text":"Native text","attachments":[{"object_id":"changed","plaintext_base64":"eA","chunk_size":1024,"relay_endpoint":"https://relay.example.invalid"}]}),
+        ] {
+            request.body = changed;
+            let error = crate::bus::dispatch::conversation_send::send_account(&request,&mut source).await.err().ok_or("changed intent was accepted")?;
+            assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code,crate::bindings::GeneratedErrorCode::InvalidArgument as i32,"different intent has a typed refusal");
+            assert_eq!(captured.lock().map_err(|_| "capture poisoned")?.len(),baseline,"rejected retry must never reach transport");
+        }
+        request.body = original;
         request.body["sender_id"] = json!("host-forged");
         assert!(
             crate::bus::dispatch::conversation_send::send_account(&request, &mut source)

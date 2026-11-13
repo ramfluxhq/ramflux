@@ -156,6 +156,11 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+# Native hosts require unwinding so the C ABI can contain Rust panics.
+[profile.ffi-release]
+inherits = "release"
+panic = "unwind"
+
 # Dependencies are compiled with optimizations so crypto-heavy tests (Argon2id,
 # ChaCha, SQLite) run fast; workspace members stay at opt-level 0 and keep
 # debug assertions and overflow checks.
