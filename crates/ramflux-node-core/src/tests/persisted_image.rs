@@ -85,6 +85,12 @@ pub(crate) fn database_image(db: &redb::Database) -> Result<(u64, [u8; 32]), Tes
         candidate!(&[u8], u64);
         candidate!(&[u8], &str);
         candidate!((u64, &str), u8);
+        candidate!((u64, &str), &str);
+        candidate!((&str, u64), &str);
+        candidate!((&str, &str), u8);
+        candidate!((&str, &str), u64);
+        candidate!((&str, &str), &str);
+        candidate!((&str, &str), &[u8]);
         tables.insert(
             name.to_owned(),
             found.ok_or_else(|| format!("fixture table type requires decoder: {name}"))?,

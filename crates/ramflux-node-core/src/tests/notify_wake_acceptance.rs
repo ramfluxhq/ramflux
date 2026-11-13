@@ -48,6 +48,15 @@ fn route_for(
     }
 }
 
+fn open_policy_store(
+    path: &std::path::Path,
+    key: NodeSecret,
+) -> Result<NotifyRedbStore, Box<dyn std::error::Error>> {
+    let mut store = NotifyRedbStore::open_with_route_key(path, key)?;
+    store.set_push_route_authorizer(|_| Ok(true));
+    Ok(store)
+}
+
 fn install_credentials(store: &NotifyRedbStore) -> Result<(), Box<dyn std::error::Error>> {
     store.update_provider_credential(&apns_credential("cred-apns", "app.example"))?;
     store.update_provider_credential(&apns_credential("cred-voip", "app.example.voip"))?;
@@ -64,7 +73,13 @@ fn install_route(
     token: &str,
     now: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store.register_push_route(route_for(device, provider, credential_id, token, now))?;
+    let mut open = gateway_open_frame("phone", "policy-route");
+    open.target_delivery_id = device.into();
+    let owner = gateway_registered_key(&open)?;
+    store.register_authenticated_push_route(
+        &owner,
+        &route_for(device, provider, credential_id, token, now),
+    )?;
     Ok(())
 }
 
@@ -115,10 +130,11 @@ fn call_voip() -> BTreeSet<PushProviderKind> {
 
 #[test]
 fn conference_wake_never_uses_voip() -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("conference_wake_never_uses_voip")?;
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("notify.redb");
     let key = NodeSecret::ephemeral()?;
     let now = now_unix_seconds();
-    let store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
+    let store = open_policy_store(&path, key.clone())?;
     store.set_voip_policy(Some(true))?;
     install_credentials(&store)?;
     for (device, provider, credential, token) in [
@@ -151,7 +167,7 @@ fn conference_wake_never_uses_voip() -> Result<(), Box<dyn std::error::Error>> {
         BTreeSet::from([PushProviderKind::ApnsVoip])
     );
     drop(store);
-    let store = NotifyRedbStore::open_with_route_key(&path, key)?;
+    let store = open_policy_store(&path, key)?;
     store.set_voip_policy(Some(true))?;
     assert_eq!(recovered_kinds(&store, "c-both")?, message_alert());
     assert_eq!(recovered_kinds(&store, "k-call")?, call_voip());
@@ -177,10 +193,11 @@ fn collapse_of(
 #[test]
 fn message_collapse_is_device_scoped_and_calls_never_collapse()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("message_collapse_is_device_scoped")?;
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("notify.redb");
     let key = NodeSecret::ephemeral()?;
     let now = now_unix_seconds();
-    let store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
+    let store = open_policy_store(&path, key.clone())?;
     install_credentials(&store)?;
     for device in ["device-a", "device-b"] {
         install_route(&store, device, PushProviderKind::Apns, "cred-apns", device, now)?;
@@ -232,7 +249,7 @@ fn message_collapse_is_device_scoped_and_calls_never_collapse()
     assert!(call_pushes.iter().all(|push| push.payload.collapse_key.is_none()));
     assert!(call_pushes.iter().all(|push| push.collapse_key_hash.is_empty()));
     drop(store);
-    let store = NotifyRedbStore::open_with_route_key(&path, key)?;
+    let store = open_policy_store(&path, key)?;
     let state = store.load_state()?.ok_or("missing collapse state")?;
     let entry = state.entry("call-a").ok_or("missing call replay")?.clone();
     let replay = store.prepare_provider_pushes_for_entry(&entry)?;
@@ -251,10 +268,11 @@ fn message_collapse_is_device_scoped_and_calls_never_collapse()
 #[test]
 fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("call_wake_deadline_is_thirty_seconds")?;
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("notify.redb");
     let key = NodeSecret::ephemeral()?;
     let now = now_unix_seconds();
-    let store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
+    let store = open_policy_store(&path, key.clone())?;
     install_credentials(&store)?;
     install_route(&store, "call-device", PushProviderKind::Apns, "cred-apns", "alert", now)?;
     install_route(&store, "call-device", PushProviderKind::Fcm, "cred-fcm", "fcm", now)?;
@@ -273,7 +291,7 @@ fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
     assert!(pushes.iter().all(|push| push.expires_at == entry.expires_at));
     assert!(pushes.iter().all(|push| push.payload.collapse_key.is_none()));
     drop(store);
-    let store = NotifyRedbStore::open_with_route_key(&path, key)?;
+    let store = open_policy_store(&path, key)?;
     let state = store.load_state()?.ok_or("missing deadline state")?;
     let restored = state.entry("deadline-call").ok_or("missing deadline wake")?.clone();
     assert_eq!(restored.expires_at, now.saturating_add(30));
@@ -285,10 +303,11 @@ fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
 #[test]
 fn provider_payload_limits_and_disabled_modes_fail_closed() -> Result<(), Box<dyn std::error::Error>>
 {
-    let path = temp_store_path("provider_payload_limits_no_route")?;
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("notify.redb");
     let key = NodeSecret::ephemeral()?;
     let now = now_unix_seconds();
-    let store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
+    let store = open_policy_store(&path, key.clone())?;
     store.set_voip_policy(Some(false))?;
     let (entry, pushes) = store.queue_wake_for_push(
         "quiet-device",
@@ -314,7 +333,7 @@ fn provider_payload_limits_and_disabled_modes_fail_closed() -> Result<(), Box<dy
     )?;
     assert_eq!(kinds, BTreeSet::from([PushProviderKind::Apns]));
     drop(store);
-    let store = NotifyRedbStore::open_with_route_key(&path, key)?;
+    let store = open_policy_store(&path, key)?;
     let state = store.load_state()?.ok_or("missing quiet state")?;
     let restored = state.entry("quiet-message").ok_or("quiet message was dropped")?;
     assert_eq!(restored.status, NotifyQueueStatus::Pending);
@@ -326,9 +345,10 @@ fn provider_payload_limits_and_disabled_modes_fail_closed() -> Result<(), Box<dy
 #[test]
 fn provider_retry_classification_preserves_deadline_and_rotated_tokens()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("provider_retry_rotated_token")?;
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("notify.redb");
     let key = NodeSecret::ephemeral()?;
-    let mut store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
+    let mut store = open_policy_store(&path, key.clone())?;
     store.set_push_route_authorizer(|_| Ok(true));
     let mut open = gateway_open_frame("phone", "stream");
     open.target_delivery_id = "rotated-retry".into();
