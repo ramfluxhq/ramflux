@@ -12,8 +12,7 @@ pub(super) const FORMAT: &str = "gateway_state_format";
 const STAGING_DIRECTORY: &str = ".ramflux-gateway-staging-v1";
 const STAGING_PREFIX: &str = ".gateway-init-";
 const STAGING_RANDOM_LENGTH: usize = 16;
-const STAGING_OWNER_FILE: &str = "owner-v1";
-const STAGING_OWNER: &[u8] = b"ramflux-gateway-staging-owner-1\n";
+const STAGING_OWNER_FILE: &str = ".ramflux-gateway-staging-owner-v1";
 pub(super) fn open(path: impl AsRef<Path>) -> Result<redb::Database, NodeCoreError> {
     open_with(path.as_ref(), |_| {})
 }
@@ -93,7 +92,6 @@ fn open_with(
     Ok(db)
 }
 fn prepare_staging_directory(directory: &Path) -> Result<(), NodeCoreError> {
-    use std::io::{Read, Write};
     match std::fs::create_dir(directory) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -106,20 +104,7 @@ fn prepare_staging_directory(directory: &Path) -> Result<(), NodeCoreError> {
     let marker = directory.join(STAGING_OWNER_FILE);
     match std::fs::symlink_metadata(&marker) {
         Ok(metadata) => {
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.len() != STAGING_OWNER.len() as u64
-            {
-                return Err(NodeCoreError::GatewayStateReservedPath);
-            }
-            // Read a fixed bound even if a local operator replaces the marker concurrently.
-            let mut contents = Vec::new();
-            std::fs::File::open(marker)
-                .map_err(redb_error)?
-                .take(64)
-                .read_to_end(&mut contents)
-                .map_err(redb_error)?;
-            if contents != STAGING_OWNER {
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != 0 {
                 return Err(NodeCoreError::GatewayStateReservedPath);
             }
         }
@@ -129,12 +114,12 @@ fn prepare_staging_directory(directory: &Path) -> Result<(), NodeCoreError> {
             if std::fs::read_dir(directory).map_err(redb_error)?.next().is_some() {
                 return Err(NodeCoreError::GatewayStateReservedPath);
             }
-            let mut file = std::fs::OpenOptions::new()
+            // An empty create-new marker is atomic: no partial marker-content crash window.
+            let file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(marker)
                 .map_err(redb_error)?;
-            file.write_all(STAGING_OWNER).map_err(redb_error)?;
             file.sync_all().map_err(redb_error)?;
         }
         Err(error) => return Err(redb_error(error)),

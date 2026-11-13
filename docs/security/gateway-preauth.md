@@ -194,7 +194,7 @@ then published without replacing an existing store. Public database paths inside
 that reserved namespace (including canonical aliases) are refused with
 `GatewayStateReservedPath`. Before publication, serialized cleanup removes only
 exactly named orphan stages there; it never scans public database names and
-retains hard-linked stages or published-inode aliases. A synced ownership marker
+retains hard-linked stages or published-inode aliases. A synced empty ownership marker
 reserves the staging directory; a nonempty directory without the exact marker
 is refused without modifying its contents. Ambiguous old temporary
 names outside the reserved directory are retained for operator inspection.
