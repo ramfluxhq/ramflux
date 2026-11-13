@@ -13,6 +13,7 @@ type Pending={resolve:(value:Reply|null)=>void;reject:(reason:Error)=>void};
 // Each WASM instance has its own Rust resident counter. Bound worker instances
 // at the app adapter too, so separate heaps cannot bypass the two-VM policy.
 let workers=0;
+let nextView=0;
 function createWorker(url:URL):Worker {
   if(workers>=2)throw Error("Card renderer capacity");
   const worker=new Worker(url,{type:"module",name:"card-renderer"});workers++;return worker;
@@ -24,6 +25,7 @@ export class CardView {
   private readonly pending=new Map<number,Pending>();
   private readonly displayed=new Map<string,Node>();
   private sequence=0;
+  private readonly view=++nextView;
   private session=0;
   private version=0;
   private disposed=false;
@@ -75,8 +77,8 @@ export class CardView {
   }
   private receive(message:{seq:number;json?:string;error?:string;disposed?:boolean}):void {
     const pending=this.pending.get(message.seq);if(!pending)return;this.pending.delete(message.seq);
+    if(message.error){pending.reject(Error(message.error));return}
     try {
-      if(message.error)throw Error(message.error);
       if(message.disposed){pending.resolve(null);return}
       if(typeof message.json!=="string"||message.json.length>131072)throw Error("Card output unavailable");
       const reply=JSON.parse(message.json) as Reply;
@@ -88,7 +90,7 @@ export class CardView {
         if(value.result==="submit" && value.action)this.intent(value.action,value.fields);
       }
       pending.resolve(reply);
-    } catch(error){pending.reject(error instanceof Error?error:Error("Card output unavailable"))}
+    } catch(error){const failure=error instanceof Error?error:Error("Card output unavailable");pending.reject(failure);this.abort(failure)}
   }
   private event(key:string,event:unknown):void {
     void this.request("event",JSON.stringify({token:{session:this.session,version:this.version,key},event}))
@@ -168,7 +170,7 @@ export class CardView {
     }
     control.disabled=a.disabled??false;control.required=a.required??false;control.setAttribute("aria-invalid",a.error?"true":"false");
     content.querySelector("[role=alert]")?.remove();
-    if(a.error){const error=document.createElement("p");error.textContent=a.error;error.id="card-error-"+this.session+"-"+node.key;error.setAttribute("role","alert");content.append(error);control.setAttribute("aria-describedby",error.id)}
+    if(a.error){const error=document.createElement("p");error.textContent=a.error;error.id="card-error-"+this.view+"-"+this.session+"-"+node.key;error.setAttribute("role","alert");content.append(error);control.setAttribute("aria-describedby",error.id)}
     else control.removeAttribute("aria-describedby");
   }
   private plot(content:HTMLElement,plot:NonNullable<NonNullable<Node["attrs"]>["plot"]>):void {
