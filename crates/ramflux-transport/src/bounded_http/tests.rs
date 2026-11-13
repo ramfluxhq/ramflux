@@ -58,3 +58,69 @@ fn trickle_body_does_not_reset_the_whole_exchange_deadline()
     peer.join().map_err(|_| "peer panicked")??;
     Ok(())
 }
+
+#[test]
+fn cr_discovery_get_has_no_body_and_preserves_original_document() -> Result<(), TransportError> {
+    struct Capture {
+        response: std::io::Cursor<&'static [u8]>,
+        written: Vec<u8>,
+    }
+    impl Read for Capture {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(bytes)
+        }
+    }
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut stream = Capture {
+        response: std::io::Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"n\":1}"),
+        written: Vec::new(),
+    };
+    let request = BoundedHttpPost {
+        endpoint: "https://node.example",
+        path: "/.well-known/ramflux/client",
+        body: &[],
+        tls: None,
+        deadline: Instant::now() + Duration::from_secs(1),
+        max_bytes: 16,
+    };
+    let document = exchange(&mut stream, "node.example", &request, "GET")?;
+    assert_eq!(
+        document, b"{\"n\":1}",
+        "discovery must return original document bytes, not a reserialized body"
+    );
+    assert_eq!(stream.written, b"GET /.well-known/ramflux/client HTTP/1.1\r\nHost: node.example\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "the local discovery read must have a body-free exact HTTP request");
+    Ok(())
+}
+
+#[test]
+fn cr_public_mesh_requires_exact_node_and_federation_service() {
+    assert!(
+        federation_identity(Some("spiffe://peer.example/ramflux-federation"), "peer.example"),
+        "the discovered node's authenticated federation service is a valid peer"
+    );
+    for uri in [
+        "spiffe://other.example/ramflux-federation",
+        "spiffe://peer.example/ramflux-router",
+        "spiffe://peer.example/ramflux-federation/one",
+        "spiffe://peer.example/ramflux-federation/one/extra",
+        "spiffe://peer.example/ramflux-federation/",
+    ] {
+        assert!(
+            !federation_identity(Some(uri), "peer.example"),
+            "a valid CA signature cannot substitute node/service/instance identity: {uri}"
+        );
+    }
+    assert!(
+        !federation_identity(None, "peer.example"),
+        "a missing SPIFFE identity cannot enter public federation"
+    );
+}

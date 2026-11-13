@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Original nested-document limits and certified sidecars remain independent of the outer snapshot.
-use super::*;
+use super::{CryptoError, VerifiedRecord, custody, reject, wire};
 pub(super) fn check_budgets(p: &wire::SnapshotPayload) -> Result<(), CryptoError> {
     wire::original_document(&p.home, 1024 * 1024)?;
     wire::original_document(&p.discovery.client, 1024 * 1024)?;
@@ -41,10 +41,12 @@ pub(super) fn verify_server(
         || text("node_public_key") != Some(key)
         || text("node_id") != Some(node)
         || text("node_ca_cert_pem") != Some(discovery.client.node_ca_cert_pem.as_str())
-        || !server
-            .get("node_capabilities")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some(wire::CAPABILITY)))
+        || [wire::CAPABILITY, wire::EPHEMERAL_CAPABILITY].into_iter().any(|required| {
+            !server
+                .get("node_capabilities")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some(required)))
+        })
     {
         return Err(reject("peer server discovery mismatch"));
     }

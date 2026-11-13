@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Service/peer query carrier contains no session, account credential or administration token.
-use super::*;
+use super::{PeerReply, QUERY_HASH_DOMAIN, Query, Reason, digest, invalid};
+use serde::{Deserialize, Serialize};
 pub const FOREIGN_PATH: &str = "/internal/contact/foreign/v1";
 pub const PEER_QUERY_PATH: &str = "/contact/foreign/v1";
 pub const SNAPSHOT_PATH: &str = "/internal/contact/snapshot/v1";
@@ -44,6 +45,9 @@ impl PeerQueryRequest {
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
         digest(&self.request_id)?;
         self.query.validate()?;
+        if self.query.nonce != self.request_id {
+            return Err(invalid("peer query nonce/request id mismatch"));
+        }
         if !(1..=10_000).contains(&self.remaining_ms) {
             return Err(invalid("peer query remaining deadline"));
         }

@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Bound queued plus running QUIC contact work before copying request or service handles.
+use super::{Context, Response};
+use crate::RouterMeshClient;
+use ramflux_node_core::{FederationRedbStore, NodeCoreError};
+use ramflux_transport::GatewayQuicRequest;
+use std::{sync::Arc, time::Instant};
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+pub(crate) struct Job {
+    _slot: SemaphorePermit<'static>,
+    request: GatewayQuicRequest,
+    own_node: String,
+    router: Arc<RouterMeshClient>,
+    store: Arc<FederationRedbStore>,
+    peer_uri: Option<String>,
+    received: Instant,
+}
+impl Job {
+    pub(crate) fn prepare(
+        request: &GatewayQuicRequest,
+        own_node: &str,
+        router: &Arc<RouterMeshClient>,
+        store: &Arc<FederationRedbStore>,
+        peer_uri: Option<&str>,
+        received: Instant,
+    ) -> Result<Self, Response> {
+        static WORKERS: Semaphore = Semaphore::const_new(4);
+        let slot = WORKERS.try_acquire().map_err(|_| super::failure(503, "foreign_capacity"))?;
+        // The shared frame decoder already checked I-JSON. Retain the narrower Query budget.
+        ramflux_protocol::contact_reach::original_document(&request.body, 8192)
+            .map_err(|_| super::failure(400, "foreign_invalid_frame"))?;
+        Ok(Self {
+            _slot: slot,
+            request: request.clone(),
+            own_node: own_node.into(),
+            router: Arc::clone(router),
+            store: Arc::clone(store),
+            peer_uri: peer_uri.map(str::to_owned),
+            received,
+        })
+    }
+    pub(crate) fn run(self) -> Result<Option<Response>, NodeCoreError> {
+        let body = ramflux_protocol::canonical_json_bytes(&self.request.body)
+            .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+        super::route(
+            &self.request.method,
+            &self.request.path,
+            &body,
+            Context {
+                own_node: &self.own_node,
+                router: &self.router,
+                store: &self.store,
+                peer_uri: self.peer_uri.as_deref(),
+                received: self.received,
+            },
+        )
+    }
+}

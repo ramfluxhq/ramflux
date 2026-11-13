@@ -159,3 +159,38 @@ impl RouterCore {
         })
     }
 }
+
+impl RouterRedbStore {
+    /// Read an exact retained home checkpoint; a request hash is never a new trust anchor.
+    /// # Errors
+    /// Refuses absent/substituted checkpoints, malformed storage and wrong roots or epochs.
+    pub fn migration_home_checkpoint(
+        &self,
+        anchor: &str,
+        base: &ramflux_protocol::contact_reach::HomeBase,
+    ) -> Result<RecordEvidence, NodeCoreError> {
+        let current =
+            self.migration_home(anchor)?.ok_or_else(|| refusal(Refusal::HomeGenesisRequired))?;
+        let evidence = if record_hash(&current.record).map_err(storage)? == base.hash {
+            current
+        } else {
+            let tx = self.migration_db().begin_read().map_err(storage)?;
+            let table = tx.open_table(RECORDS).map_err(storage)?;
+            let value = table
+                .get(base.hash.as_str())
+                .map_err(storage)?
+                .ok_or_else(|| refusal(Refusal::BaseMismatch))?;
+            if value.value().len() > MAX_RESOLVE_BYTES {
+                return Err(refusal(Refusal::EvidenceRequired));
+            }
+            decode::<RecordEvidence>(value.value())?
+        };
+        if evidence.record.account_anchor() != anchor
+            || evidence.record.epoch() != base.epoch
+            || record_hash(&evidence.record).map_err(storage)? != base.hash
+        {
+            return Err(refusal(Refusal::BaseMismatch));
+        }
+        Ok(evidence)
+    }
+}

@@ -126,3 +126,20 @@ impl RouterRedbStore {
         Ok(value.filter(|p| !public || p.body.discoverable && !p.body.deleted))
     }
 }
+
+pub(super) fn public_profile(
+    tx: &redb::WriteTransaction,
+    root: &str,
+) -> Result<Option<Signed<Profile>>> {
+    let value = tx
+        .open_table(PROFILES)
+        .map_err(storage)?
+        .get(root)
+        .map_err(storage)?
+        .map(|v| row::<Signed<Profile>>(v.value()))
+        .transpose()?;
+    if value.as_ref().is_some_and(|profile| profile.body.deleted || !profile.body.discoverable) {
+        return Err(refuse(Reason::ForeignReadRefused));
+    }
+    Ok(value)
+}

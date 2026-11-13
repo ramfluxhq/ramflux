@@ -187,6 +187,26 @@ impl PublicTarget {
     }
 }
 
+/// An authenticated public mesh exchange on a previously resolved, pinned node origin.
+#[derive(Clone, Copy)]
+pub struct PublicMeshPost<'a> {
+    pub path: &'a str,
+    pub body: &'a [u8],
+    pub tls: &'a crate::MeshTlsConfig,
+    pub peer_ca_pems: &'a [String],
+    pub deadline: Instant,
+    pub max_bytes: usize,
+}
+impl PublicTarget {
+    /// POST to a fixed contact/federation carrier without resolving DNS again.
+    /// Both the discovered CA and exact federation SPIFFE node/service must match TLS.
+    /// # Errors
+    /// Refuses a different path/identity, private addresses, deadline expiry and oversized frames.
+    pub fn post_mesh(&self, request: PublicMeshPost<'_>) -> Result<Vec<u8>, TransportError> {
+        crate::bounded_http::public_mesh_post(self, request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

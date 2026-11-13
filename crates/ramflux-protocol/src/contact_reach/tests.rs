@@ -289,6 +289,12 @@ fn cr_peer_query_literal_carrier_excludes_owner_credentials() -> TestResult {
         GOLDEN,
         "the internal, snapshot and public peer hops share this exact closed carrier"
     );
+    let mut changed = request.clone();
+    changed.query.nonce = d(99);
+    assert!(
+        changed.validate().is_err(),
+        "every peer hop retains the original request nonce binding"
+    );
     let mut value: serde_json::Value = crate::parse_i_json(GOLDEN)?;
     value.as_object_mut().ok_or("query carrier")?.insert("admin_token".into(), "legacy".into());
     assert!(

@@ -483,6 +483,7 @@ impl RouterHandle {
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
         }
+        service = crate::contact_snapshot::configure(service, config)?;
         if let Some(seed) = pairing_seed {
             let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
                 .unwrap_or_else(|_| format!("https://{}", config.node_id));
@@ -571,6 +572,34 @@ impl RouterHandle {
                 )
             },
         )
+    }
+
+    pub(crate) fn contact_snapshot(
+        &self,
+        request: &ramflux_protocol::contact_reach::PeerQueryRequest,
+    ) -> anyhow::Result<ramflux_protocol::contact_reach::PeerQueryResponse> {
+        use ramflux_protocol::contact_reach::{
+            PeerQueryResponse, PeerQueryResult, PeerQueryResultKind, Reason,
+        };
+        request.validate()?;
+        let Self::Tokio(runtime) = self;
+        if let Some(service) = runtime.custody.get() {
+            return Ok(service.contact_snapshot(
+                self.state(),
+                self.store(),
+                request,
+                ramflux_node_core::now_unix_seconds(),
+            )?);
+        }
+        Ok(PeerQueryResponse {
+            kind: PeerQueryResultKind::QueryResult,
+            request_id: request.request_id.clone(),
+            result: PeerQueryResult::Error {
+                reason: Reason::FeatureDisabled,
+                retry_after_ms: None,
+                current_revision: None,
+            },
+        })
     }
 
     pub(crate) fn contact_owner(

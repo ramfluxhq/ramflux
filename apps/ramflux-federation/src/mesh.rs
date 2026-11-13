@@ -328,7 +328,9 @@ pub(crate) fn serve_mesh_mtls(
 /// The body cap for a request, decided from its path before any body byte is read. The
 /// attachment renewal route is bounded at 16 KiB; everything else keeps the migration frame cap.
 pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
-    if path == crate::attachment_renewal::PEER_PATH {
+    if path == ramflux_protocol::contact_reach::PEER_QUERY_PATH {
+        8192
+    } else if path == crate::attachment_renewal::PEER_PATH {
         crate::attachment_renewal::MAX_BODY
     } else {
         ramflux_protocol::home_migration::MAX_FRAME_BYTES
@@ -361,6 +363,9 @@ pub(crate) fn handle_mesh_request(
     #[cfg(feature = "itest-http")]
     ramflux_node_core::shutdown_request_test_delay();
     if refuse_retention_peer(stream, peer_service_id, &request.path)? {
+        return Ok(true);
+    }
+    if serve_contact_request(stream, context, peer_spiffe_uri, &request, received)? {
         return Ok(true);
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -541,12 +546,57 @@ fn handle_s8_inbound_envelope_request(
     Ok(())
 }
 
+fn serve_contact_request(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    context: &MeshServerContext,
+    peer_spiffe_uri: Option<&str>,
+    request: &ramflux_transport::MeshHttpRequest,
+    received: std::time::Instant,
+) -> Result<bool, ramflux_node_core::NodeCoreError> {
+    if let Some(response) = crate::contact_foreign::route(
+        &request.method,
+        &request.path,
+        &request.body,
+        crate::contact_foreign::Context {
+            own_node: &context.discovery.node_id,
+            router: &context.router,
+            store: &context.store,
+            peer_uri: peer_spiffe_uri,
+            received,
+        },
+    )? {
+        let status = match response.frame.status {
+            200 => "200 OK",
+            403 => "403 Forbidden",
+            503 => "503 Service Unavailable",
+            _ => "400 Bad Request",
+        };
+        ramflux_transport::write_mesh_json_response(stream, status, &response.frame.body)
+            .map_err(|error| mesh_transport_error(&error))?;
+        return Ok(true);
+    }
+    if let Some(response) = crate::contact_discovery::route(
+        &request.method,
+        &request.path,
+        &request.body,
+        peer_spiffe_uri,
+        &context.discovery,
+    )? {
+        let status = if response.status == 200 { "200 OK" } else { "403 Forbidden" };
+        ramflux_transport::write_mesh_json_response(stream, status, &response.body)
+            .map_err(|error| mesh_transport_error(&error))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn handle_mesh_quic_connection(
     connection: ramflux_transport::MeshQuicConnection,
     context: MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let remote_address = connection.remote_address();
-    let peer_service_id = mesh_peer_service_id(connection.peer_spiffe_uri());
+    let peer_uri = connection.peer_spiffe_uri().map(str::to_owned);
+    let peer_service_id = mesh_peer_service_id(peer_uri.as_deref());
     tracing::debug!(
         %remote_address,
         peer_service_id = peer_service_id.as_deref().unwrap_or("<unknown>"),
@@ -566,10 +616,15 @@ async fn handle_mesh_quic_connection(
         };
         let context = context.clone();
         let request_peer_service_id = peer_service_id.clone();
+        let request_peer_uri = peer_uri.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_mesh_quic_request(accepted, request_peer_service_id.as_deref(), &context)
-                    .await
+            if let Err(error) = handle_mesh_quic_request(
+                accepted,
+                request_peer_service_id.as_deref(),
+                request_peer_uri.as_deref(),
+                &context,
+            )
+            .await
             {
                 tracing::warn!(%remote_address, %error, "federation mesh QUIC request failed");
             }
@@ -580,11 +635,38 @@ async fn handle_mesh_quic_connection(
 async fn handle_mesh_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     peer_service_id: Option<&str>,
+    peer_uri: Option<&str>,
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let Some(_request) = ramflux_node_core::begin_service_request() else {
         return Ok(());
     };
+    if crate::contact_foreign::recognizes(&accepted.request.path) {
+        let response = match crate::contact_foreign::quic::Job::prepare(
+            &accepted.request,
+            &context.discovery.node_id,
+            &context.router,
+            &context.store,
+            peer_uri,
+            std::time::Instant::now(),
+        ) {
+            Ok(job) => {
+                tokio::task::spawn_blocking(move || job.run()).await.map_err(|error| {
+                    ramflux_node_core::NodeCoreError::ItestJson(format!(
+                        "contact worker failed: {error:?}"
+                    ))
+                })??
+            }
+            Err(response) => Some(response),
+        };
+        if let Some(response) = response {
+            accepted
+                .write_json_response(response.frame.status, &response.frame.body)
+                .await
+                .map_err(|error| mesh_transport_error(&error))?;
+            return Ok(());
+        }
+    }
     let response = handle_federation_mesh_quic_request(
         &accepted.request,
         peer_service_id,
@@ -620,7 +702,8 @@ async fn handle_mesh_compio_quic_connection(
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let remote_address = connection.remote_address();
-    let peer_service_id = mesh_peer_service_id(connection.peer_spiffe_uri());
+    let peer_uri = connection.peer_spiffe_uri().map(str::to_owned);
+    let peer_service_id = mesh_peer_service_id(peer_uri.as_deref());
     tracing::debug!(
         %remote_address,
         peer_service_id = peer_service_id.as_deref().unwrap_or("<unknown>"),
@@ -638,7 +721,13 @@ async fn handle_mesh_compio_quic_connection(
                 return Ok(());
             }
         };
-        handle_mesh_compio_quic_request(accepted, peer_service_id.as_deref(), context).await?;
+        handle_mesh_compio_quic_request(
+            accepted,
+            peer_service_id.as_deref(),
+            peer_uri.as_deref(),
+            context,
+        )
+        .await?;
     }
 }
 
@@ -646,8 +735,37 @@ async fn handle_mesh_compio_quic_connection(
 async fn handle_mesh_compio_quic_request(
     accepted: ramflux_transport::CompioMeshQuicAcceptedRequest,
     peer_service_id: Option<&str>,
+    peer_uri: Option<&str>,
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if crate::contact_foreign::recognizes(&accepted.request.path) {
+        let response = match crate::contact_foreign::quic::Job::prepare(
+            &accepted.request,
+            &context.discovery.node_id,
+            &context.router,
+            &context.store,
+            peer_uri,
+            std::time::Instant::now(),
+        ) {
+            Ok(job) => compio::runtime::Runtime::with_current(|runtime| {
+                runtime.spawn_blocking(move || job.run())
+            })
+            .await
+            .map_err(|error| {
+                ramflux_node_core::NodeCoreError::ItestJson(format!(
+                    "contact worker failed: {error:?}"
+                ))
+            })??,
+            Err(response) => Some(response),
+        };
+        if let Some(response) = response {
+            accepted
+                .write_json_response(response.frame.status, &response.frame.body)
+                .await
+                .map_err(|error| mesh_transport_error(&error))?;
+            return Ok(());
+        }
+    }
     let response = handle_federation_mesh_quic_request(
         &accepted.request,
         peer_service_id,

@@ -84,7 +84,7 @@ fn verify_prekey_response(
         target_delivery_id: Option<String>,
     }
     let response: Response =
-        custody::decode(&ramflux_protocol::canonical_json_bytes(value)?, 64 * 1024)?;
+        custody::decode(&ramflux_protocol::canonical_json_bytes(value)?, 512 * 1024)?;
     let target = ramflux_protocol::qualified_device_id(&device.account_anchor, &device.device_id)?;
     if response.device_id != device.device_id
         || response.principal_commitment != device.account_anchor
@@ -93,7 +93,7 @@ fn verify_prekey_response(
         return Err(reject("peer prekey response target mismatch"));
     }
     let bundle = response.bundle.ok_or_else(|| reject("peer prekey unavailable"))?;
-    verify_prekey(authority, device, &bundle, now)
+    verify_native_prekey(authority, device, &bundle, now)
 }
 fn verify_bundle(
     authority: &VerifiedRecord,
@@ -102,10 +102,13 @@ fn verify_bundle(
     now: u64,
 ) -> Result<(), CryptoError> {
     let bundle: crate::PrekeyBundle =
-        custody::decode(&ramflux_protocol::canonical_json_bytes(value)?, 64 * 1024)?;
-    verify_prekey(authority, device, &bundle, now)
+        custody::decode(&ramflux_protocol::canonical_json_bytes(value)?, 512 * 1024)?;
+    verify_native_prekey(authority, device, &bundle, now)
 }
-fn verify_prekey(
+/// Verify one published native bundle against its exact current qualified branch.
+/// # Errors
+/// Refuses identity/epoch/key substitution, expired prekeys and invalid branch signatures.
+pub fn verify_native_prekey(
     authority: &VerifiedRecord,
     device: &DeviceRef,
     bundle: &crate::PrekeyBundle,

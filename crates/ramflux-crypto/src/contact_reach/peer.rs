@@ -6,6 +6,7 @@ mod documents;
 mod prekeys;
 use super::{reject, verify};
 use crate::{CryptoError, custody::VerifiedRecord};
+pub use prekeys::verify_native_prekey;
 use ramflux_protocol::{
     contact_reach as wire,
     custody::{self, CustodyAuthority, CustodyManifest, framed_hash, object_hash},
@@ -17,6 +18,7 @@ pub struct VerifiedPeer {
     node: String,
     node_key: String,
     snapshot_hash: String,
+    verified_base_hash: Option<String>,
     expires_at: u64,
     authority: VerifiedRecord,
     home: crate::home_migration::VerifiedHome,
@@ -37,6 +39,11 @@ impl VerifiedPeer {
     #[must_use]
     pub fn snapshot_hash(&self) -> &str {
         &self.snapshot_hash
+    }
+    /// Retained home checkpoint used during verification; callers compare it at adoption.
+    #[must_use]
+    pub fn verified_base_hash(&self) -> Option<&str> {
+        self.verified_base_hash.as_deref()
     }
     #[must_use]
     pub fn expires_at(&self) -> u64 {
@@ -64,28 +71,9 @@ pub fn verify_peer_reply(
     base: Option<&ramflux_protocol::home_migration::RecordEvidence>,
     now: u64,
 ) -> Result<VerifiedPeer, CryptoError> {
-    query.validate()?;
-    if ramflux_protocol::canonical_json_bytes(reply)?.len() > wire::MAX_REPLY_BYTES {
-        return Err(reject("peer reply byte budget"));
-    }
+    verify_transport_snapshot(reply, query, authenticated_node_key, now)?;
     let b = &reply.snapshot.body;
     let p = &reply.payload;
-    documents::check_budgets(p)?;
-    if query.version != 1
-        || b.version != 1
-        || b.source_node != query.target_node
-        || b.target_node != query.source_node
-        || b.account_anchor != query.account_anchor
-        || b.request_nonce != query.nonce
-        || b.request_hash != framed_hash(wire::QUERY_HASH_DOMAIN, query)?
-        || b.payload_hash != framed_hash(wire::PAYLOAD_HASH_DOMAIN, p)?
-        || b.issued_at.checked_add(60) != Some(b.expires_at)
-    {
-        return Err(reject("peer snapshot correlation mismatch"));
-    }
-    wire::check_submission_time(b.issued_at, b.expires_at, now)?;
-    verify(wire::SNAPSHOT_DOMAIN, &reply.snapshot, authenticated_node_key)?;
-    verify_discovery(p, &b.source_node, authenticated_node_key, now)?;
     let manifest_value =
         p.manifest.get("custody").ok_or_else(|| reject("native peer authority required"))?;
     let manifest: CustodyManifest =
@@ -143,27 +131,74 @@ pub fn verify_peer_reply(
         node: b.source_node.clone(),
         node_key: authenticated_node_key.into(),
         snapshot_hash: object_hash(&reply.snapshot)?,
+        verified_base_hash: base
+            .map(|base| ramflux_protocol::home_migration::record_hash(&base.record))
+            .transpose()?,
         expires_at: b.expires_at,
         authority,
         home,
     })
 }
 
-fn verify_discovery(
-    p: &wire::SnapshotPayload,
+/// Verify only the authenticated snapshot transport and original query/payload correlation.
+/// This creates no account/home authority and must not be used as admission or trust adoption.
+/// # Errors
+/// Refuses substituted requests/payloads, stale leases and node/discovery signature mismatches.
+pub fn verify_transport_snapshot(
+    reply: &wire::PeerReply,
+    query: &wire::Query,
+    authenticated_node_key: &str,
+    now: u64,
+) -> Result<(), CryptoError> {
+    query.validate()?;
+    if ramflux_protocol::canonical_json_bytes(reply)?.len() > wire::MAX_REPLY_BYTES {
+        return Err(reject("peer reply byte budget"));
+    }
+    let b = &reply.snapshot.body;
+    let p = &reply.payload;
+    documents::check_budgets(p)?;
+    if query.version != 1
+        || b.version != 1
+        || b.source_node != query.target_node
+        || b.target_node != query.source_node
+        || b.account_anchor != query.account_anchor
+        || b.request_nonce != query.nonce
+        || b.request_hash != framed_hash(wire::QUERY_HASH_DOMAIN, query)?
+        || b.payload_hash != framed_hash(wire::PAYLOAD_HASH_DOMAIN, p)?
+        || b.issued_at.checked_add(60) != Some(b.expires_at)
+    {
+        return Err(reject("peer snapshot correlation mismatch"));
+    }
+    wire::check_submission_time(b.issued_at, b.expires_at, now)?;
+    verify(wire::SNAPSHOT_DOMAIN, &reply.snapshot, authenticated_node_key)?;
+    verify_node_discovery(&p.discovery, &b.source_node, authenticated_node_key, now)?;
+    Ok(())
+}
+
+/// Verify both original discovery signatures and the common audited capability set.
+/// Callers obtain the expected node/key from authenticated public bootstrap or retained pins.
+/// This function never installs trust or substitutes for TLS possession of the discovered CA.
+/// # Errors
+/// Refuses stale, mismatched, oversized or wrongly signed node/service documents.
+pub fn verify_node_discovery(
+    discovery: &wire::Discovery,
     source_node: &str,
     authenticated_node_key: &str,
     now: u64,
 ) -> Result<(), CryptoError> {
-    ramflux_protocol::verify_client_discovery_record(&p.discovery.client, now)?;
-    let client = &p.discovery.client;
+    wire::original_document(&discovery.client, 1024 * 1024)?;
+    wire::original_document(&discovery.server, 1024 * 1024)?;
+    ramflux_protocol::verify_client_discovery_record(&discovery.client, now)?;
+    let client = &discovery.client;
     if client.node_id != source_node
         || client.node_public_key != authenticated_node_key
-        || !client.client_capabilities.iter().any(|c| c == wire::CAPABILITY)
+        || [wire::CAPABILITY, wire::EPHEMERAL_CAPABILITY]
+            .into_iter()
+            .any(|required| !client.client_capabilities.iter().any(|c| c == required))
     {
         return Err(reject("peer client discovery mismatch"));
     }
-    documents::verify_server(&p.discovery, source_node, authenticated_node_key, now)
+    documents::verify_server(discovery, source_node, authenticated_node_key, now)
 }
 
 /// Recompute cryptographic notice facts before a primary-signed admission is applied.

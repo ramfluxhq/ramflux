@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS: u64 = 20;
 
 mod attachment_authority;
+mod contact_clock;
 pub use attachment_authority::{AuthorityHistory, MAX_AUTHORITY_NODES};
 #[cfg(test)]
 pub(crate) type DurableIngressSnapshot = (u64, [u8; 32], u64, u64, u64, u64);

@@ -15,6 +15,7 @@ const HEADER_LIMIT: usize = 16 * 1024;
 pub struct BoundedHttpTls {
     config: Arc<rustls::ClientConfig>,
     server_name: rustls::pki_types::ServerName<'static>,
+    expected_mesh_uri: Option<String>,
 }
 impl BoundedHttpTls {
     /// Load local service credentials and either local-node roots or explicitly pinned peer roots.
@@ -32,7 +33,26 @@ impl BoundedHttpTls {
         };
         let server_name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
             .map_err(|e| TransportError::InvalidDnsName(e.to_string()))?;
-        Ok(Self { config: Arc::new(config), server_name })
+        Ok(Self { config: Arc::new(config), server_name, expected_mesh_uri: None })
+    }
+    /// Require this exact node/service SPIFFE SAN in addition to CA and DNS authentication.
+    /// Node/service identities here intentionally exclude gateway instance identities.
+    /// # Errors
+    /// Refuses malformed node/service segments.
+    pub fn with_mesh_peer(mut self, node: &str, service: &str) -> Result<Self, TransportError> {
+        if node.is_empty()
+            || node.len() > 253
+            || service.is_empty()
+            || service.len() > 128
+            || node
+                .bytes()
+                .chain(service.bytes())
+                .any(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.'))
+        {
+            return Err(error("invalid bounded HTTP mesh identity"));
+        }
+        self.expected_mesh_uri = Some(format!("spiffe://{node}/{service}"));
+        Ok(self)
     }
 }
 /// A caller-supplied absolute deadline includes resolver queueing and every socket operation.
@@ -50,6 +70,37 @@ pub struct BoundedHttpPost<'a> {
 /// # Errors
 /// Rejects expired deadlines, malformed/oversized frames, wrong TLS identities and failed IO.
 pub fn bounded_http_post(request: BoundedHttpPost<'_>) -> Result<Vec<u8>, TransportError> {
+    bounded_exchange(request, "POST")
+}
+
+/// A body-free document read with the same bounded transport contract as POST.
+#[derive(Clone, Copy)]
+pub struct BoundedHttpGet<'a> {
+    pub endpoint: &'a str,
+    pub path: &'a str,
+    pub tls: Option<&'a BoundedHttpTls>,
+    pub deadline: Instant,
+    pub max_bytes: usize,
+}
+/// Read a bounded original document using the same absolute DNS/connect/TLS/body deadline.
+/// This uses configured local-node or independently pinned TLS credentials, without redirects.
+/// # Errors
+/// Rejects expired deadlines, excessive responses and failed authentication/IO.
+pub fn bounded_http_get(request: BoundedHttpGet<'_>) -> Result<Vec<u8>, TransportError> {
+    bounded_exchange(
+        BoundedHttpPost {
+            endpoint: request.endpoint,
+            path: request.path,
+            body: &[],
+            tls: request.tls,
+            deadline: request.deadline,
+            max_bytes: request.max_bytes,
+        },
+        "GET",
+    )
+}
+
+fn bounded_exchange(request: BoundedHttpPost<'_>, method: &str) -> Result<Vec<u8>, TransportError> {
     if request.max_bytes == 0
         || request.body.len() > request.max_bytes
         || request.endpoint.len() > 2048
@@ -85,7 +136,7 @@ pub fn bounded_http_post(request: BoundedHttpPost<'_>) -> Result<Vec<u8>, Transp
     stream.set_nodelay(true)?;
     let stream = DeadlineTcp { stream, deadline: request.deadline };
     match request.tls {
-        None => exchange(stream, endpoint, &request),
+        None => exchange(stream, endpoint, &request, method),
         Some(tls) => {
             let connection =
                 rustls::ClientConnection::new(tls.config.clone(), tls.server_name.clone())
@@ -94,7 +145,19 @@ pub fn bounded_http_post(request: BoundedHttpPost<'_>) -> Result<Vec<u8>, Transp
             while stream.conn.is_handshaking() {
                 stream.conn.complete_io(&mut stream.sock)?;
             }
-            exchange(stream, endpoint, &request)
+            if let Some(expected) = &tls.expected_mesh_uri {
+                let actual = stream
+                    .conn
+                    .peer_certificates()
+                    .and_then(|certs| certs.first())
+                    .map(crate::extract_spiffe_uri_from_certificate)
+                    .transpose()?
+                    .flatten();
+                if actual.as_deref() != Some(expected.as_str()) {
+                    return Err(error("bounded HTTP mesh identity mismatch"));
+                }
+            }
+            exchange(stream, endpoint, &request, method)
         }
     }
 }
@@ -133,9 +196,10 @@ fn exchange<S: Read + Write>(
     mut stream: S,
     endpoint: &str,
     request: &BoundedHttpPost<'_>,
+    method: &str,
 ) -> Result<Vec<u8>, TransportError> {
     let headers = format!(
-        "POST {} HTTP/1.1\r\nHost: {endpoint}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {endpoint}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         request.path,
         request.body.len()
     );
@@ -229,5 +293,98 @@ fn read_response<R: BufRead>(reader: &mut R, cap: usize) -> Result<Vec<u8>, Tran
         })
     }
 }
+
+pub(crate) fn public_mesh_post(
+    target: &crate::contact_egress::PublicTarget,
+    request: crate::contact_egress::PublicMeshPost<'_>,
+) -> Result<Vec<u8>, TransportError> {
+    use crate::contact_egress::public_address;
+    if !matches!(
+        request.path,
+        ramflux_protocol::contact_reach::PEER_QUERY_PATH
+            | "/contact/reach/cost/v1"
+            | "/s8/federation/envelope"
+    ) || request.max_bytes == 0
+        || request.max_bytes > 5 * 1024 * 1024
+        || request.body.len() > 5 * 1024 * 1024
+        || request.peer_ca_pems.is_empty()
+        || request.peer_ca_pems.len() > 4
+        || request.peer_ca_pems.iter().any(|pem| pem.is_empty() || pem.len() > 64 * 1024)
+        || target.addresses().is_empty()
+        || target
+            .addresses()
+            .iter()
+            .any(|address| address.port() != 443 || !public_address(address.ip()))
+    {
+        return Err(error("invalid public mesh exchange"));
+    }
+    remaining(request.deadline)?;
+    let mut anchors = 0_usize;
+    for pem in request.peer_ca_pems {
+        for certificate in rustls_pemfile::certs(&mut std::io::Cursor::new(pem.as_bytes())) {
+            let _certificate = certificate?;
+            anchors += 1;
+            if anchors > 4 {
+                return Err(error("public mesh CA certificate budget"));
+            }
+        }
+    }
+    let tls = BoundedHttpTls::new(request.tls, "ramflux-federation", Some(request.peer_ca_pems))?;
+    let mut connected = None;
+    for address in target.addresses() {
+        if let Ok(stream) = TcpStream::connect_timeout(address, remaining(request.deadline)?) {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let stream = connected.ok_or_else(|| error("public mesh connection failed"))?;
+    stream.set_nodelay(true)?;
+    let stream = DeadlineTcp { stream, deadline: request.deadline };
+    let connection = rustls::ClientConnection::new(tls.config, tls.server_name)
+        .map_err(|error| TransportError::Tls(error.to_string()))?;
+    let mut stream = rustls::StreamOwned::new(connection, stream);
+    while stream.conn.is_handshaking() {
+        stream.conn.complete_io(&mut stream.sock)?;
+    }
+    let certificates = stream
+        .conn
+        .peer_certificates()
+        .ok_or_else(|| error("public mesh server certificate missing"))?;
+    if certificates.len() > 4
+        || certificates
+            .iter()
+            .try_fold(0_usize, |total, cert| total.checked_add(cert.len()))
+            .is_none_or(|total| total > 64 * 1024)
+    {
+        return Err(error("public mesh server certificate-chain budget"));
+    }
+    let uri = stream
+        .conn
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(crate::extract_spiffe_uri_from_certificate)
+        .transpose()?
+        .flatten();
+    if !federation_identity(uri.as_deref(), target.host()) {
+        return Err(error("public mesh federation identity mismatch"));
+    }
+    exchange(
+        stream,
+        target.host(),
+        &BoundedHttpPost {
+            endpoint: target.host(),
+            path: request.path,
+            body: request.body,
+            tls: None,
+            deadline: request.deadline,
+            max_bytes: request.max_bytes,
+        },
+        "POST",
+    )
+}
+fn federation_identity(uri: Option<&str>, node: &str) -> bool {
+    uri.is_some_and(|uri| uri == format!("spiffe://{node}/ramflux-federation"))
+}
+
 #[cfg(test)]
 mod tests;

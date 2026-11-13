@@ -878,6 +878,9 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
+        SdkError::ReachRefused(_) | SdkError::ReachRemote { .. } => {
+            RamfluxErrorCode::PermissionDenied
+        }
         SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),

@@ -66,7 +66,6 @@ fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
 }
 impl RamfluxClient {
     pub(crate) fn require_reach_decrypted_route(
-        &self,
         entry: &GatewayInboxEntry,
         opened: &Opened,
         body: &[u8],

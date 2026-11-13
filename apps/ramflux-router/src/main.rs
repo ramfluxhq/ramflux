@@ -3,6 +3,7 @@
 
 mod attachment_renew_home;
 mod attachment_source;
+mod contact_snapshot;
 mod custody_listener;
 #[cfg(test)]
 mod durable_ingress_registry;

@@ -427,7 +427,7 @@ impl RamfluxClient {
         } else {
             (opened.body.clone(), Vec::new())
         };
-        self.require_reach_decrypted_route(entry, &opened, &body)?;
+        Self::require_reach_decrypted_route(entry, &opened, &body)?;
         self.prepare_routed_surface_projection(&mut opened, entry, &body)?;
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data_from_outer(

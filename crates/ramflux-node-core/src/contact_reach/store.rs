@@ -256,6 +256,30 @@ impl RouterRedbStore {
         table.get(root).map_err(storage)?.map(|v| row(v.value())).transpose()
     }
 
+    /// Read an authenticated owner's retained checkpoint without installing a peer key.
+    /// # Errors
+    /// Refuses unavailable owner authority or malformed retained storage.
+    pub fn reach_peer_checkpoint(
+        &self,
+        owner: ReachOwner<'_>,
+        peer_root: &str,
+        now: u64,
+    ) -> Result<Option<ramflux_protocol::home_migration::RecordEvidence>> {
+        let tx = self.begin_write()?;
+        let now = clock(&tx, now)?;
+        authority(&tx, owner.recipient_root, now)?.authorize(owner.actor, "message", now)?;
+        let trust_key = key(owner.recipient_root, peer_root)?;
+        let previous = tx
+            .open_table(TRUST)
+            .map_err(storage)?
+            .get(trust_key.as_str())
+            .map_err(storage)?
+            .map(|v| row::<AdoptedPeer>(v.value()))
+            .transpose()?;
+        tx.commit()?;
+        Ok(previous.map(|state| state.home))
+    }
+
     /// Cache the exact result of an independently authenticated resolver read.
     /// Only the resolver calls this after TLS/discovery continuity and peer snapshot verification;
     /// owner-provided Reply objects never select or install this node key.
@@ -561,6 +585,42 @@ fn apply_conversation(
     Ok(result)
 }
 
+/// Compare the independently verified checkpoint with the latest home writer state.
+fn check_home_base(
+    peer: &ramflux_crypto::contact_reach::VerifiedPeer,
+    previous: &AdoptedPeer,
+) -> Result<()> {
+    let old = &previous.home.record;
+    let new = &peer.home().evidence().record;
+    let hash = ramflux_protocol::home_migration::record_hash(old)?;
+    if new.epoch() < old.epoch() {
+        return Err(refuse(Reason::HomeRollback));
+    }
+    if new.epoch() == old.epoch() {
+        if peer.home().hash() != hash {
+            return Err(refuse(Reason::HomeFork));
+        }
+    } else if peer.verified_base_hash() != Some(hash.as_str()) {
+        return Err(refuse(Reason::HomeRollback));
+    }
+    Ok(())
+}
+pub(super) fn adopt_ingress_peer(
+    tx: &redb::WriteTransaction,
+    recipient: &str,
+    peer: &ramflux_crypto::contact_reach::VerifiedPeer,
+) -> Result<()> {
+    let trust_key = key(recipient, peer.root())?;
+    let previous = tx
+        .open_table(TRUST)
+        .map_err(storage)?
+        .get(trust_key.as_str())
+        .map_err(storage)?
+        .map(|v| row::<AdoptedPeer>(v.value()))
+        .transpose()?;
+    adopt_peer(tx, recipient, &trust_key, peer, previous)
+}
+
 fn adopt_peer(
     tx: &redb::WriteTransaction,
     recipient: &str,
@@ -568,6 +628,9 @@ fn adopt_peer(
     peer: &ramflux_crypto::contact_reach::VerifiedPeer,
     previous: Option<AdoptedPeer>,
 ) -> Result<()> {
+    if let Some(previous) = &previous {
+        check_home_base(peer, previous)?;
+    }
     let mut state = previous.unwrap_or_else(|| AdoptedPeer {
         home: peer.home().evidence().clone(),
         authority_pins: ramflux_crypto::custody::AuthorityPins::default(),

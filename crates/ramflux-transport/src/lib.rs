@@ -38,7 +38,9 @@ mod tls_config;
 mod types;
 
 pub use backend::{GrpcH2Backend, HttpsJsonBackend, QuicQuinnBackend};
-pub use bounded_http::{BoundedHttpPost, BoundedHttpTls, bounded_http_post};
+pub use bounded_http::{
+    BoundedHttpGet, BoundedHttpPost, BoundedHttpTls, bounded_http_get, bounded_http_post,
+};
 pub use bounded_mesh_request::{
     read_bounded_mesh_http_request, read_bounded_mesh_http_request_by_path,
 };

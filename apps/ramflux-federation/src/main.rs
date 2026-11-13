@@ -3,6 +3,8 @@
 
 mod admin_http;
 mod attachment_renewal;
+mod contact_discovery;
+mod contact_foreign;
 mod discovery;
 #[cfg(test)]
 mod durable_ingress_registry;

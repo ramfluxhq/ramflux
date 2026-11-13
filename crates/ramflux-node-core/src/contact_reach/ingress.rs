@@ -349,9 +349,8 @@ impl RouterRedbStore {
         let tx = self.begin_write()?;
         let now = store::clock(&tx, now)?;
         maintenance::clean(&tx, now)?;
-        if peer.expires_at() <= now {
-            return Err(refuse(Reason::ForeignSnapshotExpired));
-        }
+        // The writer's durable clock may have advanced beyond the pre-writer proof check.
+        verify_source(peer, submission, now)?;
         let target = verify_target(&tx, &root, device, now)?;
         let local_home = store::home(&tx, &root)?;
         if local_home.record.home() != (node.node_id(), node.public_key()) {
@@ -410,6 +409,11 @@ impl RouterRedbStore {
         )?;
         let seq = pending.entry.seq;
         stage(&tx, &pending, &key, &hash)?;
+        // Open policy and unsolicited previews must not allocate permanent source trust.
+        // Explicit grants use the separately bounded adopted peer compartment.
+        if class != ReachClass::Unsolicited {
+            store::adopt_ingress_peer(&tx, &root, peer)?;
+        }
         tx.commit()?;
         Ok(ReachIngress { seq, class, duplicate: false })
     }

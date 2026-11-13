@@ -18,15 +18,17 @@ pub struct ReachSession<'a> {
 }
 
 pub struct ReachService {
-    node: MigrationNode,
+    pub(super) node: MigrationNode,
     snapshots: Snapshots,
+    pub(super) peer_resolver: Option<std::sync::Arc<dyn super::resolver::ReachPeerResolver>>,
+    pub(super) source_documents: Option<std::sync::Arc<dyn super::source::ReachSourceDocuments>>,
 }
 impl ReachService {
     /// Construct with configured node authority, never a request-provided signer.
     /// # Errors
     /// Returns private staging-key randomness failures.
     pub fn new(node: MigrationNode) -> Result<Self> {
-        Ok(Self { node, snapshots: Snapshots::new()? })
+        Ok(Self { node, snapshots: Snapshots::new()?, source_documents: None, peer_resolver: None })
     }
 
     /// Execute one account-scoped operation and preserve exact session correlation on errors.
@@ -96,6 +98,7 @@ impl ReachService {
         };
         let owner = ReachOwner { recipient_root: root, actor };
         match &request.operation {
+            Operation::Query { .. } => self.resolve_owner_query(store, owner, request, now),
             Operation::ProfilePublish { operation_id, expected_epoch, update } => {
                 store.reach_publish_profile(owner, operation_id, *expected_epoch, update, now)
             }

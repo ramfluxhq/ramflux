@@ -2,8 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! A node block retires its adopted peers' positive grants inside the same account writer.
-use super::*;
-use ramflux_protocol::contact_reach::StateRecord;
+use super::{AdoptedPeer, TRUST, row};
+use crate::contact_reach::{AccountReach, Result, refuse, storage};
+use ramflux_protocol::{
+    contact_reach::{Admission, Decision, Reason, StateRecord, Subject},
+    custody,
+};
+use redb::ReadableTable;
 use std::collections::BTreeSet;
 
 pub(super) fn retire_node_grants(

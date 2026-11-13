@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod contact_peer;
 mod entry_fetch;
 mod session_push;
 
@@ -458,7 +459,13 @@ pub(crate) fn handle_mesh_request_value(
     router: &crate::router_runtime::RouterHandle,
     peer: impl MeshPeerArgument,
 ) -> anyhow::Result<MeshResponse> {
+    let received = Instant::now();
     let peer = peer.identity();
+    if let Some(response) =
+        contact_peer::guard(&request.method, &request.path, router.node_id(), &peer)
+    {
+        return Ok(response);
+    }
     if let Some(response) = registration_peer_gate(&request, router, &peer) {
         return Ok(response);
     }
@@ -468,7 +475,7 @@ pub(crate) fn handle_mesh_request_value(
     {
         return Ok(response);
     }
-    handle_mesh_request_inner(request, router, peer_service_id)
+    handle_mesh_request_inner(request, router, peer_service_id, received)
 }
 
 fn registration_peer_gate(
@@ -543,6 +550,7 @@ fn handle_mesh_request_inner(
     request: ramflux_transport::MeshHttpRequest,
     router: &crate::router_runtime::RouterHandle,
     peer_service_id: &str,
+    received: Instant,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
     if let Some(response) =
@@ -611,21 +619,8 @@ fn handle_mesh_request_inner(
         ));
     }
 
-    if method == "POST" && path == ramflux_protocol::contact_reach::RECIPIENT_PATH {
-        if peer_service_id != "ramflux-gateway" {
-            return Ok(MeshResponse::text(
-                "403 Forbidden",
-                "contact owner requires gateway identity",
-            ));
-        }
-        let request = ramflux_protocol::contact_reach::decode(
-            &body,
-            ramflux_protocol::contact_reach::MAX_FRAME_BYTES,
-        )?;
-        return Ok(MeshResponse::json(
-            "200 OK",
-            serde_json::to_vec(&router.contact_owner(&request))?,
-        ));
+    if let Some(response) = contact_peer::route(&method, &path, &body, router, received)? {
+        return Ok(response);
     }
 
     if method == "POST" && path == "/mvp1/envelope-authority" {

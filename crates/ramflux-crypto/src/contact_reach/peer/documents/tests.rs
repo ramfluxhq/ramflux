@@ -21,7 +21,7 @@ fn discovery() -> wire::Discovery {
             prekey_http_url: "https://peer.example".into(),
             signaling_turn_addr: "peer.example:443".into(),
             protocol_versions: vec!["v1".into()],
-            client_capabilities: vec![wire::CAPABILITY.into()],
+            client_capabilities: vec![wire::CAPABILITY.into(), wire::EPHEMERAL_CAPABILITY.into()],
             updated_at: NOW,
             expires_at: NOW + 60,
             signature: String::new(),
@@ -30,7 +30,7 @@ fn discovery() -> wire::Discovery {
             "schema":"ramflux.well_known_server.v1", "node_id":"peer.example", "node_public_key":public,
             "node_ca_cert_pem":"fixture-ca", "node_endpoint":"https://peer.example",
             "protocol_versions":["v1"], "transport_backends":["quic"],
-            "node_capabilities":[wire::CAPABILITY], "node_policy_hash":"policy",
+            "node_capabilities":[wire::CAPABILITY, wire::EPHEMERAL_CAPABILITY], "node_policy_hash":"policy",
             "updated_at":NOW, "expires_at":NOW+60, "signature":""
         }),
     }
@@ -50,7 +50,12 @@ fn cr_signed_server_discovery_requires_freshness_schema_and_capability() -> Test
     signed(&mut value)?;
     verify_server(&value, "peer.example", &value.client.node_public_key, NOW)?;
     let mut stale = value.clone();
-    stale.server.as_object_mut().ok_or("server object")?.insert("expires_at".into(), NOW.into());
+    let expired = NOW - ramflux_protocol::DISCOVERY_CLOCK_SKEW_SECONDS - 1;
+    stale
+        .server
+        .as_object_mut()
+        .ok_or("server object")?
+        .insert("expires_at".into(), expired.into());
     signed(&mut stale)?;
     assert!(
         verify_server(&stale, "peer.example", &value.client.node_public_key, NOW).is_err(),

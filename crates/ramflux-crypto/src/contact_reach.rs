@@ -16,7 +16,10 @@ pub mod directory;
 mod peer;
 #[cfg(test)]
 mod tests;
-pub use peer::{VerifiedPeer, verify_notice, verify_peer_reply};
+pub use peer::{
+    VerifiedPeer, verify_native_prekey, verify_node_discovery, verify_notice, verify_peer_reply,
+    verify_transport_snapshot,
+};
 
 fn reject(reason: &'static str) -> CryptoError {
     CryptoError::IdentityAuthority(reason)

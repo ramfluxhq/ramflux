@@ -36,6 +36,7 @@ enum Origin {
 }
 
 mod admission;
+mod reach;
 use admission::{ProofAttempt, SessionRequest};
 #[derive(Clone, Copy)]
 struct Scope<'a> {
