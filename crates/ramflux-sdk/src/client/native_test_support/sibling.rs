@@ -169,6 +169,7 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
     let mut source = Fixture::new("floor-erased-source").await?;
     let _second = source.enroll_sibling("floor-second", "second").await?;
     let third = source.enroll_sibling("floor-third", "third").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let draft = g::SelfSync {
         operation: 2,
         revision: 1,
@@ -176,12 +177,8 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
         ..Default::default()
     };
     let value = source.client.change_self_sync("floor-thread", draft)?;
-    {
-        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-        source.client.erase_self_sync_conversation("floor-thread")?;
-    }
+    source.client.erase_self_sync_conversation("floor-thread")?;
     assert_eq!(source.client.account_db()?.actor_state_keys("self-sync/state/")?.len(), 0);
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(matches!(
         source.client.bootstrap_self_sync(&third.client.owned_device_identity()?),
         Err(SdkError::InboundPending(_))
