@@ -37,6 +37,7 @@ mod stream;
 pub(super) mod tail;
 
 pub(super) struct FullCeremony {
+    prepared_resume: bool,
     pub(super) common: CommonV3,
     pub(super) node: Option<ramflux_crypto::custody::VerifiedNodeRecord>,
     pending: Option<PendingSas<RoleContextV3>>,
@@ -85,6 +86,7 @@ impl FullCeremony {
             prepared,
             cancelled,
             bootstrap: None,
+            prepared_resume: false,
             candidate: None,
             source_candidate: None,
             pending_affirmation: None,

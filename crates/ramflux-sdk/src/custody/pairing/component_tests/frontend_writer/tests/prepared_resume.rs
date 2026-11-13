@@ -3,6 +3,7 @@
 
 //! Prepared B recovery reuses the immutable candidate after an actual database reopen.
 use super::*;
+mod reconnect;
 use ramflux_protocol::custody::{Publication, object_hash};
 struct RefusePhrase(std::sync::atomic::AtomicUsize);
 impl crate::custody::pairing::LocalCredentialProvider for RefusePhrase {
@@ -69,9 +70,8 @@ async fn run() -> TestResult {
         .into_iter()
         .find(|row| row.operation_id == operation)
         .ok_or("test: prepared live row missing after reopen")?;
-    let retained = rig
-        .participant_b
-        .retained_full_candidate_in(db, &live, &current, crate::custody::network_now()?)?
+    let retained = participant
+        .restore_prepared_full_candidate_in(db, &live, &current, crate::custody::network_now()?)?
         .ok_or("test: exact retained candidate was lost")?;
     assert_eq!(retained.publication(), &expected, "test: restart generated another candidate");
     assert_eq!(
@@ -86,8 +86,8 @@ async fn run() -> TestResult {
     );
     live.generation += 1;
     assert!(
-        rig.participant_b
-            .retained_full_candidate_in(db, &live, &current, crate::custody::network_now()?)
+        participant
+            .restore_prepared_full_candidate_in(db, &live, &current, crate::custody::network_now()?)
             .is_err(),
         "test: prepared candidate crossed generations"
     );

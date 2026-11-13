@@ -123,6 +123,7 @@ enum FullLocalAction {
     Reverse(reverse::Action),
     VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     PreparedDuplex,
+    RetainedReverseReceipt,
     Semantic(application::Action),
     SourceDelta(source_delta::Action),
     ProjectReceiverDelta { copy: Box<ramflux_storage::FullReceiverBaseCopy>, hash: String },
@@ -142,6 +143,7 @@ enum FullLocalResult {
     ReceiverReplay(Box<ramflux_storage::FullReceiverReplayWork>),
     Reverse(reverse::Applied),
     Duplex(ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
+    ReverseReceipt(Box<ramflux_protocol::custody::pairing::full_transfer::DataPacket>),
     Semantic(application::Applied),
     SourceDelta(source_delta::Applied),
     NativeObserved { current_hash: String, bound_hash: String },
@@ -191,10 +193,12 @@ impl FullLocalIoRequest {
         {
             return Err(wrong());
         }
-        if matches!(&self.action, FullLocalAction::PreparedDuplex) {
+        if matches!(
+            &self.action,
+            FullLocalAction::PreparedDuplex | FullLocalAction::RetainedReverseReceipt
+        ) {
             let head = db.pairing_head()?.ok_or_else(wrong)?;
-            if self.scope.role != PairingRole::Responder
-                || row.phase != "prepared"
+            if row.phase != "prepared"
                 || head.state != "prepared"
                 || head.kind != "transfer"
                 || head.operation_id != self.scope.operation
@@ -255,6 +259,9 @@ fn apply_action(
         FullLocalAction::Reverse(action) => {
             FullLocalResult::Reverse(reverse::apply(action, scope, stage)?)
         }
+        FullLocalAction::RetainedReverseReceipt => FullLocalResult::ReverseReceipt(Box::new(
+            stage.retained_reverse_data_verified(custody::network_now()?)?,
+        )),
         FullLocalAction::PreparedDuplex => {
             FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, None)
         }

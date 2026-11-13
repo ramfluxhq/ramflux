@@ -77,12 +77,16 @@ impl FullTransferStage<'_> {
             return Err(wrong());
         }
         let (forward, chain) = self.verified_forward_receipt()?;
-        self.verify_reverse_application_receipt(now)?;
-        // Only the current new-target neutral reverse is supported by reverse_receipt.
+        let reverse = self.verify_reverse_application_receipt(now)?;
+        let DataPacket::DataVerified { manifest_hash, chunks_root, .. } = &reverse else {
+            return Err(wrong());
+        };
         let tag = b"ramflux.pairing.full.target_restrictions.v1";
         let mut restrictions = blake3::Hasher::new();
         restrictions.update(&u32::try_from(tag.len()).map_err(|_| wrong())?.to_be_bytes());
         restrictions.update(tag);
+        restrictions.update(&raw32(manifest_hash)?);
+        restrictions.update(&raw32(chunks_root)?);
         self.require_io()?;
         Ok(FullDuplexReceipt {
             role: record.role,
@@ -158,7 +162,7 @@ impl FullTransferStage<'_> {
         }
         Ok((forward, chain))
     }
-    fn verify_reverse_application_receipt(&self, now: u64) -> Result<(), StorageError> {
+    fn verify_reverse_application_receipt(&self, now: u64) -> Result<DataPacket, StorageError> {
         let record = self.resume_record()?;
         let reverse = self.reverse_receipt(now)?;
         let DataPacket::DataVerified { manifest_hash: reverse_hash, .. } = reverse.packet() else {
@@ -167,10 +171,10 @@ impl FullTransferStage<'_> {
         let bytes = match record.role {
             PairingRole::Initiator => {
                 let selected = self.db.account_index.account(&self.db.local_account_id)?;
-                self.connection.query_row("SELECT receipt FROM reverse_application WHERE manifest_hash=?1 AND stage_digest=?2 AND db_path=?3 AND object_path=?4",params![reverse_hash,record.stage_digest()?.as_slice(),selected.db_relative_path,selected.object_dir_relative_path],|row|row.get::<_,Vec<u8>>(0))?
+                self.connection.query_row("SELECT receipt FROM reverse_application WHERE manifest_hash=?1 AND stage_digest=?2 AND db_path=?3 AND object_path=?4 AND length(receipt)<=16384",params![reverse_hash,record.stage_digest()?.as_slice(),selected.db_relative_path,selected.object_dir_relative_path],|row|row.get::<_,Vec<u8>>(0))?
             }
             PairingRole::Responder => self.connection.query_row(
-                "SELECT bytes FROM reverse_source_receipt WHERE manifest_hash=?1",
+                "SELECT bytes FROM reverse_source_receipt WHERE manifest_hash=?1 AND length(bytes)<=16384",
                 params![reverse_hash],
                 |row| row.get::<_, Vec<u8>>(0),
             )?,
@@ -189,7 +193,15 @@ impl FullTransferStage<'_> {
         {
             return Err(wrong());
         }
-        Ok(())
+        Ok(packet)
+    }
+    /// Return the exact already signed reverse receipt after checking its local application owner.
+    /// This does not produce a new signature or reapply imported restrictions.
+    /// # Errors
+    /// Refuses missing/corrupt receipts, changed selected paths, expiry or a locked stage.
+    pub fn retained_reverse_data_verified(&self, now: u64) -> Result<DataPacket, StorageError> {
+        self.require_io()?;
+        self.verify_reverse_application_receipt(now)
     }
     fn verified_chain(&self, last: u64) -> Result<[u8; 32], StorageError> {
         let record = self.resume_record()?;

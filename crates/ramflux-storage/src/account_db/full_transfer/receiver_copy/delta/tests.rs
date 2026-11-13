@@ -194,6 +194,26 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     Ok(())
 }
 
+fn assert_reverse_restrictions_root(root: &str, reverse_packet: &DataPacket) -> TestResult {
+    let DataPacket::DataVerified { manifest_hash: reverse_hash, chunks_root, .. } = reverse_packet
+    else {
+        return Err("test: reverse receipt missing".into());
+    };
+    let tag = b"ramflux.pairing.full.target_restrictions.v1";
+    let mut restrictions = blake3::Hasher::new();
+    restrictions.update(&u32::try_from(tag.len())?.to_be_bytes());
+    restrictions.update(tag);
+    restrictions.update(&super::super::super::stage::raw32(reverse_hash)?);
+    restrictions.update(&super::super::super::stage::raw32(chunks_root)?);
+    assert_eq!(
+        root,
+        encode_base64url(restrictions.finalize().as_bytes()),
+        "test: preservation restrictions root omitted the exact reverse manifest or chunk root"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta() -> TestResult {
     let (initial, _, _) = crate::account_db::full_transfer::stage_tests::fixture()?;
@@ -271,6 +291,7 @@ fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta()
     assert_eq!(own.manifest_chain_hash(), peer.manifest_chain_hash());
     assert_eq!(own.data_verified_hash(), peer.data_verified_hash());
     assert_eq!(own.target_restrictions_root(), peer.target_restrictions_root());
+    assert_reverse_restrictions_root(own.target_restrictions_root(), &reverse_packet)?;
     target = replay_off_loan_roundtrip(target, &b)?;
     let mut rebased = rebase_current_b(copy, &mut target, &b)?;
     retain_rebased_atomically(&mut rebased, &target)?;

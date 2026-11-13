@@ -267,6 +267,16 @@ fn retained_data_role(
         return Err(SdkError::PairingCode("WrongContext"));
     }
     if let Some(head) = db.pairing_head()? {
+        if row.role == "initiator"
+            && head.state == "prepared"
+            && head.kind == "transfer"
+            && head.operation_id == request.operation_id
+            && head.generation == request.generation
+            && head.publisher_ref == ramflux_protocol::canonical_json_bytes(reference)?
+            && head.base_record_hash == object_hash(record)?
+        {
+            return Ok(reference == &record.body.master_certificate.body.primary_device_ref);
+        }
         if row.role == "responder"
             && head.operation_id == request.operation_id
             && head.generation == request.generation

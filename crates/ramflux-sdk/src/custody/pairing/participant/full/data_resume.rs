@@ -23,8 +23,10 @@ use ramflux_storage::{AccountDb, FullStageIoCancel, LiveRow};
 use std::sync::Arc;
 
 pub(crate) struct FullDataResume {
+    pub(in crate::custody::pairing) source_candidate:
+        Option<Box<ramflux_protocol::custody::Publication>>,
     pub(in crate::custody::pairing) candidate:
-        Option<super::super::super::FullPreparedTransferCandidate>,
+        Option<Box<super::super::super::FullPreparedTransferCandidate>>,
     pub(in crate::custody::pairing) live: LiveRow,
     pub(in crate::custody::pairing) invitation: Envelope<Invitation>,
     pub(in crate::custody::pairing) context: TranscriptV3,
@@ -54,13 +56,20 @@ impl LocalPairingParticipant {
         if live.generation != request.generation {
             return Err(wrong());
         }
-        if live.phase != "mutually_confirmed"
-            && !(live.role == "responder" && live.phase == "prepared")
-        {
+        if live.phase != "mutually_confirmed" && live.phase != "prepared" {
             return Err(SdkError::PairingCode("PublicationPending"));
         }
-        let candidate =
-            self.retained_full_candidate_in(db, &live, current, custody::network_now()?)?;
+        let source_candidate = self.restore_prepared_full_source_candidate_in(
+            db,
+            &live,
+            current,
+            custody::network_now()?,
+        )?;
+        let candidate = if source_candidate.is_some() {
+            None
+        } else {
+            self.restore_prepared_full_candidate_in(db, &live, current, custody::network_now()?)?
+        };
         let role = match live.role.as_str() {
             "initiator" => PairingRole::Initiator,
             "responder" => PairingRole::Responder,
@@ -100,7 +109,8 @@ impl LocalPairingParticipant {
         )?
         .map(|entry| entry.frontend_generation);
         Ok(FullDataResume {
-            candidate,
+            source_candidate: source_candidate.map(Box::new),
+            candidate: candidate.map(Box::new),
             live,
             invitation,
             context,

@@ -117,7 +117,7 @@ impl FullTransferStage<'_> {
             now,
             ApprovalTime::BeforePublish,
         )?;
-        self.retain_preservation_bytes(previous, candidate, signed)
+        self.retain_preservation_bytes(previous, candidate, signed, now)
     }
     /// Retain B's independently checked exact source signature against B's own duplex.
     /// This grants no native publication receipt or authority to sign.
@@ -137,7 +137,7 @@ impl FullTransferStage<'_> {
             now,
             (ramflux_crypto::custody::pairing::PairingRole::Responder, ApprovalTime::BeforePublish),
         )?;
-        self.retain_preservation_bytes(previous, candidate, signed)
+        self.retain_preservation_bytes(previous, candidate, signed, now)
     }
     /// Read B's retained source approval only after separately obtaining its own native J6.
     /// Expired approval cannot undo a publication already verified by the native owner.
@@ -172,11 +172,90 @@ impl FullTransferStage<'_> {
         self.retained_destination_after_native_ack(&previous, candidate, now)?.ok_or_else(wrong)?;
         Ok(())
     }
+    /// Inspect an expired original statement before an explicit new attended affirmation.
+    /// This grants no signing capability and never treats a corrupt statement as absent.
+    /// # Errors
+    /// Refuses wrong base/candidate/role, malformed signatures or changed duplex operands.
+    pub fn has_expired_source_full_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        now: u64,
+    ) -> Result<bool, StorageError> {
+        self.require_io()?;
+        let bytes: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT bytes FROM full_preservation WHERE singleton=1 AND length(bytes)<=11700",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(bytes) = bytes else { return Ok(false) };
+        let prior: Envelope<PreservationFull> = ramflux_protocol::parse_i_json(&bytes)?;
+        if prior.body.expires_at > now {
+            return Ok(false);
+        }
+        self.read_preservation(
+            previous,
+            candidate,
+            prior.body.expires_at.saturating_sub(1),
+            ApprovalTime::BeforePublish,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+        )?
+        .ok_or_else(wrong)?;
+        self.verified_duplex(now)?;
+        Ok(true)
+    }
+    fn replace_expired_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        signed: &Envelope<PreservationFull>,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        let prior: Option<(Vec<u8>,Vec<u8>,Vec<u8>)> = self.connection.query_row(
+            "SELECT base_record,candidate,bytes FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288 AND length(candidate)<=524288 AND length(bytes)<=11700",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional()?;
+        let Some((base, proposed, bytes)) = prior else { return Ok(()) };
+        if bytes == canonical_json_bytes(signed)? {
+            return Ok(());
+        }
+        let prior: Envelope<PreservationFull> = ramflux_protocol::parse_i_json(&bytes)?;
+        let mut body = prior.body.clone();
+        body.expires_at = signed.body.expires_at;
+        if base != canonical_json_bytes(previous)?
+            || proposed != canonical_json_bytes(candidate)?
+            || prior.body.expires_at > now
+            || signed.body.expires_at <= prior.body.expires_at
+            || canonical_json_bytes(&body)? != canonical_json_bytes(&signed.body)?
+            || canonical_json_bytes(&prior)? != bytes
+        {
+            return Err(wrong());
+        }
+        self.check_preservation(
+            previous,
+            candidate,
+            &prior,
+            prior.body.expires_at.saturating_sub(1),
+            (self.resume_record()?.role, ApprovalTime::BeforePublish),
+        )?;
+        let changed = self.connection.execute(
+            "UPDATE full_preservation SET bytes=?1 WHERE singleton=1 AND bytes=?2",
+            params![canonical_json_bytes(signed)?, bytes],
+        )?;
+        if changed != 1 {
+            return Err(wrong());
+        }
+        Ok(())
+    }
     fn retain_preservation_bytes(
         &self,
         previous: &Envelope<DeviceSet>,
         candidate: &Envelope<DeviceSet>,
         signed: &Envelope<PreservationFull>,
+        now: u64,
     ) -> Result<(), StorageError> {
         let old = canonical_json_bytes(previous)?;
         let candidate = canonical_json_bytes(candidate)?;
@@ -185,6 +264,7 @@ impl FullTransferStage<'_> {
         {
             return Err(wrong());
         }
+        self.replace_expired_preservation(previous, candidate, signed, now)?;
         let changed=self.connection.execute("INSERT INTO full_preservation VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes WHERE full_preservation.base_record=excluded.base_record AND full_preservation.candidate=excluded.candidate AND full_preservation.bytes=excluded.bytes",params![old,candidate,bytes])?;
         if changed != 1 {
             return Err(wrong());

@@ -104,8 +104,18 @@ impl LocalPairingParticipant {
         if object_hash(account.record())? != bound_hash {
             return Err(wrong());
         }
-        if let Some(saved) =
-            stage.retained_source_full_preservation(current.envelope(), &candidate.record, now)?
+        let renew = allow_new_signature
+            && stage.has_expired_source_full_preservation(
+                current.envelope(),
+                &candidate.record,
+                now,
+            )?;
+        if !renew
+            && let Some(saved) = stage.retained_source_full_preservation(
+                current.envelope(),
+                &candidate.record,
+                now,
+            )?
         {
             require_original_owner(
                 &stage,
@@ -114,27 +124,21 @@ impl LocalPairingParticipant {
             )?;
             return Ok(saved);
         }
-        if !allow_new_signature || live.phase != "mutually_confirmed" {
+        if !allow_new_signature {
             return Err(wrong());
         }
+        require_new_preservation_scope(db, &live, candidate, &bound_hash)?;
         super::require_candidate_lease(proof.expires_at(), now)?;
         let primary = account.group_primary(self.vault.as_ref())?;
         stage.retain_source_primary_owner(account.primary_vault_ref(), current.envelope())?;
-        let body = PreservationFull {
-            schema: "ramflux.identity.transfer.preserve.full.v1".into(),
-            version: 1,
-            transfer_id: record.transfer_id,
-            transcript_hash: encode_base64url(th),
-            old_record_hash: bound_hash,
-            new_record_hash: object_hash(&candidate.record)?,
-            destination_ref: record.grant.destination_ref,
-            recipient_mode: context.initiator.common.recipient_mode,
-            policy: "preserve_all_existing".into(),
-            expires_at: now.saturating_add(300).min(proof.expires_at()),
-            manifest_chain_hash: proof.manifest_chain_hash().into(),
-            data_verified_hash: proof.data_verified_hash().into(),
-            target_restrictions_root: proof.target_restrictions_root().into(),
-        };
+        let body = preservation_body(
+            observation,
+            record,
+            &proof,
+            context.initiator.common.recipient_mode,
+            bound_hash,
+            now,
+        )?;
         let signed = primary.sign_cooperative_full_preservation(&current, &proposed, body, now)?;
         stage.retain_source_full_preservation(
             current.envelope(),
@@ -143,6 +147,57 @@ impl LocalPairingParticipant {
             now,
         )?;
         Ok(signed)
+    }
+}
+
+fn preservation_body(
+    observation: &super::FullSourceCandidateObservation,
+    record: ramflux_crypto::custody::pairing::FullResumeRecord,
+    proof: &ramflux_storage::FullDuplexReceipt,
+    recipient_mode: String,
+    bound_hash: String,
+    now: u64,
+) -> Result<PreservationFull, SdkError> {
+    Ok(PreservationFull {
+        schema: "ramflux.identity.transfer.preserve.full.v1".into(),
+        version: 1,
+        transfer_id: record.transfer_id,
+        transcript_hash: encode_base64url(record.th),
+        old_record_hash: bound_hash,
+        new_record_hash: object_hash(&observation.candidate.record)?,
+        destination_ref: record.grant.destination_ref,
+        recipient_mode,
+        policy: "preserve_all_existing".into(),
+        expires_at: now.saturating_add(300).min(proof.expires_at()),
+        manifest_chain_hash: proof.manifest_chain_hash().into(),
+        data_verified_hash: proof.data_verified_hash().into(),
+        target_restrictions_root: proof.target_restrictions_root().into(),
+    })
+}
+
+fn require_new_preservation_scope(
+    db: &ramflux_storage::AccountDb,
+    live: &ramflux_storage::LiveRow,
+    candidate: &ramflux_protocol::custody::Publication,
+    base: &str,
+) -> Result<(), SdkError> {
+    match live.phase.as_str() {
+        "mutually_confirmed" if db.pairing_head()?.is_none() => Ok(()),
+        "prepared" => {
+            let head = db.pairing_head()?.ok_or_else(wrong)?;
+            if head.state != "prepared"
+                || head.ack.is_some()
+                || head.operation_id != live.operation_id
+                || head.generation != live.generation
+                || head.base_record_hash != base
+                || head.candidate_hash != object_hash(&candidate.record)?
+                || head.candidate != ramflux_protocol::canonical_json_bytes(candidate)?
+            {
+                return Err(wrong());
+            }
+            Ok(())
+        }
+        _ => Err(wrong()),
     }
 }
 

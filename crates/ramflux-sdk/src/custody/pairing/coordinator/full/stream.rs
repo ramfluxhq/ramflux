@@ -216,7 +216,7 @@ impl PairingActor {
             role,
             forward_started: false,
             source_idle: state.source_idle,
-            prepared_candidate: full.candidate.is_some(),
+            prepared_candidate: full.prepared_resume,
             idle_manifest: state.idle_manifest.clone(),
             pending_rebind: None,
             progress: progress.clone(),

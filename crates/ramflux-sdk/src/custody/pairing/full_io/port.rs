@@ -309,6 +309,16 @@ impl FullLocalIoPort {
         Ok(())
     }
 
+    pub(crate) async fn retained_reverse_receipt(
+        &mut self,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::DataPacket, SdkError> {
+        let FullLocalResult::ReverseReceipt(packet) =
+            self.request(FullLocalAction::RetainedReverseReceipt).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(*packet)
+    }
     pub(crate) async fn prepared_duplex(
         &mut self,
     ) -> Result<ramflux_storage::FullDuplexReceipt, SdkError> {

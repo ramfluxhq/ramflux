@@ -17,6 +17,29 @@ impl FullStreamWork {
         self.forward_started = true;
         self.flush_rebind().await
     }
+    pub(super) async fn finish_prepared_source(
+        mut self,
+        manifest: SourceManifest,
+        reverse: SourceManifest,
+    ) -> Result<FullStreamFinished, SdkError> {
+        if !self.source_idle || !manifest.manifest.is_last_prepublication_delta() {
+            return Err(mismatch());
+        }
+        let verified = self.io.retained_reverse_receipt().await?;
+        let DataPacket::DataVerified { manifest_hash, chunks_root, .. } = &verified else {
+            return Err(mismatch());
+        };
+        let expected = hash(&reverse)?;
+        if manifest_hash != &expected || chunks_root != &reverse.manifest.chunks_root {
+            return Err(mismatch());
+        }
+        self.receipt(&expected, reverse.manifest.chunk_count.0.checked_sub(1)).await?;
+        let encrypted = self.packet.seal_packet(&verified)?;
+        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+        let proof = self.io.prepared_duplex().await?;
+        self.packet.allow_verified_duplex(&proof)?;
+        Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
+    }
     pub(super) async fn receive_position(&mut self) -> Result<(SourceManifest, bool), SdkError> {
         let packet = self.receive().await?;
         if let DataPacket::Idle { last_verified } = packet {

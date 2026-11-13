@@ -122,7 +122,12 @@ impl PairingActor {
                 .find(|row| row.operation_id == saved.operation_id)
                 .ok_or(SdkError::PairingCode("WrongContext"))?;
             let candidate = participant
-                .retained_full_candidate_in(db, &live, &current, crate::custody::network_now()?)?
+                .restore_prepared_full_candidate_in(
+                    db,
+                    &live,
+                    &current,
+                    crate::custody::network_now()?,
+                )?
                 .ok_or(SdkError::PairingCode("WrongContext"))?;
             if candidate.install() != &saved {
                 return Err(SdkError::PairingCode("WrongContext"));
@@ -184,6 +189,14 @@ impl PairingActor {
                     .into_iter()
                     .find(|row| row.operation_id == owned.operation_id)
                     .ok_or(SdkError::PairingCode("NotFound"))?;
+                if live.role == "initiator"
+                    && head.state == "prepared"
+                    && head.operation_id == owned.operation_id
+                    && head.generation == owned.generation
+                    && live.generation == owned.generation
+                {
+                    return Ok(None);
+                }
                 if head.operation_id != owned.operation_id
                     || head.generation != owned.generation
                     || live.generation != owned.generation
