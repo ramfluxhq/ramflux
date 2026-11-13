@@ -193,6 +193,9 @@ jobs:
       - name: Clippy
         run: RAMFLUX_ITEST_BUILD=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Generated C ABI header matches reviewed bytes
+        run: python3 -B scripts/check-c-abi-header.py
+
   clippy-default:
     name: Clippy (default features)
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}

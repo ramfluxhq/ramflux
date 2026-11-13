@@ -4,7 +4,7 @@
 #[path = "src/c_abi/v2/method_policy.rs"]
 mod method_policy;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(ramflux_release_profile)");
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         println!("cargo:rustc-cfg=ramflux_release_profile");
@@ -25,54 +25,28 @@ fn main() {
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
     if std::env::var_os("CARGO_FEATURE_C_ABI").is_none() {
-        return;
+        return Ok(());
     }
 
-    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
-        Ok(value) => value,
-        Err(error) => {
-            println!("cargo:warning=failed to locate manifest dir for cbindgen: {error}");
-            return;
-        }
-    };
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
+    let workspace_root = manifest_dir.join("../..");
     let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::Path::new(&manifest_dir).join("target"),
-        std::path::PathBuf::from,
+        || workspace_root.join("target"),
+        |value| {
+            let path = std::path::PathBuf::from(value);
+            if path.is_absolute() { path } else { workspace_root.join(path) }
+        },
     );
     let target_dir = target_root.join("include");
-    if let Err(error) = std::fs::create_dir_all(&target_dir) {
-        println!("cargo:warning=failed to create cbindgen output dir: {error}");
-        return;
-    }
-    let config_path = std::path::Path::new(&manifest_dir).join("cbindgen.toml");
-    write_method_policy(&target_dir.join("ramflux_sdk_methods.json"));
-    let output_path = target_dir.join("ramflux_sdk.h");
-    let config = match cbindgen::Config::from_file(&config_path) {
-        Ok(config) => config,
-        Err(error) => {
-            println!("cargo:warning=failed to read cbindgen config: {error}");
-            return;
-        }
-    };
-    match cbindgen::Builder::new().with_crate(&manifest_dir).with_config(config).generate() {
-        Ok(bindings) => {
-            let _written = bindings.write_to_file(output_path);
-        }
-        Err(error) => println!("cargo:warning=failed to generate cbindgen header: {error}"),
-    }
-}
-
-fn write_method_policy(output: &std::path::Path) {
-    let encoded = serde_json::to_vec_pretty(&method_policy::manifest()).map(|mut bytes| {
-        bytes.push(b'\n');
-        bytes
-    });
-    match encoded {
-        Ok(bytes) => {
-            if let Err(error) = std::fs::write(output, bytes) {
-                println!("cargo:warning=failed to write method policy: {error}");
-            }
-        }
-        Err(error) => println!("cargo:warning=failed to encode method policy: {error}"),
-    }
+    std::fs::create_dir_all(&target_dir)?;
+    let config = cbindgen::Config::from_file(manifest_dir.join("cbindgen.toml"))?;
+    let bindings =
+        cbindgen::Builder::new().with_crate(&manifest_dir).with_config(config).generate()?;
+    let mut header = Vec::new();
+    bindings.write(&mut header);
+    std::fs::write(target_dir.join("ramflux_sdk.h"), header)?;
+    let mut policy = serde_json::to_vec_pretty(&method_policy::manifest())?;
+    policy.push(b'\n');
+    std::fs::write(target_dir.join("ramflux_sdk_methods.json"), policy)?;
+    Ok(())
 }

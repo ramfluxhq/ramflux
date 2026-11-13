@@ -1,4 +1,5 @@
 language = "C"
+line_endings = "LF"
 header = "/* SPDX-License-Identifier: BSD-3-Clause */"
 after_includes = "#ifdef RAMFLUX_WITH_CARD_RUNTIME\n#include \"ramflux_card.h\"\n#endif"
 include_guard = "RAMFLUX_SDK_H"

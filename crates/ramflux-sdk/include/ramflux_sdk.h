@@ -18,9 +18,9 @@
  Version 1 host storage operations. References are opaque UTF-8, without a terminating NUL.
  */
 enum RamfluxV2CustodyOperation
-#ifdef __cplusplus
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : uint32_t
-#endif // __cplusplus
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
   RAMFLUX_V2_CUSTODY_OPERATION_PREFLIGHT = 0,
   RAMFLUX_V2_CUSTODY_OPERATION_STORE_PRIMARY = 1,
@@ -32,16 +32,20 @@ enum RamfluxV2CustodyOperation
   RAMFLUX_V2_CUSTODY_OPERATION_LOAD_PROVISIONING = 7,
 };
 #ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum RamfluxV2CustodyOperation RamfluxV2CustodyOperation;
+#else
 typedef uint32_t RamfluxV2CustodyOperation;
+#endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
 /*
  Permanent numeric codes shared by every generated product adapter.
  */
 enum GeneratedErrorCode
-#ifdef __cplusplus
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : int32_t
-#endif // __cplusplus
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
   GENERATED_ERROR_CODE_INVALID_ARGUMENT = 1,
   GENERATED_ERROR_CODE_INVALID_JSON = 2,
@@ -61,13 +65,17 @@ enum GeneratedErrorCode
   GENERATED_ERROR_CODE_INTERNAL = 16,
 };
 #ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum GeneratedErrorCode GeneratedErrorCode;
+#else
 typedef int32_t GeneratedErrorCode;
+#endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
 enum RamfluxErrorCode
-#ifdef __cplusplus
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : int32_t
-#endif // __cplusplus
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
   RAMFLUX_ERROR_CODE_OK = 0,
   RAMFLUX_ERROR_CODE_INVALID_ARGUMENT = 1,
@@ -98,16 +106,20 @@ enum RamfluxErrorCode
   RAMFLUX_ERROR_CODE_SCHEMA_RESET_REQUIRED = 23,
 };
 #ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum RamfluxErrorCode RamfluxErrorCode;
+#else
 typedef int32_t RamfluxErrorCode;
+#endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
 /*
  Additional v2 transport statuses. Existing `RamfluxErrorCode` values 0..23 are unchanged.
  */
 enum RamfluxV2Status
-#ifdef __cplusplus
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : int32_t
-#endif // __cplusplus
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
   /*
    No terminal completion or event is available. Poll again without resubmitting.
@@ -127,7 +139,11 @@ enum RamfluxV2Status
   RAMFLUX_V2_STATUS_RESYNC_REQUIRED = 27,
 };
 #ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum RamfluxV2Status RamfluxV2Status;
+#else
 typedef int32_t RamfluxV2Status;
+#endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
 struct RamfluxClient {

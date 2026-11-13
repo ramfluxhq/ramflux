@@ -4,3 +4,4 @@
 /crates/ramflux-sdk/include/card/*.qjb binary
 /crates/ramflux-sdk/include/card/*.sig binary
 /crates/ramflux-sdk/include/card/*.pub binary
+/crates/ramflux-sdk/include/ramflux_sdk.h text eol=lf
