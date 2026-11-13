@@ -203,7 +203,11 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
             assert!(matches!(&recovered_reply,GatewayServerFrame::VoiceLease {response} if matches!(**response,ramflux_protocol::VoiceLeaseResponse::Refused {reason:ramflux_protocol::VoiceCallFailureReason::RelayUnavailable})),"valid signed voice did not recover past admission and current authority: {recovered_reply:?}");
             // The exact retry committed once; an uncommitted busy reply consumed no replay identity.
             client.stream.send_frame(&serde_json::to_vec(&request)?).await?;
-            assert!(matches!(response(client).await?,GatewayServerFrame::VoiceLease {response} if matches!(*response,ramflux_protocol::VoiceLeaseResponse::Refused {reason:ramflux_protocol::VoiceCallFailureReason::AuthorityRefused})),"real replay refusal must stay terminal");
+            let refused_reply = response(client).await?;
+            assert!(matches!(&refused_reply,GatewayServerFrame::VoiceLease {response} if matches!(**response,ramflux_protocol::VoiceLeaseResponse::Refused {reason:ramflux_protocol::VoiceCallFailureReason::AuthorityRefused})),"real replay refusal must stay terminal");
+            let mut active = ramflux_sdk::VoiceAdmissionProbe::new(scope.clone(),true,false,i64::try_from(now)?)?;
+            active.apply(&serde_json::to_vec(&refused_reply)?,i64::try_from(now)?)?;
+            assert_eq!(active.snapshot()?["row"]["state"],"ended","true authority refusal became retryable");
         }
         assert_eq!(fixture.context.store.durable_commit_count()-before,12);
         Ok(())
