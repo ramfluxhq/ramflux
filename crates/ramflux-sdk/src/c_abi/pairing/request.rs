@@ -50,10 +50,10 @@ pub(super) fn refusal(code: &str) -> CAbiResult<LocalResult> {
             },
         },
     };
-    if result.validate().is_err() {
-        if let Outcome::Error { error } = &mut result.outcome {
-            error.code = "InvalidInput".into();
-        }
+    if result.validate().is_err()
+        && let Outcome::Error { error } = &mut result.outcome
+    {
+        error.code = "InvalidInput".into();
     }
     result.validate().map_err(|_| invalid())?;
     Ok(result)

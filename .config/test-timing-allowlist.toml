@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Existing test timing sites; review renewals individually.
 site = [
+  { path = "crates/ramflux-sdk/src/c_abi/pairing/credential/tests.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( 5 )", count = 2, owner = "ID-02-PAIR-01", reason = "Watchdogs for synchronous foreign C callback and host thread drain; bounded channels establish ordering, no elapsed-time assertion", expires = "2026-12-13" },
   { path = "crates/ramflux-sdk/src/bus/dispatch/surface_history_import_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 20 )", count = 1, owner = "ramflux-sdk", reason = "Bounds real IPC cached-history refusal fixture; no elapsed-time assertion", expires = "2026-12-13" },
   { path = "crates/ramflux-sdk/tests/pairing_multi_device.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 120 )", count = 1, owner = "ID-02-PAIR-01", reason = "Three independent SQLCipher SDK stores and actual node custody/relay owners; causal frame exchanges with one external watchdog", expires = "2026-12-13" },
   { path = "apps/ramflux-federation/src/pairing_activation_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 60 )", count = 1, owner = "ID-02-PAIR-01", reason = "Isolated real-process release-selector and public/native refusal contract; children use kill_on_drop and completion sentinels", expires = "2026-12-13" },

@@ -185,6 +185,20 @@ impl FullTransferStage<'_> {
         Ok(())
     }
 
+    pub(super) fn source_last_prepublication_data_verified(
+        &self,
+    ) -> Result<Option<DataPacket>, StorageError> {
+        self.require_io()?;
+        if self.resume_record()?.role != PairingRole::Initiator {
+            return Err(StorageError::PairingField("WrongRole"));
+        }
+        let bytes = self.connection.query_row(
+            "SELECT r.bytes FROM source_receipt r JOIN manifest m ON m.manifest_hash=r.manifest_hash AND m.direction=r.direction WHERE m.direction=0 AND m.kind!='tail' AND m.verified=1 AND length(r.bytes)<=16384 ORDER BY m.cut DESC LIMIT 1",
+            [], |row| Ok(Zeroizing::new(row.get::<_,Vec<u8>>(0)?)),
+        ).optional()?;
+        bytes.map(|bytes| DataPacket::from_wire_bytes(&bytes).map_err(|_| mismatch())).transpose()
+    }
+
     /// Read the exact original-A signed manifest named by the last durable B receipt.
     /// This is data-only local metadata, not a new consent, epoch, signing or tail grant.
     /// # Errors

@@ -91,10 +91,10 @@ impl CallbackProvider {
             metadata.len(),
             passphrase.as_mut_ptr(),
             passphrase.len(),
-            &mut pass_len,
+            std::ptr::from_mut(&mut pass_len),
             confirmation.as_mut_ptr(),
             confirmation.len(),
-            &mut confirm_len,
+            std::ptr::from_mut(&mut confirm_len),
             std::ptr::with_exposed_provenance_mut(self.user_data),
         );
         if self.stopped.load(Ordering::Acquire) || provided == 1 {

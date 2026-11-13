@@ -52,7 +52,7 @@ impl FullTransferStage<'_> {
             return Err(StorageError::PairingField("LeaseExpired"));
         }
         let durable: bool = self.db.connection.query_row(
-            "SELECT cut_state='durable' FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status='pending'",
+            "SELECT cut_state='durable' FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status IN('pending','merged')",
             rusqlite::params![self.db.local_account_id,identity.operation,self.reference().stage_id,identity.snapshot],
             |row| row.get(0),
         )?;
@@ -60,7 +60,7 @@ impl FullTransferStage<'_> {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
         let Some(DataPacket::DataVerified { manifest_hash, .. }) =
-            self.source_last_data_verified()?
+            self.source_last_prepublication_data_verified()?
         else {
             return Err(wrong());
         };
