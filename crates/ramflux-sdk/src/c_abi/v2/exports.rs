@@ -159,6 +159,7 @@ pub extern "C" fn ramflux_v2_negotiate(
                 "max_events":state::MAX_EVENTS,"max_event_bytes":state::MAX_EVENT_BYTES,
                 "methods":crate::bus::inprocess::method_names(),
             "method_policy":super::method_policy::manifest(),
+                "card_runtime":super::card::metadata(),
             }),
         )
     })

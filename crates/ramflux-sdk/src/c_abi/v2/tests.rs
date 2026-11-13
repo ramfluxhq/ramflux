@@ -84,6 +84,14 @@ fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
     let mut buffer = std::ptr::null_mut();
     assert_eq!(ramflux_v2_negotiate(2, 0, &raw mut buffer), 0, "ABI v2 negotiation");
     let metadata = take_buffer(buffer);
+    #[cfg(feature = "card-runtime")]
+    assert_eq!(
+        metadata["card_runtime"]["abi_major"],
+        ramflux_card::HOST_ABI,
+        "linked renderer must advertise its independent ABI"
+    );
+    #[cfg(not(feature = "card-runtime"))]
+    assert!(metadata["card_runtime"].is_null(), "ordinary C ABI builds must omit the renderer");
     let methods = metadata["methods"].as_array().expect("test: method inventory");
     for method in [
         "account.create.begin",

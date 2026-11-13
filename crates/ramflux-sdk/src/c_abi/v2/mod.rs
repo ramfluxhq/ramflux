@@ -4,6 +4,7 @@
 //! Version 2: bounded asynchronous requests through the process supervisor.
 //! See docs/design/c-abi-v2.md for ownership, cancellation and wire contracts.
 
+mod card;
 mod custody;
 #[cfg(test)]
 mod custody_tests;

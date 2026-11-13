@@ -20,6 +20,8 @@ itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = ["dep:ramflux-client-model"]
+# Bundle the independently versioned renderer into this same Rust library.
+card-runtime = ["c-abi", "dep:ramflux-card", "ramflux-card/c-abi"]
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]
@@ -47,6 +49,7 @@ durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
 ramflux-client-model = { path = "../ramflux-client-model", optional = true }
+ramflux-card = { path = "../ramflux-card", optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
