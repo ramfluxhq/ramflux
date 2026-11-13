@@ -15,12 +15,15 @@ mod local_unlock;
 pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
 mod preservation;
+mod read_work;
 mod receiver_contributions;
 mod receiver_copy;
+mod receiver_read;
 pub use receiver_copy::{
     FullAppliedDataReceipt, FullPinnedReceiverBase, FullPreparedReceiverDatabase,
     FullReceiverBaseCopy, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
 };
+pub use receiver_read::FullReceiverReplayWork;
 mod receiver_input;
 mod receiver_materialization;
 mod receiver_projection;

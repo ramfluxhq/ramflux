@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded decrypt-only reverse reader, independent of the ordinary account DB owner.
-use super::{SourceGuard, SourceManifest, StorageError, mismatch};
+//! Bounded directional decrypt-only reader independent of the ordinary account DB.
+use super::source_scalar::SourceGuard;
+use crate::StorageError;
+use ramflux_protocol::custody::pairing::full_transfer::SourceManifest;
+fn mismatch() -> StorageError {
+    StorageError::PairingField("ManifestMismatch")
+}
 use crate::{
     account_db::full_transfer::{
         EncryptedStageChunk,
@@ -19,11 +24,12 @@ use std::{
 use zeroize::{Zeroize as _, Zeroizing};
 pub(super) struct Reader {
     connection: Connection,
-    _lock: std::fs::File,
+    _lock: std::sync::Arc<std::fs::File>,
     directory: PathBuf,
-    key: FullChunkReadKey,
+    key: std::sync::Arc<FullChunkReadKey>,
     manifest: SourceManifest,
     hash: String,
+    direction: u8,
     guard: SourceGuard,
     position: u64,
     cached: Option<u64>,
@@ -31,9 +37,10 @@ pub(super) struct Reader {
 }
 pub(super) struct Inputs {
     pub(super) connection: Connection,
-    pub(super) lock: std::fs::File,
+    pub(super) lock: std::sync::Arc<std::fs::File>,
     pub(super) directory: PathBuf,
-    pub(super) key: FullChunkReadKey,
+    pub(super) key: std::sync::Arc<FullChunkReadKey>,
+    pub(super) direction: u8,
 }
 impl Reader {
     pub(super) fn new(
@@ -42,7 +49,7 @@ impl Reader {
         hash: String,
         guard: SourceGuard,
     ) -> Self {
-        let Inputs { connection, lock, directory, key } = inputs;
+        let Inputs { connection, lock, directory, key, direction } = inputs;
         Self {
             connection,
             _lock: lock,
@@ -50,6 +57,7 @@ impl Reader {
             key,
             manifest,
             hash,
+            direction,
             guard,
             position: 0,
             cached: None,
@@ -67,14 +75,20 @@ impl Reader {
             return Err(mismatch());
         }
         let (length, digest): (u32, [u8; 32]) = self.connection.query_row(
-            "SELECT length,digest FROM chunk WHERE direction=1 AND manifest_hash=?1 AND idx=?2",
-            rusqlite::params![self.hash, index],
+            "SELECT length,digest FROM chunk WHERE direction=?1 AND manifest_hash=?2 AND idx=?3",
+            rusqlite::params![self.direction, self.hash, index],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if length == 0 || length > CHUNK_BYTES {
             return Err(mismatch());
         }
-        let path = self.directory.join(format!("seg-r-0-{}.bin", index / 256));
+        let direction = match self.direction {
+            0 => "f",
+            1 => "r",
+            _ => return Err(mismatch()),
+        };
+        let cut = self.manifest.manifest.snapshot_cut.0;
+        let path = self.directory.join(format!("seg-{direction}-{cut}-{}.bin", index / 256));
         let mut file = open_regular(&path, false)?;
         file.seek(SeekFrom::Start((index % 256) * 262_172))?;
         let mut bytes = Zeroizing::new(vec![0; length as usize + 28]);
@@ -104,7 +118,7 @@ impl Reader {
     }
 }
 fn io_error(_: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "full reverse input refused")
+    io::Error::new(io::ErrorKind::InvalidData, "full directional input refused")
 }
 impl Read for Reader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {

@@ -119,6 +119,18 @@ impl FullTargetObservation {
         })?
     }
 
+    pub(super) fn require_current_off_loan(&self) -> Result<(), StorageError> {
+        let worker =
+            self.worker.upgrade_account_writer().ok_or(StorageError::AuthorizationRejected)?;
+        let index = crate::AccountIndex::open(&self.root)?;
+        if index.account(&self.account.local_account_id)? != self.account
+            || version(&worker)? != self.version
+        {
+            return Err(busy());
+        }
+        Ok(())
+    }
+
     /// Recheck under the actual generation/writer owner immediately before selection.
     /// ALL target writes matter, including B-local session/device state not in the
     /// portable root. Progress should be staged separately; no network runs in that fence.

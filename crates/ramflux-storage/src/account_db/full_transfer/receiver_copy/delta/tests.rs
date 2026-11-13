@@ -271,6 +271,7 @@ fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta()
     assert_eq!(own.manifest_chain_hash(), peer.manifest_chain_hash());
     assert_eq!(own.data_verified_hash(), peer.data_verified_hash());
     assert_eq!(own.target_restrictions_root(), peer.target_restrictions_root());
+    target = replay_off_loan_roundtrip(target, &b)?;
     let mut rebased = rebase_current_b(copy, &mut target, &b)?;
     retain_rebased_atomically(&mut rebased, &target)?;
     let prepared = prepared_database(rebased, &target, &broot)?;
@@ -289,6 +290,33 @@ fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta()
     std::fs::remove_dir_all(aroot)?;
     std::fs::remove_dir_all(broot)?;
     Ok(())
+}
+
+fn replay_off_loan_roundtrip<'db>(
+    stage: FullTransferStage<'db>,
+    b: &'db crate::AccountDb,
+) -> TestResult<FullTransferStage<'db>> {
+    let reference = stage.reference().clone();
+    let base = stage.resume_record()?.base_manifest_hash;
+    let copy = stage.pin_receiver_base(&base)?.copy()?;
+    let work = stage.into_receiver_replay_work(copy, 1000)?;
+    b.connection
+        .execute("UPDATE pairing_floor SET next_generation=8 WHERE account_id='acct'", [])?;
+    assert!(
+        matches!(work.replay(), Err(StorageError::PairingField("Busy"))),
+        "test: off-loan replay ignored an ordinary excluded-state B write"
+    );
+    b.connection
+        .execute("UPDATE pairing_floor SET next_generation=7 WHERE account_id='acct'", [])?;
+    let stage = b.open_full_stage_reference(reference.clone(), PairingRole::Responder, 1000)?;
+    let copy = stage.pin_receiver_base(&base)?.copy()?;
+    let work = stage.into_receiver_replay_work(copy, 1000)?;
+    let copy = work.replay()?;
+    let stage = b.open_full_stage_reference(reference, PairingRole::Responder, 1000)?;
+    copy.verify_materialization(&stage)?;
+    assert!(copy.union_encoding().is_some(), "test: owned replay produced no qualified union");
+    drop(copy);
+    Ok(stage)
 }
 
 fn retain_rebased_atomically(

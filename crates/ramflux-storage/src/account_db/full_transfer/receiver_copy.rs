@@ -11,7 +11,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 pub(super) mod application;
 mod delta;
 mod generation;
-mod rebase;
+pub(super) mod rebase;
 pub use application::FullAppliedDataReceipt;
 pub use generation::{
     FullPreparedReceiverDatabase, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
@@ -140,8 +140,14 @@ impl FullReceiverBaseCopy {
         &self,
         stage: &FullTransferStage<'_>,
     ) -> Result<(), StorageError> {
+        self.verify_input(stage)
+    }
+    pub(super) fn verify_input(
+        &self,
+        stage: &impl super::receiver_read::ReceiverInput,
+    ) -> Result<(), StorageError> {
         stage.require_io()?;
-        self.observation.require_current(stage.db)?;
+        stage.require_target(&self.observation)?;
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
             return Err(wrong());
         }
@@ -160,7 +166,7 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
-        self.observation.require_current(stage.db)
+        stage.require_target(&self.observation)
     }
     /// Recheck the original B writer and exact stage before applying retained signed bytes.
     /// The typed restrictive-first projection is atomic and keeps live B untouched. This
@@ -170,6 +176,12 @@ impl FullReceiverBaseCopy {
     pub fn project(
         &mut self,
         stage: &FullTransferStage<'_>,
+    ) -> Result<FullScalarInputCounts, StorageError> {
+        self.project_input(stage)
+    }
+    pub(super) fn project_input(
+        &mut self,
+        stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullScalarInputCounts, StorageError> {
         self.projected = None;
         self.union = None;
@@ -181,8 +193,12 @@ impl FullReceiverBaseCopy {
             &self.scratch.path.join("private.db"),
             &self.key,
         )?;
-        let counts =
-            stage.project_forward_fixed_base(&self.hash, &mut private, &self.observation)?;
+        let counts = super::receiver_projection::project_fixed(
+            stage,
+            &self.hash,
+            &mut private,
+            &self.observation,
+        )?;
         let union = self.contributions.finish(
             &self.scratch.path.join("contributions.db"),
             &self.key,
@@ -200,7 +216,7 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
-        self.observation.require_current(stage.db)?;
+        stage.require_target(&self.observation)?;
         self.union = Some(union);
         self.projected = Some(counts);
         Ok(counts)
