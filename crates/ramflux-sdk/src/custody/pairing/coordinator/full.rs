@@ -20,6 +20,7 @@ use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod bootstrap;
 pub(super) mod cancel;
 mod epoch;
+mod source_observation;
 mod status;
 mod stream;
 
@@ -479,7 +480,7 @@ impl PairingActor {
     /// Refuses B, a lost confirmation, incomplete data, changed native state or candidate.
     pub async fn preserve_full_candidate(
         &self,
-        candidate: ramflux_protocol::custody::Publication,
+        observation: crate::custody::pairing::FullSourceCandidateObservation,
     ) -> Result<
         ramflux_protocol::custody::Envelope<
             ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
@@ -488,15 +489,15 @@ impl PairingActor {
     > {
         self.require_open()?;
         self.full_runtime.require_live()?;
-        let (operation, generation, th) = self.full_source_approval_scope()?;
+        let scope = self.full_source_approval_scope()?;
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let runtime = self.full_runtime.clone();
         self.full_runtime
             .clone()
             .run_blocking(move || {
                 let _local = runtime.local_work()?;
-                let signed =
-                    participant.preserve_full_candidate(&operation, generation, th, &candidate)?;
+                participant.require_source_observation(&observation, &scope)?;
+                let signed = participant.preserve_full_candidate(&observation)?;
                 runtime.require_live()?;
                 Ok(signed)
             })
@@ -531,7 +532,7 @@ impl PairingActor {
     /// Refuses restored approval, unfinished duplex, a foreign candidate or pending intent.
     pub async fn prepare_full_source_submission(
         &self,
-        candidate: ramflux_protocol::custody::Publication,
+        observation: crate::custody::pairing::FullSourceCandidateObservation,
     ) -> Result<crate::custody::pairing::FullSourceSubmission, SdkError> {
         self.require_open()?;
         self.full_runtime.require_live()?;
@@ -551,7 +552,7 @@ impl PairingActor {
                 let _local = runtime.local_work()?;
                 participant.prepare_full_source_submission(
                     scope,
-                    candidate,
+                    observation,
                     runtime.clone(),
                     cancelled,
                 )

@@ -190,10 +190,11 @@ impl LocalPairingParticipant {
     pub(crate) fn prepare_full_source_submission(
         &self,
         scope: (String, u64, [u8; 32]),
-        publication: Publication,
+        observation: super::FullSourceCandidateObservation,
         runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
         cancelled: FullStageIoCancel,
     ) -> Result<FullSourceSubmission, SdkError> {
+        self.require_source_observation(&observation, &scope)?;
         let (operation, generation, th) = scope;
         let operation = operation.as_str();
         if cancelled.is_cancelled() {
@@ -201,7 +202,8 @@ impl LocalPairingParticipant {
         }
         // Fresh native verification and actual primary preservation finish before intent.
         // The coordinator checks original local confirmations before reaching this owner.
-        let approval = self.preserve_full_candidate(operation, generation, th, &publication)?;
+        let approval = self.preserve_full_candidate(&observation)?;
+        let publication = observation.candidate;
         runtime.require_live()?;
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;

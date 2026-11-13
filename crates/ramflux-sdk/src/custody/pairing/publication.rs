@@ -408,8 +408,7 @@ fn require_primary(
     if publisher_ref != local_ref {
         return Err(SdkError::PairingCode("PrimaryRequired"));
     }
-    let primary =
-        account.group_primary(vault).map_err(|_| SdkError::PairingCode("PrimaryRequired"))?;
+    let primary = account.group_primary(vault)?;
     let expected = &account.record().body.master_certificate.body.primary_device_ref;
     if expected != publisher_ref {
         return Err(SdkError::PairingCode("PrimaryRequired"));

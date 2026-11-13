@@ -86,6 +86,16 @@ pub(crate) fn open_owner_only_no_follow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Open an existing file for reading without following a final symlink or creating it.
+pub(crate) fn open_read_only_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(
+        i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).map_err(std::io::Error::other)?,
+    );
+    options.open(path)
+}
+
 pub(crate) fn file_device_inode(file: &File) -> std::io::Result<(u64, u64)> {
     let metadata = file.metadata()?;
     Ok((metadata.dev(), metadata.ino()))

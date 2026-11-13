@@ -25,7 +25,7 @@ pub struct FullRecipientInstallStage<'a> {
     historical_time: u64,
 }
 impl AccountDb {
-    /// Persist this pending recipient's own verified native floor even when its candidate
+    /// Persist this pending endpoint's own verified native floor even when its candidate
     /// is absent. This cannot reopen terminal data state or acknowledge another candidate.
     /// # Errors
     /// Refuses another account, wrong local role/link or native rollback/fork.
@@ -43,14 +43,17 @@ impl AccountDb {
             .ok_or_else(wrong)?;
         if head.operation_id != operation
             || head.kind != "transfer"
-            || live.role != "responder"
+            || !matches!(live.role.as_str(), "initiator" | "responder")
+            || (live.role == "initiator"
+                && !matches!(head.state.as_str(), "submitted" | "acknowledged"))
             || live.generation != head.generation
         {
             return Err(wrong());
         }
         let reference = live.full_stage_reference()?.ok_or_else(wrong)?;
-        let mut stage =
-            self.open_full_stage_reference_inner(reference, PairingRole::Responder, now, true)?;
+        let role =
+            if live.role == "initiator" { PairingRole::Initiator } else { PairingRole::Responder };
+        let mut stage = self.open_full_stage_reference_inner(reference, role, now, true)?;
         stage.observe_full_native_head(current)
     }
     /// Reopen the exact B stage after an independently verified exact native acknowledgement.
