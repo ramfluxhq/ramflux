@@ -227,7 +227,7 @@ fn decode_fixed_32(value: &str, field: &'static str) -> Result<[u8; 32], SdkErro
 pub(super) fn message_metadata_commitment(
     body: &[u8],
     created_at: i64,
-    ttl: u32,
+    ttl_seconds: u32,
 ) -> Result<Option<String>, SdkError> {
     if !crate::client::target_selection::schema_v1_selected()
         || !ramflux_protocol::message::Inner::decode(body)
@@ -237,8 +237,9 @@ pub(super) fn message_metadata_commitment(
     }
     let issued_at =
         u64::try_from(created_at).map_err(|_| invalid("negative Message issue time"))?;
-    let expires_at =
-        issued_at.checked_add(u64::from(ttl)).ok_or_else(|| invalid("Message expiry overflow"))?;
+    let expires_at = issued_at
+        .checked_add(u64::from(ttl_seconds))
+        .ok_or_else(|| invalid("Message expiry overflow"))?;
     let result = ramflux_protocol::message::original_header::for_inner(body, issued_at, expires_at);
     #[cfg(test)]
     if result.is_err() && ALLOW_INVALID_HEADER_FIXTURE.with(std::cell::Cell::get) {

@@ -215,7 +215,12 @@ impl AdapterError {
             SdkError::PayloadTooLarge | SdkError::SurfaceDeliveryTooLarge { .. } => {
                 GeneratedErrorCode::PayloadTooLarge
             }
-            SdkError::Crypto(_) | SdkError::HistoryEvidence(_) => GeneratedErrorCode::CryptoFailure,
+            SdkError::Crypto(_)
+            | SdkError::HistoryEvidence(_)
+            | SdkError::SignatureVerificationFailed(_)
+            | SdkError::Protocol(ramflux_protocol::ProtocolError::SignatureVerificationFailed) => {
+                GeneratedErrorCode::CryptoFailure
+            }
             SdkError::NoNodeSelected
             | SdkError::NodeUnreachable { .. }
             | SdkError::NodeTimeout { .. }

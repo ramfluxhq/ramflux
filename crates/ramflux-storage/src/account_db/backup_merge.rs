@@ -384,10 +384,7 @@ impl BackupDatabase {
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
             }
-            self.archive_imported_pair_sessions(&preserved_actor)?;
-            if legacy_verifications {
-                self.finish_legacy_verification_import()?;
-            }
+            self.finish_pair_import(&preserved_actor, legacy_verifications)?;
             self.merge_self_sync_values(&self_sync_floors)?;
             self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
@@ -398,14 +395,26 @@ impl BackupDatabase {
             self.finish_merge()?;
             Ok(report)
         })();
-        self.detach_merge_inputs(result.is_err())?;
-        result
-    }
-    fn detach_merge_inputs(&self, failed: bool) -> Result<(), StorageError> {
-        if failed {
+        if result.is_err() {
+            // This connection owns a private restore generation, never the live writer.
             let _ = self.db.execute_batch("ROLLBACK");
         }
+        self.detach_merge_inputs()?;
+        result
+    }
+    fn detach_merge_inputs(&self) -> Result<(), StorageError> {
         self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
+        Ok(())
+    }
+    fn finish_pair_import(
+        &self,
+        preserved_actor: &str,
+        legacy_verifications: bool,
+    ) -> Result<(), StorageError> {
+        self.archive_imported_pair_sessions(preserved_actor)?;
+        if legacy_verifications {
+            self.finish_legacy_verification_import()?;
+        }
         Ok(())
     }
     fn archive_imported_pair_sessions(&self, preserved_actor: &str) -> Result<(), StorageError> {

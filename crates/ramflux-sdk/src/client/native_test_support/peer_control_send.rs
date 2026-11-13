@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![cfg(test)]
+
 //! Explicit native recovery sends use the real session encoder and ordinary receive writer.
 use super::*;
 use crate::gateway::{GatewayClientFrame, GatewayServerFrame};

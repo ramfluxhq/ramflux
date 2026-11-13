@@ -484,3 +484,21 @@ fn gateway_writer_busy_preserves_typed_backpressure_across_adapters() {
     assert!(error.gateway_writer_busy());
     assert!(crate::error_policy::approval_retryable(&error));
 }
+
+#[test]
+fn signature_failures_preserve_crypto_classification_across_adapters() {
+    for error in [
+        SdkError::SignatureVerificationFailed("test signature".into()),
+        SdkError::Protocol(ramflux_protocol::ProtocolError::SignatureVerificationFailed),
+    ] {
+        for mapped in [
+            AdapterError::from_sdk(&error),
+            cli::AdapterError::from_sdk(&error),
+            uniffi::AdapterError::from_sdk(&error),
+            wasm::AdapterError::from_sdk(&error),
+        ] {
+            assert_eq!(mapped.code, GeneratedErrorCode::CryptoFailure as i32);
+            assert_eq!(mapped.name, "crypto_failure");
+        }
+    }
+}

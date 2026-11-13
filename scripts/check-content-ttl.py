@@ -9,11 +9,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 # Short controls have a documented lifetime, independent of retained content.
 EPHEMERAL = {
-    'bus/dispatch/message.rs': 'DIRECT_RECEIPT_TTL_SECS',
-    'bus/delivery_receipts.rs': 'RECEIPT_TTL_SECS',
-    'bus/delivery_receipts/background.rs': 'RECEIPT_TTL_SECS',
-    'bus/dispatch/call_driver/background.rs': 'CALL_SIGNAL_TTL_SECS',
-    'client/routed/reset_prepare.rs': 'RESET_TTL_SECS',
+    'bus/dispatch/message.rs': 'crate::offline_retention::DIRECT_RECEIPT_TTL_SECS',
+    'bus/delivery_receipts.rs': 'crate::offline_retention::RECEIPT_TTL_SECS',
+    'bus/delivery_receipts/background.rs': 'crate::offline_retention::RECEIPT_TTL_SECS',
+    'bus/dispatch/call_driver/background.rs': 'crate::offline_retention::CALL_SIGNAL_TTL_SECS',
+    'client/typing/send.rs': 'if active { 5 } else { 1 }',
+    'client/routed/reset_prepare.rs': 'crate::offline_retention::RESET_TTL_SECS',
 }
 FORWARD = {
     'dm.rs': 'message.ttl',
@@ -28,6 +29,8 @@ def production(text):
     # Preserve offsets/newlines, hiding strings/comments for cfg(test) brace matching.
     literals = r'//[^\n]*|/\*[\s\S]*?\*/|r(#+)?"[\s\S]*?"\1|"(?:\\.|[^"\\])*"'
     masked = re.sub(literals, lambda m: re.sub(r'[^\n]', ' ', m[0]), text)
+    if re.search(r'#!\[cfg\(test\)\]', masked):
+        return re.sub(r'[^\n]', ' ', text)
     spans = []
     for match in re.finditer(r'#\[cfg\(test\)\]', masked):
         opening = masked.find('{', match.end())
@@ -50,6 +53,16 @@ def production(text):
     return ''.join(chars)
 
 
+def classification(relative, expr):
+    if '.content_ttl()?' in expr:
+        return 'Content'
+    if relative in EPHEMERAL and expr.rstrip(',') == EPHEMERAL[relative]:
+        return 'Ephemeral'
+    if relative in FORWARD and expr.startswith(FORWARD[relative]):
+        return 'Content/ephemeral passthrough'
+    return None
+
+
 def check():
     rows, errors = [], []
     for path in sorted((ROOT / 'crates/ramflux-sdk/src').rglob('*.rs')):
@@ -60,13 +73,8 @@ def check():
         for match in re.finditer(r'(?m)(?:^\s*ttl:|"ttl"\s*:)\s*([^\n]+)', text):
             expr = match[1].strip()
             line = text.count('\n', 0, match.start(1)) + 1
-            if '.content_ttl()?' in expr:
-                kind = 'Content'
-            elif relative in EPHEMERAL and expr.startswith('crate::offline_retention::' + EPHEMERAL[relative]):
-                kind = 'Ephemeral'
-            elif relative in FORWARD and expr.startswith(FORWARD[relative]):
-                kind = 'Content/ephemeral passthrough'
-            else:
+            kind = classification(relative, expr)
+            if kind is None:
                 errors.append(f'{relative}:{line}: unclassified TTL: {expr}')
                 continue
             rows.append((relative, line, kind, expr))

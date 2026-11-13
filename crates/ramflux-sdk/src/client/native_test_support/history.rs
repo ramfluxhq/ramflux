@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![cfg(test)]
+
 //! Native sibling history through production page staging, crypto and receive commits.
 use super::*;
 use crate::client::generated_history::producer::Outgoing;
