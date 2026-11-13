@@ -457,8 +457,9 @@ pub(super) fn set_handle_owner(
 
 /// Make `owner` the owner and replace the access list with `descriptor`'s list.
 ///
-/// Setting the owner does not keep the list the creator just wrote. A later open checks that
-/// stored list, so both writes happen together while the restore privilege is held.
+/// The list must already use specific rights (`FA`), not `GA`. A later `CreateFile` asks for
+/// `SYNCHRONIZE`, which the generic bit does not grant. Both writes happen together while the
+/// restore privilege is held.
 ///
 /// # Errors
 /// Returns the OS error when either write fails.

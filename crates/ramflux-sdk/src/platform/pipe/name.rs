@@ -21,16 +21,18 @@ const MAX_PIPE_NAME_CHARS: usize = 256;
 /// Pipe descriptor: owner is the user, the DACL is protected and holds only a deny for network
 /// logons and full access for the user, and the label is medium integrity with no-write-up.
 /// Everyone, Authenticated Users and ALL APPLICATION PACKAGES get nothing.
+///
+/// `FA` is `FILE_ALL_ACCESS`: the specific read, write, standard, and `SYNCHRONIZE` bits.
+/// `CreateFile` adds `SYNCHRONIZE` to every open. `GA` is only the generic bit, so an open
+/// that asked for `SYNCHRONIZE` was denied.
 pub(super) fn pipe_sddl(user_sid: &str) -> String {
-    format!("O:{user_sid}D:P(D;;GA;;;NU)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
+    format!("O:{user_sid}D:P(D;;FA;;;NU)(A;;FA;;;{user_sid})S:(ML;;NW;;;ME)")
 }
 
 /// Name-file descriptor: owner is the user and the protected DACL holds only that user.
-/// `GA` is `GENERIC_ALL`, which the file access check maps onto read, write, and the
-/// standard rights. `FA` (`FILE_ALL_ACCESS`) does not survive that mapping, so the creator
-/// could not open the file it had just created.
+/// `FA` is `FILE_ALL_ACCESS`, including `SYNCHRONIZE`, which every later open requests.
 pub(super) fn name_file_sddl(user_sid: &str) -> String {
-    format!("O:{user_sid}D:P(A;;GA;;;{user_sid})")
+    format!("O:{user_sid}D:P(A;;FA;;;{user_sid})")
 }
 
 /// # Errors
