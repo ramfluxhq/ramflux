@@ -12,14 +12,16 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, INVALID_HANDLE_VALUE, SetLastError,
+    ERROR_ALREADY_EXISTS, GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, SetLastError,
 };
 use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    GetFinalPathNameByHandleW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    OPEN_EXISTING, READ_CONTROL, VOLUME_NAME_DOS, WRITE_DAC,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{
@@ -135,6 +137,94 @@ pub(crate) fn open_owner_only(
     Ok(file)
 }
 
+/// Open an existing file without truncating it, or create a new empty file.
+///
+/// `CREATE_ALWAYS` truncates before the owner can be read. This opens with `OPEN_EXISTING`
+/// and `FILE_FLAG_OPEN_REPARSE_POINT`, refuses a reparse point or another user's file while
+/// the bytes are still intact, applies the protected access list, and only then truncates
+/// that same handle. A missing file is created with `CREATE_NEW` and the owner-only descriptor.
+///
+/// # Errors
+/// `PermissionDenied` when the file is a reparse point, a directory, or owned by another user.
+/// `NotFound` is not returned: a missing file is created. Any other failure is the OS error.
+pub(crate) fn open_owner_only_truncate(path: &Path) -> io::Result<File> {
+    let wide = extended(path)?;
+    let (descriptor, user) = owner_descriptor(false)?;
+    match open_existing_no_truncate(&wide) {
+        Ok(file) => {
+            let attributes = file_information(&file)?.dwFileAttributes;
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "truncate target is a link or a directory",
+                ));
+            }
+            if !super::owner_matches_user(&owner_of(file.as_raw_handle(), SE_FILE_OBJECT)?, &user)?
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            reset_access_list(&file, &descriptor)?;
+            file.set_len(0)?;
+            Ok(file)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_new_exclusive(&wide, &descriptor)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn open_existing_no_truncate(wide: &[u16]) -> io::Result<File> {
+    // SAFETY: `wide` is NUL-terminated and the handle is owned by the `File`.
+    // `OPEN_EXISTING` does not truncate. `FILE_FLAG_OPEN_REPARSE_POINT` returns the link
+    // itself so a junction is not followed before the refusal below.
+    super::note_call("CreateFileW(open_existing_no_truncate)");
+    unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(File::from_raw_handle(handle))
+        }
+    }
+}
+
+fn create_new_exclusive(wide: &[u16], descriptor: &SecurityDescriptor) -> io::Result<File> {
+    let attributes = descriptor.attributes()?;
+    super::assigning_owner(|| {
+        super::note_call("CreateFileW(create_new_exclusive)");
+        // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call;
+        // the handle is owned by the `File`. `CREATE_NEW` fails if the name appeared after
+        // the `OPEN_EXISTING` miss, so this never truncates an existing file.
+        unsafe {
+            let handle = CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE | READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &raw const attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(File::from_raw_handle(handle))
+            }
+        }
+    })
+}
+
 fn reset_access_list(file: &File, descriptor: &SecurityDescriptor) -> io::Result<()> {
     super::set_handle_dacl(file.as_raw_handle(), SE_FILE_OBJECT, descriptor)
 }
@@ -165,10 +255,106 @@ pub(crate) fn restrict(path: &Path, directory: bool) -> io::Result<()> {
         }
         File::from_raw_handle(handle)
     };
+    if is_reparse_point(&file)? {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "reparse point"));
+    }
     if !super::owner_matches_user(&owner_of(file.as_raw_handle(), SE_FILE_OBJECT)?, &user)? {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     reset_access_list(&file, &descriptor)
+}
+
+/// Create every missing component of `root` as an owner-only directory and require the final
+/// directory to belong to the current user.
+///
+/// Each existing component is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and held until this
+/// function returns, so a junction cannot be given our access list and a child is not created
+/// through one. A reparse point, a resolved path under the roaming profile, or another user's
+/// directory is `PermissionDenied` before any create or access-list write.
+///
+/// # Errors
+/// `PermissionDenied` for a reparse point, a roaming location, or another user's directory.
+/// Otherwise the OS error.
+pub(crate) fn prepare_owner_only_directory(root: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(root)?;
+    let prefixes = ancestors_inclusive(&absolute)?;
+    let roaming = known_folder(KnownFolder::RoamingAppData)?;
+    let mut held = Vec::with_capacity(prefixes.len());
+    for (index, prefix) in prefixes.iter().enumerate() {
+        // `FILE_READ_ATTRIBUTES` is what `GetFinalPathNameByHandleW` requires. Access 0 can
+        // read the reparse bit and still fail the final-path query, which would refuse every
+        // data root. It does not grant write or change the access list.
+        let access = if index + 1 == prefixes.len() {
+            READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES
+        } else {
+            FILE_READ_ATTRIBUTES
+        };
+        let file = match open_for_facts(prefix, access) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match create_dir_owner_only(prefix) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                open_for_facts(prefix, access)?
+            }
+            Err(error) => return Err(error),
+        };
+        // The handle is the object. Refuse it before any later create or access-list write,
+        // and keep it open so the name we just checked cannot be replaced underneath us.
+        if is_reparse_point(&file)? {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "reparse point"));
+        }
+        let resolved = final_path(&file)?;
+        if directory_is_inside(&resolved, &roaming) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "roaming profile"));
+        }
+        held.push(file);
+    }
+    let Some(directory) = held.last() else {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "empty path"));
+    };
+    let (descriptor, user) = owner_descriptor(true)?;
+    let owner = owner_of(directory.as_raw_handle(), SE_FILE_OBJECT)?;
+    if !super::owner_matches_user(&owner, &user)? {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    reset_access_list(directory, &descriptor)?;
+    let resolved = final_path(directory)?;
+    drop(held);
+    Ok(resolved)
+}
+
+fn ancestors_inclusive(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut chain = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        chain.push(cursor.clone());
+        match cursor.parent() {
+            Some(parent) if parent != cursor && !parent.as_os_str().is_empty() => {
+                cursor = parent.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    if chain.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"));
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn directory_is_inside(path: &Path, ancestor: &Path) -> bool {
+    let path = normalized_path(path);
+    let ancestor = normalized_path(ancestor);
+    path == ancestor || path.strip_prefix(&ancestor).is_some_and(|rest| rest.starts_with('\\'))
+}
+
+fn normalized_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    text.trim_end_matches('\\').to_lowercase()
 }
 
 /// Create one directory with the owner-only, inheritable descriptor. Fails if it exists.
@@ -207,6 +393,7 @@ pub(crate) fn owner_matches_user(owner: &Sid, user: &Sid) -> io::Result<bool> {
 ///
 /// # Errors
 /// Returns the OS error when the path cannot be opened or its owner cannot be read.
+#[cfg(test)]
 pub(crate) fn path_owner(path: &Path) -> io::Result<Sid> {
     let file = open_for_facts(path, READ_CONTROL)?;
     owner_of(file.as_raw_handle(), SE_FILE_OBJECT)
@@ -238,6 +425,13 @@ fn open_for_facts(path: &Path, access: u32) -> io::Result<File> {
 /// # Errors
 /// Returns the OS error when the information cannot be read.
 pub(crate) fn identity(file: &File) -> io::Result<(u64, u64)> {
+    let information = file_information(file)?;
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((u64::from(information.dwVolumeSerialNumber), index))
+}
+
+fn file_information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     // SAFETY: the all-zero bit pattern is a valid BY_HANDLE_FILE_INFORMATION.
     let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: `file` is an open handle and `information` is a writable structure of the
@@ -245,9 +439,41 @@ pub(crate) fn identity(file: &File) -> io::Result<(u64, u64)> {
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let index =
-        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    Ok((u64::from(information.dwVolumeSerialNumber), index))
+    Ok(information)
+}
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT` on this handle. The handle must have been opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, or a junction would already have been followed.
+///
+/// # Errors
+/// Returns the OS error when the information cannot be read.
+pub(crate) fn is_reparse_point(file: &File) -> io::Result<bool> {
+    Ok(file_information(file)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut buffer = vec![0_u16; 512];
+    loop {
+        // SAFETY: `file` is an open handle. `buffer` is writable and its length fits in `u32`
+        // because it starts at 512 and only grows by the size the call reports.
+        let written = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).unwrap_or(u32::MAX),
+                VOLUME_NAME_DOS,
+            )
+        };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = usize::try_from(written).map_err(io::Error::other)?;
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer.resize(written + 1, 0);
+    }
 }
 
 /// Identity of the object at `path`, without following a final reparse point. `None` when the
@@ -317,4 +543,115 @@ pub(crate) fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
         CoTaskMemFree(text.cast());
         result
     }
+}
+
+/// Replace only the access list. The owner is left as it is.
+///
+/// # Errors
+/// Returns the OS error when the path cannot be opened or the list cannot be written.
+#[cfg(test)]
+pub(crate) fn replace_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+    let descriptor = super::SecurityDescriptor::from_sddl(sddl)?;
+    let file = open_for_facts(path, READ_CONTROL | WRITE_DAC)?;
+    if is_reparse_point(&file)? {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "reparse point"));
+    }
+    reset_access_list(&file, &descriptor)
+}
+
+#[cfg(test)]
+unsafe extern "system" {
+    fn DeviceIoControl(
+        device: *mut core::ffi::c_void,
+        code: u32,
+        input: *const u8,
+        input_size: u32,
+        output: *mut u8,
+        output_size: u32,
+        returned: *mut u32,
+        overlapped: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+/// Create a directory junction `link` -> `target`. This does not need the symbolic-link
+/// privilege. `link` must not exist; `target` must be an existing directory.
+///
+/// # Errors
+/// Returns the OS error when the junction cannot be created.
+#[cfg(test)]
+pub(crate) fn plant_mount_point(link: &Path, target: &Path) -> io::Result<()> {
+    std::fs::create_dir(link)?;
+    let target = std::path::absolute(target)?;
+    let substitute = format!(r"\??\{}", target.display());
+    let print = target.display().to_string();
+    let substitute: Vec<u16> = substitute.encode_utf16().collect();
+    let print: Vec<u16> = print.encode_utf16().collect();
+    let substitute_bytes = u16::try_from(substitute.len() * 2).map_err(io::Error::other)?;
+    let print_bytes = u16::try_from(print.len() * 2).map_err(io::Error::other)?;
+    let print_offset = substitute_bytes
+        .checked_add(2)
+        .ok_or_else(|| io::Error::other("reparse buffer is too large"))?;
+    let data_len = 8_u16
+        .checked_add(substitute_bytes)
+        .and_then(|len| len.checked_add(2))
+        .and_then(|len| len.checked_add(print_bytes))
+        .and_then(|len| len.checked_add(2))
+        .ok_or_else(|| io::Error::other("reparse buffer is too large"))?;
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&0xA000_0003_u32.to_le_bytes());
+    buffer.extend_from_slice(&data_len.to_le_bytes());
+    buffer.extend_from_slice(&0_u16.to_le_bytes());
+    buffer.extend_from_slice(&0_u16.to_le_bytes());
+    buffer.extend_from_slice(&substitute_bytes.to_le_bytes());
+    buffer.extend_from_slice(&print_offset.to_le_bytes());
+    buffer.extend_from_slice(&print_bytes.to_le_bytes());
+    for unit in &substitute {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    buffer.extend_from_slice(&0_u16.to_le_bytes());
+    for unit in &print {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    buffer.extend_from_slice(&0_u16.to_le_bytes());
+    let wide = extended(link)?;
+    // SAFETY: `wide` is NUL-terminated. Backup semantics is the documented way to open a
+    // directory, and `FILE_FLAG_OPEN_REPARSE_POINT` keeps this call on the empty directory
+    // rather than a link. The handle is closed at the end of this function.
+    super::note_call("CreateFileW(plant_mount_point)");
+    let file = unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        File::from_raw_handle(handle)
+    };
+    let mut returned = 0_u32;
+    let input_size = u32::try_from(buffer.len()).map_err(io::Error::other)?;
+    // SAFETY: `file` is the directory handle above. `buffer` is a mount-point reparse buffer
+    // of `input_size` bytes. No output buffer is required for this control code.
+    super::note_call("DeviceIoControl(FSCTL_SET_REPARSE_POINT)");
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            0x0009_00A4,
+            buffer.as_ptr(),
+            input_size,
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

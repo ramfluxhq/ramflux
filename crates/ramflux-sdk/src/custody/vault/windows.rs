@@ -164,33 +164,36 @@ impl WindowsDpapiVault {
         Ok(Zeroizing::new(secret.to_vec()))
     }
 
-    /// The vault directory exists, is owner-only, and belongs to the current user.
+    /// The vault directory exists, is owner-only, belongs to the current user, and is not a
+    /// reparse point. A junction is refused before its access list is rewritten and before
+    /// any blob is written through it.
     fn ready(&self) -> Result<(), SdkError> {
-        match fs::create_owner_only_dir(&self.directory) {
-            Ok(()) => {}
-            Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
+        let absolute = match std::path::absolute(&self.directory) {
+            Ok(path) => path,
+            Err(error) => return Err(unavailable(error)),
+        };
+        match crate::platform::pipe::win32::files::prepare_owner_only_directory(&absolute) {
+            Ok(resolved) => fs::refuse_roaming(&resolved).map_err(|error| {
                 #[cfg(test)]
                 remember_unavailable(&format!(
-                    "create_owner_only_dir: {error} | call={}",
+                    "refuse_roaming: {error} | call={}",
                     crate::platform::pipe::win32::last_call()
                 ));
                 #[cfg(not(test))]
                 let _ = error;
-                return Err(SdkError::CustodyVaultUnavailable);
+                SdkError::CustodyVaultUnavailable
+            }),
+            Err(error) => {
+                #[cfg(test)]
+                remember_unavailable(&format!(
+                    "prepare_owner_only_directory: {error} | call={}",
+                    crate::platform::pipe::win32::last_call()
+                ));
+                #[cfg(not(test))]
+                let _ = error;
+                Err(SdkError::CustodyVaultUnavailable)
             }
         }
-        // Refuses a directory another user owns before any blob is written into it.
-        fs::set_owner_only_dir(&self.directory).map_err(|error| {
-            #[cfg(test)]
-            remember_unavailable(&format!(
-                "set_owner_only_dir: {error} | call={}",
-                crate::platform::pipe::win32::last_call()
-            ));
-            #[cfg(not(test))]
-            let _ = error;
-            SdkError::CustodyVaultUnavailable
-        })
     }
 
     /// Insert only. The blob is written to a private temporary name, flushed, and moved to

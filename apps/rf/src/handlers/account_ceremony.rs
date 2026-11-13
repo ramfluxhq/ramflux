@@ -4,9 +4,13 @@
 //! Explicit local ceremonies read secret input only from the controlling terminal.
 use crate::RfError;
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{IsTerminal, Read, Write},
     path::Path,
+};
+#[cfg(not(windows))]
+use std::{
+    fs::OpenOptions,
     process::{Command, Stdio},
 };
 use zeroize::Zeroizing;
@@ -18,27 +22,55 @@ struct Terminal {
 }
 impl Terminal {
     fn open() -> Result<Self, RfError> {
-        let terminal =
-            OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| {
+        #[cfg(windows)]
+        {
+            let input = super::windows_console::open_input().map_err(|_| {
                 RfError::Message("This ceremony requires a local interactive terminal.".into())
             })?;
-        if !terminal.is_terminal() {
-            return Err(RfError::Message("A local interactive terminal is required.".into()));
+            let output = super::windows_console::open_output().map_err(|_| {
+                RfError::Message("This ceremony requires a local interactive terminal.".into())
+            })?;
+            if !input.is_terminal() {
+                return Err(RfError::Message("A local interactive terminal is required.".into()));
+            }
+            super::windows_console::disable_line_input(&input)
+                .map_err(|_| RfError::Message("Could not protect terminal input.".into()))?;
+            return Ok(Self { input, output, echo_disabled: false });
         }
-        Ok(Self { input: terminal.try_clone()?, output: terminal, echo_disabled: false })
+        #[cfg(not(windows))]
+        {
+            let terminal =
+                OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| {
+                    RfError::Message("This ceremony requires a local interactive terminal.".into())
+                })?;
+            if !terminal.is_terminal() {
+                return Err(RfError::Message("A local interactive terminal is required.".into()));
+            }
+            Ok(Self { input: terminal.try_clone()?, output: terminal, echo_disabled: false })
+        }
     }
     fn echo(&mut self, enabled: bool) -> Result<(), RfError> {
-        let status = Command::new("stty")
-            .arg(if enabled { "echo" } else { "-echo" })
-            .stdin(Stdio::from(self.input.try_clone()?))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(RfError::Message("Could not protect terminal input.".into()));
+        #[cfg(windows)]
+        {
+            super::windows_console::set_echo(&self.input, enabled)
+                .map_err(|_| RfError::Message("Could not protect terminal input.".into()))?;
+            self.echo_disabled = !enabled;
+            return Ok(());
         }
-        self.echo_disabled = !enabled;
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            let status = Command::new("stty")
+                .arg(if enabled { "echo" } else { "-echo" })
+                .stdin(Stdio::from(self.input.try_clone()?))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !status.success() {
+                return Err(RfError::Message("Could not protect terminal input.".into()));
+            }
+            self.echo_disabled = !enabled;
+            Ok(())
+        }
     }
     fn line(&mut self, prompt: &str, hidden: bool) -> Result<Zeroizing<String>, RfError> {
         if hidden {
