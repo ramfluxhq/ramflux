@@ -250,7 +250,7 @@ mod tests {
     }
     #[test]
     fn engine_descriptor_matches_the_locked_dependency_graph() {
-        let lock = include_str!("../../../Cargo.lock");
+        let lock = include_str!("../../../Cargo.lock").replace("\r\n", "\n");
         for name in ["rquickjs", "rquickjs-core", "rquickjs-sys"] {
             assert!(
                 lock.contains(&format!("name = \"{name}\"\nversion = \"0.14.0\"")),
