@@ -126,7 +126,6 @@ impl LiveCall {
         call.seen.insert(control.sender.clone(), control.seq);
         call.call_ref.clone_from(&control.call_ref);
         call.call_start.clone_from(&control.call_start);
-        call.media_held = control.call_ref.is_some();
         let ringing = call.control(CallAction::Ringing, now)?;
         call.pending.push(ringing);
         Ok(call)
@@ -187,7 +186,7 @@ impl LiveCall {
             local_generation: 1,
             gateway_generation: None,
             gateway_answered: false,
-            media_held: false,
+            media_held: true,
             #[cfg(feature = "test-support")]
             last_control_error: None,
         }
@@ -202,9 +201,7 @@ impl LiveCall {
                 .checked_add(1)
                 .ok_or_else(|| invalid("local call generation exhausted"))?;
             self.gateway_generation = generation.map(str::to_owned);
-            if self.call_ref.is_some() {
-                self.media_held = true;
-            }
+            self.media_held = true;
         }
         Ok(())
     }
@@ -214,11 +211,9 @@ impl LiveCall {
         self.apply_gateway_resolution(true);
     }
 
-    /// Apply an authenticated `call_resolved` decision. `false` leaves media held.
+    /// Apply an authenticated decision after the caller has checked its complete context.
     pub(crate) fn apply_gateway_resolution(&mut self, media_allowed: bool) {
-        if media_allowed {
-            self.media_held = false;
-        }
+        self.media_held = !media_allowed;
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
         if self.call_ref.is_some() {
@@ -563,13 +558,14 @@ mod resolution_gate {
     }
 
     #[test]
-    fn incoming_call_ref_holds_media_until_the_gateway_accepts() -> Result<(), crate::SdkError> {
+    fn incoming_calls_hold_media_with_or_without_a_reference_until_resolution()
+    -> Result<(), crate::SdkError> {
         let now = 1_700_000_000;
         let plain = LiveCall::incoming(&invite(None, now), endpoint("callee"), now)?;
-        assert!(!plain.media_held);
+        assert!(plain.media_held, "a missing reference cannot grant media authority");
         let mut held =
             LiveCall::incoming(&invite(Some("ref".to_owned()), now), endpoint("callee"), now)?;
-        assert!(held.media_held);
+        assert!(held.media_held, "a reference alone cannot grant media authority");
         assert_eq!(
             held.pending.first().and_then(|control| control.call_ref.as_deref()),
             Some("ref")
@@ -579,6 +575,7 @@ mod resolution_gate {
         assert!(held.answer(now).is_err());
         held.allow_media();
         held.answer(now)?;
+        assert!(held.media_held, "a new answer control requires a new correlated decision");
         let answer = held.pending.last().ok_or_else(|| super::invalid("answer missing"))?;
         assert_eq!(super::super::resolution_terminal(answer).as_deref(), Some("answer"));
         let mut covered = invite(Some("ref".to_owned()), now);

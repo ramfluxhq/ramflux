@@ -281,7 +281,6 @@ impl AccountSessionHarness {
                 crate::time::now_unix_timestamp(),
             )?;
             call.pin_peer(peer.clone(), device.branch_public_key.clone())?;
-            call.media_held = true;
             account.client.persist_call_row(&call.row)?;
             account.client.voice_calls.insert(id.clone(), call);
             ids.push(id);
