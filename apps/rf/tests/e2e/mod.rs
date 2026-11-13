@@ -1395,6 +1395,10 @@ impl PtySession {
     /// Prompt wait used by the born-v3 ceremony. Tracks PTY descendants on every
     /// poll so Drop can still reap a reparented `script` child after the leader exits.
     fn wait_until(&mut self, needle: &str, from: usize, deadline: Instant) -> Result<usize> {
+        // On Windows the pipe reader can still be copying the last write when the
+        // process has already exited. One pass through the sleep below lets that land.
+        #[cfg(windows)]
+        let mut saw_exit = false;
         loop {
             self.group.track_descendants();
             {
@@ -1409,7 +1413,12 @@ impl PtySession {
                 if let Some(index) = buffer.get(from..).and_then(|slice| slice.find(needle)) {
                     return Ok(from + index + needle.len());
                 }
-                return Err(format!("ceremony exited {status} before {needle:?}: {buffer}").into());
+                if saw_exit {
+                    return Err(
+                        format!("ceremony exited {status} before {needle:?}: {buffer}").into()
+                    );
+                }
+                saw_exit = true;
             }
             if Instant::now() >= deadline {
                 let buffer = lock_buf(&self.output);
