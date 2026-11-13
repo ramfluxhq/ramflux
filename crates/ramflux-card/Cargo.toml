@@ -1,0 +1,27 @@
+[package]
+name = "ramflux-card"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+c-abi = []
+
+[dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "properties"] }
+rquickjs-core = { version = "=0.14.0", default-features = false }
+rquickjs-sys = "=0.14.0"
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+web-time = "=1.1.0"
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "properties", "bindgen"] }
+
+[lints]
+workspace = true

@@ -22,6 +22,7 @@ default-members = [
     "apps/ramflux-retention",
 ]
 members = [
+    "crates/ramflux-card",
     "tools/message-schema",
     "crates/ramflux-client-model",
     "crates/ramflux-core",

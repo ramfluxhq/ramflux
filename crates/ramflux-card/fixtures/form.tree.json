@@ -1,0 +1,36 @@
+{
+  "root": {
+    "key": "root",
+    "kind": "column",
+    "text": "",
+    "value": "",
+    "action": null,
+    "children": [
+      {
+        "key": "profile",
+        "kind": "form",
+        "text": "Profile",
+        "value": "",
+        "action": null,
+        "children": [
+          {
+            "key": "profile:field",
+            "kind": "text_field",
+            "text": "Name",
+            "value": "Ada",
+            "action": null,
+            "children": []
+          },
+          {
+            "key": "profile:submit",
+            "kind": "submit",
+            "text": "save",
+            "value": "",
+            "action": "save",
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}
