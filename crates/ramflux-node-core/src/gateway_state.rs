@@ -19,7 +19,12 @@ pub use session_overlay::GatewaySessionCheckpoint;
 mod pre_auth_state;
 #[path = "gateway_store_format.rs"]
 mod store_format;
+#[path = "gateway_write_admission.rs"]
+mod write_admission;
 pub use pre_auth_state::{GatewayAdmissionCheckpoint, PRE_AUTH_CHECKPOINT_SECONDS};
+pub use write_admission::{
+    GATEWAY_NETWORK_WRITE_LIMIT, GatewayManagementAdmission, GatewayWriteAdmission,
+};
 
 use crate::{
     GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_PRE_AUTH_POLICY_KEY, GATEWAY_STATE_TABLE,
@@ -647,7 +652,8 @@ pub struct GatewayRedbStore {
     path: PathBuf,
     replay_config: std::sync::Mutex<Option<GatewayReplayConfig>>,
     write_gate: std::sync::Mutex<()>,
-    async_write_pending: std::sync::atomic::AtomicUsize,
+    network_admission: std::sync::Mutex<write_admission::Pending>,
+    management_pending: std::sync::atomic::AtomicBool,
     #[cfg(any(test, feature = "durability-test-hooks"))]
     writer_attempt: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -662,20 +668,8 @@ pub struct GatewayRedbStore {
 
 #[cfg(any(test, feature = "durability-test-hooks"))]
 struct AdmissionCommitPause {
-    started: std::sync::mpsc::Sender<()>,
+    started: Box<dyn FnOnce() -> Result<(), NodeCoreError> + Send>,
     release: std::sync::mpsc::Receiver<()>,
-}
-
-pub const GATEWAY_NETWORK_WRITE_LIMIT: usize = 8;
-
-/// One bounded queued/running network write; dropping it releases admission even after failure.
-pub struct GatewayWriteAdmission {
-    store: std::sync::Arc<GatewayRedbStore>,
-}
-impl Drop for GatewayWriteAdmission {
-    fn drop(&mut self) {
-        self.store.async_write_pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
 }
 
 /// Acquire before the gateway state mutex; durable I/O then happens after releasing state.
@@ -725,29 +719,6 @@ impl GatewayStoreWriter<'_> {
 }
 
 impl GatewayRedbStore {
-    /// Bound queued/running network offloads per store before spawning blocking work.
-    /// # Errors
-    /// Returns a typed retryable busy result; callers must not spawn work after refusal.
-    pub fn try_admit_async_write(
-        self: &std::sync::Arc<Self>,
-    ) -> Result<GatewayWriteAdmission, NodeCoreError> {
-        self.async_write_pending
-            .try_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |pending| {
-                    pending.checked_add(1).filter(|count| *count <= GATEWAY_NETWORK_WRITE_LIMIT)
-                },
-            )
-            .map_err(|_| NodeCoreError::GatewayWriterBusy)?;
-        Ok(GatewayWriteAdmission { store: std::sync::Arc::clone(self) })
-    }
-    /// Current number of bounded queued/running network writes.
-    #[must_use]
-    pub fn pending_network_writes(&self) -> usize {
-        self.async_write_pending.load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// Serialize durable writers without blocking ordinary state operations on disk I/O.
     /// # Errors
     /// Returns an error if a writer panicked while owning the serialization gate.
@@ -796,7 +767,38 @@ impl GatewayRedbStore {
             .admission_commit_pause
             .lock()
             .map_err(|_| NodeCoreError::Redb("checkpoint hook poisoned".into()))? =
-            Some(AdmissionCommitPause { started, release });
+            Some(AdmissionCommitPause {
+                started: Box::new(move || {
+                    started
+                        .send(())
+                        .map_err(|_| NodeCoreError::Redb("checkpoint observer gone".into()))
+                }),
+                release,
+            });
+        Ok(())
+    }
+
+    /// Pause a real commit with a bounded observer channel.
+    /// # Errors
+    /// Returns a poisoned test-hook error.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn pause_next_admission_commit_bounded(
+        &self,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), NodeCoreError> {
+        *self
+            .admission_commit_pause
+            .lock()
+            .map_err(|_| NodeCoreError::Redb("checkpoint hook poisoned".into()))? =
+            Some(AdmissionCommitPause {
+                started: Box::new(move || {
+                    started
+                        .try_send(())
+                        .map_err(|_| NodeCoreError::Redb("checkpoint observer unavailable".into()))
+                }),
+                release,
+            });
         Ok(())
     }
 
@@ -816,14 +818,11 @@ impl GatewayRedbStore {
                 .map_err(|_| NodeCoreError::Redb("checkpoint hook poisoned".into()))?
                 .take();
             if let Some(pause) = pause {
-                pause
-                    .started
-                    .send(())
-                    .map_err(|_| NodeCoreError::Redb("checkpoint observer gone".into()))?;
+                (pause.started)()?;
                 pause
                     .release
-                    .recv()
-                    .map_err(|_| NodeCoreError::Redb("checkpoint release gone".into()))?;
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| NodeCoreError::Redb("checkpoint release unavailable".into()))?;
             }
             if self.fail_pre_auth_commit.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
@@ -842,7 +841,8 @@ impl GatewayRedbStore {
             path,
             replay_config: std::sync::Mutex::new(None),
             write_gate: std::sync::Mutex::new(()),
-            async_write_pending: std::sync::atomic::AtomicUsize::new(0),
+            network_admission: std::sync::Mutex::new(write_admission::Pending::default()),
+            management_pending: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "durability-test-hooks"))]
             writer_attempt: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "durability-test-hooks"))]

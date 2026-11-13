@@ -11,17 +11,24 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "itest-http")]
+pub(crate) fn bind_itest_listener(addr: &str) -> anyhow::Result<TcpListener> {
+    let address: std::net::SocketAddr = addr.parse()?;
+    if !address.ip().is_loopback() {
+        return Err(ramflux_node_core::NodeCoreError::ItestListenerNonLoopback.into());
+    }
+    Ok(TcpListener::bind(address)?)
+}
+
+#[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
+    listener: TcpListener,
     router: &RouterMeshClient,
     store: &Arc<ramflux_node_core::GatewayRedbStore>,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     gateway_id: &str,
 ) -> anyhow::Result<()> {
-    let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:18081".to_owned());
-    let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(true)?;
-    tracing::info!(addr, "gateway itest HTTP surface listening");
+    tracing::info!(addr = %listener.local_addr()?, "gateway itest HTTP surface listening");
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         let mut stream = match listener.accept().map(|(stream, _)| stream) {
@@ -94,6 +101,25 @@ pub(crate) fn handle_itest_request(
         path = %request.path,
         "gateway HTTP itest request received"
     );
+    if !stream.local_addr()?.ip().is_loopback() || !stream.peer_addr()?.ip().is_loopback() {
+        return Err(ramflux_node_core::NodeCoreError::ItestListenerNonLoopback.into());
+    }
+    let _registration_write =
+        if request.method == "POST" && request.path == "/mvp6/registration/policy" {
+            match store.try_admit_management_write() {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    ramflux_node_core::write_itest_text_response(
+                        stream,
+                        "503 Service Unavailable",
+                        &error.to_string(),
+                    )?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
     if handle_preauth_control_request(stream, &request, state, store)? {
         return Ok(());
     }
@@ -114,14 +140,25 @@ pub(crate) fn handle_preauth_control_request(
     if request.method == "POST" && request.path == "/mvp6/preauth/policy" {
         let policy: ramflux_node_core::GatewayPreAuthConfig =
             serde_json::from_slice(&request.body)?;
+        let _management = match store.try_admit_management_write() {
+            Ok(admission) => admission,
+            Err(error) => {
+                ramflux_node_core::write_itest_text_response(
+                    stream,
+                    "503 Service Unavailable",
+                    &error.to_string(),
+                )?;
+                return Ok(true);
+            }
+        };
         let writer = store.write_guard()?;
-        let mut gateway = gateway_state(state)?;
-        let mut configured = gateway.clone();
+        let mut configured = { gateway_state(state)?.clone() };
         configured.configure_pre_auth_policy(&policy)?;
         configured.validate_pre_auth_configuration()?;
         let response = ramflux_node_core::GatewayPreAuthConfig::from(configured.pre_auth_policy());
         writer.save_state(&configured)?;
-        *gateway = configured;
+        // Merge only the policy: Open/timers/metrics can advance during durable I/O.
+        gateway_state(state)?.configure_pre_auth_policy(&policy)?;
         ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         return Ok(true);
     }
@@ -489,3 +526,7 @@ pub(crate) fn handle_mvp7_itest_request(
     }
     Ok(())
 }
+
+#[cfg(all(test, feature = "itest-http"))]
+#[path = "itest_management_tests.rs"]
+mod tests;

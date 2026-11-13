@@ -3479,6 +3479,7 @@ dependencies = [
 name = "ramflux-gateway"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "anyhow",
  "compio",
  "ed25519-dalek",
@@ -3519,6 +3520,7 @@ dependencies = [
 name = "ramflux-node-core"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "aes-gcm 0.10.3",
  "arc-swap",
  "blake3",

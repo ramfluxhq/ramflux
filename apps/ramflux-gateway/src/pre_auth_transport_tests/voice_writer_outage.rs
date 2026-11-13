@@ -176,6 +176,9 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
             requests.push((index,request));
         }
         establishment_busy(&fixture).await?;
+        // AUTH has an independent bounded pool: fill it explicitly while all eight
+        // authenticated roots remain queued behind the real durable writer.
+        let unauthenticated = [fixture.context.store.try_admit_async_write()?, fixture.context.store.try_admit_async_write()?];
         // Auth also exposes busy distinctly rather than a terminal establishment refusal.
         let mut joining = fixture.connect(Route::Tcp,"127.0.0.130").await?;
         let joining_open = open("joining-busy",0,None)?;
@@ -187,6 +190,7 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
         cookie(exchange(&fixture, Route::Tcp, "127.0.0.119", open("outage-open", 0, None)?).await?)?;
         assert_eq!(fixture.context.store.durable_commit_count(), before, "uncommitted signed work was acknowledged");
         assert!(tokio::time::timeout(Duration::from_millis(20), response(clients.first_mut().ok_or_else(|| anyhow::anyhow!("first client"))?)).await.is_err(), "signed work answered before commit");
+        drop(unauthenticated);
         finish.send(())?;
         watchdog.join().map_err(|_| anyhow::anyhow!("watchdog panic"))?;
         assert!(recovered.load(Ordering::SeqCst), "network progress required watchdog to release blocked writer");

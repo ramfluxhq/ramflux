@@ -120,13 +120,13 @@ pub fn configured_notify_runtime_shutdown_is_clean(
     Ok(())
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     registration_seed: Option<RegistrationSeed>,
     gateway_tls_probe: Option<GatewayTlsProbe>,
     root: PathBuf,
     config: PathBuf,
-    database: PathBuf,
-    probe_addr: String,
+    pub(crate) database: PathBuf,
+    pub(crate) probe_addr: String,
     probe_udp: bool,
     route_key: PathBuf,
     signing_seed: PathBuf,
@@ -139,7 +139,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(service: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn new(service: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = std::env::temp_dir()
             .join(format!("ramflux-{service}-shutdown-{}-{nonce}", std::process::id()));
@@ -1007,7 +1007,7 @@ fn create_tls_material(root: &Path, service: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn configured_command(
+pub(crate) fn configured_command(
     binary: &str,
     service: &str,
     fixture: &Fixture,

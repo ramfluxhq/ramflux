@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("itest_listener_non_loopback: test HTTP listeners require a loopback address")]
+    ItestListenerNonLoopback,
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(

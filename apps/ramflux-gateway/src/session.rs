@@ -313,7 +313,7 @@ async fn handle_gateway_session_transport_inner(
     let auth_open = open.clone();
     let auth_payload = auth_frame.clone();
     let auth_key = registered_auth_key.clone();
-    let auth_result = crate::durable_work::run(&context, move |context| {
+    let auth_result = crate::durable_work::run(&context, None, move |context| {
         authenticate_gateway_request(context, &auth_open, &auth_payload, &auth_key)
             .map_err(Into::into)
     })
@@ -683,7 +683,7 @@ pub(crate) async fn establish_gateway_session(
     let persisted_open = open.clone();
     let persisted_session = session_id.clone();
     let epoch = auth_frame.device_proof.device_epoch;
-    let resume_token = crate::durable_work::run(context, move |context| {
+    let resume_token = crate::durable_work::run(context, Some(&source_identity), move |context| {
         persist_established_session(
             context,
             &persisted_open,
@@ -1100,9 +1100,10 @@ async fn handle_gateway_relay_token_issue(
     runtime: &GatewaySessionRuntime,
     request: &ramflux_node_core::RelayTokenIssueRequest,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let runtime = runtime.clone();
     let request = request.clone();
-    let result = crate::durable_work::run(context, move |context| {
+    let result = crate::durable_work::run(context, Some(&source), move |context| {
         issue_relay_token_for_authenticated_session(context, &runtime, &request)
     })
     .await;
@@ -1135,9 +1136,10 @@ async fn handle_gateway_relay_token_v3_issue(
     runtime: &GatewaySessionRuntime,
     request: &ramflux_node_core::GatewayRelayTokenV3IssueRequest,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let runtime = runtime.clone();
     let request = request.clone();
-    let result = crate::durable_work::run(context, move |context| {
+    let result = crate::durable_work::run(context, Some(&source), move |context| {
         issue_relay_token_v3_for_authenticated_session(context, &runtime, &request)
     })
     .await;
@@ -1318,6 +1320,7 @@ pub(crate) async fn validate_gateway_session_signed_request_async<T: serde::Seri
     path: &str,
     body: &T,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let (runtime, request, method, path, body) = (
         runtime.clone(),
         signed_request.clone(),
@@ -1325,7 +1328,7 @@ pub(crate) async fn validate_gateway_session_signed_request_async<T: serde::Seri
         path.to_owned(),
         serde_json::to_value(body)?,
     );
-    crate::durable_work::run(context, move |context| {
+    crate::durable_work::run(context, Some(&source), move |context| {
         validate_gateway_session_signed_request(context, &runtime, &request, &method, &path, &body)
     })
     .await
@@ -1423,19 +1426,21 @@ pub(crate) async fn handle_gateway_submit(
     }
     let owned_runtime = runtime.clone();
     let owned_submit = submit.clone();
-    let validated = crate::durable_work::run(context, move |context| {
-        let envelope = crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
-        validate_gateway_session_signed_request(
-            context,
-            &owned_runtime,
-            &owned_submit.signed_request,
-            "POST",
-            "/gateway/session/submit",
-            &owned_submit.envelope,
-        )?;
-        Ok(envelope)
-    })
-    .await;
+    let validated =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            let envelope =
+                crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
+            validate_gateway_session_signed_request(
+                context,
+                &owned_runtime,
+                &owned_submit.signed_request,
+                "POST",
+                "/gateway/session/submit",
+                &owned_submit.envelope,
+            )?;
+            Ok(envelope)
+        })
+        .await;
     let mut envelope = match validated {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -1643,10 +1648,11 @@ pub(crate) async fn handle_gateway_own_device_fanout(
     }
     let owned_runtime = runtime.clone();
     let owned_fanout = fanout.clone();
-    let replay_rejection = crate::durable_work::run(context, move |context| {
-        fanout_replay_rejection(context, &owned_runtime, &owned_fanout)
-    })
-    .await?;
+    let replay_rejection =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            fanout_replay_rejection(context, &owned_runtime, &owned_fanout)
+        })
+        .await?;
     if let Some(reason) = replay_rejection {
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
         return Ok(());
@@ -2061,7 +2067,7 @@ pub(crate) async fn handle_gateway_close(
     reason: String,
 ) -> anyhow::Result<()> {
     let session_id = runtime.session_id.clone();
-    crate::durable_work::run(context, move |context| {
+    crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
         let writer = context.store.write_guard()?;
         let checkpoint = {
             let mut state = gateway_state(&context.state)?;

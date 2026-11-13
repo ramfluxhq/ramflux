@@ -165,7 +165,28 @@ The shared router replay guard retains its pre-existing v2 key isolation/lookup
 until the separate legacy-removal work removes the router store upgrader. Gateway
 format 3 never imports those rows and does not charge ownerless rows to roots.
 
-The test-feature HTTP policy POST remains a CARRY: its existing unauthenticated
-administrative full-state save can hold the global lock during commit. It acquires
-the writer gate before that lock to preserve ordering. Production Open/Auth and
-timer paths do not use that administrative save path.
+Test HTTP policy routes exist only with the non-default `itest-http` feature.
+The listener binds only to a literal loopback address (default `127.0.0.1:18081`);
+non-loopback addresses fail startup with `ItestListenerNonLoopback`. Loopback is
+the test authority boundary; local processes can use these test routes. Release
+and production builds refuse the feature, and CI checks release/deploy build
+commands and the normal production feature graph.
+
+The pre-auth and forwarded registration policy routes share one management-write
+slot. Overlap receives HTTP 503 with retryable `gateway_writer_busy`. A policy
+snapshot is captured under the state mutex, then serialized and committed after
+releasing it while retaining the writer gate. Only the committed policy is merged
+back into live state, preserving concurrent admission, metrics and session work.
+A failed commit leaves live policy unchanged.
+
+Network writes admit at most eight authenticated roots concurrently, with one
+queued/running write per root across all devices and sessions. Unverified AUTH
+uses a separate two-operation budget. No waiting request queue is allocated;
+exhaustion returns typed retryable `GatewayWriterBusy` before spawning work.
+A busy root cannot take other roots' slots; disk failure can still prevent commits.
+
+Fresh databases are initialized, committed and synced under a temporary name in
+the destination directory, then published without replacing an existing store.
+A crash before publication leaves no public partial file; existing unmarked or
+older stores still require explicit reset. SIGTERM during a crash-reservation
+wait drains startup without opening listeners or releasing the crash barrier.
