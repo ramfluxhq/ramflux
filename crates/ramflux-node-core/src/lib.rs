@@ -11,6 +11,7 @@ compile_error!("itest-http must not be enabled in release or production builds")
 
 mod authority_refusal;
 mod config;
+pub mod contact_reach;
 mod durability_io;
 #[cfg(any(test, feature = "durability-test-hooks"))]
 pub mod durability_test_hooks;

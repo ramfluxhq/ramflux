@@ -109,6 +109,7 @@ pub use layer_declaration::DeclarationValidity;
 pub(crate) use layer_declaration::candidate as sign_layer_declaration;
 mod network;
 mod node_pins;
+mod reach;
 pub(crate) mod retry;
 pub use network::{CustodyConnection, CustodyNetworkConfig};
 pub(crate) use node_pins::verify_authority as verify_public_authority;

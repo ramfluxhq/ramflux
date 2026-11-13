@@ -508,6 +508,18 @@ impl CustodyService {
         let Scope { router, store, now, .. } = scope;
         let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
         match action {
+            CustodySessionAction::ContactForeign { request } => {
+                let service = self.reach.as_ref().ok_or(CustodyRefusal::Unsupported)?;
+                let response = service.owner(
+                    store,
+                    &session.device_ref,
+                    &session.session_id,
+                    1,
+                    &request,
+                    now,
+                );
+                Ok(CustodyServerFrame::ContactForeignResult { response: Box::new(response) })
+            }
             CustodySessionAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
             CustodySessionAction::Lookup { device_ref } => {
                 let p = router

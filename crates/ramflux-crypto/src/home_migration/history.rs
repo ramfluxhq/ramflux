@@ -66,6 +66,7 @@ fn certificates(
     a: &Signed<Authorization>,
     at: u64,
     seen: &mut BTreeMap<u64, String>,
+    custodians: &[ramflux_protocol::contact_reach::HistoricalCustodian],
 ) -> Result<u64, CryptoError> {
     let mut previous: Option<&Envelope<MasterCertificate>> = None;
     for cert in &e.management_certificate_chain {
@@ -88,21 +89,26 @@ fn certificates(
     let actor =
         e.actor_certificate.as_ref().ok_or_else(|| reject("migration actor evidence absent"))?;
     let b = &actor.body;
+    let authority = historical_authority(e, at, custodians)?;
+    let human = authority.management_actor_authority(&a.body.actor)?;
+    let actor_manager = &human.envelope().body.master_certificate;
     let manager_hash = object_hash(cert)?;
     if manager_hash != a.body.management_certificate_hash
-        || b.master_certificate_hash != manager_hash
-        || b.account_anchor != a.body.account_anchor
+        || b.master_certificate_hash != object_hash(actor_manager)?
+        || b.account_anchor != a.body.actor.account_anchor
         || b.device_id != a.body.actor.device_id
         || b.device_epoch != a.body.actor.device_epoch
         || b.principal_kind != ramflux_protocol::PrincipalKind::Human
-        || a.body.actor.account_anchor != a.body.account_anchor
         || b.not_before > at
         || at > b.expires_at
         || !b.capabilities.iter().any(|cap| cap == "register")
     {
         return Err(reject("migration historical actor authority mismatch"));
     }
-    crate::custody::verify_home_branch_certificate(actor, &cert.body.self_signing_public_key)?;
+    crate::custody::verify_home_branch_certificate(
+        actor,
+        &actor_manager.body.self_signing_public_key,
+    )?;
     let expected = [
         Signer {
             role: Role::Management,
@@ -125,26 +131,9 @@ fn certificates(
     if a.signers.as_slice() != expected {
         return Err(reject("migration historical signer mismatch"));
     }
-    // A attests that this exact publication was current at commit. Client master
-    // issuance clocks never order historical home records against A's clock.
-    // Verify its cryptographic structure at its own publication time, while the
-    // actor's branch lease below remains checked at the node-signed commit time.
-    let publication_time = e
-        .authority
-        .record
-        .body
-        .issued_at
-        .max(e.authority.record.body.master_certificate.body.issued_at)
-        .max(at);
-    let authority = crate::custody::verify_record(
-        &e.authority.record,
-        publication_time,
-        e.authority.compacted_ids.as_deref(),
-        None,
-    )?;
     if object_hash(authority.envelope())? != a.body.authority_record_hash
         || object_hash(&authority.envelope().body.master_certificate)? != manager_hash
-        || authority.authorize(&a.body.actor, "register", at)? != b
+        || human.authorize(&a.body.actor, "register", at)? != b
     {
         return Err(reject("migration historical authority membership mismatch"));
     }
@@ -155,6 +144,7 @@ fn verify_genesis(
     e: &RecordEvidence,
     pin: (&str, &str),
     now: u64,
+    custodians: &[ramflux_protocol::contact_reach::HistoricalCustodian],
 ) -> Result<(u64, u64), CryptoError> {
     let HomeRecord::Genesis { genesis } = &e.record else {
         return Err(reject("migration genesis required"));
@@ -168,12 +158,7 @@ fn verify_genesis(
     {
         return Err(reject("migration genesis base mismatch"));
     }
-    let authority = crate::custody::verify_record(
-        &e.authority.record,
-        now,
-        e.authority.compacted_ids.as_deref(),
-        None,
-    )?;
+    let authority = historical_authority(e, now, custodians)?;
     if object_hash(authority.envelope())? != genesis.body.custody_record_hash
         || authority.envelope().body.account_anchor != genesis.body.account_anchor
     {
@@ -196,6 +181,42 @@ pub fn verify_home_chain(
     stored_base: &RecordEvidence,
     now: u64,
 ) -> Result<VerifiedHome, CryptoError> {
+    verify_home_chain_with_custodians(result, stored_base, &[], now)
+}
+/// Authenticate each external publication using its exact historical human authority.
+/// # Errors
+/// Refuses missing, duplicate, unused or substituted custodian references and invalid chains.
+pub fn verify_home_chain_with_custodians(
+    result: &ResolveResult,
+    stored_base: &RecordEvidence,
+    custodians: &[ramflux_protocol::contact_reach::HistoricalCustodian],
+    now: u64,
+) -> Result<VerifiedHome, CryptoError> {
+    if custodians.len() > 64 {
+        return Err(reject("historical custodian reference capacity"));
+    }
+    let records = std::iter::once(stored_base)
+        .chain(result.predecessors.iter())
+        .chain(std::iter::once(&result.home));
+    let mut needed = std::collections::BTreeSet::new();
+    for e in records {
+        if e.authority.record.body.master_certificate.body.custody_kind
+            == ramflux_protocol::custody::CustodyKind::ExternalHuman
+        {
+            needed.insert(object_hash(&e.authority.record)?);
+        }
+    }
+    let mut supplied = std::collections::BTreeSet::new();
+    for reference in custodians {
+        if !supplied.insert(reference.record_hash.clone())
+            || !needed.contains(&reference.record_hash)
+        {
+            return Err(reject("duplicate or unused historical custodian"));
+        }
+    }
+    if supplied != needed {
+        return Err(reject("missing historical custodian evidence"));
+    }
     // The retained record supplies a single consistent hash, node pin and manager floor.
     // Callers cannot combine a genuine cached hash with a substituted source signing key.
     let hash = record_hash(&stored_base.record)?;
@@ -210,7 +231,7 @@ pub fn verify_home_chain(
             key,
             registered_at,
         )?;
-        verify_genesis(stored_base, (node, key), registered_at)?;
+        verify_genesis(stored_base, (node, key), registered_at, custodians)?;
     }
     let trust = HomeTrust {
         account_anchor: stored_base.record.account_anchor(),
@@ -221,7 +242,7 @@ pub fn verify_home_chain(
         cached_manager_range: manager.body.range_index,
         cached_manager_certificate_hash: Some(&manager_hash),
     };
-    let mut verified = verify_retained_chain(result, &trust, now)?;
+    let mut verified = verify_retained_chain(result, &trust, now, custodians)?;
     let mut records = vec![stored_base.clone()];
     for record in result.predecessors.iter().chain(std::iter::once(&result.home)) {
         if records.last().is_none_or(|last| record.record.epoch() > last.record.epoch()) {
@@ -235,6 +256,7 @@ fn verify_retained_chain(
     result: &ResolveResult,
     trust: &HomeTrust<'_>,
     now: u64,
+    custodians: &[ramflux_protocol::contact_reach::HistoricalCustodian],
 ) -> Result<VerifiedHome, CryptoError> {
     if result.predecessors.len() + 1 > MAX_CHAIN_RECORDS
         || ramflux_protocol::canonical_json_bytes(result)?.len() > MAX_RESOLVE_BYTES
@@ -266,8 +288,13 @@ fn verify_retained_chain(
             }
             if let HomeRecord::Committed { authorization, commit_proof } = &e.record {
                 committed_at = commit_proof.body.committed_at;
-                manager_range =
-                    certificates(e, authorization, commit_proof.body.committed_at, &mut seen)?;
+                manager_range = certificates(
+                    e,
+                    authorization,
+                    commit_proof.body.committed_at,
+                    &mut seen,
+                    custodians,
+                )?;
             }
             continue;
         }
@@ -277,7 +304,8 @@ fn verify_retained_chain(
                 if hash.is_some() || epoch != 0 {
                     return Err(reject("migration genesis base mismatch"));
                 }
-                (committed_at, manager_range) = verify_genesis(e, (&node_id, &node_key), now)?;
+                (committed_at, manager_range) =
+                    verify_genesis(e, (&node_id, &node_key), now, custodians)?;
             }
             HomeRecord::Committed { authorization, commit_proof } => {
                 let a = &authorization.body;
@@ -308,7 +336,7 @@ fn verify_retained_chain(
                 }
                 authorization_bounds(a, c.committed_at)?;
                 verify_node(commit_proof, &node_id, &node_key)?;
-                let range = certificates(e, authorization, c.committed_at, &mut seen)?;
+                let range = certificates(e, authorization, c.committed_at, &mut seen, custodians)?;
                 if range < manager_range {
                     return Err(reject("migration management range decreased"));
                 }
@@ -369,4 +397,36 @@ pub fn activation_allowed(
         return Err(reject("migration activation stale or forked"));
     }
     Ok(())
+}
+
+fn historical_authority(
+    e: &RecordEvidence,
+    at: u64,
+    custodians: &[ramflux_protocol::contact_reach::HistoricalCustodian],
+) -> Result<crate::custody::VerifiedRecord, CryptoError> {
+    let timestamp = at
+        .max(e.authority.record.body.issued_at)
+        .max(e.authority.record.body.master_certificate.body.issued_at);
+    let hash = object_hash(&e.authority.record)?;
+    if e.authority.record.body.master_certificate.body.custody_kind
+        == ramflux_protocol::custody::CustodyKind::ExternalHuman
+    {
+        let reference = custodians
+            .iter()
+            .find(|r| r.record_hash == hash)
+            .ok_or_else(|| reject("historical custodian required"))?;
+        if reference.authority.publication != e.authority
+            || reference.authority.custodian_publication.is_none()
+        {
+            return Err(reject("historical agent publication substituted"));
+        }
+        crate::custody::verify_publication(&reference.authority, timestamp)
+    } else {
+        crate::custody::verify_record(
+            &e.authority.record,
+            timestamp,
+            e.authority.compacted_ids.as_deref(),
+            None,
+        )
+    }
 }

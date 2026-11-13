@@ -82,6 +82,8 @@ impl std::fmt::Display for GeneratedRefusalCode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("contact reach refused: {0:?}")]
+    ReachRefused(ramflux_protocol::contact_reach::Reason),
     #[error("priority session calls cannot await account writer checkpoints")]
     PriorityWriterAccess,
     #[error("gateway_writer_busy: retryable")]

@@ -858,7 +858,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                     if !*closed.borrow() { let _ = closed.changed().await; }
                 } else { std::future::pending::<()>().await; }
             } => return Ok(()),
-            bytes = recv.recv_frame() => bytes,
+            bytes = async {
+                if native.is_some() { recv.recv_custody_frame().await } else { recv.recv_frame().await }
+            } => bytes,
         };
         let bytes = match incoming {
             Ok(bytes) => bytes,
@@ -867,6 +869,14 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 return Ok(());
             }
         };
+        if crate::contact_reach::recognizes(&bytes) {
+            let Some(_request) = ramflux_node_core::begin_service_request() else {
+                return Ok(());
+            };
+            crate::contact_reach::handle(&bytes, &send, &context, &runtime, native.as_ref())
+                .await?;
+            continue;
+        }
         if bytes.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP
             || crate::session_push::recognizes(&bytes, runtime.session_push.is_some())
         {
@@ -937,6 +947,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {
             match frame {
+                ramflux_node_core::GatewayClientFrame::ContactForeign { .. } => {
+                    anyhow::bail!("invalid contact reach carrier")
+                }
                 ramflux_node_core::GatewayClientFrame::Submit { submit } => {
                     handle_gateway_submit(&send, &context, &runtime, &submit).await?;
                 }

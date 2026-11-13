@@ -51,6 +51,7 @@ pub use client::home_migration::{
 };
 pub mod attachment_renewal;
 pub mod attachment_retirement;
+pub mod contact_reach;
 pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};

@@ -47,6 +47,43 @@ impl CapacityPressure {
     }
 }
 impl VerifiedRecord {
+    /// Select the authenticated human authority that owns a management actor.
+    /// # Errors
+    /// Refuses a device other than the current human primary.
+    pub fn management_actor_authority(&self, actor: &DeviceRef) -> Result<&Self, CryptoError> {
+        let manager = self.human_custodian.as_deref().unwrap_or(self);
+        if actor != &self.envelope.body.master_certificate.body.primary_device_ref
+            || actor != &manager.envelope.body.master_certificate.body.primary_device_ref
+        {
+            return Err(reject("management actor is not the current human primary"));
+        }
+        Ok(manager)
+    }
+    /// Verify the currently certified human primary for management of this account.
+    /// For an externally managed account the independently verified human authority,
+    /// rather than a body-supplied root, owns the approving device.
+    /// # Errors
+    /// Refuses linked branches, unavailable scopes and revoked or expired custodians.
+    pub fn authorize_primary_management(
+        &self,
+        actor: &DeviceRef,
+        scope: &str,
+        now: u64,
+    ) -> Result<&BranchCertificate, CryptoError> {
+        let cert = &self.envelope.body.master_certificate.body;
+        if actor != &cert.primary_device_ref || !cert.scopes.iter().any(|s| s == scope) {
+            return Err(reject("management requires current certified primary and scope"));
+        }
+        if let Some(human) = &self.human_custodian {
+            let primary = &human.envelope.body.master_certificate.body.primary_device_ref;
+            if actor != primary {
+                return Err(reject("management requires current human primary"));
+            }
+            human.authorize(actor, "register", now)
+        } else {
+            self.authorize(actor, "register", now)
+        }
+    }
     #[must_use]
     pub const fn envelope(&self) -> &Envelope<DeviceSet> {
         &self.envelope

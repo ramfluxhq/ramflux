@@ -572,6 +572,28 @@ impl RouterHandle {
             },
         )
     }
+
+    pub(crate) fn contact_owner(
+        &self,
+        request: &ramflux_protocol::contact_reach::RecipientRequest,
+    ) -> ramflux_protocol::contact_reach::RecipientResponse {
+        use ramflux_protocol::contact_reach::*;
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map_or_else(
+            || RecipientResponse {
+                kind: OwnerResultKind::OwnerResult,
+                request_id: request.request_id.clone(),
+                result: OperationResult::Error {
+                    reason: Reason::FeatureDisabled,
+                    retry_after_ms: None,
+                    current_revision: None,
+                },
+            },
+            |service| {
+                service.contact_owner(self.store(), request, ramflux_node_core::now_unix_seconds())
+            },
+        )
+    }
 }
 
 impl RouterHandle {

@@ -62,9 +62,7 @@ pub(crate) fn verify_home_management_certificate(
     anchor: &str,
 ) -> Result<(), crate::CryptoError> {
     validate::master_body(&cert.body)?;
-    if cert.body.account_anchor != anchor
-        || cert.body.custody_kind != ramflux_protocol::custody::CustodyKind::LocalHuman
-    {
+    if cert.body.account_anchor != anchor {
         return Err(validate::reject("migration historical manager anchor/kind mismatch"));
     }
     validate::signature(

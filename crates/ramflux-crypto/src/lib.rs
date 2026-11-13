@@ -5,6 +5,7 @@
 pub mod agent_profile;
 
 pub mod backup_stream;
+pub mod contact_reach;
 pub mod custody;
 mod device_reference;
 pub mod dm_fs_v3;

@@ -55,6 +55,7 @@ pub struct CustodyService {
     leases: Mutex<CustodyLeases>,
     admission: Mutex<()>,
     migration: Option<crate::HomeMigrationService>,
+    reach: Option<crate::contact_reach::ReachService>,
     pairing: Option<Arc<Mutex<crate::pairing_relay::PairingRelayStore>>>,
 }
 pub(crate) struct ProofFailure {
@@ -106,6 +107,66 @@ fn target(reference: &DeviceRef) -> Result<String, CustodyRefusal> {
         .map_err(invalid)
 }
 impl CustodyService {
+    /// Execute a gateway-derived owner operation after the mesh listener checks its service id.
+    /// Signed management records are independently checked against the current home writer.
+    #[must_use]
+    pub fn contact_owner(
+        &self,
+        store: &RouterRedbStore,
+        request: &ramflux_protocol::contact_reach::RecipientRequest,
+        now: u64,
+    ) -> ramflux_protocol::contact_reach::RecipientResponse {
+        use ramflux_protocol::contact_reach::*;
+        let session = ramflux_protocol::qualified_device_id(
+            &request.actor.account_anchor,
+            &request.actor.device_id,
+        );
+        let result = if let (Some(service), Ok(session)) = (&self.reach, session) {
+            let derived = match &request.operation {
+                Operation::Policy { update } => update.body.account_anchor.as_str(),
+                Operation::ProfilePublish { update, .. } => update.body.account_anchor.as_str(),
+                Operation::Admission { update, .. }
+                | Operation::Start { update, .. }
+                | Operation::Reply { update, .. } => update.body.recipient_root.as_str(),
+                _ => request.actor.account_anchor.as_str(),
+            };
+            if request.recipient_root != derived {
+                OperationResult::Error {
+                    reason: Reason::AnchorMismatch,
+                    retry_after_ms: None,
+                    current_revision: None,
+                }
+            } else {
+                service
+                    .owner(
+                        store,
+                        &request.actor,
+                        &session,
+                        1,
+                        &Request {
+                            request_id: request.request_id.clone(),
+                            session_id: session.clone(),
+                            session_generation: 1,
+                            remaining_ms: request.remaining_ms,
+                            operation: request.operation.clone(),
+                        },
+                        now,
+                    )
+                    .result
+            }
+        } else {
+            OperationResult::Error {
+                reason: Reason::FeatureDisabled,
+                retry_after_ms: None,
+                current_revision: None,
+            }
+        };
+        RecipientResponse {
+            kind: OwnerResultKind::OwnerResult,
+            request_id: request.request_id.clone(),
+            result,
+        }
+    }
     /// Enable only after authenticating the receiving node against an independent pin.
     /// # Errors
     /// Rejects unadvertised no-binding mode and persistence/continuity failures.
@@ -147,6 +208,7 @@ impl CustodyService {
             leases: Mutex::new(CustodyLeases::with_issuance_settings(settings)),
             admission: Mutex::new(()),
             migration: None,
+            reach: None,
             pairing: None,
         })
     }
@@ -195,6 +257,12 @@ impl CustodyService {
             || service.node.public_key() != self.node.envelope().body.node_signing_public_key
         {
             return Err(CustodyRefusal::BindingRefused);
+        }
+        if crate::contact_reach::enabled().map_err(persistence)? {
+            self.reach = Some(
+                crate::contact_reach::ReachService::new((*service.node).clone())
+                    .map_err(persistence)?,
+            );
         }
         self.migration = Some(service);
         Ok(self)

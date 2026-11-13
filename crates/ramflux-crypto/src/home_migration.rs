@@ -10,7 +10,7 @@ use crate::{CryptoError, DeviceBranch, custody::VerifiedRecord};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 pub use history::*;
 use ramflux_protocol::{
-    custody::{CustodyKind, object_hash},
+    custody::object_hash,
     encode_base64url,
     home_migration::{
         Authorization, MAX_MESSAGE_BYTES, Message, Role, SKEW_SECONDS, Signed, Signer, SignerKey,
@@ -200,6 +200,11 @@ fn actor_signer(
     now: u64,
     capability: &str,
 ) -> Result<Signer, CryptoError> {
+    let authority = if capability == "register" {
+        authority.management_actor_authority(reference)?
+    } else {
+        authority
+    };
     let branch = authority.authorize(reference, capability, now)?;
     if now < branch.not_before || now > branch.expires_at {
         return Err(reject("migration actor lease expired"));
@@ -232,8 +237,6 @@ pub(crate) fn authorization_signers(
     if record.body.account_anchor != body.account_anchor
         || object_hash(record)? != body.authority_record_hash
         || object_hash(cert)? != body.management_certificate_hash
-        || cert.body.custody_kind != CustodyKind::LocalHuman
-        || record.body.principal_kind != ramflux_protocol::PrincipalKind::Human
     {
         return Err(reject("migration current custody authority mismatch"));
     }

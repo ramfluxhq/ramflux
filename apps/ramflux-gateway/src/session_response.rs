@@ -29,6 +29,7 @@ pub(crate) fn durable_rejection_reason(context: &str, error: &anyhow::Error) -> 
 pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'static str {
     use ramflux_node_core::GatewayClientFrame as Frame;
     match frame {
+        Frame::ContactForeign { .. } => "contact_foreign",
         Frame::PushRouteRegister { .. } => "push_route_register",
         Frame::PushRouteDeregister { .. } => "push_route_deregister",
         Frame::VoiceLease { .. } => "voice_lease",

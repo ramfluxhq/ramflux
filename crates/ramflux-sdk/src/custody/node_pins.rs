@@ -45,6 +45,9 @@ fn create(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     }
 }
 impl NodePins {
+    pub(super) fn public_key(&self) -> &str {
+        &self.public
+    }
     pub(super) fn new(root: &Path, node_id: &str, public: &str) -> Result<Self, SdkError> {
         let id = ramflux_crypto::blake3_256_base64url(
             "ramflux.identity.node_pin_path.v1",

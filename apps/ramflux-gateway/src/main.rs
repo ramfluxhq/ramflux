@@ -180,6 +180,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     shutdown.wait_and_finalize(|| Ok(())).map_err(Into::into)
 }
 
+mod contact_reach;
 mod device_set_limit;
 mod durable_work;
 mod startup_admission;

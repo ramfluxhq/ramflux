@@ -161,6 +161,7 @@ pub use identity_name::{
 };
 pub use identity_profile::{SignedIdentityProfile, identity_profile_signing_bytes};
 
+pub mod contact_reach;
 pub mod identity_profile_v2;
 pub mod username_directory;
 

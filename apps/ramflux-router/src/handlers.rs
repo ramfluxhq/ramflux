@@ -611,6 +611,23 @@ fn handle_mesh_request_inner(
         ));
     }
 
+    if method == "POST" && path == ramflux_protocol::contact_reach::RECIPIENT_PATH {
+        if peer_service_id != "ramflux-gateway" {
+            return Ok(MeshResponse::text(
+                "403 Forbidden",
+                "contact owner requires gateway identity",
+            ));
+        }
+        let request = ramflux_protocol::contact_reach::decode(
+            &body,
+            ramflux_protocol::contact_reach::MAX_FRAME_BYTES,
+        )?;
+        return Ok(MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&router.contact_owner(&request))?,
+        ));
+    }
+
     if method == "POST" && path == "/mvp1/envelope-authority" {
         if peer_service_id != "ramflux-federation" {
             anyhow::bail!("source authority refresh requires federation peer");

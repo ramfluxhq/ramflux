@@ -108,6 +108,7 @@ impl CustodyProofAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodySessionAction {
+    ContactForeign { request: Box<crate::contact_reach::Request> },
     Lookup { device_ref: DeviceRef },
     Submit { envelope: Box<crate::Envelope> },
     Inbox { after_seq: u64, limit: u32 },
@@ -273,6 +274,9 @@ pub struct CustodyManifestDevice {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyServerFrame {
+    ContactForeignResult {
+        response: Box<crate::contact_reach::Response>,
+    },
     NodeIdentity {
         record: Box<Envelope<NodeIdentityRecord>>,
         audience: String,

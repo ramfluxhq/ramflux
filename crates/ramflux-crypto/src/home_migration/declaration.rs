@@ -8,7 +8,7 @@ use crate::{
     custody::{SelfSigningKey, VerifiedRecord},
 };
 use ramflux_protocol::{
-    custody::{CustodyKind, object_hash},
+    custody::object_hash,
     home_migration::{HomeDeclarationV1, Role, SKEW_SECONDS, Signed, Signer, SignerKey},
 };
 
@@ -24,11 +24,10 @@ fn declaration_signer(
         || body.account_anchor != record.body.account_anchor
         || body.home_node != node
         || body.created_at > now.saturating_add(SKEW_SECONDS)
-        || cert.body.custody_kind != CustodyKind::LocalHuman
-        || record.body.principal_kind != ramflux_protocol::PrincipalKind::Human
     {
         return Err(reject("home declaration current master or home mismatch"));
     }
+    authority.authorize_primary_management(&cert.body.primary_device_ref, "device_set", now)?;
     Ok(Signer {
         role: Role::Management,
         key: SignerKey::MasterCertifiedHome {
