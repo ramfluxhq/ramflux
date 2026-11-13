@@ -34,6 +34,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
+#[path = "pairing_continuity_tests/native_devices.rs"]
+mod native_devices;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 struct Continuity {
@@ -46,6 +49,7 @@ struct Continuity {
     native: Arc<ProofPairingNative>,
     secondary_native: Arc<ProofPairingNative>,
     published: PublishedPrimary,
+    config: PairingConfig,
     _env: PairingEnv,
     _node: NodeMesh,
     _tls: crate::test_directories::TestDirectory,
@@ -344,7 +348,7 @@ impl Continuity {
                 },
                 None,
                 relay as _,
-                config,
+                config.clone(),
             ),
             clock,
             store: Arc::clone(&node.store),
@@ -353,6 +357,7 @@ impl Continuity {
             native,
             secondary_native,
             published,
+            config,
             _env: env,
             _node: node,
             _tls: tls_root,

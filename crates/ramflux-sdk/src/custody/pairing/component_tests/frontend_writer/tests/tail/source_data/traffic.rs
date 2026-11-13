@@ -35,7 +35,10 @@ impl Scope<'_> {
         frame: &CustodyClientFrame,
         exporter: Option<[u8; 32]>,
     ) -> Result<CustodyServerFrame, Box<dyn std::error::Error>> {
-        let request = decode(&serde_json::to_vec(frame)?, MAX_CUSTODY_FRAME_BYTES)?;
+        let request = ramflux_protocol::custody::decode(
+            &serde_json::to_vec(frame)?,
+            MAX_CUSTODY_FRAME_BYTES,
+        )?;
         let reply = self.service.tls(
             &self.rig.node.core,
             &self.rig.node.disk,
@@ -48,7 +51,10 @@ impl Scope<'_> {
             },
             crate::custody::network_now()?,
         );
-        Ok(decode(&serde_json::to_vec(&reply)?, MAX_CUSTODY_FRAME_BYTES)?)
+        Ok(ramflux_protocol::custody::decode(
+            &serde_json::to_vec(&reply)?,
+            MAX_CUSTODY_FRAME_BYTES,
+        )?)
     }
     fn prove(
         &self,
