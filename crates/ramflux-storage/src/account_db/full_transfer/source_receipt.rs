@@ -28,6 +28,17 @@ impl FullTransferStage<'_> {
         manifest: &SourceManifest,
         rules: &'static [FamilyRule],
     ) -> Result<(), StorageError> {
+        if manifest.manifest.kind == ManifestKind::Tail {
+            return Err(mismatch());
+        }
+        self.retain_own_manifest(manifest, rules, false)
+    }
+    pub(super) fn retain_own_manifest(
+        &mut self,
+        manifest: &SourceManifest,
+        rules: &'static [FamilyRule],
+        tail: bool,
+    ) -> Result<(), StorageError> {
         manifest.validate().map_err(|_| mismatch())?;
         let body = &manifest.manifest;
         let own = self.source_cut_schema(body.snapshot_cut.0, &body.snapshot_id, rules)?;
@@ -64,7 +75,11 @@ impl FullTransferStage<'_> {
         if schema != body.storage_generation.0 || erasure != body.source_erasure_generation.0 {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
-        self.retain_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
+        if tail {
+            self.retain_tail_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
+        } else {
+            self.retain_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
+        }
     }
 
     /// Verify B's receipt against A's OWN retained chain and original SAS branch key,

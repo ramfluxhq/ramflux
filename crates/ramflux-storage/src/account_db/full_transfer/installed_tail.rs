@@ -5,7 +5,13 @@
 use super::FullTransferStage;
 use crate::{AccountDb, StorageError};
 use ramflux_crypto::custody::{VerifiedRecord, pairing::PairingRole};
-use ramflux_protocol::{canonical_json_bytes, custody::pairing::full_transfer::lease::DataGrant};
+use ramflux_protocol::{
+    canonical_json_bytes,
+    custody::pairing::{
+        PairingWire,
+        full_transfer::{SourceManifest, lease::DataGrant},
+    },
+};
 
 /// Public original discovery scope and progress from a retained installed recipient.
 /// No epoch, stage key, signer or publication permission is returned.
@@ -19,7 +25,7 @@ fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
 }
 impl AccountDb {
-    fn installed_tail_stage(
+    pub(super) fn installed_tail_stage(
         &self,
         operation: &str,
         generation: u64,
@@ -76,7 +82,13 @@ impl AccountDb {
         now: u64,
     ) -> Result<FullInstalledTailScope, StorageError> {
         let stage = self.installed_tail_stage(operation, generation, now)?;
-        let manifest = stage.current_forward_manifest()?.ok_or_else(wrong)?;
+        // A durably received tail remains pending until its separate semantic application.
+        // Display the installed prepublication cut rather than imply that input is merged.
+        let bytes: Vec<u8> = stage.connection.query_row(
+            "SELECT bytes FROM manifest WHERE direction=0 AND kind!='tail' ORDER BY cut DESC LIMIT 1",
+            [], |row| row.get(0),
+        )?;
+        let manifest = SourceManifest::from_wire_bytes(&bytes).map_err(|_| wrong())?;
         Ok(FullInstalledTailScope {
             grant: stage.resume_record()?.grant,
             lease_expires_at: stage.reference().lease_expires_at.0,

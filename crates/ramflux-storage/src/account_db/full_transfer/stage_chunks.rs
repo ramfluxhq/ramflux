@@ -60,6 +60,28 @@ impl FullTransferStage<'_> {
         catalog: &[Family],
         role: PairingRole,
     ) -> Result<(), StorageError> {
+        if manifest.manifest.kind == ManifestKind::Tail {
+            return Err(manifest_error());
+        }
+        self.retain_manifest(manifest, catalog, role)
+    }
+    pub(super) fn retain_tail_manifest_for_role(
+        &mut self,
+        manifest: &SourceManifest,
+        catalog: &[Family],
+        role: PairingRole,
+    ) -> Result<(), StorageError> {
+        if manifest.manifest.kind != ManifestKind::Tail {
+            return Err(manifest_error());
+        }
+        self.retain_manifest(manifest, catalog, role)
+    }
+    fn retain_manifest(
+        &mut self,
+        manifest: &SourceManifest,
+        catalog: &[Family],
+        role: PairingRole,
+    ) -> Result<(), StorageError> {
         self.require_io()?;
         manifest.validate().map_err(|error| match error {
             ramflux_protocol::custody::pairing::WireError::Field("NoSpace") => no_space(),
@@ -69,7 +91,6 @@ impl FullTransferStage<'_> {
         let record = self.resume_record()?;
         let body = &manifest.manifest;
         if record.role != role
-            || body.kind == ManifestKind::Tail
             || body.transfer_id != record.transfer_id
             || body.source_ref != record.grant.source_ref
             || body.destination_ref != record.grant.destination_ref
@@ -102,7 +123,7 @@ impl FullTransferStage<'_> {
             if existing.as_slice() == bytes.as_slice() {
                 return Ok(());
             }
-            if verified {
+            if verified || body.kind == ManifestKind::Tail {
                 return Err(manifest_error());
             }
         }
@@ -138,7 +159,11 @@ impl FullTransferStage<'_> {
             self.discard_unverified_forward_files(cut)?;
         }
         let cut = body.snapshot_cut.0;
-        let kind = if body.kind == ManifestKind::Base { "base" } else { "delta" };
+        let kind = match body.kind {
+            ManifestKind::Base => "base",
+            ManifestKind::Delta => "delta",
+            ManifestKind::Tail => "tail",
+        };
         let root = body.chunks_root.clone();
         self.require_io()?;
         self.connection.call(move |db| {
