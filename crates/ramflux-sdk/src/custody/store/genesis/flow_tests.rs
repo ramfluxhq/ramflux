@@ -12,7 +12,9 @@ use crate::custody::{
 };
 use ramflux_protocol::custody::CustodyAuthority;
 use ramflux_storage::{AccountIndex, WrappedAccountDbKey};
-use std::{cell::RefCell, os::unix::fs::PermissionsExt, rc::Rc};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{cell::RefCell, rc::Rc};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn prepared(root: &Path, id: &str) -> Result<(CreationCeremony, [zeroize::Zeroizing<String>; 3])> {
@@ -37,6 +39,7 @@ fn observe_publication(dir: &Path, stage: Stage) -> std::result::Result<(), SdkE
     assert_eq!(temporaries(dir)?.len(), 1, "publication temporary must exist at every checkpoint");
     if stage == Stage::Linked {
         let _: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     } else {
         assert!(!path.exists(), "authority is visible before the atomic link");
@@ -159,6 +162,7 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
                 fs::read(dir.join("authority.json"))?,
                 ramflux_protocol::canonical_json_bytes(&restored.stored)?
             );
+            #[cfg(unix)]
             assert_eq!(
                 fs::metadata(dir.join("authority.json"))?.permissions().mode() & 0o777,
                 0o600

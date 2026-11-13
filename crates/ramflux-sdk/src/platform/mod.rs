@@ -15,3 +15,6 @@ pub(crate) mod fs;
 pub(crate) mod pipe;
 #[cfg(windows)]
 pub(crate) use pipe::listener;
+
+#[cfg(any(windows, test))]
+pub(crate) mod server_token;

@@ -407,5 +407,5 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     result
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

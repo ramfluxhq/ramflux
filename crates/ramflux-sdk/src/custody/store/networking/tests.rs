@@ -5,7 +5,10 @@
 use super::*;
 use crate::custody::tests::{Root, TestVault, create};
 use ramflux_protocol::custody::{CapacityHint, CapacityScope, CustodyRefusal};
-use std::os::unix::fs::MetadataExt;
+fn file_identity(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    let file = std::fs::File::open(path)?;
+    crate::platform::fs::file_device_inode(&file)
+}
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -79,10 +82,10 @@ fn custody_capacity_blocked_retry_loop_writes_once_and_displays_remaining_delay(
     let mut account = create(&root.0, "stable-capacity", &TestVault::default(), now)?;
     account.bind_capacity_node(&root.0, "node-a", "key-a", now)?;
     let path = directory(&root.0, "stable-capacity")?.join("authority.json");
-    let before = fs::metadata(&path)?.ino();
+    let before = file_identity(&path)?;
     account.set_networking_reason_at(&root.0, Some(reason(now + 3600, 3_600_000)), now)?;
-    let inode = fs::metadata(&path)?.ino();
-    assert_ne!(inode, before, "the first refusal must be persisted");
+    let identity = file_identity(&path)?;
+    assert_ne!(identity, before, "the first refusal must be persisted");
     let bytes = fs::read(&path)?;
     for elapsed in [1, 2, 10, 100, 3599] {
         let error = crate::custody::capacity_hint::check_account(&account, now + elapsed)
@@ -94,7 +97,7 @@ fn custody_capacity_blocked_retry_loop_writes_once_and_displays_remaining_delay(
             Some(reason(capacity.resets_at_unix, (3600 - elapsed) * 1000)),
             now + elapsed,
         )?;
-        assert_eq!(fs::metadata(&path)?.ino(), inode, "a blocked retry rewrote authority.json");
+        assert_eq!(file_identity(&path)?, identity, "a blocked retry rewrote authority.json");
         assert_eq!(fs::read(&path)?, bytes);
         assert_eq!(
             account.networking_view(now + elapsed).map(|view| view.cause),
@@ -102,7 +105,7 @@ fn custody_capacity_blocked_retry_loop_writes_once_and_displays_remaining_delay(
         );
     }
     assert!(account.networking_view(now + 3600).is_none());
-    assert_eq!(fs::metadata(&path)?.ino(), inode, "display expiry must not write");
+    assert_eq!(file_identity(&path)?, identity, "display expiry must not write");
     Ok(())
 }
 
@@ -315,13 +318,13 @@ async fn custody_capacity_forward_wall_step_keeps_the_active_capture_and_allows_
     account.set_networking_reason_at(&root.0, Some(cause.clone()), now)?;
     let path = directory(&root.0, "forward-capacity")?.join("authority.json");
     let captured = fs::read(&path)?;
-    let inode = fs::metadata(&path)?.ino();
+    let identity = file_identity(&path)?;
     assert_eq!(account.networking_view(now).ok_or("floor missing")?.remaining_ms, Some(300_000));
     tokio::time::advance(std::time::Duration::from_secs(100)).await;
     let forward = now + 86_400;
     account.set_networking_reason_at(&root.0, Some(cause.clone()), forward)?;
     assert!(fs::read(&path)? == captured, "a wall-clock step rewrote the active refusal");
-    assert_eq!(fs::metadata(&path)?.ino(), inode);
+    assert_eq!(file_identity(&path)?, identity);
     assert_eq!(
         account.networking_view(forward).ok_or("active floor missing")?.remaining_ms,
         Some(200_000)
