@@ -86,7 +86,7 @@ async fn run() -> TestResult {
     rig.source.client = crate::RamfluxClient::new();
     let mut reopened = crate::RamfluxClient::new();
     reopened.open_account_index(&rig.participant_a.root)?;
-    reopened.unlock_account(&rig.participant_a.account_id, b"component-source-passphrase")?;
+    reopened.unlock_account(&rig.participant_a.account_id, b"fresh-source-data")?;
     assert!(
         !ordinary_session_admitted(&reopened, &rig.participant_a.account_id)?,
         "test: original data password revived revoked networking after restart"

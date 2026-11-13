@@ -513,7 +513,7 @@ fn pairing_full_stage_forward_slots_are_immutable_and_corruption_cuts_prefix() -
     oversized.manifest.chunk_count = U64(chunk_layout(MAX_TAIL_BYTES + 1)?.0);
     assert!(matches!(
         stage.retain_forward_manifest(&oversized, &manifest.manifest.families),
-        Err(crate::StorageError::PairingField("NoSpace"))
+        Err(crate::StorageError::PairingField("WrongContext"))
     ));
     assert_eq!(
         stage

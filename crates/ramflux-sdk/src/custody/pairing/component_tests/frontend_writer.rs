@@ -6,6 +6,7 @@
 mod tests {
     use super::super::*;
     use crate::custody::pairing::PairingLocalWriterService;
+    mod tail;
     struct Registered(std::path::PathBuf, String);
     impl Drop for Registered {
         fn drop(&mut self) {

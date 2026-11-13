@@ -107,6 +107,7 @@ pub struct PairingActor {
     frontend_generation: u64,
     ceremony: Option<Ceremony>,
     recovered_installation: Option<full::install_recovery::RecoveredInstallation>,
+    tail_jobs: BTreeMap<String, full::tail::TailJob>,
     unsolicited: u32,
     recipient_stage: Option<Arc<dyn super::recipient::RecipientKeyStaging>>,
     local_writer: Option<local_writer::LocalWriterPort>,
@@ -220,6 +221,7 @@ impl PairingActor {
             frontend_generation: 1,
             ceremony: None,
             recovered_installation: None,
+            tail_jobs: BTreeMap::new(),
             unsolicited: 0,
             recipient_stage: None,
             local_writer: None,
@@ -504,6 +506,16 @@ impl PairingActor {
     pub async fn cancel(&mut self, cancel: &Cancel) -> Result<LocalResult, SdkError> {
         cancel.validate().map_err(|e| wire(&e))?;
         self.require_open()?;
+        if self.abandon_completed_tail(&cancel.operation_id, cancel.generation).await? {
+            return self
+                .transfer_status(&StatusRequest {
+                    schema: "ramflux.pairing.StatusRequest.v2".into(),
+                    version: 2,
+                    operation_id: cancel.operation_id.clone(),
+                    generation: cancel.generation,
+                })
+                .await;
+        }
         self.with_ceremony(|c| check_generation(c, &cancel.operation_id, cancel.generation))?;
         self.fail("cancelled", "Retired").await
     }
@@ -528,6 +540,7 @@ impl PairingActor {
             return recovered.local_result();
         }
         self.expire_live().await;
+        self.advance_full_tails().await?;
         if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
             self.flush_send().await?;
             self.close_completed_relay().await;
@@ -1229,6 +1242,7 @@ impl PairingActor {
             participant.provider.cancel();
         }
         self.full_runtime.stop();
+        self.tail_jobs.clear();
         if let Some(native) = &self.native {
             native.close();
         }

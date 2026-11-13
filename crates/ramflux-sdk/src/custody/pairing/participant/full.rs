@@ -30,7 +30,9 @@ mod submission;
 pub use submission::{FullSourcePublished, FullSourceSubmission};
 mod proof_signer;
 mod stage;
+mod tail;
 pub(crate) use proof_signer::FullProofSigner;
+pub use tail::FullTailContext;
 
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")

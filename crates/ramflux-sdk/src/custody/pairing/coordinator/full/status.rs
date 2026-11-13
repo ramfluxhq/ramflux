@@ -78,7 +78,11 @@ impl PairingActor {
             return Ok(None);
         };
         let Some(trust) = &state.trust else { return Ok(None) };
-        let progress = if let Some(stream) = &state.stream {
+        let progress = if let Some(progress) =
+            self.tail_jobs.get(&c.operation_id).and_then(super::tail::TailJob::completed_progress)
+        {
+            progress
+        } else if let Some(stream) = &state.stream {
             *stream.progress.lock().map_err(|_| SdkError::PairingCode("Busy"))?
         } else {
             state.source_manifest.as_ref().map_or(Ok(FullProgress::default()), |manifest| {
@@ -87,15 +91,21 @@ impl PairingActor {
         };
         let publication =
             &c.full.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?.publication;
+        let abandoned =
+            self.tail_jobs.get(&c.operation_id).is_some_and(super::tail::TailJob::abandoned);
+        let merged = self.tail_jobs.get(&c.operation_id).is_some_and(super::tail::TailJob::merged);
         let result = if publication.tail_pending()
+            && !merged
             && crate::custody::network_now()? >= trust.lease_expires_at()
         {
             Some(FullError::LeaseExpired)
         } else {
-            c.full_error.or_else(|| {
-                (publication.source_acknowledged() && !publication.source_tail_durable)
-                    .then_some(FullError::ResumeRequired)
-            })
+            self.tail_jobs.get(&c.operation_id).and_then(|job| job.error).or(c.full_error).or_else(
+                || {
+                    (publication.source_acknowledged() && !publication.source_tail_durable)
+                        .then_some(FullError::ResumeRequired)
+                },
+            )
         };
         let value = FullStatus {
             attachment_absent: U64(0),
@@ -126,7 +136,11 @@ impl PairingActor {
             } else {
                 FullStatusStage::Snapshot
             },
-            tail_status: if publication.tail_pending() {
+            tail_status: if abandoned {
+                FullTailStatus::Abandoned
+            } else if merged {
+                FullTailStatus::Merged
+            } else if publication.tail_pending() {
                 FullTailStatus::Pending
             } else {
                 FullTailStatus::None

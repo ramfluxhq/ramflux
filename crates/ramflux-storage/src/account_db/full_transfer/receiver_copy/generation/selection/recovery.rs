@@ -221,7 +221,11 @@ fn verify_selected(
     for (database, own_key) in
         [(scratch.path.join("private.db"), &key), (path.to_owned(), selected_key)]
     {
-        let private = BackupDatabase::open_full_receiver_copy(&database, own_key)?;
+        let private = if database == path {
+            BackupDatabase::open_full_selected_read(&database, own_key)?
+        } else {
+            BackupDatabase::open_full_receiver_copy(&database, own_key)?
+        };
         crate::account_db::full_transfer::receiver_materialization::Verification {
             directory: &scratch.path,
             key: &key,

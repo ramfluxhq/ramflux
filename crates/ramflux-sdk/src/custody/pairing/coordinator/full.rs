@@ -34,6 +34,7 @@ mod restore;
 mod source_observation;
 mod status;
 mod stream;
+pub(super) mod tail;
 
 pub(super) struct FullCeremony {
     pub(super) common: CommonV3,

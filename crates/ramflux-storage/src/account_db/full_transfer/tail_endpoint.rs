@@ -119,6 +119,66 @@ impl FullTailEndpoint<'_> {
         }
         Ok(())
     }
+    /// A cancellation fence for this one tail job; contains no data or key.
+    #[must_use]
+    pub fn io_cancel_handle(&self) -> crate::FullStageIoCancel {
+        self.stage.io_cancel_handle()
+    }
+    /// Pin only the immutable J6 cut for an off-loan local encoder.
+    /// # Errors
+    /// Refuses stale authority, another role, incomplete J6 or lost local unlock.
+    pub fn into_source_encoding_work(
+        self,
+        now: u64,
+    ) -> Result<super::FullSourceTailEncodingWork, StorageError> {
+        self.require_live(now)?;
+        self.stage.into_source_tail_encoding_work(self.current, now)
+    }
+    /// Revalidate retained slots before advertising a restart's durable tail prefix.
+    /// # Errors
+    /// Refuses foreign tails, corrupt storage, stale native authority or expiry.
+    pub fn durable_recipient_prefix(
+        &self,
+        hash: &str,
+        now: u64,
+    ) -> Result<Option<u64>, StorageError> {
+        self.require_tail(hash, now)?;
+        if self.stage.resume_record()?.role != PairingRole::Responder {
+            return Err(wrong());
+        }
+        self.stage.revalidate_forward_prefix(hash)
+    }
+    /// Bind this endpoint's local work to the root owner's cancellation fence.
+    /// # Errors
+    /// Refuses an already cancelled stage or root; no key or stage capability is exposed.
+    pub fn bind_local_io_cancellation(
+        &mut self,
+        cancelled: &crate::FullStageIoCancel,
+    ) -> Result<(), StorageError> {
+        self.stage.bind_local_io_cancellation(cancelled)
+    }
+    /// Return signing bytes only for this original source's exact immutable J6 draft.
+    /// # Errors
+    /// Refuses a foreign draft, wrong native roles/keys, a recut or expired admission.
+    pub fn source_manifest_signing_bytes(
+        &self,
+        draft: &FullSourceDeltaDraft,
+        now: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.require_live(now)?;
+        let identity = self.stage.tail_capture_identity()?;
+        let record = self.stage.resume_record()?;
+        if record.role != PairingRole::Initiator
+            || draft.manifest().kind != ManifestKind::Tail
+            || draft.stage_digest() != record.stage_digest()?
+            || draft.expected_branch_key() != record.grant.branch_keys.source
+            || draft.manifest().snapshot_id != identity.snapshot
+            || draft.manifest().snapshot_cut.0 != identity.ordinal
+        {
+            return Err(wrong());
+        }
+        draft.manifest().signing_bytes().map_err(|_| wrong())
+    }
     /// Retain only the original source's exact locally encoded immutable J6 tail.
     /// # Errors
     /// Refuses foreign drafts, a later recut, changed signatures/bytes, quota or stale admission.

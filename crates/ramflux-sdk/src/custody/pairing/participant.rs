@@ -546,7 +546,7 @@ pub(crate) use full::FullProofSigner;
 pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
     FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
-    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
+    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission, FullTailContext,
     retry_full_source_cleanup,
 };
 

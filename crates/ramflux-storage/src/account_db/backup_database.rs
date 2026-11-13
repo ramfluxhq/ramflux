@@ -51,6 +51,10 @@ pub struct BackupDatabase {
     original_input: BackupInputObservation,
     _generation_reader: Option<crate::account_generation::GenerationReadLease>,
 }
+enum FullInputMode {
+    PrivateCopy,
+    SelectedRead,
+}
 impl BackupDatabase {
     /// Open only the receiver owner's freshly copied CURRENT-schema B database.
     /// This preserves B-local rows and MAC authority exactly: archive normalization
@@ -59,18 +63,44 @@ impl BackupDatabase {
         path: &Path,
         key: &AccountDbKey,
     ) -> Result<Self, StorageError> {
+        Self::open_full_input(path, key, FullInputMode::PrivateCopy)
+    }
+    /// Verify a selected live generation without changing its journal or taking a writer lock.
+    pub(in crate::account_db) fn open_full_selected_read(
+        path: &Path,
+        key: &AccountDbKey,
+    ) -> Result<Self, StorageError> {
+        Self::open_full_input(path, key, FullInputMode::SelectedRead)
+    }
+    fn open_full_input(
+        path: &Path,
+        key: &AccountDbKey,
+        mode: FullInputMode,
+    ) -> Result<Self, StorageError> {
         let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(StorageError::AuthorizationRejected);
         }
-        let db = rusqlite::Connection::open(path)?;
+        let (flags, settings) = match mode {
+            FullInputMode::PrivateCopy => (
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+            ),
+            FullInputMode::SelectedRead => {
+                (rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, "PRAGMA query_only=ON; BEGIN;")
+            }
+        };
+        let db = rusqlite::Connection::open_with_flags(
+            path,
+            flags | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         let hex = zeroize::Zeroizing::new(key.sqlcipher_hex());
         let pragma = zeroize::Zeroizing::new(format!(
-            "PRAGMA key=\"x'{}'\"; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+            "PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; {settings}",
             hex.as_str()
         ));
-        // A live B snapshot can inherit WAL mode. This private single-owner copy must
-        // checkpoint it into one immutable file before physical attestation and G2.
+        // Only our private copy is normalized. A selected ordinary writer keeps its
+        // existing WAL mode; recovery reads one stable transaction under observation.
         db.execute_batch(&pragma)?;
         crate::schema_generation::validate(&db)?;
         crate::schema_object_erasure::validate(&db)?;

@@ -19,6 +19,7 @@ pub(crate) struct FullRuntimeCancel {
     local_jobs: Mutex<Vec<local_jobs::LocalJob>>,
     idle: Condvar,
     stage: Mutex<Option<FullStageIoCancel>>,
+    tail_stages: Mutex<Vec<FullStageIoCancel>>,
     preparation: Mutex<Option<ramflux_storage::FullSourcePreparationCancel>>,
     job: Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -102,6 +103,20 @@ impl FullRuntimeCancel {
         }
         Ok(())
     }
+    pub(crate) fn register_tail_stage(&self, stage: FullStageIoCancel) -> Result<(), SdkError> {
+        let mut stages = self.tail_stages.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        if let Err(error) = self.require_live() {
+            stage.cancel();
+            return Err(error);
+        }
+        stages.retain(|stage| !stage.is_cancelled());
+        if stages.len() >= 3 {
+            stage.cancel();
+            return Err(SdkError::PairingCode("TransferCapacity"));
+        }
+        stages.push(stage);
+        Ok(())
+    }
     pub(crate) fn register_job(&self, job: tokio::task::AbortHandle) -> Result<(), SdkError> {
         let mut slot = self.job.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(error) = self.require_live() {
@@ -122,6 +137,11 @@ impl FullRuntimeCancel {
         }
         if let Some(stage) =
             self.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        {
+            stage.cancel();
+        }
+        for stage in
+            self.tail_stages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..)
         {
             stage.cancel();
         }

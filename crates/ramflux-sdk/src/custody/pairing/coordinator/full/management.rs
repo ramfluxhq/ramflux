@@ -32,6 +32,16 @@ enum Input {
     Completion(FullControlPayload),
 }
 impl FullManagement {
+    pub(super) fn ready_for_tail(&self) -> bool {
+        self.outbound.is_empty()
+    }
+    pub(super) fn into_tail_packet(self) -> Result<FullPacketEpoch, SdkError> {
+        if !self.outbound.is_empty() {
+            return Err(wrong());
+        }
+        Ok(self.packet)
+    }
+
     pub(super) fn queue_local_control(
         &mut self,
         payload: FullControlPayload,

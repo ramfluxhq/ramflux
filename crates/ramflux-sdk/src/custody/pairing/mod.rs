@@ -24,7 +24,7 @@ pub use native_ports::{NativePairingPublication, NativePairingQuery};
 pub use participant::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
     FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
-    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
+    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission, FullTailContext,
     LocalPairingParticipant, ParticipantContext, retry_full_source_cleanup,
 };
 pub mod install_gate;
