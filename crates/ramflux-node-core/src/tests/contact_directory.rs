@@ -407,13 +407,18 @@ fn legacy_devices_are_owned_by_their_signed_root_even_when_a_principal_name_is_a
     claim.target_delivery_id = "new-alias".into();
     claim.branch_public_key =
         ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());
-    claim.proof = ramflux_crypto::authorize_device_branch(
+    claim.proof = ramflux_crypto::authorize_device_branch_v2(
         &root,
         &device,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.into()],
-        claim.now,
-        claim.now + 3600,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: claim.now,
+            expires_at: claim.now + 3600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed([97; 32])
+                .public,
+        },
     )?;
     assert!(registry.register_identity(&claim).is_err());
     registry.remove_principal_metadata("alice");

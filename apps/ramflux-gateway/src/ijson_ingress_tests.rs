@@ -78,7 +78,7 @@ fn ack(timestamp: i64) -> anyhow::Result<ramflux_protocol::Ack> {
         "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
         "ack_id":"ijson-ack","envelope_id":"ijson-envelope",
         "receiver_device_id":"receiver","received_at":timestamp,
-        "ext":{"x_probe":"v"}
+        "ext":{"x_probe":"v","inbox_seq":1}
     }))?)
 }
 
@@ -88,7 +88,7 @@ fn nack(timestamp: i64) -> anyhow::Result<ramflux_protocol::Nack> {
         "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
         "nack_id":"ijson-nack","envelope_id":"ijson-envelope",
         "receiver_device_id":"receiver","reason":"expired","received_at":timestamp,
-        "ext":{"x_probe":"v"}
+        "ext":{"x_probe":"v","inbox_seq":1}
     }))?)
 }
 

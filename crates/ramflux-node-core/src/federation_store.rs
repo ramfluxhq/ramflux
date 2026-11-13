@@ -153,9 +153,20 @@ impl FederationRedbStore {
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         let path = path.as_ref().to_path_buf();
-        let db = open_redb_with_table(&path, FEDERATION_STATE_TABLE)?;
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|source| NodeCoreError::StoreDirectory {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let db = redb::Database::create(&path)
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        crate::foreign_device_store::validate(&db)?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        write_txn
+            .open_table(FEDERATION_STATE_TABLE)
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
             let _table = write_txn
                 .open_table(FEDERATION_OUTBOUND_SPOOL_TABLE)
@@ -170,7 +181,6 @@ impl FederationRedbStore {
         crate::foreign_device_store::initialize(
             &db,
             crate::foreign_device_store::Namespace::Federation,
-            None,
         )?;
         let store = Self {
             db,

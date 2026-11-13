@@ -100,15 +100,14 @@ pub struct AttachmentReservation {
     pub lease_step: u64,
     pub retention_seconds: u64,
     pub expires_at: Option<u64>,
-    /// Authoritative payload generation, allocated once at reserve. Legacy rows read as 0.
-    #[serde(default)]
+    /// Authoritative payload generation, allocated once at reserve; required on disk.
     pub pending_generation: u64,
     /// Set exactly once at commit, equal to `pending_generation`.
     #[serde(default)]
     pub committed_generation: Option<u64>,
 }
 impl AttachmentReservation {
-    /// The one legacy-zero refusal shared by every admission and authority reader
+    /// The generation binding required by every admission and authority reader
     /// (ATTACH-LARGE-01 §4): a payload needs a nonzero pending generation and an equal
     /// committed generation before it can be read, granted or leased.
     pub(super) fn require_bound_generation(&self) -> Result<(), AttachmentLedgerError> {
@@ -300,4 +299,33 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, AttachmentLedgerError> {
 }
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, AttachmentLedgerError> {
     serde_json::from_slice(bytes).map_err(store)
+}
+
+#[cfg(test)]
+mod format_guards {
+    #[test]
+    fn persisted_attachment_requires_its_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let row = super::AttachmentReservation {
+            owner: "root".into(),
+            upload_id: [1; 32],
+            object_id: [2; 32],
+            plaintext_length: 0,
+            network_chunk_bytes: 524_288,
+            size: 16,
+            manifest_hash: None,
+            state: super::AttachmentReservationState::Pending,
+            lease_until: 100,
+            lease_hard_until: 200,
+            lease_step: 10,
+            retention_seconds: 1000,
+            expires_at: None,
+            pending_generation: 1,
+            committed_generation: None,
+        };
+        let mut value = serde_json::to_value(row)?;
+        assert!(serde_json::from_value::<super::AttachmentReservation>(value.clone()).is_ok());
+        value.as_object_mut().ok_or("attachment fixture object")?.remove("pending_generation");
+        assert!(serde_json::from_value::<super::AttachmentReservation>(value).is_err());
+        Ok(())
+    }
 }

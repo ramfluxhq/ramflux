@@ -67,24 +67,34 @@ fn renewed_registration_at_two_hours_is_accepted_but_original_proof_replay_and_e
     Ok(())
 }
 #[test]
-fn legacy_constructor_renewal_has_a_distinct_time_bound_identifier() -> TestResult {
+fn bound_constructor_renewal_has_a_distinct_time_bound_identifier() -> TestResult {
     let root = ramflux_crypto::create_identity_root("alice", [71; 32]);
     let device = ramflux_crypto::create_device_branch("alice", "one", 1, [72; 32]);
-    let first = ramflux_crypto::authorize_device_branch(
+    let first = ramflux_crypto::authorize_device_branch_v2(
         &root,
         &device,
-        "ramflux-node",
-        vec!["device.delivery.bind".into()],
-        1000,
-        4600,
+        ramflux_crypto::BranchAuthorization {
+            audience: "ramflux-node",
+            capability_scope: vec!["device.delivery.bind".into()],
+            issued_at: 1000,
+            expires_at: 4600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed([73; 32])
+                .public,
+        },
     )?;
-    let second = ramflux_crypto::authorize_device_branch(
+    let second = ramflux_crypto::authorize_device_branch_v2(
         &root,
         &device,
-        "ramflux-node",
-        vec!["device.delivery.bind".into()],
-        2800,
-        6400,
+        ramflux_crypto::BranchAuthorization {
+            audience: "ramflux-node",
+            capability_scope: vec!["device.delivery.bind".into()],
+            issued_at: 2800,
+            expires_at: 6400,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed([73; 32])
+                .public,
+        },
     )?;
     assert_ne!(first.proof_id, second.proof_id);
     ramflux_crypto::verify_branch_proof(

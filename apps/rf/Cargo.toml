@@ -18,9 +18,6 @@ itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
 itest-legacy-accounts = ["ramflux-sdk/itest-legacy-accounts"]
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = ["ramflux-sdk/itest-identity-proof"]
-# T22-A1 / RQ-04: itest LocalMint compatibility. Propagates the SDK compile gate and re-admits the
-# `--relay-service-key` object CLI flags. Never enabled by production rf binaries.
-itest-local-mint = ["ramflux-sdk/itest-local-mint"]
 # T24-B2: propagate the SDK rfd mid-flight crash-resume barrier gate. Never enabled by production rf.
 itest-rfd-fault = ["ramflux-sdk/itest-rfd-fault"]
 # T25-A2 (OBJ-IPC-01): propagate the SDK local-bus response-loss seam gate. Never enabled by
@@ -51,6 +48,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1.42", features = ["test-util"] }
 tracing = { workspace = true }
 ramflux-node-core = { workspace = true }

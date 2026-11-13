@@ -74,10 +74,14 @@ fn held_boundary(pipeline: bool, roll: bool, operation: &'static str) -> Result 
     let worker = thread::spawn(move || -> std::result::Result<(), NodeCoreError> {
         let wal = store(&worker_root, pipeline)?;
         if roll {
-            wal.record_submission("first", i64::MAX, None)?;
+            wal.record_submission(&crate::tests::request_replay_fixture("first"), i64::MAX, None)?;
             armed.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        let location = wal.record_submission("observed", i64::MAX, None)?;
+        let location = wal.record_submission(
+            &crate::tests::request_replay_fixture("observed"),
+            i64::MAX,
+            None,
+        )?;
         ack_tx.send(location).map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
         Ok(())
     });
@@ -144,7 +148,7 @@ fn new_ancestor_order(pipeline: bool) -> Result {
     );
     durability_io::create_dir_all(&root)?;
     let wal = store(&root, pipeline)?;
-    wal.record_submission("first-ack", i64::MAX, None)?;
+    wal.record_submission(&crate::tests::request_replay_fixture("first-ack"), i64::MAX, None)?;
     let events = events.lock().expect("events");
     let position = |path: &Path, op: &str| {
         events

@@ -375,3 +375,27 @@ async fn native_received_request_keeps_lookup_provenance_and_preserves_card_pins
     assert_eq!(target.client.contact_entry(principal)?["root_source"], "card");
     Ok(())
 }
+
+#[tokio::test]
+async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let sender = Fixture::new("native-preview-sender").await?;
+        let target = Fixture::new("native-preview-target").await?;
+        target.client.persist_fetched_identity_directory(&sender.manifest)?;
+        let bytes = approve_request(&sender, &target).await?;
+        let (entry, route) = transport(&sender, &target)?;
+        let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
+        target.client.apply_contact_control(&control)?;
+        let root = &sender.manifest.principal_commitment;
+        let request =
+            target.client.account_db()?.contact_request(root, "inbound")?.ok_or("request")?;
+        let preview = target.client.contact_request_preview(&request)?;
+        let expected =
+            ramflux_crypto::custody::safety_number(&target.manifest.principal_commitment, root)?;
+        assert!(target.client.identity_root.is_none());
+        assert_eq!(preview["safety_number"], serde_json::json!(expected));
+        assert_eq!(preview["safety_number"].as_array().map(Vec::len), Some(12));
+        Ok(())
+    })
+    .await?
+}

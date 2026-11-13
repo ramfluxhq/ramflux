@@ -61,12 +61,7 @@ pub(super) async fn prepare(
         let owned_writer = writer.clone();
         let page = writer
             .apply(move |account| {
-                match account.client.prepare_own_history_receive(
-                    current,
-                    manifest,
-                    #[cfg(feature = "itest-local-mint")]
-                    account.timeouts.relay_http,
-                )? {
+                match account.client.prepare_own_history_receive(current, manifest)? {
                     HistoryPreparation::Complete(next) => Ok(Page::Complete(next)),
                     HistoryPreparation::Fetch(fetch) => {
                         let permit = account

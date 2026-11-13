@@ -4,17 +4,13 @@
 //! Payload-free chunk index, reservations, and in-memory publication.
 
 use super::{
-    BTreeMap, BTreeSet, Deserialize, NodeCoreError, OBJECT_RELAY_TOKEN_VERSION,
-    OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS, ObjectChunkFrame, ObjectPermissionEnvelope,
-    ObjectRelayAck, ObjectRelayCapability, ObjectRelayTombstone, RELAY_METADATA_MAX_BYTES_DEFAULT,
-    RelayChunkEntry, RelayChunkMeta, RelayChunkStatus, RelayInternalInvariant,
-    RelayResidentBudgetExceeded, RelayStoreOpError, RelayToken, Serialize,
-    clamp_relay_chunk_expires_at, existing_tombstone_matches_replay,
-    permission_owner_matches_token, tombstone_resident_charge, validate_object_chunk_frame,
-    validate_object_permission, validate_relay_token,
+    BTreeMap, BTreeSet, NodeCoreError, OBJECT_RELAY_TOKEN_VERSION,
+    OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS, ObjectPermissionEnvelope, ObjectRelayCapability,
+    ObjectRelayTombstone, RELAY_METADATA_MAX_BYTES_DEFAULT, RelayChunkEntry, RelayChunkMeta,
+    RelayChunkStatus, RelayInternalInvariant, RelayResidentBudgetExceeded, RelayStoreOpError,
+    RelayToken, Serialize, clamp_relay_chunk_expires_at, existing_tombstone_matches_replay,
+    tombstone_resident_charge,
 };
-
-use super::relay_default_max_bytes;
 
 /// The concrete mutation an in-flight reservation will publish once its redb commit succeeds. Stored
 /// on the reservation so `publish(id)` is an infallible, self-contained consume of an exact token.
@@ -45,7 +41,7 @@ pub(super) struct RelayReservation {
     pending: RelayPendingMutation,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RelayCacheState {
     /// Resident, payload-free chunk index. Ciphertext is never held here; it lives in redb.
     pub(super) chunks_by_id: BTreeMap<String, RelayChunkMeta>,
@@ -73,8 +69,8 @@ pub struct RelayCacheState {
     #[serde(skip)]
     reserved_bytes: u64,
     /// Resident metadata budget ceiling. Not serialized; set explicitly on construction/hydrate and
-    /// defaults to 64 MiB so a deserialized legacy snapshot is never left with a zero (fail-open) cap.
-    #[serde(skip, default = "relay_default_max_bytes")]
+    /// constructed with an explicit operator budget or the 64 MiB default.
+    #[serde(skip)]
     max_bytes: u64,
 }
 
@@ -142,11 +138,11 @@ impl RelayExpiryMutation {
 }
 
 /// Internal plan of a PUT against the resident meta index (no mutation, no persist).
-pub(super) enum RelayPutPlan {
+pub(crate) enum RelayPutPlan {
     /// Chunk id already present and all metadata-level checks passed. The caller must still
     /// byte-verify the candidate against the stored ciphertext (via a redb point-read) before
     /// treating it as an idempotent replay.
-    Existing { existing: RelayChunkMeta, candidate: RelayChunkEntry },
+    Existing { candidate: RelayChunkEntry },
     /// A fresh chunk id whose owner/tombstone checks passed; the candidate must be persisted.
     New(RelayChunkEntry),
 }
@@ -696,46 +692,9 @@ impl RelayCacheState {
         Ok(())
     }
 
-    /// Validates a v2 PUT frame and builds the candidate [`RelayChunkEntry`] (with clamped expiry).
-    /// No state access. Shared by the pure state method and the persist-before-publish orchestration.
-    ///
-    /// # Errors
-    /// Returns an error when token/permission/TTL/size/ciphertext-hash validation fails or the owner
-    /// binding is missing.
-    pub fn build_put_entry_from_frame(
-        frame: ObjectChunkFrame,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<RelayChunkEntry, NodeCoreError> {
-        validate_object_chunk_frame(&frame, relay_service_key, ObjectRelayCapability::Put, now)?;
-        let owner_signing_key_id = frame.relay_token.owner_signing_key_id.clone();
-        let owner_public_key = frame.relay_token.owner_public_key.clone();
-        if owner_signing_key_id.is_empty() || owner_public_key.is_empty() {
-            return Err(NodeCoreError::Unauthorized(
-                "object relay put missing owner binding".to_owned(),
-            ));
-        }
-        let expires_at = clamp_relay_chunk_expires_at(now, frame.expires_at);
-        Ok(RelayChunkEntry {
-            chunk_id: frame.chunk_id,
-            object_id: frame.object_id,
-            manifest_hash: frame.manifest_hash,
-            chunk_index: frame.chunk_index,
-            chunk_cipher_hash: frame.chunk_cipher_hash,
-            owner_signing_key_id,
-            owner_public_key,
-            encrypted_chunk: frame.encrypted_chunk,
-            stored_at: now,
-            expires_at,
-            delete_after_ack: frame.delete_after_ack,
-            acked_by: BTreeSet::new(),
-            status: RelayChunkStatus::Available,
-        })
-    }
-
     /// Metadata-level PUT plan: tombstone-block, owner-binding, cross-owner, content (via
     /// `chunk_cipher_hash`), and resurrect checks against the resident index. No mutation.
-    pub(super) fn plan_put(
+    pub(crate) fn plan_put(
         &self,
         candidate: RelayChunkEntry,
     ) -> Result<RelayPutPlan, RelayStoreOpError> {
@@ -770,213 +729,12 @@ impl RelayCacheState {
                     "object relay put cannot resurrect a consumed chunk".to_owned(),
                 ));
             }
-            return Ok(RelayPutPlan::Existing { existing: existing.clone(), candidate });
+            return Ok(RelayPutPlan::Existing { candidate });
         }
         Ok(RelayPutPlan::New(candidate))
     }
 
-    /// # Errors
-    /// Returns an error when token, object permission, TTL, tombstone, size or ciphertext hash
-    /// validation fails, or the resident metadata budget is exceeded.
-    ///
-    /// Pure (store-free) PUT used by tests and as the validation authority. It publishes metadata
-    /// only (no ciphertext is retained). Content-overwrite is compared by `chunk_cipher_hash`; the
-    /// exact byte-identity check is enforced by the store read-through orchestration.
-    pub fn put_object_chunk_frame(
-        &mut self,
-        frame: ObjectChunkFrame,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<RelayChunkMeta, NodeCoreError> {
-        let candidate = Self::build_put_entry_from_frame(frame, relay_service_key, now)?;
-        match self.plan_put(candidate).map_err(RelayStoreOpError::into_node_core)? {
-            RelayPutPlan::Existing { existing, .. } => Ok(existing),
-            RelayPutPlan::New(candidate) => {
-                let meta = RelayChunkMeta::from(&candidate);
-                let id =
-                    self.reserve_put(meta.clone()).map_err(RelayStoreOpError::into_node_core)?;
-                self.publish(id);
-                Ok(meta)
-            }
-        }
-    }
-
-    /// # Errors
-    /// Returns an error when token or permission validation fails, the chunk is missing, or it is
-    /// expired/tombstoned.
-    ///
-    /// Validates a v2 GET and returns the resident metadata snapshot (payload-free). The ciphertext
-    /// must be obtained through the store read-through path.
-    pub fn get_object_chunk(
-        &self,
-        chunk_id: &str,
-        token: &RelayToken,
-        permission: &ObjectPermissionEnvelope,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<RelayChunkMeta, NodeCoreError> {
-        validate_relay_token(token, relay_service_key, ObjectRelayCapability::Get, now)?;
-        validate_object_permission(permission, ObjectRelayCapability::Get, now)?;
-        if token.chunk_id != chunk_id
-            || permission.object_id != token.object_id
-            || permission.manifest_hash != token.manifest_hash
-            || permission.grantee_device_hash != token.recipient_device_hash
-            || !permission_owner_matches_token(permission, token)
-        {
-            return Err(NodeCoreError::ItestHttp("object relay get binding mismatch".to_owned()));
-        }
-        let meta = self
-            .available_meta(chunk_id, now)
-            .ok_or_else(|| NodeCoreError::EnvelopeNotFound(chunk_id.to_owned()))?;
-        // NOTE (RQ-03 follow-up / finding "C"): binding the retrieved chunk's original owner to the
-        // requester requires an uploader-signed Get/Ack grant, deferred until that grant model lands.
-        if self.tombstones_by_object_id.contains_key(&meta.object_id) {
-            return Err(NodeCoreError::ItestHttp(
-                "object relay tombstone blocks chunk get".to_owned(),
-            ));
-        }
-        Ok(meta.clone())
-    }
-
-    /// Validates a v2 ACK and computes the updated metadata (payload handling is the store layer's
-    /// job). No mutation.
-    ///
-    /// # Errors
-    /// Returns an error when token/permission validation fails or the chunk is missing.
-    pub fn plan_ack(
-        &self,
-        ack: &ObjectRelayAck,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<RelayChunkMeta, NodeCoreError> {
-        validate_relay_token(&ack.relay_token, relay_service_key, ObjectRelayCapability::Ack, now)?;
-        validate_object_permission(
-            &ack.object_permission_envelope,
-            ObjectRelayCapability::Ack,
-            now,
-        )?;
-        if ack.relay_token.object_id != ack.object_id
-            || ack.relay_token.manifest_hash != ack.manifest_hash
-            || ack.relay_token.chunk_id != ack.chunk_id
-            || ack.relay_token.recipient_device_hash != ack.recipient_device_hash
-            || ack.object_permission_envelope.object_id != ack.object_id
-            || ack.object_permission_envelope.manifest_hash != ack.manifest_hash
-            || ack.object_permission_envelope.grantee_device_hash != ack.recipient_device_hash
-            || !permission_owner_matches_token(&ack.object_permission_envelope, &ack.relay_token)
-        {
-            return Err(NodeCoreError::ItestHttp("object relay ack binding mismatch".to_owned()));
-        }
-        let existing = self
-            .chunks_by_id
-            .get(&ack.chunk_id)
-            .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.chunk_id.clone()))?;
-        if existing.object_id != ack.object_id || existing.manifest_hash != ack.manifest_hash {
-            return Err(NodeCoreError::ItestHttp("object relay ack binding mismatch".to_owned()));
-        }
-        let mut updated = existing.clone();
-        updated.acked_by.insert(ack.recipient_device_hash.clone());
-        // Deletion on ack is governed solely by the owner's stored delete policy, never the token.
-        if updated.delete_after_ack {
-            updated.status = RelayChunkStatus::AckedDeleted;
-        }
-        Ok(updated)
-    }
-
-    /// # Errors
-    /// Returns an error when token/permission validation fails or the chunk is missing.
-    ///
-    /// Pure (store-free) ACK used by tests: reserve the positive meta delta (checked, hard bound),
-    /// then publish. Returns the updated metadata (payload-free).
-    #[allow(clippy::needless_pass_by_value)] // mirrors the wire ACK ownership for test ergonomics
-    pub fn ack_object_chunk(
-        &mut self,
-        ack: ObjectRelayAck,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<RelayChunkMeta, NodeCoreError> {
-        let updated = self.plan_ack(&ack, relay_service_key, now)?;
-        let id = self.reserve_ack(updated.clone()).map_err(RelayStoreOpError::into_node_core)?;
-        self.publish(id);
-        Ok(updated)
-    }
-
-    /// # Errors
-    /// Returns an error when token/permission validation fails.
-    pub fn apply_object_tombstone(
-        &mut self,
-        tombstone: ObjectRelayTombstone,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<ObjectRelayTombstone, NodeCoreError> {
-        Ok(self.apply_object_tombstone_mutation(tombstone, relay_service_key, now)?.tombstone)
-    }
-
-    /// # Errors
-    /// Returns an error when token/permission validation fails.
-    ///
-    /// Pure (store-free) v2 tombstone used by tests: plan, then reserve (exclusive object + affected
-    /// chunk locks, one checked admission) and publish.
-    pub fn apply_object_tombstone_mutation(
-        &mut self,
-        tombstone: ObjectRelayTombstone,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
-        let mutation = self.plan_object_tombstone_mutation(tombstone, relay_service_key, now)?;
-        if mutation.changed {
-            let id = self
-                .reserve_tombstone(mutation.clone())
-                .map_err(RelayStoreOpError::into_node_core)?;
-            self.publish(id);
-        }
-        Ok(mutation)
-    }
-
-    /// Validates and computes a v2 tombstone mutation WITHOUT mutating state (persist-before-publish
-    /// plan phase). The affected chunk metas are returned already marked `Tombstoned` (payload
-    /// cleared by construction).
-    ///
-    /// # Errors
-    /// Returns an error when token/permission validation fails or the shared core rejects it.
-    pub fn plan_object_tombstone_mutation(
-        &self,
-        tombstone: ObjectRelayTombstone,
-        relay_service_key: &[u8],
-        now: u64,
-    ) -> Result<ObjectRelayTombstoneMutation, NodeCoreError> {
-        validate_relay_token(
-            &tombstone.relay_token,
-            relay_service_key,
-            ObjectRelayCapability::Tombstone,
-            now,
-        )?;
-        validate_object_permission(
-            &tombstone.object_permission_envelope,
-            ObjectRelayCapability::Tombstone,
-            now,
-        )?;
-        if tombstone.relay_token.object_id != tombstone.object_id
-            || tombstone
-                .manifest_hash
-                .as_ref()
-                .is_some_and(|manifest_hash| &tombstone.relay_token.manifest_hash != manifest_hash)
-            || tombstone.object_permission_envelope.object_id != tombstone.object_id
-            || tombstone.manifest_hash.as_ref().is_some_and(|manifest_hash| {
-                &tombstone.object_permission_envelope.manifest_hash != manifest_hash
-            })
-            || !permission_owner_matches_token(
-                &tombstone.object_permission_envelope,
-                &tombstone.relay_token,
-            )
-        {
-            return Err(NodeCoreError::ItestHttp(
-                "object relay tombstone binding mismatch".to_owned(),
-            ));
-        }
-        self.plan_object_tombstone_record(tombstone, now)
-    }
-
-    /// Post-validation tombstone plan core shared by the v2 and v3 owner-session paths. `retained`
+    /// Post-validation tombstone plan core for the v3 owner-session path. `retained`
     /// must already carry the verified owner identity. Computes (but does not apply) the mutation:
     /// fail-closed TTL, idempotent-replay (zero mutation), cross-owner scope, empty-scope, and
     /// tombstone-wins (affected chunk metas marked `Tombstoned`).

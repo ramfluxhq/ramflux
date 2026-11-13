@@ -11,8 +11,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-#[cfg(feature = "itest-object-v2")]
-use std::sync::mpsc;
 
 pub(crate) fn client_quic_request(
     method: &str,
@@ -491,48 +489,6 @@ pub(crate) fn v3_chunk_status(
     v3_chunk_snapshot(state).map(|chunk| chunk.status)
 }
 
-#[cfg(feature = "itest-object-v2")]
-pub(crate) fn spawn_retention_blocking_mesh_echo_server(
-    server_tls: ramflux_transport::MeshTlsConfig,
-    trusted_relay_ca: String,
-) -> Result<
-    (String, mpsc::Receiver<ramflux_node_core::RetentionRecordRequest>),
-    Box<dyn std::error::Error>,
-> {
-    let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
-    let endpoint = server.local_addr()?.to_string();
-    let (request_tx, request_rx) = mpsc::channel::<ramflux_node_core::RetentionRecordRequest>();
-    std::thread::spawn(move || {
-        let result: Result<(), String> = (|| {
-            let mut accepted = server
-                .accept_authenticated_with_pem_roots(&server_tls, &[trusted_relay_ca])
-                .map_err(|source| source.to_string())?
-                .stream;
-            let request = ramflux_transport::read_mesh_http_request(&mut accepted)
-                .map_err(|source| source.to_string())?
-                .ok_or_else(|| "missing retention blocking mesh request".to_owned())?;
-            if request.method != "POST" || request.path != "/retention/v1/object_relay_ttl" {
-                return Err(format!(
-                    "unexpected retention blocking mesh request {} {}",
-                    request.method, request.path
-                ));
-            }
-            let request: ramflux_node_core::RetentionRecordRequest =
-                serde_json::from_slice(&request.body).map_err(|source| source.to_string())?;
-            let response = request.record.clone();
-            request_tx.send(request).map_err(|source| source.to_string())?;
-            ramflux_transport::write_mesh_json_response(&mut accepted, "200 OK", &response)
-                .map_err(|source| source.to_string())?;
-            ramflux_transport::close_mesh_server_stream(&mut accepted)
-                .map_err(|source| source.to_string())
-        })();
-        if let Err(error) = result {
-            tracing::debug!(%error, "relay retention blocking mesh fallback test server stopped");
-        }
-    });
-    Ok((endpoint, request_rx))
-}
-
 pub(crate) fn test_config(
     tls: &ramflux_transport::MeshTlsConfig,
     retention_endpoint: &str,
@@ -561,29 +517,8 @@ pub(crate) fn test_config(
     }
 }
 
-#[cfg(feature = "itest-object-v2")]
-pub(crate) fn test_relay_chunk_entry() -> ramflux_node_core::RelayChunkEntry {
-    ramflux_node_core::RelayChunkEntry {
-        chunk_id: "chunk-retention-quic-fallback".to_owned(),
-        object_id: "object-retention-quic-fallback".to_owned(),
-        manifest_hash: "manifest-hash".to_owned(),
-        chunk_index: 0,
-        chunk_cipher_hash: "chunk-cipher-hash".to_owned(),
-        owner_signing_key_id: "owner-retention-quic-fallback".to_owned(),
-        owner_public_key: "owner-public-retention-quic-fallback".to_owned(),
-        encrypted_chunk: b"ciphertext".to_vec(),
-        stored_at: 1_000,
-        expires_at: 1_900,
-        delete_after_ack: false,
-        acked_by: BTreeSet::new(),
-        status: ramflux_node_core::RelayChunkStatus::Available,
-    }
-}
-
 pub(crate) struct TestPeerCerts {
     pub(crate) tls: ramflux_transport::MeshTlsConfig,
-    #[cfg_attr(not(feature = "itest-object-v2"), allow(dead_code))]
-    pub(crate) ca_pem: String,
 }
 
 pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -664,7 +599,6 @@ pub(crate) fn issue_test_ca_and_service_cert(
             service_cert,
             service_key,
         },
-        ca_pem: std::fs::read_to_string(ca_cert)?,
     })
 }
 
@@ -678,9 +612,4 @@ pub(crate) fn run_openssl(args: &[&str]) -> Result<(), Box<dyn std::error::Error
 
 pub(crate) fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
     path.to_str().ok_or_else(|| format!("non-UTF-8 path {}", path.display()).into())
-}
-
-#[cfg(feature = "itest-object-v2")]
-pub(crate) fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    message.into().into()
 }

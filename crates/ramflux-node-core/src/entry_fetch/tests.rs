@@ -22,7 +22,11 @@ fn fetch_all_terminal_races() -> Result {
                 row.envelope.encrypted_payload = "x".repeat(crate::ENTRY_FRAME_BYTE_CAP);
             }
             // Deliberate legacy fixture: persistence accepts rows predating admission bounds.
-            store.record_submission_increment(&format!("legacy-{seq}"), deadline, Some(&row))?;
+            store.record_submission_increment(
+                &crate::tests::request_replay_fixture(&format!("legacy-{seq}")),
+                deadline,
+                Some(&row),
+            )?;
         }
         let router = store.load_router()?.ok_or("router")?;
         let id = store.inbox_status("target")?.0;

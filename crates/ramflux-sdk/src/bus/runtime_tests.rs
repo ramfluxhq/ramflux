@@ -429,7 +429,7 @@ fn actor_account_with_blocked_upload(
         )?;
         account.client.node_relay_options = Some(RelayTransferOptions {
             relay_endpoint: "https://relay.invalid".into(),
-            token_provider: RelayTokenProvider::GatewayIssued,
+
             interrupt_after_chunks: None,
             relay_quic_peer_addr: None,
             relay_quic_server_name: None,

@@ -28,8 +28,7 @@ pub(crate) struct RuntimeTimeouts {
     pub task_approval: Duration,
     pub task_submit: Duration,
     pub http: Duration,
-    #[cfg(feature = "itest-local-mint")]
-    pub relay_http: Duration,
+
     pub command: Duration,
     pub post_claim: Duration,
     pub frame: Duration,
@@ -54,8 +53,7 @@ impl Default for RuntimeTimeouts {
             task_approval: Duration::from_secs(1),
             task_submit: Duration::from_secs(15),
             http: crate::prekey::SDK_HTTP_TIMEOUT,
-            #[cfg(feature = "itest-local-mint")]
-            relay_http: Duration::from_secs(60),
+
             command: COMMAND_DEADLINE,
             post_claim: COMMAND_DEADLINE,
             frame: crate::constants::GATEWAY_SESSION_NETWORK_TIMEOUT,
@@ -102,8 +100,6 @@ impl RuntimeTimeouts {
             fetch: held,
             keepalive_idle: held,
             keepalive_call: held,
-            #[cfg(feature = "itest-local-mint")]
-            relay_http: held,
         }
     }
 }

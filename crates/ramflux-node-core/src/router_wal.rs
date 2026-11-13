@@ -172,11 +172,11 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
                         accepted_at: *accepted_at,
                         entry,
                     },
-                    (None, _) => Self::Submission {
-                        replay_key: replay_key.clone(),
-                        replay_expires_at: *replay_expires_at,
-                        entry,
-                    },
+                    (None, _) => {
+                        return Err(NodeCoreError::UnsupportedPersistedFormat(
+                            "router WAL acceptance time",
+                        ));
+                    }
                 };
                 Ok(if local_delivery.is_some() {
                     Self::SenderAssigned { payload: Box::new(stored) }
@@ -200,43 +200,46 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
                 }
                 (*payload).try_into()
             }
-            StoredRouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
-                // Records from before acceptance times were logged. The router store resolves
-                // and persists their deadline once, so it is never rebased at a later restart.
-                let entry = entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?;
-                Ok(Self::Submission {
-                    replay_key,
-                    replay_expires_at,
-                    entry: entry.map(Box::new),
-                    accepted_at: None,
-                    local_delivery: None,
-                })
+            StoredRouterWalPayload::Submission { .. } => {
+                Err(NodeCoreError::UnsupportedPersistedFormat("router WAL acceptance time"))
             }
             StoredRouterWalPayload::SubmissionAccepted {
                 replay_key,
                 replay_expires_at,
                 accepted_at,
                 entry,
-            } => Ok(Self::Submission {
-                replay_key,
-                replay_expires_at,
-                entry: entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?.map(Box::new),
-                accepted_at: Some(accepted_at),
-                local_delivery: None,
-            }),
+            } => {
+                crate::replay_guard::key_format::require_current_key(&replay_key)?;
+                Ok(Self::Submission {
+                    replay_key,
+                    replay_expires_at,
+                    entry: entry
+                        .map(|entry| InboxEntry::try_from(*entry))
+                        .transpose()?
+                        .map(Box::new),
+                    accepted_at: Some(accepted_at),
+                    local_delivery: None,
+                })
+            }
             StoredRouterWalPayload::SubmissionClassified {
                 replay_key,
                 replay_expires_at,
                 accepted_at,
                 entry,
                 local_delivery,
-            } => Ok(Self::Submission {
-                replay_key,
-                replay_expires_at,
-                entry: entry.map(|entry| InboxEntry::try_from(*entry)).transpose()?.map(Box::new),
-                accepted_at: Some(accepted_at),
-                local_delivery: Some(local_delivery),
-            }),
+            } => {
+                crate::replay_guard::key_format::require_current_key(&replay_key)?;
+                Ok(Self::Submission {
+                    replay_key,
+                    replay_expires_at,
+                    entry: entry
+                        .map(|entry| InboxEntry::try_from(*entry))
+                        .transpose()?
+                        .map(Box::new),
+                    accepted_at: Some(accepted_at),
+                    local_delivery: Some(local_delivery),
+                })
+            }
         }
     }
 }
@@ -351,7 +354,7 @@ impl RouterWalSubmissionRecord {
     pub fn retain_until(&self) -> i64 {
         self.entry.as_ref().map_or(self.replay_expires_at, |entry| {
             self.accepted_at.map_or_else(
-                || crate::inbox_legacy_retain_until(&entry.envelope, router_wal_now()),
+                || i64::MIN,
                 |accepted_at| crate::inbox_retain_until(&entry.envelope, accepted_at),
             )
         })
@@ -405,19 +408,6 @@ impl RouterWalState {
                         self.issued_by_target.entry(entry.target_delivery_id.clone()).or_default();
                     *issued = (*issued).max(entry.inbox_seq);
                 }
-                let replay_key = if let Some(tail) = replay_key.strip_prefix("envelope/v2/") {
-                    entry.as_ref().map_or_else(
-                        || replay_key.clone(),
-                        |entry| {
-                            format!(
-                                "envelope/v3/{tail}/{}",
-                                ramflux_protocol::encode_base64url(&entry.target_delivery_id)
-                            )
-                        },
-                    )
-                } else {
-                    replay_key
-                };
                 let record = RouterWalSubmissionRecord {
                     replay_key: replay_key.clone(),
                     replay_expires_at,
@@ -629,6 +619,35 @@ impl RouterWalStore {
         directory_bytes(&self.root)
     }
 
+    /// Decode existing records without repair, truncation, identity reservation or writes.
+    pub(crate) fn validate_formats(root: &Path) -> Result<(), NodeCoreError> {
+        if !root.try_exists().map_err(identity::error)? {
+            return Ok(());
+        }
+        let directories = std::iter::once(root.to_path_buf())
+            .chain(router_wal_existing_shard_roots(root)?.into_iter().map(|(_, path)| path));
+        for directory in directories {
+            for segment in router_wal_segment_ids(&directory)? {
+                let mut file = File::open(router_wal_segment_path(&directory, segment))
+                    .map_err(identity::error)?;
+                // Structural damage, interrupted headers and pending quarantine moves retain
+                // the existing recovery preflight and its typed operator diagnostics. This
+                // pass never repairs them; it refuses retired authority in decodable records.
+                if identity::read_header(&mut file).is_err() {
+                    continue;
+                }
+                while let Ok(Some((stored, _))) = read_router_wal_record(&mut file) {
+                    if let Err(error @ NodeCoreError::UnsupportedPersistedFormat(_)) =
+                        RouterWalPayload::try_from(stored)
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when the WAL directory cannot be created, recovered, or opened.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
@@ -645,6 +664,7 @@ impl RouterWalStore {
         pipeline: bool,
     ) -> Result<Self, NodeCoreError> {
         let root = root.as_ref().to_path_buf();
+        Self::validate_formats(&root)?;
         durability_io::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
         let shard_count = shard_count.max(1);
@@ -682,6 +702,7 @@ impl RouterWalStore {
         entry: Option<&InboxEntry>,
         local_delivery: Option<RouterWalLocalDelivery>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         self.prepare_sender_identity(entry)?;
         self.writer.append(RouterWalPayload::Submission {
             replay_key: replay_key.to_owned(),
@@ -728,6 +749,7 @@ impl RouterWalStore {
         local_delivery: Option<RouterWalLocalDelivery>,
         lease: Option<crate::SubmissionLease>,
     ) -> Result<RouterWalRecordLocation, NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         self.prepare_sender_identity(entry)?;
         self.writer
             .append_async(
@@ -1939,6 +1961,31 @@ pub(crate) fn write_legacy_router_wal_segment(
     write_router_wal_record_to_file(&file, &encoded)
 }
 
+/// Writes a current deadline-bound record for startup durability fixtures.
+#[cfg(test)]
+pub(crate) fn write_current_router_wal_segment(
+    root: &Path,
+    replay_key: &str,
+    replay_expires_at: i64,
+    entry: &InboxEntry,
+) -> Result<(), NodeCoreError> {
+    fs::create_dir_all(root).map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    let stored = StoredRouterWalPayload::SubmissionAccepted {
+        accepted_at: entry.envelope.created_at,
+
+        replay_key: crate::tests::request_replay_fixture(replay_key),
+        replay_expires_at,
+        entry: Some(Box::new(StoredRouterWalInboxEntry::try_from(entry)?)),
+    };
+    let encoded = postcard::to_allocvec(&stored)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+    let mut file = File::create(router_wal_segment_path(root, 0))
+        .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    file.write_all(ROUTER_WAL_MAGIC)
+        .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+    write_router_wal_record_to_file(&file, &encoded)
+}
+
 fn writer_check(path: &Path, operation: &str) -> Result<(), NodeCoreError> {
     crate::fatal_durability::check()?;
     #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -2002,12 +2049,12 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn legacy_classified_receipts_do_not_gain_sender_assignments()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn classified_receipts_do_not_gain_sender_assignments() -> Result<(), Box<dyn std::error::Error>>
+    {
         for assigned in [false, true] {
             let entry = router_wal_inbox_entry("legacy-classified", "target");
             let stored = StoredRouterWalPayload::SubmissionClassified {
-                replay_key: "legacy".into(),
+                replay_key: crate::tests::request_replay_fixture("classified"),
                 replay_expires_at: i64::MAX,
                 accepted_at: 1_760_000_001,
                 entry: Some(Box::new(StoredRouterWalInboxEntry::try_from(&entry)?)),
@@ -2054,7 +2101,8 @@ mod tests {
     }
 
     #[test]
-    fn wal_record_with_v2_key_replays_into_tuple_index() -> Result<(), Box<dyn std::error::Error>> {
+    fn current_wal_record_reopens_with_its_exact_tuple_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
         let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
         let branch = ramflux_crypto::create_device_branch(
             "alice",
@@ -2063,14 +2111,16 @@ mod tests {
             ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
         );
         let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-        let path = temp_router_wal_dir("v2-upgrade")?;
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path();
         let db_path = path.join("db");
         let wal_path = path.join("wal");
         let entry = router_wal_inbox_entry("same-id", "left");
         let key = format!(
-            "envelope/v2/{}/{}",
+            "envelope/v3/{}/{}/{}",
             source.storage_key(),
-            ramflux_protocol::encode_base64url("same-id")
+            ramflux_protocol::encode_base64url("same-id"),
+            ramflux_protocol::encode_base64url("left")
         );
         {
             let wal = RouterWalStore::open(&wal_path)?;
@@ -2107,7 +2157,6 @@ mod tests {
             1_760_000_001
         )?);
         drop(store);
-        remove_router_wal_dir(path);
         Ok(())
     }
 
@@ -2235,7 +2284,9 @@ mod tests {
         let store = RouterWalStore::open(&root)?;
         let entry = router_wal_inbox_entry("env_router_wal_recover", "target_router_wal");
         store.record_submission(
-            "device:env_router_wal_recover:env_router_wal_recover",
+            &crate::tests::request_replay_fixture(
+                "device:env_router_wal_recover:env_router_wal_recover",
+            ),
             9_999_999_999,
             Some(&entry),
         )?;
@@ -2270,14 +2321,14 @@ mod tests {
         let store = RouterWalStore::open_with_shards(&root, shard_count)?;
         let left_entry = router_wal_inbox_entry("env_router_wal_shard_left", &left_target);
         let right_entry = router_wal_inbox_entry("env_router_wal_shard_right", &right_target);
-        let left_replay_key = format!(
+        let left_replay_key = crate::tests::request_replay_fixture(&format!(
             "device_router_wal_shard:{}:{}",
             left_entry.envelope.envelope_id, left_entry.envelope.envelope_id
-        );
-        let right_replay_key = format!(
+        ));
+        let right_replay_key = crate::tests::request_replay_fixture(&format!(
             "device_router_wal_shard:{}:{}",
             right_entry.envelope.envelope_id, right_entry.envelope.envelope_id
-        );
+        ));
 
         store.record_submission(&left_replay_key, 9_999_999_999, Some(&left_entry))?;
         store.record_submission(&right_replay_key, 9_999_999_999, Some(&right_entry))?;
@@ -2286,7 +2337,7 @@ mod tests {
                 replay_key: left_replay_key.clone(),
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(left_entry)),
-                accepted_at: None,
+                accepted_at: Some(router_wal_now()),
                 local_delivery: None,
             },
             shard_count,
@@ -2296,7 +2347,7 @@ mod tests {
                 replay_key: right_replay_key.clone(),
                 replay_expires_at: 9_999_999_999,
                 entry: Some(Box::new(right_entry)),
-                accepted_at: None,
+                accepted_at: Some(router_wal_now()),
                 local_delivery: None,
             },
             shard_count,
@@ -2351,10 +2402,10 @@ mod tests {
                     "target_router_wal_batch",
                 );
                 worker_store.record_submission(
-                    &format!(
+                    &crate::tests::request_replay_fixture(&format!(
                         "device_router_wal_batch:{}:{}",
                         entry.envelope.envelope_id, entry.envelope.envelope_id
-                    ),
+                    )),
                     9_999_999_999,
                     Some(&entry),
                 )?;
@@ -2390,10 +2441,10 @@ mod tests {
                     );
                     task_store
                         .record_submission_async(
-                            &format!(
+                            &crate::tests::request_replay_fixture(&format!(
                                 "device_router_wal_async:{}:{}",
                                 entry.envelope.envelope_id, entry.envelope.envelope_id
-                            ),
+                            )),
                             9_999_999_999,
                             Some(&entry),
                         )
@@ -2419,10 +2470,10 @@ mod tests {
         let store = RouterWalStore::open_with_shards_config(&root, 1, true)?;
         let entry =
             router_wal_inbox_entry("env_router_wal_pipeline_recover", "target_router_wal_pipeline");
-        let replay_key = format!(
+        let replay_key = crate::tests::request_replay_fixture(&format!(
             "device_router_wal_pipeline:{}:{}",
             entry.envelope.envelope_id, entry.envelope.envelope_id
-        );
+        ));
         store.record_submission(&replay_key, 9_999_999_999, Some(&entry))?;
         drop(store);
 
@@ -2468,10 +2519,10 @@ mod tests {
                         &target,
                     );
                     worker_store.record_submission(
-                        &format!(
+                        &crate::tests::request_replay_fixture(&format!(
                             "device_router_wal:{}:{}",
                             entry.envelope.envelope_id, entry.envelope.envelope_id
-                        ),
+                        )),
                         9_999_999_999,
                         Some(&entry),
                     )?;
@@ -2529,10 +2580,10 @@ mod tests {
                         );
                         task_store
                             .record_submission_async(
-                                &format!(
+                                &crate::tests::request_replay_fixture(&format!(
                                     "device_router_wal_async_bench:{}:{}",
                                     entry.envelope.envelope_id, entry.envelope.envelope_id
-                                ),
+                                )),
                                 9_999_999_999,
                                 Some(&entry),
                             )
@@ -2579,7 +2630,7 @@ mod tests {
             replay_key: replay_key.to_owned(),
             replay_expires_at: 9_999_999_999,
             entry: Some(Box::new(router_wal_inbox_entry(envelope_id, target_delivery_id))),
-            accepted_at: None,
+            accepted_at: Some(router_wal_now()),
             local_delivery: None,
         }
     }
@@ -2673,3 +2724,6 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod acknowledgement_test;
+
+#[cfg(test)]
+mod retired_format_tests;

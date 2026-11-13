@@ -28,7 +28,6 @@ impl RamfluxClient {
         &self,
         envelope: SdkOwnDeviceSyncEnvelope,
         manifest: SdkDeviceManifestResponse,
-        #[cfg(feature = "itest-local-mint")] http_timeout: std::time::Duration,
     ) -> Result<HistoryPreparation, SdkError> {
         self.validate_own_sync_header(&self.own_account_anchor()?, &envelope)?;
         let manifest = self.accept_fetched_device_manifest(
@@ -61,12 +60,7 @@ impl RamfluxClient {
             .received_attachment_prepared_slot(&envelope.history_ref)?
             .map_or_else(|| self.decrypt_object_key_slot(&envelope.history_ref.key_slot), Ok)?;
         let input = self.prepare_reference_fetch_input(&envelope.history_ref, slot.object_key)?;
-        #[cfg(feature = "itest-local-mint")]
-        let input = {
-            let mut input = input;
-            input.http_timeout = http_timeout;
-            input
-        };
+
         Ok(HistoryPreparation::Fetch(Arc::new(HistoryFetch {
             input: Arc::new(input),
             envelope,

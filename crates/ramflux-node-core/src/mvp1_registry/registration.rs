@@ -56,7 +56,7 @@ impl RegistrationDelta {
             .chain(self.signed_device_sets.keys())
             .chain(self.root_public_keys_by_commitment.keys())
             .cloned()
-            .chain(self.receipts.iter().filter_map(|receipt| receipt.root.clone()))
+            .chain(self.receipts.iter().map(|receipt| receipt.root.clone()))
             .collect()
     }
 

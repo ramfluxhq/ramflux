@@ -1,0 +1,37 @@
+{
+  "bound": {
+    "audience": "ramflux-node",
+    "capability_scope": [
+      "device.delivery.bind"
+    ],
+    "device_epoch": 1,
+    "device_id": "device",
+    "expires_at": 2000,
+    "issued_at": 1000,
+    "key_binding": {
+      "agreement_identity_public_key": "WFV4TLPIx5bYSsk-j0pT2rC7MegJYAQs-ofwOkKTswg",
+      "branch_signing_public_key": "C1E62bSSQBXKCQLtB5BE06xdvsIwbwaUjBDajrbjny0",
+      "principal_kind": "human",
+      "version": 2
+    },
+    "principal_id": "alice",
+    "proof_id": "vHVToqSIql-i8PbmT91nmWODPy82ueeP8n0qd7w6qxc",
+    "signature": "Ged3EXent9bwLH2Ol2c2GVQFusnF8hp-c_WgcnEflt7K7YezKpl1ifAOq-93pWHJP0w5DkDVdj8q8NZYUNEzBQ"
+  },
+  "bound_preimage": "eyJhdWRpZW5jZSI6InJhbWZsdXgtbm9kZSIsImNhcGFiaWxpdHlfc2NvcGUiOlsiZGV2aWNlLmRlbGl2ZXJ5LmJpbmQiXSwiZGV2aWNlX2Vwb2NoIjoxLCJkZXZpY2VfaWQiOiJkZXZpY2UiLCJkb21haW4iOiJyYW1mbHV4LmJyYW5jaF9wcm9vZi52MiIsImV4cGlyZXNfYXQiOjIwMDAsImlzc3VlZF9hdCI6MTAwMCwia2V5X2JpbmRpbmciOnsiYWdyZWVtZW50X2lkZW50aXR5X3B1YmxpY19rZXkiOiJXRlY0VExQSXg1YllTc2stajBwVDJyQzdNZWdKWUFRcy1vZndPa0tUc3dnIiwiYnJhbmNoX3NpZ25pbmdfcHVibGljX2tleSI6IkMxRTYyYlNTUUJYS0NRTHRCNUJFMDZ4ZHZzSXdid2FVakJEYWpyYmpueTAiLCJwcmluY2lwYWxfa2luZCI6Imh1bWFuIiwidmVyc2lvbiI6Mn0sInByaW5jaXBhbF9pZCI6ImFsaWNlIiwicHJvb2ZfaWQiOiJ2SFZUb3FTSXFsLWk4UGJtVDkxbm1XT0RQeTgydWVlUDhuMHFkN3c2cXhjIn0",
+  "old": {
+    "audience": "ramflux-node",
+    "capability_scope": [
+      "device.delivery.bind"
+    ],
+    "device_epoch": 1,
+    "device_id": "device",
+    "expires_at": 2000,
+    "issued_at": 1000,
+    "principal_id": "alice",
+    "proof_id": "E_hL_B9IK6aN5w8JxGsnBRhb5-IDrCm1YFE0S-Xnx-A",
+    "signature": "VQjn7Sti0XRT_9KdA4Gxch9DkwV1nqRvLpgKXo1ndQcLLZ16W8DHexNWZW2XhqKAkDGHCMmqa8aoxh7d4ZfhCQ"
+  },
+  "old_preimage": "eyJhdWRpZW5jZSI6InJhbWZsdXgtbm9kZSIsImNhcGFiaWxpdHlfc2NvcGUiOlsiZGV2aWNlLmRlbGl2ZXJ5LmJpbmQiXSwiZGV2aWNlX2Vwb2NoIjoxLCJkZXZpY2VfaWQiOiJkZXZpY2UiLCJleHBpcmVzX2F0IjoyMDAwLCJpc3N1ZWRfYXQiOjEwMDAsInByaW5jaXBhbF9pZCI6ImFsaWNlIiwicHJvb2ZfaWQiOiJFX2hMX0I5SUs2YU41dzhKeEdzbkJSaGI1LUlEckNtMVlGRTBTLVhueC1BIn0",
+  "root": "Zr5-Myx6RTMyvZ0Kf32wVfXF7xoGraZtmLOftoEMRzo"
+}

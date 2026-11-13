@@ -8,9 +8,9 @@ use super::{
 };
 use crate::prelude::{
     DeviceBranch, EncryptedObject, GatewaySessionAccess, OBJECT_TRANSFER_UPLOAD, RamfluxClient,
-    RelayTokenProvider, RelayTransferOptions, SdkError, SdkObjectRelayPutResponse,
-    SdkObjectTransferStatus, SdkRelayChunkStatus, chunk_manifest_for_object, object_relay_chunk_id,
-    object_transfer_id, object_transfer_status,
+    RelayTransferOptions, SdkError, SdkObjectRelayPutResponse, SdkObjectTransferStatus,
+    SdkRelayChunkStatus, chunk_manifest_for_object, object_relay_chunk_id, object_transfer_id,
+    object_transfer_status,
 };
 use std::{future::Future, sync::Arc};
 
@@ -19,8 +19,7 @@ pub(crate) struct UploadInput {
     key: zeroize::Zeroizing<[u8; 32]>,
     branch: DeviceBranch,
     pub options: RelayTransferOptions,
-    #[cfg(feature = "itest-local-mint")]
-    pub http_timeout: std::time::Duration,
+
     pub chunk_size: usize,
     pub completed: Vec<u32>,
     pub transfer_id: String,
@@ -55,8 +54,7 @@ impl RamfluxClient {
             key,
             branch,
             options,
-            #[cfg(feature = "itest-local-mint")]
-            http_timeout: std::time::Duration::from_secs(60),
+
             chunk_size: chunk_size.max(1),
             completed,
             transfer_id,
@@ -185,73 +183,15 @@ async fn put(
     index: u32,
     bytes: Vec<u8>,
 ) -> Result<SdkObjectRelayPutResponse, SdkError> {
-    match &input.options.token_provider {
-        RelayTokenProvider::GatewayIssued => {
-            put_object_chunk_via_relay_quic(
-                engine,
-                pool,
-                &input.options,
-                &input.branch,
-                &input.object,
-                index,
-                bytes,
-                input.expires_at,
-            )
-            .await
-        }
-        #[cfg(feature = "itest-local-mint")]
-        RelayTokenProvider::LocalMint { .. } => local_put(input, index, bytes).await,
-    }
-}
-
-#[cfg(feature = "itest-local-mint")]
-async fn local_put(
-    input: &UploadInput,
-    index: u32,
-    bytes: Vec<u8>,
-) -> Result<SdkObjectRelayPutResponse, SdkError> {
-    use crate::prelude::{
-        SdkObjectChunkFrame, SdkObjectRelayCapability, object_permission_for_chunk,
-        object_relay_chunk_cipher_hash,
-    };
-    let options = &input.options;
-    let object = &input.object;
-    let branch = &input.branch;
-    let expires_at = input.expires_at;
-    let token = super::local_relay_token_for_chunk(
-        options,
-        branch,
-        object,
+    put_object_chunk_via_relay_quic(
+        engine,
+        pool,
+        &input.options,
+        &input.branch,
+        &input.object,
         index,
-        SdkObjectRelayCapability::Put,
-        expires_at,
-    )?;
-    let permission = object_permission_for_chunk(
-        branch,
-        object,
-        index,
-        SdkObjectRelayCapability::Put,
-        expires_at,
-    )?;
-    let frame = SdkObjectChunkFrame {
-        schema: "ramflux.object_chunk_frame.v1".into(),
-        object_id: object.object_id.clone(),
-        manifest_hash: object.manifest_hash.clone(),
-        chunk_index: index,
-        chunk_id: token.chunk_id.clone(),
-        chunk_cipher_hash: object_relay_chunk_cipher_hash(&object.manifest_hash, index, &bytes),
-        cipher_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        encrypted_chunk: bytes,
-        relay_token: token,
-        object_permission_envelope: permission,
-        expires_at,
-        delete_after_ack: false,
-    };
-    super::local_relay::post(
-        &options.relay_endpoint,
-        "/relay/v1/object/put_chunk",
-        &frame,
-        input.http_timeout,
+        bytes,
+        input.expires_at,
     )
     .await
 }

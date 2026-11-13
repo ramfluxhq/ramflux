@@ -6,7 +6,7 @@
 use crate::prelude::*;
 
 // T25-A3 (CTRL-102 / OBJ-IPC-01): the bounded UPLOAD spool wiring.
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 
 use crate::bus::daemon::local_bus_accounts_dir;
 use crate::bus::io::{
@@ -123,7 +123,7 @@ fn rehydrate_one_object_put_spool(
     journal_path: &Path,
 ) {
     // Parse the journal; missing/corrupt -> fail closed.
-    let journal: ObjectPutJournal = match std::fs::read(journal_path)
+    let journal: ObjectPutJournal = match read_object_put_journal(journal_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     {
@@ -186,7 +186,6 @@ fn rehydrate_one_object_put_spool(
             plaintext_hash: journal.plaintext_hash,
             chunk_size: journal.chunk_size,
             relay_endpoint: journal.relay_endpoint,
-            relay_service_key_base64: journal.relay_service_key_base64,
             relay_interrupt_after_chunks: journal.relay_interrupt_after_chunks,
             path: spool_path.to_path_buf(),
             journal_path: journal_path.to_path_buf(),
@@ -202,6 +201,9 @@ pub(crate) async fn dispatch_object_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    crate::object::reject_retired_relay_service_key(
+        request.body.get("relay_service_key_base64").is_some_and(|value| !value.is_null()),
+    )?;
     let account_id = request_account_id(request)?;
     // T25-A3 (OBJ-IPC-01): the bounded UPLOAD spool lives under the daemon data_root; capture it
     // before the mutable account borrow (data_root is an immutable read of the same state).
@@ -251,7 +253,7 @@ pub(crate) async fn dispatch_object_bus_request(
             }
             let relay_options = account.client.relay_transfer_options(
                 body.relay_endpoint.clone(),
-                body.relay_service_key_base64.clone(),
+                body.relay_service_key_base64.as_deref(),
                 body.relay_interrupt_after_chunks,
             )?;
             let plaintext = ramflux_protocol::decode_base64url(&body.plaintext_base64)
@@ -290,7 +292,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 account,
                 &body.object_id,
                 body.relay_endpoint.clone(),
-                body.relay_service_key_base64.clone(),
+                body.relay_service_key_base64.as_deref(),
                 body.relay_interrupt_after_chunks,
             )?;
             let plaintext = if let Some(options) = relay_options.as_ref() {
@@ -338,7 +340,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 .client
                 .relay_transfer_options(
                     body.relay_endpoint.clone(),
-                    body.relay_service_key_base64.clone(),
+                    body.relay_service_key_base64.as_deref(),
                     body.relay_interrupt_after_chunks,
                 )?
                 .ok_or_else(|| {
@@ -447,7 +449,7 @@ pub(crate) async fn dispatch_object_bus_request(
             let body: LocalBusObjectDeleteRequest = serde_json::from_value(request.body.clone())?;
             let relay_options = account.client.relay_transfer_options(
                 body.relay_endpoint,
-                body.relay_service_key_base64,
+                body.relay_service_key_base64.as_deref(),
                 None,
             )?;
             if let Some(options) = relay_options.as_ref() {
@@ -530,7 +532,7 @@ async fn prepare_put_core(
 ) -> Result<PreparedPut, SdkError> {
     let relay_options = account.client.relay_transfer_options(
         body.relay_endpoint.clone(),
-        body.relay_service_key_base64.clone(),
+        body.relay_service_key_base64.as_deref(),
         body.relay_interrupt_after_chunks,
     )?;
     let plaintext_hash =
@@ -789,12 +791,15 @@ const OBJECT_PUT_JOURNAL_PREFIX_DOMAIN: &str = "ramflux.object_put_journal.prefi
 /// T25-A5: abandoned (orphaned) spool/journal pairs older than this are swept on startup so disk stays
 /// bounded even if a resume never arrives.
 const OBJECT_PUT_JOURNAL_TTL_SECONDS: u64 = 24 * 60 * 60;
+const OBJECT_PUT_JOURNAL_MAX_BYTES: u64 = 64 * 1024;
 
 /// T25-A5 (OBJ-IPC-01): the standalone durable crash-resume journal sidecar for one in-flight upload.
 /// Written atomically (temp + fsync + rename + parent-dir fsync) AFTER the spool bytes are fsync'd, so
 /// `written` never exceeds the durable spool length. On restart the daemon verifies the persisted
 /// prefix content (BLAKE3) matches `prefix_hash` before resuming.
+/// Unknown fields refuse restore, including retired keys; journals have no forward-compatibility reader.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 struct ObjectPutJournal {
     account_id: String,
     operation_id: String,
@@ -803,10 +808,18 @@ struct ObjectPutJournal {
     plaintext_hash: String,
     chunk_size: usize,
     relay_endpoint: Option<String>,
-    relay_service_key_base64: Option<String>,
     relay_interrupt_after_chunks: Option<u32>,
     written: usize,
     prefix_hash: String,
+}
+
+fn read_object_put_journal(path: &Path) -> Result<Vec<u8>, SdkError> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(OBJECT_PUT_JOURNAL_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > OBJECT_PUT_JOURNAL_MAX_BYTES {
+        return Err(SdkError::LocalBus("object put journal exceeds its byte limit".into()));
+    }
+    Ok(bytes)
 }
 
 /// The per-account subdirectory that routes an account's upload spools without a cross-account scan.
@@ -854,6 +867,9 @@ fn write_object_put_journal_atomic(
     set_owner_only_dir_permissions(parent)?;
     let tmp_path = journal_path.with_extension("journal.tmp");
     let bytes = serde_json::to_vec(journal)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > OBJECT_PUT_JOURNAL_MAX_BYTES {
+        return Err(SdkError::LocalBus("object put journal exceeds its byte limit".into()));
+    }
     {
         let mut tmp = crate::platform::fs::open_owner_only_truncate(&tmp_path)?;
         tmp.write_all(&bytes)?;
@@ -889,6 +905,7 @@ fn object_put_begin(
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusObjectPutBeginRequest = serde_json::from_value(request.body.clone())?;
+    crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
     if body.protocol_version != OBJECT_PUT_PROTOCOL_VERSION {
         return Err(SdkError::LocalBus(format!(
             "object.put.begin unsupported protocol_version {} (expected {OBJECT_PUT_PROTOCOL_VERSION})",
@@ -929,7 +946,6 @@ fn object_put_begin(
         plaintext_hash: body.plaintext_hash.clone(),
         chunk_size: body.chunk_size,
         relay_endpoint: body.relay_endpoint.clone(),
-        relay_service_key_base64: body.relay_service_key_base64.clone(),
         relay_interrupt_after_chunks: body.relay_interrupt_after_chunks,
         written: 0,
         prefix_hash: prefix_hasher.finalize_base64url(),
@@ -950,7 +966,6 @@ fn object_put_begin(
             plaintext_hash: body.plaintext_hash,
             chunk_size: body.chunk_size,
             relay_endpoint: body.relay_endpoint,
-            relay_service_key_base64: body.relay_service_key_base64,
             relay_interrupt_after_chunks: body.relay_interrupt_after_chunks,
             path,
             journal_path,
@@ -1050,7 +1065,6 @@ fn object_put_chunk_apply(
         plaintext_hash: session.plaintext_hash.clone(),
         chunk_size: session.chunk_size,
         relay_endpoint: session.relay_endpoint.clone(),
-        relay_service_key_base64: session.relay_service_key_base64.clone(),
         relay_interrupt_after_chunks: session.relay_interrupt_after_chunks,
         written: end,
         prefix_hash,
@@ -1137,7 +1151,7 @@ fn verify_finish_spool(
         plaintext_base64: String::new(),
         chunk_size: session.chunk_size,
         relay_endpoint: session.relay_endpoint.clone(),
-        relay_service_key_base64: session.relay_service_key_base64.clone(),
+        relay_service_key_base64: None,
         relay_interrupt_after_chunks: session.relay_interrupt_after_chunks,
         operation_id: Some(body.operation_id.clone()),
     };
@@ -1173,7 +1187,7 @@ pub(in crate::bus) fn prepare_local_first_network(
         account,
         &body.object_id,
         body.relay_endpoint,
-        body.relay_service_key_base64,
+        body.relay_service_key_base64.as_deref(),
         body.relay_interrupt_after_chunks,
     )?
     .is_some()
@@ -1353,7 +1367,7 @@ async fn object_get_begin(
         account,
         &body.object_id,
         body.relay_endpoint.clone(),
-        body.relay_service_key_base64.clone(),
+        body.relay_service_key_base64.as_deref(),
         body.relay_interrupt_after_chunks,
     )?;
     if relay_options.is_some() {
@@ -1609,10 +1623,7 @@ fn with_reconciled(mut terminal: serde_json::Value, reconciled: bool) -> serde_j
     terminal
 }
 
-// T22-A1 / RQ-04: object upload/download relay dispatch. Production builds always use the async v3
-// GatewayIssued path; the synchronous LocalMint (v2 shared-HMAC) branch is compiled only under the
-// `itest-local-mint` feature so the default binary contains no v2 mint code.
-#[cfg(not(feature = "itest-local-mint"))]
+// Object upload/download dispatch uses gateway-issued QUIC capabilities.
 async fn dispatch_object_upload_to_relay(
     account: &mut LocalBusAccountState,
     object_id: &str,
@@ -1629,53 +1640,12 @@ async fn dispatch_object_upload_to_relay(
     result
 }
 
-#[cfg(feature = "itest-local-mint")]
-async fn dispatch_object_upload_to_relay(
-    account: &mut LocalBusAccountState,
-    object_id: &str,
-    chunk_size: usize,
-    options: &RelayTransferOptions,
-) -> Result<SdkObjectTransferStatus, SdkError> {
-    if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
-        return account.client.upload_object_to_relay(object_id, chunk_size, options);
-    }
-    let mut engine = account.session_client().await?;
-    let pool = account.relay_quic_pool()?;
-    let result = account
-        .client
-        .upload_object_to_relay_via_gateway(&mut engine, &pool, object_id, chunk_size, options)
-        .await;
-    account.apply_session_metadata(engine);
-    result
-}
-
-#[cfg(not(feature = "itest-local-mint"))]
 async fn dispatch_object_download_from_relay(
     account: &mut LocalBusAccountState,
     object_id: &str,
     options: &RelayTransferOptions,
     ack: bool,
 ) -> Result<Vec<u8>, SdkError> {
-    let mut engine = account.session_client().await?;
-    let pool = account.relay_quic_pool()?;
-    let result = account
-        .client
-        .download_object_from_relay_via_gateway(&mut engine, &pool, object_id, options, ack)
-        .await;
-    account.apply_session_metadata(engine);
-    result
-}
-
-#[cfg(feature = "itest-local-mint")]
-async fn dispatch_object_download_from_relay(
-    account: &mut LocalBusAccountState,
-    object_id: &str,
-    options: &RelayTransferOptions,
-    ack: bool,
-) -> Result<Vec<u8>, SdkError> {
-    if matches!(options.token_provider, RelayTokenProvider::LocalMint { .. }) {
-        return account.client.download_object_from_relay(object_id, options, ack);
-    }
     let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
     let result = account
@@ -1852,6 +1822,79 @@ mod spool_tests {
 
     fn spool_path(state: &LocalBusDaemonState) -> PathBuf {
         object_put_spool_path(&state.config.data_root, ACCOUNT, OPERATION)
+    }
+
+    #[tokio::test]
+    async fn retired_relay_keys_refuse_local_bus_requests_with_and_without_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            for profile in [false, true] {
+                let directory = tempfile::TempDir::new()?;
+                let mut state = make_state(directory.path().to_path_buf());
+                if profile {
+                    state.accounts.get_mut(ACCOUNT).ok_or("test: account")?.client.node_relay_options = Some(RelayTransferOptions {
+                        relay_endpoint: "quic://127.0.0.1:18443".into(),
+                        interrupt_after_chunks: None,
+                        relay_quic_peer_addr: Some("127.0.0.1:18443".into()),
+                        relay_quic_server_name: Some("relay".into()),
+                        relay_quic_ca_cert: Some(directory.path().join("ca.pem")),
+                        relay_owner_home_node_id: Some("node".into()),
+                        relay_owner_principal_id: Some("principal_spool_test".into()),
+                        relay_audience_node_id: Some("node".into()),
+                    });
+                }
+                for (method, mut body) in [
+                    ("object.put", serde_json::json!({"object_id":OBJECT_ID,"plaintext_base64":"eA","chunk_size":1024,"relay_endpoint":null,"operation_id":null})),
+                    ("object.put.begin", begin_body(1, &plaintext_hash(b"x"))),
+                ] {
+                    body.as_object_mut().ok_or("test: request")?.insert("relay_service_key_base64".into(), serde_json::json!("retired-test-key"));
+                    let error = dispatch(&mut state, method, body).await.err().ok_or("test: obsolete key accepted")?;
+                    assert!(matches!(error, SdkError::CapabilityDenied(_)), "retired key must produce typed capability refusal with profile={profile}");
+                    assert!(!object_put_spool_dir(directory.path()).try_exists()?, "retired key refusal must precede spool/journal writes");
+                }
+                let client = &state.accounts.get(ACCOUNT).ok_or("test: account")?.client;
+                assert!(matches!(client.relay_transfer_options(None, Some("retired-test-key"), None), Err(SdkError::CapabilityDenied(_))), "profile shortcut must not bypass SDK option refusal");
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }).await?
+    }
+
+    #[tokio::test]
+    async fn retired_key_spool_journals_are_discarded_on_real_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            for retired in [serde_json::json!("retired-test-key"), serde_json::Value::Null] {
+                let directory = tempfile::TempDir::new()?;
+                let mut state = make_state(directory.path().to_path_buf());
+                dispatch(&mut state, "object.put.begin", begin_body(1, &plaintext_hash(b"x")))
+                    .await?;
+                let spool = object_put_spool_path(directory.path(), ACCOUNT, OPERATION);
+                let journal = object_put_journal_path(directory.path(), ACCOUNT, OPERATION);
+                let mut row: serde_json::Value =
+                    serde_json::from_slice(&read_object_put_journal(&journal)?)?;
+                assert!(
+                    row.get("relay_service_key_base64").is_none(),
+                    "new journals must never serialize the retired key field"
+                );
+                row.as_object_mut()
+                    .ok_or("test: journal object")?
+                    .insert("relay_service_key_base64".into(), retired);
+                std::fs::write(&journal, serde_json::to_vec(&row)?)?;
+                let account = state.accounts.get_mut(ACCOUNT).ok_or("test: account")?;
+                account.object_put_spools.clear();
+                rehydrate_object_put_spools(account, directory.path(), ACCOUNT)?;
+                assert!(
+                    account.object_put_spools.is_empty(),
+                    "key-bearing journal must not restore an upload session"
+                );
+                assert!(
+                    !spool.try_exists()? && !journal.try_exists()?,
+                    "refused obsolete journal and its uncommitted spool must be discarded"
+                );
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await?
     }
 
     #[tokio::test]

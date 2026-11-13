@@ -20,6 +20,7 @@ impl RamfluxClient {
         relay_service_key_base64: Option<String>,
         chunk_size: usize,
     ) -> Result<SdkOwnDeviceSyncExportResponse, SdkError> {
+        crate::object::reject_retired_relay_service_key(relay_service_key_base64.is_some())?;
         self.cache_verified_device_manifest(
             engine.config(),
             principal_commitment,
@@ -117,7 +118,8 @@ impl RamfluxClient {
         let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&bundle)?);
         let object_id = format!("own-device-sync:{snapshot_id}");
         let object = self.prepare_history_transport(&object_id, &plaintext, &bundle.messages)?;
-        let relay_options = self.own_history_relay_options(relay_endpoint, options.service_key)?;
+        let relay_options =
+            self.own_history_relay_options(relay_endpoint, options.service_key.as_deref())?;
         let transfer = self
             .upload_object_to_relay_inner_via_gateway(
                 engine,
@@ -214,7 +216,7 @@ impl RamfluxClient {
     fn own_history_relay_options(
         &self,
         endpoint: &str,
-        key: Option<String>,
+        key: Option<&str>,
     ) -> Result<RelayTransferOptions, SdkError> {
         self.relay_transfer_options(Some(endpoint.to_owned()), key, None)?
             .ok_or_else(|| SdkError::LocalBus("own-device sync relay endpoint missing".into()))
@@ -227,6 +229,7 @@ impl RamfluxClient {
         envelope: &SdkOwnDeviceSyncEnvelope,
         relay_service_key_base64: Option<String>,
     ) -> Result<SdkOwnDeviceSyncImportResponse, SdkError> {
+        crate::object::reject_retired_relay_service_key(relay_service_key_base64.is_some())?;
         let mut current = envelope.clone();
         let mut seen = BTreeSet::new();
         let mut total = SdkOwnDeviceSyncImportResponse {
@@ -1412,7 +1415,7 @@ pub(crate) mod tests {
         // The effective relay options this snapshot was uploaded with carry a concrete lineage.
         let relay_options = RelayTransferOptions {
             relay_endpoint: "http://127.0.0.1:2".to_owned(),
-            token_provider: RelayTokenProvider::GatewayIssued,
+
             interrupt_after_chunks: None,
             relay_quic_peer_addr: None,
             relay_quic_server_name: None,

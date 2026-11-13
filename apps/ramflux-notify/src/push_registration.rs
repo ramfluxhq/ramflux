@@ -53,7 +53,7 @@ pub(crate) fn configure(
         store.allow_itest_unbound_push_routes();
     }
     for credential in credentials()? {
-        store.update_provider_credential(credential)?;
+        store.update_provider_credential(&credential)?;
     }
     Ok(())
 }

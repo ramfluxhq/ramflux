@@ -1159,7 +1159,7 @@ async fn handle_s13_provider_credential_value_async(
             "notify provider credential registered"
         );
         let _guard = lock_notify_store(&ingress.store_gate)?;
-        ingress.store.update_provider_credential(credential.clone())?;
+        ingress.store.update_provider_credential(&credential)?;
         Ok::<_, ramflux_node_core::NodeCoreError>(credential)
     })
     .await
@@ -1486,7 +1486,7 @@ fn handle_s13_provider_credential(
     );
     {
         let _guard = lock_notify_store(store_gate)?;
-        store.update_provider_credential(credential.clone())?;
+        store.update_provider_credential(&credential)?;
     }
     ramflux_node_core::write_itest_json_response_with_connection(
         stream,

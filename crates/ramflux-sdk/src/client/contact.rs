@@ -1148,13 +1148,20 @@ mod tests {
         let branch = ramflux_crypto::create_device_branch(principal_id, device_id, 1, branch_seed);
         let branch_public_key =
             ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-        let branch_proof = ramflux_crypto::authorize_device_branch(
+        let branch_proof = ramflux_crypto::authorize_device_branch_v2(
             &root,
             &branch,
-            "ramflux-node",
-            vec!["device.delivery.bind".to_owned()],
-            now_unix_timestamp(),
-            now_unix_timestamp().saturating_add(3600),
+            ramflux_crypto::BranchAuthorization {
+                audience: "ramflux-node",
+                capability_scope: vec!["device.delivery.bind".to_owned()],
+                issued_at: now_unix_timestamp(),
+                expires_at: now_unix_timestamp().saturating_add(3600),
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed(
+                    x25519_seed,
+                )
+                .public,
+            },
         )?;
         let identity_key = ramflux_crypto::X25519KeyPair::from_seed(x25519_seed);
         let signed_prekey = ramflux_crypto::X25519KeyPair::from_seed(signed_prekey_seed);

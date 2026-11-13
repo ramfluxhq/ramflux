@@ -98,7 +98,7 @@ impl KeyStore for OsKeychain {
     fn load(&self, account_id: &str) -> Result<Option<KeychainSecret>, RfError> {
         let entry = Self::entry(account_id)?;
         match entry.get_password() {
-            Ok(raw) => Ok(Some(decode_keychain_secret(&raw))),
+            Ok(raw) => decode_keychain_secret(&raw).map(Some),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(keyring_error(&error)),
         }
@@ -153,7 +153,7 @@ impl KeyStore for InMemoryKeyStore {
         let values = self.values.lock().map_err(|_error| {
             RfError::Message("in-memory key store values lock poisoned".to_owned())
         })?;
-        Ok(values.get(account_id).map(|raw| decode_keychain_secret(raw)))
+        values.get(account_id).map(|raw| decode_keychain_secret(raw)).transpose()
     }
 
     fn store(&self, account_id: &str, secret: &KeychainSecret) -> Result<(), RfError> {
@@ -175,11 +175,10 @@ impl KeyStore for InMemoryKeyStore {
     }
 }
 
-fn decode_keychain_secret(raw: &str) -> KeychainSecret {
-    match serde_json::from_str::<KeychainSecret>(raw) {
-        Ok(secret) => secret,
-        Err(_error) => KeychainSecret { passphrase: raw.to_owned(), device_seed_base64url: None },
-    }
+fn decode_keychain_secret(raw: &str) -> Result<KeychainSecret, RfError> {
+    serde_json::from_str(raw).map_err(|_| {
+        RfError::Message("invalid keychain credential; enter the passphrase again".into())
+    })
 }
 
 fn keyring_error(error: &keyring::Error) -> RfError {
@@ -248,10 +247,18 @@ mod tests {
     }
 
     #[test]
-    fn keychain_secret_reader_accepts_legacy_plaintext_passphrase() {
-        let secret = decode_keychain_secret("legacy-passphrase");
+    fn keychain_secret_reader_rejects_plaintext_passphrase() {
+        assert!(decode_keychain_secret("legacy-passphrase").is_err());
+        assert!(decode_keychain_secret("\"json string passphrase\"").is_err());
+        assert!(decode_keychain_secret(r#"{"device_seed_base64url":null}"#).is_err());
+    }
 
-        assert_eq!(secret.passphrase, "legacy-passphrase");
-        assert_eq!(secret.device_seed_base64url, None);
+    #[test]
+    fn keychain_secret_reader_accepts_current_shape() -> Result<(), RfError> {
+        let secret = decode_keychain_secret(
+            r#"{"passphrase":"current-passphrase","device_seed_base64url":null}"#,
+        )?;
+        assert_eq!(secret.passphrase, "current-passphrase");
+        Ok(())
     }
 }

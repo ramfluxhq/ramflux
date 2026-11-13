@@ -108,13 +108,20 @@ mod registration_tests {
             root_public_key: String::new(),
             principal_commitment: String::new(),
             branch_public_key: String::new(),
-            proof: ramflux_crypto::authorize_device_branch(
+            proof: ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &device,
-                "ramflux-node",
-                vec!["device.delivery.bind".into()],
-                0,
-                1,
+                ramflux_crypto::BranchAuthorization {
+                    audience: "ramflux-node",
+                    capability_scope: vec!["device.delivery.bind".into()],
+                    issued_at: 0,
+                    expires_at: 1,
+                    principal_kind: ramflux_protocol::PrincipalKind::Human,
+                    agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed(
+                        [14; 32],
+                    )
+                    .public,
+                },
             )?,
             target_delivery_id: "target".into(),
             gateway_id: "gateway".into(),

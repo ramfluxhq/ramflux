@@ -205,7 +205,7 @@ fn proof_signing_key_id(proof: &HomeNodeMigrationProof) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authorize_device_branch, create_device_branch, create_identity_root};
+    use crate::{authorize_device_branch_v2, create_device_branch, create_identity_root};
 
     const NOW: i64 = 1_760_000_000;
 
@@ -338,13 +338,18 @@ mod tests {
         fn new() -> Result<Self, CryptoError> {
             let root = create_identity_root("id_a", [0x11; 32]);
             let device = create_device_branch("id_a", "dev_a", 7, [0x22; 32]);
-            let branch_proof = authorize_device_branch(
+            let branch_proof = authorize_device_branch_v2(
                 &root,
                 &device,
-                "ramflux.home_node_migration",
-                vec!["identity.home_node_migrate".to_owned()],
-                NOW.saturating_sub(10),
-                NOW.saturating_add(3_600),
+                crate::BranchAuthorization {
+                    audience: "ramflux.home_node_migration",
+                    capability_scope: vec!["identity.home_node_migrate".to_owned()],
+                    issued_at: NOW.saturating_sub(10),
+                    expires_at: NOW.saturating_add(3_600),
+                    principal_kind: ramflux_protocol::PrincipalKind::Human,
+                    agreement_identity_public_key: crate::X25519KeyPair::from_seed([0x33; 32])
+                        .public,
+                },
             )?;
             let actor_public_key =
                 ramflux_protocol::encode_base64url(device.signing_key.verifying_key().to_bytes());

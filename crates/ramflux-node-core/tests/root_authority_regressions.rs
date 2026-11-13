@@ -201,15 +201,20 @@ fn another_root_cannot_reserve_or_revoke_a_local_device_name() -> TestResult {
 fn empty_commitment_legacy_device_is_fenced_from_own_device_copies() -> TestResult {
     let f = Fixture::new()?;
     let legacy = create_device_branch("alice", "legacy", 1, [31; 32]);
-    let proof = authorize_device_branch(
+    let mut proof = authorize_device_branch_v2(
         &f.root,
         &legacy,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.into()],
-        1000,
-        2000,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: 1000,
+            expires_at: 2000,
+            principal_kind: ramflux_protocol::PrincipalKind::HeadlessAi,
+            agreement_identity_public_key: f.x.public,
+        },
     )?;
-    let old = json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"legacy":{"principal_id":"alice","device_id":"legacy","device_epoch":1,"branch_public_key":encode_base64url(legacy.signing_key.verifying_key().to_bytes()),"target_delivery_id":"legacy-target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{}});
+    proof.key_binding = None;
+    let old = json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"legacy":{"principal_id":"alice","device_id":"legacy","device_epoch":1,"branch_public_key":encode_base64url(legacy.signing_key.verifying_key().to_bytes()),"target_delivery_id":"legacy-target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"root_seen_proofs":[],"prekey_bundles":{}});
     let mut registry: IdentityRegistry = serde_json::from_value(old)?;
     assert_eq!(
         registry.active_own_device_targets("alice", "alice-device"),

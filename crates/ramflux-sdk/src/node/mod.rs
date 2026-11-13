@@ -43,7 +43,7 @@ pub(crate) async fn profile_relay_options(
 ) -> Result<RelayTransferOptions, SdkError> {
     Ok(RelayTransferOptions {
         relay_endpoint: format!("quic://{}", relay.quic_addr),
-        token_provider: crate::object::RelayTokenProvider::GatewayIssued,
+
         interrupt_after_chunks: None,
         relay_quic_peer_addr: Some(resolve_node_addr(&relay.quic_addr).await?.to_string()),
         relay_quic_server_name: Some(relay.server_name.clone()),

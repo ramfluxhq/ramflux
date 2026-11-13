@@ -49,14 +49,13 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         };
         store.save_state(&state)?;
         start_gc_scheduler(Arc::clone(&store), config.clone());
-        serve_retention_mesh_mtls(&config, Arc::clone(&store))?;
+        serve_retention_mesh_mtls(&config)?;
         if retention_async_ingress_enabled()
             && let Some(listen_addr) = retention_async_listen_addr()
         {
             spawn_retention_async_mesh_quic_listener(
                 listen_addr,
                 mesh_tls_config(&config),
-                Arc::clone(&store),
                 Arc::new(config.clone()),
             )?;
         }
@@ -133,7 +132,6 @@ fn retention_async_listen_addr_from_value(value: Option<&str>) -> Option<String>
 fn spawn_retention_async_mesh_quic_listener(
     listen_addr: String,
     tls: ramflux_transport::MeshTlsConfig,
-    store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: Arc<ramflux_node_core::NodeServiceConfig>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let runtime = ramflux_node_core::environment::var(RETENTION_ASYNC_INGRESS_RUNTIME_ENV)
@@ -149,7 +147,7 @@ fn spawn_retention_async_mesh_quic_listener(
         "ramflux-retention-async-quic-ingress",
         move |shutdown| {
             if let Err(error) =
-                run_retention_async_mesh_quic_listener(&listen_addr, &tls, store, config, shutdown)
+                run_retention_async_mesh_quic_listener(&listen_addr, &tls, config, shutdown)
             {
                 tracing::error!(%error, "retention async QUIC ingress stopped");
             }
@@ -162,7 +160,6 @@ fn spawn_retention_async_mesh_quic_listener(
 fn run_retention_async_mesh_quic_listener(
     listen_addr: &str,
     tls: &ramflux_transport::MeshTlsConfig,
-    store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: Arc<ramflux_node_core::NodeServiceConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
@@ -193,12 +190,9 @@ fn run_retention_async_mesh_quic_listener(
                     continue;
                 }
             };
-            let store = Arc::clone(&store);
             let config = Arc::clone(&config);
             tokio::spawn(async move {
-                if let Err(error) =
-                    retention_async_quic_connection_loop(connection, store, config).await
-                {
+                if let Err(error) = retention_async_quic_connection_loop(connection, config).await {
                     tracing::debug!(%error, "retention async QUIC connection ended");
                 }
             });
@@ -211,7 +205,6 @@ fn run_retention_async_mesh_quic_listener(
 
 async fn retention_async_quic_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
-    store: Arc<ramflux_node_core::RetentionRedbStore>,
     config: Arc<ramflux_node_core::NodeServiceConfig>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let peer = ramflux_node_core::authorize_mesh_peer(
@@ -232,14 +225,13 @@ async fn retention_async_quic_connection_loop(
                 return Ok(());
             }
         };
-        let store = Arc::clone(&store);
         let peer_service_id = Arc::clone(&peer_service_id);
         tokio::spawn(async move {
             let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
                 return;
             };
             if let Err(error) =
-                handle_retention_async_quic_request(accepted, store, &peer_service_id).await
+                handle_retention_async_quic_request(accepted, &peer_service_id).await
             {
                 tracing::warn!(%error, "retention async QUIC request failed");
             }
@@ -249,62 +241,13 @@ async fn retention_async_quic_connection_loop(
 
 async fn handle_retention_async_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
-    store: Arc<ramflux_node_core::RetentionRedbStore>,
     peer_service_id: &str,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let response = handle_retention_quic_request_value(&accepted.request, &store, peer_service_id)?;
-    if (200..300).contains(&response.status) {
-        accepted
-            .write_json_response(response.status, &response.body)
-            .await
-            .map_err(|error| retention_transport_error(&error))
-    } else {
-        accepted
-            .write_text_response(response.status, retention_quic_error_text(&response.body))
-            .await
-            .map_err(|error| retention_transport_error(&error))
-    }
-}
-
-fn handle_retention_quic_request_value(
-    request: &ramflux_transport::GatewayQuicRequest,
-    store: &ramflux_node_core::RetentionRedbStore,
-    peer_service_id: &str,
-) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
-    tracing::info!(
-        method = %request.method,
-        path = %request.path,
-        peer_service_id,
-        "retention async QUIC request received"
-    );
-    match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/retention/v1/object_relay_ttl") if peer_service_id == "ramflux-relay" => {
-            let request: ramflux_node_core::RetentionRecordRequest =
-                serde_json::from_value(request.body.clone()).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?;
-            store.record_metadata(request.record.clone())?;
-            Ok(ramflux_transport::GatewayQuicResponse {
-                status: 200,
-                body: serde_json::to_value(&request.record).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?,
-            })
-        }
-        ("POST", "/retention/v1/object_relay_ttl") => Ok(retention_text_quic_response(
-            403,
-            "object relay TTL registration requires ramflux-relay peer",
-        )),
-        _ => Ok(retention_text_quic_response(404, "not found")),
-    }
-}
-
-fn retention_text_quic_response(status: u16, body: &str) -> ramflux_transport::GatewayQuicResponse {
-    ramflux_transport::GatewayQuicResponse { status, body: serde_json::json!({ "error": body }) }
-}
-
-fn retention_quic_error_text(body: &serde_json::Value) -> &str {
-    body.get("error").and_then(serde_json::Value::as_str).unwrap_or("retention mesh request failed")
+    tracing::info!(method = %accepted.request.method, path = %accepted.request.path, peer_service_id, "retention async QUIC request received");
+    accepted
+        .write_text_response(404, "not found")
+        .await
+        .map_err(|error| retention_transport_error(&error))
 }
 
 fn retention_transport_error(
@@ -378,6 +321,7 @@ fn handle_itest_request(
             )?;
         }
         ("POST", "/mvp7/retention/record") => {
+            ramflux_node_core::shutdown_request_test_delay();
             let request: ramflux_node_core::RetentionRecordRequest =
                 serde_json::from_slice(&request.body).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
@@ -721,7 +665,6 @@ fn post_gc_sweep_blocking(
 
 fn serve_retention_mesh_mtls(
     config: &ramflux_node_core::NodeServiceConfig,
-    store: Arc<ramflux_node_core::RetentionRedbStore>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let server =
         ramflux_transport::MeshTlsServer::bind(&config.mesh.listen_addr, &mesh_tls_config(config))
@@ -756,14 +699,9 @@ fn serve_retention_mesh_mtls(
             };
             match connections.spawn(
                 socket,
-                (
-                    server.handshake_config(),
-                    Arc::clone(&store),
-                    local_service_id.clone(),
-                    allowed_service_ids.clone(),
-                ),
+                (server.handshake_config(), local_service_id.clone(), allowed_service_ids.clone()),
                 |socket, context, connection| {
-                    let (config, store, local_id, allowed_ids) = context;
+                    let (config, local_id, allowed_ids) = context;
                     let accepted = match ramflux_transport::authenticate_tcp_stream(
                         socket,
                         Arc::clone(config),
@@ -787,8 +725,7 @@ fn serve_retention_mesh_mtls(
                     };
                     let mut stream = accepted.stream;
                     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-                        match handle_mesh_request(&mut stream, store, &peer.service_id, connection)
-                        {
+                        match handle_mesh_request(&mut stream, &peer.service_id, connection) {
                             Ok(true) => {}
                             Ok(false) => break,
                             Err(error) => {
@@ -817,7 +754,6 @@ fn serve_retention_mesh_mtls(
 
 fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
-    store: &ramflux_node_core::RetentionRedbStore,
     peer_service_id: &str,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
@@ -844,33 +780,8 @@ fn handle_mesh_request(
         peer_service_id,
         "retention mesh request received"
     );
-    match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/retention/v1/object_relay_ttl") if peer_service_id == "ramflux-relay" => {
-            let request: ramflux_node_core::RetentionRecordRequest =
-                serde_json::from_slice(&request.body).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?;
-            store.record_metadata(request.record.clone())?;
-            ramflux_transport::write_mesh_json_response(stream, "200 OK", &request.record)
-                .map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?;
-        }
-        ("POST", "/retention/v1/object_relay_ttl") => {
-            ramflux_transport::write_mesh_text_response(
-                stream,
-                "403 Forbidden",
-                "object relay TTL registration requires ramflux-relay peer",
-            )
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-        }
-        _ => {
-            ramflux_transport::write_mesh_text_response(stream, "404 Not Found", "not found")
-                .map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestHttp(source.to_string())
-                })?;
-        }
-    }
+    ramflux_transport::write_mesh_text_response(stream, "404 Not Found", "not found")
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     Ok(true)
 }
 
@@ -1209,72 +1120,6 @@ mod tests {
         cleanup_store(&store_path);
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-
-    #[test]
-    fn retention_quic_mesh_surface_matches_mtls_peer_gate() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let path = temp_path("retention_quic_mesh_surface_matches_mtls_peer_gate")?;
-        let store = ramflux_node_core::RetentionRedbStore::open(&path)?;
-        let request = retention_quic_request("/retention/v1/object_relay_ttl")?;
-
-        let rejected = handle_retention_quic_request_value(&request, &store, "ramflux-router")?;
-        assert_eq!(rejected.status, 403);
-
-        let accepted = handle_retention_quic_request_value(&request, &store, "ramflux-relay")?;
-        assert_eq!(accepted.status, 200);
-        let record: ramflux_node_core::RetentionMetadataRecord =
-            serde_json::from_value(accepted.body)?;
-        assert_eq!(record.record_id, "retention-quic-record");
-
-        let finalize = handle_retention_quic_request_value(
-            &retention_quic_request("/mvp7/retention/finalize_identity_delete")?,
-            &store,
-            "ramflux-relay",
-        )?;
-        assert_eq!(finalize.status, 404);
-
-        let gc = handle_retention_quic_request_value(
-            &retention_quic_request("/mvp7/retention/gc")?,
-            &store,
-            "ramflux-relay",
-        )?;
-        assert_eq!(gc.status, 404);
-
-        let _removed = std::fs::remove_file(&path);
-        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
-        Ok(())
-    }
-
-    fn retention_quic_request(
-        path: &str,
-    ) -> Result<ramflux_transport::GatewayQuicRequest, Box<dyn std::error::Error>> {
-        Ok(ramflux_transport::GatewayQuicRequest {
-            method: "POST".to_owned(),
-            path: path.to_owned(),
-            body: serde_json::to_value(ramflux_node_core::RetentionRecordRequest {
-                record: retention_record(),
-            })?,
-        })
-    }
-
-    fn retention_record() -> ramflux_node_core::RetentionMetadataRecord {
-        ramflux_node_core::RetentionMetadataRecord {
-            record_id: "retention-quic-record".to_owned(),
-            subject_hash: "subject-hash".to_owned(),
-            metadata_class: "object_relay_ttl".to_owned(),
-            source_service_id: "ramflux-relay".to_owned(),
-            retention_policy_id: "relay-cache".to_owned(),
-            created_at: 1,
-            expires_at: 600,
-            delete_after_ack: None,
-            legal_hold: false,
-            legal_hold_next_review_at: None,
-            legal_basis: None,
-            legal_hold_actor: None,
-            legal_hold_created_at: None,
-            metadata_hash: "metadata-hash".to_owned(),
-        }
     }
 
     fn temp_path(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {

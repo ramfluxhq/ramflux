@@ -266,6 +266,7 @@ impl RouterWalStore {
         shards: usize,
         segment_bytes: u64,
     ) -> Result<Self, NodeCoreError> {
+        Self::validate_formats(root)?;
         let (association, recovered) = recovery::prepare(root, db, db_path)?;
         let association = Arc::new(association);
         let state = Arc::new(Mutex::new(recovered.state));

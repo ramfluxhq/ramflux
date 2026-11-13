@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use ramflux_protocol::{decode_base64url, encode_base64url};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{CryptoError, blake3_256_base64url, verify_canonical_signature};
+use crate::{CryptoError, verify_canonical_signature};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct IdentityRoot {
@@ -102,18 +102,6 @@ pub fn verifying_key_from_base64url(value: &str) -> Result<VerifyingKey, CryptoE
     VerifyingKey::from_bytes(&public_key_array).map_err(|_err| CryptoError::VerifyFailed)
 }
 
-#[derive(Serialize)]
-struct BranchProofSigningBody<'a> {
-    proof_id: &'a str,
-    principal_id: &'a str,
-    device_id: &'a str,
-    device_epoch: u64,
-    audience: &'a str,
-    capability_scope: &'a [String],
-    issued_at: i64,
-    expires_at: i64,
-}
-
 #[must_use]
 pub fn create_identity_root(principal_id: &str, seed: [u8; 32]) -> IdentityRoot {
     IdentityRoot {
@@ -149,58 +137,7 @@ pub fn create_device_branch_from_seed(
     }
 }
 
-/// Historical v1 proof constructor retained for legacy state/fixture compatibility. Its signature
-/// does not authorize any public key. New registrations require `authorize_device_branch_v2`.
-/// # Errors
-/// Returns canonical serialization errors.
-pub fn authorize_device_branch(
-    root: &IdentityRoot,
-    device: &DeviceBranch,
-    audience: &str,
-    capability_scope: Vec<String>,
-    issued_at: i64,
-    expires_at: i64,
-) -> Result<BranchProofDocument, CryptoError> {
-    let proof_id = blake3_256_base64url(
-        ramflux_protocol::domain::BRANCH_PROOF,
-        &ramflux_protocol::canonical_json_bytes(&(
-            encode_base64url(root.signing_key.verifying_key().to_bytes()),
-            &device.principal_id,
-            &device.device_id,
-            device.device_epoch,
-            audience,
-            &capability_scope,
-            issued_at,
-            expires_at,
-        ))?,
-    );
-    let body = BranchProofSigningBody {
-        proof_id: &proof_id,
-        principal_id: &device.principal_id,
-        device_id: &device.device_id,
-        device_epoch: device.device_epoch,
-        audience,
-        capability_scope: &capability_scope,
-        issued_at,
-        expires_at,
-    };
-    let canonical = ramflux_protocol::canonical_json_bytes(&body)?;
-    let signature = root.signing_key.sign(&canonical);
-    Ok(BranchProofDocument {
-        proof_id,
-        principal_id: device.principal_id.clone(),
-        device_id: device.device_id.clone(),
-        device_epoch: device.device_epoch,
-        audience: audience.to_owned(),
-        capability_scope,
-        issued_at,
-        expires_at,
-        signature: encode_base64url(signature.to_bytes()),
-        key_binding: None,
-    })
-}
-
-/// Verify historical metadata or the signed v2 document. This does not compare advertised keys.
+/// Verify a bound v2 document. This does not compare advertised keys.
 /// Live key authority requires `verify_root_bound_branch_proof` and an authenticated device set.
 /// # Errors
 /// Rejects invalid signatures, audience, expiry or capabilities.

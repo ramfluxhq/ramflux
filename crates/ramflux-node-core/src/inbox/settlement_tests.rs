@@ -102,7 +102,7 @@ fn run_receiver(nack_leg: bool) -> Result {
         let write = held.hand_off().expect("hand off");
         let middle = entry(2);
         store.record_submission_increment(
-            "middle",
+            &format!("request/v2/{}", ramflux_protocol::encode_base64url([1; 32])),
             middle.envelope.created_at + 3600,
             Some(&middle),
         )?;
@@ -155,7 +155,7 @@ fn settled_prefix_bounded_by_publication() -> Result {
 fn ordered_indexes_restore_and_release() -> Result {
     let mut inbox = OpaqueDeviceInbox::new();
     for seq in [1_000_000_000_000_000, 7, 3] {
-        inbox.restore_pending_entry_until(entry(seq), Some(i64::MAX));
+        inbox.restore_pending_entry_until(entry(seq), i64::MAX);
     }
     assert_eq!(
         inbox.pull_after("target", 3, 2).iter().map(|e| e.inbox_seq).collect::<Vec<_>>(),

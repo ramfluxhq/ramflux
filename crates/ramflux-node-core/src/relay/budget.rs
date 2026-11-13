@@ -21,11 +21,6 @@ pub(super) const RELAY_CHUNK_META_CHARGE_OVERHEAD: u64 = 512;
 /// over-estimate rationale as [`RELAY_CHUNK_META_CHARGE_OVERHEAD`].
 pub(super) const RELAY_TOMBSTONE_CHARGE_OVERHEAD: u64 = 256;
 
-#[must_use]
-pub(super) fn relay_default_max_bytes() -> u64 {
-    RELAY_METADATA_MAX_BYTES_DEFAULT
-}
-
 /// Resolve an optional environment override without accepting an unexpanded expression.
 ///
 /// # Errors

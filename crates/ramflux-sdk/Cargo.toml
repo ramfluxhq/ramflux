@@ -23,11 +23,6 @@ c-abi = []
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]
-# T22-A1 / RQ-04: legacy v2 shared-HMAC relay-token local minting. Compile-time gate for the itest
-# LocalMint compatibility path; still requires the runtime opt-in env to activate (double gate).
-# Never enabled by production binaries — default SDK/rf carry no HMAC mint code, service-key env, or
-# LocalMint env. The v3 GatewayIssued path is unaffected.
-itest-local-mint = ["dep:hmac", "dep:sha2", "tokio/fs"]
 # T24-B2: rfd mid-flight crash-resume itest. Compile-time gate for a post-local-commit /
 # pre-remote barrier seam used only by mvp_s63 to SIGKILL `rf daemon start` at a durable-commit
 # boundary. Never enabled by production binaries — default SDK/rf carry no fault mode/marker env
@@ -73,13 +68,8 @@ getrandom = { workspace = true }
 rustix = { version = "1.1", features = ["fs", "process"] }
 mime = "0.3"
 blake3 = "1.5"
-# Only used by the itest-local-mint v2 HMAC relay-token minting path; optional so production
-# SDK/rf binaries do not link the HMAC implementation.
-hmac = { version = "0.13", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Only used (via hmac) by the itest-local-mint v2 relay-token minting path.
-sha2 = { version = "0.11", optional = true }
 thiserror = "2.0"
 time = { version = "0.3.51", features = ["formatting"] }
 tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }

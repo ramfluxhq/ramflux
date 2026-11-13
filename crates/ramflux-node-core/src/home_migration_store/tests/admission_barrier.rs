@@ -180,7 +180,11 @@ fn cutover_waits_for_receiver_ack_and_uses_the_settled_view() -> TestResult {
     let sealed = s.seal()?;
     let queued = super::wal_barrier::entry(&s.target);
     let store = s.a.store()?;
-    store.record_submission_increment("before-ack", i64::MAX / 2, Some(&queued))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("before-ack"),
+        i64::MAX / 2,
+        Some(&queued),
+    )?;
     let lease = store.acquire_acknowledgement(&s.target)?;
     assert!(
         matches!(s.commit(&sealed), Err(error) if error.to_string().contains("MigrationInProgress") || error.to_string().contains("migration_in_progress"))
@@ -217,7 +221,7 @@ fn indexed_barrier_counts_each_delivery_once_and_preserves_settled_replay_receip
         queued.inbox_seq = sequence;
         queued.envelope.envelope_id = format!("indexed-{sequence}");
         s.a.store()?.record_submission_increment_for_sender(
-            &format!("replay-{sequence}"),
+            &crate::tests::request_replay_fixture(&format!("replay-{sequence}")),
             i64::MAX / 2,
             Some(&queued),
             Some("verified-sender"),

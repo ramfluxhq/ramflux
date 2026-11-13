@@ -35,7 +35,7 @@ pub struct GatewayRelayTokenV3IssueResponse {
 // This block is NOT wired into any production handler. It defines the asymmetric issuer-attestation
 // token (v3), the owner-signed access grant, the owner authorization proof and the per-invocation
 // requester proof-of-possession, plus pure verifiers and a capability/proof matrix. The existing v2
-// HMAC path (RelayToken/validate_relay_token) is untouched. v3 has no HMAC/shared-key surface.
+// v3 uses Ed25519 authority; no shared-key token acceptor exists.
 // ===========================================================================================
 
 pub const OBJECT_RELAY_TOKEN_V3_VERSION: u32 = 3;

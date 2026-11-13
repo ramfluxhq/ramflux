@@ -107,18 +107,6 @@ pub fn inbox_retain_until(envelope: &ramflux_protocol::Envelope, accepted_at: i6
         .min(accepted_at.saturating_add(cap))
 }
 
-/// Deadline for a delivery stored before acceptance times were recorded: it is treated as
-/// accepted at the earlier of its creation and `migrated_at`, so a far-future `created_at`
-/// written by an older build still expires seven days after the upgrade.
-#[must_use]
-pub fn inbox_legacy_retain_until(envelope: &ramflux_protocol::Envelope, migrated_at: i64) -> i64 {
-    inbox_retain_until(envelope, envelope.created_at.min(migrated_at))
-}
-
-fn server_now() -> i64 {
-    i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX)
-}
-
 impl CursorAckState {
     fn bound_receipts(&mut self) {
         while self.dead_letters.len() > ROUTER_DEAD_LETTER_LIMIT {
@@ -192,6 +180,7 @@ impl From<&CursorAckState> for InboxCursorResponse {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(try_from = "persisted::StoredInbox")]
 pub struct OpaqueDeviceInbox {
     next_seq: BTreeMap<String, u64>,
     #[serde(skip)]
@@ -345,7 +334,7 @@ impl OpaqueDeviceInbox {
             .get(&entry.target_delivery_id)
             .and_then(|deadlines| deadlines.get(&entry.inbox_seq))
             .copied()
-            .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()))
+            .unwrap_or(i64::MIN)
     }
 
     pub(crate) fn set_deadline(&mut self, target: &str, seq: u64, deadline: i64) {
@@ -362,28 +351,6 @@ impl OpaqueDeviceInbox {
     fn ensure_expiry_index(&mut self) {
         if self.expiry.ready {
             return;
-        }
-        // Fix deadlines missing from older snapshots once, so they stop moving with the clock.
-        let migrated_at = server_now();
-        let missing: Vec<(String, u64, i64)> = self
-            .pending
-            .values()
-            .flat_map(BTreeMap::values)
-            .filter(|entry| {
-                self.retain_until
-                    .get(&entry.target_delivery_id)
-                    .is_none_or(|deadlines| !deadlines.contains_key(&entry.inbox_seq))
-            })
-            .map(|entry| {
-                (
-                    entry.target_delivery_id.clone(),
-                    entry.inbox_seq,
-                    inbox_legacy_retain_until(&entry.envelope, migrated_at),
-                )
-            })
-            .collect();
-        for (target, seq, deadline) in missing {
-            self.retain_until.entry(target).or_default().insert(seq, deadline);
         }
         let mut due = BTreeSet::new();
         for entries in self.pending.values() {
@@ -490,29 +457,26 @@ impl OpaqueDeviceInbox {
 
     /// A server-assigned sequence selects one delivery even when sender-chosen IDs collide.
     /// # Errors
-    /// Rejects missing deliveries, mismatched IDs, and ambiguous legacy selectors.
+    /// Rejects missing deliveries, mismatched IDs, and missing sequence selectors.
     pub fn apply_ack_for_target(
         &mut self,
         target: &str,
         ack: &ramflux_protocol::Ack,
     ) -> Result<CursorAckState, NodeCoreError> {
         let entry_seq = match ack.ext.ext.get("inbox_seq") {
-            Some(value) => value
-                .as_u64()
-                .filter(|seq| *seq > 0)
-                .ok_or_else(|| NodeCoreError::ItestHttp("invalid ACK inbox sequence".into()))?,
-            None => self
-                .legacy_seq_for_envelope(target, &ack.envelope_id)?
-                .ok_or_else(|| NodeCoreError::EnvelopeNotFound(ack.envelope_id.clone()))?,
+            Some(value) => value.as_u64().filter(|seq| *seq > 0).ok_or_else(|| {
+                NodeCoreError::InvalidInboxSequence {
+                    target: target.into(),
+                    envelope_id: ack.envelope_id.clone(),
+                }
+            })?,
+            None => {
+                return Err(NodeCoreError::MissingInboxSequence {
+                    target: target.into(),
+                    envelope_id: ack.envelope_id.clone(),
+                });
+            }
         };
-        if !ack.ext.ext.contains_key("inbox_seq")
-            && self.cursors.get(target).is_some_and(|cursor| {
-                cursor.acked_envelope_ids.contains(&ack.envelope_id)
-                    && !cursor.acked_inbox_seqs.contains(&entry_seq)
-            })
-        {
-            return Err(NodeCoreError::AmbiguousEnvelopeId(ack.envelope_id.clone()));
-        }
         let pending = self.pending.get(target).and_then(|entries| entries.get(&entry_seq));
         if let Some(entry) = pending {
             if entry.envelope.envelope_id != ack.envelope_id {
@@ -659,19 +623,25 @@ impl OpaqueDeviceInbox {
 
     /// Records a NACK; after [`ROUTER_NACK_RETRY_LIMIT`] NACKs the delivery is dead-lettered.
     /// # Errors
-    /// Rejects an invalid sequence selector or an ambiguous legacy envelope id.
+    /// Rejects an invalid sequence selector or a missing sequence selector.
     pub fn apply_nack_for_target(
         &mut self,
         target: &str,
         nack: &ramflux_protocol::Nack,
     ) -> Result<CursorAckState, NodeCoreError> {
         let seq = match nack.ext.ext.get("inbox_seq") {
-            Some(value) => {
-                Some(value.as_u64().filter(|seq| *seq > 0).ok_or_else(|| {
-                    NodeCoreError::ItestHttp("invalid NACK inbox sequence".into())
-                })?)
+            Some(value) => Some(value.as_u64().filter(|seq| *seq > 0).ok_or_else(|| {
+                NodeCoreError::InvalidInboxSequence {
+                    target: target.into(),
+                    envelope_id: nack.envelope_id.clone(),
+                }
+            })?),
+            None => {
+                return Err(NodeCoreError::MissingInboxSequence {
+                    target: target.into(),
+                    envelope_id: nack.envelope_id.clone(),
+                });
             }
-            None => self.legacy_seq_for_envelope(target, &nack.envelope_id)?,
         }
         .filter(|seq| {
             self.pending.get(target).is_some_and(|entries| {
@@ -858,12 +828,8 @@ impl OpaqueDeviceInbox {
         self.cursors.values()
     }
 
-    /// Restores a delivery; a missing deadline falls back to the envelope's capped expiry.
-    pub(crate) fn restore_pending_entry_until(
-        &mut self,
-        entry: InboxEntry,
-        retain_until: Option<i64>,
-    ) {
+    /// Restores a current delivery with its persisted server-assigned deadline.
+    pub(crate) fn restore_pending_entry_until(&mut self, entry: InboxEntry, retain_until: i64) {
         let cursor = self.cursors.entry(entry.target_delivery_id.clone()).or_insert_with(|| {
             CursorAckState {
                 target_delivery_id: entry.target_delivery_id.clone(),
@@ -875,8 +841,7 @@ impl OpaqueDeviceInbox {
         *next_seq = (*next_seq).max(entry.inbox_seq.saturating_add(1));
         let target = entry.target_delivery_id.clone();
         let seq = entry.inbox_seq;
-        let deadline = retain_until
-            .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()));
+        let deadline = retain_until;
         let entries = self.pending.entry(target.clone()).or_default();
         if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(seq.into()) {
             slot.insert(entry);
@@ -936,7 +901,7 @@ impl OpaqueDeviceInbox {
         self.incarnations.extend(other.incarnations.clone());
         self.aborted_ranges.extend(other.aborted_ranges.clone());
         for (entry, deadline) in other.pending_entries_with_deadline() {
-            self.restore_pending_entry_until(entry.clone(), Some(deadline));
+            self.restore_pending_entry_until(entry.clone(), deadline);
         }
         for cursor in other.cursor_states().cloned() {
             self.restore_cursor_state(cursor);
@@ -965,22 +930,6 @@ impl OpaqueDeviceInbox {
                 .any(|entry| entry.envelope.envelope_id == envelope_id)
                 .then(|| target.clone())
         })
-    }
-
-    fn legacy_seq_for_envelope(
-        &self,
-        target: &str,
-        id: &str,
-    ) -> Result<Option<u64>, NodeCoreError> {
-        let Some(entries) = self.pending.get(target) else {
-            return Ok(None);
-        };
-        let mut matching = entries.values().filter(|entry| entry.envelope.envelope_id == id);
-        let first = matching.next().map(|entry| entry.inbox_seq);
-        if matching.next().is_some() {
-            return Err(NodeCoreError::AmbiguousEnvelopeId(id.into()));
-        }
-        Ok(first)
     }
 }
 
@@ -1014,3 +963,6 @@ pub enum RouterSubmitOutcome {
 
 #[cfg(test)]
 mod retention_settlement_tests;
+
+#[path = "inbox/persisted.rs"]
+mod persisted;

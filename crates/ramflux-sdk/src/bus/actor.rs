@@ -14,15 +14,6 @@ pub(super) type AccountInitializer =
 
 pub(super) enum PrivateCommand {
     #[cfg(test)]
-    #[cfg_attr(
-        not(feature = "itest-local-mint"),
-        expect(dead_code, reason = "Used by local-mint transfer fixtures")
-    )]
-    TransferCheckpoint {
-        checkpoint: Box<super::account_runtime::uploads::Checkpoint>,
-        applied: oneshot::Sender<()>,
-    },
-    #[cfg(test)]
     HoldLocalMutation {
         entered: oneshot::Sender<tokio::time::Instant>,
         release: oneshot::Receiver<()>,
@@ -310,23 +301,6 @@ impl AccountActor {
     pub(super) fn backup_capture_count(&self) -> usize {
         self.backup_captures.load(std::sync::atomic::Ordering::Relaxed)
     }
-    #[cfg(test)]
-    #[cfg_attr(
-        not(feature = "itest-local-mint"),
-        expect(dead_code, reason = "Used by local-mint transfer fixtures")
-    )]
-    pub(super) async fn inject_transfer_checkpoint(
-        &self,
-        checkpoint: super::account_runtime::uploads::Checkpoint,
-    ) -> Result<(), SdkError> {
-        let (applied, completed) = oneshot::channel();
-        self.send_private(PrivateCommand::TransferCheckpoint {
-            checkpoint: Box::new(checkpoint),
-            applied,
-        })?;
-        completed.await.map_err(|_| stopped())
-    }
-
     pub(super) fn reader_pool(&self) -> Result<AccountReaders, SdkError> {
         self.readers.lock().map_err(|_| stopped())?.clone().ok_or_else(stopped)
     }

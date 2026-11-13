@@ -224,17 +224,7 @@ impl GatewaySessionAccess for SessionClient {
             self.generation,
         ))
     }
-    #[cfg(feature = "itest-local-mint")]
-    fn issue_relay_token(
-        &mut self,
-        body: GatewayRelayTokenIssueBody,
-    ) -> GatewayCallFuture<'_, SdkRelayToken> {
-        Box::pin(self.handle.call_generation(
-            move |engine| Box::pin(async move { engine.issue_relay_token(body).await }),
-            self.deadline,
-            self.generation,
-        ))
-    }
+
     fn issue_relay_token_v3(
         &mut self,
         body: SdkRelayTokenV3IssueBody,

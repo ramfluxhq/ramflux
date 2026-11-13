@@ -245,9 +245,7 @@ services:
     environment:
       RAMFLUX_NODE_ID: "${RF_COMPOSE_NODE_ID:-localhost}"
       RAMFLUX_ITEST_HTTP: "1"
-      # itest-only relay object HMAC key. Production config templates carry no
-      # literal (T22-A2); the itest relay gets the well-known test key here so
-      # LocalMint/object/media realnet tests keep their expected MAC.
+      # Deferred media-UDP fixture only; SDK/shared-HMAC object transfers are refused.
       RAMFLUX_RELAY_SERVICE_KEY_REF: "literal:ramflux-relay-itest-service-key"
       RAMFLUX_ITEST_RELAY_HTTP_ADDR: "0.0.0.0:18084"
       RAMFLUX_ITEST_RELAY_MEDIA_UDP_ADDR: "0.0.0.0:19000"

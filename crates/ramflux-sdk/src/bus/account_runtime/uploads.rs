@@ -29,7 +29,7 @@ pub(super) struct Transfers {
     pub(super) fetches: BTreeMap<u64, super::fetches::Fetch>,
     pub(super) next: u64,
     pub(super) checkpoints: mpsc::Sender<Checkpoint>,
-    pub receive: mpsc::Receiver<Checkpoint>,
+    pub(super) receive: mpsc::Receiver<Checkpoint>,
     stopped: bool,
 }
 struct Upload {
@@ -39,7 +39,7 @@ struct Upload {
     outcome: Option<Result<ActorResponse, SdkError>>,
 }
 
-pub(in crate::bus) enum Checkpoint {
+pub(super) enum Checkpoint {
     Fetch(super::fetches::FetchCheckpoint),
     Progress {
         job_id: u64,
@@ -86,8 +86,6 @@ struct UploadJob {
     deadline: Instant,
     spool: FinishSpool,
     checkpoints: mpsc::Sender<Checkpoint>,
-    #[cfg(test)]
-    hook: Option<Arc<super::super::transfer_slots::test_hooks::Hook>>,
 }
 
 impl Transfers {
@@ -182,15 +180,6 @@ impl AccountRuntime {
                     .transfers
                     .slots
                     .submit(permit.bind(generation, upload_job(context, reply)));
-                #[cfg(test)]
-                if let Some(hook) = self
-                    .state
-                    .accounts
-                    .get(&self.id)
-                    .and_then(|account| account.test_transfer_hook.as_ref())
-                {
-                    hook.observe_job(handle.finished_for_test());
-                }
                 self.transfers.jobs.insert(
                     job_id,
                     Upload {
@@ -300,31 +289,12 @@ impl AccountRuntime {
             deadline,
             spool,
             checkpoints: self.transfers.checkpoints.clone(),
-            #[cfg(test)]
-            hook: account.test_transfer_hook.clone(),
         };
         let record = UploadRecord { binding, request: command.request };
         Ok(UploadDispatch::Queued(Box::new(PreparedUpload { context, record, permit })))
     }
 
     pub(super) fn apply_transfer_checkpoint(&mut self, checkpoint: Checkpoint) {
-        #[cfg(test)]
-        let checkpoint = {
-            let hook = self
-                .state
-                .accounts
-                .get(&self.id)
-                .and_then(|account| account.test_transfer_hook.as_ref());
-            match hook {
-                Some(hook) => {
-                    match hook.intercept(checkpoint, self.transfers.checkpoints.clone()) {
-                        Some(checkpoint) => checkpoint,
-                        None => return,
-                    }
-                }
-                None => checkpoint,
-            }
-        };
         match checkpoint {
             Checkpoint::Fetch(checkpoint) => self.apply_fetch_checkpoint(checkpoint),
             Checkpoint::Progress { job_id, generation, binding, input, progress, ack } => {
@@ -467,15 +437,9 @@ async fn upload_job(context: UploadJob, mut reply: Reply) -> Result<(), SdkError
         deadline,
         spool,
         checkpoints,
-        #[cfg(test)]
-        hook,
     } = context;
     let _spool = spool;
     let network = async {
-        #[cfg(test)]
-        if let Some(hook) = hook {
-            hook.before_upload().await?;
-        }
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::PutAfterLocalCommitted)
             .await?;
@@ -557,13 +521,6 @@ fn prepare_upload_transport(
                         options.clone(),
                     )
                     .map(|input| {
-                        #[cfg(feature = "itest-local-mint")]
-                        let input = {
-                            let mut input = input;
-                            input.http_timeout = limits.relay_http;
-                            input
-                        };
-                        #[cfg(not(feature = "itest-local-mint"))]
                         let _ = limits;
                         Arc::new(input)
                     })

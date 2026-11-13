@@ -3,17 +3,17 @@
 
 use crate::relay::{
     BTreeSet, FederatedIssuerTrustStatus, NodeCoreError, ObjectRelayCapability,
-    RelayTrustSnapshotCache, signed_federated_issuer_trust_snapshot_signing_bytes,
+    RelayTrustSnapshotCache, provider_signed_trust_snapshot_signing_bytes,
     verify_federated_issuer_trust_snapshot, verify_federated_issuer_trust_snapshot_admission,
     verify_federated_issuer_trust_snapshot_successor, verify_federated_trust_snapshot_envelope,
-    verify_relay_token_v3_with_trust_snapshot, verify_signed_federated_issuer_trust_snapshot,
+    verify_relay_token_v3_with_trust_snapshot,
 };
 
 use crate::relay::test_support::{
     V3_AUDIENCE_NODE, V3_CERT_ID, V3_ISSUER_NODE, V3_PROVIDER_SEED, V3_ROOT_KEY_ID,
-    V3_ROOT_PREV_KEY_ID, V3_ROOT_PREV_SEED, V3_ROOT_SEED, signed_trust_snapshot_envelope, v3_pk,
-    v3_previous_root, v3_sign, v3_signed_snapshot_envelope, v3_token_signed_by_root,
-    v3_trust_snapshot,
+    V3_ROOT_PREV_KEY_ID, V3_ROOT_PREV_SEED, V3_ROOT_SEED, fixture_provider_keyring,
+    signed_trust_snapshot_envelope, v3_pk, v3_previous_root, v3_sign, v3_signed_snapshot_envelope,
+    v3_token_signed_by_root, v3_trust_snapshot, verify_fixture_provider_snapshot,
 };
 
 use std::sync::{Arc, Mutex};
@@ -163,12 +163,16 @@ fn relay_trust_snapshot_envelope_valid_admits_to_cache() -> Result<(), String> {
     let now = 1_000_000;
     let provider_pk = v3_pk(V3_PROVIDER_SEED);
     let envelope = v3_signed_snapshot_envelope(now, |_e| {})?;
-    verify_signed_federated_issuer_trust_snapshot(&envelope, &provider_pk, now)
-        .map_err(|e| e.to_string())?;
+    verify_fixture_provider_snapshot(&envelope, &provider_pk, now).map_err(|e| e.to_string())?;
 
     let mut cache = RelayTrustSnapshotCache::new();
     cache
-        .update_from_signed(&envelope, &provider_pk, V3_ISSUER_NODE, now)
+        .update_from_keyring_signed(
+            &envelope,
+            &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+            V3_ISSUER_NODE,
+            now,
+        )
         .map_err(|e| e.to_string())?;
     assert_eq!(cache.generation(), Some(5));
     Ok(())
@@ -181,11 +185,18 @@ fn relay_trust_snapshot_envelope_rejects_tamper() -> Result<(), String> {
     // Tamper the inner snapshot after signing: the provider signature no longer verifies.
     let mut tampered = v3_signed_snapshot_envelope(now, |_e| {})?;
     tampered.snapshot.generation = 999;
-    assert!(verify_signed_federated_issuer_trust_snapshot(&tampered, &provider_pk, now).is_err());
+    assert!(verify_fixture_provider_snapshot(&tampered, &provider_pk, now).is_err());
 
     let mut cache = RelayTrustSnapshotCache::new();
     assert!(
-        cache.update_from_signed(&tampered, &provider_pk, V3_ISSUER_NODE, now).is_err(),
+        cache
+            .update_from_keyring_signed(
+                &tampered,
+                &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+                V3_ISSUER_NODE,
+                now
+            )
+            .is_err(),
         "a tampered envelope must never reach the cache"
     );
     assert_eq!(cache.generation(), None);
@@ -193,7 +204,7 @@ fn relay_trust_snapshot_envelope_rejects_tamper() -> Result<(), String> {
 }
 
 // T23-A1a closure: a provider-signed non-Active snapshot must be admissible over the full signed
-// ingress path (update_from_signed), replacing a stale Active, yet fail requests closed; and a
+// ingress path (update_from_keyring_signed), replacing a stale Active, yet fail requests closed; and a
 // wrong-provider signature over the same body must be rejected without mutating the cache.
 #[test]
 fn t23a1a_signed_suspended_admits_but_rejects_requests_and_forged_is_inert() -> Result<(), String> {
@@ -203,7 +214,14 @@ fn t23a1a_signed_suspended_admits_but_rejects_requests_and_forged_is_inert() -> 
 
     // G1 Active installs and authorizes over the signed path.
     let g1 = v3_signed_snapshot_envelope(now, |e| e.snapshot.generation = 1)?;
-    cache.update_from_signed(&g1, &provider_pk, V3_ISSUER_NODE, now).map_err(|e| e.to_string())?;
+    cache
+        .update_from_keyring_signed(
+            &g1,
+            &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+            V3_ISSUER_NODE,
+            now,
+        )
+        .map_err(|e| e.to_string())?;
     assert!(cache.current(V3_ISSUER_NODE, now).is_ok());
 
     // A provider-signed Suspended G2 is admitted (generation replaced to 2)...
@@ -211,7 +229,14 @@ fn t23a1a_signed_suspended_admits_but_rejects_requests_and_forged_is_inert() -> 
         e.snapshot.generation = 2;
         e.snapshot.trust_status = FederatedIssuerTrustStatus::Suspended;
     })?;
-    cache.update_from_signed(&g2, &provider_pk, V3_ISSUER_NODE, now).map_err(|e| e.to_string())?;
+    cache
+        .update_from_keyring_signed(
+            &g2,
+            &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+            V3_ISSUER_NODE,
+            now,
+        )
+        .map_err(|e| e.to_string())?;
     assert_eq!(cache.generation(), Some(2));
     // ...but the read path is Active-only: requests fail closed; the stale Active is not retained.
     assert!(matches!(cache.current(V3_ISSUER_NODE, now), Err(NodeCoreError::Unauthorized(_))));
@@ -223,11 +248,19 @@ fn t23a1a_signed_suspended_admits_but_rejects_requests_and_forged_is_inert() -> 
         e.snapshot.trust_status = FederatedIssuerTrustStatus::Suspended;
     })?;
     forged.signature = v3_sign(
-        &signed_federated_issuer_trust_snapshot_signing_bytes(&forged)
-            .map_err(|e| e.to_string())?,
+        &provider_signed_trust_snapshot_signing_bytes(&forged).map_err(|e| e.to_string())?,
         [0x99; 32],
     );
-    assert!(cache.update_from_signed(&forged, &provider_pk, V3_ISSUER_NODE, now).is_err());
+    assert!(
+        cache
+            .update_from_keyring_signed(
+                &forged,
+                &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+                V3_ISSUER_NODE,
+                now
+            )
+            .is_err()
+    );
     assert_eq!(cache.generation(), Some(2), "wrong-provider envelope must not mutate the cache");
     assert!(matches!(cache.current(V3_ISSUER_NODE, now), Err(NodeCoreError::Unauthorized(_))));
     Ok(())
@@ -239,22 +272,15 @@ fn relay_trust_snapshot_envelope_rejects_wrong_root() -> Result<(), String> {
     let envelope = v3_signed_snapshot_envelope(now, |_e| {})?;
 
     // Expected provider key differs from the envelope's declared provider key.
-    assert!(
-        verify_signed_federated_issuer_trust_snapshot(&envelope, &v3_pk(V3_ROOT_SEED), now)
-            .is_err()
-    );
+    assert!(verify_fixture_provider_snapshot(&envelope, &v3_pk(V3_ROOT_SEED), now).is_err());
 
     // Envelope signed by a non-provider key (declared provider key kept, signature forged).
     let mut forged = v3_signed_snapshot_envelope(now, |_e| {})?;
     forged.signature = v3_sign(
-        &signed_federated_issuer_trust_snapshot_signing_bytes(&forged)
-            .map_err(|e| e.to_string())?,
+        &provider_signed_trust_snapshot_signing_bytes(&forged).map_err(|e| e.to_string())?,
         V3_ROOT_SEED,
     );
-    assert!(
-        verify_signed_federated_issuer_trust_snapshot(&forged, &v3_pk(V3_PROVIDER_SEED), now)
-            .is_err()
-    );
+    assert!(verify_fixture_provider_snapshot(&forged, &v3_pk(V3_PROVIDER_SEED), now).is_err());
     Ok(())
 }
 
@@ -268,12 +294,21 @@ fn relay_trust_snapshot_envelope_rejects_expired() -> Result<(), String> {
         e.expires_at = now;
     })?;
     assert!(matches!(
-        verify_signed_federated_issuer_trust_snapshot(&expired, &provider_pk, now),
+        verify_fixture_provider_snapshot(&expired, &provider_pk, now),
         Err(NodeCoreError::TtlExpired { .. })
     ));
 
     let mut cache = RelayTrustSnapshotCache::new();
-    assert!(cache.update_from_signed(&expired, &provider_pk, V3_ISSUER_NODE, now).is_err());
+    assert!(
+        cache
+            .update_from_keyring_signed(
+                &expired,
+                &fixture_provider_keyring(&provider_pk, now).map_err(|e| e.to_string())?,
+                V3_ISSUER_NODE,
+                now
+            )
+            .is_err()
+    );
     assert_eq!(cache.generation(), None);
     Ok(())
 }

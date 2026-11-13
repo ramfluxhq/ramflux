@@ -54,3 +54,7 @@ mod durable_ingress_registry;
 mod fanout_entry_bound;
 
 mod ephemeral_durable_sinks;
+
+mod registration_receipt_format;
+
+pub(crate) mod persisted_image;

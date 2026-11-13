@@ -49,13 +49,17 @@ fn identity(
                 device.signing_key.verifying_key().to_bytes(),
             ),
             target_delivery_id: name.into(),
-            branch_proof: ramflux_crypto::authorize_device_branch(
+            branch_proof: ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &device,
-                "ramflux-node",
-                vec!["device.delivery.bind".into()],
-                1,
-                20000,
+                ramflux_crypto::BranchAuthorization {
+                    audience: "ramflux-node",
+                    capability_scope: vec!["device.delivery.bind".into()],
+                    issued_at: 1,
+                    expires_at: 20000,
+                    principal_kind: ramflux_protocol::PrincipalKind::Human,
+                    agreement_identity_public_key: identity.public,
+                },
             )?,
             prekey_bundle: ramflux_crypto::create_prekey_bundle(
                 &device,

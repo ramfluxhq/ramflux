@@ -129,38 +129,47 @@ fn replaced_branch_key_and_self_signed_bundle_cannot_reuse_a_genuine_root_proof(
     Ok(())
 }
 #[test]
-fn legacy_proof_bytes_still_verify_but_cannot_authorize_any_advertised_key() -> TestResult {
-    let root = create_identity_root("alice", [11; 32]);
-    let device = create_device_branch("alice", "device", 1, [12; 32]);
-    let proof = authorize_device_branch(
-        &root,
-        &device,
-        "ramflux-node",
-        vec!["device.delivery.bind".into()],
-        1000,
-        2000,
-    )?;
-    let encoded = serde_json::to_vec(&proof)?;
-    assert!(!String::from_utf8(encoded.clone())?.contains("key_binding"));
-    let restored: BranchProofDocument = ramflux_protocol::parse_i_json(&encoded)?;
-    verify_branch_proof(
-        &root.signing_key.verifying_key(),
-        &restored,
+fn retired_branch_proof_is_refused_without_changing_bound_v2_bytes() -> TestResult {
+    let frozen: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/retired_branch_proof.json"))?;
+    let root_text = frozen["root"].as_str().ok_or("frozen root")?;
+    let key = verifying_key_from_base64url(root_text)?;
+    let old: BranchProofDocument = serde_json::from_value(frozen["old"].clone())?;
+    let old_bytes =
+        ramflux_protocol::decode_base64url(frozen["old_preimage"].as_str().ok_or("old bytes")?)?;
+    // This is a valid historical signature, frozen before the constructor was removed.
+    verify_canonical_signature(&old_bytes, &old.signature, root_text)?;
+    assert!(old.key_binding.is_none());
+    assert!(verify_branch_proof(&key, &old, "ramflux-node", "device.delivery.bind", 1100).is_err());
+    assert!(branch_proof_signing_bytes(&old).is_err());
+    let bound: BranchProofDocument = serde_json::from_value(frozen["bound"].clone())?;
+    assert_eq!(
+        ramflux_protocol::encode_base64url(branch_proof_signing_bytes(&bound)?),
+        frozen["bound_preimage"].as_str().ok_or("bound bytes")?
+    );
+    verify_root_bound_branch_proof(
+        &key,
+        &bound,
+        bound.key_binding.as_ref().ok_or("binding")?,
         "ramflux-node",
         "device.delivery.bind",
         1100,
     )?;
-    assert!(
-        verify_root_bound_branch_proof(
-            &root.signing_key.verifying_key(),
-            &restored,
-            &binding(&device, &X25519KeyPair::from_seed([14; 32])),
-            "ramflux-node",
-            "device.delivery.bind",
-            1100
-        )
-        .is_err()
-    );
+    let root = create_identity_root("alice", [11; 32]);
+    let device = create_device_branch("alice", "device", 1, [12; 32]);
+    let issued = authorize_device_branch_v2(
+        &root,
+        &device,
+        BranchAuthorization {
+            audience: "ramflux-node",
+            capability_scope: vec!["device.delivery.bind".into()],
+            issued_at: 1000,
+            expires_at: 2000,
+            principal_kind: PrincipalKind::Human,
+            agreement_identity_public_key: X25519KeyPair::from_seed([14; 32]).public,
+        },
+    )?;
+    assert_eq!(serde_json::to_value(issued)?, frozen["bound"]);
     Ok(())
 }
 #[test]

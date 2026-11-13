@@ -87,7 +87,11 @@ fn server_retention_router_gc_is_dry_run_safe_and_survives_restart()
     let mut message = envelope("retire", "mailbox", DeliveryClass::OpaqueEvent);
     message.ttl = 1;
     let entry = inbox.append(message);
-    store.record_submission_increment("expiry-proof", 1_760_000_001, Some(&entry))?;
+    store.record_submission_increment(
+        &request_replay_fixture("expiry-proof"),
+        1_760_000_001,
+        Some(&entry),
+    )?;
     assert!(store.sweep_delivery_retention(1_760_000_002, true)? > 0);
     assert_eq!(store.load_router()?.ok_or("router")?.resume("mailbox", 0, 10).len(), 1);
     assert!(store.sweep_delivery_retention(1_760_000_002, false)? > 0);
@@ -190,7 +194,7 @@ fn server_retention_notify_terminal_rows_and_raw_collapse_are_not_exposed()
     route.registered_at = now;
     route.expires_at = now + 600;
     store.register_push_route(route)?;
-    store.update_provider_credential(notify_webpush_credential("web"))?;
+    store.update_provider_credential(&notify_webpush_credential("web"))?;
     let wake = notification_wake("privacy", 300);
     let (entry, pushes) = store.queue_wake_for_push("delivery", &wake, now, false)?;
     assert_eq!(pushes.len(), 1);
@@ -280,7 +284,11 @@ fn server_retention_router_wal_does_not_resurrect_expired_entries()
     message.created_at = now;
     message.ttl = 600;
     let entry = inbox.append(message);
-    store.record_submission_increment("wal-expiry", now + 600, Some(&entry))?;
+    store.record_submission_increment(
+        &request_replay_fixture("wal-expiry"),
+        now + 600,
+        Some(&entry),
+    )?;
     assert!(store.sweep_delivery_retention(now + 601, true)? > 0);
     let router = store.load_router()?.ok_or("WAL router")?;
     assert_eq!(router.sweep_delivery_retention(now + 601), 1);
@@ -329,32 +337,22 @@ fn server_retention_notify_wal_prunes_expired_work_and_bounded_diagnostics()
 }
 
 #[test]
-fn server_retention_legacy_notify_routes_are_encrypted_and_compacted()
+fn server_retention_retired_notify_routes_are_refused_without_rewriting()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("server_retention_legacy_push")?;
+    let path = temp_store_path("server_retention_retired_push")?;
     let mut state = NotifyQueueState::new();
-    let mut route = notify_webpush_route("legacy-delivery", "web");
-    route.token = "legacy-provider-token-that-must-leave-plaintext-pages".into();
+    let mut route = notify_webpush_route("retired-delivery", "web");
+    route.token = "retired-provider-token".into();
     state.register_push_route(route.clone());
     let store = NotifyRedbStore::open_without_wal(&path)?;
     store.save_legacy_state_only(&state)?;
     drop(store);
+    assert!(matches!(
+        NotifyRedbStore::open_with_route_key(&path, NodeSecret::ephemeral()?),
+        Err(NodeCoreError::UnsupportedPersistedFormat("notify full snapshot"))
+    ));
     assert!(
         std::fs::read(&path)?
-            .windows(route.token.len())
-            .any(|bytes| bytes == route.token.as_bytes())
-    );
-    let store = NotifyRedbStore::open_with_route_key(&path, NodeSecret::ephemeral()?)?;
-    assert_eq!(
-        store
-            .load_state()?
-            .ok_or("migrated routes")?
-            .push_routes("legacy-delivery", route.registered_at),
-        vec![route.clone()]
-    );
-    drop(store);
-    assert!(
-        !std::fs::read(&path)?
             .windows(route.token.len())
             .any(|bytes| bytes == route.token.as_bytes())
     );

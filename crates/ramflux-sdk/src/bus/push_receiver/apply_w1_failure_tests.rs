@@ -100,12 +100,14 @@ fn router_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
     }
 }
 
-fn router_ack(envelope_id: &str) -> Ack {
+fn router_ack(envelope_id: &str, inbox_seq: u64) -> Ack {
+    let mut ext = Ext::default();
+    ext.ext.insert("inbox_seq".into(), serde_json::json!(inbox_seq));
     Ack {
         schema: "ramflux.ack.v1".into(),
         version: 1,
         domain: "ramflux.ack.v1".into(),
-        ext: Ext::default(),
+        ext,
         signed: SignedFields {
             signing_key_id: "key".into(),
             signature_alg: SignatureAlg::Ed25519,
@@ -146,8 +148,9 @@ fn ack_router_row(
         .map_err(|error| SdkError::LocalBus(error.to_string()))?
         .ok_or_else(|| SdkError::LocalBus("router row missing before ACK".into()))?;
     let id = entry.envelope.envelope_id.as_str();
-    let cursor =
-        router.apply_ack(&router_ack(id)).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let cursor = router
+        .apply_ack(&router_ack(id, entry.inbox_seq))
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
     store.record_ack_increment(&cursor, id).map_err(|error| SdkError::LocalBus(error.to_string()))
 }
 

@@ -292,7 +292,11 @@ fn source_budget_survives_held_backlog_and_releases_exactly_once_when_settled() 
     let s = Scenario::prepared()?;
     let sealed = s.seal()?;
     let queued = super::wal_barrier::entry(&s.target);
-    s.a.store()?.record_submission_increment("pending-drain", i64::MAX / 2, Some(&queued))?;
+    s.a.store()?.record_submission_increment(
+        &crate::tests::request_replay_fixture("pending-drain"),
+        i64::MAX / 2,
+        Some(&queued),
+    )?;
     s.commit(&sealed)?;
     assert!(
         s.a.store()?

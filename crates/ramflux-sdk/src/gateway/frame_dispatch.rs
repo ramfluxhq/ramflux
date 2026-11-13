@@ -127,8 +127,7 @@ pub(crate) enum ExpectedReply {
     PublishPrekey,
     Manifest,
     Prekey,
-    #[cfg(feature = "itest-local-mint")]
-    RelayToken,
+
     RelayTokenV3,
     VoiceLease,
     PushRoute,
@@ -154,8 +153,7 @@ impl ExpectedReply {
             Self::PublishPrekey => matches!(kind, FrameKind::PrekeyPublished),
             Self::Manifest => matches!(kind, FrameKind::PrincipalManifest),
             Self::Prekey => matches!(kind, FrameKind::Prekey),
-            #[cfg(feature = "itest-local-mint")]
-            Self::RelayToken => matches!(kind, FrameKind::RelayTokenIssued),
+
             Self::RelayTokenV3 => matches!(kind, FrameKind::RelayTokenV3Issued),
             Self::VoiceLease => matches!(kind, FrameKind::VoiceLease),
             Self::PushRoute => matches!(

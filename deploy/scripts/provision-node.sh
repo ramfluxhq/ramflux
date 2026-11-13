@@ -79,6 +79,6 @@ PY
 done
 # No [relay] service_key block: v3 (Ed25519 issuer trust) is the only production
 # object data plane; the default/production relay loads no object HMAC key
-# (T22-A3). The legacy v2 shared-HMAC surface exists only in itest builds.
+# (T22-A3). Retired shared-HMAC object data planes are refused in every build.
 
 printf 'provision-node complete: %s/config\n' "${deploy_dir}"

@@ -31,7 +31,7 @@ pub(super) struct Fetch {
     slot_committed: bool,
     outcome: Option<Result<ActorResponse, SdkError>>,
 }
-pub(in crate::bus) enum FetchCheckpoint {
+pub(super) enum FetchCheckpoint {
     Chunk {
         generation: u64,
         fence: Arc<FetchFence>,
@@ -184,15 +184,6 @@ impl AccountRuntime {
                     .transfers
                     .slots
                     .submit(job.permit.bind(generation, run(job.context, reply)));
-                #[cfg(test)]
-                if let Some(hook) = self
-                    .state
-                    .accounts
-                    .get(&self.id)
-                    .and_then(|account| account.test_transfer_hook.as_ref())
-                {
-                    hook.observe_job(handle.finished_for_test());
-                }
                 self.transfers.fetches.insert(
                     id,
                     Fetch {
@@ -252,15 +243,7 @@ impl AccountRuntime {
             FetchPreparation::Ready(binding) => *binding,
         };
         let input = match account.client.prepare_fetch_input(&binding) {
-            Ok(input) => {
-                #[cfg(feature = "itest-local-mint")]
-                let input = {
-                    let mut input = input;
-                    input.http_timeout = self.timeouts.relay_http;
-                    input
-                };
-                Arc::new(input)
-            }
+            Ok(input) => Arc::new(input),
             Err(error) => {
                 return account
                     .client

@@ -46,9 +46,7 @@ pub(crate) struct ObjectPut {
     pub(crate) chunk_size: usize,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
-    #[cfg(feature = "itest-local-mint")]
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
+
     #[arg(long)]
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
     pub(crate) file: PathBuf,
@@ -62,9 +60,7 @@ pub(crate) struct ObjectGet {
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
-    #[cfg(feature = "itest-local-mint")]
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
+
     #[arg(long)]
     pub(crate) relay_ack: bool,
     #[arg(long)]
@@ -92,9 +88,7 @@ pub(crate) struct ObjectResume {
     pub(crate) direction: String,
     #[arg(long)]
     pub(crate) relay_url: String,
-    #[cfg(feature = "itest-local-mint")]
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
+
     #[arg(long)]
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
 }
@@ -127,9 +121,6 @@ pub(crate) struct ObjectDelete {
     pub(crate) object: String,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
-    #[cfg(feature = "itest-local-mint")]
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
 }
 
 #[derive(Args)]

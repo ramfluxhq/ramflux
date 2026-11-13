@@ -149,11 +149,11 @@ else
   DEFAULT_BIN_ARGS="$DEFAULT_BIN_ARGS --bin ramflux-notify"
 fi
 # relay is built on its own so the itest-only surfaces can be enabled explicitly
-# (itest-media-udp / itest-object-v2 / itest-quic-fault are all default-off and must
+# (itest-media-udp / itest-quic-fault are all default-off and must
 # not be pulled via itest-http). The T24-A3 post-commit QUIC fault seam
 # (itest-quic-fault) stays inert unless a test sets RAMFLUX_RELAY_ITEST_DROP_AFTER_COMMIT,
 # so enabling it here does not affect any other realnet test.
-RELAY_FEATURES="itest-http,itest-media-udp,itest-object-v2,itest-quic-fault"
+RELAY_FEATURES="itest-http,itest-media-udp,itest-quic-fault"
 RELAY_LOCKED="--locked"
 # CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only passthrough (default-off). When
 # RAMFLUX_RELAY_ALLOC_PROF=1, additionally compile the relay with the default-off itest-alloc-prof

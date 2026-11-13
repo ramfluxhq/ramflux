@@ -47,7 +47,7 @@ fn seed(
         static CREATED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
         let mut row = entry(seq);
         row.envelope.created_at = *CREATED.get_or_init(|| row.envelope.created_at);
-        router.target_shard("target").inbox.restore_pending_entry_until(row, None);
+        router.target_shard("target").inbox.restore_pending_entry_until(row, i64::MAX);
     }
     // Build the common precondition offline, then persist it atomically. The
     // measured ACK batch and the sequential comparison below use real writers.
@@ -61,7 +61,7 @@ fn seed(
         let inbox = router.inbox_snapshot();
         for row in inbox.pending_entries() {
             store.record_submission_increment(
-                &format!("seed-{}", row.inbox_seq),
+                &crate::tests::request_replay_fixture(&format!("seed-{}", row.inbox_seq)),
                 row.envelope.created_at + 3600,
                 Some(row),
             )?;

@@ -17,17 +17,12 @@ const REPLAY_EXPIRY: TableDefinition<&str, &[u8]> = TableDefinition::new("router
 const LOCAL_DELIVERY_EXPIRY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("router_local_delivery_expiry_v1");
 const FORMAT: TableDefinition<&str, u8> = TableDefinition::new("router_expiry_index_format_v1");
-/// Deadlines computed once for WAL records written before acceptance times were logged.
-pub(crate) const LEGACY_WAL_DEADLINES: TableDefinition<&str, i64> =
-    TableDefinition::new("router_legacy_wal_deadlines_v1");
-
 /// Durable mailbox row: the entry plus the deadline assigned when the router accepted it.
 #[derive(Deserialize, Serialize)]
 struct StoredInboxEntry {
     #[serde(flatten)]
     entry: InboxEntry,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    retain_until: Option<i64>,
+    retain_until: i64,
 }
 
 fn db_error(error: impl std::fmt::Display) -> NodeCoreError {
@@ -46,27 +41,15 @@ pub(super) fn encode_entry(
     entry: &InboxEntry,
     retain_until: i64,
 ) -> Result<Vec<u8>, NodeCoreError> {
-    serde_json::to_vec(&StoredInboxEntry { entry: entry.clone(), retain_until: Some(retain_until) })
+    serde_json::to_vec(&StoredInboxEntry { entry: entry.clone(), retain_until })
         .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))
 }
 
-/// Decodes a mailbox row; rows written before deadlines were stored use the envelope expiry.
+/// Decodes a current mailbox row; a missing server deadline is refused.
 pub(crate) fn decode_entry(bytes: &[u8]) -> Result<(InboxEntry, i64), NodeCoreError> {
     let stored: StoredInboxEntry = serde_json::from_slice(bytes)
-        .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
-    let deadline = stored.retain_until.unwrap_or_else(|| {
-        crate::inbox_legacy_retain_until(
-            &stored.entry.envelope,
-            i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX),
-        )
-    });
-    Ok((stored.entry, deadline))
-}
-
-fn has_stored_deadline(bytes: &[u8]) -> Result<bool, NodeCoreError> {
-    let stored: StoredInboxEntry = serde_json::from_slice(bytes)
-        .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
-    Ok(stored.retain_until.is_some())
+        .map_err(|_| NodeCoreError::UnsupportedPersistedFormat("router inbox deadline"))?;
+    Ok((stored.entry, stored.retain_until))
 }
 
 pub(super) fn index_inbox_row(
@@ -127,30 +110,19 @@ pub(super) fn index_local_delivery_row(
 /// Index format 2 stores a fixed deadline in every mailbox row.
 const FORMAT_VERSION: u8 = 3;
 
-/// One-time migration for databases written before the indexes or stored deadlines existed.
-/// Rows without a deadline get `min(created_at, now) + 7 d` (capped by the envelope expiry)
-/// written into the row, so a far-future row from an older build still expires.
+/// Initialize derived expiry indexes from current rows without synthesizing authority.
 pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
     let mut format = txn.open_table(FORMAT).map_err(db_error)?;
     let version = format.get("version").map_err(db_error)?.map(|value| value.value());
     if version.is_some_and(|version| version >= FORMAT_VERSION) {
         return Ok(());
     }
-    let migrated_at = i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX);
-    let mut rewrites = Vec::new();
     let mut inbox_index = Vec::new();
     for row in
         txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?.iter().map_err(db_error)?
     {
         let (key, value) = row.map_err(db_error)?;
-        let deadline = if has_stored_deadline(value.value())? {
-            decode_entry(value.value())?.1
-        } else {
-            let (entry, _) = decode_entry(value.value())?;
-            let deadline = crate::inbox_legacy_retain_until(&entry.envelope, migrated_at);
-            rewrites.push((key.value().to_owned(), encode_entry(&entry, deadline)?));
-            deadline
-        };
+        let (_, deadline) = decode_entry(value.value())?;
         inbox_index.push(index_key(deadline, key.value()));
     }
     let mut replay_index = Vec::new();
@@ -174,11 +146,6 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
             .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
         local_delivery_index.push(index_key(record.expires_at, key.value()));
     }
-    let mut rows = txn.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(db_error)?;
-    for (key, bytes) in rewrites {
-        rows.insert(key.as_str(), bytes.as_slice()).map_err(db_error)?;
-    }
-    drop(rows);
     clear(txn)?;
     let mut table = txn.open_table(INBOX_EXPIRY).map_err(db_error)?;
     for key in inbox_index {
@@ -194,42 +161,6 @@ pub(super) fn upgrade(txn: &redb::WriteTransaction) -> Result<(), NodeCoreError>
     }
     format.insert("version", FORMAT_VERSION).map_err(db_error)?;
     Ok(())
-}
-
-/// Returns the persisted deadline of each legacy WAL record, storing `computed` the first
-/// time a record is seen. Rows for records no longer in the WAL are removed.
-pub(super) fn resolve_legacy_wal_deadlines(
-    db: &redb::Database,
-    records: &[(String, i64)],
-) -> Result<std::collections::BTreeMap<String, i64>, NodeCoreError> {
-    let txn = db.begin_write().map_err(db_error)?;
-    let mut resolved = std::collections::BTreeMap::new();
-    {
-        let mut table = txn.open_table(LEGACY_WAL_DEADLINES).map_err(db_error)?;
-        let stale = table
-            .iter()
-            .map_err(db_error)?
-            .map(|row| row.map(|(key, _)| key.value().to_owned()).map_err(db_error))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|key| !records.iter().any(|(record, _)| record == key))
-            .collect::<Vec<_>>();
-        for key in stale {
-            table.remove(key.as_str()).map_err(db_error)?;
-        }
-        for (key, computed) in records {
-            let stored = table.get(key.as_str()).map_err(db_error)?.map(|value| value.value());
-            let deadline = if let Some(deadline) = stored {
-                deadline
-            } else {
-                table.insert(key.as_str(), computed).map_err(db_error)?;
-                *computed
-            };
-            resolved.insert(key.clone(), deadline);
-        }
-    }
-    txn.commit().map_err(db_error)?;
-    Ok(resolved)
 }
 
 /// Replaces both indexes after a full table rewrite.

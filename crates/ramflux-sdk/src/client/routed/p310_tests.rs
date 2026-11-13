@@ -62,7 +62,7 @@ impl Relay {
     fn options(&self, principal: &str) -> RelayTransferOptions {
         RelayTransferOptions {
             relay_endpoint: "https://relay.invalid".into(),
-            token_provider: RelayTokenProvider::GatewayIssued,
+
             interrupt_after_chunks: None,
             relay_quic_peer_addr: Some(self.addr.to_string()),
             relay_quic_server_name: Some("localhost".into()),

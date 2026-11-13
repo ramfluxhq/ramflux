@@ -998,21 +998,6 @@ mod receive_failure;
 #[path = "receive_history.rs"]
 mod receive_history;
 
-#[cfg(feature = "itest-local-mint")]
-#[path = "receive_history_relay.rs"]
-mod receive_history_relay;
-#[cfg(feature = "itest-local-mint")]
-#[path = "relay_fixture.rs"]
-mod relay_fixture;
-
-#[cfg(feature = "itest-local-mint")]
-#[path = "transfer_upload.rs"]
-mod transfer_upload;
-
-#[cfg(feature = "itest-local-mint")]
-#[path = "transfer_fetch.rs"]
-mod transfer_fetch;
-
 #[path = "courier_independence.rs"]
 mod courier_independence;
 

@@ -18,22 +18,6 @@ itest-http = ["ramflux-node-core/itest-http"]
 # Enabled explicitly for realnet by deploy/scripts/run-realnet.sh so mvp_s52 /
 # mvp45 media tests exercise it; must not be pulled in via itest-http.
 itest-media-udp = []
-# itest-only: legacy v2 shared-HMAC object relay acceptance surface (mesh mTLS
-# object listener + shared object handler + HMAC service-key loader + the itest
-# HTTP object routes). Never in the default/production relay: v3 (Ed25519 issuer
-# trust) is the only production object data plane. Enabled explicitly for realnet
-# LocalMint/v2 compatibility by deploy/scripts/run-realnet.sh; must NOT be pulled
-# in via itest-http (itest-http alone serves only health/capture, no object/key).
-itest-object-v2 = []
-# T23-A2b2b: the offline-root-signed provider-keyring trust path (versioned
-# provider_epoch envelope) is now the DEFAULT/production relay trust path. The
-# legacy single-pinned-key path (SignedFederatedIssuerTrustSnapshot v3 +
-# RAMFLUX_FEDERATION_PROVIDER_PUBLIC_KEY loader) is gated behind this default-off
-# compatibility feature. The two startup wirings are mutually exclusive at compile
-# time — keyring under `not(feature = "itest-provider-single-key")`, single-key under
-# `feature = "itest-provider-single-key")` — so one running instance never enables
-# both, and the default/production binary contains zero single-key markers.
-itest-provider-single-key = ["ramflux-node-core/itest-provider-single-key"]
 # T24-A3 itest-only: a post-commit QUIC fault seam in the client-facing QUIC
 # connection loop. AFTER a client object request's business commit succeeds and
 # BEFORE the app response is written, it can (fail-once per process, keyed by
@@ -45,7 +29,7 @@ itest-provider-single-key = ["ramflux-node-core/itest-provider-single-key"]
 # proofs. Never in the default/production relay: the env string, capture field
 # names, drop/hold branches and dedicated markers are all absent. Enabled explicitly
 # for realnet by deploy/scripts/run-realnet.sh; must NOT be pulled in via itest-http
-# / itest-object-v2 / itest-media-udp.
+# / itest-media-udp.
 itest-quic-fault = []
 # CTRL-089 RELAY-MEM-02-A1 DIAGNOSTIC/profiler-only (default-off): installs dhat as the global
 # allocator and starts a `dhat::Profiler` for the process lifetime so a PUT-only / GET-only wave can

@@ -59,7 +59,7 @@ fn accept(store: &RouterRedbStore, guard: &AssignmentGuard) -> Result {
     let write = guard.hand_off().expect("hand off before store call");
     let entry = entry(guard.sequence());
     store.record_submission_increment(
-        &format!("fixture/{}", guard.sequence()),
+        &crate::tests::request_replay_fixture(&format!("fixture/{}", guard.sequence())),
         entry.envelope.created_at + 3600,
         Some(&entry),
     )?;

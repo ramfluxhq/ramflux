@@ -100,8 +100,7 @@ fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
 }
 
 #[test]
-fn far_future_rows_from_older_builds_expire_seven_days_after_upgrade()
--> Result<(), Box<dyn std::error::Error>> {
+fn persisted_rows_without_server_deadlines_are_refused() -> Result<(), Box<dyn std::error::Error>> {
     const FORMAT: redb::TableDefinition<&str, u8> =
         redb::TableDefinition::new("router_expiry_index_format_v1");
     let path = temp_store_path("r3_legacy_rows")?;
@@ -128,12 +127,9 @@ fn far_future_rows_from_older_builds_expire_seven_days_after_upgrade()
         txn.open_table(FORMAT)?.remove("version")?;
         txn.commit()?;
     }
-    let store = RouterRedbStore::open_without_wal(&path)?;
-    let later = wall_clock() + 604_800 + 60;
-    store.sweep_delivery_retention(later, false)?;
-    drop(store);
-    let store = RouterRedbStore::open_without_wal(&path)?;
-    let restored = store.load_router()?.unwrap_or_default();
-    assert_eq!(restored.resume("legacy-mailbox", 0, 10).len(), 0, "legacy row never expired");
+    assert!(matches!(
+        RouterRedbStore::open_without_wal(&path),
+        Err(NodeCoreError::UnsupportedPersistedFormat("router inbox deadline"))
+    ));
     Ok(())
 }

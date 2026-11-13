@@ -136,7 +136,7 @@ impl NodeProfile {
     ) -> Result<RelayTransferOptions, SdkError> {
         Ok(RelayTransferOptions {
             relay_endpoint: format!("quic://{}", self.relay.quic_addr),
-            token_provider: crate::object::RelayTokenProvider::GatewayIssued,
+
             interrupt_after_chunks: None,
             relay_quic_peer_addr: Some(resolve_node_addr(&self.relay.quic_addr).await?.to_string()),
             relay_quic_server_name: Some(self.relay.server_name.clone()),
@@ -152,9 +152,10 @@ impl RamfluxClient {
     pub(crate) fn relay_transfer_options(
         &self,
         endpoint: Option<String>,
-        service_key: Option<String>,
+        service_key: Option<&str>,
         interrupt: Option<u32>,
     ) -> Result<Option<RelayTransferOptions>, SdkError> {
+        crate::object::reject_retired_relay_service_key(service_key.is_some())?;
         if let Some(profile) = &self.node_relay_options {
             let mut options = profile.clone();
             options.interrupt_after_chunks = interrupt;

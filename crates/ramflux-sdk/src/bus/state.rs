@@ -44,7 +44,6 @@ pub(crate) struct ObjectPutSpoolSession {
     pub(crate) plaintext_hash: String,
     pub(crate) chunk_size: usize,
     pub(crate) relay_endpoint: Option<String>,
-    pub(crate) relay_service_key_base64: Option<String>,
     pub(crate) relay_interrupt_after_chunks: Option<u32>,
     pub(crate) path: PathBuf,
     pub(crate) journal_path: PathBuf,
@@ -89,8 +88,6 @@ pub(crate) struct LocalBusAccountState {
     #[cfg(test)]
     pub(crate) test_connector:
         Option<std::sync::Arc<dyn super::connection_manager::SessionConnector>>,
-    #[cfg(test)]
-    pub(crate) test_transfer_hook: Option<std::sync::Arc<super::transfer_slots::test_hooks::Hook>>,
     #[cfg(test)]
     pub(crate) test_pre_send_hold: Option<ramflux_storage::PreSendObjectHold>,
     #[cfg(test)]
@@ -171,8 +168,6 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_connector: None,
             #[cfg(test)]
-            test_transfer_hook: None,
-            #[cfg(test)]
             test_pre_send_hold: None,
             #[cfg(test)]
             test_task_deliveries_applied: None,
@@ -224,8 +219,6 @@ impl LocalBusAccountState {
             transfer_slots: None,
             #[cfg(test)]
             test_connector: None,
-            #[cfg(test)]
-            test_transfer_hook: None,
             #[cfg(test)]
             test_pre_send_hold: None,
             #[cfg(test)]

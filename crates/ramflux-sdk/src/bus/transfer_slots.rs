@@ -9,9 +9,6 @@ use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
-#[cfg(test)]
-pub(crate) mod test_hooks;
-
 type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 struct QueuedJob {
@@ -152,10 +149,6 @@ impl TransferPermit {
 }
 
 impl<T> JobHandle<T> {
-    #[cfg(test)]
-    pub(crate) fn finished_for_test(&self) -> watch::Receiver<bool> {
-        self.finished.clone()
-    }
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }

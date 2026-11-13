@@ -612,7 +612,9 @@ fn ack_fixture() -> ramflux_protocol::Ack {
         schema: "ack.v1".into(),
         version: 1,
         domain: "ack".into(),
-        ext: ramflux_protocol::Ext::default(),
+        ext: ramflux_protocol::Ext {
+            ext: std::collections::BTreeMap::from([("inbox_seq".into(), serde_json::json!(1))]),
+        },
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "key".into(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -631,7 +633,9 @@ fn nack_fixture() -> ramflux_protocol::Nack {
         schema: "nack.v1".into(),
         version: 1,
         domain: "nack".into(),
-        ext: ramflux_protocol::Ext::default(),
+        ext: ramflux_protocol::Ext {
+            ext: std::collections::BTreeMap::from([("inbox_seq".into(), serde_json::json!(1))]),
+        },
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "key".into(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,

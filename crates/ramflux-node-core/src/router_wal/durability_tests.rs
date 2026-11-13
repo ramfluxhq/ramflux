@@ -135,10 +135,10 @@ fn segment_directory_before_ack() -> TestResult {
         let (_guard, events) = capture(&root);
         let mut writer = RouterWalWriterState::open(root.join("shard"), 0, 0, 1)?;
         let payload = RouterWalPayload::Submission {
-            replay_key: "key".into(),
+            replay_key: crate::tests::request_replay_fixture("key"),
             replay_expires_at: i64::MAX,
             entry: None,
-            accepted_at: None,
+            accepted_at: Some(router_wal_now()),
             local_delivery: None,
         };
         for _ in 0..2 {
@@ -257,7 +257,11 @@ fn interrupted_roll_empty_header() -> TestResult {
         let root = PathBuf::from(root);
         let wal = RouterWalStore::open_with_shards_config(&root, 1, false)?;
         let entry = super::tests::router_wal_inbox_entry("ack-before-crash", "residue-target");
-        wal.record_submission("ack-before-crash", i64::MAX, Some(&entry))?;
+        wal.record_submission(
+            &crate::tests::request_replay_fixture("ack-before-crash"),
+            i64::MAX,
+            Some(&entry),
+        )?;
         let kind = std::env::var("RAMFLUX_EMPTY_HEADER_KIND")?;
         let residue = match kind.as_str() {
             "empty" => Vec::new(),
@@ -335,13 +339,13 @@ fn record_k_child(root: PathBuf) -> TestResult {
     );
     let payloads: Vec<_> = (0..3)
         .map(|index| RouterWalPayload::Submission {
-            replay_key: format!("crash-{index}"),
+            replay_key: crate::tests::request_replay_fixture(&format!("crash-{index}")),
             replay_expires_at: i64::MAX,
             entry: Some(Box::new(super::tests::router_wal_inbox_entry(
                 &format!("crash-{index}"),
                 "recovery-target",
             ))),
-            accepted_at: None,
+            accepted_at: Some(router_wal_now()),
             local_delivery: None,
         })
         .collect();

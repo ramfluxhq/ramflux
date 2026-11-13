@@ -11,7 +11,7 @@ pub(crate) const RELAY_TRUST_SNAPSHOT_CACHE_FILE_ENV: &str =
 pub(crate) const RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_ENV: &str =
     "RAMFLUX_RELAY_TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS";
 
-#[cfg(any(feature = "itest-object-v2", feature = "itest-media-udp"))]
+#[cfg(feature = "itest-media-udp")]
 pub(crate) fn relay_service_key(
     config: &ramflux_node_core::NodeServiceConfig,
 ) -> anyhow::Result<Vec<u8>> {
@@ -73,7 +73,7 @@ pub(crate) fn validate_relay_client_quic_tls(
     })
 }
 
-#[cfg(any(feature = "itest-object-v2", feature = "itest-media-udp"))]
+#[cfg(feature = "itest-media-udp")]
 pub(crate) fn read_relay_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
     let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
         literal.to_owned()

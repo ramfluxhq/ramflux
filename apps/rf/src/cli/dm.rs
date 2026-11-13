@@ -40,8 +40,6 @@ pub(crate) struct DmRead {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
     /// Wait for deferred attachment fetches for at most this many seconds.
     #[arg(long, value_name = "SECS", default_value_t = 0)]
     pub(crate) wait: u64,
@@ -73,8 +71,6 @@ pub(crate) struct DmSend {
     pub(crate) attach: Vec<PathBuf>,
     #[arg(long)]
     pub(crate) relay_url: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key: Option<String>,
     #[arg(long, default_value_t = 1024)]
     pub(crate) attachment_chunk_size: usize,
     #[arg(long)]

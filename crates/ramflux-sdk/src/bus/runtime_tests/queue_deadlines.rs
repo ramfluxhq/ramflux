@@ -62,8 +62,7 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
         keepalive_idle: held,
         keepalive_call: held,
         post_claim,
-        #[cfg(feature = "itest-local-mint")]
-        relay_http: held,
+
         ..RuntimeTimeouts::default()
     };
     let initial_limits = limits.clone();

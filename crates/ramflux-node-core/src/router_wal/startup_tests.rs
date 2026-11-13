@@ -27,7 +27,11 @@ fn setup(root: &Path, mode: &str, populated: bool, due: bool) -> Result {
     let store = open(root, "redb")?;
     crate::durability_test_hooks::notify(root, "startup_fixture_open", true)?;
     if populated {
-        store.record_submission_increment("startup-row", i64::MAX, Some(&entry()))?;
+        store.record_submission_increment(
+            &crate::tests::request_replay_fixture("startup-row"),
+            i64::MAX,
+            Some(&entry()),
+        )?;
         // Persisted redb rows do not mark a cursor checkpoint due merely by loading.
         let (mut inbox, _) = store.load_delivery_state(0)?;
         assert_eq!(inbox.take_checkpoint_due().len(), 0);
@@ -53,7 +57,7 @@ fn setup(root: &Path, mode: &str, populated: bool, due: bool) -> Result {
             expired.envelope.target_delivery_id = expired.target_delivery_id.clone();
             expired.envelope.created_at = 0;
             expired.envelope.ttl = 1;
-            write_legacy_router_wal_segment(
+            write_current_router_wal_segment(
                 &router_wal_shard_root(&wal, 1),
                 "expired",
                 1,
@@ -302,7 +306,11 @@ fn legacy_surfaces(router: &crate::RouterCore, store: &RouterRedbStore, control:
     fs::write(control.join("http-inbox"), serde_json::to_vec(&response)?)?;
     // The existing submit reply cannot be produced until the store's durable call returns.
     let row = entry();
-    store.record_submission_increment("post-startup-submit", i64::MAX, Some(&row))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("post-startup-submit"),
+        i64::MAX,
+        Some(&row),
+    )?;
     fs::write(control.join("submit-reply"), serde_json::to_vec(&row)?)?;
     let mut gateway = crate::GatewayState::new();
     gateway.open_session(crate::GatewaySession {
@@ -361,6 +369,14 @@ fn redb_crash_child(root: &Path, kind: &str) -> Result {
             Ok(())
         }),
     );
-    assert!(store.record_submission_increment("startup-row", i64::MAX, Some(&entry())).is_err());
+    assert!(
+        store
+            .record_submission_increment(
+                &crate::tests::request_replay_fixture("startup-row"),
+                i64::MAX,
+                Some(&entry())
+            )
+            .is_err()
+    );
     std::process::abort();
 }

@@ -44,9 +44,7 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 object_id: resume.object,
                 direction: resume.direction,
                 relay_endpoint: Some(resume.relay_url),
-                #[cfg(feature = "itest-local-mint")]
-                relay_service_key_base64: resume.relay_service_key,
-                #[cfg(not(feature = "itest-local-mint"))]
+
                 relay_service_key_base64: None,
                 relay_interrupt_after_chunks: resume.relay_interrupt_after_chunks,
             };
@@ -103,9 +101,7 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             let request = LocalBusObjectDeleteRequest {
                 object_id: delete.object,
                 relay_endpoint: delete.relay_url,
-                #[cfg(feature = "itest-local-mint")]
-                relay_service_key_base64: delete.relay_service_key,
-                #[cfg(not(feature = "itest-local-mint"))]
+
                 relay_service_key_base64: None,
             };
             print_json(
@@ -196,9 +192,7 @@ async fn object_get_stream_attempt(
         operation_id: operation_id.to_owned(),
         protocol_version: OBJECT_PUT_PROTOCOL_VERSION,
         relay_endpoint: get.relay_url.clone(),
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key_base64: get.relay_service_key.clone(),
-        #[cfg(not(feature = "itest-local-mint"))]
+
         relay_service_key_base64: None,
         relay_ack: get.relay_ack,
         relay_interrupt_after_chunks: get.relay_interrupt_after_chunks,
@@ -456,9 +450,7 @@ async fn handle_object_put_one_shot(
         plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
         chunk_size: put.chunk_size,
         relay_endpoint: put.relay_url,
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key_base64: put.relay_service_key,
-        #[cfg(not(feature = "itest-local-mint"))]
+
         relay_service_key_base64: None,
         relay_interrupt_after_chunks: put.relay_interrupt_after_chunks,
         operation_id: Some(operation_id.clone()),
@@ -524,9 +516,7 @@ async fn handle_object_put_spooled(
         chunk_size: put.chunk_size,
         protocol_version: OBJECT_PUT_PROTOCOL_VERSION,
         relay_endpoint: put.relay_url.clone(),
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key_base64: put.relay_service_key.clone(),
-        #[cfg(not(feature = "itest-local-mint"))]
+
         relay_service_key_base64: None,
         relay_interrupt_after_chunks: put.relay_interrupt_after_chunks,
     };

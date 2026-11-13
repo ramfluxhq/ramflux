@@ -99,7 +99,11 @@ fn inbox_incarnation_lifecycle() -> Result {
     assert_eq!(empty_cursor.cursor.issued_inbox_seq, 0);
     assert_eq!(empty_cursor.inbox_incarnation_id.as_deref(), Some(empty.as_str()));
     let row = entry(7);
-    store.record_submission_increment("row", i64::MAX, Some(&row))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("row"),
+        i64::MAX,
+        Some(&row),
+    )?;
     let before = stored(&store, "target")?.expect("row cursor");
     let id = before.inbox_incarnation_id.expect("incarnation");
     validate(&id)?;
@@ -140,7 +144,11 @@ fn pre_s6_store_upgrade() -> Result {
     let path = root.join("db");
     let store = reopen(&path)?;
     let row = entry(50);
-    store.record_submission_increment("legacy-row", i64::MAX, Some(&row))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("legacy-row"),
+        i64::MAX,
+        Some(&row),
+    )?;
     // Remove only the new field: this cursor is serialized with the pre-S6 shape.
     let cursor = CursorAckState {
         target_delivery_id: "target".into(),

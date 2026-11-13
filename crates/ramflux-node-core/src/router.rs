@@ -166,7 +166,11 @@ pub(crate) struct RouterControlState {
     #[serde(skip)]
     principal_lookup_limiter: crate::principal_directory::PrincipalLookupLimiter,
     pub(crate) mvp1_identities: IdentityRegistry,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::foreign_device_heads::refuse_snapshot"
+    )]
     pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
@@ -209,7 +213,11 @@ pub(crate) struct RouterCoreSnapshot {
     pub(crate) registry: SessionRegistry,
     pub(crate) inbox: OpaqueDeviceInbox,
     pub(crate) mvp1_identities: IdentityRegistry,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::foreign_device_heads::refuse_snapshot"
+    )]
     pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) lifecycle_by_principal: BTreeMap<String, AccountLifecycleRecord>,
     pub(crate) lifecycle_tombstones: BTreeMap<String, IdentityLifecycleTombstone>,
@@ -1501,7 +1509,7 @@ impl RouterCore {
             router
                 .target_shard(&entry.target_delivery_id)
                 .inbox
-                .restore_pending_entry_until(entry.clone(), Some(deadline));
+                .restore_pending_entry_until(entry.clone(), deadline);
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             router.index_cursor_targets(&cursor);
@@ -1557,7 +1565,7 @@ impl RouterCore {
             self.index_envelope_target(entry);
             self.target_shard(&entry.target_delivery_id)
                 .inbox
-                .restore_pending_entry_until(entry.clone(), Some(deadline));
+                .restore_pending_entry_until(entry.clone(), deadline);
         }
         for cursor in snapshot.inbox.cursor_states().cloned().collect::<Vec<_>>() {
             self.index_cursor_targets(&cursor);

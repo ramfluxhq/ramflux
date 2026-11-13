@@ -249,7 +249,8 @@ async fn serve_connection(
                     let ack: ramflux_protocol::Ack = serde_json::from_value(serde_json::json!({
                         "schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1",
                         "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
-                        "ack_id":"ack","envelope_id":envelope.envelope_id,"receiver_device_id":"alice-device","received_at":envelope.created_at
+                        "ack_id":"ack","envelope_id":envelope.envelope_id,"receiver_device_id":"alice-device","received_at":envelope.created_at,
+                        "ext":{"inbox_seq":entry.inbox_seq}
                     }))?;
                     pending.apply_ack(&ack)?;
                     assert_eq!(pending.pull_after("alice-target", 0, 1), []);
@@ -347,6 +348,7 @@ async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox
             "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
             "ack_id":"fanout-race-ack","envelope_id":expected.envelope_id,
             "receiver_device_id":"alice-device","received_at":submitted.created_at,
+            "ext":{"inbox_seq":entry.inbox_seq},
         }))?;
         inbox.apply_ack(&ack)?;
         assert_eq!(inbox.pull_after("alice-target", 0, 10).len(), 0);

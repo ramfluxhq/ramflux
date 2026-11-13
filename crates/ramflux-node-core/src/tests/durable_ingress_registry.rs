@@ -89,16 +89,14 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "home_node_migration.rs:federated_forward_request",
         Class::NonIngress("pure request construction from an admitted plan"),
     ),
-    ("relay/cache.rs:get_object_chunk", Class::NonIngress("relay object read")),
     (
-        "relay/legacy.rs:validate_object_permission",
+        "relay/gateway_issuance.rs:validate_object_permission",
         Class::NonIngress("pure relay permission validation"),
     ),
     (
-        "relay/legacy.rs:object_permission_canonical_bytes",
+        "relay/gateway_issuance.rs:object_permission_canonical_bytes",
         Class::NonIngress("pure canonical encoding"),
     ),
-    ("relay/legacy.rs:permission_owner_matches_token", Class::NonIngress("pure relay owner check")),
     (
         "relay/trust.rs:federated_trust_snapshot_envelope_signing_bytes",
         Class::NonIngress("pure canonical encoding"),
@@ -181,7 +179,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let sink_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Sink).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 37));
+    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 35));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

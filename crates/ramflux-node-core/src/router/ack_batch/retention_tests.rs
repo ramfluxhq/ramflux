@@ -26,7 +26,7 @@ fn run(mode: u8, expired_dead_letter: bool) -> Result {
         if seq == first {
             row.envelope.created_at = now - 7200;
         }
-        router.target_shard("target").inbox.restore_pending_entry_until(row, Some(deadline));
+        router.target_shard("target").inbox.restore_pending_entry_until(row, deadline);
     }
     if expired_dead_letter {
         router.target_shard("target").inbox.restore_cursor_state(CursorAckState {
@@ -48,7 +48,7 @@ fn run(mode: u8, expired_dead_letter: bool) -> Result {
         let snapshot = router.inbox_snapshot();
         for (row, deadline) in snapshot.pending_entries_with_deadline() {
             store.record_submission_increment(
-                &format!("ack-retention-{}", row.inbox_seq),
+                &crate::tests::request_replay_fixture(&format!("ack-retention-{}", row.inbox_seq)),
                 deadline,
                 Some(row),
             )?;

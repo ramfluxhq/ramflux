@@ -1034,3 +1034,26 @@ mod revocation_receive_tests;
 mod effect_marker_tests;
 #[path = "legacy_effect_marker_tests.rs"]
 mod legacy_effect_marker;
+
+#[test]
+fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError> {
+    const CHILD: &str = "RAMFLUX_TEST_LEGACY_OVERRIDE_GUARD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "client::routed::tests::legacy_override_cannot_admit_v1_with_an_active_pair",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("RAMFLUX_ALLOW_LEGACY_V1", "1")
+            .status()?;
+        assert!(status.success(), "legacy override admitted a v1 path");
+        return Ok(());
+    }
+    let alice = Fixture::new("alice", 21)?;
+    let bob = Fixture::new("bob", 31)?;
+    let _ = seal(&alice, &bob, message("current-pair", "thread"), b"current route")?;
+    assert!(alice.client.v2_blocks_legacy(&bob.reference()?)?);
+    Ok(())
+}

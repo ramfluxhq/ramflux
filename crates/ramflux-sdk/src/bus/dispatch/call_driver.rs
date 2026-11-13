@@ -79,10 +79,6 @@ async fn drive_controls(
     delivered
 }
 
-#[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
-#[path = "call_refresh_barrier.rs"]
-mod refresh_barrier;
-
 #[cfg(test)]
 #[path = "call_driver_tests.rs"]
 mod tests;

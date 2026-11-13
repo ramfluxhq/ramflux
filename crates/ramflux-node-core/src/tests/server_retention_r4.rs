@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Review r3 regression: a legacy WAL record's deadline is computed once, not per restart.
+//! Retired WAL records without a server acceptance time are refused.
 use super::*;
 
 #[test]
-fn legacy_wal_record_deadline_is_not_rebased_by_a_restart() -> Result<(), Box<dyn std::error::Error>>
+fn legacy_wal_record_without_acceptance_time_is_refused() -> Result<(), Box<dyn std::error::Error>>
 {
     let path = temp_store_path("r4_legacy_wal")?;
     let wal = path.with_extension("wal");
@@ -21,18 +21,9 @@ fn legacy_wal_record_deadline_is_not_rebased_by_a_restart() -> Result<(), Box<dy
         i64::MAX / 2,
         &entry,
     )?;
-    let deadline = |store: &RouterRedbStore| -> Result<i64, Box<dyn std::error::Error>> {
-        let router = store.load_router()?.ok_or("router")?;
-        let restored = router.resume("legacy-wal-mailbox", 0, 10);
-        let restored = restored.first().ok_or("legacy entry restored")?;
-        Ok(router.target_shard("legacy-wal-mailbox").inbox.retain_until(restored))
-    };
-    let store = RouterRedbStore::open_with_wal(&path, &wal)?;
-    let first = deadline(&store)?;
-    drop(store);
-    assert!(first <= now + 604_800 + 5, "legacy deadline is bounded by the upgrade: {first}");
-    std::thread::sleep(Duration::from_millis(1_100));
-    let store = RouterRedbStore::open_with_wal(&path, &wal)?;
-    assert_eq!(deadline(&store)?, first, "a restart must not push the deadline out again");
+    assert!(matches!(
+        RouterRedbStore::open_with_wal(&path, &wal),
+        Err(NodeCoreError::UnsupportedPersistedFormat("router WAL acceptance time"))
+    ));
     Ok(())
 }

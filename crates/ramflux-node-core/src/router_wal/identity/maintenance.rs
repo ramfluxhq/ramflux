@@ -27,7 +27,11 @@ struct Quarantine {
 
 fn pending(db: &redb::Database) -> Result<Option<Pending>, NodeCoreError> {
     let txn = db.begin_read().map_err(error)?;
-    let table = txn.open_table(crate::ROUTER_SNAPSHOT_TABLE).map_err(error)?;
+    let table = match txn.open_table(crate::ROUTER_SNAPSHOT_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(source) => return Err(error(source)),
+    };
     let request = table
         .get(KEY)
         .map_err(error)?
@@ -39,6 +43,19 @@ fn pending(db: &redb::Database) -> Result<Option<Pending>, NodeCoreError> {
     }
     Ok(request)
 }
+/// Follow persisted recovery authority before any schema, budget or quarantine write.
+pub(crate) fn validate_pending_formats(db: &redb::Database) -> Result<(), NodeCoreError> {
+    if let Some(request) = pending(db)? {
+        if request.quarantine.is_some() && request.wal_root.is_none() {
+            return Err(error("pending quarantine requires a WAL root"));
+        }
+        if let Some(root) = request.wal_root {
+            crate::RouterWalStore::validate_formats(&root)?;
+        }
+    }
+    Ok(())
+}
+
 fn mark(db: &redb::Database, path: &Path, request: &Pending) -> Result<(), NodeCoreError> {
     crate::fatal_durability::run(|| {
         let mut txn = db.begin_write().map_err(error)?;
@@ -143,6 +160,7 @@ fn amend_quarantine(
 
 /// Resume before enabling any store writer or listener. No TTL can clear this marker.
 pub(crate) fn resume(db: &Arc<redb::Database>, path: &Path) -> Result<(), NodeCoreError> {
+    validate_pending_formats(db)?;
     let Some(request) = pending(db)? else { return Ok(()) };
     if let Some(root) = &request.wal_root {
         if let Some(segment) = &request.quarantine {
@@ -204,9 +222,11 @@ impl RouterRedbStore {
         root: Option<&Path>,
         segment: Option<&Path>,
     ) -> Result<usize, NodeCoreError> {
+        if let Some(root) = root {
+            crate::RouterWalStore::validate_formats(root)?;
+        }
         let db = Arc::new(redb::Database::open(path).map_err(error)?);
-        // Run the exact ordinary-open schema/import/upgrade sequence before
-        // reading either a pending marker or the cursor inventory.
+        // Run the shared read-only preflight before schema/import initialization.
         Self::initialize_open_schema(&db)?;
         let resume_pending = pending(&db)?;
         if let Some(mut request) = resume_pending {

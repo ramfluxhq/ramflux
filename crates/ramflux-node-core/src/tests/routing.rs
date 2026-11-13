@@ -121,7 +121,7 @@ fn ack_advances_cursor_and_removes_pending_entry() -> Result<(), Box<dyn std::er
     inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));
     inbox.append(envelope("env_2", "target_a", DeliveryClass::OpaqueEvent));
 
-    let state = inbox.apply_ack(&ack("env_1"))?;
+    let state = inbox.apply_ack(&sequence_ack("env_1", 1))?;
     assert_eq!(state.inbox_seq, 1);
     assert_eq!(state.last_envelope_id, Some("env_1".to_owned()));
     assert!(state.acked_envelope_ids.contains("env_1"));
@@ -135,7 +135,7 @@ fn ack_advances_cursor_and_removes_pending_entry() -> Result<(), Box<dyn std::er
 fn nack_records_reason_without_advancing_cursor() -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
     inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));
-    let state = inbox.apply_nack(&nack("env_1", NackReason::RateLimited))?;
+    let state = inbox.apply_nack(&sequence_nack("env_1", NackReason::RateLimited, 1))?;
     assert_eq!(state.inbox_seq, 0);
     assert_eq!(state.last_envelope_id, None);
     assert_eq!(state.nacked_envelope_ids.get("env_1"), Some(&NackReason::RateLimited));
@@ -148,11 +148,12 @@ fn nack_after_ack_returns_existing_cursor_idempotently() -> Result<(), Box<dyn s
     let mut inbox = OpaqueDeviceInbox::new();
     inbox.append(envelope("env_ack_then_nack", "target_a", DeliveryClass::OpaqueEvent));
 
-    let acked = inbox.apply_ack(&ack("env_ack_then_nack"))?;
+    let acked = inbox.apply_ack(&sequence_ack("env_ack_then_nack", 1))?;
     assert!(acked.acked_envelope_ids.contains("env_ack_then_nack"));
     assert_eq!(inbox.pull_after("target_a", 0, 10).len(), 0);
 
-    let nacked = inbox.apply_nack(&nack("env_ack_then_nack", NackReason::RateLimited))?;
+    let nacked =
+        inbox.apply_nack(&sequence_nack("env_ack_then_nack", NackReason::RateLimited, 1))?;
     assert_eq!(nacked.target_delivery_id, "target_a");
     assert!(nacked.acked_envelope_ids.contains("env_ack_then_nack"));
     Ok(())
@@ -171,14 +172,19 @@ fn bound_ack_and_nack_reject_other_target_envelope() -> Result<(), Box<dyn std::
         envelope("env_bound_target_b", "target_b", DeliveryClass::OpaqueEvent),
     );
 
-    let ack_rejected = router.apply_ack_for_target("target_a", &ack("env_bound_target_b"));
-    assert!(matches!(ack_rejected, Err(NodeCoreError::EnvelopeTargetMismatch { .. })));
+    let ack_rejected =
+        router.apply_ack_for_target("target_a", &sequence_ack("env_bound_target_b", 1));
+    assert!(matches!(ack_rejected, Err(NodeCoreError::EnvelopeNotFound(_))));
     assert_eq!(router.resume("target_b", 0, 10).len(), 1);
+    assert_eq!(router.resume("target_a", 0, 10).len(), 1);
 
-    let nack_rejected = router
-        .apply_nack_for_target("target_a", &nack("env_bound_target_b", NackReason::RateLimited));
+    let nack_rejected = router.apply_nack_for_target(
+        "target_a",
+        &sequence_nack("env_bound_target_b", NackReason::RateLimited, 1),
+    );
     assert!(matches!(nack_rejected, Err(NodeCoreError::EnvelopeTargetMismatch { .. })));
     assert_eq!(router.resume("target_b", 0, 10).len(), 1);
+    assert_eq!(router.resume("target_a", 0, 10).len(), 1);
     Ok(())
 }
 
@@ -219,7 +225,7 @@ fn router_target_index_supports_concurrent_submit_and_ack() -> Result<(), Box<dy
             let envelope_id = format!("env_index_{worker_index}_{envelope_index}");
             let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
             assert_eq!(router.target_for_envelope_id(&envelope_id), Some(target_delivery_id));
-            router.apply_ack(&ack(&envelope_id))?;
+            router.apply_ack(&sequence_ack(&envelope_id, 1))?;
         }
     }
     Ok(())
@@ -380,7 +386,7 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
     }
     assert_eq!(router.resume("target_offline", 0, 10).len(), 1);
 
-    let state = router.apply_ack(&ack("env_offline"))?;
+    let state = router.apply_ack(&sequence_ack("env_offline", 1))?;
     assert_eq!(state.inbox_seq, 1);
     assert_eq!(router.resume("target_offline", 0, 10).len(), 0);
     Ok(())

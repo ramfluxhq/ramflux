@@ -324,13 +324,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rf_dm_attachment_does_not_forward_relay_service_key()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "ramflux-rf-attachment-{}-{}.bin",
-            std::process::id(),
-            rf_now_unix_timestamp()
-        ));
+    fn rf_dm_attachment_uses_current_relay_options() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("attachment.bin");
         std::fs::write(&path, b"attachment")?;
         let send = DmSend {
             account: "alice".to_owned(),
@@ -345,7 +341,6 @@ mod tests {
             body: "body".to_owned(),
             attach: vec![path.clone()],
             relay_url: Some("http://127.0.0.1:18084".to_owned()),
-            relay_service_key: Some("ramflux-relay-itest-service-key".to_owned()),
             attachment_chunk_size: 1024,
             federation_url: None,
             source_node: None,
@@ -357,9 +352,11 @@ mod tests {
         };
 
         let attachments = rf_dm_attachments(&send)?;
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].relay_service_key_base64, None);
-        let _ = std::fs::remove_file(path);
+        assert_eq!(attachments.len(), 1, "attachment fixture must yield one current request");
+        assert!(
+            attachments.first().ok_or("attachment")?.relay_service_key_base64.is_none(),
+            "current attachment requests must have no retired service key"
+        );
         Ok(())
     }
 }

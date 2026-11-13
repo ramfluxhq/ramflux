@@ -4,9 +4,9 @@
 //! Persist-before-publish relay operations and reservation cleanup.
 
 use super::{
-    ObjectChunkFrame, ObjectRelayTombstoneMutation, RelayCacheState, RelayChunkEntry,
-    RelayChunkMeta, RelayChunkStatus, RelayExpiryMutation, RelayPutPlan, RelayRedbStore,
-    RelayStoreOpError, object_relay_chunk_cipher_hash,
+    ObjectRelayTombstoneMutation, RelayCacheState, RelayChunkEntry, RelayChunkMeta,
+    RelayChunkStatus, RelayExpiryMutation, RelayPutPlan, RelayRedbStore, RelayStoreOpError,
+    object_relay_chunk_cipher_hash,
 };
 
 pub(super) type RelayStateMutex = std::sync::Mutex<RelayCacheState>;
@@ -42,8 +42,8 @@ impl RelayReservationGuard<'_> {
     }
 }
 
-/// Persist-before-publish PUT of a pre-built candidate entry (shared by v2 after frame validation and
-/// by the pre-verified v3 owner-session path). Never holds the state lock across the redb commit.
+/// Persist-before-publish PUT of a pre-verified v3 candidate entry.
+/// Never holds the state lock across the redb commit.
 ///
 /// Ordering:
 /// 1. Plan AND reserve under ONE lock (atomic): tombstone-block/owner/content(meta)/resurrect checks;
@@ -107,22 +107,6 @@ pub fn relay_store_put_candidate(
             Ok((candidate, true))
         }
     }
-}
-
-/// Persist-before-publish v2 PUT: validates the frame, builds the candidate, then applies
-/// [`relay_store_put_candidate`].
-///
-/// # Errors
-/// Returns a [`RelayStoreOpError`].
-pub fn relay_store_put_frame(
-    store: &RelayRedbStore,
-    state: &RelayStateMutex,
-    frame: ObjectChunkFrame,
-    relay_service_key: &[u8],
-    now: u64,
-) -> Result<(RelayChunkEntry, bool), RelayStoreOpError> {
-    let candidate = RelayCacheState::build_put_entry_from_frame(frame, relay_service_key, now)?;
-    relay_store_put_candidate(store, state, candidate, now)
 }
 
 /// Read-through GET: given a validated resident meta snapshot, point-read the ciphertext from redb

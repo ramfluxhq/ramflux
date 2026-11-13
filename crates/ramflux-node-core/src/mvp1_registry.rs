@@ -251,9 +251,13 @@ pub struct IdentityRegistry {
     delivery_root_bindings: BTreeMap<String, (String, String, String)>,
     // Historical unqualified proof ids are retained only for snapshot provenance.
     seen_proofs: BTreeSet<String>,
-    #[serde(default, deserialize_with = "crate::registration_receipts::load_receipts")]
+    #[serde(deserialize_with = "crate::registration_receipts::load_receipts")]
     root_seen_proofs: std::collections::VecDeque<crate::registration_receipts::RegistrationReceipt>,
-    #[serde(default, skip_serializing)]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::foreign_device_heads::refuse_snapshot"
+    )]
     pub(crate) foreign_device_heads: crate::foreign_device_heads::ForeignDeviceHeads,
     pub(crate) prekey_bundles: BTreeMap<String, ramflux_crypto::PrekeyBundle>,
     #[serde(default, deserialize_with = "load_registration_policy")]
@@ -422,26 +426,16 @@ impl IdentityRegistry {
             &ramflux_protocol::canonical_json_bytes(&(source.storage_key(), proof))
                 .map_err(|error| NodeCoreError::ItestHttp(error.to_string()))?,
         );
-        self.migrate_legacy_registration_receipts(now);
-        self.root_seen_proofs
-            .retain(|receipt| receipt.expires_at.is_none_or(|expires| expires >= now));
+        self.root_seen_proofs.retain(|receipt| receipt.expires_at >= now);
         if self.root_seen_proofs.iter().any(|receipt| receipt.key == key) {
             return Err(NodeCoreError::ItestHttp("branch proof replay".into()));
         }
-        if self
-            .root_seen_proofs
-            .iter()
-            .filter(|r| r.root.as_deref() == Some(source.root_commitment()))
-            .count()
+        if self.root_seen_proofs.iter().filter(|r| r.root == source.root_commitment()).count()
             >= crate::registration_receipts::REGISTRATION_ROOT_LIMIT
         {
             return Err(NodeCoreError::Capacity { resource: "registration_proofs_per_root" });
         }
-        if self
-            .root_seen_proofs
-            .iter()
-            .filter(|r| r.source.as_deref() == Some(source_bucket))
-            .count()
+        if self.root_seen_proofs.iter().filter(|r| r.source == source_bucket).count()
             >= crate::registration_receipts::registration_source_limit()?
         {
             return Err(NodeCoreError::Capacity { resource: "registration_proofs_per_source" });
@@ -451,31 +445,16 @@ impl IdentityRegistry {
         }
         self.root_seen_proofs.push_back(crate::registration_receipts::RegistrationReceipt {
             key,
-            expires_at: Some(expires_at),
-            root: Some(source.root_commitment().to_owned()),
-            source: Some(source_bucket.to_owned()),
+            expires_at,
+            root: source.root_commitment().to_owned(),
+            source: source_bucket.to_owned(),
         });
         Ok(())
     }
-    pub(crate) fn migrate_legacy_registration_receipts(&mut self, now: i64) -> bool {
-        let deadline = now
-            .saturating_add(ramflux_crypto::MAX_BRANCH_PROOF_LIFETIME_SECONDS)
-            .saturating_add(ramflux_crypto::BRANCH_PROOF_CLOCK_SKEW_SECONDS);
-        let mut changed = false;
-        for receipt in &mut self.root_seen_proofs {
-            if receipt.expires_at.is_none() {
-                receipt.expires_at = Some(deadline);
-                changed = true;
-            }
-        }
-        changed
-    }
     pub(crate) fn prune_registration_proofs(&mut self, now: i64) -> usize {
-        self.migrate_legacy_registration_receipts(now);
         let before = self.root_seen_proofs.len() + self.seen_proofs.len();
         self.seen_proofs.clear();
-        self.root_seen_proofs
-            .retain(|receipt| receipt.expires_at.is_some_and(|expires| expires >= now));
+        self.root_seen_proofs.retain(|receipt| receipt.expires_at >= now);
         before - self.root_seen_proofs.len()
     }
     pub fn set_registration_policy(&mut self, policy: RegistrationPolicy) {
@@ -530,7 +509,6 @@ impl IdentityRegistry {
         &mut self,
         request: &IdentityRegisterRequest,
     ) -> Result<RegistrationTrustTier, NodeCoreError> {
-        self.migrate_legacy_registration_receipts(request.now);
         self.check_source_registration_budget(request)?;
         match self.registration_policy.challenge_policy {
             RegistrationChallengePolicy::None => Ok(RegistrationTrustTier::New),
@@ -1141,6 +1119,59 @@ mod proof_retention_tests {
         ));
         registry.admit_registration_proof(&identity(32)?, "fresh-source", "new", 3000, 2001)?;
         assert_eq!(registry.root_seen_proofs.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn current_registration_receipts_keep_replay_fences_through_real_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use redb::{ReadableDatabase, ReadableTable};
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("store.redb");
+        let root = ramflux_crypto::create_identity_root("owner", [9; 32]);
+        let source =
+            ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")?;
+        let now = i64::try_from(crate::now_unix_seconds())?;
+        let expires = now + 100;
+        let mut registry = IdentityRegistry::new();
+        registry.admit_registration_proof(&source, "source", "proof", expires, now)?;
+        let bytes = serde_json::to_vec(&registry)?;
+        drop(crate::RouterRedbStore::open_without_wal(&path)?);
+        let db = redb::Database::open(&path)?;
+        let tx = db.begin_write()?;
+        tx.open_table(crate::ROUTER_SNAPSHOT_TABLE)?
+            .insert(crate::ROUTER_IDENTITY_REGISTRY_KEY, bytes.as_slice())?;
+        tx.commit()?;
+        drop(db);
+        let store = crate::RouterRedbStore::open_without_wal(&path)?;
+        let mut restored = store.load_router()?.ok_or("router")?.mvp1_identities_snapshot();
+        assert_eq!(serde_json::to_vec(&restored)?, bytes);
+        assert!(
+            restored
+                .admit_registration_proof(&source, "source", "proof", expires + 100, expires)
+                .is_err()
+        );
+        assert_eq!(restored.prune_registration_proofs(expires), 0);
+        assert_eq!(restored.root_seen_proofs.len(), 1);
+        assert_eq!(restored.prune_registration_proofs(expires + 1), 1);
+        restored.admit_registration_proof(
+            &source,
+            "source",
+            "fresh",
+            expires + 100,
+            expires + 1,
+        )?;
+        assert_eq!(restored.root_seen_proofs.len(), 1);
+        drop(store);
+        let db = redb::Database::open(&path)?;
+        assert_eq!(
+            db.begin_read()?
+                .open_table(crate::ROUTER_SNAPSHOT_TABLE)?
+                .get(crate::ROUTER_IDENTITY_REGISTRY_KEY)?
+                .ok_or("snapshot")?
+                .value(),
+            bytes
+        );
+        drop(db);
         Ok(())
     }
 }

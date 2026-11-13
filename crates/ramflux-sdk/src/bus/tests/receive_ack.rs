@@ -14,17 +14,11 @@ use serde_json::json;
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::{oneshot, watch};
 
-#[cfg_attr(
-    not(feature = "itest-local-mint"),
-    expect(dead_code, reason = "Used by local-mint transfer fixtures")
-)]
 pub(super) struct Started {
     pub actor: AccountActor,
     pub root: PathBuf,
     pub router: tokio::task::JoinHandle<()>,
     peer: LocalBusAccountState,
-    sibling: LocalBusAccountState,
-    resume: ResumeConfig,
 }
 impl Started {
     pub(super) fn peer(&mut self) -> &mut LocalBusAccountState {
@@ -99,38 +93,22 @@ pub(super) async fn controls(actor: &AccountActor) -> Case {
 }
 
 pub(super) async fn start(fixture: Fixture) -> Case<Started> {
-    let Fixture { root, mut source, peer, sibling, .. } = fixture;
+    let Fixture { root, mut source, peer, .. } = fixture;
     let mut engine = source.engine.take().ok_or("fixture engine")?;
     engine.frame_timeout = Duration::from_secs(600);
     let config = source.gateway_config.clone();
     let commitment = source.principal_commitment.clone();
     let relay_options = source.client.node_relay_options.clone();
-    let transfer_hook = source.test_transfer_hook.clone();
     drop(source);
-    let resume = ResumeConfig { config, commitment, relay_options, transfer_hook };
+    let resume = ResumeConfig { config, commitment, relay_options };
     let (actor, router) = launch(&root, &resume, Some(engine)).await?;
-    Ok(Started { actor, root, router, peer, sibling, resume })
+    Ok(Started { actor, root, router, peer })
 }
 #[derive(Clone)]
 struct ResumeConfig {
     config: GatewaySessionConfig,
     commitment: String,
     relay_options: Option<RelayTransferOptions>,
-    transfer_hook: Option<Arc<crate::bus::transfer_slots::test_hooks::Hook>>,
-}
-impl Started {
-    #[cfg_attr(
-        not(feature = "itest-local-mint"),
-        expect(dead_code, reason = "Used by local-mint transfer fixtures")
-    )]
-    pub(super) async fn restart(self) -> Case<Self> {
-        let Self { actor, root, router, peer, sibling, resume } = self;
-        actor.stop().await?;
-        drop(actor);
-        router.await?;
-        let (actor, router) = launch(&root, &resume, None).await?;
-        Ok(Self { actor, root, router, peer, sibling, resume })
-    }
 }
 async fn launch(
     root: &Path,
@@ -139,7 +117,7 @@ async fn launch(
 ) -> Case<(AccountActor, tokio::task::JoinHandle<()>)> {
     let loaded_root = root.join("source");
     let data_root = loaded_root.clone();
-    let ResumeConfig { config, commitment, relay_options, transfer_hook } = resume.clone();
+    let ResumeConfig { config, commitment, relay_options } = resume.clone();
     let index = AccountIndex::open(&loaded_root)?;
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
     let router = tokio::task::spawn_local(async move {
@@ -168,7 +146,6 @@ async fn launch(
                 account.principal_commitment = commitment;
                 account.gateway_config = config;
                 account.client.node_relay_options = relay_options;
-                account.test_transfer_hook = transfer_hook;
                 account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
                 account.engine = None;
                 crate::bus::dispatch::object::hydrate_local_object_state(&mut account)?;

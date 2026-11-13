@@ -24,40 +24,6 @@ pub enum RelayChunkStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ObjectChunkFrame {
-    pub schema: String,
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub chunk_index: u32,
-    pub chunk_id: String,
-    pub chunk_cipher_hash: String,
-    pub cipher_size: u64,
-    pub encrypted_chunk: Vec<u8>,
-    pub relay_token: RelayToken,
-    pub object_permission_envelope: ObjectPermissionEnvelope,
-    pub expires_at: u64,
-    pub delete_after_ack: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ObjectRelayAck {
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub chunk_id: String,
-    pub recipient_device_hash: String,
-    pub relay_token: RelayToken,
-    pub object_permission_envelope: ObjectPermissionEnvelope,
-    pub acked_at: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ObjectRelayGetRequest {
-    pub chunk_id: String,
-    pub relay_token: RelayToken,
-    pub object_permission_envelope: ObjectPermissionEnvelope,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObjectRelayPutResponse {
     pub chunk_id: String,
     pub object_id: String,
@@ -116,17 +82,8 @@ pub struct RelayChunkEntry {
     pub manifest_hash: String,
     pub chunk_index: u32,
     pub chunk_cipher_hash: String,
-    /// Immutable identity of the device that originally uploaded this chunk. Bound at put time
-    /// and never mutated. Legacy records persisted before owner binding existed deserialize with
-    /// empty strings via `serde(default)`.
-    ///
-    /// Enforcement status (RQ-03, partial): only put-overwrite and tombstone currently fail closed
-    /// on an empty (legacy) or foreign owner binding. Get/Ack owner enforcement is NOT yet landed
-    /// (deferred to the owner-grant / issuer-attestation work), so an unbound legacy chunk is at
-    /// present still readable and ackable. Do not rely on this field to gate reads/acks yet.
-    #[serde(default)]
+    /// Immutable uploader binding, required in every persisted row.
     pub owner_signing_key_id: String,
-    #[serde(default)]
     pub owner_public_key: String,
     pub encrypted_chunk: Vec<u8>,
     pub stored_at: u64,
@@ -156,9 +113,7 @@ pub struct RelayChunkMeta {
     pub manifest_hash: String,
     pub chunk_index: u32,
     pub chunk_cipher_hash: String,
-    #[serde(default)]
     pub owner_signing_key_id: String,
-    #[serde(default)]
     pub owner_public_key: String,
     pub stored_at: u64,
     pub expires_at: u64,
@@ -188,6 +143,17 @@ impl From<&RelayChunkEntry> for RelayChunkMeta {
 }
 
 impl RelayChunkMeta {
+    /// Applies an already-authorized recipient ACK under the owner's stored deletion policy.
+    #[must_use]
+    pub fn acknowledged_by(&self, recipient: &str) -> Self {
+        let mut updated = self.clone();
+        updated.acked_by.insert(recipient.to_owned());
+        if updated.delete_after_ack {
+            updated.status = RelayChunkStatus::AckedDeleted;
+        }
+        updated
+    }
+
     /// Returns `true` only when the chunk carries a non-empty immutable owner binding.
     #[must_use]
     pub fn has_owner_binding(&self) -> bool {
@@ -285,32 +251,6 @@ pub(super) fn object_relay_chunk_max_ttl_seconds_from_env(value: Option<&str>) -
         .min(OBJECT_RELAY_CHUNK_HARD_MAX_TTL_SECONDS)
 }
 
-#[must_use]
-pub fn object_relay_retention_record(
-    entry: &RelayChunkEntry,
-    now: u64,
-) -> crate::RetentionMetadataRecord {
-    crate::RetentionMetadataRecord {
-        record_id: format!("object_relay:{}:{}", entry.object_id, entry.chunk_id),
-        subject_hash: entry.object_id.clone(),
-        metadata_class: "transport_relay_chunk_cache".to_owned(),
-        source_service_id: "relay".to_owned(),
-        retention_policy_id: "transport_relay_chunk_cache.default_15m_max_24h".to_owned(),
-        created_at: now,
-        expires_at: entry.expires_at,
-        delete_after_ack: if entry.delete_after_ack { Some(now) } else { None },
-        legal_hold: false,
-        legal_hold_next_review_at: None,
-        legal_basis: None,
-        legal_hold_actor: None,
-        legal_hold_created_at: None,
-        metadata_hash: ramflux_crypto::blake3_256_base64url(
-            "ramflux.object_relay.retention_metadata.v1",
-            format!("{}:{}:{}", entry.object_id, entry.manifest_hash, entry.chunk_id).as_bytes(),
-        ),
-    }
-}
-
 #[cfg(test)]
 mod retention_budget_tests {
     use super::*;
@@ -326,5 +266,36 @@ mod retention_budget_tests {
             );
         }
         assert_eq!(object_relay_chunk_max_ttl_seconds_from_env(Some("60")), 60);
+    }
+}
+
+#[cfg(test)]
+mod format_guards {
+    use std::collections::BTreeSet;
+    #[test]
+    fn persisted_chunk_requires_its_owner_binding() -> Result<(), Box<dyn std::error::Error>> {
+        let entry = super::RelayChunkEntry {
+            chunk_id: "chunk".into(),
+            object_id: "object".into(),
+            manifest_hash: "manifest".into(),
+            chunk_index: 0,
+            chunk_cipher_hash: "hash".into(),
+            owner_signing_key_id: "owner".into(),
+            owner_public_key: "key".into(),
+            encrypted_chunk: vec![1],
+            stored_at: 100,
+            expires_at: 200,
+            delete_after_ack: false,
+            acked_by: BTreeSet::default(),
+            status: super::RelayChunkStatus::Available,
+        };
+        let current = serde_json::to_value(entry)?;
+        assert!(serde_json::from_value::<super::RelayChunkEntry>(current.clone()).is_ok());
+        for field in ["owner_signing_key_id", "owner_public_key"] {
+            let mut old = current.clone();
+            old.as_object_mut().ok_or("chunk fixture object")?.remove(field);
+            assert!(serde_json::from_value::<super::RelayChunkEntry>(old).is_err());
+        }
+        Ok(())
     }
 }

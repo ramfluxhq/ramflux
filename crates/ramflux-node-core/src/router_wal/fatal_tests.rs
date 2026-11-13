@@ -17,10 +17,10 @@ fn entry(seq: u64) -> InboxEntry {
 }
 fn payload(seq: u64) -> RouterWalPayload {
     RouterWalPayload::Submission {
-        replay_key: format!("fatal-{seq}"),
+        replay_key: crate::tests::request_replay_fixture(&format!("fatal-{seq}")),
         replay_expires_at: i64::MAX,
         entry: Some(Box::new(entry(seq))),
-        accepted_at: None,
+        accepted_at: Some(router_wal_now()),
         local_delivery: None,
     }
 }
@@ -123,7 +123,11 @@ fn uncertain_write_fail_stop() -> TestResult {
                 u64::MAX
             },
         )?;
-        store.record_submission_increment("before", i64::MAX, Some(&entry(1)))?;
+        store.record_submission_increment(
+            &crate::tests::request_replay_fixture("before"),
+            i64::MAX,
+            Some(&entry(1)),
+        )?;
         if case == "writer_channel_loss" {
             let (sender, receiver) = mpsc::sync_channel(1);
             drop(receiver);
@@ -221,7 +225,11 @@ fn uncertain_write_fail_stop() -> TestResult {
             }
             return Ok(());
         }
-        let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(2)));
+        let _ = store.record_submission_increment(
+            &crate::tests::request_replay_fixture("fault"),
+            i64::MAX,
+            Some(&entry(2)),
+        );
         park();
     }
     // Each durability mode gets its own nextest deadline. Combining all 43
@@ -307,7 +315,11 @@ fn redb_fail_stop_cases() -> TestResult {
 
 fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
     let store = crate::router_store::incarnation::test_store(root, mode, u64::MAX)?;
-    store.record_submission_increment("before", i64::MAX, Some(&entry(1)))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("before"),
+        i64::MAX,
+        Some(&entry(1)),
+    )?;
     let selected = match case {
         "redb_begin" => "begin_write",
         "redb_apply" | "redb_error" => "commit_apply",
@@ -360,7 +372,11 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
             let _ = store.load_router();
         }
         _ => {
-            let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(2)));
+            let _ = store.record_submission_increment(
+                &crate::tests::request_replay_fixture("fault"),
+                i64::MAX,
+                Some(&entry(2)),
+            );
         }
     }
     if track_error {
@@ -434,12 +450,20 @@ fn writer_fence_blocks_later_batch() -> TestResult {
     if let Some((root, _, mode)) = child_config() {
         fs::create_dir_all(&root)?;
         let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
-        store.record_submission_increment("before", i64::MAX, Some(&entry(1)))?;
+        store.record_submission_increment(
+            &crate::tests::request_replay_fixture("before"),
+            i64::MAX,
+            Some(&entry(1)),
+        )?;
         let id = store.inbox_status("fatal-target")?.0.expect("E");
         let core = store.publication_core()?;
         let first = core.reserve("fatal-target", &id, &[])?;
         let success = first.hand_off().expect("handoff");
-        store.record_submission_increment("held-success", i64::MAX, Some(&entry(2)))?;
+        store.record_submission_increment(
+            &crate::tests::request_replay_fixture("held-success"),
+            i64::MAX,
+            Some(&entry(2)),
+        )?;
         let op = if mode == 0 { "commit" } else { "sync_all" };
         let (entered, reached) = mpsc::sync_channel(1);
         let (release, resume) = mpsc::sync_channel(1);
@@ -498,7 +522,15 @@ fn writer_fence_blocks_later_batch() -> TestResult {
         );
         success.accepted_durable();
         assert_eq!(core.view("fatal-target", &id).0, 1, "stale Ok crossed final gate");
-        assert!(store.record_submission_increment("later", i64::MAX, Some(&entry(4))).is_err());
+        assert!(
+            store
+                .record_submission_increment(
+                    &crate::tests::request_replay_fixture("later"),
+                    i64::MAX,
+                    Some(&entry(4))
+                )
+                .is_err()
+        );
         assert!(core.reserve("fatal-target", &id, &[]).is_err());
         fs::write(root.join("checked"), [])?;
         park();
@@ -591,10 +623,10 @@ fn enqueue(
     }
     let wal = store.submission_wal.as_ref().expect("wal");
     let payload = RouterWalPayload::Submission {
-        replay_key: entry.envelope.envelope_id.clone(),
+        replay_key: crate::tests::request_replay_fixture(&entry.envelope.envelope_id.clone()),
         replay_expires_at: i64::MAX,
         entry: Some(Box::new(entry)),
-        accepted_at: None,
+        accepted_at: Some(router_wal_now()),
         local_delivery: None,
     };
     let shard = wal.writer.shard_for_payload(&payload)?;

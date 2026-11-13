@@ -27,8 +27,16 @@ fn entry(seq: u64) -> InboxEntry {
 }
 fn seed(root: &Path, mode: u8) -> std::result::Result<Vec<String>, Box<dyn std::error::Error>> {
     let store = test_store(root, mode, 1)?;
-    store.record_submission_increment("row-1", i64::MAX, Some(&entry(1)))?;
-    store.record_submission_increment("row-2", i64::MAX, Some(&entry(2)))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("row-1"),
+        i64::MAX,
+        Some(&entry(1)),
+    )?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("row-2"),
+        i64::MAX,
+        Some(&entry(2)),
+    )?;
     let ids =
         vec![store.inbox_status("restore-target")?.0.expect("E"), store.initialize_inbox("empty")?];
     store.load_router()?;
@@ -616,66 +624,41 @@ fn legacy_maintenance_image(root: &Path, corrupt_tuple: bool) -> Result {
 }
 
 #[test]
-fn review_low_l2_maintenance_runs_ordinary_open_prelude() -> Result {
+
+fn maintenance_refuses_retired_tuple_images() -> Result {
     for mode in 0..=2 {
         for corrupt in [false, true] {
-            let root = fixture();
+            let directory = tempfile::TempDir::new()?;
+            let root = directory.path().join("case");
             legacy_maintenance_image(&root, corrupt)?;
-            let result = rotate(&root, mode, false);
-            if corrupt {
-                assert!(result.is_err(), "tuple upgrade must fail before reading pending/marking");
-            } else {
-                assert_eq!(result?, 1, "maintenance must initialize a legacy schema itself");
-            }
-            assert_maintenance_upgrades(&root, corrupt)?;
-            if !corrupt {
-                let store = test_store(&root, mode, 1)?;
-                assert_eq!(store.inbox_status("restore-target")?.1, 7);
-                store.load_router()?;
-                drop(store);
-            }
-            fs::remove_dir_all(root)?;
+            let before = crate::tests::persisted_image::image(&root)?;
+            assert!(
+                rotate(&root, mode, false).is_err(),
+                "maintenance must refuse retired tuples before initialization"
+            );
+            assert!(test_store(&root, mode, 1).is_err());
+            assert_eq!(
+                crate::tests::persisted_image::image(&root)?,
+                before,
+                "ordinary and maintenance refusal must preserve every table"
+            );
+            let db = redb::Database::open(root.join("db"))?;
+            let tx = db.begin_read()?;
+            assert!(
+                tx.open_table(crate::ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?
+                    .get("s:4:rootid")?
+                    .is_some()
+            );
+            assert!(
+                matches!(
+                    tx.open_table(crate::ROUTER_SNAPSHOT_TABLE),
+                    Err(redb::TableError::TableDoesNotExist(_))
+                ),
+                "refusal must not create the missing snapshot table"
+            );
+            drop(tx);
+            drop(db);
         }
-    }
-    Ok(())
-}
-
-fn assert_maintenance_upgrades(root: &Path, corrupt: bool) -> Result {
-    let db = redb::Database::open(root.join("db"))?;
-    let tx = db.begin_read()?;
-    // These tables were absent, proving schema initialization ran before pending.
-    tx.open_table(crate::ROUTER_SESSION_ENTRY_TABLE)?;
-    let snapshots = tx.open_table(crate::ROUTER_SNAPSHOT_TABLE)?;
-    assert!(snapshots.get(MARKER)?.is_none());
-    let row = tx
-        .open_table(crate::router_store::incarnation_state::TABLE)?
-        .get("restore-target")?
-        .expect("cursor-field incarnation imported before tuple upgrade");
-    let (id, issued) = crate::router_store::incarnation_state::decode(row.value())?;
-    assert_eq!(issued, 7);
-    if corrupt {
-        assert_eq!(id, LEGACY_E, "import precedes failed tuple upgrade without rotating");
-        assert!(snapshots.get("router_envelope_tuple_v3")?.is_none());
-        assert!(!root.join("wal").exists());
-    } else {
-        assert_ne!(id, LEGACY_E);
-        assert!(snapshots.get("router_envelope_tuple_v3")?.is_some());
-        let deliveries = tx.open_table(crate::ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)?;
-        assert!(deliveries.get("s:4:rootid")?.is_none());
-        let target = ramflux_protocol::encode_base64url("restore-target");
-        let key = format!(
-            "v3/{}/{}/{target}",
-            ramflux_protocol::encode_base64url("root"),
-            ramflux_protocol::encode_base64url("id")
-        );
-        assert!(deliveries.get(key.as_str())?.is_some());
-        let source = ramflux_protocol::qualified_device_id("root", "device")?;
-        let old = format!("envelope/v2/{source}/{}", ramflux_protocol::encode_base64url("id"));
-        let new =
-            format!("envelope/v3/{source}/{}/{target}", ramflux_protocol::encode_base64url("id"));
-        let replay = tx.open_table(crate::ROUTER_REPLAY_TUPLE_TABLE)?;
-        assert!(replay.get(old.as_str())?.is_none());
-        assert!(replay.get(new.as_str())?.is_some());
     }
     Ok(())
 }

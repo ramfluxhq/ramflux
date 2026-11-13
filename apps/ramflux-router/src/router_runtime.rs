@@ -950,7 +950,7 @@ pub(crate) mod tests {
         let envelope = current_envelope("env_runtime_ack", "target_runtime_ack")?;
 
         let (oracle_state, oracle_store, _oracle_path) = test_router("ack_oracle")?;
-        let _submitted = crate::router_engine::submit_envelope(
+        let submitted = crate::router_engine::submit_envelope(
             oracle_state.as_ref(),
             oracle_store.as_ref(),
             no_forward(),
@@ -958,7 +958,10 @@ pub(crate) mod tests {
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
-        let ack = ack("env_runtime_ack");
+        let inbox_seq = submitted.inbox_seq.ok_or_else(|| {
+            anyhow::anyhow!("test: oracle submit did not allocate an inbox sequence")
+        })?;
+        let ack = ack("env_runtime_ack", inbox_seq);
         let ack_request = ramflux_node_core::TargetAckRequest {
             target_delivery_id: "target_runtime_ack".to_owned(),
             ack: ack.clone(),
@@ -970,15 +973,20 @@ pub(crate) mod tests {
         )?;
 
         let (handle, _handle_path) = test_handle("ack_handle")?;
-        let _submitted = handle.submit_envelope_from(
+        let submitted = handle.submit_envelope_from(
             envelope,
             Instant::now(),
             ramflux_node_core::RouterEnvelopeOrigin::Gateway,
         )?;
+        assert_eq!(
+            submitted.inbox_seq,
+            Some(inbox_seq),
+            "both real router paths must allocate the same sequence"
+        );
         let handle_ack = handle.apply_bound_ack(&ack_request)?;
-        assert_eq!(handle_ack, oracle_ack);
+        assert_eq!(handle_ack, oracle_ack, "qualified ACK results must agree across router paths");
 
-        let nack = nack("env_runtime_ack");
+        let nack = nack("env_runtime_ack", inbox_seq);
         let nack_request = ramflux_node_core::TargetNackRequest {
             target_delivery_id: "target_runtime_ack".to_owned(),
             nack,
@@ -989,7 +997,10 @@ pub(crate) mod tests {
             &nack_request,
         )?;
         let handle_nack_response = handle.apply_bound_nack(&nack_request)?;
-        assert_eq!(handle_nack_response, oracle_nack_response);
+        assert_eq!(
+            handle_nack_response, oracle_nack_response,
+            "qualified NACK results must agree across router paths"
+        );
         Ok(())
     }
 
@@ -1526,12 +1537,17 @@ pub(crate) mod tests {
         }
     }
 
-    fn ack(envelope_id: &str) -> ramflux_protocol::Ack {
+    fn ack(envelope_id: &str, inbox_seq: u64) -> ramflux_protocol::Ack {
         ramflux_protocol::Ack {
             schema: "ramflux.ack.v1".to_owned(),
             version: 1,
             domain: "ramflux.ack.v1".to_owned(),
-            ext: Ext::default(),
+            ext: Ext {
+                ext: std::collections::BTreeMap::from([(
+                    "inbox_seq".into(),
+                    serde_json::json!(inbox_seq),
+                )]),
+            },
             signed: signed_fields(),
             ack_id: format!("ack_{envelope_id}"),
             envelope_id: envelope_id.to_owned(),
@@ -1541,12 +1557,17 @@ pub(crate) mod tests {
         }
     }
 
-    fn nack(envelope_id: &str) -> ramflux_protocol::Nack {
+    fn nack(envelope_id: &str, inbox_seq: u64) -> ramflux_protocol::Nack {
         ramflux_protocol::Nack {
             schema: "ramflux.nack.v1".to_owned(),
             version: 1,
             domain: "ramflux.nack.v1".to_owned(),
-            ext: Ext::default(),
+            ext: Ext {
+                ext: std::collections::BTreeMap::from([(
+                    "inbox_seq".into(),
+                    serde_json::json!(inbox_seq),
+                )]),
+            },
             signed: signed_fields(),
             nack_id: format!("nack_{envelope_id}"),
             envelope_id: envelope_id.to_owned(),

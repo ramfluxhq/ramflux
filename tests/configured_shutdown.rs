@@ -75,7 +75,9 @@ fn configured_shutdown_with_probes(
             run_case(binary, service, &fixture, &format!("failure-{stage}"))?;
             assert_clean_reopen(&fixture.database)?;
         }
-        run_case(binary, service, &fixture, "request")?;
+        let mode =
+            if service == "ramflux-retention" { "http-retention-request" } else { "request" };
+        run_case(binary, service, &fixture, mode)?;
         assert_clean_reopen(&fixture.database)?;
         assert_committed_request(service, &fixture)?;
     }
@@ -308,7 +310,9 @@ fn run_case(
     let mut child = ChildGuard(command.spawn()?);
     let stdout = child.0.stdout.take().ok_or("missing stdout")?;
     let log_reader = spawn_shutdown_log_reader(stdout);
-    if let Err(error) = wait_for_ready(&log_reader.receiver, service, Duration::from_secs(10)) {
+    if let Err(error) =
+        wait_for_ready_mode(&log_reader.receiver, service, mode, Duration::from_secs(10))
+    {
         let _ = child.0.kill();
         let _ = child.0.wait();
         let mut logs = log_reader.thread.join().map_err(|_| "stdout reader panicked")?;
@@ -454,6 +458,15 @@ fn wait_for_ready(
     service: &str,
     timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_ready_mode(receiver, service, "idle", timeout)
+}
+
+fn wait_for_ready_mode(
+    receiver: &mpsc::Receiver<String>,
+    service: &str,
+    mode: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
     let marker = match service {
         "ramflux-gateway" => "gateway QUIC session surface listening",
         "ramflux-router" => "router mesh mTLS surface listening",
@@ -474,6 +487,9 @@ fn wait_for_ready(
     };
     let mut pending = vec![marker];
     pending.extend_from_slice(extra);
+    if mode == "http-retention-request" {
+        pending.push("retention itest HTTP surface listening");
+    }
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -829,7 +845,7 @@ fn start_mesh_peer(
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/shutdown_peer.py"))
             .args([
                 fixture.root.to_str().ok_or("fixture path")?,
-                if mode.starts_with("http-admin-") {
+                if mode.starts_with("http-admin-") || mode == "http-retention-request" {
                     &fixture.admin_addr
                 } else if mode.starts_with("http-public-") {
                     &fixture.public_addr
@@ -878,8 +894,10 @@ fn assert_committed_request(
     service: &str,
     fixture: &Fixture,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixture.root.join("response.json"))?)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(fixture.root.join("response.json"))?.take(65537).read_to_end(&mut bytes)?;
+    assert!(bytes.len() <= 65536, "test: shutdown response exceeded bound");
+    let response: serde_json::Value = serde_json::from_slice(&bytes)?;
     let committed = response["status"] == 200;
     match service {
         "ramflux-router" => {
@@ -901,16 +919,14 @@ fn assert_committed_request(
             }
         }
         "ramflux-retention" => {
+            assert!(committed, "admitted retention write must commit during shutdown");
             let store = ramflux_node_core::RetentionRedbStore::open(&fixture.database)?;
-            let state = store.load_state()?.unwrap_or_default();
-            let record = state.metadata_record("shutdown-record");
-            assert_eq!(record.is_some(), committed);
-            if let Some(record) = record {
-                assert_eq!(record.subject_hash, "shutdown-subject");
-                assert_eq!(record.metadata_hash, "shutdown-hash");
-                assert_eq!(record.expires_at, 4_102_444_800);
-                assert!(!record.legal_hold);
-            }
+            let state = store.load_state()?.ok_or("test: missing retention checkpoint")?;
+            let record =
+                state.metadata_record("shutdown-record").ok_or("test: retention write lost")?;
+            let body: ramflux_node_core::RetentionMetadataRecord =
+                serde_json::from_str(response["body"].as_str().ok_or("test: response body")?)?;
+            assert_eq!(record, &body, "committed retention row must survive shutdown and reopen");
         }
         "ramflux-federation" => {
             let store = ramflux_node_core::FederationRedbStore::open(&fixture.database)?;
@@ -1031,6 +1047,11 @@ fn configured_command(
             "RAMFLUX_RELAY_SERVICE_KEY_REF",
             "literal:shutdown-test-relay-service-key-material",
         );
+    }
+    if mode == "http-retention-request" {
+        child
+            .env("RAMFLUX_ITEST_HTTP", "1")
+            .env("RAMFLUX_ITEST_RETENTION_HTTP_ADDR", &fixture.admin_addr);
     }
     if matches!(mode, "request" | "second") || mode.ends_with("-request") {
         child.env("RAMFLUX_ITEST_SHUTDOWN_REQUEST_MARKER", fixture.root.join("admitted"));

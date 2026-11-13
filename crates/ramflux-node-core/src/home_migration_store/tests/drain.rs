@@ -38,7 +38,7 @@ fn setup_count_mode(
                 s.a.store()?.record_inbox_entry(&entry)?;
             } else {
                 s.a.store()?.record_submission_increment(
-                    "drain-cutover",
+                    &crate::tests::request_replay_fixture("drain-cutover"),
                     i64::MAX / 2,
                     Some(&entry),
                 )?;
@@ -257,7 +257,7 @@ fn receiver_ack_at_a_after_commit_counts_receiver_acked_and_releases() -> TestRe
     }
     let (mut s, _, row) = setup()?;
     s.a.restart()?;
-    let nack = ramflux_protocol::Nack {
+    let mut nack = ramflux_protocol::Nack {
         schema: "ramflux.nack.v1".into(),
         version: 1,
         domain: "ramflux.nack.v1".into(),
@@ -272,6 +272,7 @@ fn receiver_ack_at_a_after_commit_counts_receiver_acked_and_releases() -> TestRe
         proof_hash: None,
         new_home_node_hint: None,
     };
+    nack.ext.ext.insert("inbox_seq".into(), serde_json::json!(row.entry.inbox_seq));
     for _ in 0..crate::inbox::ROUTER_NACK_RETRY_LIMIT {
         let cursor = s.a.core.apply_nack_for_target(&s.target, &nack)?;
         s.a.store()?.record_nack_increment(&cursor)?;

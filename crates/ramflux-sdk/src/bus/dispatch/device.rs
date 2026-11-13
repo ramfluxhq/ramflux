@@ -289,6 +289,7 @@ async fn dispatch_device_sync_export(
     state: &mut LocalBusDaemonState,
     body: LocalBusDeviceSyncExportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
     let account_id = request_account_id(request)?.to_owned();
     let account = local_bus_account_mut(state, &account_id)?;
     let commitment = account.principal_commitment.clone();
@@ -315,6 +316,7 @@ async fn dispatch_device_sync_import(
     state: &mut LocalBusDaemonState,
     body: LocalBusDeviceSyncImportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
     let account_id = request_account_id(request)?.to_owned();
     let account = local_bus_account_mut(state, &account_id)?;
     let commitment = account.principal_commitment.clone();

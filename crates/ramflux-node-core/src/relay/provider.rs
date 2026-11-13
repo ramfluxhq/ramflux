@@ -16,7 +16,7 @@ pub(super) const PROVIDER_KEYRING_FINGERPRINT_DOMAIN: &str =
     "ramflux.federation_provider_keyring.fingerprint.v1";
 /// T23-A2b2: the versioned provider-signed trust-snapshot envelope carrying `provider_epoch`. This is
 /// the production keyring-era envelope; the legacy single-pin `..._envelope.v3` schema is hard-rejected
-/// by the keyring verifier and only parsed by the compile-gated `itest-provider-single-key` path.
+/// by the keyring verifier; only the current keyring envelope is accepted.
 pub const PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_SCHEMA: &str =
     "ramflux.federated_issuer_trust_snapshot_envelope.v4";
 pub const PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_VERSION: u32 = 4;

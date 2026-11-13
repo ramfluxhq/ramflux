@@ -48,7 +48,11 @@ fn nacked_mailbox_head_does_not_stall_later_acks() -> Result<(), Box<dyn std::er
     let mut inbox = OpaqueDeviceInbox::new();
     let stuck = inbox.append(envelope("stuck", "target", DeliveryClass::OpaqueEvent));
     for _ in 0..3 {
-        inbox.apply_nack(&nack("stuck", NackReason::UnsupportedSchema))?;
+        inbox.apply_nack(&sequence_nack(
+            "stuck",
+            NackReason::UnsupportedSchema,
+            stuck.inbox_seq,
+        ))?;
     }
     let mut last = 0;
     for index in 0..=crate::inbox::ROUTER_ACK_WINDOW {
@@ -91,11 +95,18 @@ fn idle_router_wal_segment_survives_retention_then_recovers_new_writes()
     message.created_at = wall_clock();
     let entry =
         InboxEntry { inbox_seq: 1, target_delivery_id: "idle-mailbox".into(), envelope: message };
-    store.record_submission("after-idle", wall_clock() + 3_600, Some(&entry))?;
+    store.record_submission(
+        &request_replay_fixture("after-idle"),
+        wall_clock() + 3_600,
+        Some(&entry),
+    )?;
     drop(store);
     let reopened = RouterWalStore::open(&root)?;
     assert!(
-        reopened.submissions(wall_clock()).iter().any(|record| record.replay_key == "after-idle"),
+        reopened
+            .submissions(wall_clock())
+            .iter()
+            .any(|record| record.replay_key == request_replay_fixture("after-idle")),
         "a write after an idle week must survive restart"
     );
     Ok(())
@@ -112,7 +123,11 @@ fn router_restart_never_reuses_an_expired_logged_sequence() -> Result<(), Box<dy
     message.ttl = 10;
     let entry =
         InboxEntry { inbox_seq: 7, target_delivery_id: "mailbox".into(), envelope: message };
-    store.record_submission_increment("expired-key", wall_clock() + 60, Some(&entry))?;
+    store.record_submission_increment(
+        &request_replay_fixture("expired-key"),
+        wall_clock() + 60,
+        Some(&entry),
+    )?;
     drop(store);
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
     let issued = store
@@ -183,7 +198,7 @@ fn provider_collapse_value_is_keyed_per_node() -> Result<(), Box<dyn std::error:
         route.registered_at = now;
         route.expires_at = now + 600;
         store.register_push_route(route)?;
-        store.update_provider_credential(notify_webpush_credential("web"))?;
+        store.update_provider_credential(&notify_webpush_credential("web"))?;
         let (_entry, pushes) = store.queue_wake_for_push(
             "delivery",
             &notification_wake("collapse", 300),
@@ -202,13 +217,16 @@ fn provider_collapse_value_is_keyed_per_node() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn ownerless_legacy_routes_are_removed_in_production() -> Result<(), Box<dyn std::error::Error>> {
+fn ownerless_retired_routes_are_refused_in_production() -> Result<(), Box<dyn std::error::Error>> {
     let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let store = authorized_store("server_retention_ownerless", &live)?;
     let now = now_unix_seconds();
     store.register_push_route(route_for("legacy", now))?;
-    store.sweep_push_route_revocations()?;
-    assert_eq!(store.load_state()?.unwrap_or_default().push_routes("legacy", now).len(), 0);
+    assert!(matches!(
+        store.sweep_push_route_revocations(),
+        Err(NodeCoreError::UnsupportedPersistedFormat("notify unowned route"))
+    ));
+    assert_eq!(store.load_state()?.unwrap_or_default().push_routes("legacy", now).len(), 1);
     Ok(())
 }
 

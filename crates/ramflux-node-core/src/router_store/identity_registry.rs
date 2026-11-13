@@ -119,6 +119,21 @@ fn budget_delta(
     }
     Ok(delta)
 }
+/// Check row grammar independently of the snapshot base that the operator may repair.
+pub(super) fn validate_formats(db: &redb::Database) -> Result<(), NodeCoreError> {
+    let txn = db.begin_read().map_err(error)?;
+    let table = match txn.open_table(ADMISSIONS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(source) => return Err(error(source)),
+    };
+    for row in table.iter().map_err(error)? {
+        let (_, bytes) = row.map_err(error)?;
+        let _: RegistrationJournalEntry = serde_json::from_slice(bytes.value()).map_err(error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn replay(
     db: &redb::Database,
     registry: &mut IdentityRegistry,
@@ -168,7 +183,11 @@ impl RouterRedbStore {
         if !path.is_file() {
             return Err(NodeCoreError::StoreDoesNotExist { path: path.to_path_buf() });
         }
+        if super::router_wal_enabled() {
+            crate::RouterWalStore::validate_formats(&super::router_wal_root_for_redb_path(path))?;
+        }
         let db = redb::Database::open(path).map_err(error)?;
+        super::startup_format::validate_formats(&db)?;
         let txn = db.begin_write().map_err(error)?;
         let (current_snapshot_hash, mut effective_registry) = {
             let snapshots = txn.open_table(ROUTER_SNAPSHOT_TABLE).map_err(error)?;

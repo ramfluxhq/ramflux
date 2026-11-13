@@ -55,7 +55,8 @@ def response(peer):
     try:
         reply = http.client.HTTPResponse(peer)
         reply.begin()
-        body = reply.read()
+        body = reply.read(65537)
+        assert len(body) <= 65536, "shutdown response exceeded bound"
         return reply.status, body.decode()
     except TimeoutError as error:
         raise AssertionError(f"{service} {mode}: response did not complete") from error
@@ -64,8 +65,18 @@ def response(peer):
 if mode.startswith("http-"):
     peer = raw_connect()
     if mode.endswith("-request"):
-        request(peer)
+        if mode == "http-retention-request":
+            request(peer, "/mvp7/retention/record", {"record": {
+                "record_id": "shutdown-record", "subject_hash": "shutdown-subject",
+                "metadata_class": "security_incident", "source_service_id": "ramflux-router",
+                "retention_policy_id": "shutdown-policy", "created_at": 100,
+                "expires_at": 4102444800, "legal_hold": False, "metadata_hash": "shutdown-hash",
+            }})
+        else:
+            request(peer)
         status, body = response(peer)
+        if mode == "http-retention-request":
+            (root / "response.json").write_text(json.dumps({"status": status, "body": body}))
         assert status == 200, (status, body)
         print("response-complete", flush=True)
         sys.exit(0)
@@ -151,13 +162,6 @@ elif mode == "request":
             "device_epoch": 1, "session_seq": 1, "last_cursor": None,
             "push_alias_hash": None, "lifecycle": "Live",
         })
-    elif service == "ramflux-retention":
-        request(peer, "/retention/v1/object_relay_ttl", {"record": {
-            "record_id": "shutdown-record", "subject_hash": "shutdown-subject",
-            "metadata_class": "object_relay_ttl", "source_service_id": "ramflux-relay",
-            "retention_policy_id": "relay-cache", "created_at": 1,
-            "expires_at": 4102444800, "legal_hold": False, "metadata_hash": "shutdown-hash",
-        }})
     else:
         request(peer, "/internal/retention/gc_sweep", {"owner_service": "federation", "sweep_id": "shutdown-sweep", "now": 200, "dry_run": False})
     status, body = response(peer)

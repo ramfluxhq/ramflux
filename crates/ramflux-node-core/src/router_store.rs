@@ -48,8 +48,9 @@ pub mod publication;
 mod retention;
 pub mod sender_retry;
 pub(crate) mod settlement;
+mod startup_format;
 mod submission_barrier;
-mod tuple_upgrade;
+mod tuple_format;
 pub use identity_registry::IdentityJournalDiscardReport;
 pub use submission_barrier::SubmissionLease;
 
@@ -366,6 +367,8 @@ fn record_local_delivery_envelope_in_txn(
     expires_at: i64,
     sender_root_commitment: Option<&str>,
 ) -> Result<(), NodeCoreError> {
+    // An unscoped submission cannot create a root-qualified sender index.
+    let Some(root) = sender_root_commitment else { return Ok(()) };
     let record = LocalDeliveryEnvelopeRecord {
         target_delivery_id: entry.target_delivery_id.clone(),
         expires_at,
@@ -387,12 +390,8 @@ fn record_local_delivery_envelope_in_txn(
     let mut table = write_txn
         .open_table(ROUTER_LOCAL_DELIVERY_ENVELOPE_TABLE)
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    let storage_key = sender_root_commitment.map_or_else(
-        || entry.envelope.envelope_id.clone(),
-        |root| {
-            local_delivery_storage_key(root, &entry.envelope.envelope_id, &entry.target_delivery_id)
-        },
-    );
+    let storage_key =
+        local_delivery_storage_key(root, &entry.envelope.envelope_id, &entry.target_delivery_id);
     table
         .insert(storage_key.as_str(), bytes.as_slice())
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
@@ -414,13 +413,6 @@ fn local_delivery_storage_key(
     )
 }
 
-fn legacy_scoped_local_delivery_storage_key(
-    sender_root_commitment: &str,
-    envelope_id: &str,
-) -> String {
-    format!("{}:{}{}", sender_root_commitment.len(), sender_root_commitment, envelope_id)
-}
-
 fn local_delivery_classification(
     entry: Option<&InboxEntry>,
     sender_root_commitment: Option<&str>,
@@ -438,6 +430,7 @@ fn record_replay_tuple_in_txn(
     replay_key: &str,
     replay_expires_at: i64,
 ) -> Result<(), NodeCoreError> {
+    crate::replay_guard::key_format::require_current_key(replay_key)?;
     let replay_bytes = serialize_value(&replay_expires_at)?;
     let mut replay_table = write_txn
         .open_table(ROUTER_REPLAY_TUPLE_TABLE)
@@ -580,6 +573,9 @@ impl RouterRedbStore {
         create: bool,
     ) -> Result<Self, NodeCoreError> {
         crate::fatal_durability::initialize();
+        if let Some(root) = wal_root {
+            RouterWalStore::validate_formats(root)?;
+        }
         let path = path.as_ref();
         if create
             && let Some(parent) = path.parent()
@@ -594,6 +590,9 @@ impl RouterRedbStore {
             if create { redb::Database::create(path) } else { redb::Database::open(path) }
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?,
         );
+        if let Some(root) = wal_root {
+            RouterWalStore::validate_formats(root)?;
+        }
         Self::initialize_open_schema(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
@@ -601,7 +600,6 @@ impl RouterRedbStore {
         crate::foreign_device_store::initialize(
             &db,
             crate::foreign_device_store::Namespace::Router,
-            Some(&legacy_registry.foreign_device_heads),
         )?;
         identity_registry::replay(&db, &mut legacy_registry)?;
         identity_registry::initialize_budgets(&db, &legacy_registry)?;
@@ -667,11 +665,12 @@ impl RouterRedbStore {
 
     /// Shared ordinary/maintenance prelude, before pending or cursor reads.
     pub(crate) fn initialize_open_schema(db: &redb::Database) -> Result<(), NodeCoreError> {
+        startup_format::validate(db)?;
         Self::initialize_mailbox_schema(db)?;
         let txn = db.begin_write().map_err(incarnation::error)?;
         incarnation_state::import(&txn)?;
         txn.commit().map_err(incarnation::error)?;
-        tuple_upgrade::upgrade(db)
+        tuple_format::validate(db)
     }
 
     fn initialize_mailbox_schema(db: &redb::Database) -> Result<(), NodeCoreError> {
@@ -714,8 +713,8 @@ impl RouterRedbStore {
                 .open_table(ROUTER_ABUSE_REPORT_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        mailbox_keys::upgrade(&write_txn)?;
-        migration_barrier::upgrade_legacy_snapshot(&write_txn)?;
+        mailbox_keys::initialize(&write_txn)?;
+        migration_barrier::initialize_snapshot_index(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;
         write_txn.commit().map_err(incarnation::error)?;
         Ok(())
@@ -923,6 +922,7 @@ impl RouterRedbStore {
         sender_root_commitment: Option<&str>,
         lease: Option<SubmissionLease>,
     ) -> Result<(), NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         self.validate_submission_lease(entry, lease.as_ref())?;
         let writes = publication::operation::hand_off(&entry.into_iter().collect::<Vec<_>>())?;
         let _submission = lease;
@@ -1002,6 +1002,7 @@ impl RouterRedbStore {
         sender_root_commitment: Option<&str>,
         submission: Option<SubmissionLease>,
     ) -> Result<(), NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         self.validate_submission_lease(entry, submission.as_ref())?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
@@ -1038,6 +1039,7 @@ impl RouterRedbStore {
         replay_key: &str,
         replay_expires_at: i64,
     ) -> Result<(), NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         let save_started = Instant::now();
         let replay_started = Instant::now();
         self.commit_router_op(RouterCommitOp::ReplayTuple {
@@ -1080,17 +1082,14 @@ impl RouterRedbStore {
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let storage_key =
             local_delivery_storage_key(sender_root_commitment, envelope_id, target_delivery_id);
-        let legacy_scoped_key =
-            legacy_scoped_local_delivery_storage_key(sender_root_commitment, envelope_id);
-        for key in [storage_key.as_str(), legacy_scoped_key.as_str()] {
-            if let Some(value) =
-                table.get(key).map_err(|source| NodeCoreError::Redb(source.to_string()))?
-            {
-                let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
-                    .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-                if record.target_delivery_id == target_delivery_id && record.expires_at > now {
-                    return Ok(true);
-                }
+        if let Some(value) = table
+            .get(storage_key.as_str())
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?
+        {
+            let record: LocalDeliveryEnvelopeRecord = serde_json::from_slice(value.value())
+                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+            if record.target_delivery_id == target_delivery_id && record.expires_at > now {
+                return Ok(true);
             }
         }
         Ok(self.submission_wal.as_ref().is_some_and(|wal| {
@@ -1466,6 +1465,7 @@ impl RouterRedbStore {
         entries: &[InboxEntry],
         leases: Vec<SubmissionLease>,
     ) -> Result<(), NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         for entry in entries {
             let lease =
                 leases.iter().find(|lease| lease.target() == entry.target_delivery_id).ok_or_else(
@@ -1564,7 +1564,7 @@ impl RouterRedbStore {
         let mut registry = self.load_session_registry()?;
         let now = i64::try_from(now_unix_seconds()).unwrap_or(i64::MAX);
         let (mut inbox, replay_guard_state) = self.load_delivery_state(now)?;
-        let mvp1_identities = self.load_identity_registry(now)?;
+        let mvp1_identities = self.load_identity_registry()?;
         let foreign_device_heads = crate::foreign_device_store::load(
             &self.db,
             crate::foreign_device_store::Namespace::Router,
@@ -1675,7 +1675,7 @@ impl RouterRedbStore {
                 .unwrap_or_default()
         };
         for (entry, retain_until) in incremental_entries {
-            inbox.restore_pending_entry_until(entry, Some(retain_until));
+            inbox.restore_pending_entry_until(entry, retain_until);
         }
         for cursor in incremental_cursors {
             inbox.restore_cursor_state(cursor);
@@ -1705,20 +1705,20 @@ impl RouterRedbStore {
                 .unwrap_or_default()
         };
         for (key, expires_at) in incremental_replay_tuples {
+            if !crate::replay_guard::key_format::is_current_key(&key) {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("router replay identity"));
+            }
             replay_guard_state.restore_accepted(key, expires_at);
         }
         Ok((inbox, replay_guard_state))
     }
 
-    fn load_identity_registry(&self, now: i64) -> Result<IdentityRegistry, NodeCoreError> {
+    fn load_identity_registry(&self) -> Result<IdentityRegistry, NodeCoreError> {
         let mut mvp1_identities: IdentityRegistry =
             load_snapshot(&self.db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
         identity_registry::replay(&self.db, &mut mvp1_identities)?;
         self.load_custody_accounts(&mut mvp1_identities)?;
-        if mvp1_identities.migrate_legacy_registration_receipts(now) {
-            self.record_identity_registry(&mvp1_identities)?;
-        }
         mvp1_identities.foreign_device_heads =
             crate::foreign_device_heads::ForeignDeviceHeads::default();
         Ok(mvp1_identities)
@@ -1735,20 +1735,12 @@ impl RouterRedbStore {
             return Ok(());
         };
         let submissions = wal.submissions(now_unix_seconds);
-        let legacy = submissions
-            .iter()
-            .filter(|submission| submission.accepted_at.is_none())
-            .filter_map(|submission| {
-                submission.entry.as_ref().map(|entry| {
-                    (
-                        inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq),
-                        submission.retain_until(),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let legacy_deadlines = expiry_index::resolve_legacy_wal_deadlines(&self.db, &legacy)?;
         for submission in submissions {
+            if submission.accepted_at.is_none()
+                || !crate::replay_guard::key_format::is_current_key(&submission.replay_key)
+            {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("router WAL authority"));
+            }
             if !incremental_replay_tuples
                 .iter()
                 .any(|(key, _expires_at)| key == &submission.replay_key)
@@ -1756,16 +1748,10 @@ impl RouterRedbStore {
                 incremental_replay_tuples
                     .push((submission.replay_key.clone(), submission.replay_expires_at));
             }
-            let mut retain_until = submission.retain_until();
+            let retain_until = submission.retain_until();
             let Some(entry) = submission.entry else {
                 continue;
             };
-            if submission.accepted_at.is_none()
-                && let Some(deadline) = legacy_deadlines
-                    .get(&inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq))
-            {
-                retain_until = *deadline;
-            }
             if retain_until <= now_unix_seconds {
                 continue;
             }
@@ -2316,6 +2302,7 @@ impl RouterRedbStore {
         retain_until: i64,
         lease: SubmissionLease,
     ) -> Result<(), NodeCoreError> {
+        crate::replay_guard::key_format::require_current_key(replay_key)?;
         self.validate_submission_lease(Some(entry), Some(&lease))?;
         let writes = publication::operation::hand_off(&[entry])?;
         let _lease = lease;
@@ -2355,7 +2342,7 @@ impl RouterRedbStore {
             .ok_or_else(|| incarnation::error("group writer stopped"))?
             .send(RouterCommitRequest {
                 op: RouterCommitOp::Submission {
-                    replay_key: entry.envelope.envelope_id.clone(),
+                    replay_key: crate::tests::request_replay_fixture(&entry.envelope.envelope_id),
                     replay_expires_at: i64::MAX,
                     entry: Some(Box::new(entry)),
                     local_delivery: None,

@@ -2,8 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    BTreeSet, FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA,
-    FEDERATED_ISSUER_TRUST_SNAPSHOT_SCHEMA, FEDERATED_TRUST_SNAPSHOT_ENVELOPE_SCHEMA,
+    BTreeSet, FEDERATED_ISSUER_TRUST_SNAPSHOT_SCHEMA, FEDERATED_TRUST_SNAPSHOT_ENVELOPE_SCHEMA,
     FederatedIssuerTrustSnapshot, FederatedIssuerTrustStatus, FederatedTrustSnapshotEnvelope,
     GATEWAY_CERTIFICATE_REQUEST_SCHEMA, GATEWAY_ISSUER_CERTIFICATE_SCHEMA,
     GatewayCertificateRequest, GatewayIssuerCertificate, NodeCoreError, OBJECT_ACCESS_GRANT_SCHEMA,
@@ -16,43 +15,14 @@ use super::{
     PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_VERSION, ProviderKeyEntry, ProviderKeyring,
     ProviderSignedTrustSnapshot, RELAY_TOKEN_V3_AUDIENCE_RELAY, REQUESTER_POP_SCHEMA,
     RelayAuthorizationKind, RelayChunkEntry, RelayChunkStatus, RelayToken, RelayTokenV3,
-    RequesterProofOfPossession, SignedFederatedIssuerTrustSnapshot, TrustedNodeRootKey,
-    ValidatedProviderKeyring, federated_trust_snapshot_envelope_signing_bytes,
-    gateway_certificate_request_signing_bytes, gateway_issuer_certificate_signing_bytes,
-    object_access_grant_binding_hash, object_access_grant_signing_bytes,
-    object_permission_canonical_bytes, owner_authorization_proof_signing_bytes,
-    provider_keyring_signing_bytes, provider_signed_trust_snapshot_signing_bytes, relay_token_mac,
-    relay_token_v3_signing_bytes, requester_pop_signing_bytes,
-    signed_federated_issuer_trust_snapshot_signing_bytes, verify_provider_keyring,
+    RequesterProofOfPossession, TrustedNodeRootKey, ValidatedProviderKeyring,
+    federated_trust_snapshot_envelope_signing_bytes, gateway_certificate_request_signing_bytes,
+    gateway_issuer_certificate_signing_bytes, object_access_grant_binding_hash,
+    object_access_grant_signing_bytes, object_permission_canonical_bytes,
+    owner_authorization_proof_signing_bytes, provider_keyring_signing_bytes,
+    provider_signed_trust_snapshot_signing_bytes, relay_token_mac, relay_token_v3_signing_bytes,
+    requester_pop_signing_bytes, verify_provider_keyring,
 };
-
-pub(super) fn test_relay_token(
-    service_key: &[u8],
-    capability: ObjectRelayCapability,
-    issued_at: u64,
-    expires_at: u64,
-) -> Result<RelayToken, String> {
-    let mut token = RelayToken {
-        token_version: OBJECT_RELAY_TOKEN_VERSION,
-        token_id: format!("token_clock_skew_{capability:?}_{issued_at}"),
-        object_id: "object_relay_clock_skew".to_owned(),
-        manifest_hash: "manifest_relay_clock_skew".to_owned(),
-        chunk_id: "chunk_relay_clock_skew".to_owned(),
-        recipient_device_hash: "recipient_clock_skew".to_owned(),
-        owner_signing_key_id: "owner_fixture_key".to_owned(),
-        owner_public_key: ramflux_crypto::fixture_public_key_base64url(),
-        issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
-        audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
-        capabilities: vec![capability],
-        delete_after_ack: false,
-        issued_at,
-        expires_at,
-        nonce: format!("nonce_clock_skew_{issued_at}"),
-        mac: String::new(),
-    };
-    token.mac = relay_token_mac(service_key, &token).map_err(|source| source.to_string())?;
-    Ok(token)
-}
 
 pub(super) fn test_object_permission(
     capability: ObjectRelayCapability,
@@ -162,22 +132,22 @@ pub(super) const V3_PROVIDER_SEED: [u8; 32] = [0x66; 32];
 
 pub(super) fn v3_signed_snapshot_envelope(
     now: u64,
-    apply: impl FnOnce(&mut SignedFederatedIssuerTrustSnapshot),
-) -> Result<SignedFederatedIssuerTrustSnapshot, String> {
-    let mut envelope = SignedFederatedIssuerTrustSnapshot {
-        schema: FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA.to_owned(),
-        version: OBJECT_RELAY_V3_PROOF_VERSION,
+    apply: impl FnOnce(&mut ProviderSignedTrustSnapshot),
+) -> Result<ProviderSignedTrustSnapshot, String> {
+    let mut envelope = ProviderSignedTrustSnapshot {
+        schema: PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_SCHEMA.to_owned(),
+        version: PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_VERSION,
         snapshot: v3_trust_snapshot(now, |_s| {}),
         provider_signing_key_id: "node-b#trust-provider".to_owned(),
         provider_public_key: v3_pk(V3_PROVIDER_SEED),
+        provider_epoch: 1,
         issued_at: now,
         expires_at: now + 300,
         signature: String::new(),
     };
     apply(&mut envelope);
     envelope.signature = v3_sign(
-        &signed_federated_issuer_trust_snapshot_signing_bytes(&envelope)
-            .map_err(|e| e.to_string())?,
+        &provider_signed_trust_snapshot_signing_bytes(&envelope).map_err(|e| e.to_string())?,
         V3_PROVIDER_SEED,
     );
     Ok(envelope)
@@ -352,3 +322,25 @@ pub(super) fn a2b2_envelope(
 }
 
 pub(super) use super::native_fixture_crypto::*;
+
+/// Current offline-root-authorized provider fixture used by signed-ingress tests.
+pub(super) fn fixture_provider_keyring(
+    public_key: &str,
+    now: u64,
+) -> Result<ValidatedProviderKeyring, NodeCoreError> {
+    let mut entry = a2b2_entry("node-b#trust-provider", V3_PROVIDER_SEED, now, None, 1);
+    entry.public_key = public_key.to_owned();
+    a2b2_validate(&a2b2_keyring(1, vec![entry], |_| {}))
+}
+pub(super) fn verify_fixture_provider_snapshot(
+    envelope: &ProviderSignedTrustSnapshot,
+    public_key: &str,
+    now: u64,
+) -> Result<(), NodeCoreError> {
+    super::verify_provider_signed_trust_snapshot(
+        envelope,
+        &fixture_provider_keyring(public_key, now)?,
+        now,
+    )
+    .map(|_| ())
+}

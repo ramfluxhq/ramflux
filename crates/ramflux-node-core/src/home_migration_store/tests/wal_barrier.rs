@@ -41,7 +41,11 @@ fn acknowledged_wal_only_submission_is_in_signed_cutover_manifest() -> TestResul
     let s = Scenario::prepared()?;
     let sealed = s.seal()?;
     let entry = entry(&s.target);
-    s.a.store()?.record_submission_increment("wal-barrier", i64::MAX / 2, Some(&entry))?;
+    s.a.store()?.record_submission_increment(
+        &crate::tests::request_replay_fixture("wal-barrier"),
+        i64::MAX / 2,
+        Some(&entry),
+    )?;
     let cursors = s.a.store()?.migration_backlog_barrier(
         &s.anchor,
         &s.authorization.body.migration_id,
@@ -62,7 +66,15 @@ fn acknowledged_wal_only_submission_is_in_signed_cutover_manifest() -> TestResul
             &cursors
         )?
     );
-    assert!(s.a.store()?.record_submission_increment("late", i64::MAX / 2, Some(&entry)).is_err());
+    assert!(
+        s.a.store()?
+            .record_submission_increment(
+                &crate::tests::request_replay_fixture("late"),
+                i64::MAX / 2,
+                Some(&entry)
+            )
+            .is_err()
+    );
     Ok(())
 }
 #[test]
@@ -75,11 +87,23 @@ fn in_flight_submission_serializes_before_commit_and_late_append_is_refused() ->
     let store = s.a.store()?;
     let pending = store.submission_permit(Some(&entry))?;
     assert!(s.commit(&sealed).is_err());
-    store.record_submission_increment("racing", i64::MAX / 2, Some(&entry))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("racing"),
+        i64::MAX / 2,
+        Some(&entry),
+    )?;
     drop(pending);
     s.commit(&sealed)?;
     assert!(store.record_inbox_entry(&entry).is_err());
-    assert!(store.record_submission_increment("late", i64::MAX / 2, Some(&entry)).is_err());
+    assert!(
+        store
+            .record_submission_increment(
+                &crate::tests::request_replay_fixture("late"),
+                i64::MAX / 2,
+                Some(&entry)
+            )
+            .is_err()
+    );
     let cursors = store.migration_backlog_barrier(
         &s.anchor,
         &s.authorization.body.migration_id,
@@ -100,7 +124,11 @@ fn actual_wal_append_racing_cutover_is_included_or_refused_before_ack() -> TestR
         let (submitted, committed) = std::thread::scope(|scope| {
             let append = scope.spawn(|| {
                 start.wait();
-                store.record_submission_increment("race", i64::MAX / 2, Some(&queued))
+                store.record_submission_increment(
+                    &crate::tests::request_replay_fixture("race"),
+                    i64::MAX / 2,
+                    Some(&queued),
+                )
             });
             start.wait();
             let committed = s.commit(&sealed);
@@ -136,11 +164,9 @@ fn cancelled_async_caller_keeps_queued_wal_lease_until_durable_index_and_ack() -
     let mut pause = store.pause_next_submission_ack()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
-        let mut append = Box::pin(store.record_submission_increment_async(
-            "cancelled",
-            i64::MAX / 2,
-            Some(&queued),
-        ));
+        let replay = crate::tests::request_replay_fixture("cancelled");
+        let mut append =
+            Box::pin(store.record_submission_increment_async(&replay, i64::MAX / 2, Some(&queued)));
         std::future::poll_fn(|cx| -> Poll<TestResult> {
             if let Poll::Ready(result) = append.as_mut().poll(cx) {
                 return Poll::Ready(Err(format!("append escaped pause: {result:?}").into()));
@@ -170,7 +196,11 @@ fn acknowledged_wal_rows_keep_the_issued_sequence_floor_without_drain_work() -> 
     let sealed = s.seal()?;
     let queued = entry(&s.target);
     let store = s.a.store()?;
-    store.record_submission_increment("acked-before-cutover", i64::MAX / 2, Some(&queued))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("acked-before-cutover"),
+        i64::MAX / 2,
+        Some(&queued),
+    )?;
     store.record_ack_increment(
         &crate::CursorAckState {
             target_delivery_id: s.target.clone(),

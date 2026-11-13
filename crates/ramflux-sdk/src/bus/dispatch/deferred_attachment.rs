@@ -148,7 +148,7 @@ pub(super) fn read_relay_options(
     account: &LocalBusAccountState,
     object_id: &str,
     endpoint: Option<String>,
-    service_key: Option<String>,
+    service_key: Option<&str>,
     interrupt: Option<u32>,
 ) -> Result<Option<RelayTransferOptions>, SdkError> {
     account.client.account_db()?.check_object_access(object_id)?;

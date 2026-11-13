@@ -22,7 +22,7 @@ async fn durable_sender_assignment_writers_survive_settlement_and_restart() -> R
             let expiry = now + 3600;
             match writer {
                 0 => store.record_submission_increment_for_sender(
-                    "replay",
+                    &crate::tests::request_replay_fixture("replay"),
                     expiry,
                     Some(&row),
                     Some("sender"),
@@ -30,7 +30,7 @@ async fn durable_sender_assignment_writers_survive_settlement_and_restart() -> R
                 1 => {
                     store
                         .record_submission_increment_for_sender_async(
-                            "replay",
+                            &crate::tests::request_replay_fixture("replay"),
                             expiry,
                             Some(&row),
                             Some("sender"),
@@ -40,7 +40,7 @@ async fn durable_sender_assignment_writers_survive_settlement_and_restart() -> R
                 2 => {
                     let lease = store.acquire_submission(&row.target_delivery_id)?;
                     store.record_leased_fanout(
-                        "replay",
+                        &crate::tests::request_replay_fixture("replay"),
                         expiry,
                         "sender",
                         std::slice::from_ref(&row),
@@ -50,7 +50,7 @@ async fn durable_sender_assignment_writers_survive_settlement_and_restart() -> R
                 _ => {
                     let lease = store.acquire_submission(&row.target_delivery_id)?;
                     store.record_forwarded_submission(
-                        "replay",
+                        &crate::tests::request_replay_fixture("replay"),
                         &row,
                         "sender",
                         now + 123,
@@ -197,7 +197,7 @@ async fn retry_admission_retains_capacity_until_publication() -> Result {
     let write = guard.hand_off().ok_or("handoff")?;
     let row = entry(2);
     store.record_submission_increment_for_sender(
-        "original",
+        &crate::tests::request_replay_fixture("original"),
         row.envelope.created_at + 3600,
         Some(&row),
         Some(source.root_commitment()),

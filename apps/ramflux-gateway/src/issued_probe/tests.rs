@@ -266,7 +266,10 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
                 anyhow::bail!("router did not accept probe fixture");
             };
             store.record_submission_increment(
-                &format!("probe-origin-{seq}"),
+                &ramflux_node_core::envelope_replay_tuple_key(
+                    &runtime.source_identity,
+                    &queued.entry.envelope,
+                ),
                 now + 3600,
                 Some(&queued.entry),
             )?;

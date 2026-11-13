@@ -13,10 +13,6 @@ use super::{
 
 pub const FEDERATED_ISSUER_TRUST_SNAPSHOT_SCHEMA: &str =
     "ramflux.federated_issuer_trust_snapshot.v3";
-/// T23-A2b2b: legacy single-pinned-key envelope schema — gated to the legacy compatibility path.
-#[cfg(any(test, feature = "itest-provider-single-key"))]
-pub const FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA: &str =
-    "ramflux.federated_issuer_trust_snapshot_envelope.v3";
 
 /// Trust status of a federated issuer node, mirroring the federation trust directory. Only `Active`
 /// nodes may back new relay tokens.
@@ -329,80 +325,6 @@ pub fn verify_federated_issuer_trust_snapshot_successor(
     Ok(())
 }
 
-/// A provider-signed envelope carrying a `FederatedIssuerTrustSnapshot`. The signing key is the
-/// trusted provider / node-root key that distributes trust snapshots to relays; the relay pins that
-/// public key out of band. The envelope binds the snapshot plus an issuance/expiry window, so an
-/// unsigned or tampered snapshot cannot enter the relay's trust cache.
-///
-/// T23-A2b2b: this is the LEGACY single-pinned-key envelope. It is gated to the
-/// `itest-provider-single-key` compatibility path; the production/default relay uses only the
-/// offline-root-signed keyring envelope [`ProviderSignedTrustSnapshot`].
-#[cfg(any(test, feature = "itest-provider-single-key"))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SignedFederatedIssuerTrustSnapshot {
-    pub schema: String,
-    pub version: u32,
-    pub snapshot: FederatedIssuerTrustSnapshot,
-    pub provider_signing_key_id: String,
-    pub provider_public_key: String,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub signature: String,
-}
-
-/// # Errors
-/// Returns an error when the envelope cannot be canonicalized.
-#[cfg(any(test, feature = "itest-provider-single-key"))]
-pub fn signed_federated_issuer_trust_snapshot_signing_bytes(
-    envelope: &SignedFederatedIssuerTrustSnapshot,
-) -> Result<Vec<u8>, NodeCoreError> {
-    let mut canonical = envelope.clone();
-    canonical.signature.clear();
-    ramflux_protocol::canonical_json_bytes(&canonical)
-        .map_err(|source| NodeCoreError::ItestJson(source.to_string()))
-}
-
-/// Verifies a signed trust-snapshot envelope against a pinned provider/node-root public key.
-///
-/// Checks schema/version, required non-empty fields, that the envelope names the expected pinned
-/// provider key, a fresh issuance/expiry window, and the provider signature over the canonical
-/// envelope (which covers the inner snapshot, so tampering breaks the signature). This authenticates
-/// the snapshot's source; the inner snapshot's structural validity and successor rules are enforced
-/// separately when it is installed via [`RelayTrustSnapshotCache::update_from_signed`].
-///
-/// # Errors
-/// Returns an error when any of the above checks fail.
-#[cfg(any(test, feature = "itest-provider-single-key"))]
-pub fn verify_signed_federated_issuer_trust_snapshot(
-    envelope: &SignedFederatedIssuerTrustSnapshot,
-    expected_provider_public_key: &str,
-    now: u64,
-) -> Result<(), NodeCoreError> {
-    if envelope.schema != FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA {
-        return Err(NodeCoreError::ItestJson("trust snapshot envelope schema rejected".to_owned()));
-    }
-    if envelope.version != OBJECT_RELAY_V3_PROOF_VERSION {
-        return Err(NodeCoreError::ItestJson(
-            "trust snapshot envelope version rejected".to_owned(),
-        ));
-    }
-    require_non_empty(&envelope.provider_signing_key_id, "envelope provider_signing_key_id")?;
-    require_non_empty(&envelope.provider_public_key, "envelope provider_public_key")?;
-    require_non_empty(&envelope.signature, "envelope signature")?;
-    if envelope.provider_public_key != expected_provider_public_key {
-        return Err(NodeCoreError::Unauthorized(
-            "trust snapshot envelope provider key is not the pinned provider".to_owned(),
-        ));
-    }
-    within_ttl(envelope.issued_at, envelope.expires_at, now, &envelope.provider_signing_key_id)?;
-    ramflux_crypto::verify_canonical_signature(
-        &signed_federated_issuer_trust_snapshot_signing_bytes(envelope)?,
-        &envelope.signature,
-        &envelope.provider_public_key,
-    )
-    .map_err(|source| NodeCoreError::Unauthorized(source.to_string()))
-}
-
 /// A pure, cloneable in-memory holder for the relay's current federated issuer trust snapshot.
 ///
 /// It has no interior mutability (no lock): callers own the cache and clone it for sharing, so
@@ -503,26 +425,6 @@ impl RelayTrustSnapshotCache {
         })?;
         verify_federated_issuer_trust_snapshot(snapshot, expected_node_id, now)?;
         Ok(snapshot)
-    }
-
-    /// Authenticated ingress: verifies the provider signature on `envelope` against the pinned
-    /// provider public key first, and only then installs the inner snapshot via
-    /// [`RelayTrustSnapshotCache::update`]. This is the required path for admitting a snapshot from an
-    /// external provider — an unsigned or tampered envelope never reaches the cache.
-    ///
-    /// # Errors
-    /// Returns an error when the envelope signature/window fails verification, or when the inner
-    /// snapshot fails the structural/successor checks in [`RelayTrustSnapshotCache::update`].
-    #[cfg(any(test, feature = "itest-provider-single-key"))]
-    pub fn update_from_signed(
-        &mut self,
-        envelope: &SignedFederatedIssuerTrustSnapshot,
-        expected_provider_public_key: &str,
-        expected_node_id: &str,
-        now: u64,
-    ) -> Result<(), NodeCoreError> {
-        verify_signed_federated_issuer_trust_snapshot(envelope, expected_provider_public_key, now)?;
-        self.update(envelope.snapshot.clone(), expected_node_id, now)
     }
 
     /// T23-A2b2 accessors for persistence / anti-rollback bookkeeping.

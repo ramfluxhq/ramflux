@@ -4,15 +4,10 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
-#[cfg(feature = "itest-local-mint")]
-use hmac::{Hmac, KeyInit, Mac};
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "itest-local-mint")]
-use sha2::Sha256;
-use std::collections::BTreeSet;
 
-#[cfg(feature = "itest-local-mint")]
-type HmacSha256 = Hmac<Sha256>;
+use serde::{Deserialize, Serialize};
+
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SdkObjectKeySlot {
@@ -90,23 +85,6 @@ pub(crate) struct SdkObjectPermissionEnvelope {
     pub owner_signature: String,
 }
 
-#[cfg(feature = "itest-local-mint")]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkObjectChunkFrame {
-    pub schema: String,
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub chunk_index: u32,
-    pub chunk_id: String,
-    pub chunk_cipher_hash: String,
-    pub cipher_size: u64,
-    pub encrypted_chunk: Vec<u8>,
-    pub relay_token: SdkRelayToken,
-    pub object_permission_envelope: SdkObjectPermissionEnvelope,
-    pub expires_at: u64,
-    pub delete_after_ack: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SdkRelayChunkEntry {
     pub chunk_id: String,
@@ -131,29 +109,9 @@ pub(crate) struct SdkObjectRelayPutResponse {
     pub status: SdkRelayChunkStatus,
 }
 
-#[cfg(feature = "itest-local-mint")]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkObjectRelayGetRequest {
-    pub chunk_id: String,
-    pub relay_token: SdkRelayToken,
-    pub object_permission_envelope: SdkObjectPermissionEnvelope,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SdkObjectRelayGetResponse {
     pub chunk: SdkRelayChunkEntry,
-}
-
-#[cfg(feature = "itest-local-mint")]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkObjectRelayAck {
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub chunk_id: String,
-    pub recipient_device_hash: String,
-    pub relay_token: SdkRelayToken,
-    pub object_permission_envelope: SdkObjectPermissionEnvelope,
-    pub acked_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -183,7 +141,6 @@ pub(crate) struct SdkObjectTransferStatus {
 #[derive(Clone, Debug)]
 pub(crate) struct RelayTransferOptions {
     pub relay_endpoint: String,
-    pub token_provider: RelayTokenProvider,
     pub interrupt_after_chunks: Option<u32>,
     pub relay_quic_peer_addr: Option<String>,
     pub relay_quic_server_name: Option<String>,
@@ -191,18 +148,6 @@ pub(crate) struct RelayTransferOptions {
     pub relay_owner_home_node_id: Option<String>,
     pub relay_owner_principal_id: Option<String>,
     pub relay_audience_node_id: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum RelayTokenProvider {
-    GatewayIssued,
-    // T22-A1 / RQ-04: legacy v2 shared-HMAC local minting is compiled only under the
-    // `itest-local-mint` feature. In production builds this variant does not exist, so no code path
-    // can select or mint a v2 relay token — the v3 GatewayIssued path is the only reachable option.
-    #[cfg(feature = "itest-local-mint")]
-    LocalMint {
-        relay_service_key: Vec<u8>,
-    },
 }
 
 pub(crate) const OBJECT_TRANSFER_UPLOAD: &str = "upload";
@@ -216,18 +161,6 @@ pub(crate) const OBJECT_OPERATION_FAILED: &str = "failed";
 pub(crate) const OBJECT_OPERATION_UNKNOWN: &str = "unknown";
 pub(crate) const OBJECT_PUT_REQUEST_HASH_DOMAIN: &str = "ramflux.object_put.request.v1";
 pub const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
-// T22-A1 / RQ-04: v2 relay-token constants and the LocalMint runtime-opt-in env are compiled only
-// under the `itest-local-mint` feature, so production SDK/rf binaries carry no v2 mint metadata or
-// LocalMint env string.
-#[cfg(feature = "itest-local-mint")]
-pub(crate) const SDK_RELAY_TOKEN_VERSION: u32 = 2;
-#[cfg(feature = "itest-local-mint")]
-pub(crate) const SDK_RELAY_TOKEN_ISSUER_GATEWAY: &str = "ramflux-gateway";
-#[cfg(feature = "itest-local-mint")]
-pub(crate) const SDK_RELAY_TOKEN_AUDIENCE_RELAY: &str = "ramflux-relay";
-#[cfg(feature = "itest-local-mint")]
-pub(crate) const SDK_RELAY_LOCAL_MINT_ENV: &str = "RAMFLUX_SDK_OBJECT_RELAY_LOCAL_MINT";
-
 pub(crate) fn object_key_slot_associated_data(
     object_id: &str,
     conversation_id: &str,
@@ -272,15 +205,28 @@ pub(crate) fn object_transfer_status(record: ObjectTransferRecord) -> SdkObjectT
     }
 }
 
+/// The obsolete input remains only as an explicit refusal carrier at SDK boundaries.
+/// # Errors
+/// Returns `CapabilityDenied` when a retired key is supplied.
+pub(crate) fn reject_retired_relay_service_key(present: bool) -> Result<(), SdkError> {
+    if present {
+        return Err(SdkError::CapabilityDenied(
+            "relay service keys are unsupported; use gateway-issued QUIC tokens".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_relay_transfer_options(
     relay_endpoint: Option<String>,
-    relay_service_key_base64: Option<String>,
+    relay_service_key_base64: Option<&str>,
     interrupt_after_chunks: Option<u32>,
 ) -> Result<Option<RelayTransferOptions>, SdkError> {
+    reject_retired_relay_service_key(relay_service_key_base64.is_some())?;
     let Some(relay_endpoint) = relay_endpoint else {
         return Ok(None);
     };
-    let token_provider = relay_token_provider_from_service_key(relay_service_key_base64)?;
+
     let relay_quic_peer_addr = std::env::var("RAMFLUX_SDK_RELAY_QUIC_ADDR").ok();
     let relay_quic_server_name = std::env::var("RAMFLUX_SDK_RELAY_QUIC_SERVER_NAME").ok();
     let relay_quic_ca_cert = std::env::var("RAMFLUX_SDK_RELAY_QUIC_CA_CERT").ok().map(Into::into);
@@ -303,7 +249,6 @@ pub(crate) fn parse_relay_transfer_options(
     }
     Ok(Some(RelayTransferOptions {
         relay_endpoint,
-        token_provider,
         interrupt_after_chunks,
         relay_quic_peer_addr,
         relay_quic_server_name,
@@ -334,85 +279,12 @@ fn sdk_relay_token_default_version() -> u32 {
     1
 }
 
-// T22-A1 / RQ-04: production builds never mint a v2 relay token. Any caller-provided service key is
-// ignored and the gateway-issued v3 path is always used; no service-key env is read, so the default
-// SDK/rf binary carries no `RAMFLUX_SDK_OBJECT_RELAY_SERVICE_KEY_BASE64` string.
-#[cfg(not(feature = "itest-local-mint"))]
-#[allow(clippy::unnecessary_wraps)] // Result parity with the itest-local-mint variant.
-fn relay_token_provider_from_service_key(
-    _relay_service_key_base64: Option<String>,
-) -> Result<RelayTokenProvider, SdkError> {
-    Ok(RelayTokenProvider::GatewayIssued)
-}
-
-// itest LocalMint compatibility: still double-gated — the compile feature merely admits the code;
-// activation additionally requires the `RAMFLUX_SDK_OBJECT_RELAY_LOCAL_MINT` runtime opt-in.
-#[cfg(feature = "itest-local-mint")]
-fn relay_token_provider_from_service_key(
-    relay_service_key_base64: Option<String>,
-) -> Result<RelayTokenProvider, SdkError> {
-    match relay_service_key_base64
-        .or_else(|| std::env::var("RAMFLUX_SDK_OBJECT_RELAY_SERVICE_KEY_BASE64").ok())
-    {
-        Some(key) if sdk_relay_local_mint_enabled() => {
-            let relay_service_key = ramflux_protocol::decode_base64url(&key)
-                .or_else(|_| Ok::<Vec<u8>, ramflux_protocol::ProtocolError>(key.into_bytes()))
-                .map_err(|error| {
-                    SdkError::LocalBus(format!("invalid object relay service key: {error}"))
-                })?;
-            Ok(RelayTokenProvider::LocalMint { relay_service_key })
-        }
-        Some(_key) => {
-            tracing::warn!(
-                "object relay service key was provided but local mint is disabled; requesting gateway-issued relay token"
-            );
-            Ok(RelayTokenProvider::GatewayIssued)
-        }
-        None => Ok(RelayTokenProvider::GatewayIssued),
-    }
-}
-
-#[cfg(feature = "itest-local-mint")]
-fn sdk_relay_local_mint_enabled() -> bool {
-    sdk_relay_local_mint_enabled_from_value(std::env::var(SDK_RELAY_LOCAL_MINT_ENV).ok().as_deref())
-}
-
-#[cfg(feature = "itest-local-mint")]
-fn sdk_relay_local_mint_enabled_from_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes")
-    })
-}
-
 pub(crate) fn object_relay_chunk_cipher_hash(
     manifest_hash: &str,
     chunk_index: u32,
     encrypted_chunk: &[u8],
 ) -> String {
     ramflux_sync::chunk_cipher_hash(manifest_hash, chunk_index, encrypted_chunk)
-}
-
-#[cfg(feature = "itest-local-mint")]
-pub(crate) fn relay_token_mac(
-    service_key: &[u8],
-    token: &SdkRelayToken,
-) -> Result<String, SdkError> {
-    let mut canonical = token.clone();
-    canonical.mac.clear();
-    let mut mac = HmacSha256::new_from_slice(service_key)
-        .map_err(|source| SdkError::LocalBus(source.to_string()))?;
-    mac.update(&ramflux_protocol::canonical_json_bytes(&canonical)?);
-    Ok(ramflux_protocol::encode_base64url(mac.finalize().into_bytes()))
-}
-
-#[cfg(feature = "itest-local-mint")]
-pub(crate) fn object_permission_signature(
-    permission: &SdkObjectPermissionEnvelope,
-    branch: &DeviceBranch,
-) -> Result<String, SdkError> {
-    let mut canonical = permission.clone();
-    canonical.owner_signature.clear();
-    Ok(ramflux_crypto::sign_protocol_object_with_device_branch(branch, &canonical)?)
 }
 
 // ---- RQ-03 v3 SDK-owned envelope builders (shared `ramflux_protocol::object_relay_v3` types) ----
@@ -552,72 +424,6 @@ pub(crate) fn build_signed_requester_pop(
     pop.signature =
         sign_v3_canonical_bytes(branch, &ramflux_protocol::requester_pop_signing_bytes(&pop)?);
     Ok(pop)
-}
-
-#[cfg(feature = "itest-local-mint")]
-pub(crate) fn relay_token_for_chunk(
-    service_key: &[u8],
-    branch: &DeviceBranch,
-    object: &EncryptedObject,
-    chunk_index: u32,
-    capability: SdkObjectRelayCapability,
-    expires_at: u64,
-) -> Result<SdkRelayToken, SdkError> {
-    let owner_public_key =
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-    let chunk_id = object_relay_chunk_id(&object.object_id, &object.manifest_hash, chunk_index);
-    let now = u64::try_from(now_unix_timestamp()).unwrap_or(0);
-    let mut token = SdkRelayToken {
-        token_id: format!("token:{chunk_id}:{capability:?}"),
-        object_id: object.object_id.clone(),
-        manifest_hash: object.manifest_hash.clone(),
-        chunk_id,
-        recipient_device_hash: ramflux_crypto::blake3_256_base64url(
-            "ramflux.object_relay.recipient_device.v1",
-            branch.device_id.as_bytes(),
-        ),
-        owner_signing_key_id: branch.device_id.clone(),
-        owner_public_key,
-        token_version: SDK_RELAY_TOKEN_VERSION,
-        issuer_service: SDK_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
-        audience_service: SDK_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
-        capabilities: vec![capability],
-        delete_after_ack: false,
-        issued_at: now,
-        expires_at,
-        nonce: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
-        mac: String::new(),
-    };
-    token.mac = relay_token_mac(service_key, &token)?;
-    Ok(token)
-}
-
-#[cfg(feature = "itest-local-mint")]
-pub(crate) fn object_permission_for_chunk(
-    branch: &DeviceBranch,
-    object: &EncryptedObject,
-    _chunk_index: u32,
-    capability: SdkObjectRelayCapability,
-    expires_at: u64,
-) -> Result<SdkObjectPermissionEnvelope, SdkError> {
-    let owner_public_key =
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-    let mut permission = SdkObjectPermissionEnvelope {
-        object_id: object.object_id.clone(),
-        manifest_hash: object.manifest_hash.clone(),
-        grantee_device_hash: ramflux_crypto::blake3_256_base64url(
-            "ramflux.object_relay.recipient_device.v1",
-            branch.device_id.as_bytes(),
-        ),
-        capability,
-        issued_at: u64::try_from(now_unix_timestamp()).unwrap_or(0),
-        expires_at,
-        owner_signing_key_id: branch.device_id.clone(),
-        owner_public_key,
-        owner_signature: String::new(),
-    };
-    permission.owner_signature = object_permission_signature(&permission, branch)?;
-    Ok(permission)
 }
 
 /// Recipient-side domain hash of this root-qualified device, matching the uploader-embedded `grantee_device_hash`
@@ -1019,25 +825,12 @@ pub(crate) fn build_v3_grant_token_issue_body(
     })
 }
 
-#[cfg(feature = "itest-local-mint")]
-pub(crate) fn relay_post_json<T, R>(
-    relay_endpoint: &str,
-    path: &str,
-    value: &T,
-) -> Result<R, SdkError>
-where
-    T: Serialize,
-    R: serde::de::DeserializeOwned,
-{
-    sdk_http_post_json(relay_endpoint, path, value)
-}
-
 /// Explicit relay client-facing QUIC health/diagnostic probe.
 ///
 /// Validates the connection parameters (fail-closed on a malformed peer address, empty server name,
 /// or missing CA certificate) and performs a control-plane `GET /healthz` against the relay's
 /// client-facing QUIC surface, reusing the shared transport helper. This is diagnostic only: it does
-/// NOT carry object data or relay tokens, does NOT replace the object `relay_post_json` transport,
+/// NOT carry object data or relay tokens, does NOT carry object data,
 /// and never falls back to plaintext HTTP.
 ///
 /// # Errors
@@ -1291,23 +1084,17 @@ mod tests {
     }
 
     #[test]
-    fn relay_transfer_options_default_to_gateway_issued_tokens() -> Result<(), SdkError> {
-        let options =
-            parse_relay_transfer_options(Some("http://127.0.0.1:18084".to_owned()), None, None)?
-                .ok_or_else(|| SdkError::LocalBus("missing relay options".to_owned()))?;
-        assert!(matches!(options.token_provider, RelayTokenProvider::GatewayIssued));
-        Ok(())
-    }
-
-    #[test]
-    fn relay_transfer_options_ignore_service_key_without_local_mint_gate() -> Result<(), SdkError> {
-        let options = parse_relay_transfer_options(
-            Some("http://127.0.0.1:18084".to_owned()),
-            Some("ramflux-relay-itest-service-key".to_owned()),
-            None,
-        )?
-        .ok_or_else(|| SdkError::LocalBus("missing relay options".to_owned()))?;
-        assert!(matches!(options.token_provider, RelayTokenProvider::GatewayIssued));
+    fn relay_transfer_options_refuse_retired_service_keys() -> Result<(), SdkError> {
+        let endpoint = Some("https://relay.example".to_owned());
+        assert!(parse_relay_transfer_options(endpoint.clone(), None, None)?.is_some());
+        assert!(matches!(
+            parse_relay_transfer_options(endpoint, Some("retired-hmac-key"), None),
+            Err(SdkError::CapabilityDenied(_))
+        ));
+        assert!(matches!(
+            parse_relay_transfer_options(None, Some("retired-hmac-key"), None),
+            Err(SdkError::CapabilityDenied(_))
+        ));
         Ok(())
     }
 
@@ -1320,7 +1107,7 @@ mod tests {
         ) -> RelayTransferOptions {
             RelayTransferOptions {
                 relay_endpoint: "http://127.0.0.1:18084".to_owned(),
-                token_provider: RelayTokenProvider::GatewayIssued,
+
                 interrupt_after_chunks: None,
                 relay_quic_peer_addr: peer.map(str::to_owned),
                 relay_quic_server_name: server.map(str::to_owned),
@@ -1625,15 +1412,5 @@ mod tests {
             .await
             .is_err()
         );
-    }
-
-    #[cfg(feature = "itest-local-mint")]
-    #[test]
-    fn relay_local_mint_gate_parses_explicit_values() {
-        assert!(sdk_relay_local_mint_enabled_from_value(Some("1")));
-        assert!(sdk_relay_local_mint_enabled_from_value(Some("true")));
-        assert!(sdk_relay_local_mint_enabled_from_value(Some("on")));
-        assert!(!sdk_relay_local_mint_enabled_from_value(Some("0")));
-        assert!(!sdk_relay_local_mint_enabled_from_value(None));
     }
 }

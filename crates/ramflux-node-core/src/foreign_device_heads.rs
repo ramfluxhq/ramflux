@@ -52,12 +52,10 @@ impl HeadObservation {
         self.fence_changed || self.set_changed
     }
 }
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct ForeignDeviceHeads {
-    // Retain the r6 sequence representation solely for backwards-compatible snapshot import.
-    #[serde(default)]
+    // Runtime cache; durable authority is stored only in the current per-root tables.
     pub(crate) records: VecDeque<SignedDeviceSetRecord>,
-    #[serde(default)]
     pub(crate) fences: BTreeMap<String, EpochFence>,
 }
 impl ForeignDeviceHeads {
@@ -103,15 +101,14 @@ impl ForeignDeviceHeads {
             self.records.push_back(record.clone());
         }
     }
-    pub(crate) fn observe(
-        &mut self,
-        record: &SignedDeviceSetRecord,
-    ) -> Result<HeadObservation, NodeCoreError> {
-        let observation = self.prepare(record)?;
-        self.apply(record, observation);
-        Ok(observation)
-    }
     pub(crate) fn is_empty(&self) -> bool {
         self.fences.is_empty() && self.records.is_empty()
     }
+}
+
+/// A serialized cache field is a retired snapshot shape; current snapshots omit it.
+pub(crate) fn refuse_snapshot<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> Result<ForeignDeviceHeads, D::Error> {
+    Err(serde::de::Error::custom("retired foreign device heads snapshot"))
 }

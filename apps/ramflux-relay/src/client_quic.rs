@@ -280,13 +280,7 @@ pub(crate) fn relay_client_quic_object_ack(
                 "relay chunk owner/object binding mismatch".to_owned(),
             ));
         }
-        let mut updated = existing.clone();
-        updated.acked_by.insert(token.requester_device_hash.clone());
-        // Deletion is governed solely by the owner's stored policy, never the token, and a consumed
-        // chunk is never brought back to `Available`.
-        if updated.delete_after_ack {
-            updated.status = ramflux_node_core::RelayChunkStatus::AckedDeleted;
-        }
+        let updated = existing.acknowledged_by(&token.requester_device_hash);
         Ok(updated)
     }) {
         Ok(meta) => meta,
@@ -314,7 +308,7 @@ pub(crate) fn relay_client_quic_object_ack(
 
 /// Verified owner-session Put data plane: after full v3 verification (owner proof required; requester
 /// must be the owner device), stores the carried chunk under the owner's immutable original-owner
-/// binding. Mirrors the node-core `put_object_chunk_frame` store invariants:
+/// binding. Matches the current candidate hash, ownership and retention invariants:
 /// - the carried ciphertext is bound to the signed invocation (its canonical cipher hash must match
 ///   `chunk_cipher_hash` AND the invocation `body_hash` that the owner proof and `PoP` both sign);
 /// - a tombstone on the object blocks the put (`409`);

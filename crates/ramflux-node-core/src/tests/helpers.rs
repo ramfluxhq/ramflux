@@ -683,3 +683,25 @@ impl FixtureClock for RouterCore {
         self.mvp10_own_device_fanout_at(request, now)
     }
 }
+
+/// Current request replay-key shape for tests concerned with storage rather than signing.
+pub(crate) fn request_replay_fixture(label: &str) -> String {
+    format!(
+        "request/v2/{}",
+        ramflux_protocol::encode_base64url(ramflux_crypto::blake3_256(
+            "ramflux.test.request_replay.v1",
+            label.as_bytes()
+        ))
+    )
+}
+pub(super) fn sequence_nack(id: &str, reason: NackReason, seq: u64) -> Nack {
+    let mut value = nack(id, reason);
+    value.ext.ext.insert("inbox_seq".into(), serde_json::json!(seq));
+    value
+}
+
+pub(super) fn sequence_ack(id: &str, seq: u64) -> Ack {
+    let mut value = ack(id);
+    value.ext.ext.insert("inbox_seq".into(), serde_json::json!(seq));
+    value
+}

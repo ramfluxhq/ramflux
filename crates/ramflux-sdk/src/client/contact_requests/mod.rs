@@ -427,12 +427,20 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("request safety material unavailable"))?;
             super::contact::contact_safety_material_from_manifest(&manifest)
         };
-        let safety = material(own.root_commitment())
-            .and_then(|own| {
-                material(&record.contact_identity_commitment)
-                    .map(|peer| ramflux_crypto::safety_number(&own, &peer))
-            })
-            .ok();
+        let safety = if self.born_v3_account.is_some() {
+            Some(ramflux_crypto::custody::safety_number(
+                own.root_commitment(),
+                &record.contact_identity_commitment,
+            )?)
+        } else {
+            material(own.root_commitment())
+                .and_then(|own| {
+                    material(&record.contact_identity_commitment)
+                        .map(|peer| ramflux_crypto::safety_number(&own, &peer))
+                })
+                .ok()
+        };
+
         let contact = self.contact_entry(&record.principal_id)?;
         Ok(
             json!({"kind_asserted":contact["kind_asserted"],"kind_verified":contact["kind_verified"],"display_name":contact["display_name"],"display_name_confusable_with":contact["display_name_confusable_with"],"mixed_script":contact["mixed_script"],"request_id":record.request_id,"link_id":record.link_id,"principal_id":record.principal_id,

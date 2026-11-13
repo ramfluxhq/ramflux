@@ -68,7 +68,7 @@ fn shared_relay_store_handles_concurrent_save_and_expiry_without_reopen() -> Res
     let loaded = store
         .load_state(RELAY_METADATA_MAX_BYTES_DEFAULT)
         .map_err(|source| source.to_string())?
-        .ok_or_else(|| "relay state should exist".to_owned())?;
+        .unwrap_or_default();
     assert_eq!(loaded.available_count(u64::MAX), 0);
 
     drop(state);

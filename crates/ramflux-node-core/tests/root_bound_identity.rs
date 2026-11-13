@@ -160,22 +160,25 @@ fn root_cannot_change_an_established_principal_kind_or_alias_another_root() -> T
     Ok(())
 }
 #[test]
-fn legacy_registry_load_is_readable_but_key_writes_require_root_bound_migration() -> TestResult {
+fn unbound_stored_proof_is_not_directory_authority_and_current_registration_recovers() -> TestResult
+{
     let f = Fixture::new()?;
-    let proof = authorize_device_branch(
+    let mut proof = authorize_device_branch_v2(
         &f.root,
         &f.device,
-        IDENTITY_BIND_AUDIENCE,
-        vec![IDENTITY_BIND_CAPABILITY.into()],
-        1000,
-        2000,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: 1000,
+            expires_at: 2000,
+            principal_kind: ramflux_protocol::PrincipalKind::HeadlessAi,
+            agreement_identity_public_key: f.x.public,
+        },
     )?;
-    let value = serde_json::json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"alice-device":{"principal_id":"alice","principal_commitment":f.request.principal_commitment,"device_id":"alice-device","device_epoch":1,"branch_public_key":f.request.branch_public_key,"target_delivery_id":"target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{"alice-device":f.bundle()?}});
+    proof.key_binding = None;
+    let value = serde_json::json!({"root_public_keys":{"alice":f.request.root_public_key},"root_public_keys_by_commitment":{f.request.principal_commitment.clone():f.request.root_public_key},"devices":{"alice-device":{"principal_id":"alice","principal_commitment":f.request.principal_commitment,"device_id":"alice-device","device_epoch":1,"branch_public_key":f.request.branch_public_key,"target_delivery_id":"target","branch_proof":proof}},"revoked_devices":[],"seen_proofs":[],"root_seen_proofs":[],"prekey_bundles":{"alice-device":f.bundle()?}});
     let mut legacy: IdentityRegistry = serde_json::from_value(value)?;
-    let manifest =
-        legacy.device_manifest(&f.request.principal_commitment).ok_or("legacy manifest")?;
-    assert!(manifest.signed_device_set.is_none());
-    assert!(manifest.devices[0].branch_proof.key_binding.is_none());
+    assert!(legacy.device_manifest(&f.request.principal_commitment).is_none());
     let mut old_request = f.request.clone();
     old_request.proof = proof;
     old_request.device_set = None;
@@ -461,6 +464,8 @@ fn historical_unqualified_proof_ids_cannot_reserve_a_current_root_qualified_proo
     let mut old = serde_json::to_value(IdentityRegistry::new())?;
     old.as_object_mut().ok_or("registry")?.remove("root_seen_proofs");
     old["seen_proofs"] = serde_json::json!([predicted]);
+    assert!(serde_json::from_value::<IdentityRegistry>(old.clone()).is_err());
+    old["root_seen_proofs"] = serde_json::json!([]);
     let mut reopened: IdentityRegistry = serde_json::from_value(old)?;
     reopened.register_identity(&f.request)?;
     assert!(reopened.device_auth_key(&source).is_some());

@@ -874,7 +874,7 @@ jobs:
           if-no-files-found: ignore
 
   v-sdk-b:
-    name: "SDK variant: legacy accounts and gateway local-mint"
+    name: "SDK variant: deferred accounts and gateway transport"
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -925,12 +925,6 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label legacy-accounts -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
-      - name: Test (gateway local-mint)
-        if: ${{ !cancelled() }}
-        run: |
-          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
-          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label local-mint -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
-
       - name: Build same-tree router for the session push real-router gate
         if: ${{ !cancelled() }}
         run: |
@@ -942,7 +936,7 @@ jobs:
       - name: Session push real-router gate (explicit, ignored by default)
         if: ${{ !cancelled() }}
         run: |
-          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label local-mint-gate -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label session-push-real-router -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
 
       - name: Ephemeral activation and persistence (real router, WAL on)
         if: ${{ !cancelled() }}

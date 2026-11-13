@@ -11,9 +11,9 @@ use super::{
 use crate::client::deferred_attachment::job::FetchBinding;
 use crate::prelude::{
     ChunkManifest, ChunkPayload, DeviceBranch, EncryptedObject, GatewaySessionAccess,
-    OBJECT_TRANSFER_DOWNLOAD, ObjectSyncSession, RamfluxClient, RelayTokenProvider,
-    RelayTransferOptions, SdkDmAttachmentRef, SdkError, SdkObjectRelayAckResponse,
-    now_unix_timestamp, object_transfer_id, verify_recipient_object_access_grant,
+    OBJECT_TRANSFER_DOWNLOAD, ObjectSyncSession, RamfluxClient, RelayTransferOptions,
+    SdkDmAttachmentRef, SdkError, SdkObjectRelayAckResponse, now_unix_timestamp,
+    object_transfer_id, verify_recipient_object_access_grant,
 };
 use ramflux_storage::ObjectRetention;
 use std::{
@@ -27,8 +27,7 @@ pub(crate) struct FetchInput {
     pub manifest: ChunkManifest,
     pub transfer_id: String,
     pub options: RelayTransferOptions,
-    #[cfg(feature = "itest-local-mint")]
-    pub http_timeout: std::time::Duration,
+
     pub branch: DeviceBranch,
     pub key: zeroize::Zeroizing<[u8; 32]>,
     pub cached: BTreeMap<u32, ChunkPayload>,
@@ -96,8 +95,7 @@ impl RamfluxClient {
             manifest,
             transfer_id,
             options,
-            #[cfg(feature = "itest-local-mint")]
-            http_timeout: std::time::Duration::from_secs(60),
+
             branch,
             key: object_key,
             cached,
@@ -222,15 +220,8 @@ pub(crate) async fn acknowledge(
     input: &FetchInput,
     index: u32,
 ) -> Result<SdkObjectRelayAckResponse, SdkError> {
-    let response = match input.options.token_provider {
-        RelayTokenProvider::GatewayIssued => {
-            ack_dm_attachment_chunk_via_relay_quic(engine, pool, &context(input), index).await?
-        }
-        #[cfg(feature = "itest-local-mint")]
-        RelayTokenProvider::LocalMint { .. } => {
-            super::local_relay::ack(&context(input), index, input.http_timeout).await?
-        }
-    };
+    let response =
+        ack_dm_attachment_chunk_via_relay_quic(engine, pool, &context(input), index).await?;
     let expected = crate::object::object_relay_chunk_id(
         &input.reference.object_id,
         &input.reference.manifest_hash,
@@ -255,7 +246,6 @@ fn context(input: &FetchInput) -> DmAttachmentFetch<'_> {
         object: &input.object,
         manifest: &input.manifest,
         object_key: *input.key,
-        expires_at: input.expires_at,
     }
 }
 
@@ -265,13 +255,5 @@ async fn fetch_chunk(
     input: &FetchInput,
     index: u32,
 ) -> Result<super::DmAttachmentChunk, SdkError> {
-    match input.options.token_provider {
-        RelayTokenProvider::GatewayIssued => {
-            fetch_dm_attachment_chunk_via_gateway(engine, pool, &context(input), index).await
-        }
-        #[cfg(feature = "itest-local-mint")]
-        RelayTokenProvider::LocalMint { .. } => {
-            super::local_relay::get(&context(input), index, input.http_timeout).await
-        }
-    }
+    fetch_dm_attachment_chunk_via_gateway(engine, pool, &context(input), index).await
 }

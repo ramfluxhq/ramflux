@@ -78,7 +78,7 @@ pub fn authorize_device_branch_v2(
         encode_base64url(root.signing_key.sign(&branch_proof_signing_bytes(&proof)?).to_bytes());
     Ok(proof)
 }
-/// Canonical signing bytes for v2, or the exact historical v1 body for read-only legacy state.
+/// Canonical signing bytes for the bound v2 document; unbound proofs are refused.
 /// This function alone does not grant key authority.
 /// # Errors
 /// Rejects unsupported binding versions, invalid bound fields or serialization errors.
@@ -98,12 +98,8 @@ pub fn branch_proof_signing_bytes(proof: &BranchProofDocument) -> Result<Vec<u8>
         #[serde(skip_serializing_if = "Option::is_none")]
         key_binding: Option<&'a DeviceKeyBinding>,
     }
-    let domain = if proof.key_binding.is_some() {
-        validate_bound_proof(proof)?;
-        Some(ramflux_protocol::domain::BRANCH_PROOF_V2)
-    } else {
-        None
-    };
+    validate_bound_proof(proof)?;
+    let domain = Some(ramflux_protocol::domain::BRANCH_PROOF_V2);
     Ok(ramflux_protocol::canonical_json_bytes(&Body {
         domain,
         proof_id: &proof.proof_id,
@@ -151,7 +147,7 @@ pub fn verify_root_bound_key_authorization(
     now: i64,
 ) -> Result<(), CryptoError> {
     let binding =
-        proof.key_binding.as_ref().ok_or_else(|| invalid("legacy branch proof is read-only"))?;
+        proof.key_binding.as_ref().ok_or_else(|| invalid("unbound branch proof is unsupported"))?;
     if binding != expected
         || proof.issued_at > now.saturating_add(BRANCH_PROOF_CLOCK_SKEW_SECONDS)
         || root.is_weak()

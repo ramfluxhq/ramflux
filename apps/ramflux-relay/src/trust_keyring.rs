@@ -16,10 +16,8 @@ use std::io::Write as _;
 
 // ---- T23-A2b2a: opt-in provider keyring trust path (offline-root-signed keyring + provider_epoch) ----
 
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) const RELAY_FEDERATION_PROVIDER_KEYRING_FILE_ENV: &str =
     "RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE";
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) const RELAY_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY_ENV: &str =
     "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY";
 
@@ -28,7 +26,6 @@ pub(crate) const RELAY_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY_ENV: &str =
 /// cache file is required because the strong-security keyring path relies on a persisted, fsync'd
 /// anti-rollback high-water — without it there is no restart anti-rollback, so the provider stays off
 /// (fail-closed) rather than authorizing without persistence.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn relay_keyring_provider_config() -> Option<(String, String, String, String, String)> {
     relay_keyring_provider_config_from_values(
         non_empty_env(RELAY_FEDERATION_TRUST_ENDPOINT_ENV).as_deref(),
@@ -42,7 +39,6 @@ pub(crate) fn relay_keyring_provider_config() -> Option<(String, String, String,
 /// Resolves the keyring-era config from raw values. The provider is enabled ONLY when ALL FIVE are
 /// present and non-empty; a missing endpoint, keyring file, offline-root public key, issuer node id, or
 /// cache file returns `None` (provider stays off — fail-closed), never a partial config.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn relay_keyring_provider_config_from_values(
     endpoint: Option<&str>,
     keyring_file: Option<&str>,
@@ -67,7 +63,6 @@ pub(crate) fn relay_keyring_provider_config_from_values(
 /// Atomically hot-reads and validates the provider keyring file against the pinned offline root. The
 /// offline-root public key is an independent trust anchor (never the provider/snapshot key), so a
 /// forged keyring is rejected before any key can be selected.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn load_provider_keyring(
     keyring_file: &str,
     offline_root_public_key: &str,
@@ -85,7 +80,6 @@ pub(crate) fn load_provider_keyring(
 /// offline root / for a mismatched issuer node. Callers that will serve the client object-relay QUIC
 /// surface propagate this error so the relay process fails to start (the container cannot become
 /// healthy) rather than accepting object requests it can never authorize.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn require_keyring_provider_ready() -> anyhow::Result<(
     String,
     String,
@@ -99,7 +93,6 @@ pub(crate) fn require_keyring_provider_ready() -> anyhow::Result<(
 
 /// The fail-closed readiness decision from a resolved config. Errors (never silently disables) when the
 /// config is incomplete (`None`) or the keyring file fails to load/verify.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn require_keyring_provider_ready_from(
     config: Option<(String, String, String, String, String)>,
 ) -> anyhow::Result<(
@@ -125,7 +118,6 @@ pub(crate) fn require_keyring_provider_ready_from(
 /// Persisted keyring-era cache record: the accepted envelope (absent when the cache is fail-closed with
 /// no authoritative snapshot) plus the anti-rollback high-waters, keyring fingerprint, and accepted
 /// signer key id, so a restart restores the high-water/fingerprint and re-validates the envelope.
-#[cfg(not(feature = "itest-provider-single-key"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct PersistedKeyringTrust {
     pub(crate) envelope: Option<ramflux_node_core::ProviderSignedTrustSnapshot>,
@@ -138,7 +130,6 @@ pub(crate) struct PersistedKeyringTrust {
 /// Atomically persists the cache's authoritative state (tmp + fsync + rename). Callers persist a
 /// candidate BEFORE publishing it live, so a persistence failure never leaves a live cache ahead of
 /// the durable anti-rollback high-water.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn persist_keyring_trust(
     path: &str,
     cache: &ramflux_node_core::RelayTrustSnapshotCache,
@@ -178,7 +169,6 @@ pub(crate) fn persist_keyring_trust(
 /// restored authoritative envelope, or `None` when the record was fail-closed or the persisted signer
 /// is no longer usable under the current keyring. On a non-adoptable keyring (rollback) it errors and
 /// the caller keeps the cache fail-closed.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn load_keyring_trust(
     path: &str,
     cache: &mut ramflux_node_core::RelayTrustSnapshotCache,
@@ -211,7 +201,6 @@ pub(crate) fn load_keyring_trust(
 }
 
 /// Fetches the versioned provider-signed envelope from federation over mesh QUIC (no cache mutation).
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn fetch_keyring_envelope(
     endpoint: &str,
     tls: &ramflux_transport::MeshTlsConfig,
@@ -237,7 +226,6 @@ pub(crate) fn fetch_keyring_envelope(
 ///
 /// A retirement of the current signer clears the cached snapshot in the candidate (fail-closed), and
 /// its authoritative envelope becomes `None`, so the persisted+published state is empty-authorization.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn plan_keyring_candidate(
     live: &ramflux_node_core::RelayTrustSnapshotCache,
     keyring: &ramflux_node_core::ValidatedProviderKeyring,
@@ -279,7 +267,6 @@ pub(crate) fn plan_keyring_candidate(
 /// Publish-after-persist: durably persist the candidate FIRST, and only on success publish it into the
 /// live cache. A persistence failure leaves the live cache (and durable file) unchanged, so a crash
 /// can never restore a state behind a live-but-unpersisted anti-rollback high-water.
-#[cfg(not(feature = "itest-provider-single-key"))]
 pub(crate) fn publish_keyring_candidate(
     live: &Mutex<ramflux_node_core::RelayTrustSnapshotCache>,
     candidate: ramflux_node_core::RelayTrustSnapshotCache,
@@ -295,7 +282,6 @@ pub(crate) fn publish_keyring_candidate(
 /// Background keyring-era refresh: each tick re-reads + re-validates the keyring file (hot-read),
 /// clones the live cache, applies the fetched envelope (or reconciles the signer on a fetch failure)
 /// on the CANDIDATE, then persists the candidate and only publishes it live on persist success.
-#[cfg(not(feature = "itest-provider-single-key"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_keyring_trust_refresh(
     cache: Arc<Mutex<ramflux_node_core::RelayTrustSnapshotCache>>,
@@ -374,6 +360,6 @@ pub(crate) fn start_keyring_trust_refresh(
 // T23-A2b2a: relay-glue pure tests for the opt-in provider-keyring trust path (file load + validate,
 // persist/restore roundtrip honouring the anti-rollback high-water). The core verifier/cache logic is
 // covered by node-core; these cover the relay's file IO + serde + restore wiring.
-#[cfg(all(test, not(feature = "itest-provider-single-key")))]
+#[cfg(test)]
 #[path = "tests/trust_keyring.rs"]
 mod keyring_loader_tests;

@@ -121,6 +121,10 @@ fn invalid(message: &str) -> SdkError {
 }
 
 pub(super) fn validate(request: &LocalBusFrame) -> Result<(), SdkError> {
+    // Deferred transfers must reject obsolete options before cached receipts or mutation intents.
+    crate::object::reject_retired_relay_service_key(
+        request.body.get("relay_service_key_base64").is_some_and(|value| !value.is_null()),
+    )?;
     for field in ["label", "name", "mime", "title"] {
         if request.body.get(field).and_then(Value::as_str).is_some_and(|text| text.len() > 1024) {
             return Err(invalid("client metadata field exceeds 1024 bytes"));

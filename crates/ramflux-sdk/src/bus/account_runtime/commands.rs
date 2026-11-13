@@ -50,15 +50,6 @@ impl AccountRuntime {
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
         self.transfers.stop().await;
-        #[cfg(test)]
-        if let Some(hook) = self
-            .state
-            .accounts
-            .get(&self.id)
-            .and_then(|account| account.test_transfer_hook.as_ref())
-        {
-            hook.observe_lock_workers();
-        }
         if let Some(account) = self.state.accounts.get(&self.id) {
             account.client.recover_received_attachment_fetches()?;
         }
@@ -79,11 +70,6 @@ impl AccountRuntime {
         request: &LocalBusFrame,
     ) -> Result<(), SdkError> {
         match backup {
-            #[cfg(test)]
-            super::super::actor::PrivateCommand::TransferCheckpoint { checkpoint, applied } => {
-                self.apply_transfer_checkpoint(*checkpoint);
-                let _ = applied.send(());
-            }
             #[cfg(test)]
             super::super::actor::PrivateCommand::HoldLocalMutation { entered, release } => {
                 let _ = entered.send(tokio::time::Instant::now());

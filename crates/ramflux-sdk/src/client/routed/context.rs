@@ -95,9 +95,6 @@ impl RamfluxClient {
             == Some(conversation))
     }
     pub(crate) fn v2_blocks_legacy(&self, remote: &str) -> Result<bool, SdkError> {
-        if std::env::var("RAMFLUX_ALLOW_LEGACY_V1").as_deref() == Ok("1") {
-            return Ok(false);
-        }
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
         Ok(self
             .active_pair(&self.local_device_identity(local)?, &self.device_identity(remote)?)?

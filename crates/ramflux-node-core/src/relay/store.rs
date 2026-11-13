@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Relay redb persistence, hydration, and legacy snapshot migration.
+//! Current row-based relay persistence and bounded metadata hydration.
 
 use super::{
-    BTreeMap, BTreeSet, Deserialize, NodeCoreError, ObjectRelayTombstone,
-    ObjectRelayTombstoneMutation, Path, RELAY_CACHE_KEY, RELAY_CACHE_TABLE,
-    RELAY_CHUNK_ENTRY_TABLE, RELAY_TOMBSTONE_TABLE, ReadableDatabase, RelayCacheState,
-    RelayChunkEntry, RelayChunkMeta, RelayChunkStatus, RelayCommitOp, RelayCommitWriter,
-    RelayExpiryMutation, Serialize, TableDefinition, env, fs,
+    NodeCoreError, ObjectRelayTombstone, ObjectRelayTombstoneMutation, Path, RELAY_CACHE_KEY,
+    RELAY_CACHE_TABLE, RELAY_CHUNK_ENTRY_TABLE, RELAY_TOMBSTONE_TABLE, ReadableDatabase,
+    RelayCacheState, RelayChunkEntry, RelayChunkMeta, RelayCommitOp, RelayCommitWriter,
+    RelayExpiryMutation, Serialize, fs,
 };
+#[cfg(test)]
+use redb::TableDefinition;
 
 use redb::ReadableTable;
 
@@ -65,6 +66,8 @@ impl RelayRedbStore {
             })?;
         }
         let db = std::sync::Arc::new(Self::create_database(path)?);
+        reject_retired_snapshot(&db)?;
+        validate_chunk_owners(&db)?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -140,30 +143,25 @@ impl RelayRedbStore {
         self.db.cache_stats()
     }
 
-    /// # Errors
-    /// Returns an error when serialization or storage fails.
-    ///
-    /// Writes a metadata-only snapshot of the resident state to the legacy `RELAY_CACHE_KEY` and
-    /// clears the incremental tables. Ciphertext is NEVER persisted here (it is written through
-    /// [`Self::record_relay_chunk_entry`]); `save_state` therefore only snapshots metadata and is
-    /// used by tests, not the production write path.
-    pub fn save_state(&self, state: &RelayCacheState) -> Result<(), NodeCoreError> {
-        let snapshot = serde_json::to_vec(state)
-            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(RELAY_CACHE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            table
-                .insert(RELAY_CACHE_KEY, snapshot.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            replace_relay_table_values(&write_txn, RELAY_CHUNK_ENTRY_TABLE, &[])?;
-            replace_relay_table_values(&write_txn, RELAY_TOMBSTONE_TABLE, &[])?;
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+    /// Test fixtures persist only the current row format, never a cache snapshot.
+    #[cfg(test)]
+    pub(crate) fn save_state(&self, state: &RelayCacheState) -> Result<(), NodeCoreError> {
+        let chunks = state
+            .chunks_by_id
+            .iter()
+            .map(|(key, meta)| {
+                Ok((key.clone(), serialize_relay_value(&meta.to_entry(Vec::new()))?))
+            })
+            .collect::<Result<Vec<_>, NodeCoreError>>()?;
+        let tombstones = state
+            .tombstones_by_object_id
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), serialize_relay_value(value)?)))
+            .collect::<Result<Vec<_>, NodeCoreError>>()?;
+        let write = self.db.begin_write().map_err(redb_error)?;
+        replace_relay_table_values(&write, RELAY_CHUNK_ENTRY_TABLE, &chunks)?;
+        replace_relay_table_values(&write, RELAY_TOMBSTONE_TABLE, &tombstones)?;
+        write.commit().map_err(redb_error)
     }
 
     /// Reads the full stored [`RelayChunkEntry`] (including ciphertext) for a single chunk id from
@@ -190,6 +188,9 @@ impl RelayRedbStore {
         };
         let entry: RelayChunkEntry = serde_json::from_slice(value.value())
             .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+        if !entry.has_owner_binding() {
+            return Err(NodeCoreError::UnsupportedPersistedFormat("relay chunk owner binding"));
+        }
         Ok(Some(entry))
     }
 
@@ -201,74 +202,13 @@ impl RelayRedbStore {
     /// Hydration accumulates the resident charge and fails closed (no partial load) if it would
     /// exceed the budget.
     pub fn load_state(&self, max_bytes: u64) -> Result<Option<RelayCacheState>, NodeCoreError> {
-        let (mut incremental, has_incremental_rows) = self.load_incremental_state()?;
-        if has_incremental_rows {
-            hydrate_relay_budget(&mut incremental, max_bytes)?;
-            return Ok(Some(incremental));
+        reject_retired_snapshot(&self.db)?;
+        let (mut state, has_rows) = self.load_incremental_state()?;
+        if !has_rows {
+            return Ok(None);
         }
-        let snapshot_bytes = {
-            let read_txn =
-                self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let table = read_txn
-                .open_table(RELAY_CACHE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let Some(snapshot) = table
-                .get(RELAY_CACHE_KEY)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?
-            else {
-                return Ok(None);
-            };
-            snapshot.value().to_vec()
-        };
-        // A pre-incremental snapshot may embed full ciphertext (old format) or only metadata (the
-        // current `save_state` format). Deserialize with defaulted payload so both parse, backfill
-        // any recovered entries into the incremental table (reusing the existing schema) so a GET can
-        // read through, and drop the legacy snapshot key.
-        let compat: RelayCacheSnapshotCompat = serde_json::from_slice(&snapshot_bytes)
-            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-        self.migrate_snapshot_to_incremental(&compat)?;
-        let mut state = RelayCacheState::default();
-        for (chunk_id, chunk) in compat.chunks_by_id {
-            state.chunks_by_id.insert(chunk_id, RelayChunkMeta::from(&chunk.into_entry()));
-        }
-        state.tombstones_by_object_id = compat.tombstones_by_object_id;
         hydrate_relay_budget(&mut state, max_bytes)?;
         Ok(Some(state))
-    }
-
-    /// One-time migration: writes the recovered full entries / tombstones into the incremental tables
-    /// and removes the legacy snapshot key, so subsequent loads take the incremental path and GETs
-    /// read through to the payload.
-    fn migrate_snapshot_to_incremental(
-        &self,
-        compat: &RelayCacheSnapshotCompat,
-    ) -> Result<(), NodeCoreError> {
-        let write_txn =
-            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        {
-            let mut chunk_table = write_txn
-                .open_table(RELAY_CHUNK_ENTRY_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            for chunk in compat.chunks_by_id.values() {
-                let entry = chunk.clone().into_entry();
-                let entry_bytes = serialize_relay_value(&entry)?;
-                chunk_table
-                    .insert(entry.chunk_id.as_str(), entry_bytes.as_slice())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            }
-            let mut tombstone_table = write_txn
-                .open_table(RELAY_TOMBSTONE_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            for tombstone in compat.tombstones_by_object_id.values() {
-                let bytes = serialize_relay_value(tombstone)?;
-                tombstone_table
-                    .insert(tombstone.object_id.as_str(), bytes.as_slice())
-                    .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            }
-            remove_relay_legacy_snapshot(&write_txn)?;
-        }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
     }
 
     /// # Errors
@@ -301,7 +241,7 @@ impl RelayRedbStore {
 
     /// Test-only: writes raw legacy-snapshot bytes to `RELAY_CACHE_KEY` and clears the incremental
     /// tables, so tests can craft a pre-incremental (full-entry, payload-bearing) snapshot and verify
-    /// the load-time backfill/read-through compatibility.
+    /// the load-time typed refusal at reopen.
     #[cfg(test)]
     pub(crate) fn save_legacy_snapshot_bytes(
         &self,
@@ -316,8 +256,6 @@ impl RelayRedbStore {
             legacy_table
                 .insert(RELAY_CACHE_KEY, snapshot_bytes)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            replace_relay_table_values(&write_txn, RELAY_CHUNK_ENTRY_TABLE, &[])?;
-            replace_relay_table_values(&write_txn, RELAY_TOMBSTONE_TABLE, &[])?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(())
@@ -326,6 +264,9 @@ impl RelayRedbStore {
     /// # Errors
     /// Returns an error when the chunk entry cannot be durably recorded.
     pub fn record_relay_chunk_entry(&self, entry: &RelayChunkEntry) -> Result<(), NodeCoreError> {
+        if !entry.has_owner_binding() {
+            return Err(NodeCoreError::UnsupportedPersistedFormat("relay chunk owner binding"));
+        }
         self.commit_writer.commit(RelayCommitOp::ChunkEntry { entry: Box::new(entry.clone()) })
     }
 
@@ -374,6 +315,11 @@ impl RelayRedbStore {
                 // metadata becomes resident; the ciphertext stays in redb for read-through.
                 let chunk: RelayChunkEntry = serde_json::from_slice(value.value())
                     .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+                if !chunk.has_owner_binding() {
+                    return Err(NodeCoreError::UnsupportedPersistedFormat(
+                        "relay chunk owner binding",
+                    ));
+                }
                 state.chunks_by_id.insert(chunk.chunk_id.clone(), RelayChunkMeta::from(&chunk));
             }
         }
@@ -408,56 +354,41 @@ pub(super) fn hydrate_relay_budget(
     state.rehydrate_budget(max_bytes).map_err(|error| NodeCoreError::ItestHttp(error.to_string()))
 }
 
-/// Deserialization-compat view of a pre-incremental `RELAY_CACHE_KEY` snapshot. Both the old
-/// full-entry format and the current metadata-only format parse (ciphertext defaults to empty).
-#[derive(Deserialize)]
-pub(super) struct RelayCacheSnapshotCompat {
-    #[serde(default)]
-    chunks_by_id: BTreeMap<String, RelayChunkEntryCompat>,
-    #[serde(default)]
-    tombstones_by_object_id: BTreeMap<String, ObjectRelayTombstone>,
-}
-
-#[derive(Clone, Deserialize)]
-pub(super) struct RelayChunkEntryCompat {
-    chunk_id: String,
-    object_id: String,
-    manifest_hash: String,
-    chunk_index: u32,
-    chunk_cipher_hash: String,
-    #[serde(default)]
-    owner_signing_key_id: String,
-    #[serde(default)]
-    owner_public_key: String,
-    #[serde(default)]
-    encrypted_chunk: Vec<u8>,
-    stored_at: u64,
-    expires_at: u64,
-    delete_after_ack: bool,
-    acked_by: BTreeSet<String>,
-    status: RelayChunkStatus,
-}
-
-impl RelayChunkEntryCompat {
-    fn into_entry(self) -> RelayChunkEntry {
-        RelayChunkEntry {
-            chunk_id: self.chunk_id,
-            object_id: self.object_id,
-            manifest_hash: self.manifest_hash,
-            chunk_index: self.chunk_index,
-            chunk_cipher_hash: self.chunk_cipher_hash,
-            owner_signing_key_id: self.owner_signing_key_id,
-            owner_public_key: self.owner_public_key,
-            encrypted_chunk: self.encrypted_chunk,
-            stored_at: self.stored_at,
-            expires_at: self.expires_at,
-            delete_after_ack: self.delete_after_ack,
-            acked_by: self.acked_by,
-            status: self.status,
+fn validate_chunk_owners(db: &redb::Database) -> Result<(), NodeCoreError> {
+    let read = db.begin_read().map_err(redb_error)?;
+    let table = match read.open_table(RELAY_CHUNK_ENTRY_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+        Err(source) => return Err(redb_error(source)),
+    };
+    for row in table.iter().map_err(redb_error)? {
+        let (_, bytes) = row.map_err(redb_error)?;
+        let chunk: RelayChunkEntry = serde_json::from_slice(bytes.value()).map_err(redb_error)?;
+        if !chunk.has_owner_binding() {
+            return Err(NodeCoreError::UnsupportedPersistedFormat("relay chunk owner binding"));
         }
     }
+    Ok(())
 }
 
+fn reject_retired_snapshot(db: &redb::Database) -> Result<(), NodeCoreError> {
+    let read = db.begin_read().map_err(redb_error)?;
+    match read.open_table(RELAY_CACHE_TABLE) {
+        Ok(table) => {
+            if table.get(RELAY_CACHE_KEY).map_err(redb_error)?.is_some() {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("relay cache snapshot"));
+            }
+        }
+        Err(redb::TableError::TableDoesNotExist(_)) => {}
+        Err(error) => return Err(redb_error(error)),
+    }
+    Ok(())
+}
+fn redb_error(error: impl std::fmt::Display) -> NodeCoreError {
+    NodeCoreError::Redb(error.to_string())
+}
+
+#[cfg(test)]
 pub(super) fn replace_relay_table_values(
     write_txn: &redb::WriteTransaction,
     table: TableDefinition<&str, &[u8]>,
@@ -486,16 +417,46 @@ pub(super) fn replace_relay_table_values(
     Ok(())
 }
 
-pub(super) fn remove_relay_legacy_snapshot(
-    write_txn: &redb::WriteTransaction,
-) -> Result<(), NodeCoreError> {
-    let mut table = write_txn
-        .open_table(RELAY_CACHE_TABLE)
-        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    let _removed =
-        table.remove(RELAY_CACHE_KEY).map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    Ok(())
-}
 #[cfg(test)]
 #[path = "tests/store.rs"]
 mod tests;
+
+#[cfg(test)]
+mod startup_format_tests {
+    use super::*;
+    use crate::tests::persisted_image::image;
+    #[test]
+    fn ownerless_chunk_refuses_before_attachment_initialization_or_writer_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("relay.redb");
+        drop(RelayRedbStore::open_at(&path, 100)?);
+        let db = redb::Database::open(&path)?;
+        let write = db.begin_write()?;
+        let valid = serde_json::json!({"chunk_id":"current","object_id":"object","manifest_hash":"manifest","chunk_index":0,"chunk_cipher_hash":"hash","owner_signing_key_id":"owner","owner_public_key":"key","encrypted_chunk":[1],"stored_at":100,"expires_at":200,"delete_after_ack":false,"acked_by":[],"status":"Available"});
+        let mut retired = valid.clone();
+        retired["chunk_id"] = serde_json::json!("retired");
+        retired["owner_public_key"] = serde_json::json!("");
+        {
+            let mut rows = write.open_table(RELAY_CHUNK_ENTRY_TABLE)?;
+            rows.insert("current", serde_json::to_vec(&valid)?.as_slice())?;
+            rows.insert("retired", serde_json::to_vec(&retired)?.as_slice())?;
+        }
+        write.commit()?;
+        drop(db);
+        let before = image(directory.path())?;
+        assert!(
+            matches!(
+                RelayRedbStore::open_at(&path, 100),
+                Err(NodeCoreError::UnsupportedPersistedFormat("relay chunk owner binding"))
+            ),
+            "mixed ownerless chunks must fail before startup writes"
+        );
+        assert_eq!(
+            image(directory.path())?,
+            before,
+            "relay refusal changed any chunk, accounting table or journal"
+        );
+        Ok(())
+    }
+}

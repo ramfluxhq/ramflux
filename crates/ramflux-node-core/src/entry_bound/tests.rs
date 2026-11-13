@@ -200,7 +200,11 @@ fn admitted_candidate_envelope_is_fetchable() -> Result<(), Box<dyn std::error::
     row.envelope = envelope;
     row.envelope.created_at = now;
     row.envelope.target_delivery_id = "target".to_owned();
-    store.record_submission_increment("p06-r4", now + 3600, Some(&row))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture("p06-r4"),
+        now + 3600,
+        Some(&row),
+    )?;
     let router = store.load_router()?.ok_or("router")?;
     match router.fetch_entry("target", 1, now)? {
         InboxEntryResponse::Entry { .. } => {}

@@ -9,7 +9,7 @@ fn ack() -> anyhow::Result<ramflux_protocol::Ack> {
         "schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1",
         "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
         "ack_id":"ack-test","envelope_id":"entry-1","receiver_device_id":"receiver",
-        "received_at":1_760_000_010
+        "received_at":1_760_000_010,"ext":{"inbox_seq":1}
     }))?)
 }
 type RefusalRouter =

@@ -24,6 +24,10 @@ pub enum NodeCoreError {
     PreAuthCheckpointUnavailable,
     #[error("stale admission checkpoint")]
     PreAuthCheckpointStale,
+    #[error(
+        "unsupported persisted format: {0}; stop the owning service, back up and inspect affected state before a scoped reset"
+    )]
+    UnsupportedPersistedFormat(&'static str),
     #[error("clock_invalid")]
     PreAuthClockInvalid,
     #[error("clock_rollback")]
@@ -122,6 +126,10 @@ pub enum NodeCoreError {
     TtlExpired { envelope_id: String },
     #[error("HTTP request rejected: {status}")]
     HttpRequestRejected { status: &'static str },
+    #[error("missing inbox_seq for delivery target {target}, envelope {envelope_id}")]
+    MissingInboxSequence { target: String, envelope_id: String },
+    #[error("invalid inbox_seq for delivery target {target}, envelope {envelope_id}")]
+    InvalidInboxSequence { target: String, envelope_id: String },
     #[error("itest HTTP operation failed: {0}")]
     ItestHttp(String),
     #[error("itest HTTP JSON failed: {0}")]

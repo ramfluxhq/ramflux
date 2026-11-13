@@ -105,13 +105,13 @@ fn receiver_keeps_unswept_expired_wal_head() -> Result {
             let mut first = entry(1);
             first.envelope.created_at -= 7200;
             store.record_submission_increment(
-                "expired-head",
+                &crate::tests::request_replay_fixture("expired-head"),
                 first.envelope.created_at + 3600,
                 Some(&first),
             )?;
             let later = entry(2);
             store.record_submission_increment(
-                "live-tail",
+                &crate::tests::request_replay_fixture("live-tail"),
                 later.envelope.created_at + 3600,
                 Some(&later),
             )?;

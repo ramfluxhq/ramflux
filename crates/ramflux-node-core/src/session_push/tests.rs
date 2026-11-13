@@ -33,7 +33,7 @@ fn incarnation_bound_batch_all_store_modes() -> Result {
         let store = test_store(&root, mode, u64::MAX)?;
         for seq in 1..=65 {
             store.record_submission_increment(
-                &format!("row-{seq}"),
+                &crate::tests::request_replay_fixture(&format!("row-{seq}")),
                 i64::MAX,
                 Some(&entry(seq)),
             )?;

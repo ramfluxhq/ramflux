@@ -29,14 +29,8 @@ impl Namespace {
             ),
         }
     }
-    fn name(self) -> &'static str {
-        match self {
-            Self::Router => "router",
-            Self::Federation => "federation",
-        }
-    }
 }
-const MIGRATED: TableDefinition<&str, u8> = TableDefinition::new("foreign_set_fence_migration_v1");
+
 fn error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
@@ -55,86 +49,51 @@ fn decode(bytes: &[u8]) -> Result<EpochFence, NodeCoreError> {
     hash.copy_from_slice(&raw[8..]);
     Ok(EpochFence { epoch: u64::from_be_bytes(epoch), hash })
 }
-fn import(
-    heads: &mut ForeignDeviceHeads,
-    record: &SignedDeviceSetRecord,
-) -> Result<(), NodeCoreError> {
-    if heads
-        .fences
-        .get(&record.principal_commitment)
-        .is_some_and(|old| old.epoch > record.device_set_epoch)
-    {
-        return Ok(());
+pub(crate) fn validate(db: &redb::Database) -> Result<(), NodeCoreError> {
+    // Only current per-root tables are accepted. Old snapshot data is never imported.
+    let read = db.begin_read().map_err(error)?;
+    for name in ["federated_source_device_sets_v1", "bounded_foreign_device_heads_v1"] {
+        match read.open_table(TableDefinition::<&str, &[u8]>::new(name)) {
+            Ok(_) | Err(redb::TableError::TableTypeMismatch { .. }) => {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("foreign authority store"));
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(self::error(error)),
+        }
     }
-    heads.observe(record)?;
+    for namespace in [Namespace::Router, Namespace::Federation] {
+        let (fences, sets) = namespace.tables();
+        match read.open_table(fences) {
+            Ok(table) => {
+                for row in table.iter().map_err(error)? {
+                    let (_, value) = row.map_err(error)?;
+                    decode(value.value())?;
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(source) => return Err(error(source)),
+        }
+        match read.open_table(sets) {
+            Ok(table) => {
+                for row in table.iter().map_err(error)? {
+                    let (_, value) = row.map_err(error)?;
+                    let _: SignedDeviceSetRecord =
+                        serde_json::from_slice(value.value()).map_err(error)?;
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(source) => return Err(error(source)),
+        }
+    }
     Ok(())
 }
-pub(crate) fn initialize(
-    db: &redb::Database,
-    namespace: Namespace,
-    legacy: Option<&ForeignDeviceHeads>,
-) -> Result<(), NodeCoreError> {
-    const OLD_HEADS: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("federated_source_device_sets_v1");
-    const OLD_CACHE: TableDefinition<&str, &[u8]> =
-        TableDefinition::new("bounded_foreign_device_heads_v1");
+pub(crate) fn initialize(db: &redb::Database, namespace: Namespace) -> Result<(), NodeCoreError> {
+    validate(db)?;
     let txn = crate::fatal_durability::run(|| db.begin_write().map_err(error))?;
     let _panic = crate::fatal_durability::UnwindGuard;
-    let mut migrated = txn.open_table(MIGRATED).map_err(error)?;
-    if migrated.get(namespace.name()).map_err(error)?.is_some() {
-        return Ok(());
-    }
-    let mut heads = ForeignDeviceHeads::default();
-    if let Some(legacy) = legacy {
-        for record in &legacy.records {
-            import(&mut heads, record)?;
-        }
-        for (root, fence) in &legacy.fences {
-            if let Some(old) = heads.fences.get(root) {
-                old.check(*fence)?;
-            }
-            heads.fences.insert(root.clone(), *fence);
-        }
-    }
-    if matches!(namespace, Namespace::Federation) {
-        let old = txn.open_table(OLD_HEADS).map_err(error)?;
-        for entry in old.iter().map_err(error)? {
-            let (_, row) = entry.map_err(error)?;
-            import(
-                &mut heads,
-                &serde_json::from_slice(row.value())
-                    .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?,
-            )?;
-        }
-        drop(old);
-        let old = txn.open_table(OLD_CACHE).map_err(error)?;
-        if let Some(row) = old.get("heads").map_err(error)? {
-            let legacy: ForeignDeviceHeads = serde_json::from_slice(row.value())
-                .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
-            for record in &legacy.records {
-                import(&mut heads, record)?;
-            }
-        }
-        drop(old);
-        txn.delete_table(OLD_HEADS).map_err(error)?;
-        txn.delete_table(OLD_CACHE).map_err(error)?;
-    }
-    let (fence_table, set_table) = namespace.tables();
-    let mut fences = txn.open_table(fence_table).map_err(error)?;
-    let mut sets = txn.open_table(set_table).map_err(error)?;
-    for (root, fence) in &heads.fences {
-        let bytes = encode(*fence);
-        fences.insert(root.as_str(), bytes.as_slice()).map_err(error)?;
-    }
-    for record in &heads.records {
-        let bytes =
-            serde_json::to_vec(record).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
-        sets.insert(record.principal_commitment.as_str(), bytes.as_slice()).map_err(error)?;
-    }
-    migrated.insert(namespace.name(), 1).map_err(error)?;
-    drop(fences);
-    drop(sets);
-    drop(migrated);
+    let (fences, sets) = namespace.tables();
+    txn.open_table(fences).map_err(error)?;
+    txn.open_table(sets).map_err(error)?;
     crate::fatal_durability::run(|| txn.commit().map_err(error))
 }
 pub(crate) fn load(
@@ -287,3 +246,7 @@ fn charge_peer_new_root(
     table.insert(peer, bytes.as_slice()).map_err(error)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "foreign_device_store_tests.rs"]
+mod format_guards;

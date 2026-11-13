@@ -82,7 +82,7 @@ pub(super) fn startup_after_wal_merge() -> Result {
         // The accepted row exists only in WAL; the redb counter is higher.
         let accepted = entry(2);
         store.record_submission_increment(
-            "startup-accepted",
+            &format!("request/v2/{}", ramflux_protocol::encode_base64url([1; 32])),
             accepted.envelope.created_at + 3600,
             Some(&accepted),
         )?;
@@ -121,7 +121,7 @@ fn retention_mode_oracles() -> Result {
         let mut expired = entry(4);
         expired.envelope.created_at -= 7200;
         store.record_submission_increment(
-            "expired-mode",
+            &format!("request/v2/{}", ramflux_protocol::encode_base64url([2; 32])),
             expired.envelope.created_at + 3600,
             Some(&expired),
         )?;

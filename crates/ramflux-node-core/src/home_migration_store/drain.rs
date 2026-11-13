@@ -73,18 +73,8 @@ pub(super) fn capture(
         let mut entries = std::collections::BTreeMap::new();
         if let Some(wal) = &store.submission_wal {
             for record in wal.migration_target_view(target)?.1 {
-                let mut until = record.retain_until();
-                let legacy = record.accepted_at.is_none();
+                let until = record.retain_until();
                 if let Some(entry) = record.entry {
-                    if legacy {
-                        until = tx
-                            .open_table(expiry_index::LEGACY_WAL_DEADLINES)
-                            .map_err(storage)?
-                            .get(inbox_entry_storage_key(target, entry.inbox_seq).as_str())
-                            .map_err(storage)?
-                            .ok_or_else(|| storage("missing legacy WAL deadline"))?
-                            .value();
-                    }
                     entries.insert(entry.inbox_seq, (entry, until));
                 }
             }

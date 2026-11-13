@@ -65,19 +65,25 @@ fn acknowledging_one_delivery_never_deletes_a_different_roots_same_id_message()
     assert_eq!(entries[0].envelope.source_principal_id, "mallory");
     assert_eq!(entries[1].envelope.source_principal_id, "bob");
     let mut first = ack("next-bob-envelope");
-    assert!(matches!(
-        router.apply_ack_for_target("root-replay-target", &first),
-        Err(NodeCoreError::AmbiguousEnvelopeId(_))
-    ));
+    assert!(
+        matches!(
+            router.apply_ack_for_target("root-replay-target", &first),
+            Err(NodeCoreError::MissingInboxSequence { target, envelope_id }) if target == "root-replay-target" && envelope_id == "next-bob-envelope"
+        ),
+        "unqualified ACK must identify the exact missing sequence selector context"
+    );
     first.ext.ext.insert("inbox_seq".into(), serde_json::json!(entries[0].inbox_seq));
     let cursor = router.apply_ack_for_target("root-replay-target", &first)?;
     store.record_ack_increment(&cursor, &first.envelope_id)?;
     assert_eq!(router.resume("root-replay-target", 0, 10).len(), 1);
     let legacy_retry = ack("next-bob-envelope");
-    assert!(matches!(
-        router.apply_ack_for_target("root-replay-target", &legacy_retry),
-        Err(NodeCoreError::AmbiguousEnvelopeId(_))
-    ));
+    assert!(
+        matches!(
+            router.apply_ack_for_target("root-replay-target", &legacy_retry),
+            Err(NodeCoreError::MissingInboxSequence { target, envelope_id }) if target == "root-replay-target" && envelope_id == "next-bob-envelope"
+        ),
+        "unqualified ACK must identify the exact missing sequence selector context"
+    );
     drop(store);
     let reopened = RouterRedbStore::open(&path)?;
     let restored = reopened.load_router()?.ok_or("router")?;
@@ -95,9 +101,9 @@ fn acknowledging_one_delivery_never_deletes_a_different_roots_same_id_message()
 }
 
 #[test]
-fn migration_never_interprets_an_old_sender_chosen_id_as_a_current_delivery_key()
+fn retired_mailbox_import_is_refused_without_rewriting_sender_chosen_ids()
 -> Result<(), Box<dyn std::error::Error>> {
-    use redb::{ReadableTable, TableDefinition};
+    use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
     let Mailbox { path, store, router } = populated_mailbox()?;
     let mut entries = router.resume("root-replay-target", 0, 10);
     let target = ramflux_protocol::encode_base64url("root-replay-target");
@@ -131,12 +137,19 @@ fn migration_never_interprets_an_old_sender_chosen_id_as_a_current_delivery_key(
     }
     transaction.commit()?;
     drop(db);
-    let reopened = RouterRedbStore::open(&path)?;
-    let restored = reopened.load_router()?.ok_or("router")?;
-    let pending = restored.resume("root-replay-target", 0, 10);
-    assert_eq!(pending.len(), 2);
-    assert_eq!(pending[0].envelope.source_principal_id, "mallory");
-    assert_eq!(pending[1].envelope.source_principal_id, "bob");
-    assert_eq!(pending[1].envelope.envelope_id, "honest-message");
+    assert!(matches!(
+        RouterRedbStore::open(&path),
+        Err(NodeCoreError::UnsupportedPersistedFormat("router mailbox keys"))
+    ));
+    let db = redb::Database::create(&path)?;
+    let read = db.begin_read()?;
+    let table = read.open_table(ROUTER_INBOX_ENTRY_TABLE)?;
+    assert_eq!(table.len()?, 2);
+    for entry in &entries {
+        assert_eq!(
+            table.get(entry.envelope.envelope_id.as_str())?.ok_or("unchanged row")?.value(),
+            serde_json::to_vec(entry)?
+        );
+    }
     Ok(())
 }

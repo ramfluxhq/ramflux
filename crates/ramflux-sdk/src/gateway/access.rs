@@ -119,13 +119,7 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
         &'a mut self,
         device_id: &'a str,
     ) -> GatewayCallFuture<'a, SdkPrekeyResponse>;
-    #[cfg(feature = "itest-local-mint")]
-    /// # Errors
-    /// Returns an error if the session exchange is refused, cancelled, or expires.
-    fn issue_relay_token(
-        &mut self,
-        body: GatewayRelayTokenIssueBody,
-    ) -> GatewayCallFuture<'_, SdkRelayToken>;
+
     /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
     fn issue_relay_token_v3(
@@ -250,13 +244,7 @@ impl GatewaySessionAccess for GatewaySessionEngine {
     ) -> GatewayCallFuture<'a, SdkPrekeyResponse> {
         Box::pin(GatewaySessionEngine::fetch_prekey_bundle(self, device_id))
     }
-    #[cfg(feature = "itest-local-mint")]
-    fn issue_relay_token(
-        &mut self,
-        body: GatewayRelayTokenIssueBody,
-    ) -> GatewayCallFuture<'_, SdkRelayToken> {
-        Box::pin(GatewaySessionEngine::issue_relay_token(self, body))
-    }
+
     fn issue_relay_token_v3(
         &mut self,
         body: SdkRelayTokenV3IssueBody,
@@ -432,13 +420,7 @@ impl GatewaySessionAccess for CountingGateway {
     ) -> GatewayCallFuture<'a, SdkPrekeyResponse> {
         unused("fetch_prekey_bundle")
     }
-    #[cfg(feature = "itest-local-mint")]
-    fn issue_relay_token(
-        &mut self,
-        _body: GatewayRelayTokenIssueBody,
-    ) -> GatewayCallFuture<'_, SdkRelayToken> {
-        unused("issue_relay_token")
-    }
+
     fn issue_relay_token_v3(
         &mut self,
         _body: SdkRelayTokenV3IssueBody,

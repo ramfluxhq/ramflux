@@ -5,8 +5,8 @@
 
 use super::{
     Duration, Instant, NodeCoreError, ObjectRelayTombstoneMutation, RELAY_CHUNK_ENTRY_TABLE,
-    RELAY_TOMBSTONE_TABLE, RelayChunkEntry, RelayExpiryMutation, env, mpsc,
-    remove_relay_legacy_snapshot, serialize_relay_value, thread,
+    RELAY_TOMBSTONE_TABLE, RelayChunkEntry, RelayExpiryMutation, env, mpsc, serialize_relay_value,
+    thread,
 };
 
 use redb::ReadableTable;
@@ -162,7 +162,7 @@ pub(super) fn record_relay_chunk_entry_in_txn(
     table
         .insert(entry.chunk_id.as_str(), entry_bytes.as_slice())
         .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    remove_relay_legacy_snapshot(write_txn)
+    Ok(())
 }
 
 pub(super) fn record_relay_tombstone_mutation_in_txn(
@@ -188,7 +188,7 @@ pub(super) fn record_relay_tombstone_mutation_in_txn(
             .insert(entry.chunk_id.as_str(), entry_bytes.as_slice())
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     }
-    remove_relay_legacy_snapshot(write_txn)
+    Ok(())
 }
 
 pub(super) fn record_relay_expiry_mutation_in_txn(
@@ -211,7 +211,7 @@ pub(super) fn record_relay_expiry_mutation_in_txn(
             .remove(object_id.as_str())
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
     }
-    remove_relay_legacy_snapshot(write_txn)
+    Ok(())
 }
 
 pub(super) fn relay_usize_env(name: &str, default: usize) -> usize {

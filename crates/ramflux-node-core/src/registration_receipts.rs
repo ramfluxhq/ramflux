@@ -11,32 +11,14 @@ pub(crate) const REGISTRATION_SOURCE_LIMIT: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RegistrationReceipt {
     pub(crate) key: String,
-    pub(crate) expires_at: Option<i64>,
-    #[serde(default)]
-    pub(crate) root: Option<String>,
-    #[serde(default)]
-    pub(crate) source: Option<String>,
+    pub(crate) expires_at: i64,
+    pub(crate) root: String,
+    pub(crate) source: String,
 }
 pub(crate) fn load_receipts<'de, D: Deserializer<'de>>(
     de: D,
 ) -> Result<VecDeque<RegistrationReceipt>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Stored {
-        Current(RegistrationReceipt),
-        Legacy(String),
-    }
-    let stored = Vec::<Stored>::deserialize(de)?;
-    // No truncation: historical live receipts remain fences, even above a newer capacity.
-    Ok(stored
-        .into_iter()
-        .map(|receipt| match receipt {
-            Stored::Current(receipt) => receipt,
-            Stored::Legacy(key) => {
-                RegistrationReceipt { key, expires_at: None, root: None, source: None }
-            }
-        })
-        .collect())
+    VecDeque::<RegistrationReceipt>::deserialize(de)
 }
 
 /// Per-source admission is configurable for large shared NATs; invalid settings fail closed.
@@ -69,6 +51,27 @@ fn parse_source_limit(value: Option<&str>) -> Result<usize, crate::NodeCoreError
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_receipts_refuse_unbounded_or_ownerless_old_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Deserialize)]
+        struct Rows {
+            #[serde(deserialize_with = "load_receipts")]
+            receipts: VecDeque<RegistrationReceipt>,
+        }
+        let current: Rows = serde_json::from_value(
+            serde_json::json!({"receipts":[{"key":"proof","expires_at":100,"root":"root","source":"source"}]}),
+        )?;
+        assert_eq!(current.receipts.len(), 1);
+        for row in [
+            serde_json::json!("bare-proof"),
+            serde_json::json!({"key":"proof","expires_at":null,"root":null,"source":null}),
+            serde_json::json!({"key":"proof","expires_at":100}),
+        ] {
+            assert!(serde_json::from_value::<Rows>(serde_json::json!({"receipts":[row]})).is_err());
+        }
+        Ok(())
+    }
     #[test]
     fn shared_nat_override_is_bounded_and_invalid_values_fail_closed() {
         assert!(matches!(parse_source_limit(None), Ok(256)));

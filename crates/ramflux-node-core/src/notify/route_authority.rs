@@ -9,14 +9,13 @@
 use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, routes};
 use crate::{DeviceAuthKeyResponse, NodeCoreError};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
-const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("notify_route_authority_v1");
+pub(super) const OWNERS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("notify_route_authority_v1");
 /// Per-device `(client sequence, set at)` of the last deregistration. It only has to outlive a
 /// registration still in flight (control freshness 30 s, gateway bound 10 s), so it expires
 /// [`PUSH_ROUTE_FENCE_SECONDS`] after it was set, by notify's own clock, and the retention
 /// sweep deletes it. A wrong client clock therefore delays registration by at most that long.
 const FENCES: TableDefinition<&str, (u64, u64)> = TableDefinition::new("notify_route_fence_v2");
-/// Unreleased pre-expiry fence table; dropped by the retention sweep.
-const LEGACY_FENCES: TableDefinition<&str, u64> = TableDefinition::new("notify_route_fence_v1");
 /// Lifetime of a deregistration fence.
 pub const PUSH_ROUTE_FENCE_SECONDS: u64 = 600;
 /// Owners per authority lookup request.
@@ -319,15 +318,15 @@ impl NotifyRedbStore {
     }
 
     /// Checks up to [`PUSH_ROUTE_SWEEP_LIMIT`] owners in batched lookups, continuing from the
-    /// previous call, and deletes revoked owners' routes. In production it also deletes legacy
-    /// routes that have no verified owner: they can never be delivered.
+    /// previous call, and deletes revoked owners' routes. Unowned stored routes are refused.
     /// # Errors
     /// Unavailable authority defers deletion; it never authorizes provider delivery.
     pub fn sweep_push_route_revocations(&self) -> Result<usize, NodeCoreError> {
         if self.route_authorizer.is_none() {
             return Ok(0);
         }
-        let mut removed = self.remove_ownerless_routes()?;
+        self.reject_ownerless_routes()?;
+        let mut removed = 0;
         let start = self.revocation_cursor.lock().map_err(error)?.clone();
         let txn = self.db.begin_read().map_err(error)?;
         let mut owners = Vec::new();
@@ -361,38 +360,35 @@ impl NotifyRedbStore {
         Ok(removed)
     }
 
-    /// Runs once per process: production never creates ownerless rows, so only legacy rows
-    /// from before ownership binding are removed.
-    fn remove_ownerless_routes(&self) -> Result<usize, NodeCoreError> {
+    /// Validate route ownership once; old unbound rows require an explicit store reset.
+    fn reject_ownerless_routes(&self) -> Result<(), NodeCoreError> {
         if self.allow_itest_unbound_routes
-            || self.ownerless_routes_cleared.load(std::sync::atomic::Ordering::Acquire)
+            || self.route_owners_checked.load(std::sync::atomic::Ordering::Acquire)
         {
-            return Ok(0);
+            return Ok(());
         }
-        let txn = self.db.begin_write().map_err(error)?;
-        let mut removed = 0;
-        {
-            let owners = txn.open_table(OWNERS).map_err(error)?;
-            let mut routes = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
-            let mut ownerless = Vec::new();
-            for row in routes.iter().map_err(error)? {
-                let (key, _) = row.map_err(error)?;
-                if owners.get(key.value()).map_err(error)?.is_none() {
-                    ownerless.push(key.value().to_owned());
-                }
-            }
-            for key in ownerless {
-                routes.remove(key.as_str()).map_err(error)?;
-                removed += 1;
+        let txn = self.db.begin_read().map_err(error)?;
+        let owners = match txn.open_table(OWNERS) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(source) => return Err(error(source)),
+        };
+        let routes = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
+        for row in routes.iter().map_err(error)? {
+            let (key, _) = row.map_err(error)?;
+            let bound = match &owners {
+                Some(owners) => owners.get(key.value()).map_err(error)?.is_some(),
+                None => false,
+            };
+            if !bound {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("notify unowned route"));
             }
         }
-        txn.commit().map_err(error)?;
-        self.ownerless_routes_cleared.store(true, std::sync::atomic::Ordering::Release);
-        Ok(removed)
+        self.route_owners_checked.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
-    /// Deletes deregistration fences older than [`PUSH_ROUTE_FENCE_SECONDS`] and the
-    /// unreleased pre-expiry fence table. Returns the number of removed fences.
+    /// Deletes current deregistration fences older than [`PUSH_ROUTE_FENCE_SECONDS`].
     pub(super) fn prune_route_fences(&self, now: u64) -> Result<usize, NodeCoreError> {
         let txn = self.db.begin_write().map_err(error)?;
         let removed;
@@ -416,7 +412,6 @@ impl NotifyRedbStore {
                 fences.remove(key.as_str()).map_err(error)?;
             }
         }
-        txn.delete_table(LEGACY_FENCES).map_err(error)?;
         txn.commit().map_err(error)?;
         Ok(removed)
     }

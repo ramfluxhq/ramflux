@@ -105,7 +105,11 @@ fn durable_issued_floor_survives_late_registration() -> Result {
                     store.provisional_inbox_incarnation("target")?;
                 }
                 let row = super::tests::entry(5);
-                store.record_submission_increment("durable-five", i64::MAX, Some(&row))?;
+                store.record_submission_increment(
+                    &crate::tests::request_replay_fixture("durable-five"),
+                    i64::MAX,
+                    Some(&row),
+                )?;
                 let expected = store.inbox_status("target")?.0.expect("durable E");
                 let id = if initialize {
                     store.initialize_inbox("target")?

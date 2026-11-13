@@ -66,8 +66,6 @@ fn sweep_timeouts() -> crate::bus::runtime_limits::RuntimeTimeouts {
         fetch: hold,
         keepalive_idle: hold,
         keepalive_call: hold,
-        #[cfg(feature = "itest-local-mint")]
-        relay_http: hold,
     }
 }
 

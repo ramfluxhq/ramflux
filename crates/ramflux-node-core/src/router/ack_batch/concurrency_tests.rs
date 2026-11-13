@@ -49,13 +49,13 @@ fn ack_commit_releases_shard_and_clones_only_target() -> Result {
     let router = Arc::new(RouterCore::new());
     let other = other_target();
     for seq in 1..=3 {
-        router.target_shard("target").inbox.restore_pending_entry_until(entry(seq), Some(i64::MAX));
+        router.target_shard("target").inbox.restore_pending_entry_until(entry(seq), i64::MAX);
     }
     for seq in 1..=4096 {
         let mut row = entry(seq);
         row.target_delivery_id = other.clone();
         row.envelope.target_delivery_id = other.clone();
-        router.target_shard(&other).inbox.restore_pending_entry_until(row, Some(i64::MAX));
+        router.target_shard(&other).inbox.restore_pending_entry_until(row, i64::MAX);
     }
     store.bootstrap_router(&router)?;
     router.prepare_publication_target(&store, "target")?;

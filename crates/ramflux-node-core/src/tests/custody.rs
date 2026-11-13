@@ -15,8 +15,8 @@ fn native() -> TestResult<crate::CustodyPublication> {
     Ok(crate::CustodyPublication { record, compacted_ids: None })
 }
 #[test]
-fn custody_registry_reads_legacy_snapshot_without_changing_legacy_bytes() -> TestResult {
-    let legacy = serde_json::json!({"root_public_keys":{},"devices":{},"revoked_devices":[],"seen_proofs":[],"prekey_bundles":{}});
+fn custody_registry_without_custody_preserves_current_registry_bytes() -> TestResult {
+    let legacy = serde_json::json!({"root_public_keys":{},"devices":{},"revoked_devices":[],"seen_proofs":[],"root_seen_proofs":[],"prekey_bundles":{}});
     let mut registry: IdentityRegistry = serde_json::from_value(legacy)?;
     assert!(registry.custody.is_empty());
     let router = RouterCore::new();

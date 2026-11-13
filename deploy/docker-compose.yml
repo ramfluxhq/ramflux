@@ -202,8 +202,7 @@ services:
       # object data plane; the default/production relay loads no HMAC key (T22-A3).
       RAMFLUX_RELAY_CLIENT_QUIC_ADDR: "0.0.0.0:17447"
       # T23-A2b2b: the production relay serves the object-relay QUIC surface only against a fully
-      # configured, offline-root-verified provider KEYRING (the legacy single pinned provider public
-      # key is gone; that path exists only in the default-off itest-provider-single-key build). The
+      # configured, offline-root-verified provider KEYRING. The
       # federation endpoint, the pinned offline-root PUBLIC key, and the issuer node id are REQUIRED
       # (`:?` is advisory under podman-compose). Run compose-preflight.py to reject empty or
       # unresolved security inputs; Docker Compose v2 also rejects missing inputs during config.

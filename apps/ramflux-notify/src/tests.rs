@@ -20,7 +20,7 @@ fn s13_dispatch_sends_wake_to_tls_h2_provider() -> Result<(), Box<dyn std::error
     let _ = std::fs::remove_file(&store_path);
     let store = ramflux_node_core::NotifyRedbStore::open(&store_path)?;
     let subscription = test_webpush_subscription();
-    store.update_provider_credential(ramflux_node_core::ProviderCredential::WebPush(
+    store.update_provider_credential(&ramflux_node_core::ProviderCredential::WebPush(
         ramflux_node_core::WebPushProviderCredential {
             credential_id: "credential_webpush".to_owned(),
             vapid_public_key_ref: "literal:test-vapid-public-key".to_owned(),

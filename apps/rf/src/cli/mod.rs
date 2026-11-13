@@ -79,6 +79,26 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn retired_relay_service_key_flags_are_typed_parse_refusals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for arguments in [
+            vec!["rf", "dm", "send", "--relay-service-key", "retired"],
+            vec!["rf", "dm", "read", "--relay-service-key", "retired"],
+            vec!["rf", "device", "sync", "export", "--relay-service-key-base64", "retired"],
+            vec!["rf", "device", "sync", "import", "--relay-service-key-base64", "retired"],
+        ] {
+            let error =
+                Cli::try_parse_from(arguments).err().ok_or("test: retired relay flag accepted")?;
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "retired flag must fail during parsing rather than be silently ignored"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn a2i_append_defaults_created_at_to_runtime_now() {
         let cli = Cli::try_parse_from([
             "rf",

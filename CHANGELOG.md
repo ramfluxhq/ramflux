@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Remove relay HTTP/shared-HMAC object transfers and the obsolete relay-to-retention
+  TTL registration route and relay retention fallback settings. Retired relay-key
+  options and upload journals carrying them are refused; restart those uploads with
+  current gateway-issued QUIC capabilities. Router replay/mailbox tuples and WAL keys,
+  registration receipts, foreign authority caches, ownerless notify/relay state,
+  unmarked gateway stores and plaintext account/keychain state in retired formats
+  now fail closed at load/startup (`UnsupportedPersistedFormat` where applicable).
+  Current authority and acknowledged history must be preserved during operator repair.
+
 ### Session push
 
 - SDK receive ledger first-activation is default-on for managed push, compatibility

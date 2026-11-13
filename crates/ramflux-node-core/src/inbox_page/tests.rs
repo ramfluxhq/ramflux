@@ -18,7 +18,7 @@ fn inbox(rows: impl IntoIterator<Item = u64>, deadline: i64) -> OpaqueDeviceInbo
     let mut inbox = OpaqueDeviceInbox::new();
     inbox.restore_incarnation("target", "0123456789abcdef0123456789abcdef".into());
     for seq in rows {
-        inbox.restore_pending_entry_until(entry(seq), Some(deadline));
+        inbox.restore_pending_entry_until(entry(seq), deadline);
     }
     inbox
 }

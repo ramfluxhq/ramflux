@@ -2,8 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::relay::{
-    FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA, RelayTrustSnapshotCache,
-    provider_keyring_signing_bytes, verify_provider_signed_trust_snapshot,
+    RelayTrustSnapshotCache, provider_keyring_signing_bytes, verify_provider_signed_trust_snapshot,
 };
 
 use crate::relay::test_support::{
@@ -158,7 +157,7 @@ fn a2b2_envelope_binding_and_rejections() -> Result<(), String> {
     assert!(
         verify_provider_signed_trust_snapshot(
             &a2b2_envelope(now, A2B2_K1, A2B2_K1_SEED, 1, |e| e.schema =
-                FEDERATED_ISSUER_TRUST_SNAPSHOT_ENVELOPE_SCHEMA.to_owned()),
+                "ramflux.federated_issuer_trust_snapshot_envelope.v3".to_owned()),
             &validated,
             now
         )
@@ -515,5 +514,24 @@ fn a2b2_same_keyring_epoch_content_replacement_rejected() -> Result<(), String> 
     assert_eq!(kr1_same.fingerprint(), kr1.fingerprint());
     cache.reconcile_keyring(&kr1_same, now).map_err(|e| e.to_string())?;
     assert!(cache.current(V3_ISSUER_NODE, now).is_ok());
+    Ok(())
+}
+
+#[test]
+fn retired_single_pin_provider_envelope_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_000_000;
+    let keyring = a2b2_validate(&a2b2_keyring(
+        1,
+        vec![a2b2_entry(A2B2_K1, A2B2_K1_SEED, now, None, 1)],
+        |_| {},
+    ))?;
+    let current = a2b2_envelope(now, A2B2_K1, A2B2_K1_SEED, 1, |_| {});
+    verify_provider_signed_trust_snapshot(&current, &keyring, now)?;
+    let mut retired = serde_json::to_value(&current)?;
+    retired["schema"] = "ramflux.federated_issuer_trust_snapshot_envelope.v3".into();
+    retired.as_object_mut().ok_or("provider fixture object")?.remove("provider_epoch");
+    if let Ok(parsed) = serde_json::from_value::<crate::ProviderSignedTrustSnapshot>(retired) {
+        assert!(verify_provider_signed_trust_snapshot(&parsed, &keyring, now).is_err());
+    }
     Ok(())
 }

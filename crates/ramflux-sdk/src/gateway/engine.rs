@@ -778,33 +778,6 @@ impl GatewaySessionEngine {
     }
 
     /// # Errors
-    /// Returns an error when the gateway rejects relay token issuance.
-    // T22-A1 / RQ-04: legacy v2 gateway-issued relay token; compiled only under itest-local-mint.
-    #[cfg(feature = "itest-local-mint")]
-    pub(crate) async fn issue_relay_token(
-        &mut self,
-        body: GatewayRelayTokenIssueBody,
-    ) -> Result<SdkRelayToken, SdkError> {
-        let request = GatewayRelayTokenIssueRequest {
-            signed_request: self.signed_request(
-                "POST",
-                "/relay/v1/token/issue",
-                "already_authed",
-                &body,
-            )?,
-            body,
-        };
-        self.write_frame(&GatewayClientFrame::RelayTokenIssue { request }).await?;
-        match self.read_reply(super::frame_dispatch::ExpectedReply::RelayToken).await? {
-            GatewayServerFrame::RelayTokenIssued { response } => Ok(response.relay_token),
-            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
-            other => Err(SdkError::GatewaySessionRejected(format!(
-                "expected relay_token_issued frame, got {other:?}"
-            ))),
-        }
-    }
-
-    /// # Errors
     /// Returns an error when the gateway rejects v3 relay-token issuance or the response frame is
     /// not the expected v3 token frame.
     #[allow(dead_code)]

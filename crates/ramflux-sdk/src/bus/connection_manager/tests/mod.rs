@@ -109,10 +109,7 @@ fn limits() -> RuntimeTimeouts {
     limits.task_approval = held;
     limits.task_submit = held;
     limits.http = held;
-    #[cfg(feature = "itest-local-mint")]
-    {
-        limits.relay_http = held;
-    }
+
     limits.command = held;
     limits.post_claim = held;
     limits.frame = held;

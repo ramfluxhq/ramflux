@@ -70,8 +70,6 @@ pub(crate) struct DeviceSyncExport {
     pub(crate) target_device: String,
     #[arg(long)]
     pub(crate) relay_endpoint: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key_base64: Option<String>,
     #[arg(long)]
     pub(crate) chunk_size: Option<usize>,
 }
@@ -84,8 +82,6 @@ pub(crate) struct DeviceSyncImport {
     pub(crate) envelope_json: Option<String>,
     #[arg(long)]
     pub(crate) envelope_file: Option<PathBuf>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) relay_service_key_base64: Option<String>,
 }
 
 #[derive(Args)]

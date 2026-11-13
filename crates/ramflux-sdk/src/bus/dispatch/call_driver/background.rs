@@ -233,10 +233,6 @@ async fn exchange_lease(
     writer: &Writer,
     lease: Lease,
 ) -> Result<(), SdkError> {
-    #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
-    if lease.next.row.state == "active" {
-        super::refresh_barrier::wait().await?;
-    }
     let request = lease.request;
     let result = context
         .priority_call(
@@ -257,11 +253,7 @@ async fn exchange_lease(
             Ok(true)
         })
         .await?;
-    #[cfg(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production)))]
-    if applied && refused {
-        super::refresh_barrier::refused().await?;
-    }
-    #[cfg(not(all(feature = "itest-local-mint", ramflux_itest, not(ramflux_production))))]
+
     let _ = (applied, refused);
     Ok(())
 }

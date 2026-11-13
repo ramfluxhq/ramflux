@@ -17,14 +17,6 @@ services:
       RAMFLUX_FEDERATION_FORCE_TCP_MESH: "0"
       RAMFLUX_FEDERATION_DISABLE_TCP_FALLBACK: "0"
 
-  ramflux-relay:
-    environment:
-      # Keep relay -> retention QUIC-first enabled; retention disables ingress
-      # below so relay must fall back to the blocking mesh.
-      RAMFLUX_RETENTION_ASYNC_ENDPOINT: "ramflux-retention:17446"
-      RAMFLUX_RETENTION_ASYNC_SERVER_NAME: "ramflux-retention"
-      RAMFLUX_RETENTION_ASYNC_PEER_CA_PEM_FILE: "/etc/ramflux/mesh/ca.pem"
-
   ramflux-retention:
     environment:
       RAMFLUX_RETENTION_ASYNC_INGRESS: "0"

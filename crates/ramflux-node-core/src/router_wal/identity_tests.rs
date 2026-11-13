@@ -25,7 +25,11 @@ fn entry(seq: u64) -> InboxEntry {
     row
 }
 fn row(store: &RouterRedbStore, seq: u64) -> std::result::Result<(), NodeCoreError> {
-    store.record_submission_increment(&format!("row-{seq}"), i64::MAX, Some(&entry(seq)))?;
+    store.record_submission_increment(
+        &crate::tests::request_replay_fixture(&format!("row-{seq}")),
+        i64::MAX,
+        Some(&entry(seq)),
+    )?;
     Ok(())
 }
 pub(crate) fn lifecycle() -> Result {
@@ -86,7 +90,7 @@ pub(crate) fn upgrade() -> Result {
             let wal = root.join("wal");
             let directory = if legacy_root { wal.clone() } else { router_wal_shard_root(&wal, 0) };
             fs::create_dir_all(&directory)?;
-            write_legacy_router_wal_segment(&directory, "legacy-row", i64::MAX, &entry(50))?;
+            write_current_router_wal_segment(&directory, "legacy-row", i64::MAX, &entry(50))?;
             let rotated = Arc::new(AtomicBool::new(false));
             let observed = Arc::clone(&rotated);
             let guard = observe(
@@ -455,7 +459,11 @@ fn retired_anchor() -> Result {
         let store = test_store(&root, mode, 1)?;
         let mut expired = entry(1);
         expired.envelope.created_at = 0;
-        store.record_submission_increment("expired", i64::MAX, Some(&expired))?;
+        store.record_submission_increment(
+            &crate::tests::request_replay_fixture("expired"),
+            i64::MAX,
+            Some(&expired),
+        )?;
         row(&store, 2)?;
         row(&store, 3)?;
         store.load_router()?;

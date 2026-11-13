@@ -14,8 +14,19 @@ fn copied_device_names_and_proof_ids_do_not_share_revocation_or_replay_state()
     let honest = RootQualifiedDeviceRef::for_owned_device(&alice, &alice_branch)?;
     let attacker = RootQualifiedDeviceRef::for_owned_device(&mallory, &mallory_branch)?;
     let proof = |root: &IdentityRoot, branch: &DeviceBranch, id: &str| {
-        let mut proof =
-            authorize_device_branch(root, branch, "node", vec!["send".into()], 100, 1000)?;
+        let mut proof = authorize_device_branch_v2(
+            root,
+            branch,
+            ramflux_crypto::BranchAuthorization {
+                audience: "node",
+                capability_scope: vec!["send".into()],
+                issued_at: 100,
+                expires_at: 1000,
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed([5; 32])
+                    .public,
+            },
+        )?;
         proof.proof_id = id.into();
         proof.signature = sign_canonical_bytes_with_seed(
             &branch_proof_signing_bytes(&proof)?,

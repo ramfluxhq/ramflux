@@ -190,19 +190,7 @@ pub fn checkpoint_hash(value: &wire::Checkpoint) -> Result<String, Error> {
 pub fn profile_hash_v2(value: &wire::SignedIdentityProfileV2) -> Result<String, Error> {
     framed(domain::USERNAME_PROFILE_HASH, value)
 }
-/// Hash a complete legacy v1 document without changing its flat signing grammar.
-/// # Errors
-/// Rejects invalid v1 fields or noncanonical signature encodings.
-pub fn profile_hash_v1(value: &ramflux_protocol::SignedIdentityProfile) -> Result<String, Error> {
-    ramflux_protocol::identity_profile_signing_bytes(value).map_err(crate::CryptoError::from)?;
-    let signature = ramflux_protocol::decode_base64url(&value.signature)
-        .map_err(|_| crate::CryptoError::VerifyFailed)?;
-    if signature.len() != 64 || encode_base64url(&signature) != value.signature {
-        return Err(crate::CryptoError::VerifyFailed.into());
-    }
-    ramflux_protocol::custody::framed_hash(domain::USERNAME_PROFILE_HASH, value)
-        .map_err(|e| crate::CryptoError::from(e).into())
-}
+
 /// Hash the exact plaintext file bytes, with the existing no-NUL grammar.
 /// Decoding, signed size/type checks and upload policy belong to the avatar pipeline.
 #[must_use]
@@ -376,6 +364,9 @@ mod tests {
         let mut fields = 0;
         for case in cases {
             let name = string(case, "name");
+            if name == "profile_v1" {
+                continue;
+            }
             let domain = string(case, "domain");
             let preimage = bytes(case, "preimage")?;
             assert_eq!(
@@ -407,8 +398,6 @@ mod tests {
                     operation_hash(&wire::decode(data)?)
                 } else if name.starts_with("checkpoint_") {
                     checkpoint_hash(&wire::decode(data)?)
-                } else if name == "profile_v1" {
-                    profile_hash_v1(&serde_json::from_slice(data)?)
                 } else {
                     profile_hash_v2(&wire::decode(data)?)
                 }?;
@@ -440,6 +429,17 @@ mod tests {
             bytes(&vectors["legacy"], "preimage")?
         );
         crate::verify_identity_profile(&key(&vectors, "root_key")?, &legacy)?;
+        Ok(())
+    }
+    #[test]
+    fn username_directory_refuses_flat_v1_profile() -> TestResult {
+        let vectors = corpus()?;
+        assert!(
+            wire::decode::<wire::SignedIdentityProfileV2>(
+                string(&vectors["legacy"], "wire").as_bytes()
+            )
+            .is_err()
+        );
         Ok(())
     }
     type FieldMutation = (&'static str, Value, &'static str);
@@ -627,34 +627,7 @@ mod tests {
         ));
         Ok(())
     }
-    #[test]
-    fn username_profile_v1_hash_rejects_invalid_signature_encodings() -> TestResult {
-        let vectors = corpus()?;
-        let original: ramflux_protocol::SignedIdentityProfile =
-            serde_json::from_str(string(&vectors["legacy"], "wire"))?;
-        profile_hash_v1(&original)?;
-        let mut short = original.clone();
-        short.signature = encode_base64url([0_u8; 63]);
-        assert!(
-            matches!(profile_hash_v1(&short), Err(Error::Crypto(crate::CryptoError::VerifyFailed))),
-            "63-byte signatures must not enter a document hash"
-        );
-        let mut noncanonical = original;
-        // 64 zero bytes have 86 canonical 'A's. 'B' changes only unused trailing bits.
-        noncanonical.signature = format!("{}B", "A".repeat(85));
-        assert!(matches!(
-            ramflux_protocol::decode_base64url(&noncanonical.signature),
-            Err(base64::DecodeError::InvalidLastSymbol(85, b'B'))
-        ));
-        assert!(
-            matches!(
-                profile_hash_v1(&noncanonical),
-                Err(Error::Crypto(crate::CryptoError::VerifyFailed))
-            ),
-            "noncanonical base64 must not enter a document hash"
-        );
-        Ok(())
-    }
+
     #[test]
     fn username_center_verifiers_reject_weak_keys() -> TestResult {
         let vectors = corpus()?;

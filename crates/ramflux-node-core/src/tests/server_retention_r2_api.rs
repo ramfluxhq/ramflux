@@ -64,11 +64,17 @@ fn repeated_nacks_dead_letter_without_keeping_ciphertext() -> Result<(), Box<dyn
     let mut message = envelope("poison", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = i64::try_from(now_unix_seconds())?;
     let entry = inbox.append(message);
-    store.record_submission_increment("poison-key", i64::MAX / 2, Some(&entry))?;
+    store.record_submission_increment(
+        &request_replay_fixture("poison-key"),
+        i64::MAX / 2,
+        Some(&entry),
+    )?;
     let mut cursor = CursorAckState::default();
     for _ in 0..crate::inbox::ROUTER_NACK_RETRY_LIMIT {
-        cursor =
-            inbox.apply_nack_for_target("mailbox", &nack("poison", NackReason::EpochRollback))?;
+        cursor = inbox.apply_nack_for_target(
+            "mailbox",
+            &sequence_nack("poison", NackReason::EpochRollback, entry.inbox_seq),
+        )?;
         store.record_nack_increment(&cursor)?;
     }
     assert_eq!(cursor.retired_inbox_seqs, vec![entry.inbox_seq]);
@@ -97,7 +103,11 @@ fn durable_sweep_removes_only_rows_whose_index_deadline_is_due()
         message.created_at = now;
         message.ttl = ttl;
         let entry = inbox.append(message);
-        store.record_submission_increment(id, now + i64::from(ttl), Some(&entry))?;
+        store.record_submission_increment(
+            &request_replay_fixture(id),
+            now + i64::from(ttl),
+            Some(&entry),
+        )?;
     }
     assert_eq!(store.sweep_delivery_retention(now + 11, true)?, 2, "one row and one replay tuple");
     assert_eq!(store.sweep_delivery_retention(now + 11, false)?, 2);
@@ -132,7 +142,7 @@ fn router_wal_keeps_issued_watermarks_after_expiry() -> Result<(), Box<dyn std::
     message.ttl = 10;
     let entry =
         InboxEntry { inbox_seq: 9, target_delivery_id: "mailbox".into(), envelope: message };
-    store.record_submission("old", 1_010, Some(&entry))?;
+    store.record_submission(&request_replay_fixture("old"), 1_010, Some(&entry))?;
     assert!(store.prune_expired(i64::try_from(now_unix_seconds())?)? >= 1);
     assert_eq!(store.issued_watermarks().get("mailbox"), Some(&9));
     Ok(())

@@ -24,11 +24,6 @@ impl RouterRedbStore {
         let tx = self.db.begin_read().map_err(storage)?;
         let rows = tx.open_table(ROUTER_INBOX_ENTRY_TABLE).map_err(storage)?;
         let cursors = tx.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(storage)?;
-        let legacy = match tx.open_table(expiry_index::LEGACY_WAL_DEADLINES) {
-            Ok(table) => Some(table),
-            Err(redb::TableError::TableDoesNotExist(_)) => None,
-            Err(error) => return Err(storage(error)),
-        };
         let mut result = Vec::with_capacity(map.len());
         for target in map {
             let target = &target.target_delivery_id;
@@ -63,24 +58,12 @@ impl RouterRedbStore {
                 let (issued, records) = wal.migration_target_view(target)?;
                 view.high_water = view.high_water.max(issued);
                 for record in records {
-                    let mut until = record.retain_until();
-                    let is_legacy = record.accepted_at.is_none();
+                    let until = record.retain_until();
                     if let Some(entry) = record.entry {
                         let key = inbox_entry_storage_key(target, entry.inbox_seq);
                         // redb owns the original deadline when the same coordinate is in both stores.
                         if rows.get(key.as_str()).map_err(storage)?.is_some() {
                             continue;
-                        }
-                        if is_legacy {
-                            until = legacy
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    storage("legacy WAL deadlines were not initialized at startup")
-                                })?
-                                .get(key.as_str())
-                                .map_err(storage)?
-                                .ok_or_else(|| storage("legacy WAL deadline missing"))?
-                                .value();
                         }
                         view.observe(&entry, until)?;
                     }
@@ -134,9 +117,9 @@ impl MailboxCutoverView {
     }
 }
 
-/// Upgrade the legacy whole-inbox snapshot once, while the store is opening.
+/// Index a current, deadline-bound inbox snapshot once while the store is opening.
 /// Cutover itself only reads indexed mailbox rows.
-pub(super) fn upgrade_legacy_snapshot(tx: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
+pub(super) fn initialize_snapshot_index(tx: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
     use super::{ROUTER_INBOX_SLICE_KEY, ROUTER_SNAPSHOT_TABLE, record_inbox_entry_until_in_txn};
     let marker = redb::TableDefinition::<&str, u8>::new("router_migration_mailbox_format_v1");
     if tx.open_table(marker).map_err(storage)?.get("version").map_err(storage)?.is_some() {
@@ -187,20 +170,6 @@ pub(super) fn initialize_wal_view(
     let Some(wal) = wal else {
         return Ok(());
     };
-    let legacy = wal
-        .submissions(i64::try_from(crate::now_unix_seconds()).unwrap_or(i64::MAX))
-        .into_iter()
-        .filter(|record| record.accepted_at.is_none())
-        .filter_map(|record| {
-            record.entry.as_ref().map(|entry| {
-                (
-                    inbox_entry_storage_key(&entry.target_delivery_id, entry.inbox_seq),
-                    record.retain_until(),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    expiry_index::resolve_legacy_wal_deadlines(db, &legacy)?;
     let tx = db.begin_read().map_err(storage)?;
     let cursors = tx.open_table(ROUTER_CURSOR_STATE_TABLE).map_err(storage)?;
     for row in cursors.iter().map_err(storage)? {

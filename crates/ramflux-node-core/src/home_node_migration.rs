@@ -12,7 +12,6 @@ pub const HOME_NODE_FORWARD_COUNT_EXT_KEY: &str = "home_node_migration_forward_c
 /// Applied home-node migration state for one identity binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HomeNodeMigrationRecord {
-    #[serde(default = "legacy_migration_format")]
     pub format_version: u8,
     pub identity_commitment: String,
     pub old_home_node: String,
@@ -23,10 +22,6 @@ pub struct HomeNodeMigrationRecord {
     pub issued_at: i64,
     pub migration_proof_hash: String,
     pub migrated_at: i64,
-}
-
-fn legacy_migration_format() -> u8 {
-    1
 }
 
 impl HomeNodeMigrationRecord {
@@ -166,5 +161,19 @@ pub fn home_node_route_commitment_from_update(
         node_public_key: proof.node_public_key.clone(),
         node_endpoint: proof.node_endpoint.clone(),
         expires_at: proof.expires_at,
+    }
+}
+
+#[cfg(test)]
+mod format_guards {
+    #[test]
+    fn migration_record_requires_an_explicit_format_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::json!({"format_version":1,"identity_commitment":"root","old_home_node":"old","new_home_node":"new","new_home_node_key_hash":"key","route_record_hash":"route","effective_at":100,"issued_at":99,"migration_proof_hash":"proof","migrated_at":100});
+        let current: super::HomeNodeMigrationRecord = serde_json::from_value(value.clone())?;
+        assert!(current.is_effective(100));
+        value.as_object_mut().ok_or("migration fixture object")?.remove("format_version");
+        assert!(serde_json::from_value::<super::HomeNodeMigrationRecord>(value).is_err());
+        Ok(())
     }
 }

@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) mod retention;
 mod route_authority;
 pub use route_authority::PUSH_ROUTE_FENCE_SECONDS;
+mod format;
 mod routes;
 
 pub const NOTIFY_RATE_ALIAS_PER_MINUTE: usize = 60;
@@ -473,7 +474,7 @@ pub struct NotifyRedbStore {
     route_authorizer: Option<Box<route_authority::RouteAuthorizer>>,
     allow_itest_unbound_routes: bool,
     revocation_cursor: Mutex<Option<String>>,
-    ownerless_routes_cleared: std::sync::atomic::AtomicBool,
+    route_owners_checked: std::sync::atomic::AtomicBool,
     db: std::sync::Arc<redb::Database>,
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
@@ -763,8 +764,11 @@ impl NotifyRedbStore {
                 source,
             })?;
         }
-        let mut db = redb::Database::create(path)
+        let db = redb::Database::create(path)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let route_key = route_key_override.map_or_else(routes::configured_key, Ok)?;
+        format::validate_store(&db)?;
+        routes::validate(&db, &route_key)?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -785,8 +789,6 @@ impl NotifyRedbStore {
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let route_key = route_key_override.map_or_else(routes::configured_key, Ok)?;
-        routes::migrate(&mut db, &route_key)?;
         let wal_shards = match (wal_root, shard_count_override) {
             (Some(root), Some(shard_count)) => {
                 Some(open_notify_wal_shards_with_config(root, shard_count)?)
@@ -801,7 +803,7 @@ impl NotifyRedbStore {
             route_authorizer: None,
             allow_itest_unbound_routes: false,
             revocation_cursor: Mutex::new(None),
-            ownerless_routes_cleared: std::sync::atomic::AtomicBool::new(false),
+            route_owners_checked: std::sync::atomic::AtomicBool::new(false),
             db,
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
@@ -949,30 +951,18 @@ impl NotifyRedbStore {
         }
     }
 
-    fn load_bounded_state_with_incremental_flag(
-        &self,
-    ) -> Result<(Option<NotifyQueueState>, bool), NodeCoreError> {
+    fn load_bounded_state(&self) -> Result<NotifyQueueState, NodeCoreError> {
         let read_txn =
             self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let table = read_txn
             .open_table(NOTIFY_QUEUE_TABLE)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let state = match table
+        match table
             .get(NOTIFY_QUEUE_KEY)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?
         {
-            Some(snapshot) => serde_json::from_slice(snapshot.value())
-                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?,
-            None => NotifyQueueState::new(),
-        };
-        let has_incremental_rows = notify_table_has_rows(&read_txn, NOTIFY_QUEUE_ENTRY_TABLE)?
-            || notify_table_has_rows(&read_txn, NOTIFY_PROVIDER_ATTEMPT_TABLE)?
-            || notify_table_has_rows(&read_txn, NOTIFY_ROUTE_TABLE)?
-            || notify_table_has_rows(&read_txn, NOTIFY_CREDENTIAL_TABLE)?;
-        if state == NotifyQueueState::new() && !has_incremental_rows {
-            Ok((None, false))
-        } else {
-            Ok((Some(state), has_incremental_rows))
+            Some(snapshot) => deserialize_notify_bounded_snapshot(snapshot.value()),
+            None => Ok(NotifyQueueState::new()),
         }
     }
 
@@ -988,8 +978,7 @@ impl NotifyRedbStore {
             .get(NOTIFY_QUEUE_KEY)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?
         {
-            Some(snapshot) => serde_json::from_slice(snapshot.value())
-                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?,
+            Some(snapshot) => deserialize_notify_bounded_snapshot(snapshot.value())?,
             None => NotifyQueueState::new(),
         };
         let mut has_incremental_rows = false;
@@ -1074,35 +1063,23 @@ impl NotifyRedbStore {
     /// # Errors
     /// Returns an error when the notify state cannot be persisted.
     pub fn register_push_route(&self, route: DevicePushRoute) -> Result<(), NodeCoreError> {
-        let (state, has_incremental_rows) = self.load_bounded_state_with_incremental_flag()?;
-        let mut state = state.unwrap_or_default();
-        if has_incremental_rows {
-            let mut routes = self.load_notify_routes(&route.device_delivery_id)?;
-            routes.retain(|existing| {
-                existing.provider != route.provider || existing.token != route.token
-            });
-            routes.push(route);
-            self.record_notify_routes(&routes)
-        } else {
-            state.register_push_route(route);
-            self.save_state(&state)
-        }
+        self.load_bounded_state()?;
+        let mut routes = self.load_notify_routes(&route.device_delivery_id)?;
+        routes.retain(|existing| {
+            existing.provider != route.provider || existing.token != route.token
+        });
+        routes.push(route);
+        self.record_notify_routes(&routes)
     }
 
     /// # Errors
     /// Returns an error when the provider credential cannot be persisted.
     pub fn update_provider_credential(
         &self,
-        credential: ProviderCredential,
+        credential: &ProviderCredential,
     ) -> Result<(), NodeCoreError> {
-        let (state, has_incremental_rows) = self.load_bounded_state_with_incremental_flag()?;
-        let mut state = state.unwrap_or_default();
-        if has_incremental_rows {
-            self.record_notify_credential(&credential)
-        } else {
-            state.update_provider_credential(credential);
-            self.save_state(&state)
-        }
+        self.load_bounded_state()?;
+        self.record_notify_credential(credential)
     }
 
     /// # Errors
@@ -1114,8 +1091,7 @@ impl NotifyRedbStore {
         queued_at: u64,
         dnd_active: bool,
     ) -> Result<(NotifyQueueEntry, Vec<PreparedProviderPush>), NodeCoreError> {
-        let (state, has_incremental_rows) = self.load_bounded_state_with_incremental_flag()?;
-        let mut state = state.unwrap_or_default();
+        let mut state = self.load_bounded_state()?;
         let normalized_wake = normalized_notification_wake(wake, device_delivery_id);
         let push_alias_hash = notification_hash(
             "ramflux.notification.push_alias_hash.v1",
@@ -1128,14 +1104,11 @@ impl NotifyRedbStore {
             queued_at,
             dnd_active,
         );
-        let routes = if has_incremental_rows {
-            self.load_notify_routes(device_delivery_id)?
-                .into_iter()
-                .filter(|route| route.expires_at > queued_at)
-                .collect()
-        } else {
-            state.push_routes(device_delivery_id, queued_at)
-        };
+        let routes = self
+            .load_notify_routes(device_delivery_id)?
+            .into_iter()
+            .filter(|route| route.expires_at > queued_at)
+            .collect::<Vec<_>>();
         // All routes share the target's owner binding: one authority check per wake.
         let routes: Vec<DevicePushRoute> =
             if routes.is_empty() || self.authorize_push_route(device_delivery_id)? {
@@ -1166,12 +1139,7 @@ impl NotifyRedbStore {
             if self.notify_rate_limited(&route.provider, &push_alias_hash, queued_at)? {
                 continue;
             }
-            let credential = self.provider_credential_for_route(
-                &state,
-                has_incremental_rows,
-                &mut credential_cache,
-                &route,
-            )?;
+            let credential = self.provider_credential_for_route(&mut credential_cache, &route)?;
             self.record_notify_rate_event(
                 push_alias_hash.clone(),
                 route.provider.clone(),
@@ -1198,14 +1166,10 @@ impl NotifyRedbStore {
                 }
             });
         }
-        if has_incremental_rows {
-            self.commit_writer.commit(NotifyCommitOp::QueueEntry {
-                entry: Box::new(entry.clone()),
-                bounded_state: deferred_changed.then_some(Box::new(state)),
-            })?;
-        } else {
-            self.save_state(&state)?;
-        }
+        self.commit_writer.commit(NotifyCommitOp::QueueEntry {
+            entry: Box::new(entry.clone()),
+            bounded_state: deferred_changed.then_some(Box::new(state)),
+        })?;
         Ok((entry, pushes))
     }
 
@@ -1495,16 +1459,12 @@ impl NotifyRedbStore {
         {
             return Ok(Vec::new());
         }
-        let (state, has_incremental_rows) = self.load_bounded_state_with_incremental_flag()?;
-        let state = state.unwrap_or_default();
-        let routes = if has_incremental_rows {
-            self.load_notify_routes(&entry.device_delivery_id)?
-                .into_iter()
-                .filter(|route| route.expires_at > entry.queued_at)
-                .collect()
-        } else {
-            state.push_routes(&entry.device_delivery_id, entry.queued_at)
-        };
+        self.load_bounded_state()?;
+        let routes = self
+            .load_notify_routes(&entry.device_delivery_id)?
+            .into_iter()
+            .filter(|route| route.expires_at > entry.queued_at)
+            .collect::<Vec<_>>();
         let routes: Vec<DevicePushRoute> =
             if routes.is_empty() || self.authorize_push_route(&entry.device_delivery_id)? {
                 routes
@@ -1527,12 +1487,7 @@ impl NotifyRedbStore {
             if self.notify_rate_limited(&route.provider, &entry.push_alias_hash, entry.queued_at)? {
                 continue;
             }
-            let credential = self.provider_credential_for_route(
-                &state,
-                has_incremental_rows,
-                &mut credential_cache,
-                &route,
-            )?;
+            let credential = self.provider_credential_for_route(&mut credential_cache, &route)?;
             self.record_notify_rate_event(
                 entry.push_alias_hash.clone(),
                 route.provider.clone(),
@@ -1590,8 +1545,6 @@ impl NotifyRedbStore {
 
     fn provider_credential_for_route(
         &self,
-        state: &NotifyQueueState,
-        has_incremental_rows: bool,
         credential_cache: &mut BTreeMap<String, ProviderCredential>,
         route: &DevicePushRoute,
     ) -> Result<ProviderCredential, NodeCoreError> {
@@ -1601,7 +1554,7 @@ impl NotifyRedbStore {
                 route.device_delivery_id
             ))
         })?;
-        let credential = if has_incremental_rows {
+        let credential = {
             if let Some(cached) = credential_cache.get(credential_id) {
                 cached.clone()
             } else {
@@ -1614,13 +1567,6 @@ impl NotifyRedbStore {
                 credential_cache.insert(credential_id.to_owned(), credential.clone());
                 credential
             }
-        } else {
-            state.provider_credential(credential_id).cloned().ok_or_else(|| {
-                NodeCoreError::ItestJson(format!(
-                    "provider credential {credential_id} not registered for {:?}",
-                    route.provider
-                ))
-            })?
         };
         if credential.provider_kind() != route.provider {
             return Err(NodeCoreError::ItestJson(format!(
@@ -1682,27 +1628,28 @@ impl NotifyRedbStore {
     #[cfg(test)]
     pub(crate) fn save_legacy_json_incremental_entry_and_attempt(
         &self,
-        entry: &NotifyQueueEntry,
-        attempt: &ProviderPushAttempt,
+        entry: Option<&NotifyQueueEntry>,
+        attempt: Option<&ProviderPushAttempt>,
     ) -> Result<(), NodeCoreError> {
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
-            let mut entry_table = write_txn
-                .open_table(NOTIFY_QUEUE_ENTRY_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let entry_bytes = serialize_notify_value(entry)?;
-            entry_table
-                .insert(entry.queue_id.as_str(), entry_bytes.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-
-            let mut attempt_table = write_txn
-                .open_table(NOTIFY_PROVIDER_ATTEMPT_TABLE)
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-            let attempt_bytes = serialize_notify_value(attempt)?;
-            attempt_table
-                .insert("legacy-json-attempt", attempt_bytes.as_slice())
-                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            if let Some(entry) = entry {
+                let entry_bytes = serialize_notify_value(entry)?;
+                write_txn
+                    .open_table(NOTIFY_QUEUE_ENTRY_TABLE)
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+                    .insert(entry.queue_id.as_str(), entry_bytes.as_slice())
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            }
+            if let Some(attempt) = attempt {
+                let attempt_bytes = serialize_notify_value(attempt)?;
+                write_txn
+                    .open_table(NOTIFY_PROVIDER_ATTEMPT_TABLE)
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+                    .insert("legacy_json_attempt", attempt_bytes.as_slice())
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            }
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(())
@@ -1999,17 +1946,26 @@ fn deserialize_notify_hot_value<T>(bytes: &[u8]) -> Result<T, NodeCoreError>
 where
     T: serde::de::DeserializeOwned,
 {
-    postcard::from_bytes(bytes)
-        .or_else(|_postcard_error| serde_json::from_slice(bytes))
-        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+    let (value, trailing) = postcard::take_from_bytes(bytes)
+        .map_err(|_| NodeCoreError::UnsupportedPersistedFormat("notify binary row"))?;
+    if !trailing.is_empty() {
+        return Err(NodeCoreError::UnsupportedPersistedFormat("notify binary row"));
+    }
+    Ok(value)
 }
 
 fn deserialize_notify_queue_entry(bytes: &[u8]) -> Result<NotifyQueueEntry, NodeCoreError> {
-    match postcard::from_bytes::<StoredNotifyQueueEntry>(bytes) {
-        Ok(entry) => entry.try_into(),
-        Err(_postcard_error) => serde_json::from_slice(bytes)
-            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string())),
+    let stored: StoredNotifyQueueEntry = deserialize_notify_hot_value(bytes)?;
+    stored.try_into()
+}
+
+fn deserialize_notify_bounded_snapshot(bytes: &[u8]) -> Result<NotifyQueueState, NodeCoreError> {
+    let state: NotifyQueueState = serde_json::from_slice(bytes)
+        .map_err(|_| NodeCoreError::UnsupportedPersistedFormat("notify bounded snapshot"))?;
+    if state != notify_bounded_snapshot(&state) {
+        return Err(NodeCoreError::UnsupportedPersistedFormat("notify full snapshot"));
     }
+    Ok(state)
 }
 
 fn deserialize_notify_provider_attempt(bytes: &[u8]) -> Result<ProviderPushAttempt, NodeCoreError> {
@@ -2038,16 +1994,6 @@ fn notify_provider_attempt_key(
     let digest =
         ramflux_crypto::blake3_256_base64url("ramflux.notify.provider_attempt_key.v1", &material);
     Ok(format!("{queue_id}\u{1f}{index:020}\u{1f}{digest}"))
-}
-
-fn notify_table_has_rows(
-    read_txn: &redb::ReadTransaction,
-    table: TableDefinition<&str, &[u8]>,
-) -> Result<bool, NodeCoreError> {
-    let table =
-        read_txn.open_table(table).map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    let mut iter = table.iter().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-    Ok(iter.next().is_some())
 }
 
 fn replace_notify_table_values(
