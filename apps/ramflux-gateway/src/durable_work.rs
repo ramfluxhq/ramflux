@@ -38,6 +38,7 @@ mod tests {
             let context = crate::session::tests::test_gateway_context_at(
                 &directory.path().join("gateway.redb"),
             )?;
+            let initial_commits = context.store.full_snapshot_commit_count();
             let source = |seed| {
                 let root = ramflux_crypto::create_identity_root("peer", [seed; 32]);
                 ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "device")
@@ -83,7 +84,7 @@ mod tests {
             })
             .await?;
             assert_eq!(
-                context.store.full_snapshot_commit_count(),
+                context.store.full_snapshot_commit_count() - initial_commits,
                 1,
                 "another root must commit while noisy and unverified slots remain occupied"
             );
