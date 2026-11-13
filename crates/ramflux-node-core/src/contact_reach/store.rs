@@ -24,9 +24,16 @@ pub(super) const OUTBOX: TableDefinition<&str, &[u8]> =
 const CLOCK: TableDefinition<&str, u64> = TableDefinition::new("contact_reach_clock_v1");
 const CUSTODY: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_accounts_v3");
 const HEADS: TableDefinition<&str, &[u8]> = TableDefinition::new("home_head_v1");
-const TRUST: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach_peer_home_v1");
+const TRUST: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach_peer_trust_v1");
 const QUERIES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("contact_reach_candidate_queries_v1");
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdoptedPeer {
+    home: ramflux_protocol::home_migration::RecordEvidence,
+    authority_pins: ramflux_crypto::custody::AuthorityPins,
+    custodian_pins: ramflux_crypto::custody::AuthorityPins,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CandidateQuery {
@@ -454,6 +461,7 @@ fn apply_owner_command(
                 notice.as_deref(),
                 now,
             )?;
+            check_allow(state, update, peer_evidence.as_deref(), now)?;
             let conversation = match &update.body.subject {
                 Subject::Conversation { conversation_id, .. } => Some(conversation_id.clone()),
                 Subject::Friendship { root } => Some(
@@ -462,6 +470,7 @@ fn apply_owner_command(
                 ),
                 _ => None,
             };
+            denials::retire_node_grants(tx, state, owner.recipient_root, update)?;
             state.admission(update.clone(), conversation.as_deref(), now)?;
             super::ingress::erase_denied(tx, owner.recipient_root, update)?;
             OperationResult::Admission {
@@ -510,7 +519,7 @@ fn apply_conversation(
             return Err(refuse(Reason::ReachRouteInvalid));
         }
         ramflux_crypto::contact_reach::verify_submission(submission, current, now)?;
-        state.check_denials(root, target_node_id, now)?;
+        check_allow(state, update, Some(peer_evidence), now)?;
         let id = &update.body.operation_id;
         let hash = custody::framed_hash(OPERATION_HASH_DOMAIN, operation)?;
         let operation_key = key(owner.recipient_root, id)?;
@@ -552,6 +561,73 @@ fn apply_conversation(
     Ok(result)
 }
 
+fn adopt_peer(
+    tx: &redb::WriteTransaction,
+    recipient: &str,
+    key: &str,
+    peer: &ramflux_crypto::contact_reach::VerifiedPeer,
+    previous: Option<AdoptedPeer>,
+) -> Result<()> {
+    let mut state = previous.unwrap_or_else(|| AdoptedPeer {
+        home: peer.home().evidence().clone(),
+        authority_pins: ramflux_crypto::custody::AuthorityPins::default(),
+        custodian_pins: ramflux_crypto::custody::AuthorityPins::default(),
+    });
+    state.authority_pins.observe(peer.authority())?;
+    state.authority_pins.require_current(peer.authority())?;
+    let certificate = &peer.authority().envelope().body.master_certificate.body;
+    if certificate.custody_kind == custody::CustodyKind::ExternalHuman {
+        let human = peer.authority().management_actor_authority(&certificate.primary_device_ref)?;
+        state.custodian_pins.observe(human)?;
+        state.custodian_pins.require_current(human)?;
+    }
+    state.home = peer.home().evidence().clone();
+    let bytes = encoded(&state)?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(refuse(Reason::ForeignCapacity));
+    }
+    let prefix = format!("[{},", serde_json::to_string(recipient).map_err(storage)?);
+    let mut table = tx.open_table(TRUST).map_err(storage)?;
+    let mut count = 1_usize;
+    let mut total = bytes.len();
+    for entry in table.range(prefix.as_str()..).map_err(storage)?.take(1025) {
+        let (old, value) = entry.map_err(storage)?;
+        if !old.value().starts_with(&prefix) {
+            break;
+        }
+        if old.value() == key {
+            continue;
+        }
+        count += 1;
+        total = total
+            .checked_add(value.value().len())
+            .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+    }
+    if count > 1024 || total > 64 * 1024 * 1024 {
+        return Err(refuse(Reason::ForeignCapacity));
+    }
+    table.insert(key, bytes.as_slice()).map_err(storage)?;
+    Ok(())
+}
+
+fn check_allow(
+    state: &AccountReach,
+    update: &Signed<Admission>,
+    reply: Option<&PeerReply>,
+    now: u64,
+) -> Result<()> {
+    if update.body.decision != Decision::Allow {
+        return Ok(());
+    }
+    let root = update.body.subject.root().ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
+    let reply = reply.ok_or_else(|| refuse(Reason::ForeignSnapshotInvalid))?;
+    state.check_denials(root, &reply.snapshot.body.source_node, now)?;
+    if state.blocks.contains_key(&update.body.subject.key()?) {
+        return Err(refuse(Reason::ForeignReadRefused));
+    }
+    Ok(())
+}
+
 fn check_peer(
     tx: &redb::WriteTransaction,
     recipient: &str,
@@ -575,7 +651,7 @@ fn check_peer(
         .map_err(storage)?
         .get(trust_key.as_str())
         .map_err(storage)?
-        .map(|v| row::<ramflux_protocol::home_migration::RecordEvidence>(v.value()))
+        .map(|v| row::<AdoptedPeer>(v.value()))
         .transpose()?;
     let b = &reply.snapshot.body;
     let query_key = key(recipient, &b.request_nonce)?;
@@ -601,7 +677,7 @@ fn check_peer(
         reply,
         &candidate.query,
         node_key,
-        saved.as_ref(),
+        saved.as_ref().map(|state| &state.home),
         now,
     )?;
     ramflux_crypto::contact_reach::verify_notice(notice, recipient, &peer)?;
@@ -612,10 +688,7 @@ fn check_peer(
     {
         return Err(refuse(Reason::ContactConfirmationRequired));
     }
-    tx.open_table(TRUST)
-        .map_err(storage)?
-        .insert(trust_key.as_str(), encoded(peer.home().evidence())?.as_slice())
-        .map_err(storage)?;
+    adopt_peer(tx, recipient, &trust_key, &peer, saved)?;
     candidate.consumed = true;
     tx.open_table(QUERIES)
         .map_err(storage)?
@@ -626,3 +699,5 @@ fn check_peer(
 
 #[cfg(test)]
 mod tests;
+
+mod denials;

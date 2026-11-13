@@ -53,6 +53,7 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     assert!(!envelope.encrypted_payload.contains("sent to peer"));
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sibling".into(),
@@ -131,6 +132,7 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     crate::bus::own_device_copy::flush(&mut source).await?;
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sibling".into(),
@@ -205,6 +207,7 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     crate::bus::own_device_copy::flush(&mut source).await?;
     let copy = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let copy = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 2,
         target_delivery_id: "sibling".into(),
@@ -214,6 +217,7 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     assert_eq!(sibling.client.direct_messages("self-thread")?.len(), 0);
     let original = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let original = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sibling".into(),

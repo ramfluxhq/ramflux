@@ -30,6 +30,8 @@ pub struct SenderAssignment {
     pub inbox_seq: u64,
     pub retain_until: i64,
     pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Box<ramflux_protocol::contact_reach::DeliveryReach>>,
 }
 impl SenderAssignment {
     pub(crate) fn new(
@@ -43,6 +45,7 @@ impl SenderAssignment {
             inbox_seq: entry.inbox_seq,
             retain_until,
             digest: content_digest(&entry.envelope)?,
+            reach: entry.reach.clone(),
         })
     }
 }
@@ -219,6 +222,7 @@ pub(crate) fn accepted_outcome(
             delivery_class: envelope.delivery_class.clone(),
         },
         entry: InboxEntry {
+            reach: assignment.reach.clone(),
             inbox_seq: assignment.inbox_seq,
             target_delivery_id: assignment.target_delivery_id.clone(),
             envelope,

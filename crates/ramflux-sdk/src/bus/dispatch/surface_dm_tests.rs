@@ -235,6 +235,7 @@ async fn assert_deliveries(
     );
     for (seq, envelope) in envelopes.into_iter().enumerate() {
         let entry = GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: u64::try_from(seq + 1)?,
             target_delivery_id: envelope.target_delivery_id.clone(),

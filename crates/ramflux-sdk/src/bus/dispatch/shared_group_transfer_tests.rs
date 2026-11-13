@@ -214,6 +214,7 @@ async fn deliver(
         Box::new(super::super::fixture::RecordingGateway::new(Arc::default())),
     );
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),

@@ -141,8 +141,12 @@ fn router_wal_keeps_issued_watermarks_after_expiry() -> Result<(), Box<dyn std::
     let mut message = envelope("old", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = 1_000;
     message.ttl = 10;
-    let entry =
-        InboxEntry { inbox_seq: 9, target_delivery_id: "mailbox".into(), envelope: message };
+    let entry = InboxEntry {
+        reach: None,
+        inbox_seq: 9,
+        target_delivery_id: "mailbox".into(),
+        envelope: message,
+    };
     store.record_submission(&request_replay_fixture("old"), 1_010, Some(&entry))?;
     assert!(store.prune_expired(i64::try_from(now_unix_seconds())?)? >= 1);
     assert_eq!(store.issued_watermarks().get("mailbox"), Some(&9));

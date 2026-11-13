@@ -287,6 +287,7 @@ fn routed_entry(
     )?;
     message.encrypted_body = serde_json::to_vec(&sealed)?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: alice.config.target_delivery_id.clone(),

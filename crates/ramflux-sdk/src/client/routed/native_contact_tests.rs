@@ -49,6 +49,7 @@ pub(super) fn carrier(
     packet.packet.schema = crate::client::contact_requests::ENVELOPE_SCHEMA.into();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),

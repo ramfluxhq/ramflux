@@ -53,6 +53,7 @@ async fn generation_zero_generated_sdk_effects_are_inert_body() -> TestResult {
         "../../../../ramflux-protocol/src/sender_transcript_vectors.json"
     ))?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: own.config.target_delivery_id.clone(),

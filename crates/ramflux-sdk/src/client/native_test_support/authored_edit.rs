@@ -100,6 +100,7 @@ fn prepare_current_edit(
         .ok_or("cached original")?;
     let exact = encoded_edit(source, &original, &message)?;
     let entry = GatewayInboxEntry {
+        reach: None,
         envelope: source.seal_inner_to(peer, &message)?,
         forwarded: false,
         inbox_seq: 1,

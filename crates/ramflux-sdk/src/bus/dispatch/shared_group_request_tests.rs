@@ -273,6 +273,7 @@ async fn reject_demoted_federated_add(
 
 fn request_entry(inbox_seq: u64, envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq,
         target_delivery_id: envelope.target_delivery_id.clone(),

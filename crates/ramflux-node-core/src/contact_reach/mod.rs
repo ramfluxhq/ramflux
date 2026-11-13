@@ -3,6 +3,8 @@
 
 //! Receiving-home reach state and bounded admission, shared by local and foreign routes.
 mod cost;
+mod forward;
+pub use forward::{ReachCapability, ReachDeliveryClass, ReachForward};
 mod ephemeral;
 mod profile;
 pub use ephemeral::{ReachEphemeralAdmission, ReachEphemeralContext};

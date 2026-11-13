@@ -312,6 +312,7 @@ fn open_router(path: &Path, mode: Mode) -> Result<RouterRedbStore, SdkError> {
 
 fn as_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
     InboxEntry {
+        reach: None,
         inbox_seq: entry.inbox_seq,
         target_delivery_id: entry.target_delivery_id.clone(),
         envelope: entry.envelope.clone(),
@@ -376,6 +377,7 @@ fn row_removed(
 fn receive_from_inbox(row: &InboxEntry) -> ReceiveEntry {
     ReceiveEntry {
         entry: crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: row.inbox_seq,
             target_delivery_id: row.target_delivery_id.clone(),
@@ -469,6 +471,7 @@ fn legacy_dm_entry(
     };
     Ok(ReceiveEntry {
         entry: crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: account.target_delivery_id.clone(),

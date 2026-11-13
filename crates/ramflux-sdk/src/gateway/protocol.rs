@@ -660,6 +660,9 @@ pub struct GatewayInboxEntry {
     pub inbox_seq: u64,
     pub target_delivery_id: String,
     pub envelope: ramflux_protocol::Envelope,
+    /// Original branch route and nullable cost; required when the common reach profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Box<ramflux_protocol::contact_reach::DeliveryReach>>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

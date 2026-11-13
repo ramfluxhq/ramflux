@@ -155,3 +155,23 @@ fn cr_retained_denial_dominates_current_positive_grants() -> Result<(), SdkError
     );
     Ok(())
 }
+
+#[test]
+fn cr_remote_cas_failure_preserves_revision_for_explicit_refresh() {
+    let result = ramflux_protocol::contact_reach::OperationResult::Error {
+        reason: Reason::ReachRevisionConflict,
+        retry_after_ms: None,
+        current_revision: Some(9),
+    };
+    assert!(
+        matches!(
+            crate::contact_reach::remote_result(result),
+            Err(SdkError::ReachRemote {
+                reason: Reason::ReachRevisionConflict,
+                current_revision: Some(9),
+                retry_after_ms: None
+            })
+        ),
+        "SDK must preserve authoritative CAS metadata rather than returning an opaque refusal"
+    );
+}

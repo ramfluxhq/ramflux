@@ -7,6 +7,7 @@ use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, Sig
 use std::{future::Future, task::Poll};
 pub(super) fn entry(target: &str) -> crate::InboxEntry {
     crate::InboxEntry {
+        reach: None,
         inbox_seq: 7,
         target_delivery_id: target.into(),
         envelope: Envelope {

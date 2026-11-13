@@ -254,6 +254,7 @@ async fn single(frames: Vec<Vec<u8>>) -> (Result<GatewayCursor, SdkError>, Gatew
 fn sdk_record(seq: u64) -> PageEntryRecord {
     PageEntryRecord {
         entry: GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: seq,
             target_delivery_id: "target-route".into(),

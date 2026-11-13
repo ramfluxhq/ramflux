@@ -269,7 +269,6 @@ pub struct GatewayForwardAck {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
-    ContactForeign { request: Box<ramflux_protocol::contact_reach::Request> },
     PushRouteRegister { request: Box<crate::PushRouteRegistrationFrame> },
     PushRouteDeregister { request: Box<crate::PushRouteDeregistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
@@ -289,14 +288,12 @@ pub enum GatewayClientFrame {
     Nack { nack: ramflux_protocol::Nack },
     Heartbeat { now: u64 },
     Close { reason: String },
+    ContactForeign { request: Box<ramflux_protocol::contact_reach::Request> },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayServerFrame {
-    ContactForeignResult {
-        response: Box<ramflux_protocol::contact_reach::Response>,
-    },
     /// Replies to registration carry the signed request id, so a late reply is matched to
     /// its request and never mistaken for the answer to another frame.
     PushRouteRegistered {
@@ -392,6 +389,9 @@ pub enum GatewayServerFrame {
         state: ramflux_protocol::CallResolutionState,
         media_allowed: bool,
         wake_resolved: bool,
+    },
+    ContactForeignResult {
+        response: Box<ramflux_protocol::contact_reach::Response>,
     },
 }
 

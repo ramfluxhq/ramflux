@@ -11,7 +11,7 @@ use crate::{MigrationNode, RouterRedbStore};
 use ramflux_protocol::{
     contact_reach::{
         Admission, ChallengeRequest, CostPurpose, Decision, DeliveryReach, ENVELOPE_HASH_DOMAIN,
-        OperationResult, Reason, StrangerEntry, Subject, Submission,
+        OperationResult, Placement, Reason, StrangerEntry, Subject, Submission,
     },
     custody::{self, DeviceRef},
 };
@@ -41,6 +41,7 @@ pub struct ReachIngress {
 #[serde(deny_unknown_fields)]
 struct Dedup {
     hash: String,
+    route_hash: String,
     seq: u64,
     class: ReachClass,
     until: u64,
@@ -161,25 +162,26 @@ fn stage(tx: &redb::WriteTransaction, pending: &ReachPending, key: &str, hash: &
     let seq = pending.entry.seq;
     let retain_until = pending.entry.retain_until;
     let now = pending.entry.received_at;
+    let route_hash = custody::object_hash(&pending.entry.reach.route)?;
     for (key, cap, byte_cap) in keys(pending)? {
         charge(tx, &key, (1, bytes), (cap, byte_cap), 0)?;
     }
     rates(tx, pending, now)?;
-    let (metadata, metadata_cap) = maintenance::metadata(class);
-    charge(
-        tx,
-        metadata,
-        (
-            1,
-            u64::try_from(
-                key.len()
-                    + encoded(&Dedup { hash: hash.into(), seq, class, until: retain_until })?.len(),
-            )
-            .map_err(storage)?,
-        ),
-        (metadata_cap, 32 * 1024 * 1024),
-        0,
-    )?;
+    let metadata_bytes = u64::try_from(
+        key.len()
+            + encoded(&Dedup {
+                hash: hash.into(),
+                route_hash: route_hash.clone(),
+                seq,
+                class,
+                until: retain_until,
+            })?
+            .len(),
+    )
+    .map_err(storage)?;
+    for (metadata, capacity) in maintenance::metadata(class) {
+        charge(tx, metadata, (1, metadata_bytes), capacity, 0)?;
+    }
     tx.open_table(PENDING)
         .map_err(storage)?
         .insert(seq, encoded(pending)?.as_slice())
@@ -188,11 +190,104 @@ fn stage(tx: &redb::WriteTransaction, pending: &ReachPending, key: &str, hash: &
         .map_err(storage)?
         .insert(
             key,
-            encoded(&Dedup { hash: hash.into(), seq, class, until: retain_until })?.as_slice(),
+            encoded(&Dedup {
+                hash: hash.into(),
+                route_hash: route_hash.clone(),
+                seq,
+                class,
+                until: retain_until,
+            })?
+            .as_slice(),
         )
         .map_err(storage)?;
     maintenance::remember_dedup(tx, key, retain_until)?;
     Ok(())
+}
+
+struct PendingContext<'a> {
+    source_home: &'a str,
+    target: DeviceRef,
+    class: ReachClass,
+    placement: Placement,
+    policy_revision: u64,
+    now: u64,
+}
+fn make_pending(
+    tx: &redb::WriteTransaction,
+    submission: &Submission,
+    context: PendingContext<'_>,
+) -> Result<ReachPending> {
+    let PendingContext { source_home, target, class, placement, policy_revision, now } = context;
+    let route = &submission.route.body;
+    let envelope = &submission.envelope;
+    let root = route.recipient_root.clone();
+    let retain_until = if class == ReachClass::Unsolicited {
+        route
+            .expires_at
+            .min(now.checked_add(604_800).ok_or_else(|| refuse(Reason::ForeignCapacity))?)
+    } else {
+        route.expires_at
+    };
+    if retain_until <= now {
+        return Err(refuse(Reason::ForeignReadRefused));
+    }
+    let bytes = u64::try_from(encoded(envelope)?.len()).map_err(storage)?;
+    if class == ReachClass::Unsolicited && bytes > 256 * 1024 {
+        return Err(refuse(Reason::ForeignPayloadTooLarge));
+    }
+    let mut sequence = tx.open_table(SEQUENCE).map_err(storage)?;
+    let old = sequence.get("next").map_err(storage)?.map_or(0, |v| v.value());
+    let seq = old
+        .checked_add(1)
+        .filter(|n| *n <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
+        .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+    sequence.insert("next", seq).map_err(storage)?;
+    drop(sequence);
+    let pending = ReachPending {
+        recipient_root: root,
+        class,
+        bytes,
+        target,
+        entry: StrangerEntry {
+            seq,
+            peer_node: source_home.into(),
+            source_root: route.source.account_anchor.clone(),
+            received_at: now,
+            retain_until,
+            envelope: envelope.clone(),
+            reach: DeliveryReach { route: submission.route.clone(), cost: submission.cost.clone() },
+            conversation_id: route.conversation_id.clone(),
+            placement,
+            policy_revision,
+        },
+    };
+    Ok(pending)
+}
+
+fn verify_target(
+    tx: &redb::WriteTransaction,
+    root: &str,
+    device: String,
+    now: u64,
+) -> Result<DeviceRef> {
+    let recipient = store::authority(tx, root, now)?;
+    let target = recipient
+        .envelope()
+        .body
+        .devices
+        .iter()
+        .find(|d| d.device_id == device)
+        .ok_or_else(|| refuse(Reason::ReachRouteInvalid))?;
+    let target = DeviceRef {
+        account_anchor: root.into(),
+        device_id: device,
+        device_epoch: target.device_epoch,
+    };
+    recipient.authorize(&target, "message", now)?;
+    if recipient.envelope().body.devices.len() > 32 {
+        return Err(refuse(Reason::ForeignCapacity));
+    }
+    Ok(target)
 }
 
 fn verify_source(
@@ -257,23 +352,7 @@ impl RouterRedbStore {
         if peer.expires_at() <= now {
             return Err(refuse(Reason::ForeignSnapshotExpired));
         }
-        let recipient = store::authority(&tx, &root, now)?;
-        let target = recipient
-            .envelope()
-            .body
-            .devices
-            .iter()
-            .find(|d| d.device_id == device)
-            .ok_or_else(|| refuse(Reason::ReachRouteInvalid))?;
-        let target = DeviceRef {
-            account_anchor: root.clone(),
-            device_id: device,
-            device_epoch: target.device_epoch,
-        };
-        recipient.authorize(&target, "message", now)?;
-        if recipient.envelope().body.devices.len() > 32 {
-            return Err(refuse(Reason::ForeignCapacity));
-        }
+        let target = verify_target(&tx, &root, device, now)?;
         let local_home = store::home(&tx, &root)?;
         if local_home.record.home() != (node.node_id(), node.public_key()) {
             return Err(refuse(Reason::HomeRollback));
@@ -294,24 +373,10 @@ impl RouterRedbStore {
             .map(|v| row::<Dedup>(v.value()))
             .transpose()?
         {
-            if old.hash != hash {
+            if old.hash != hash || old.route_hash != custody::object_hash(&submission.route)? {
                 return Err(refuse(Reason::IdempotencyConflict));
             }
             return Ok(ReachIngress { seq: old.seq, class: old.class, duplicate: true });
-        }
-        let retain_until = if class == ReachClass::Unsolicited {
-            route
-                .expires_at
-                .min(now.checked_add(604_800).ok_or_else(|| refuse(Reason::ForeignCapacity))?)
-        } else {
-            route.expires_at
-        };
-        if retain_until <= now {
-            return Err(refuse(Reason::ForeignReadRefused));
-        }
-        let bytes = u64::try_from(encoded(envelope)?.len()).map_err(storage)?;
-        if class == ReachClass::Unsolicited && bytes > 256 * 1024 {
-            return Err(refuse(Reason::ForeignPayloadTooLarge));
         }
         drop(dedup);
         if class == ReachClass::Unsolicited {
@@ -331,35 +396,19 @@ impl RouterRedbStore {
             )?;
             super::cost::consume(&tx, cost, &hash, now)?;
         }
-        let mut sequence = tx.open_table(SEQUENCE).map_err(storage)?;
-        let old = sequence.get("next").map_err(storage)?.map_or(0, |v| v.value());
-        let seq = old
-            .checked_add(1)
-            .filter(|n| *n <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
-            .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
-        sequence.insert("next", seq).map_err(storage)?;
-        drop(sequence);
-        let pending = ReachPending {
-            recipient_root: root,
-            class,
-            bytes,
-            target,
-            entry: StrangerEntry {
-                seq,
-                peer_node: source_home.into(),
-                source_root: route.source.account_anchor.clone(),
-                received_at: now,
-                retain_until,
-                envelope: envelope.clone(),
-                reach: DeliveryReach {
-                    route: submission.route.clone(),
-                    cost: submission.cost.clone(),
-                },
-                conversation_id: route.conversation_id.clone(),
+        let pending = make_pending(
+            &tx,
+            submission,
+            PendingContext {
+                source_home,
+                target,
+                class,
                 placement,
                 policy_revision: state.policy_revision(),
+                now,
             },
-        };
+        )?;
+        let seq = pending.entry.seq;
         stage(&tx, &pending, &key, &hash)?;
         tx.commit()?;
         Ok(ReachIngress { seq, class, duplicate: false })

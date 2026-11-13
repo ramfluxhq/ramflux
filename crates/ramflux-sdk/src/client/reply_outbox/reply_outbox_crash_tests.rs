@@ -299,6 +299,7 @@ fn bootstrap_pair(
     let local = peer_branch.device_id.clone();
     let _ = peer.open_routed(
         &crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: local.clone(),
@@ -699,6 +700,7 @@ fn assert_control_packet(
     let local = device_target(peer)?;
     let opened = peer.open_routed(
         &crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: local.clone(),

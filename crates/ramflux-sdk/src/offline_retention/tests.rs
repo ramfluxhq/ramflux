@@ -328,6 +328,7 @@ impl ramflux_transport::GatewaySessionFrameSource for MailboxTransport {
 
 fn gateway_entry(entry: ramflux_node_core::InboxEntry) -> crate::GatewayInboxEntry {
     crate::GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: entry.inbox_seq,
         target_delivery_id: entry.target_delivery_id,

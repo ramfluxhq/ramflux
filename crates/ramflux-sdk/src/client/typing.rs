@@ -94,6 +94,7 @@ impl TypingReceiver {
             return Ok(TypingOutcome::Dropped(EphemeralDropReason::Invalid));
         }
         let entry = crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 0,
             target_delivery_id: envelope.target_delivery_id.clone(),

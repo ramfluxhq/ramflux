@@ -31,6 +31,9 @@ pub struct InboxEntry {
     pub inbox_seq: u64,
     pub target_delivery_id: String,
     pub envelope: ramflux_protocol::Envelope,
+    /// Original branch route and nullable cost; required when the common reach profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Box<ramflux_protocol::contact_reach::DeliveryReach>>,
 }
 
 impl Clone for InboxEntry {
@@ -40,6 +43,7 @@ impl Clone for InboxEntry {
             *counts.borrow_mut().entry(self.target_delivery_id.clone()).or_default() += 1;
         });
         Self {
+            reach: self.reach.clone(),
             inbox_seq: self.inbox_seq,
             target_delivery_id: self.target_delivery_id.clone(),
             envelope: self.envelope.clone(),
@@ -310,6 +314,7 @@ impl OpaqueDeviceInbox {
         let retain_until = inbox_retain_until(&envelope, now);
         let next_seq = self.next_seq.entry(target_delivery_id.clone()).or_insert(1);
         let entry = InboxEntry {
+            reach: None,
             inbox_seq: *next_seq,
             target_delivery_id: target_delivery_id.clone(),
             envelope,
@@ -940,6 +945,8 @@ pub struct OnlineDelivery {
     pub target_delivery_id: String,
     pub inbox_seq: u64,
     pub envelope: ramflux_protocol::Envelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Box<ramflux_protocol::contact_reach::DeliveryReach>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

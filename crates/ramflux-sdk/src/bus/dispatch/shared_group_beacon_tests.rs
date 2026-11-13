@@ -113,6 +113,7 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
 
 fn beacon_entry(envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sender".into(),

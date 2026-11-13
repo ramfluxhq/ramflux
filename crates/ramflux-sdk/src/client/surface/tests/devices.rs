@@ -103,6 +103,7 @@ pub(super) fn entry(
         ttl: 600,
     };
     Ok(crate::GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "test-target".into(),

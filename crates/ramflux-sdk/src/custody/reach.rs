@@ -29,7 +29,10 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         }
         let session = self.session.as_ref().ok_or_else(|| refused(Reason::ForeignUnavailable))?;
         let request = Request {
-            request_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            request_id: match &operation {
+                Operation::Query { query } => query.nonce.clone(),
+                _ => ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            },
             session_id: session.session_id.clone(),
             session_generation: 1,
             remaining_ms: u64::try_from(self.timeout.as_millis().min(10_000))
@@ -43,17 +46,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let CustodyServerFrame::ContactForeignResult { response } = frame else {
             return Err(refused(Reason::ForeignInvalidFrame));
         };
-        if response.request_id != request.request_id
-            || response.session_id != request.session_id
-            || response.session_generation != request.session_generation
-        {
-            return Err(refused(Reason::ForeignInvalidFrame));
-        }
-        request.operation.validate_result(&response.result)?;
-        if let OperationResult::Error { reason, .. } = response.result {
-            return Err(refused(reason));
-        }
-        Ok(response.result)
+        request.validate_response(&response)?;
+        crate::contact_reach::remote_result(response.result)
     }
 
     /// Fetch a complete immutable reach mirror before projecting any page.

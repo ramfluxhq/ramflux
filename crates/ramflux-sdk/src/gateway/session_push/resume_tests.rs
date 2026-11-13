@@ -83,6 +83,7 @@ pub(super) fn eid(first: u8) -> String {
 pub(super) fn node_record(seq: u64, retain_until: i64) -> n::PageEntryRecord {
     n::PageEntryRecord {
         entry: n::InboxEntry {
+            reach: None,
             inbox_seq: seq,
             target_delivery_id: "target-route".into(),
             envelope: envelope(),
@@ -94,6 +95,7 @@ pub(super) fn node_record(seq: u64, retain_until: i64) -> n::PageEntryRecord {
 fn sdk_record(seq: u64, retain_until: i64) -> PageEntryRecord {
     PageEntryRecord {
         entry: GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: seq,
             target_delivery_id: "target-route".into(),
@@ -187,6 +189,7 @@ fn buffered() -> GatewaySessionEngine {
     pushed.envelope_id = "env-pushed".into();
     engine.last_frame_bytes = 1;
     engine.buffer_delivery(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 71,
         target_delivery_id: "target-route".into(),
@@ -267,6 +270,7 @@ async fn capable_resume_page_exact_reply() {
             engine.last_frame_bytes = 7;
             engine.buffer_capable_delivery(
                 GatewayInboxEntry {
+                    reach: None,
                     forwarded: false,
                     inbox_seq: 71,
                     target_delivery_id: "target-route".into(),

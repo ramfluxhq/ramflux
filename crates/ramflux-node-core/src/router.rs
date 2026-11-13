@@ -873,6 +873,7 @@ impl RouterCore {
                 "online".to_owned(),
                 Some(delivery.inbox_seq),
                 Some(InboxEntry {
+                    reach: delivery.reach.clone(),
                     inbox_seq: delivery.inbox_seq,
                     target_delivery_id: delivery.target_delivery_id,
                     envelope: delivery.envelope,
@@ -1292,6 +1293,7 @@ impl RouterCore {
                 };
                 self.index_envelope_target(&entry);
                 RouterSubmitOutcome::Online(OnlineDelivery {
+                    reach: entry.reach.clone(),
                     gateway_id,
                     session_id,
                     target_delivery_id,

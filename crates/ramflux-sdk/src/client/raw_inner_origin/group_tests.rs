@@ -467,6 +467,7 @@ async fn own_group_copy_of_received_original_matches_exact_authenticated_plainte
         "../../../../ramflux-protocol/src/sender_transcript_vectors.json"
     ))?;
     let entry = crate::GatewayInboxEntry {
+        reach: None,
         envelope: serde_json::from_value(vectors["envelope"].clone())?,
         forwarded: false,
         inbox_seq: 1,

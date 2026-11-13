@@ -1944,6 +1944,7 @@ fn committed_submit_entry(
         anyhow::anyhow!("router submit response is missing its committed sequence")
     })?;
     Ok(ramflux_node_core::InboxEntry {
+        reach: None,
         inbox_seq,
         target_delivery_id: response.target_delivery_id.clone(),
         envelope,

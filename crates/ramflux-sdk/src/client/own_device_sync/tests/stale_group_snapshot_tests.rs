@@ -402,6 +402,7 @@ fn member_packet(
         ttl: 3600,
     };
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "target_device_sync".into(),

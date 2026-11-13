@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
+mod delivery;
+mod inner;
 mod projection;
 mod verification;
 use crate::SdkError;
@@ -19,6 +21,19 @@ use std::collections::BTreeMap;
 
 fn refused(reason: Reason) -> SdkError {
     SdkError::ReachRefused(reason)
+}
+pub(crate) fn remote_result(
+    result: ramflux_protocol::contact_reach::OperationResult,
+) -> Result<ramflux_protocol::contact_reach::OperationResult, SdkError> {
+    if let ramflux_protocol::contact_reach::OperationResult::Error {
+        reason,
+        retry_after_ms,
+        current_revision,
+    } = result
+    {
+        return Err(SdkError::ReachRemote { reason, retry_after_ms, current_revision });
+    }
+    Ok(result)
 }
 /// A completely verified home mirror, suitable for one atomic local projection.
 pub struct VerifiedReachState {

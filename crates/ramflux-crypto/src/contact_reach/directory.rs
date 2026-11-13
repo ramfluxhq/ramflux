@@ -235,6 +235,7 @@ pub fn verify_resolve(
     now: u64,
 ) -> Result<(), CryptoError> {
     let b = &value.body;
+    b.validate()?;
     if b.version != 2
         || b.centre_id != pin.pin.centre_id
         || b.name != name

@@ -280,6 +280,7 @@ async fn refusal_rows() {
     // (r7) each capable reply kind other than submit_accepted while awaiting the submit.
     let record = n::PageEntryRecord {
         entry: n::InboxEntry {
+            reach: None,
             inbox_seq: 71,
             target_delivery_id: "target-route".into(),
             envelope: envelope(),

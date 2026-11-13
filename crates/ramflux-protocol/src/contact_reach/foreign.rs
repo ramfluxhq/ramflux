@@ -4,7 +4,7 @@
 //! Correlated account/session and node-service carriers for unified contact reach.
 use super::{
     Admission, Challenge, ChallengeRequest, Cost, DeliveryReach, Placement, ReachPolicy,
-    StateManifest, StatePage, Submission, actor, digest, directory, invalid, node, safe, text,
+    StateManifest, StatePage, Submission, actor, digest, directory, invalid, node, safe,
 };
 use crate::custody::{CustodyAuthority, DeviceRef, Envelope as Signed};
 use serde::{Deserialize, Serialize};
@@ -389,113 +389,7 @@ pub enum Reason {
     UsernameSignerRevoked,
 }
 
-impl Request {
-    /// Check account/session framing before dispatch; no body claims grant a session.
-    /// # Errors
-    /// Refuses invalid correlation ids, generation or hop budgets.
-    pub fn validate(&self) -> Result<(), crate::ProtocolError> {
-        digest(&self.request_id)?;
-        text(&self.session_id)?;
-        safe(self.session_generation)?;
-        if self.session_generation == 0 || !(1..=10_000).contains(&self.remaining_ms) {
-            return Err(invalid("reach session generation or budget"));
-        }
-        Ok(())
-    }
-}
+mod validation;
 
-impl Operation {
-    /// Match the exact result arm and immutable request identity before exposing an owner result.
-    /// # Errors
-    /// Refuses substituted envelope/profile ids, mismatched revisions and recursive composite results.
-    pub fn validate_result(&self, result: &OperationResult) -> Result<(), crate::ProtocolError> {
-        if matches!(result, OperationResult::Error { .. } | OperationResult::Challenge { .. }) {
-            return Ok(());
-        }
-        let valid = match (self, result) {
-            (Self::Query { .. }, OperationResult::Query { .. }) => true,
-            (
-                Self::Submit { submission, .. },
-                OperationResult::Submit { envelope_id, outcome, reason },
-            ) => {
-                envelope_id == &submission.envelope.envelope_id
-                    && (*outcome == SubmitOutcome::Refused) == reason.is_some()
-            }
-            (Self::Policy { update }, OperationResult::Policy { revision, .. }) => {
-                *revision == update.body.revision
-            }
-            (Self::Admission { update, .. }, OperationResult::Admission { revision, .. }) => {
-                update.body.expected_revision.checked_add(1) == Some(*revision)
-            }
-            (
-                Self::Start { update, submission, .. },
-                OperationResult::Start { revision, submission: result, .. },
-            )
-            | (
-                Self::Reply { update, submission, .. },
-                OperationResult::Reply { revision, submission: result, .. },
-            ) => {
-                update.body.expected_revision.checked_add(1) == Some(*revision)
-                    && matches!(result.as_ref(),OperationResult::Submit {
-                    envelope_id,outcome:SubmitOutcome::Spooled,reason:None } if envelope_id==&submission.envelope.envelope_id)
-            }
-            (
-                Self::ReachState { snapshot_id, page, .. },
-                OperationResult::ReachState { manifest, page: result },
-            ) => {
-                result.page == *page
-                    && snapshot_id.as_ref().is_none_or(|id| id == &manifest.body.snapshot_id)
-                    && result.snapshot_id == manifest.body.snapshot_id
-            }
-            (
-                Self::Strangers { after_seq, limit, .. },
-                OperationResult::Strangers { entries, next_seq },
-            ) => {
-                let mut previous = *after_seq;
-                let mut ordered = true;
-                for entry in entries {
-                    if entry.seq <= previous {
-                        ordered = false;
-                    }
-                    previous = entry.seq;
-                }
-                ordered
-                    && u64::try_from(entries.len()).is_ok_and(|n| n <= *limit && n <= 16)
-                    && *next_seq == previous
-                    && crate::canonical_json_bytes(entries)?.len() <= 2 * 1024 * 1024
-            }
-            (
-                Self::ProfilePublish { update, .. },
-                OperationResult::ProfilePublish { epoch, profile_hash, .. },
-            ) => {
-                *epoch == update.body.epoch
-                    && profile_hash
-                        == &crate::custody::framed_hash(directory::PROFILE_HASH_DOMAIN, update)?
-            }
-            (
-                Self::UsernameMutate { operation, .. },
-                OperationResult::UsernameMutate { receipt },
-            ) => {
-                receipt.body.operation_id == operation.body.operation_id
-                    && receipt.body.operation_hash
-                        == crate::custody::framed_hash(directory::OPERATION_HASH_DOMAIN, operation)?
-            }
-            (
-                Self::UsernameStatus { operation_id, operation_hash, .. },
-                OperationResult::UsernameStatus { receipt },
-            ) => {
-                receipt.body.operation_id == *operation_id
-                    && receipt.body.operation_hash == *operation_hash
-            }
-            (
-                Self::UsernameResolve { name, nonce },
-                OperationResult::UsernameResolve { resolve },
-            ) => resolve.body.name == *name && resolve.body.request_nonce == *nonce,
-            _ => false,
-        };
-        if !valid {
-            return Err(invalid("reach operation/result mismatch"));
-        }
-        Ok(())
-    }
-}
+mod query;
+pub use query::*;

@@ -5,6 +5,7 @@
 use super::*;
 fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
     crate::GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "target".into(),

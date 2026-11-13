@@ -52,6 +52,7 @@ fn bootstrap(
     )?;
     msg.encrypted_body = serde_json::to_vec(&sealed)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
@@ -368,6 +369,7 @@ async fn legacy_a2i_refusal_has_no_ack_or_persistent_effects_across_reopen() -> 
         report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".to_owned(),
@@ -434,6 +436,7 @@ fn sealed_legacy_a2i(
     })?;
     Ok((
         GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "bob".to_owned(),

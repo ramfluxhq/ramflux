@@ -164,6 +164,7 @@ mod tests {
     #[test]
     fn legacy_group_key_is_stable_for_the_same_envelope() -> Result<(), SdkError> {
         let entry = GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "t".into(),

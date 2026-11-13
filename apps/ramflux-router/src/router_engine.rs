@@ -660,6 +660,7 @@ pub(crate) fn persistent_entry_from_outcome(
     match outcome {
         ramflux_node_core::RouterSubmitOutcome::Online(delivery) => {
             Some(ramflux_node_core::InboxEntry {
+                reach: delivery.reach.clone(),
                 inbox_seq: delivery.inbox_seq,
                 target_delivery_id: delivery.target_delivery_id.clone(),
                 envelope: delivery.envelope.clone(),

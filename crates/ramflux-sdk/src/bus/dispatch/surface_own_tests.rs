@@ -118,6 +118,7 @@ async fn sibling_fixture_with_peer(
 fn entry(envelope: ramflux_protocol::Envelope, sequence: u64) -> GatewayInboxEntry {
     // Inbox sequence and destination are node metadata; the sender's signed envelope stays exact.
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: "sibling".into(),
@@ -330,12 +331,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     let create = super::dm_tests::create_carrier(&source.client)?;
     send(&mut source, &create).await?;
     let first = initial.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    let incoming = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: first.target_delivery_id.clone(),
-        envelope: first,
-    };
+    let incoming = received_entry(1, first);
     let mut receiver = GatewaySessionEngine::with_test_transport(
         peer_config.clone(),
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
@@ -368,12 +364,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     let request = controls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
     let replies = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(replies.clone());
-    gateway.inbox.push(GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: request.target_delivery_id.clone(),
-        envelope: request,
-    });
+    gateway.inbox.push(received_entry(1, request));
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         fixture.config,
         Box::new(gateway),
@@ -387,12 +378,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         .find(|e| e.target_delivery_id == "device-peer-one")
         .cloned()
         .ok_or("resync answer")?;
-    let incoming = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 2,
-        target_delivery_id: reply.target_delivery_id.clone(),
-        envelope: reply,
-    };
+    let incoming = received_entry(2, reply);
     peer.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
     let view = peer.client.surface_get("surface", 0, None)?;
     assert_eq!(view["version"], 2);
@@ -845,6 +831,7 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     )
     .await?;
     let incoming = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 2,
         target_delivery_id: sealed.envelope.target_delivery_id.clone(),
@@ -1063,3 +1050,13 @@ mod ownership;
 
 #[path = "surface_own_tests/contact_backfill_tests.rs"]
 mod contact_backfill_tests;
+
+fn received_entry(inbox_seq: u64, envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
+    GatewayInboxEntry {
+        reach: None,
+        forwarded: false,
+        inbox_seq,
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
+    }
+}

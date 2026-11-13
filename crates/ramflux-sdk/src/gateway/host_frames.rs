@@ -396,7 +396,9 @@ impl GatewaySessionEngine {
         if let Some(frame) = super::reach::decode_reply(bytes)? {
             return Ok(Some(Step::Legacy(Box::new(frame))));
         }
-        if bytes.len() > ramflux_transport::MAX_GATEWAY_FRAME_BYTES {
+        if bytes.len() > ramflux_transport::MAX_GATEWAY_FRAME_BYTES
+            && !super::reach::permits_metadata_overhead(bytes)?
+        {
             return Err(self.retire("ordinary frame exceeds gateway budget"));
         }
         match route(bytes, &self.mode) {

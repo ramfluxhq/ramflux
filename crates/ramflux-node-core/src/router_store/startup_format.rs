@@ -116,6 +116,7 @@ mod tests {
         let path = directory.path().join("router.redb");
         drop(RouterRedbStore::open_without_wal(&path)?);
         let entry = InboxEntry {
+            reach: None,
             inbox_seq: 1,
             target_delivery_id: "target".into(),
             envelope: crate::test_support::federation_fixtures::envelope(

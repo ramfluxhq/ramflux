@@ -226,6 +226,7 @@ fn seal_as(
         &envelope,
     )?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
@@ -569,6 +570,7 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
         report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".to_owned(),

@@ -8,6 +8,7 @@ fn frame(seq: u64) -> ramflux_node_core::GatewayServerFrame {
     envelope.target_delivery_id = "target".into();
     ramflux_node_core::GatewayServerFrame::Deliver {
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             target_delivery_id: "target".into(),
             inbox_seq: seq,
             envelope,

@@ -1457,6 +1457,7 @@ mod sender_hash_audit_tests {
         );
         assert!(authenticate(&envelope, &envelope.source_principal_id, &public).is_ok());
         let mut entry = crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: envelope.target_delivery_id.clone(),

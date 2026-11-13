@@ -274,6 +274,7 @@ impl ramflux_transport::GatewaySessionFrameSink for DirectorySession {
 
 fn delivered_entry(envelope: ramflux_protocol::Envelope) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),

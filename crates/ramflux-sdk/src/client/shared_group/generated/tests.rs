@@ -21,6 +21,7 @@ fn entry(source: &Fixture) -> TestResult<crate::GatewayInboxEntry> {
         &outer
     )?);
     Ok(crate::GatewayInboxEntry {
+        reach: None,
         envelope: serde_json::from_value(outer)?,
         forwarded: false,
         inbox_seq: 1,

@@ -366,6 +366,8 @@ fn committed_evidence(
     )
     .map_err(auth_error)?;
     let actor = authority
+        .management_actor_authority(&a.actor)
+        .map_err(auth_error)?
         .envelope()
         .body
         .devices

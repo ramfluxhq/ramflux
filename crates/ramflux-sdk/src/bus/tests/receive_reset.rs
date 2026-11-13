@@ -37,6 +37,7 @@ async fn retry() -> Case {
     hold.release.notify_one();
     let envelope = submitted(&gateway).await?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),
@@ -80,6 +81,7 @@ async fn recovery() -> Case {
     hold.release.notify_one();
     let envelope = submitted(&gateway).await?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),
@@ -118,6 +120,7 @@ async fn reply() -> Case {
     hold.release.notify_one();
     let envelope = submitted(&gateway).await?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),
@@ -162,6 +165,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     )?;
     message.encrypted_body = serde_json::to_vec(&packet)?;
     let trigger = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "peer".into(),
@@ -183,6 +187,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
         )?
         .ok_or("reset envelope")?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sender".into(),

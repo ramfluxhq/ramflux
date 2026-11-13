@@ -44,9 +44,18 @@ impl ReachService {
                 retry_after_ms: None,
                 current_revision: Some(revision),
             },
-            ReachError::Refused(reason) => {
-                OperationResult::Error { reason, retry_after_ms: None, current_revision: None }
-            }
+            ReachError::Refused(reason) => OperationResult::Error {
+                reason,
+                retry_after_ms: if matches!(
+                    reason,
+                    Reason::ForeignRateLimited | Reason::ForeignSpamLimited
+                ) {
+                    Some(1000)
+                } else {
+                    None
+                },
+                current_revision: None,
+            },
             ReachError::Storage(_) => OperationResult::Error {
                 reason: Reason::ForeignStorageUnavailable,
                 retry_after_ms: None,

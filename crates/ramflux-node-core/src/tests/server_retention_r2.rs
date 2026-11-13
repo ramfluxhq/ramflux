@@ -94,8 +94,12 @@ fn idle_router_wal_segment_survives_retention_then_recovers_new_writes()
     store.prune_expired(wall_clock())?;
     let mut message = envelope("after-idle", "idle-mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = wall_clock();
-    let entry =
-        InboxEntry { inbox_seq: 1, target_delivery_id: "idle-mailbox".into(), envelope: message };
+    let entry = InboxEntry {
+        reach: None,
+        inbox_seq: 1,
+        target_delivery_id: "idle-mailbox".into(),
+        envelope: message,
+    };
     store.record_submission(
         &request_replay_fixture("after-idle"),
         wall_clock() + 3_600,
@@ -122,8 +126,12 @@ fn router_restart_never_reuses_an_expired_logged_sequence() -> Result<(), Box<dy
     let mut message = envelope("expired-before-checkpoint", "mailbox", DeliveryClass::OpaqueEvent);
     message.created_at = wall_clock() - 1_000;
     message.ttl = 10;
-    let entry =
-        InboxEntry { inbox_seq: 7, target_delivery_id: "mailbox".into(), envelope: message };
+    let entry = InboxEntry {
+        reach: None,
+        inbox_seq: 7,
+        target_delivery_id: "mailbox".into(),
+        envelope: message,
+    };
     store.record_submission_increment(
         &request_replay_fixture("expired-key"),
         wall_clock() + 60,

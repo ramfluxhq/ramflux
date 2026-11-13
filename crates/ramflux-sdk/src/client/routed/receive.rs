@@ -270,9 +270,7 @@ impl RamfluxClient {
             ApplyOpts { attachments, prepared: None },
             Self::legacy_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
-        let apply = Box::pin(apply);
-        apply.await
+        Box::pin(apply).await
     }
 
     pub(crate) async fn apply_routed_prepared_entry(
@@ -289,9 +287,7 @@ impl RamfluxClient {
             ApplyOpts { attachments: false, prepared: Some(prepared) },
             Self::legacy_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
-        let apply = Box::pin(apply);
-        apply.await
+        Box::pin(apply).await
     }
 
     /// Same prepare/open as live apply; persist joins the caller's receive transaction.
@@ -310,9 +306,7 @@ impl RamfluxClient {
             ApplyOpts { attachments: false, prepared },
             persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
-        let apply = Box::pin(apply);
-        apply.await
+        Box::pin(apply).await
     }
 
     fn legacy_persist(
@@ -406,6 +400,7 @@ impl RamfluxClient {
         let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
         #[cfg(feature = "itest-rfd-fault")]
         let entry = fault_entry.as_deref().unwrap_or(entry);
+        self.require_reach_entry_metadata(entry)?;
         let consume_erased = CONSUME_ERASED;
         let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
@@ -420,6 +415,7 @@ impl RamfluxClient {
         let history = prepared.as_mut().and_then(|prepared| prepared.history.take());
         let (native_prepared, directory) =
             self.prepare_routed_authority(engine, entry, prepared).await?;
+        self.require_reach_entry_authority(entry)?;
         let commit = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
@@ -431,6 +427,7 @@ impl RamfluxClient {
         } else {
             (opened.body.clone(), Vec::new())
         };
+        self.require_reach_decrypted_route(entry, &opened, &body)?;
         self.prepare_routed_surface_projection(&mut opened, entry, &body)?;
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data_from_outer(

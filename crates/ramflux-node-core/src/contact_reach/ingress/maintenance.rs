@@ -14,11 +14,15 @@ const BATCH: usize = 128;
 fn index_key(until: u64, key: &str) -> String {
     format!("{until:020}/{key}")
 }
-pub(super) fn metadata(class: ReachClass) -> (&'static str, u64) {
+pub(super) fn metadata(class: ReachClass) -> Vec<(&'static str, (u64, u64))> {
     if class == ReachClass::Unsolicited {
-        ("metadata-unsolicited", 65_536)
+        vec![("metadata-unsolicited", (65_536, 32 * 1024 * 1024))]
     } else {
-        ("metadata-accepted", 65_536)
+        let mut compartments = vec![("metadata-accepted", (65_536, 32 * 1024 * 1024))];
+        if class == ReachClass::Replied {
+            compartments.push(("metadata-replied", (32_768, 16 * 1024 * 1024)));
+        }
+        compartments
     }
 }
 pub(super) fn remember_dedup(tx: &redb::WriteTransaction, key: &str, until: u64) -> Result<()> {
@@ -66,24 +70,25 @@ pub(super) fn clean(tx: &redb::WriteTransaction, now: u64) -> Result<()> {
             table.remove(key.as_str()).map_err(storage)?;
             drop(table);
             remove_payload(tx, value.seq)?;
-            let (metadata, _) = metadata(value.class);
             let mut counters = tx.open_table(COUNTERS).map_err(storage)?;
-            let mut count: Counter = counters
-                .get(metadata)
-                .map_err(storage)?
-                .map(|v| row(v.value()))
-                .transpose()?
-                .ok_or_else(|| storage("missing dedup metadata charge"))?;
             let bytes = u64::try_from(key.len() + encoded(&value)?.len()).map_err(storage)?;
-            count.entries = count
-                .entries
-                .checked_sub(1)
-                .ok_or_else(|| storage("dedup metadata entry underflow"))?;
-            count.bytes = count
-                .bytes
-                .checked_sub(bytes)
-                .ok_or_else(|| storage("dedup metadata byte underflow"))?;
-            counters.insert(metadata, encoded(&count)?.as_slice()).map_err(storage)?;
+            for (metadata, _) in metadata(value.class) {
+                let mut count: Counter = counters
+                    .get(metadata)
+                    .map_err(storage)?
+                    .map(|v| row(v.value()))
+                    .transpose()?
+                    .ok_or_else(|| storage("missing dedup metadata charge"))?;
+                count.entries = count
+                    .entries
+                    .checked_sub(1)
+                    .ok_or_else(|| storage("dedup metadata entry underflow"))?;
+                count.bytes = count
+                    .bytes
+                    .checked_sub(bytes)
+                    .ok_or_else(|| storage("dedup metadata byte underflow"))?;
+                counters.insert(metadata, encoded(&count)?.as_slice()).map_err(storage)?;
+            }
         }
         tx.open_table(DEDUP_EXPIRY).map_err(storage)?.remove(index.as_str()).map_err(storage)?;
     }

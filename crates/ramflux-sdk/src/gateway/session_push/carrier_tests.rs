@@ -49,6 +49,7 @@ pub(super) fn attach_host_with_dispatch_counter(
 
 fn entry(seq: u64) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: seq,
         target_delivery_id: "target-route".into(),

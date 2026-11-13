@@ -263,6 +263,7 @@ fn deliver_frame(
 ) -> ramflux_node_core::GatewayServerFrame {
     ramflux_node_core::GatewayServerFrame::Deliver {
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             inbox_seq: 1,
             target_delivery_id: target_delivery_id.to_owned(),
             envelope: test_envelope(envelope_id, target_delivery_id),

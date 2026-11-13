@@ -70,6 +70,7 @@ pub(super) fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInbo
         report_commitment: None,
     })?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),
@@ -517,6 +518,7 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
             report_commitment: None,
         })?;
         inbound = Some(GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "bob".to_owned(),
@@ -870,6 +872,7 @@ fn a_legacy_group_envelope_cannot_be_released_under_a_different_group_id() -> Re
     let mut msg = message("legacy-group-conflict", "requested-thread");
     msg.encrypted_body = alice.client.encrypt_group_message("actual-group", "alice", b"text")?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".to_owned(),

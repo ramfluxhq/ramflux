@@ -143,6 +143,7 @@ fn legacy_group_fixture_with_pin(
         ttl: 3600,
     };
     let good = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 2,
         target_delivery_id: "target".into(),

@@ -103,6 +103,7 @@ pub(crate) fn submit(
     let (entry, status) = match outcome {
         RouterSubmitOutcome::Online(delivery) => (
             InboxEntry {
+                reach: delivery.reach.clone(),
                 inbox_seq: delivery.inbox_seq,
                 target_delivery_id: delivery.target_delivery_id,
                 envelope: delivery.envelope,

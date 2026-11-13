@@ -53,6 +53,7 @@ async fn legacy_body_invalid_quarantine_preserves_pair_bootstrap_and_ratchet_bod
         report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: b.id.clone(),

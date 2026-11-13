@@ -753,6 +753,7 @@ fn drain_row(envelope: &ramflux_protocol::Envelope) -> ramflux_node_core::Migrat
         account_anchor: "anchor".into(),
         migration_id: "migration".into(),
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             inbox_seq: 1,
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope: envelope.clone(),

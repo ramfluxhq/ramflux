@@ -29,6 +29,7 @@ pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, M
 mod attachment_floor;
 mod authority_evidence;
 mod courier;
+mod custodian_history;
 pub(crate) use courier::MigrationCourierClaim;
 pub(crate) mod drain;
 pub use drain::{MigrationDrainEntry, MigrationDrainOutcome, MigrationDrainState};
@@ -288,6 +289,7 @@ fn write<T: Serialize>(
     Ok(())
 }
 fn save_head(tx: &redb::WriteTransaction, evidence: &RecordEvidence) -> Result<(), NodeCoreError> {
+    custodian_history::remember(tx, evidence)?;
     let hash = record_hash(&evidence.record).map_err(storage)?;
     write(tx, RECORDS, &hash, evidence)?;
     write(tx, HEADS, evidence.record.account_anchor(), evidence)?;

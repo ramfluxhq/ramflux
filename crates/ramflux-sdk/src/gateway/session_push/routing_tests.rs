@@ -95,7 +95,12 @@ pub(super) fn envelope() -> ramflux_protocol::Envelope {
 }
 
 pub(super) fn node_entry() -> n::InboxEntry {
-    n::InboxEntry { inbox_seq: 71, target_delivery_id: "target-route".into(), envelope: envelope() }
+    n::InboxEntry {
+        reach: None,
+        inbox_seq: 71,
+        target_delivery_id: "target-route".into(),
+        envelope: envelope(),
+    }
 }
 
 fn capable(frame: &n::SessionPushServerFrame) -> Value {

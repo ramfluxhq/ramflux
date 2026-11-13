@@ -55,6 +55,7 @@ fn changing_the_bootstrap_sequence_without_reencrypting_is_rejected() -> Result<
     let mut message = outgoing(&alice, &bob, "sequence-tamper");
     message.encrypted_body = serde_json::to_vec(&encrypted)?;
     let tampered = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".into(),

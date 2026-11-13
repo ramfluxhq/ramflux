@@ -91,6 +91,7 @@ impl LegacyCase {
             report_commitment: None,
         })?;
         Ok(GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: seq,
             target_delivery_id: "bob".into(),

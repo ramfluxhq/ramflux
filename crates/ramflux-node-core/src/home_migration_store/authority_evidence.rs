@@ -17,6 +17,8 @@ pub(super) const EXPIRY: TableDefinition<&str, &[u8]> =
 #[serde(deny_unknown_fields)]
 struct Evidence {
     publication: Publication,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custodian_publication: Option<Publication>,
     retain_until: u64,
 }
 pub(super) fn remember(
@@ -39,6 +41,7 @@ pub(super) fn remember(
         until
     };
     let evidence = Evidence {
+        custodian_publication: super::custodian_history::capture(tx, publication, now)?,
         publication: Publication {
             record: publication.record.clone(),
             compacted_ids: publication.compacted_ids.clone(),
@@ -65,9 +68,14 @@ pub(super) fn verify(
         .issued_at
         .max(p.record.body.issued_at)
         .max(p.record.body.master_certificate.body.issued_at);
-    let authority =
-        ramflux_crypto::custody::verify_record(&p.record, at, p.compacted_ids.as_deref(), None)
-            .map_err(auth_error)?;
+    let authority = ramflux_crypto::custody::verify_publication(
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: p.clone(),
+            custodian_publication: evidence.custodian_publication,
+        },
+        at,
+    )
+    .map_err(auth_error)?;
     crypto::verify_authorization(authorization, &authority, a.issued_at).map_err(auth_error)
 }
 pub(super) fn cleanup(tx: &redb::WriteTransaction, now: u64) -> Result<(), NodeCoreError> {

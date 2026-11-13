@@ -38,6 +38,7 @@ fn seal_reaction(
     let envelope = peer.seal_inner_to(own, &exact)?;
     Ok((
         GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: hlc,
             target_delivery_id: own.config.target_delivery_id.clone(),

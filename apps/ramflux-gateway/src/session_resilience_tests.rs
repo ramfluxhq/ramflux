@@ -252,6 +252,7 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
     let envelope = super::tests::test_envelope();
     let frame = ramflux_node_core::GatewayServerFrame::Deliver {
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             target_delivery_id: "peer".into(),
             inbox_seq: 1,
             envelope: envelope.clone(),

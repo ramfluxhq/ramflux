@@ -282,6 +282,7 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
             report_commitment: None,
         })?;
         let entry = GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "bob".into(),
@@ -360,6 +361,7 @@ async fn valid_delivery_after_rejected_control(
         report_commitment: None,
     })?;
     let next = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 2,
         target_delivery_id: "bob".into(),
@@ -411,6 +413,7 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
         report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".into(),

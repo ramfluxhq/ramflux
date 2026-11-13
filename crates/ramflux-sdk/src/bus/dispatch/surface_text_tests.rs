@@ -202,6 +202,7 @@ pub(in crate::bus::dispatch) fn assert_receivers(
         )?;
         for (index, delivery) in pair.iter().enumerate() {
             let entry = GatewayInboxEntry {
+                reach: None,
                 forwarded: false,
                 inbox_seq: u64::try_from(index + 1)
                     .map_err(|_| SdkError::LocalBus("index".into()))?,
@@ -387,6 +388,7 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
     assert_receivers(&peers, &first, epoch, 1)?;
     let envelope = envelopes[2].clone();
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 3,
         target_delivery_id: envelope.target_delivery_id.clone(),

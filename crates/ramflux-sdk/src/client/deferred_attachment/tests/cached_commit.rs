@@ -40,6 +40,7 @@ pub(super) fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkErro
         ttl: 3600,
     };
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "recipient-device".into(),

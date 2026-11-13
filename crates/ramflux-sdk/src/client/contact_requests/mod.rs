@@ -42,6 +42,11 @@ impl RamfluxClient {
             .unwrap_or_else(|| "manual".into()))
     }
     pub(crate) fn set_contact_request_policy(&self, policy: &str) -> Result<(), SdkError> {
+        if ramflux_protocol::contact_reach::enabled() && policy == "auto_accept" {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ContactConfirmationRequired,
+            ));
+        }
         if !matches!(policy, "manual" | "auto_accept") {
             return Err(invalid("contact_requests must be manual or auto_accept"));
         }
@@ -243,7 +248,9 @@ impl RamfluxClient {
             return Ok(());
         }
         self.record_pending_friend_link(&request.link_id, root, &body.target_root)?;
-        if reciprocal || self.contact_request_policy()? == "auto_accept" {
+        if !ramflux_protocol::contact_reach::enabled()
+            && (reciprocal || self.contact_request_policy()? == "auto_accept")
+        {
             self.decide_inbound_contact(&request, "accepted")?;
         }
         Ok(())

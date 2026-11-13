@@ -105,6 +105,7 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     let envelope =
         directory.captured.lock().map_err(|_| "capture poisoned")?.pop().ok_or("request")?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),
@@ -217,6 +218,7 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
     assert_eq!(outcome, (1, true));
     let entry = directory.captured.lock().map_err(|_| "capture poisoned")?[0].clone();
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: entry.target_delivery_id.clone(),

@@ -26,6 +26,7 @@ async fn native_contact_background_bootstrap_and_contact_backpressure_record() -
         .await?;
     let envelope = directory.captured.lock().map_err(|_| "capture")?.pop().ok_or("request")?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: envelope.target_delivery_id.clone(),

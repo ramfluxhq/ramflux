@@ -164,3 +164,146 @@ fn cr_closed_admission_rejects_missing_nulls_duplicates_and_invented_permissions
     );
     Ok(())
 }
+
+#[test]
+fn cr_session_query_and_closed_error_metadata_are_correlated() -> TestResult {
+    let query = Query {
+        version: 1,
+        source_node: "a.example".into(),
+        target_node: "b.example".into(),
+        account_anchor: d(2),
+        card_hash: None,
+        nonce: d(3),
+        base: None,
+        device_ref: None,
+    };
+    let mut request = Request {
+        request_id: d(4),
+        session_id: "session".into(),
+        session_generation: 1,
+        remaining_ms: 1000,
+        operation: Operation::Query { query: Box::new(query) },
+    };
+    assert!(request.validate().is_err(), "a query nonce must equal the outer request id");
+    request.request_id = d(3);
+    request.validate()?;
+    let mut response = Response {
+        request_id: request.request_id.clone(),
+        session_id: request.session_id.clone(),
+        session_generation: 2,
+        result: OperationResult::Error {
+            reason: Reason::ForeignRateLimited,
+            retry_after_ms: Some(1000),
+            current_revision: None,
+        },
+    };
+    assert!(
+        request.validate_response(&response).is_err(),
+        "another session generation cannot complete this operation"
+    );
+    response.session_generation = 1;
+    request.validate_response(&response)?;
+    response.result = OperationResult::Error {
+        reason: Reason::ForeignReadRefused,
+        retry_after_ms: Some(1000),
+        current_revision: None,
+    };
+    assert!(
+        request.validate_response(&response).is_err(),
+        "a generic private denial cannot reveal a retry hint"
+    );
+    response.result = OperationResult::Error {
+        reason: Reason::ReachRevisionConflict,
+        retry_after_ms: None,
+        current_revision: None,
+    };
+    assert!(
+        request.validate_response(&response).is_err(),
+        "CAS conflicts must carry the current revision"
+    );
+    response.result = OperationResult::Error {
+        reason: Reason::ReachRevisionConflict,
+        retry_after_ms: None,
+        current_revision: Some(7),
+    };
+    request.validate_response(&response)?;
+    Ok(())
+}
+
+#[test]
+fn cr_original_nested_document_keeps_sixteen_level_budget() -> TestResult {
+    let at_limit = format!("{}0{}", "[".repeat(16), "]".repeat(16));
+    let value: serde_json::Value = crate::parse_i_json(at_limit.as_bytes())?;
+    original_document(&value, at_limit.len())?;
+    assert!(
+        original_document(&value, at_limit.len() - 1).is_err(),
+        "a nested original document must retain its individual byte limit"
+    );
+    let too_deep = format!("{}0{}", "[".repeat(17), "]".repeat(17));
+    let value: serde_json::Value = decode(too_deep.as_bytes(), 128)?;
+    assert!(
+        original_document(&value, 128).is_err(),
+        "the new outer depth of 32 must not silently raise original document depth from 16"
+    );
+    original_document(&serde_json::json!({"text":"[{{\\\"}]"}), 128)?;
+    Ok(())
+}
+
+#[test]
+fn cr_discovery_cannot_advertise_an_incomplete_reach_profile() {
+    let base = vec![
+        "opaque_delivery".into(),
+        CAPABILITY.into(),
+        EPHEMERAL_CAPABILITY.into(),
+        DIRECTORY_CAPABILITY.into(),
+    ];
+    let advertised = advertised_capabilities(&base);
+    assert_eq!(
+        advertised.contains(&CAPABILITY.into()),
+        enabled(),
+        "configured strings cannot advertise reach before common release"
+    );
+    assert_eq!(
+        advertised.contains(&EPHEMERAL_CAPABILITY.into()),
+        enabled(),
+        "volatile federation must have the identical local/foreign common release gate"
+    );
+    assert_eq!(
+        advertised.contains(&DIRECTORY_CAPABILITY.into()),
+        enabled() && directory_enabled(),
+        "directory additionally requires its independent provisioned profile"
+    );
+    assert!(
+        advertised.contains(&"opaque_delivery".into()),
+        "unrelated existing capabilities must survive"
+    );
+}
+
+#[test]
+fn cr_peer_query_literal_carrier_excludes_owner_credentials() -> TestResult {
+    const GOLDEN: &[u8] = br#"{"kind":"query","query":{"account_anchor":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","base":null,"card_hash":null,"device_ref":null,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","source_node":"source.example","target_node":"target.example","version":1},"remaining_ms":10000,"request_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#;
+    let request: PeerQueryRequest = decode(GOLDEN, 8192)?;
+    request.validate()?;
+    assert_eq!(
+        crate::canonical_json_bytes(&request)?,
+        GOLDEN,
+        "the internal, snapshot and public peer hops share this exact closed carrier"
+    );
+    let mut value: serde_json::Value = crate::parse_i_json(GOLDEN)?;
+    value.as_object_mut().ok_or("query carrier")?.insert("admin_token".into(), "legacy".into());
+    assert!(
+        decode::<PeerQueryRequest>(&serde_json::to_vec(&value)?, 8192).is_err(),
+        "no administration or session credential may leave the caller's home"
+    );
+    value.as_object_mut().ok_or("query carrier")?.remove("admin_token");
+    value
+        .get_mut("query")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("query")?
+        .remove("card_hash");
+    assert!(
+        decode::<PeerQueryRequest>(&serde_json::to_vec(&value)?, 8192).is_err(),
+        "card correlation remains explicit null without becoming a possession credential"
+    );
+    Ok(())
+}

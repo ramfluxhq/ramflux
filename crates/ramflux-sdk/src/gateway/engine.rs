@@ -636,6 +636,7 @@ impl GatewaySessionEngine {
                         && ack.target_delivery_id == expected_target_delivery_id =>
                 {
                     return Ok(Ok(GatewayInboxEntry {
+                        reach: None,
                         forwarded: true,
                         inbox_seq: ack.inbox_seq.unwrap_or(0),
                         target_delivery_id: ack.target_delivery_id,
@@ -651,6 +652,7 @@ impl GatewaySessionEngine {
                 GatewayServerFrame::Nack { reason } => {
                     if reason == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
                         return Ok(Ok(GatewayInboxEntry {
+                            reach: None,
                             forwarded: true,
                             inbox_seq: 0,
                             target_delivery_id: expected_target_delivery_id,

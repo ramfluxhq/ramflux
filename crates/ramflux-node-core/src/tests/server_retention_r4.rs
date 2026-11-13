@@ -13,8 +13,12 @@ fn legacy_wal_record_without_acceptance_time_is_refused() -> Result<(), Box<dyn 
     let mut envelope = envelope("legacy-wal", "legacy-wal-mailbox", DeliveryClass::OpaqueEvent);
     envelope.created_at = now + 10 * 365 * 86_400;
     envelope.ttl = 604_800;
-    let entry =
-        InboxEntry { inbox_seq: 3, target_delivery_id: "legacy-wal-mailbox".into(), envelope };
+    let entry = InboxEntry {
+        reach: None,
+        inbox_seq: 3,
+        target_delivery_id: "legacy-wal-mailbox".into(),
+        envelope,
+    };
     crate::router_wal::write_legacy_router_wal_segment(
         &wal,
         "legacy-wal-key",

@@ -133,6 +133,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
         &envelope,
     )?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sender".into(),

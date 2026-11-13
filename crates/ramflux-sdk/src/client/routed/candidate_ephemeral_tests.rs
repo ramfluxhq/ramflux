@@ -82,6 +82,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
         sealed.metadata_commitment,
     )?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id,

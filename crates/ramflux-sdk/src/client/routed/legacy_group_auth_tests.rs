@@ -30,6 +30,7 @@ fn packet(sender: &Fixture, body: Vec<u8>, id: &str) -> Result<GatewayInboxEntry
     message.sender_id = sender.id.clone();
     message.encrypted_body = body;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "bob".into(),

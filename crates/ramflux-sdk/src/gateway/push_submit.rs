@@ -69,6 +69,7 @@ impl GatewaySessionEngine {
             return Err(self.retire("submit_accepted without an inbox sequence"));
         }
         Ok(GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq,
             target_delivery_id,
@@ -86,6 +87,7 @@ impl GatewaySessionEngine {
                     && ack.target_delivery_id == submitted.target_delivery_id =>
             {
                 Ok(Ok(GatewayInboxEntry {
+                    reach: None,
                     forwarded: true,
                     inbox_seq: ack.inbox_seq.unwrap_or(0),
                     target_delivery_id: ack.target_delivery_id,
@@ -102,6 +104,7 @@ impl GatewaySessionEngine {
                 if reason == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON =>
             {
                 Ok(Ok(GatewayInboxEntry {
+                    reach: None,
                     forwarded: true,
                     inbox_seq: 0,
                     target_delivery_id: submitted.target_delivery_id.clone(),

@@ -59,6 +59,7 @@ fn envelope(tag: &str) -> ramflux_protocol::Envelope {
 
 fn node_entry(seq: u64, tag: &str) -> n::InboxEntry {
     n::InboxEntry {
+        reach: None,
         inbox_seq: seq,
         target_delivery_id: format!("target-{tag}"),
         envelope: envelope(tag),
@@ -67,6 +68,7 @@ fn node_entry(seq: u64, tag: &str) -> n::InboxEntry {
 
 fn sdk_entry(seq: u64, tag: &str) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: seq,
         target_delivery_id: format!("target-{tag}"),

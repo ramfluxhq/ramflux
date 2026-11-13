@@ -96,6 +96,11 @@ enum StoredRouterWalPayload {
     SenderAssigned {
         payload: Box<StoredRouterWalPayload>,
     },
+    /// Appended binary shape; old record bodies and enum indices remain unchanged.
+    ContactReach {
+        reach_json: Vec<u8>,
+        payload: Box<StoredRouterWalPayload>,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -135,7 +140,9 @@ impl StoredRouterWalPayload {
     fn sender_assigned(&self) -> bool {
         match self {
             Self::SenderAssigned { .. } => true,
-            Self::Incarnated { payload, .. } => payload.sender_assigned(),
+            Self::Incarnated { payload, .. } | Self::ContactReach { payload, .. } => {
+                payload.sender_assigned()
+            }
             _ => false,
         }
     }
@@ -153,6 +160,17 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
                 accepted_at,
                 local_delivery,
             } => {
+                if let Some(entry) = entry.as_deref()
+                    && let Some(reach) = entry.reach.as_deref()
+                {
+                    validate_reach_entry(reach, entry)?;
+                }
+                let reach_json = entry
+                    .as_ref()
+                    .and_then(|entry| entry.reach.as_ref())
+                    .map(ramflux_protocol::canonical_json_bytes)
+                    .transpose()
+                    .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?;
                 let entry = entry
                     .as_ref()
                     .map(|entry| StoredRouterWalInboxEntry::try_from(entry.as_ref()))
@@ -178,8 +196,13 @@ impl TryFrom<&RouterWalPayload> for StoredRouterWalPayload {
                         ));
                     }
                 };
-                Ok(if local_delivery.is_some() {
+                let stored = if local_delivery.is_some() {
                     Self::SenderAssigned { payload: Box::new(stored) }
+                } else {
+                    stored
+                };
+                Ok(if let Some(reach_json) = reach_json {
+                    Self::ContactReach { reach_json, payload: Box::new(stored) }
                 } else {
                     stored
                 })
@@ -194,6 +217,9 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
     fn try_from(payload: StoredRouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
             StoredRouterWalPayload::Incarnated { payload, .. } => (*payload).try_into(),
+            StoredRouterWalPayload::ContactReach { reach_json, payload } => {
+                decode_reach_payload(&reach_json, *payload)
+            }
             StoredRouterWalPayload::SenderAssigned { payload } => {
                 if !matches!(*payload, StoredRouterWalPayload::SubmissionClassified { .. }) {
                     return Err(identity::error("invalid sender assignment WAL wrapper"));
@@ -244,6 +270,59 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
     }
 }
 
+fn decode_reach_payload(
+    reach_json: &[u8],
+    stored: StoredRouterWalPayload,
+) -> Result<RouterWalPayload, NodeCoreError> {
+    use ramflux_protocol::contact_reach::{self as reach, DeliveryReach};
+    if !matches!(
+        stored,
+        StoredRouterWalPayload::SubmissionAccepted { .. }
+            | StoredRouterWalPayload::SubmissionClassified { .. }
+            | StoredRouterWalPayload::SenderAssigned { .. }
+    ) {
+        return Err(identity::error("invalid reach WAL wrapper"));
+    }
+    let reach: DeliveryReach =
+        reach::decode(reach_json, 8192).map_err(|error| identity::error(error.to_string()))?;
+    let mut payload = RouterWalPayload::try_from(stored)?;
+    let RouterWalPayload::Submission { entry, .. } = &mut payload;
+    let entry = entry.as_mut().ok_or_else(|| identity::error("reach WAL missing entry"))?;
+    validate_reach_entry(&reach, entry)?;
+    entry.reach = Some(Box::new(reach));
+    Ok(payload)
+}
+
+fn validate_reach_entry(
+    reach: &ramflux_protocol::contact_reach::DeliveryReach,
+    entry: &InboxEntry,
+) -> Result<(), NodeCoreError> {
+    use ramflux_protocol::contact_reach::{self as wire, Traffic};
+    let route = &reach.route.body;
+    route.validate().map_err(|error| identity::error(error.to_string()))?;
+    let target = ramflux_protocol::parse_qualified_device_id(&entry.target_delivery_id)
+        .map_err(|error| identity::error(error.to_string()))?
+        .ok_or_else(|| identity::error("reach WAL target"))?;
+    if route.envelope_hash
+        != ramflux_protocol::custody::framed_hash(wire::ENVELOPE_HASH_DOMAIN, &entry.envelope)
+            .map_err(|error| identity::error(error.to_string()))?
+        || route.recipient_root != target.0
+        || entry.envelope.target_delivery_id != entry.target_delivery_id
+        || route.source.device_id != entry.envelope.source_device_id
+        || route.traffic == Traffic::Typing
+        || ramflux_protocol::canonical_json_bytes(&reach.route)
+            .map_err(|error| identity::error(error.to_string()))?
+            .len()
+            > 4096
+        || reach.cost.as_ref().is_some_and(|cost| {
+            ramflux_protocol::canonical_json_bytes(cost).map_or(true, |v| v.len() > 2048)
+        })
+    {
+        return Err(identity::error("reach WAL binding mismatch"));
+    }
+    Ok(())
+}
+
 impl TryFrom<&InboxEntry> for StoredRouterWalInboxEntry {
     type Error = NodeCoreError;
 
@@ -261,6 +340,7 @@ impl TryFrom<StoredRouterWalInboxEntry> for InboxEntry {
 
     fn try_from(entry: StoredRouterWalInboxEntry) -> Result<Self, Self::Error> {
         Ok(Self {
+            reach: None,
             inbox_seq: entry.inbox_seq,
             target_delivery_id: entry.target_delivery_id,
             envelope: entry.envelope.try_into()?,
@@ -2614,6 +2694,7 @@ mod tests {
         target_delivery_id: &str,
     ) -> InboxEntry {
         InboxEntry {
+            reach: None,
             inbox_seq: 1,
             target_delivery_id: target_delivery_id.to_owned(),
             envelope: router_wal_envelope(envelope_id, target_delivery_id),
@@ -2722,3 +2803,6 @@ pub(crate) mod acknowledgement_test;
 
 #[cfg(test)]
 mod retired_format_tests;
+
+#[cfg(test)]
+mod reach_tests;

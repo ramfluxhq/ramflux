@@ -327,6 +327,7 @@ fn apply_claim(client: &RamfluxClient, item: &g::HistoryItem) -> TestResult<bool
     )?;
     outer["encrypted_payload"] = json!("");
     let entry = crate::GatewayInboxEntry {
+        reach: None,
         envelope: serde_json::from_value(outer)?,
         forwarded: false,
         inbox_seq: 1,

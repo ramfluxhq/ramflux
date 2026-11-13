@@ -71,6 +71,7 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
         ttl: 3600,
     };
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),

@@ -120,6 +120,7 @@ pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry
     .await?;
     fixture.peer.install_test_session(engine);
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: "sender".into(),
@@ -271,6 +272,7 @@ async fn legacy_join_entry(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, St
     fixture.peer.install_test_session(engine);
     Ok((
         GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "sender".into(),

@@ -71,6 +71,7 @@ fn signed_control(
     };
     Ok((
         GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: message.target_delivery_id.clone(),

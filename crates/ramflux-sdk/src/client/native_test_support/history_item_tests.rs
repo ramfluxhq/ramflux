@@ -132,6 +132,7 @@ async fn receive_edited_history(
     let exact = super::authored_edit::encoded_edit(peer, &target, &original_item.exact_inner)?;
     let envelope = peer.seal_inner_to(source, &exact)?;
     let entry = crate::GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 4,
         target_delivery_id: source.config.target_delivery_id.clone(),

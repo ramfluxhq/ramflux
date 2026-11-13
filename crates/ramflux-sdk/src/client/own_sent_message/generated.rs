@@ -434,6 +434,7 @@ mod tests {
             "../../../../ramflux-protocol/src/sender_transcript_vectors.json"
         ))?;
         Ok(GatewayInboxEntry {
+            reach: None,
             envelope: serde_json::from_value(vectors["envelope"].clone())?,
             forwarded: false,
             inbox_seq: 1,

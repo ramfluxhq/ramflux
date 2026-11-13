@@ -100,6 +100,7 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                 },
                 GatewayClientFrame::Submit { submit } => {
                     let entry = GatewayInboxEntry {
+                        reach: None,
                         forwarded: false,
                         inbox_seq: 2,
                         target_delivery_id: submit.envelope.target_delivery_id.clone(),
@@ -298,6 +299,7 @@ fn group_bootstrap(
     )?;
     message.encrypted_body = serde_json::to_vec(&wrapper)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: receiver.id.clone(),

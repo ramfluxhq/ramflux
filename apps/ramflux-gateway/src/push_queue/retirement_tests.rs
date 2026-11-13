@@ -22,6 +22,7 @@ async fn retirement_before_sink_authority_refuses_dequeued_frame() -> anyhow::Re
     envelope.target_delivery_id = "target".into();
     let bytes = serde_json::to_vec(&ramflux_node_core::SessionPushServerFrame::Deliver {
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             target_delivery_id: "target".into(),
             inbox_seq: 1,
             envelope,

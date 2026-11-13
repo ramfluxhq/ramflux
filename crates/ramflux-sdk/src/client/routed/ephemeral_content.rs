@@ -29,6 +29,7 @@ impl RamfluxClient {
     ) -> Result<EphemeralContent, SdkError> {
         let result = self.account_db()?.write_transaction(|| {
             let entry = GatewayInboxEntry {
+                reach: None,
                 forwarded: false,
                 inbox_seq: 0,
                 target_delivery_id: envelope.target_delivery_id.clone(),

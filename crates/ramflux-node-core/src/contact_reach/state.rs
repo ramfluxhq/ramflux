@@ -125,10 +125,12 @@ impl AccountReach {
             .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
         let key = b.subject.key()?;
         match b.decision {
-            Decision::Allow => self.apply_allow(&update, conversation)?,
+            Decision::Allow => self.apply_allow(&update, conversation, now)?,
             Decision::Block | Decision::Decline => {
-                if let Some(root) = b.subject.root() {
+                if let Subject::Friendship { root } = &b.subject {
                     self.grants.retain(|_,r| !matches!(r,StateRecord::Grant { subject,.. } if subject.root() == Some(root)));
+                } else {
+                    self.grants.remove(&key);
                 }
                 if b.decision == Decision::Block {
                     self.blocks.insert(
@@ -242,9 +244,16 @@ impl AccountReach {
         &mut self,
         update: &Signed<Admission>,
         conversation: Option<&str>,
+        now: u64,
     ) -> Result<()> {
         let b = &update.body;
         let key = b.subject.key()?;
+        if let Some(root) = b.subject.root() {
+            self.check_denials(root, "", now)?;
+        }
+        if self.blocks.contains_key(&key) {
+            return Err(refuse(Reason::ForeignReadRefused));
+        }
 
         let permissions = b.permissions.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
         let grant_until = b.grant_until.ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
@@ -326,6 +335,11 @@ impl AccountReach {
             }
             return Ok((ReachClass::Accepted, Placement::Direct));
         }
+        if route.traffic == Traffic::Group {
+            // TODO(r4a): receiving homes need the audited group/conversation/epoch binding carrier.
+            // A W label or group_sender hash cannot substitute for that missing proof.
+            return Err(refuse(Reason::ReachRouteInvalid));
+        }
         let friendship = Subject::Friendship { root: route.source.account_anchor.clone() }.key()?;
         let conversation = Subject::Conversation {
             root: route.source.account_anchor.clone(),
@@ -354,17 +368,6 @@ impl AccountReach {
                     (ReachClass::Replied, Placement::Strangers)
                 });
             }
-        }
-        if route.traffic == Traffic::Group {
-            let group = self.grants.values().any(|r| {
-                matches!(r,StateRecord::Grant {
-                subject: Subject::GroupSender { root,group_id,.. },grant_until:0,.. }
-                if root == &route.source.account_anchor && group_id == &route.conversation_id)
-            });
-            if group {
-                return Ok((ReachClass::Accepted, Placement::Direct));
-            }
-            return Err(refuse(Reason::ForeignReadRefused));
         }
         if matches!(route.traffic, Traffic::Receipt | Traffic::Typing) {
             return Err(refuse(Reason::ForeignReadRefused));
@@ -411,3 +414,6 @@ impl AccountReach {
         Ok(keyed.into_iter().map(|(_, r)| r).collect())
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -77,6 +77,7 @@ fn legacy_retry(
     let source = router.authenticated_envelope_source_durable(&request.envelope, store)?;
     let replay_key = crate::envelope_replay_tuple_key(&source, &child);
     let row = crate::InboxEntry {
+        reach: None,
         inbox_seq: 1,
         target_delivery_id: child.target_delivery_id.clone(),
         envelope: child,

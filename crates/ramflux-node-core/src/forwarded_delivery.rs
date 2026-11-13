@@ -281,6 +281,7 @@ impl RouterCore {
 fn accepted_entry(outcome: &RouterSubmitOutcome) -> Option<InboxEntry> {
     match outcome {
         RouterSubmitOutcome::Online(d) => Some(InboxEntry {
+            reach: d.reach.clone(),
             inbox_seq: d.inbox_seq,
             target_delivery_id: d.target_delivery_id.clone(),
             envelope: d.envelope.clone(),

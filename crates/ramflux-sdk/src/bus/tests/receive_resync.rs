@@ -367,38 +367,39 @@ async fn recover(
     tokio::pin!(completion);
     loop {
         tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(10), io.output.recv()) => {
-                match recovery_frame(result, handle, acked.len())? {
-                    GatewayClientFrame::Resume { resume } => respond_page(io, entries, resume.after_inbox_seq, resume.limit)?,
-                    GatewayClientFrame::Ack { ack } => {
-                        let index = entries.iter().position(|entry| entry.envelope.envelope_id == ack.envelope_id).ok_or("unexpected ACK")?;
-                        assert!(reader.actor_state_exists(&receipts[index])?, "ACK preceded the durable receive commit");
-                        assert!(acked.insert(ack.envelope_id.clone()), "a recovered entry was acknowledged twice");
-                        if let Some(probe) = probe { work::assert_prefix_not_rescanned(probe); }
-                        if acked.len().is_multiple_of(32) { eprintln!("durable recovery ACK {}: {:?}", acked.len(), handle.test_receive_profile()); }
-                        let cursor = GatewayCursor {
-                            target_delivery_id: "sender".into(), inbox_seq: entries[index].inbox_seq,
-                            last_envelope_id: Some(ack.envelope_id.clone()), acked_envelope_ids: vec![ack.envelope_id],
-                            nacked_envelope_ids: BTreeMap::new(),
-                        };
-                        send(io, &GatewayServerFrame::Ack { cursor: cursor.clone() })?;
-                        send(io, &GatewayServerFrame::Cursor { cursor: Some(cursor) })?;
+                    result = tokio::time::timeout(Duration::from_secs(10), io.output.recv()) => {
+                        match recovery_frame(result, handle, acked.len())? {
+                            GatewayClientFrame::Resume { resume } => respond_page(io, entries, resume.after_inbox_seq, resume.limit)?,
+                            GatewayClientFrame::Ack { ack } => {
+                                let index = entries.iter().position(|entry| entry.envelope.envelope_id == ack.envelope_id).ok_or("unexpected ACK")?;
+                                assert!(reader.actor_state_exists(&receipts[index])?, "ACK preceded the durable receive commit");
+                                assert!(acked.insert(ack.envelope_id.clone()), "a recovered entry was acknowledged twice");
+                                if let Some(probe) = probe { work::assert_prefix_not_rescanned(probe); }
+                                if acked.len().is_multiple_of(32) { eprintln!("durable recovery ACK {}: {:?}", acked.len(), handle.test_receive_profile()); }
+                                let cursor = GatewayCursor {
+                                    target_delivery_id: "sender".into(), inbox_seq: entries[index].inbox_seq,
+                                    last_envelope_id: Some(ack.envelope_id.clone()), acked_envelope_ids: vec![ack.envelope_id],
+                                    nacked_envelope_ids: BTreeMap::new(),
+                                };
+                                send(io, &GatewayServerFrame::Ack { cursor: cursor.clone() })?;
+                                send(io, &GatewayServerFrame::Cursor { cursor: Some(cursor) })?;
+                            }
+                            GatewayClientFrame::Submit { submit } => {
+                                send(io, &GatewayServerFrame::Deliver { entry: GatewayInboxEntry {
+        reach: None,
+                                    forwarded: false, inbox_seq: 1,
+                                    target_delivery_id: submit.envelope.target_delivery_id.clone(),
+                                    envelope: submit.envelope,
+                                } })?;
+                            }
+                            GatewayClientFrame::OwnDeviceFanout { fanout } => {
+                                send(io, &super::fixture::own_copy_response(fanout)?)?;
+                            }
+                            other => return Err(format!("unexpected recovery frame {}", serde_json::to_value(other)?["frame_type"]).into()),
+                        }
                     }
-                    GatewayClientFrame::Submit { submit } => {
-                        send(io, &GatewayServerFrame::Deliver { entry: GatewayInboxEntry {
-                            forwarded: false, inbox_seq: 1,
-                            target_delivery_id: submit.envelope.target_delivery_id.clone(),
-                            envelope: submit.envelope,
-                        } })?;
-                    }
-                    GatewayClientFrame::OwnDeviceFanout { fanout } => {
-                        send(io, &super::fixture::own_copy_response(fanout)?)?;
-                    }
-                    other => return Err(format!("unexpected recovery frame {}", serde_json::to_value(other)?["frame_type"]).into()),
+                    () = &mut completion => break,
                 }
-            }
-            () = &mut completion => break,
-        }
     }
     Ok(acked)
 }
@@ -489,6 +490,7 @@ async fn entries(
         };
         let packet = seal(&fixture.peer, &mut engine, &target, "healthy", body, route).await?;
         let mut entry = GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: u64::try_from(index + 1)?,
             target_delivery_id: "sender".into(),

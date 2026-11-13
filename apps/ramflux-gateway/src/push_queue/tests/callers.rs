@@ -85,6 +85,7 @@ async fn produce(
                 retain_until: None,
                 frame: ramflux_node_core::GatewayServerFrame::Deliver {
                     entry: ramflux_node_core::InboxEntry {
+                        reach: None,
                         inbox_seq: seq,
                         target_delivery_id: "alice-target".into(),
                         envelope: submit.envelope,

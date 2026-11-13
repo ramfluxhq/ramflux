@@ -19,5 +19,5 @@ pub use state::*;
 mod codec;
 mod domains;
 pub(crate) use codec::{actor, digest, invalid, lifetime, node, safe, text};
-pub use codec::{check_submission_time, decode};
+pub use codec::{check_submission_time, decode, original_document};
 pub use domains::*;

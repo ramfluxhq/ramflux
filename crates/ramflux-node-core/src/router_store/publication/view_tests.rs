@@ -34,6 +34,7 @@ pub(crate) fn submit(
     let entry = match outcome {
         RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
         RouterSubmitOutcome::Online(delivery) => crate::InboxEntry {
+            reach: None,
             inbox_seq: delivery.inbox_seq,
             target_delivery_id: delivery.target_delivery_id,
             envelope: delivery.envelope,

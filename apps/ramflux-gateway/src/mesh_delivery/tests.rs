@@ -18,6 +18,7 @@ fn request() -> crate::GatewayForwardDeliverRequest {
         retain_until: Some(12345),
         frame: ramflux_node_core::GatewayServerFrame::Deliver {
             entry: ramflux_node_core::InboxEntry {
+                reach: None,
                 target_delivery_id: "target".into(),
                 inbox_seq: 1,
                 envelope,

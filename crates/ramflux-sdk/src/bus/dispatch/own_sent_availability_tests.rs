@@ -405,6 +405,7 @@ async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> Te
         .receive_own_device_message(
             &f.receiver,
             &GatewayInboxEntry {
+                reach: None,
                 forwarded: false,
                 inbox_seq: 1,
                 target_delivery_id: "sibling".into(),

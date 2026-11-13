@@ -41,6 +41,7 @@ pub(super) fn seed(path: &std::path::Path, count: u64) -> Result<u64> {
             account_anchor: authorization.body.account_anchor.clone(),
             migration_id: authorization.body.migration_id.clone(),
             entry: ramflux_node_core::InboxEntry {
+                reach: None,
                 inbox_seq: i,
                 target_delivery_id: "moving".into(),
                 envelope: migration_tests::envelope("moving", &format!("drain-{i}"))?,
@@ -463,6 +464,7 @@ fn drain_tick_publishes_terminal_settlement_to_live_inbox() -> Result {
         let path = dir.0.join("live-projection.redb");
         // Populate the mailbox before installing the committed source-home fixture.
         let pending = ramflux_node_core::InboxEntry {
+            reach: None,
             inbox_seq: 1,
             target_delivery_id: "moving".into(),
             envelope: migration_tests::envelope("moving", "drain-1")?,

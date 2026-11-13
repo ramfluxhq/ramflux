@@ -17,6 +17,7 @@ use ramflux_storage::{
 
 fn entry(target: &str) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: target.to_owned(),

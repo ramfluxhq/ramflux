@@ -33,6 +33,7 @@ impl TransientHost {
         consumer
             .next(|envelope| {
                 let entry = GatewayInboxEntry {
+                    reach: None,
                     envelope: envelope.clone(),
                     forwarded: false,
                     inbox_seq: 0,

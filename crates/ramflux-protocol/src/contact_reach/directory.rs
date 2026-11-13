@@ -341,3 +341,50 @@ pub struct CentreRotation {
     pub old_signature: String,
     pub new_signature: String,
 }
+
+impl IndexReceipt {
+    /// Validate receipt shape without asserting centre signature or current name ownership.
+    /// Historical committed receipts may outlive their status window.
+    /// # Errors
+    /// Refuses malformed authority identifiers, epochs, hashes and status lifetimes.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        node(&self.centre_id)?;
+        for value in [&self.operation_id, &self.operation_hash, &self.account_anchor] {
+            digest(value)?;
+        }
+        if let Some(hash) = &self.binding_hash {
+            digest(hash)?;
+        }
+        for value in [self.epoch, self.committed_at, self.expires_at] {
+            safe(value)?;
+        }
+        let duration = if self.state == ReceiptState::Reserved { 120 } else { 60 };
+        if self.version != 2
+            || self.epoch == 0
+            || self.expires_at <= self.committed_at
+            || self.committed_at.checked_add(duration).is_none_or(|max| self.expires_at > max)
+        {
+            return Err(invalid("index receipt version, epoch or lifetime"));
+        }
+        Ok(())
+    }
+}
+impl IndexResolve {
+    /// Validate a fresh-name result's closed fields, independent of its pinned signature.
+    /// # Errors
+    /// Refuses malformed tuples, noncanonical names and non-60-second leases.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        name(&self.name)?;
+        node(&self.centre_id)?;
+        node(&self.home_node)?;
+        for value in [&self.account_anchor, &self.binding_hash, &self.request_nonce] {
+            digest(value)?;
+        }
+        safe(self.epoch)?;
+        lifetime(self.issued_at, self.expires_at, 60)?;
+        if self.version != 2 || self.epoch == 0 {
+            return Err(invalid("index resolution version or epoch"));
+        }
+        Ok(())
+    }
+}

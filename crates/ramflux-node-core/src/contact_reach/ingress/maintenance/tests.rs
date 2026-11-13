@@ -37,16 +37,64 @@ fn cr_rate_counter_survives_reopen_for_two_windows_then_releases() -> TestResult
 #[test]
 fn cr_unsolicited_metadata_cannot_consume_accepted_metadata_reserve() -> TestResult {
     let dir = tempfile::TempDir::new()?;
-    let store = RouterRedbStore::open_without_wal(&dir.path().join("quota.redb"))?;
+    let store = RouterRedbStore::open_without_wal(dir.path().join("quota.redb"))?;
     let tx = store.begin_write()?;
-    let (key, cap) = metadata(ReachClass::Unsolicited);
-    super::super::charge(&tx, key, (cap, 32 * 1024 * 1024), (cap, 32 * 1024 * 1024), 0)?;
+    for (key, capacity) in metadata(ReachClass::Unsolicited) {
+        super::super::charge(&tx, key, capacity, capacity, 0)?;
+        assert!(
+            super::super::charge(&tx, key, (1, 1), capacity, 0).is_err(),
+            "full unsolicited metadata must refuse additional strangers"
+        );
+    }
+    for (key, capacity) in metadata(ReachClass::Accepted) {
+        super::super::charge(&tx, key, (1, 100), capacity, 0)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
+fn cr_replied_metadata_keeps_half_for_accepted_after_reopen() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("metadata.redb");
+    {
+        let store = RouterRedbStore::open_without_wal(&path)?;
+        let tx = store.begin_write()?;
+        // Aggregate counter charges exercise the durable quota component without allocating
+        // tens of thousands of payloads. Full receiving-path acceptance is a separate gate.
+        for (key, capacity) in metadata(ReachClass::Replied) {
+            super::super::charge(&tx, key, (32_768, 16 * 1024 * 1024), capacity, 0)?;
+        }
+        tx.commit()?;
+    }
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let tx = store.begin_write()?;
+    let (key, capacity) = metadata(ReachClass::Replied)
+        .into_iter()
+        .find(|(key, _)| *key == "metadata-replied")
+        .ok_or("replied compartment")?;
     assert!(
-        super::super::charge(&tx, key, (1, 1), (cap, 32 * 1024 * 1024), 0).is_err(),
-        "full unsolicited metadata must refuse additional strangers"
+        super::super::charge(&tx, key, (1, 1), capacity, 0).is_err(),
+        "replied metadata saturation must survive reopen and stop at its own half"
     );
-    let (accepted, cap) = metadata(ReachClass::Accepted);
-    super::super::charge(&tx, accepted, (1, 100), (cap, 32 * 1024 * 1024), 0)?;
+    for (key, capacity) in metadata(ReachClass::Accepted) {
+        super::super::charge(&tx, key, (32_768, 16 * 1024 * 1024), capacity, 0)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+#[test]
+fn cr_accepted_metadata_can_borrow_unused_replied_half() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let store = RouterRedbStore::open_without_wal(dir.path().join("metadata.redb"))?;
+    let tx = store.begin_write()?;
+    for (key, capacity) in metadata(ReachClass::Accepted) {
+        super::super::charge(&tx, key, capacity, capacity, 0)?;
+        assert!(
+            super::super::charge(&tx, key, (1, 1), capacity, 0).is_err(),
+            "accepted borrowing remains bounded by the whole shared pool"
+        );
+    }
     tx.commit()?;
     Ok(())
 }

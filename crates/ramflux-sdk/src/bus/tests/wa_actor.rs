@@ -242,6 +242,7 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
         )
         .await?;
         entries.push(GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: seq,
             target_delivery_id: "sender".into(),
@@ -868,6 +869,7 @@ async fn contact_request_case() -> Case {
         let mut served = fixture.gateway.lock().map_err(|_| "gateway")?;
         served.ack_target = fixture.source.target_delivery_id.clone();
         served.inbox = vec![GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: "sender".into(),
@@ -1488,6 +1490,7 @@ async fn submit_peer_through_gateway(
     let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
     for queued in queued_entries {
         gateway.inbox.push(GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: queued.inbox_seq,
             target_delivery_id: queued.target_delivery_id.clone(),

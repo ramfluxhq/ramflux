@@ -123,3 +123,41 @@ pub fn decode<T: Serialize + for<'de> Deserialize<'de>>(
     }
     Ok(value)
 }
+
+/// Check an original nested document without raising its pre-existing depth or size limit.
+/// Outer reach carriers have a separate depth budget of 32.
+/// # Errors
+/// Refuses documents larger than `limit` or nested beyond 16 object/array containers.
+pub fn original_document<T: Serialize>(value: &T, limit: usize) -> Result<(), ProtocolError> {
+    let bytes = crate::canonical_json_bytes(value)?;
+    if bytes.len() > limit {
+        return Err(invalid("original reach document byte budget"));
+    }
+    let mut depth = 0_u32;
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > 16 {
+                        return Err(invalid("original reach document nesting exceeds 16"));
+                    }
+                }
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}

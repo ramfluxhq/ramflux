@@ -60,6 +60,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
     let envelope =
         captured.lock().map_err(|_| "capture lock")?.first().cloned().ok_or("distribution")?;
     let entry = GatewayInboxEntry {
+        reach: None,
         inbox_seq: 42,
         target_delivery_id: envelope.target_delivery_id.clone(),
         forwarded: false,

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Pure verification of bounded candidate peer evidence; this module never adopts trust.
+mod documents;
+mod prekeys;
 use super::{reject, verify};
 use crate::{CryptoError, custody::VerifiedRecord};
 use ramflux_protocol::{
@@ -68,6 +70,7 @@ pub fn verify_peer_reply(
     }
     let b = &reply.snapshot.body;
     let p = &reply.payload;
+    documents::check_budgets(p)?;
     if query.version != 1
         || b.version != 1
         || b.source_node != query.target_node
@@ -97,9 +100,7 @@ pub fn verify_peer_reply(
     if authority.envelope().body.account_anchor != b.account_anchor {
         return Err(reject("peer native anchor mismatch"));
     }
-    if query.device_ref.is_some() != p.prekey.is_some() {
-        return Err(reject("peer prekey request mismatch"));
-    }
+    prekeys::verify_manifest(p, query, &manifest, &authority, now)?;
     let initial = if let Some(base) = base {
         base
     } else {
@@ -136,6 +137,7 @@ pub fn verify_peer_reply(
         &p.reach,
         &authority.envelope().body.master_certificate.body.self_signing_public_key,
     )?;
+    documents::verify_sidecars(p, &authority, home.hash(), &b.source_node)?;
     Ok(VerifiedPeer {
         root: b.account_anchor.clone(),
         node: b.source_node.clone(),
@@ -161,26 +163,7 @@ fn verify_discovery(
     {
         return Err(reject("peer client discovery mismatch"));
     }
-    let server = &p.discovery.server;
-    let server_key = server.get("node_public_key").and_then(serde_json::Value::as_str);
-    let server_id = server.get("node_id").and_then(serde_json::Value::as_str);
-    let signature = server
-        .get("signature")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| reject("server discovery signature missing"))?;
-    if server_key != Some(authenticated_node_key)
-        || server_id != Some(source_node)
-        || server.get("node_ca_cert_pem").and_then(serde_json::Value::as_str)
-            != Some(client.node_ca_cert_pem.as_str())
-    {
-        return Err(reject("peer server discovery mismatch"));
-    }
-    crate::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(server)?,
-        signature,
-        authenticated_node_key,
-    )?;
-    Ok(())
+    documents::verify_server(&p.discovery, source_node, authenticated_node_key, now)
 }
 
 /// Recompute cryptographic notice facts before a primary-signed admission is applied.

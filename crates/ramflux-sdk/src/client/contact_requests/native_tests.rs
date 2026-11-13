@@ -82,6 +82,7 @@ pub(crate) async fn request_entry(
     let envelope =
         crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, packet, None)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
@@ -120,6 +121,7 @@ fn transport(sender: &Fixture, target: &Fixture) -> TestResult<(GatewayInboxEntr
     };
     Ok((
         GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: 1,
             target_delivery_id: message.target_delivery_id.clone(),

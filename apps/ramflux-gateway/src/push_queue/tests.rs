@@ -118,6 +118,7 @@ async fn oversized_legacy_frame_is_unhandled_without_retiring_registration() -> 
     envelope.ext.ext.insert("oversized".into(), serde_json::json!("x".repeat(BYTE_CAP)));
     let frame = ramflux_node_core::GatewayServerFrame::Deliver {
         entry: ramflux_node_core::InboxEntry {
+            reach: None,
             target_delivery_id: "target".into(),
             inbox_seq: 1,
             envelope,

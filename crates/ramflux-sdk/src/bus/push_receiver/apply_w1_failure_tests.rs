@@ -94,6 +94,7 @@ fn assert_router_mode(path: &Path, mode: Mode) {
 
 fn router_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
     InboxEntry {
+        reach: None,
         inbox_seq: entry.inbox_seq,
         target_delivery_id: entry.target_delivery_id.clone(),
         envelope: entry.envelope.clone(),

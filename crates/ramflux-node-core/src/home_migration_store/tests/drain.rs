@@ -26,6 +26,7 @@ fn setup_count_mode(
     let op = s.seal()?;
     let mut request = super::forwarded::sender(&s.target)?;
     let entry = crate::InboxEntry {
+        reach: None,
         inbox_seq: 7,
         target_delivery_id: s.target.clone(),
         envelope: request.envelope.clone(),

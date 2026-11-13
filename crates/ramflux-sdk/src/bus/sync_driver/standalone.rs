@@ -783,6 +783,7 @@ mod retry_key_tests {
 
     fn inbox(seq: u64) -> crate::GatewayInboxEntry {
         crate::GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: seq,
             target_delivery_id: "t".into(),

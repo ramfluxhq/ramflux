@@ -44,6 +44,7 @@ pub(super) async fn retire_and_refuse_redelivery(
     let fresh = Box::pin(deliver_sent(source, target, sent)).await?;
     assert_retired(target, &owner)?;
     let entry = crate::GatewayInboxEntry {
+        reach: None,
         envelope: fresh,
         forwarded: false,
         inbox_seq: 4,

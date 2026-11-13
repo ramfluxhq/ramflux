@@ -187,6 +187,7 @@ fn bound(
     )?;
     receiver.client.persist_dm_session(conversation, &format!("prior-{id}"), "recv", &receiving)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: seq,
         target_delivery_id: receiver.id.clone(),
@@ -238,6 +239,7 @@ fn bound_to(
     )?;
     receiver.client.persist_dm_session(conversation, &format!("prior-{id}"), "recv", &receiving)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: seq,
         target_delivery_id: delivery.to_owned(),
@@ -328,6 +330,7 @@ fn a2i_sealed_to(
         receiver.client.persist_dm_session(&conversation, &prior, "recv", &receiving)?;
     }
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: seq,
         target_delivery_id: delivery.to_owned(),
@@ -790,6 +793,7 @@ fn cut_erased_dm_row() -> Result<(), SdkError> {
         report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: case.b.id.clone(),

@@ -27,6 +27,7 @@ pub(super) struct SnapshotRead<'a> {
     pub page: u64,
     pub now: u64,
 }
+#[derive(Clone, Copy)]
 struct LeaseContext<'a> {
     owner: ReachOwner<'a>,
     session: &'a str,

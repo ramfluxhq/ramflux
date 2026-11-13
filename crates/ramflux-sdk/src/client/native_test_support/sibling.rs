@@ -95,6 +95,7 @@ impl Fixture {
     ) -> TestResult {
         ramflux_node_core::check_entry_bound(&envelope)?;
         let entry = GatewayInboxEntry {
+            reach: None,
             forwarded: false,
             inbox_seq: sequence,
             target_delivery_id: self.config.target_delivery_id.clone(),

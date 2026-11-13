@@ -40,6 +40,7 @@ async fn native_generated_receipt_opens_on_receipt_route_with_exact_inner() -> T
     target.client.persist_fetched_identity_directory(&source.manifest)?;
     ramflux_node_core::check_entry_bound(&envelope)?;
     let entry = crate::GatewayInboxEntry {
+        reach: None,
         envelope,
         forwarded: false,
         inbox_seq: 1,

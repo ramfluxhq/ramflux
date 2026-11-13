@@ -318,6 +318,7 @@ impl Fixture {
         gateway.ack_target = self.source.target_delivery_id.clone();
         for (index, delivery) in [dm, call].into_iter().enumerate() {
             gateway.inbox.push(GatewayInboxEntry {
+                reach: None,
                 forwarded: false,
                 inbox_seq: u64::try_from(index + 1)?,
                 target_delivery_id: "sender".into(),
@@ -497,6 +498,7 @@ async fn serve(
                         }
                         GatewayServerFrame::Deliver {
                             entry: GatewayInboxEntry {
+                                reach: None,
                                 forwarded: false,
                                 inbox_seq: 1,
                                 target_delivery_id: submit.envelope.target_delivery_id.clone(),
@@ -875,6 +877,7 @@ pub(super) async fn publish_router_envelope(
             ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
             ramflux_node_core::RouterSubmitOutcome::Online(online) => {
                 ramflux_node_core::InboxEntry {
+                    reach: None,
                     inbox_seq: online.inbox_seq,
                     target_delivery_id: online.target_delivery_id,
                     envelope: online.envelope,
@@ -919,6 +922,7 @@ async fn record_router_submit(
     let sequence = entry.inbox_seq;
     let mut gateway = shared.lock().map_err(|_| "gateway")?;
     gateway.inbox.push(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: entry.target_delivery_id,

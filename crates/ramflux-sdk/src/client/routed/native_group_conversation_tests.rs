@@ -52,6 +52,7 @@ fn carrier(
     )?;
     message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: 42,
         target_delivery_id: message.target_delivery_id.clone(),

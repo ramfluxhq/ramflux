@@ -309,6 +309,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
                 envelope.envelope_id =
                     mvp10_fanout_envelope_id(&request.envelope.envelope_id, &delivery.device_id);
                 InboxEntry {
+                    reach: None,
                     inbox_seq,
                     target_delivery_id: delivery.target_delivery_id.clone(),
                     envelope,

@@ -103,6 +103,7 @@ pub(crate) fn envelope(id: &str) -> Envelope {
 
 pub(crate) fn inbox(id: &str, sequence: u64) -> GatewayInboxEntry {
     GatewayInboxEntry {
+        reach: None,
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: TARGET.to_owned(),

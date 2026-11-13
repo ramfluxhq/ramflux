@@ -134,6 +134,8 @@ impl FederationDiscoverySurface {
         {
             record.client_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
         }
+        record.client_capabilities =
+            ramflux_protocol::contact_reach::advertised_capabilities(&record.client_capabilities);
         let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
         record.signature =
@@ -173,6 +175,8 @@ impl FederationDiscoverySurface {
             attachment_authority: self.attachment_authority.clone(),
             signature: String::new(),
         };
+        record.node_capabilities =
+            ramflux_protocol::contact_reach::advertised_capabilities(&record.node_capabilities);
         ramflux_node_core::sign_federation_server_record_with_seed(
             &mut record,
             self.node_signing_seed,
