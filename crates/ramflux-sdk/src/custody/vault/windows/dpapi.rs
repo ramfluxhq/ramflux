@@ -64,6 +64,7 @@ pub(super) fn protect(plaintext: &[u8], entropy: &[u8]) -> io::Result<Zeroizing<
     // SAFETY: the input and entropy blobs point at live slices; the description, reserved and
     // prompt pointers are null as documented; `output` receives a system allocation that
     // `take` releases.
+    crate::platform::pipe::win32::note_call("CryptProtectData");
     unsafe {
         if CryptProtectData(
             &raw const input,
@@ -94,6 +95,7 @@ pub(super) fn unprotect(protected: &[u8], entropy: &[u8]) -> io::Result<Zeroizin
     let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
     // SAFETY: as in `protect`; the description out-pointer is null, so nothing else is
     // allocated.
+    crate::platform::pipe::win32::note_call("CryptUnprotectData");
     unsafe {
         if CryptUnprotectData(
             &raw const input,

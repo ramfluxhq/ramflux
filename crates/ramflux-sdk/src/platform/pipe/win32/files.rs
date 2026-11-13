@@ -45,14 +45,18 @@ pub(crate) fn current_user() -> io::Result<Sid> {
 /// `CreateFile` adds `SYNCHRONIZE` even to an owner open that asked only for `READ_CONTROL`,
 /// and the owner's implicit rights do not include it. A directory has one entry for itself and
 /// one inherit-only entry, so a file created inside it receives the same list.
-fn owner_descriptor(directory: bool) -> io::Result<(SecurityDescriptor, Sid)> {
-    let user = current_user()?;
-    let sid = user.to_sddl_string()?;
-    let sddl = if directory {
+pub(crate) fn owner_only_sddl(directory: bool) -> io::Result<String> {
+    let sid = current_user()?.to_sddl_string()?;
+    Ok(if directory {
         format!("O:{sid}D:P(A;;FA;;;{sid})(A;OICIIO;FA;;;{sid})")
     } else {
         format!("O:{sid}D:P(A;;FA;;;{sid})")
-    };
+    })
+}
+
+fn owner_descriptor(directory: bool) -> io::Result<(SecurityDescriptor, Sid)> {
+    let user = current_user()?;
+    let sddl = owner_only_sddl(directory)?;
     Ok((SecurityDescriptor::from_sddl(&sddl)?, user))
 }
 
@@ -105,6 +109,7 @@ pub(crate) fn open_owner_only(
     // returned handle is owned by the `File`. The last-error value is read before any other
     // call can replace it.
     let (file, existed) = super::assigning_owner(|| unsafe {
+        super::note_call("CreateFileW(open_owner_only)");
         SetLastError(0);
         let handle = CreateFileW(
             wide.as_ptr(),
@@ -155,6 +160,7 @@ pub(crate) fn restrict(path: &Path, directory: bool) -> io::Result<()> {
     let (descriptor, user) = owner_descriptor(directory)?;
     // SAFETY: `wide` is NUL-terminated; the handle is owned by the `File`. Backup semantics is
     // the documented way to obtain a directory handle; it grants nothing without the privilege.
+    super::note_call("CreateFileW(restrict)");
     let file = unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
@@ -186,6 +192,7 @@ pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
     let attributes = descriptor.attributes()?;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call.
     super::assigning_owner(|| {
+        super::note_call("CreateDirectoryW");
         if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -215,6 +222,7 @@ pub(crate) fn path_owner(path: &Path) -> io::Result<Sid> {
 fn open_for_facts(path: &Path, access: u32) -> io::Result<File> {
     let wide = extended(path)?;
     // SAFETY: `wide` is NUL-terminated; the handle is owned by the `File`.
+    super::note_call("CreateFileW(open_for_facts)");
     unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),

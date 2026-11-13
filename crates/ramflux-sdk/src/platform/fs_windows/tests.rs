@@ -18,6 +18,25 @@ fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+/// Failure text for the data-root test: token, built SDDL, read-back SDDL, and the last
+/// labeled Win32 call. The read-back does not record a new call name.
+fn explain_root(error: impl std::fmt::Display, root: &Path) -> String {
+    let call = crate::platform::pipe::win32::last_call();
+    let token = crate::platform::pipe::win32::diag::token_line();
+    let built = match crate::platform::pipe::win32::files::owner_only_sddl(true) {
+        Ok(text) => text,
+        Err(error) => format!("build-failed:{error}"),
+    };
+    let root_sd = crate::platform::pipe::win32::diag::object_sddl(root, false);
+    let parent_sd = match root.parent() {
+        Some(parent) => crate::platform::pipe::win32::diag::object_sddl(parent, false),
+        None => "no parent".to_owned(),
+    };
+    format!(
+        "{error} | {token} | built={built} | root={root_sd} | parent={parent_sd} | last_labeled_call={call}"
+    )
+}
+
 fn second_user() -> Result<(String, String), String> {
     Ok((
         std::env::var("RAMFLUX_TEST_SECOND_USER").map_err(text)?,
@@ -225,8 +244,8 @@ fn the_default_data_root_is_local_and_a_roaming_root_is_refused() -> Result<(), 
 fn ensure_data_root_creates_owner_only_directories() -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(text)?;
     let root = dir.path().join("ramflux").join("profile");
-    ensure_data_root(&root).map_err(text)?;
-    ensure_data_root(&root).map_err(text)?;
+    ensure_data_root(&root).map_err(|error| explain_root(error, &root))?;
+    ensure_data_root(&root).map_err(|error| explain_root(error, &root))?;
     owned_by_me(&root)?;
     owned_by_me(&dir.path().join("ramflux"))
 }

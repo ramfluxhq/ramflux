@@ -43,7 +43,33 @@ const MAX_REFERENCE_BYTES: usize = 256;
 const MAX_SECRET_BYTES: usize = 1024;
 const CHECK_BYTES: usize = 32;
 
-fn unavailable<E>(_: E) -> SdkError {
+#[cfg(test)]
+thread_local! {
+    static UNAVAILABLE_REASON: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+#[cfg(test)]
+fn remember_unavailable(reason: &str) {
+    UNAVAILABLE_REASON.with(|slot| *slot.borrow_mut() = reason.to_owned());
+}
+
+/// The last reason `ready` or DPAPI was mapped to `CustodyVaultUnavailable` on this thread.
+#[cfg(test)]
+pub(super) fn last_unavailable() -> String {
+    UNAVAILABLE_REASON.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(super) fn clear_unavailable() {
+    UNAVAILABLE_REASON.with(|slot| slot.borrow_mut().clear());
+}
+
+fn unavailable<E: std::fmt::Display>(error: E) -> SdkError {
+    #[cfg(test)]
+    remember_unavailable(&format!("{error} | call={}", crate::platform::pipe::win32::last_call()));
+    #[cfg(not(test))]
+    let _ = error;
     SdkError::CustodyVaultUnavailable
 }
 
@@ -143,10 +169,28 @@ impl WindowsDpapiVault {
         match fs::create_owner_only_dir(&self.directory) {
             Ok(()) => {}
             Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(SdkError::CustodyVaultUnavailable),
+            Err(error) => {
+                #[cfg(test)]
+                remember_unavailable(&format!(
+                    "create_owner_only_dir: {error} | call={}",
+                    crate::platform::pipe::win32::last_call()
+                ));
+                #[cfg(not(test))]
+                let _ = error;
+                return Err(SdkError::CustodyVaultUnavailable);
+            }
         }
         // Refuses a directory another user owns before any blob is written into it.
-        fs::set_owner_only_dir(&self.directory).map_err(unavailable)
+        fs::set_owner_only_dir(&self.directory).map_err(|error| {
+            #[cfg(test)]
+            remember_unavailable(&format!(
+                "set_owner_only_dir: {error} | call={}",
+                crate::platform::pipe::win32::last_call()
+            ));
+            #[cfg(not(test))]
+            let _ = error;
+            SdkError::CustodyVaultUnavailable
+        })
     }
 
     /// Insert only. The blob is written to a private temporary name, flushed, and moved to
@@ -214,8 +258,20 @@ impl PrimaryVault for WindowsDpapiVault {
     fn preflight(&self) -> Result<(), SdkError> {
         self.ready()?;
         let entropy = Self::entropy("provider-availability-probe");
-        let protected = dpapi::protect(b"probe", &entropy).map_err(unavailable)?;
-        let opened = dpapi::unprotect(&protected, &entropy).map_err(unavailable)?;
+        let protected = dpapi::protect(b"probe", &entropy).map_err(|error| {
+            #[cfg(test)]
+            remember_unavailable(&format!("CryptProtectData: {error}"));
+            #[cfg(not(test))]
+            let _ = error;
+            SdkError::CustodyVaultUnavailable
+        })?;
+        let opened = dpapi::unprotect(&protected, &entropy).map_err(|error| {
+            #[cfg(test)]
+            remember_unavailable(&format!("CryptUnprotectData: {error}"));
+            #[cfg(not(test))]
+            let _ = error;
+            SdkError::CustodyVaultUnavailable
+        })?;
         if opened.as_slice() == b"probe" { Ok(()) } else { Err(SdkError::CustodyVaultUnavailable) }
     }
 
