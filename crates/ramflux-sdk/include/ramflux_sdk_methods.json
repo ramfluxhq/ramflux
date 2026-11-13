@@ -975,8 +975,15 @@
       "show_once": false
     },
     {
-      "capability": "message",
+      "capability": "raw_message",
       "name": "message.submit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.send",
       "secret_input": true,
       "secret_output": true,
       "show_once": false

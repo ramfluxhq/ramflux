@@ -14,6 +14,27 @@
 #include "ramflux_card.h"
 #endif
 
+/*
+ Version 1 host storage operations. References are opaque UTF-8, without a terminating NUL.
+ */
+enum RamfluxV2CustodyOperation
+#ifdef __cplusplus
+  : uint32_t
+#endif // __cplusplus
+ {
+  RAMFLUX_V2_CUSTODY_OPERATION_PREFLIGHT = 0,
+  RAMFLUX_V2_CUSTODY_OPERATION_STORE_PRIMARY = 1,
+  RAMFLUX_V2_CUSTODY_OPERATION_LOAD_PRIMARY = 2,
+  RAMFLUX_V2_CUSTODY_OPERATION_DELETE = 3,
+  RAMFLUX_V2_CUSTODY_OPERATION_STORE_BRANCH = 4,
+  RAMFLUX_V2_CUSTODY_OPERATION_LOAD_BRANCH = 5,
+  RAMFLUX_V2_CUSTODY_OPERATION_STORE_PROVISIONING = 6,
+  RAMFLUX_V2_CUSTODY_OPERATION_LOAD_PROVISIONING = 7,
+};
+#ifndef __cplusplus
+typedef uint32_t RamfluxV2CustodyOperation;
+#endif // __cplusplus
+
 enum RamfluxErrorCode
 #ifdef __cplusplus
   : int32_t
@@ -91,6 +112,41 @@ struct RamfluxBuffer {
 
 struct RamfluxEventQueue {
   uint8_t _private[0];
+};
+
+/*
+ One synchronous storage request. Never write beyond `output_capacity` or retain pointers.
+ Store inputs are secret bytes: primary=32, branch=64, provisioning<=4096.
+ Loads write the same bytes and set `output_len`; other operations return length 0.
+ SDK-owned output memory is erased after use. Hosts erase their own temporary copies.
+ */
+struct RamfluxV2CustodyRequest {
+  RamfluxV2CustodyOperation operation;
+  const uint8_t *reference;
+  size_t reference_len;
+  const uint8_t *input;
+  size_t input_len;
+  uint8_t *output;
+  size_t output_capacity;
+  size_t output_len;
+};
+
+/*
+ Trusted host provider, copied during open. All callbacks are required, thread safe and
+ synchronous. They must not unwind or reenter this client. `retain` is called once on
+ acceptance; `release` once after the last SDK task using the provider has finished.
+ `context` is a host token (for example a JNI global-reference registry id).
+ */
+struct RamfluxV2CustodyProvider {
+  uint32_t abi_version;
+  uint64_t context;
+  void (*retain)(uint64_t);
+  void (*release)(uint64_t);
+  /*
+   Return 0 on success; 1 missing, 2 corrupt, 3 permission, 4 locked, 5 busy,
+   6 unavailable. Unknown statuses fail closed. The request is borrowed for this call.
+   */
+  int32_t (*invoke)(uint64_t context, struct RamfluxV2CustodyRequest *request);
 };
 
 #ifdef __cplusplus
@@ -180,10 +236,22 @@ int32_t ramflux_client_put_object(struct RamfluxClient *client,
 int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxBuffer **out);
 
 /*
- Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?}`.
+ Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?}`.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */
-int32_t ramflux_v2_client_open(const uint8_t *config, size_t len, uint64_t *out_client);
+int32_t ramflux_v2_client_open(const uint8_t *config,
+                               size_t len,
+                               uint64_t *out_client);
+
+/*
+ Open with trusted host OS credential storage (provider ABI version 1).
+ The table is borrowed only during this call; retained context lives through shutdown.
+ Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+ */
+int32_t ramflux_v2_client_open_with_custody(const uint8_t *config,
+                                            size_t len,
+                                            const struct RamfluxV2CustodyProvider *provider,
+                                            uint64_t *out_client);
 
 /*
  Stop the supervisor and release its writer lease. Call off the UI thread.

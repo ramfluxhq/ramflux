@@ -7,6 +7,7 @@ pub(crate) mod call;
 pub mod call_bot;
 pub mod contact;
 mod contact_resolution;
+pub(in crate::bus) mod conversation_send;
 pub mod daemon;
 pub(crate) mod deferred_attachment;
 pub mod device;

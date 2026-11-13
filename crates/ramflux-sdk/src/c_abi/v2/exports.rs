@@ -38,6 +38,8 @@ static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registr
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default)]
+    allow_raw_messages: bool,
     data_root: std::path::PathBuf,
     #[serde(default)]
     builtin_nodes: Vec<crate::NodeProfile>,
@@ -162,7 +164,7 @@ pub extern "C" fn ramflux_v2_negotiate(
     })
 }
 
-/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?}`.
+/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?}`.
 /// This may block during startup; invoke off the UI thread. Output is zero on failure.
 #[unsafe(no_mangle)]
 #[must_use]
@@ -170,6 +172,46 @@ pub extern "C" fn ramflux_v2_client_open(
     config: *const u8,
     len: usize,
     out_client: *mut u64,
+) -> i32 {
+    open(config, len, out_client, None)
+}
+
+/// Open with trusted host OS credential storage (provider ABI version 1).
+/// The table is borrowed only during this call; retained context lives through shutdown.
+/// Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_client_open_with_custody(
+    config: *const u8,
+    len: usize,
+    provider: *const super::custody::RamfluxV2CustodyProvider,
+    out_client: *mut u64,
+) -> i32 {
+    if provider.is_null() {
+        return call(|| {
+            write_handle(out_client, 0)?;
+            Err(invalid("null custody provider"))
+        });
+    }
+    // SAFETY: the host supplies one valid aligned provider table during this call.
+    let table = unsafe { provider.read() };
+    let vault = match super::custody::HostVault::new(table) {
+        Ok(vault) => vault,
+        Err(error) => {
+            return call(|| {
+                write_handle(out_client, 0)?;
+                Err(super::super::map_sdk_error(&error))
+            });
+        }
+    };
+    open(config, len, out_client, Some(vault))
+}
+
+fn open(
+    config: *const u8,
+    len: usize,
+    out_client: *mut u64,
+    vault: Option<Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
 ) -> i32 {
     call(|| {
         write_handle(out_client, 0)?;
@@ -200,10 +242,15 @@ pub extern "C" fn ramflux_v2_client_open(
         };
         let mut bus = LocalBusConfig::new(std::path::PathBuf::new(), config.data_root);
         bus.builtin_nodes = config.builtin_nodes;
+        bus.custody_vault = vault;
         let started = Client::start(bus);
         let mut registry = REGISTRY.lock().map_err(|_| internal())?;
         registry.opening = registry.opening.saturating_sub(1);
         let client = started.map_err(|error| super::super::map_sdk_error(&error))?;
+        client
+            .shared
+            .allow_raw_messages
+            .store(config.allow_raw_messages, std::sync::atomic::Ordering::Release);
         registry.clients.insert(id, client);
         write_handle(out_client, id)
     })
@@ -283,6 +330,14 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(invalid("invalid method"));
         }
         let client = client(handle)?;
+        if request.method == "message.submit"
+            && !client.shared.allow_raw_messages.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(CAbiError::new(
+                RamfluxErrorCode::PermissionDenied,
+                "raw_message capability is disabled",
+            ));
+        }
         if client.closing.load(std::sync::atomic::Ordering::Acquire)
             || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
         {

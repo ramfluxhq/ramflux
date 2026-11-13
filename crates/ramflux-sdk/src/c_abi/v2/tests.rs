@@ -72,7 +72,7 @@ impl Drop for Fixture {
         }
     }
 }
-fn deadline() -> u64 {
+pub(super) fn deadline() -> u64 {
     u64::try_from(super::super::current_millis())
         .expect("test: epoch millis")
         .saturating_add(30_000)
@@ -504,7 +504,7 @@ fn close_timeout_retains_handle_until_real_supervisor_releases_writer() {
     assert_eq!(ramflux_v2_client_close(replacement), 0, "replacement must close normally");
 }
 
-fn wait_result(handle: u64, operation: u64) -> Value {
+pub(super) fn wait_result(handle: u64, operation: u64) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut buffer = std::ptr::null_mut();
@@ -640,4 +640,19 @@ fn shared_receipt_projection_never_invents_delivery_or_retry_permission() {
         Value::Null,
         "incoming messages have no outgoing receipt presentation"
     );
+}
+
+#[test]
+fn native_clients_cannot_submit_raw_routing_without_explicit_capability() {
+    let fixture = Fixture::open();
+    let request = serde_json::to_vec(&json!({"sdk_api":"message","method":"message.submit",
+        "body":{},"deadline_ms":deadline()}))
+    .expect("test: raw request");
+    let mut operation = 99;
+    assert_eq!(
+        ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation),
+        12,
+        "raw message routing must be refused before carrier admission"
+    );
+    assert_eq!(operation, 0, "refused raw routing cannot allocate an operation");
 }

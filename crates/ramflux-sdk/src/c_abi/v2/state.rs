@@ -46,6 +46,7 @@ pub(super) struct Events {
 
 #[derive(Default)]
 pub(super) struct Shared {
+    pub allow_raw_messages: std::sync::atomic::AtomicBool,
     pub operations: Mutex<BTreeMap<u64, Arc<Operation>>>,
     pub events: Mutex<Events>,
     pub closed: std::sync::atomic::AtomicBool,

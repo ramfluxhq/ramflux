@@ -10,6 +10,63 @@ use std::sync::{Arc, Mutex, atomic::AtomicBool};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
+async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_device() -> TestResult {
+    Box::pin(tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir()?;
+        let mut source = runtime_tests::account(
+            &root.path().join("source"),
+            "sender",
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        let PeerFixture { peers, config, directory, .. } =
+            peer_fixture(root.path(), &mut source).await?;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        source.install_test_session(GatewaySessionEngine::with_test_transport(
+            config,
+            Box::new(super::fixture::RecordingGateway::new(captured.clone())),
+        ));
+        let mut request = LocalBusFrame::request(
+            "send",
+            Some("sender".into()),
+            "conversation",
+            "conversation.send",
+            json!({"conversation_id":"thread","text":"Native text"}),
+        );
+        request.operation_id = Some("host-send-1".into());
+        let response =
+            crate::bus::dispatch::conversation_send::send_account(&request, &mut source).await?;
+        assert_eq!(
+            response.response_body["delivery_state"], "submitted",
+            "SDK fan-out must submit all peers"
+        );
+        let envelopes = captured.lock().map_err(|_| "capture poisoned")?.clone();
+        assert_eq!(envelopes.len(), 2, "verified two-device directory must determine fan-out");
+        assert_ne!(
+            envelopes.first().ok_or("first envelope")?.encrypted_payload,
+            ramflux_protocol::encode_base64url(b"Native text"),
+            "SDK must seal native plaintext"
+        );
+        assert_eq!(
+            source.client.direct_messages("thread")?.len(),
+            1,
+            "fan-out must retain one logical local message"
+        );
+        request.body["sender_id"] = json!("host-forged");
+        assert!(
+            crate::bus::dispatch::conversation_send::send_account(&request, &mut source)
+                .await
+                .is_err(),
+            "native callers cannot override authenticated sender routing"
+        );
+        directory.abort();
+        drop(peers);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }))
+    .await?
+}
+
+#[tokio::test]
 async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallback() -> TestResult
 {
     let root = runtime_tests::root("surface-dm");

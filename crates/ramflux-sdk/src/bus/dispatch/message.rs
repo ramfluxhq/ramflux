@@ -16,6 +16,7 @@ pub(crate) async fn dispatch_message_bus_request(
     connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
+        "conversation.send" => super::conversation_send::send(request, state).await,
         "message.submit" => Box::pin(dispatch_message_submit_request(request, state)).await,
         "message.receive" => dispatch_message_receive_request(request, state, connection).await,
         "message.ack" => dispatch_message_ack_request(request, state).await,
@@ -105,7 +106,22 @@ async fn dispatch_message_submit_request(
 
 pub(super) async fn submit_message(
     account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    submit_message_mode(account, body, false).await
+}
+
+pub(super) async fn submit_conversation_message(
+    account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    submit_message_mode(account, body, true).await
+}
+
+async fn submit_message_mode(
+    account: &mut LocalBusAccountState,
     mut body: LocalBusMessageSubmitRequest,
+    fanout: bool,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     if let Some(plaintext) = body.plaintext_body()?
         && crate::client::surface::Carrier::decode(&plaintext)?.is_some()
@@ -134,16 +150,28 @@ pub(super) async fn submit_message(
             // pass; the account keeps its own Arc regardless of how this request ends.
             let pool = account.relay_quic_pool()?;
             let message = body.clone().into_gateway_message_with_body(Vec::new());
-            let result = account
-                .client
-                .send_plaintext_direct_message_with_attachments_via_gateway(
-                    &mut engine,
-                    &pool,
-                    message,
-                    &plaintext,
-                    &body.attachments,
-                )
-                .await;
+            let result = if fanout {
+                account
+                    .client
+                    .send_conversation_attachments_via_gateway(
+                        &mut engine,
+                        &pool,
+                        message,
+                        (&plaintext, &body.attachments),
+                    )
+                    .await
+            } else {
+                account
+                    .client
+                    .send_plaintext_direct_message_with_attachments_via_gateway(
+                        &mut engine,
+                        &pool,
+                        message,
+                        &plaintext,
+                        &body.attachments,
+                    )
+                    .await
+            };
             account.apply_session_metadata(engine);
             result?
         } else if let Some(federation) = body.federation.clone() {
@@ -158,14 +186,18 @@ pub(super) async fn submit_message(
             )
             .await?;
             require_message_submit_friend_link_accepted(account, &recipient)?;
-            let result = account
-                .client
-                .send_plaintext_direct_message_via_gateway(
-                    &mut engine,
-                    body.into_gateway_message_with_body(Vec::new()),
-                    &plaintext,
-                )
-                .await;
+            let message = body.into_gateway_message_with_body(Vec::new());
+            let result = if fanout {
+                account
+                    .client
+                    .send_conversation_direct_message_via_gateway(&mut engine, message, &plaintext)
+                    .await
+            } else {
+                account
+                    .client
+                    .send_plaintext_direct_message_via_gateway(&mut engine, message, &plaintext)
+                    .await
+            };
             account.apply_session_metadata(engine);
             result?
         }

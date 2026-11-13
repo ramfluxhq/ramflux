@@ -14,7 +14,7 @@ parse_deps = false
 include = ["ramflux-sdk"]
 
 [export]
-include = ["RamfluxErrorCode", "RamfluxV2Status"]
+include = ["RamfluxErrorCode", "RamfluxV2Status", "RamfluxV2CustodyOperation"]
 item_types = ["enums", "structs", "functions", "opaque"]
 exclude = ["CAbiClientInner", "CAbiEventQueue"]
 

@@ -205,6 +205,7 @@ methods! {
         "message.ack",
         "message.receive",
         "message.submit",
+        "conversation.send",
         "object.fetch",
         "object.import",
         "object.share",

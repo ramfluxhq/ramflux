@@ -417,80 +417,79 @@ async fn backup_archive_corrupted_mac_is_tampered() -> TestResult {
 #[tokio::test(flavor = "current_thread")]
 async fn failed_verification_and_cancellation_leave_existing_accounts_and_output_untouched()
 -> TestResult {
-    LocalSet::new()
-        .run_until(async {
-            let root = crate::bus::runtime_tests::root("backup-failures");
-            let supervisor = source_supervisor(&root, SMALL)?;
-            let archive = root.join("archive.rfb");
-            let secret = "test archive secret";
-            let original = archive_while_reading(&supervisor, &archive, secret).await?;
-            let mut tampered = original.clone();
-            let last = tampered.len() - 1;
-            tampered[last] ^= 1;
-            let altered = root.join("altered.rfb");
-            std::fs::write(&altered, tampered)?;
-            let truncated = root.join("truncated.rfb");
-            std::fs::write(&truncated, &original[..original.len() - 7])?;
-            let original_record = supervisor.index.account("alice")?;
-            for (input, password, code) in [
-                (&archive, "incorrect", "wrong_passphrase"),
-                (&altered, secret, "tampered"),
-                (&truncated, secret, "truncated"),
-            ] {
-                let verify = call(
-                    &supervisor,
-                    "account.restore.verify",
-                    None,
-                    json!({"input_path":input,"passphrase":password}),
-                )
-                .await?;
-                let id = verify["job"]["job_id"].as_str().ok_or("id")?;
-                let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
-                assert_eq!(serde_json::to_value(failed.error)?["code"], code);
-                assert_eq!(
-                    supervisor.index.account("alice")?.db_relative_path,
-                    original_record.db_relative_path
-                );
-                let read = call(
-                    &supervisor,
-                    "message.read",
-                    Some("alice"),
-                    json!({"conversation_id":"thread"}),
-                )
-                .await?;
-                assert!(read.to_string().contains("m5"));
-            }
-            rejects_identity_replacement_and_rollback(&supervisor, &root, &archive, secret).await?;
+    Box::pin(LocalSet::new().run_until(async {
+        let root = crate::bus::runtime_tests::root("backup-failures");
+        let supervisor = source_supervisor(&root, SMALL)?;
+        let archive = root.join("archive.rfb");
+        let secret = "test archive secret";
+        let original = archive_while_reading(&supervisor, &archive, secret).await?;
+        let mut tampered = original.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        let altered = root.join("altered.rfb");
+        std::fs::write(&altered, tampered)?;
+        let truncated = root.join("truncated.rfb");
+        std::fs::write(&truncated, &original[..original.len() - 7])?;
+        let original_record = supervisor.index.account("alice")?;
+        for (input, password, code) in [
+            (&archive, "incorrect", "wrong_passphrase"),
+            (&altered, secret, "tampered"),
+            (&truncated, secret, "truncated"),
+        ] {
             let verify = call(
                 &supervisor,
                 "account.restore.verify",
                 None,
-                json!({"input_path":archive,"passphrase":secret}),
+                json!({"input_path":input,"passphrase":password}),
             )
             .await?;
             let id = verify["job"]["job_id"].as_str().ok_or("id")?;
-            let cancelled =
-                call(&supervisor, "account.backup.cancel", None, json!({"job_id":id})).await?;
-            assert_eq!(cancelled["job"]["state"], "cancelled");
-            assert!(!root.join("backup_jobs").join(format!("job_{id}")).exists());
-            assert_eq!(std::fs::read(&archive)?, original);
-            let duplicate = call(
+            let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
+            assert_eq!(serde_json::to_value(failed.error)?["code"], code);
+            assert_eq!(
+                supervisor.index.account("alice")?.db_relative_path,
+                original_record.db_relative_path
+            );
+            let read = call(
                 &supervisor,
-                "account.backup.create",
+                "message.read",
                 Some("alice"),
-                json!({"output_path":archive,"passphrase":secret}),
+                json!({"conversation_id":"thread"}),
             )
             .await?;
-            let id = duplicate["job"]["job_id"].as_str().ok_or("id")?;
-            let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
-            assert_eq!(serde_json::to_value(failed.error)?["code"], "not_writable");
-            assert_eq!(std::fs::read(&archive)?, original);
-            supervisor.shutdown().await?;
-            drop(supervisor);
-            std::fs::remove_dir_all(root)?;
-            Ok::<(), Box<dyn std::error::Error>>(())
-        })
-        .await
+            assert!(read.to_string().contains("m5"));
+        }
+        rejects_identity_replacement_and_rollback(&supervisor, &root, &archive, secret).await?;
+        let verify = call(
+            &supervisor,
+            "account.restore.verify",
+            None,
+            json!({"input_path":archive,"passphrase":secret}),
+        )
+        .await?;
+        let id = verify["job"]["job_id"].as_str().ok_or("id")?;
+        let cancelled =
+            call(&supervisor, "account.backup.cancel", None, json!({"job_id":id})).await?;
+        assert_eq!(cancelled["job"]["state"], "cancelled");
+        assert!(!root.join("backup_jobs").join(format!("job_{id}")).exists());
+        assert_eq!(std::fs::read(&archive)?, original);
+        let duplicate = call(
+            &supervisor,
+            "account.backup.create",
+            Some("alice"),
+            json!({"output_path":archive,"passphrase":secret}),
+        )
+        .await?;
+        let id = duplicate["job"]["job_id"].as_str().ok_or("id")?;
+        let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
+        assert_eq!(serde_json::to_value(failed.error)?["code"], "not_writable");
+        assert_eq!(std::fs::read(&archive)?, original);
+        supervisor.shutdown().await?;
+        drop(supervisor);
+        std::fs::remove_dir_all(root)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }))
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]

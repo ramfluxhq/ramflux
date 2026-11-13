@@ -225,3 +225,62 @@ accepted); u64/i64 output quantities use decimal strings. Both entrypoints run
 without a client handle, use the common buffer ownership/error contract, and
 serialize confidential snapshot data. They retrieve no data and confer no SDK
 authority. Business models and policy stay in the shared crate.
+
+## Conversation send
+
+Use `conversation.send` through `ramflux_v2_execute`, with an account id, a durable
+`operation_id`, and body `{conversation_id,text,attachments?}`. Text is UTF-8, at
+most 65536 bytes; an empty text requires an attachment. Routing fields are refused.
+The SDK derives the sender from its authenticated device, the peer commitment from
+the existing conversation, and recipient devices from the verified manifest. Group
+conversations use the ordinary group sender. Sealing, friend-link checks, TTL,
+own-device copies and gateway submission use the existing SDK delivery paths.
+Group attachments retain the existing SDK limitation and are refused.
+
+The call returns the usual asynchronous operation handle. Its completion body has
+`message_id`, `conversation_id`, `delivery_state` (`submitted` or `failed`), and
+per-target `deliveries` with stable error codes on failure. Submitted means gateway
+submission, never delivery or read. Use existing receipt/event projections for later
+progress. Fan-out preserves the first local ciphertext and refuses a changed sender,
+conversation or plaintext under that logical id. Raw SDK sends retain their existing
+ciphertext collision fence. The logical message id is derived from account and operation id, so retries
+retain identity. Existing operation reconciliation governs interrupted mutations;
+a failed fan-out can have partial effects and is not a no-effects cancellation.
+Before a verified route is available the operation can return the usual SDK error.
+
+`message.submit` is disabled in v2 by default (PermissionDenied=12 before admission).
+Trusted diagnostic hosts can open with `allow_raw_messages:true`; its generated
+capability is `raw_message`. Native product clients use `conversation.send`.
+
+## Host custody provider (Android M4 and iOS)
+
+`ramflux_v2_client_open_with_custody` accepts the same JSON config plus a version-1
+`RamfluxV2CustodyProvider` table. It adapts host OS storage to the SDK's existing
+`PrimaryVault`; account create/recovery/pairing remain SDK ceremonies. M4 supplies
+Android Keystore wrapping and JNI attachment on callback threads. An iOS host can
+supply Keychain storage through the same seam. Ordinary open keeps the existing
+native provider selection; there is no file or data-passphrase fallback.
+
+The provider must be non-synchronizing, device-local and independent of data unlock.
+Primary and branch entries are separate. Store operations are create-only, refuse
+an existing reference, and complete only after durable protected storage; delete is
+idempotent. References are opaque canonical SDK references, not filesystem paths.
+The provider's preflight runs before recovery material is shown. This seam grants
+no independent user-presence authorization: migration signing remains fail-closed.
+
+The header defines operations and callback status values. Primary bytes are a
+32-byte vault seed; branch bytes are 64-byte signing/agreement seeds; provisioning
+bytes are bounded to 4096. Store inputs and load outputs are secret and must never
+be logged, persisted in ordinary preferences, or exposed to application observers.
+All callback buffers are borrowed for the synchronous invocation only. The SDK owns
+and erases its output buffers; hosts must erase temporary copies. Output lengths
+are validated before decoding and key lengths must match exactly.
+
+The table is copied during open. All callbacks are mandatory and may run on SDK
+worker/blocking threads, including concurrently; attach to the host runtime as
+needed. Callbacks must be bounded, must not unwind, and must not reenter this client.
+`retain(context)` occurs once after table validation; `release(context)` occurs
+once after the final SDK task drops the provider, including failed startup or a
+shutdown that initially timed out. Keep callback code loaded until release. Pending
+close retains context; confirmed successful close has drained its tasks. Context is
+an opaque 64-bit host token; the SDK never dereferences it.

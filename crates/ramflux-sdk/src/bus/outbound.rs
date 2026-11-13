@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_dispatcher_preserves_old_generation_after_close_and_reopen() {
-        tokio::time::timeout(
+        Box::pin(tokio::time::timeout(
             Duration::from_secs(10),
             tokio::task::LocalSet::new().run_until(async {
                 let root = tempfile::tempdir().expect("test: isolated root");
@@ -195,10 +195,10 @@ mod tests {
                     Some(DataRootLock::acquire(root.path()).expect("test: real writer lease"));
                 let (outbound, mut receiver) = LocalBusOutbound::channel(64, true);
                 let mut connection_state = LocalBusConnectionState::new(1, outbound);
-                let body = serde_json::json!({"topics":["account.backup.job.changed"]});
+                let body = serde_json::json!({"topics":["message.changed"]});
                 let open = LocalBusFrame::request(
                     "open1",
-                    None,
+                    Some("same-account".into()),
                     "account",
                     "subscription.open",
                     body.clone(),
@@ -212,7 +212,7 @@ mod tests {
                 let old_producer = connection_state.outbound.clone();
                 let close = LocalBusFrame::request(
                     "close",
-                    None,
+                    Some("same-account".into()),
                     "account",
                     "subscription.close",
                     serde_json::json!({}),
@@ -222,8 +222,13 @@ mod tests {
                     .expect("test: dispatch close");
                 let closed = receiver.recv().await.expect("test: close acknowledgement");
                 assert_eq!(closed.frame.body["subscribed"], false, "the real stream must close");
-                let reopen =
-                    LocalBusFrame::request("open2", None, "account", "subscription.open", body);
+                let reopen = LocalBusFrame::request(
+                    "open2",
+                    Some("same-account".into()),
+                    "account",
+                    "subscription.open",
+                    body,
+                );
                 connection::configure_subscription(&supervisor, &mut connection_state, &reopen)
                     .await
                     .expect("test: dispatch reopen");
@@ -233,14 +238,13 @@ mod tests {
                     second_generation > first_generation,
                     "same-account reopen must advance its generation"
                 );
-                let mut late = super::super::io::local_bus_event(
+                let late = super::super::io::local_bus_event(
                     &open,
-                    "",
+                    "same-account",
                     "account",
-                    "account.backup.job.changed",
+                    "message.changed",
                     serde_json::json!({"late":true}),
                 );
-                late.account_id = None;
                 old_producer.send(late).await.expect("test: old producer completes after reopen");
                 let late = receiver.recv().await.expect("test: late old frame");
                 assert_eq!(
@@ -264,7 +268,7 @@ mod tests {
                 supervisor.disconnect(1);
                 supervisor.shutdown().await.expect("test: real supervisor shutdown");
             }),
-        )
+        ))
         .await
         .expect("test: bounded dispatcher lifecycle");
     }

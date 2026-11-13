@@ -4,6 +4,9 @@
 //! Version 2: bounded asynchronous requests through the process supervisor.
 //! See docs/design/c-abi-v2.md for ownership, cancellation and wire contracts.
 
+mod custody;
+#[cfg(test)]
+mod custody_tests;
 mod exports;
 mod method_policy;
 mod projection;
@@ -12,6 +15,8 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+pub use custody::{RamfluxV2CustodyOperation, RamfluxV2CustodyProvider, RamfluxV2CustodyRequest};
+pub use exports::ramflux_v2_client_open_with_custody;
 pub use exports::{
     RamfluxV2Status, ramflux_v2_buffer_free, ramflux_v2_client_close, ramflux_v2_client_open,
     ramflux_v2_client_release, ramflux_v2_conversation_project, ramflux_v2_event_poll,
