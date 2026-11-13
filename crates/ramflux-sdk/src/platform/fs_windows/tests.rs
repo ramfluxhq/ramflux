@@ -30,14 +30,19 @@ fn as_second_user<T: Send + 'static>(
     action: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
     let (user, password) = second_user()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let guard = impersonate_user(&user, &password).map_err(text)?;
-        let result = action();
-        drop(guard);
-        Ok(result)
-    })
-    .join()
-    .map_err(|_| "impersonating thread failed".to_owned())?
+        let outcome = (|| {
+            let guard = impersonate_user(&user, &password).map_err(text)?;
+            let result = action();
+            drop(guard);
+            Ok(result)
+        })();
+        let _ = sender.send(outcome);
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .map_err(|_| "test: impersonating thread exceeded its deadline".to_owned())?
 }
 
 /// A directory the second user can otherwise read, with a control file that proves it. The
@@ -136,8 +141,8 @@ fn replace_is_one_step_and_no_replace_refuses_an_existing_name() -> Result<(), S
     let dir = tempfile::tempdir().map_err(text)?;
     let target = dir.path().join("manifest.json");
     let temporary = dir.path().join("manifest.json.tmp");
-    std::fs::write(&target, b"old").map_err(text)?;
-    std::fs::write(&temporary, b"new").map_err(text)?;
+    create_new_owner_only(&target).map_err(text)?.write_all(b"old").map_err(text)?;
+    create_new_owner_only(&temporary).map_err(text)?.write_all(b"new").map_err(text)?;
     let before = open_owner_only_read_write(&target).map_err(text)?;
     let (device, inode) = file_device_inode(&before).map_err(text)?;
     if !same_device_inode(&target, device, inode).map_err(text)? {
@@ -230,7 +235,7 @@ fn ensure_data_root_creates_owner_only_directories() -> Result<(), String> {
 fn a_final_symbolic_link_is_refused() -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(text)?;
     let target = dir.path().join("target");
-    std::fs::write(&target, b"x").map_err(text)?;
+    create_new_owner_only(&target).map_err(text)?.write_all(b"x").map_err(text)?;
     let link = dir.path().join("link");
     // Creating a symbolic link needs a privilege or developer mode. Without it there is no
     // link to refuse, and the plain-file case below still runs.

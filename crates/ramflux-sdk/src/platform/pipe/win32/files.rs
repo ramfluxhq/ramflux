@@ -22,7 +22,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{
@@ -108,7 +108,7 @@ pub(crate) fn open_owner_only(
         SetLastError(0);
         let handle = CreateFileW(
             wide.as_ptr(),
-            access | READ_CONTROL | WRITE_DAC,
+            access | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &raw const attributes,
             disposition,
@@ -119,7 +119,16 @@ pub(crate) fn open_owner_only(
             return Err(io::Error::last_os_error());
         }
         let existed = GetLastError() == ERROR_ALREADY_EXISTS;
-        Ok((File::from_raw_handle(handle), existed))
+        let owned = File::from_raw_handle(handle);
+        if !existed
+            && let Err(error) =
+                super::set_handle_owner(owned.as_raw_handle(), SE_FILE_OBJECT, &user)
+        {
+            drop(owned);
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok((owned, existed))
     })?;
     if existed {
         if owner_of(file.as_raw_handle(), SE_FILE_OBJECT)? != user {
@@ -212,15 +221,22 @@ pub(crate) fn restrict(path: &Path, directory: bool) -> io::Result<()> {
 /// Returns the OS error; `AlreadyExists` when the path exists.
 pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
     let wide = extended(path)?;
-    let (descriptor, _) = owner_descriptor(true)?;
+    let (descriptor, user) = owner_descriptor(true)?;
     let attributes = descriptor.attributes()?;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call.
     super::assigning_owner(|| {
         if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
+            return Err(io::Error::last_os_error());
         }
+        let directory = open_for_facts(path, READ_CONTROL | WRITE_OWNER)?;
+        if let Err(error) =
+            super::set_handle_owner(directory.as_raw_handle(), SE_FILE_OBJECT, &user)
+        {
+            drop(directory);
+            let _ = std::fs::remove_dir(path);
+            return Err(error);
+        }
+        Ok(())
     })
 }
 

@@ -8,6 +8,10 @@
 //! `RAMFLUX_TEST_SECOND_USER` and `RAMFLUX_TEST_SECOND_USER_PASSWORD`.
 
 use std::ffi::OsString;
+use std::future::Future;
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ServerOptions;
@@ -17,15 +21,45 @@ use super::listener::{
 };
 use super::name;
 use super::win32::test_tokens::{impersonate_low_integrity, impersonate_user, sid_from_string};
-use super::win32::{self, MEDIUM_INTEGRITY_RID, TokenFacts};
+use super::win32::{self, MEDIUM_INTEGRITY_RID, SecurityDescriptor, TokenFacts};
 use crate::SdkError;
 
 const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
 const LOW_INTEGRITY_RID: u32 = 0x1000;
 const HIGH_INTEGRITY_RID: u32 = 0x3000;
+const MAX_TEST_FRAME: u64 = 64;
+const STEP: Duration = Duration::from_secs(15);
 
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+/// Bound one real pipe or thread wait. Paused time cannot cover a kernel object.
+async fn within<T>(work: impl Future<Output = T>) -> Result<T, String> {
+    match tokio::time::timeout(STEP, work).await {
+        Ok(value) => Ok(value),
+        Err(_elapsed) => Err("test: the pipe operation exceeded its deadline".to_owned()),
+    }
+}
+
+fn finish_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver.recv_timeout(STEP).map_err(|_| "test: worker thread exceeded its deadline".to_owned())
+}
+
+/// A name file this user owns. `std::fs::write` on an elevated token is owned by Administrators.
+fn write_user_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let me = win32::process_facts().map_err(text)?.user;
+    let sid = me.to_sddl_string().map_err(text)?;
+    let descriptor = SecurityDescriptor::from_sddl(&name::name_file_sddl(&sid)).map_err(text)?;
+    let mut file = win32::create_new_file(path, &descriptor).map_err(text)?;
+    file.write_all(bytes).map_err(text)?;
+    Ok(())
 }
 
 fn unused_name() -> Result<(OsString, String, win32::Sid), String> {
@@ -47,14 +81,12 @@ fn open_while_impersonating<G: Send + 'static>(
     name: OsString,
     token: impl FnOnce() -> std::io::Result<G> + Send + 'static,
 ) -> Result<std::io::Result<()>, String> {
-    std::thread::spawn(move || {
+    finish_thread(move || {
         let guard = token().map_err(text)?;
         let opened = std::fs::OpenOptions::new().read(true).write(true).open(&name).map(|_pipe| ());
         drop(guard);
         Ok(opened)
-    })
-    .join()
-    .map_err(|_| "impersonating thread failed".to_owned())?
+    })?
 }
 
 #[tokio::test]
@@ -63,23 +95,30 @@ async fn same_user_connects_and_bytes_round_trip() -> Result<(), String> {
     let path = dir.path().join("daemon.sock");
     let listener = bind(&path).map_err(text)?;
     let owner = listener.owner().map_err(text)?;
-    let (accepted, client) = tokio::join!(listener.accept(), connect(&path));
-    let accepted = accepted.map_err(text)?;
-    let mut client = client.map_err(text)?;
-    accepted.matches_peer(owner).map_err(text)?;
-    let (mut reader, mut writer) = accepted.into_halves();
-    client.write_all(&5_u32.to_be_bytes()).await.map_err(text)?;
-    client.write_all(b"hello").await.map_err(text)?;
-    let len = reader.read_u32().await.map_err(text)?;
-    let mut body = vec![0_u8; usize::try_from(len).map_err(text)?];
-    reader.read_exact(&mut body).await.map_err(text)?;
-    if body != b"hello" {
-        return Err("frame body changed in transit".to_owned());
-    }
-    writer.write_all(b"ok").await.map_err(text)?;
-    let mut reply = [0_u8; 2];
-    client.read_exact(&mut reply).await.map_err(text)?;
-    if &reply == b"ok" { Ok(()) } else { Err("reply changed in transit".to_owned()) }
+    within(async move {
+        let (accepted, client) = tokio::join!(listener.accept(), connect(&path));
+        let accepted = accepted.map_err(text)?;
+        let mut client = client.map_err(text)?;
+        accepted.matches_peer(owner).map_err(text)?;
+        let (mut reader, mut writer) = accepted.into_halves();
+        client.write_all(&5_u32.to_be_bytes()).await.map_err(text)?;
+        client.write_all(b"hello").await.map_err(text)?;
+        let len = reader.read_u32().await.map_err(text)?;
+        let body_len = usize::try_from(len).map_err(text)?;
+        if u64::try_from(body_len).map_err(text)? > MAX_TEST_FRAME {
+            return Err("frame longer than the test bound".to_owned());
+        }
+        let mut body = vec![0_u8; body_len];
+        reader.read_exact(&mut body).await.map_err(text)?;
+        if body != b"hello" {
+            return Err("frame body changed in transit".to_owned());
+        }
+        writer.write_all(b"ok").await.map_err(text)?;
+        let mut reply = [0_u8; 2];
+        client.read_exact(&mut reply).await.map_err(text)?;
+        if &reply == b"ok" { Ok(()) } else { Err("reply changed in transit".to_owned()) }
+    })
+    .await?
 }
 
 #[tokio::test]
@@ -87,11 +126,14 @@ async fn a_second_client_is_served_while_the_first_stays_connected() -> Result<(
     let dir = tempfile::tempdir().map_err(text)?;
     let path = dir.path().join("daemon.sock");
     let listener = bind(&path).map_err(text)?;
-    let (first, _first_client) = tokio::join!(listener.accept(), connect(&path));
-    let _first = first.map_err(text)?;
-    let (second, second_client) = tokio::join!(listener.accept(), connect(&path));
-    second.map_err(text)?;
-    second_client.map(|_stream| ()).map_err(text)
+    within(async move {
+        let (first, _first_client) = tokio::join!(listener.accept(), connect(&path));
+        let _first = first.map_err(text)?;
+        let (second, second_client) = tokio::join!(listener.accept(), connect(&path));
+        second.map_err(text)?;
+        second_client.map(|_stream| ()).map_err(text)
+    })
+    .await?
 }
 
 #[test]
@@ -121,14 +163,17 @@ async fn accepted_client_fails_the_check_against_another_owner_sid() -> Result<(
     let dir = tempfile::tempdir().map_err(text)?;
     let path = dir.path().join("daemon.sock");
     let listener = bind(&path).map_err(text)?;
-    let (accepted, _client) = tokio::join!(listener.accept(), connect(&path));
-    let accepted = accepted.map_err(text)?;
-    let other = PeerCred { sid: sid_from_string(LOCAL_SYSTEM_SID).map_err(text)? };
-    match accepted.matches_peer(other) {
-        Err(SdkError::LocalBusPermissionDenied) => Ok(()),
-        Ok(()) => Err("a different SID was accepted".to_owned()),
-        Err(error) => Err(text(error)),
-    }
+    within(async move {
+        let (accepted, _client) = tokio::join!(listener.accept(), connect(&path));
+        let accepted = accepted.map_err(text)?;
+        let other = PeerCred { sid: sid_from_string(LOCAL_SYSTEM_SID).map_err(text)? };
+        match accepted.matches_peer(other) {
+            Err(SdkError::LocalBusPermissionDenied) => Ok(()),
+            Ok(()) => Err("a different SID was accepted".to_owned()),
+            Err(error) => Err(text(error)),
+        }
+    })
+    .await?
 }
 
 #[tokio::test]
@@ -158,26 +203,29 @@ async fn client_refuses_a_pipe_of_another_owner_before_sending_a_frame() -> Resu
     let (pipe_name, user_sid, me) = unused_name()?;
     let listener = PipeBusListener::create(pipe_name, &user_sid, me).map_err(text)?;
     let other = sid_from_string(LOCAL_SYSTEM_SID).map_err(text)?;
-    let (accepted, client) =
-        tokio::join!(listener.accept(), connect_named(listener.name(), &other));
-    match client {
-        Err(SdkError::LocalBusPermissionDenied) => {}
-        Ok(_) => return Err("the client trusted a pipe of another owner".to_owned()),
-        Err(error) => return Err(text(error)),
-    }
-    let (mut reader, _writer) = accepted.map_err(text)?.into_halves();
-    let mut received = Vec::new();
-    // The refused client closed its end. The server sees end of stream and not one byte.
-    let _ = reader.read_to_end(&mut received).await;
-    if received.is_empty() { Ok(()) } else { Err("the client sent bytes".to_owned()) }
+    within(async move {
+        let (accepted, client) =
+            tokio::join!(listener.accept(), connect_named(listener.name(), &other));
+        match client {
+            Err(SdkError::LocalBusPermissionDenied) => {}
+            Ok(_) => return Err("the client trusted a pipe of another owner".to_owned()),
+            Err(error) => return Err(text(error)),
+        }
+        let (mut reader, _writer) = accepted.map_err(text)?.into_halves();
+        let mut received = Vec::new();
+        // The refused client closed its end. The server sees end of stream and not one byte.
+        let _ = reader.take(MAX_TEST_FRAME).read_to_end(&mut received).await;
+        if received.is_empty() { Ok(()) } else { Err("the client sent bytes".to_owned()) }
+    })
+    .await?
 }
 
 #[tokio::test]
 async fn client_refuses_a_name_file_it_does_not_own_or_cannot_parse() -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(text)?;
     let path = dir.path().join("daemon.sock");
-    std::fs::write(&path, b"not a pipe name").map_err(text)?;
-    match connect(&path).await {
+    write_user_file(&path, b"not a pipe name")?;
+    match within(connect(&path)).await? {
         Err(SdkError::LocalBus(_)) => {}
         Ok(_) => return Err("a malformed name file was used".to_owned()),
         Err(error) => return Err(text(error)),
@@ -199,7 +247,7 @@ async fn name_file_is_removed_only_while_it_publishes_this_listener() -> Result<
         return Err("the listener published no name file".to_owned());
     };
     std::fs::remove_file(&path).map_err(text)?;
-    std::fs::write(&path, b"0123456789abcdef0123456789abcdef").map_err(text)?;
+    write_user_file(&path, b"0123456789abcdef0123456789abcdef")?;
     endpoint.remove_if_unchanged().map_err(text)?;
     if !path.exists() {
         return Err("a name file of another listener was removed".to_owned());
@@ -261,25 +309,22 @@ async fn daemon_and_client_refuse_a_name_pre_created_by_a_second_user() -> Resul
     let (pipe_name, user_sid, me) = unused_name()?;
     let runtime = tokio::runtime::Handle::current();
     let squatted = pipe_name.clone();
-    let squatter = tokio::task::spawn_blocking(move || {
-        std::thread::spawn(move || {
+    let squatter = within(tokio::task::spawn_blocking(move || {
+        finish_thread(move || {
             let guard = impersonate_user(&user, &password).map_err(text)?;
             let _context = runtime.enter();
-            let pipe = ServerOptions::new().create(&squatted).map_err(text);
+            let pipe = ServerOptions::new().create(&squatted).map_err(text)?;
             drop(guard);
-            pipe
+            Ok(pipe)
         })
-        .join()
-        .map_err(|_| "squatting thread failed".to_owned())?
-    })
-    .await
-    .map_err(text)??;
+    }))
+    .await???;
     match PipeBusListener::create(pipe_name.clone(), &user_sid, me) {
         Err(SdkError::DataRootInUse) => {}
         Ok(_) => return Err("the daemon bound a name another user created".to_owned()),
         Err(error) => return Err(text(error)),
     }
-    let refused = match connect_named(&pipe_name, &me).await {
+    let refused = match within(connect_named(&pipe_name, &me)).await? {
         Err(SdkError::LocalBusPermissionDenied) => Ok(()),
         Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
         Ok(_) => Err("the client trusted a pipe another user created".to_owned()),
