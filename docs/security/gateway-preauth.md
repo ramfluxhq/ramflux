@@ -161,9 +161,11 @@ fixture, not a physical upper bound for arbitrary workloads.
 Authentication and each signed operation commit one root-owned identity and its
 indexes outside the global state mutex. Establishment commits a session/token pair.
 
-The shared router replay guard retains its pre-existing v2 key isolation/lookup
-until the separate legacy-removal work removes the router store upgrader. Gateway
-format 3 never imports those rows and does not charge ownerless rows to roots.
+Gateway format 3 never imports router replay rows or charges ownerless rows to roots.
+
+Root fairness bounds admission, not commit latency. Admitted writes, retention and
+checkpoint work share a mutex without FIFO ordering; disk stalls or repeated lock
+competition can delay a root. No successful-commit latency bound is promised.
 
 Test HTTP policy routes exist only with the non-default `itest-http` feature.
 The listener binds only to a literal loopback address (default `127.0.0.1:18081`);

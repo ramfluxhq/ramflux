@@ -178,7 +178,10 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
         establishment_busy(&fixture).await?;
         // AUTH has an independent bounded pool: fill it explicitly while all eight
         // authenticated roots remain queued behind the real durable writer.
-        let unauthenticated = [fixture.context.store.try_admit_async_write()?, fixture.context.store.try_admit_async_write()?];
+        let unauthenticated = [
+            fixture.context.store.try_admit_async_write()?,
+            fixture.context.store.try_admit_async_write()?,
+        ];
         // Auth also exposes busy distinctly rather than a terminal establishment refusal.
         let mut joining = fixture.connect(Route::Tcp,"127.0.0.130").await?;
         let joining_open = open("joining-busy",0,None)?;

@@ -45,7 +45,7 @@ def check_tree(graph):
 def check_release_commands(text, file):
     # Fold shell continuations so feature flags on a following line are checked too.
     for command in text.replace("\\\n", " ").splitlines():
-        if re.search(r"\bcargo(?:\s+[^\s;]+)*?\s+build\b", command):
+        if re.search(r"\b(?:cargo|cross)(?:\s+[^\s;]+)*?\s+(?:build|install|run)\b", command):
             if "itest-http" in command or "--all-features" in command:
                 raise ValueError(f"test HTTP feature in release/deploy build command: {file}")
 
@@ -53,6 +53,9 @@ def check_release_commands(text, file):
 def self_test_release_commands():
     for command in (
         "cargo build --release --features itest-http",
+        "cargo install --path apps/ramflux-gateway --features itest-http",
+        "cargo run --release --features ramflux-gateway/itest-http",
+        "cross build --release --all-features",
         "cargo +stable build --release --all-features",
         "cargo $TC build --release " + "\\" + "\n --features ramflux-gateway/itest-http",
     ):

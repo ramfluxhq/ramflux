@@ -20,9 +20,9 @@ async fn sigterm_during_startup_reservation_exits_without_serving()
 
 #[cfg(unix)]
 async fn cancel_startup_reservation(binary: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = Fixture::new("ramflux-gateway")?;
     let directory = tempfile::TempDir::new()?;
     let log_path = directory.path().join("gateway.log");
+    let fixture = Fixture::in_directory(directory, "ramflux-gateway")?;
     let store = ramflux_node_core::GatewayRedbStore::open(&fixture.database)?;
     let mut state = ramflux_node_core::GatewayState::new();
     let floor = ramflux_node_core::now_unix_seconds();
@@ -55,7 +55,7 @@ async fn cancel_startup_reservation(binary: &str) -> Result<(), Box<dyn std::err
     })
     .await??;
     assert!(
-        TcpStream::connect(&fixture.probe_addr).is_err(),
+        TcpStream::connect_timeout(&fixture.probe_addr.parse()?, Duration::from_secs(1)).is_err(),
         "startup reservation must withhold the public listener"
     );
     let pid = child.id().ok_or("gateway process disappeared")?;
@@ -80,7 +80,7 @@ async fn cancel_startup_reservation(binary: &str) -> Result<(), Box<dyn std::err
         "SIGTERM must preserve the crash reservation"
     );
     assert!(
-        TcpStream::connect(&fixture.probe_addr).is_err(),
+        TcpStream::connect_timeout(&fixture.probe_addr.parse()?, Duration::from_secs(1)).is_err(),
         "cancelled startup must never start listening"
     );
     Ok(())
@@ -90,9 +90,9 @@ async fn cancel_startup_reservation(binary: &str) -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn clean_restart_is_immediate_and_true_rollback_is_refused()
 -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = Fixture::new("ramflux-gateway")?;
     let directory = tempfile::TempDir::new()?;
     let path = directory.path().join("startup.log");
+    let fixture = Fixture::in_directory(directory, "ramflux-gateway")?;
     for _ in 0..2 {
         let mut command = tokio::process::Command::from(configured_command(
             env!("CARGO_BIN_EXE_ramflux-gateway"),
@@ -134,5 +134,87 @@ async fn clean_restart_is_immediate_and_true_rollback_is_refused()
     std::fs::File::open(&path)?.take(65537).read_to_string(&mut error)?;
     assert!(error.len() <= 65536, "rollback diagnostics exceeded bound");
     assert!(error.contains("clock_rollback"), "rollback must retain its typed diagnostic");
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "itest-http"))]
+#[tokio::test]
+async fn configured_startup_refuses_non_loopback_itest_listener()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("refusal.log");
+    let fixture = Fixture::in_directory(directory, "ramflux-gateway")?;
+    let mut command = tokio::process::Command::from(configured_command(
+        env!("CARGO_BIN_EXE_ramflux-gateway"),
+        "ramflux-gateway",
+        &fixture,
+        "idle",
+    )?);
+    command
+        .env("RAMFLUX_ITEST_HTTP", "1")
+        .env("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR", "0.0.0.0:0")
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&path)?)
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(Duration::from_secs(10), command.status()).await??;
+    assert_eq!(status.code(), Some(2), "non-loopback test listener must refuse configured startup");
+    let mut error = String::new();
+    std::fs::File::open(path)?.take(65537).read_to_string(&mut error)?;
+    assert!(error.len() <= 65536, "startup refusal diagnostics exceeded bound");
+    assert!(
+        error.contains("itest_listener_non_loopback"),
+        "startup must preserve the typed bind refusal"
+    );
+    assert!(
+        TcpStream::connect_timeout(&fixture.probe_addr.parse()?, Duration::from_secs(1)).is_err(),
+        "bind refusal must precede the public listener"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_and_stalled_tls_setup_is_owned_bounded_and_reaped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::TempDir::new()?;
+    for stalled in [false, true] {
+        let child_directory = tempfile::TempDir::new_in(directory.path())?;
+        let child_path = child_directory.path().to_path_buf();
+        let pid_path = directory.path().join("tls.pid");
+        let result =
+            Fixture::in_directory_with_tls(child_directory, "ramflux-gateway", |root, _| {
+                std::fs::write(root.join("partial.pem"), b"partial fixture")?;
+                let script = if stalled { "echo $$ > \"$1\"; exec sleep 30" } else { "exit 7" };
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", script, "tls"]).arg(&pid_path).current_dir(root);
+                configured_shutdown::run_tls_command(command, Duration::from_secs(1))
+            });
+        let error = result.err().ok_or("test: failing TLS setup unexpectedly succeeded")?;
+        assert!(!child_path.try_exists()?, "failed TLS setup must remove all owned material");
+        if stalled {
+            assert!(
+                error.to_string().contains("deadline exceeded"),
+                "stalled TLS child must hit its explicit deadline"
+            );
+            let mut pid = String::new();
+            std::fs::File::open(&pid_path)?.take(65).read_to_string(&mut pid)?;
+            assert!(pid.len() <= 64, "test: child PID exceeded bound");
+            let pid: u32 = pid.trim().parse()?;
+            let mut probe = std::process::Command::new("kill");
+            probe.args(["-0", &pid.to_string()]);
+            let error = configured_shutdown::run_tls_command(probe, Duration::from_secs(1))
+                .err()
+                .ok_or("test: timed-out TLS child still exists")?;
+            assert!(
+                error.to_string().contains("TLS child exited"),
+                "test: reaping probe itself must finish"
+            );
+        } else {
+            assert!(
+                error.to_string().contains("TLS child exited"),
+                "failed TLS child must return its exit status"
+            );
+        }
+    }
     Ok(())
 }

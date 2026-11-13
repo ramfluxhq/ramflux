@@ -1182,6 +1182,13 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/shutdown/junit.xml --label graceful-shutdown -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
 
+      - name: Gateway management route regressions
+        run: |
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-http --bin ramflux-gateway -E 'test(itest_http::tests)'
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label gateway-management -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-http --bin ramflux-gateway -E 'test(itest_http::tests)'
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-http --bin ramflux-gateway -E 'test(durable_work::tests)'
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label gateway-durable-fairness -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-http --bin ramflux-gateway -E 'test(durable_work::tests)'
+
       - name: Gateway startup cancellation regressions
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --all-features --test startup_cancellation
@@ -1196,6 +1203,8 @@ jobs:
             target/nextest/shutdown/junit-*.xml
             target/nextest/ci/junit-migration-refusals.xml
             target/nextest/ci/junit-gateway-startup-cancellation.xml
+            target/nextest/ci/junit-gateway-management.xml
+            target/nextest/ci/junit-gateway-durable-fairness.xml
           if-no-files-found: ignore
 
   quic-dependencies:

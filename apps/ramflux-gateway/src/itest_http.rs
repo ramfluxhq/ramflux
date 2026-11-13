@@ -78,6 +78,9 @@ pub(crate) fn handle_itest_request(
     store: &ramflux_node_core::GatewayRedbStore,
     gateway_id: &str,
 ) -> anyhow::Result<()> {
+    if !stream.local_addr()?.ip().is_loopback() || !stream.peer_addr()?.ip().is_loopback() {
+        return Err(ramflux_node_core::NodeCoreError::ItestListenerNonLoopback.into());
+    }
     let read_timeout = gateway_state(state)?.pre_auth_read_timeout();
     let request =
         match ramflux_node_core::read_itest_http_request_with_timeout(stream, read_timeout) {
@@ -101,9 +104,6 @@ pub(crate) fn handle_itest_request(
         path = %request.path,
         "gateway HTTP itest request received"
     );
-    if !stream.local_addr()?.ip().is_loopback() || !stream.peer_addr()?.ip().is_loopback() {
-        return Err(ramflux_node_core::NodeCoreError::ItestListenerNonLoopback.into());
-    }
     let _registration_write =
         if request.method == "POST" && request.path == "/mvp6/registration/policy" {
             match store.try_admit_management_write() {
@@ -158,7 +158,7 @@ pub(crate) fn handle_preauth_control_request(
         let response = ramflux_node_core::GatewayPreAuthConfig::from(configured.pre_auth_policy());
         writer.save_state(&configured)?;
         // Merge only the policy: Open/timers/metrics can advance during durable I/O.
-        gateway_state(state)?.configure_pre_auth_policy(&policy)?;
+        gateway_state(state)?.install_committed_pre_auth_policy_from(&configured);
         ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         return Ok(true);
     }

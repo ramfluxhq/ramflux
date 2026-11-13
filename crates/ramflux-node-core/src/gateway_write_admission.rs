@@ -67,7 +67,7 @@ impl GatewayRedbStore {
         root: Option<&str>,
     ) -> Result<GatewayWriteAdmission, NodeCoreError> {
         let mut pending =
-            self.network_admission.lock().map_err(|_| NodeCoreError::GatewayWriterBusy)?;
+            self.network_admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(root) = root {
             if pending.roots.len() >= GATEWAY_NETWORK_WRITE_LIMIT || pending.roots.contains(root) {
                 return Err(NodeCoreError::GatewayWriterBusy);
@@ -144,6 +144,27 @@ mod tests {
         drop((first, unverified, others));
         assert_eq!(store.pending_network_writes(), 0, "all slots must be released by RAII");
         let _retry = store.try_admit_root_write(&device)?;
+        Ok(())
+    }
+    #[test]
+    fn poisoned_bookkeeping_recovers_for_admission_and_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let store = Arc::new(GatewayRedbStore::open(directory.path().join("gateway.redb"))?);
+        let copy = Arc::clone(&store);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = copy.network_admission.lock().expect("test: initial mutex");
+                panic!("test: poison bookkeeping");
+            })
+            .join()
+            .is_err(),
+            "test: poisoning thread must fail"
+        );
+        let admission = store.try_admit_async_write()?;
+        assert_eq!(store.pending_network_writes(), 1, "poison recovery must retain admitted work");
+        drop(admission);
+        assert_eq!(store.pending_network_writes(), 0, "poison recovery must release capacity");
         Ok(())
     }
 }

@@ -16,6 +16,20 @@ fn open_with(
     path: &Path,
     mut initialized: impl FnMut(bool),
 ) -> Result<redb::Database, NodeCoreError> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // Serialize cleanup and publication, including creators of other stores in this directory.
+    // Holding the lock makes every earlier staging file an abandoned initializer, never live work.
+    let initialization = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join(".gateway-init.lock"))
+        .map_err(redb_error)?;
+    fs2::FileExt::try_lock_exclusive(&initialization).map_err(redb_error)?;
+    sweep_abandoned_stages(directory, std::time::SystemTime::now())?;
     let mut builder = redb::Database::builder();
     builder.set_cache_size(super::GATEWAY_REPLAY_PAGE_CACHE_BYTES);
     if !path.try_exists().map_err(redb_error)? {
@@ -64,6 +78,26 @@ fn open_with(
     }
     Ok(db)
 }
+fn sweep_abandoned_stages(
+    directory: &Path,
+    before: std::time::SystemTime,
+) -> Result<(), NodeCoreError> {
+    for entry in std::fs::read_dir(directory).map_err(redb_error)? {
+        let entry = entry.map_err(redb_error)?;
+        if !entry.file_name().to_string_lossy().starts_with(".gateway-init-") {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(redb_error)?;
+        if metadata.is_file()
+            && !entry.file_type().map_err(redb_error)?.is_symlink()
+            && metadata.modified().map_err(redb_error)? < before
+        {
+            std::fs::remove_file(entry.path()).map_err(redb_error)?;
+        }
+    }
+    Ok(())
+}
+
 fn redb_error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
@@ -159,6 +193,13 @@ mod tests {
             );
             let store = crate::GatewayRedbStore::open(&path)?;
             drop(store);
+            assert!(
+                std::fs::read_dir(directory.path())?.all(|entry| entry.is_ok_and(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gateway-init-"))),
+                "restart must sweep staging files abandoned at either crash boundary"
+            );
             let db = open(&path)?;
             let read = db.begin_read()?;
             let table = read.open_table(GATEWAY_STATE_TABLE)?;

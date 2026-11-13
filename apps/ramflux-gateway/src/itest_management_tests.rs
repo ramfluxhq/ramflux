@@ -158,3 +158,6 @@ fn failed_policy_commit_preserves_live_and_persisted_policy_and_releases_slot() 
     let _retry = store.try_admit_management_write()?;
     Ok(())
 }
+
+#[path = "itest_management_route_tests.rs"]
+mod routes;

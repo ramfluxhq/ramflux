@@ -170,6 +170,16 @@ impl GatewayState {
         Ok(())
     }
 
+    /// Install the policy from an already validated and durably committed snapshot.
+    /// Retains live counters, debt and resume-signing bytes; no validation can fail after commit.
+    pub fn install_committed_pre_auth_policy_from(&mut self, committed: &Self) {
+        let mut policy = committed.pre_auth_policy.clone();
+        policy.cookie_secret = self.pre_auth_policy.cookie_secret.clone();
+        self.pre_auth_policy = policy;
+        self.pre_auth_policy_revision = committed.pre_auth_policy_revision;
+        self.trim_pre_auth_debt();
+    }
+
     fn trim_pre_auth_debt(&mut self) {
         let rate = self.pre_auth_policy.per_source_ip_handshake_rate.min(60) as usize;
         for events in self.pre_auth_handshakes_by_source_ip.values_mut() {

@@ -52,12 +52,3 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 
 [profile.shutdown.junit]
 path = "junit.xml"
-
-# Real crash reservation proofs each wait one 30-second barrier. Serialize them;
-# clean restart and rollback have separate tests, keeping every proof inside its existing deadline.
-[test-groups.gateway-reservation]
-max-threads = 1
-
-[[profile.default.overrides]]
-filter = 'package(ramflux-gateway) & test(/^crash_restart_waits_then_serves_in_/)'
-test-group = "gateway-reservation"
