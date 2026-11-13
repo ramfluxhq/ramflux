@@ -50,7 +50,7 @@ fn random() -> Result<zeroize::Zeroizing<[u8; 32]>, SdkError> {
     getrandom::fill(&mut *seed).map_err(|_| SdkError::CustodyRandomUnavailable)?;
     Ok(seed)
 }
-fn valid_id(id: &str) -> Result<(), SdkError> {
+pub(crate) fn valid_id(id: &str) -> Result<(), SdkError> {
     if id.is_empty()
         || id.len() > 128
         || !id.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))

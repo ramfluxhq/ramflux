@@ -89,14 +89,14 @@ impl FullSourceTailWork {
         source.require_source_live()
     }
 }
-struct TailIdentity {
-    snapshot: String,
-    operation: String,
-    hash: String,
-    ordinal: u64,
+pub(super) struct TailIdentity {
+    pub(super) snapshot: String,
+    pub(super) operation: String,
+    pub(super) hash: String,
+    pub(super) ordinal: u64,
 }
 impl FullTransferStage<'_> {
-    fn tail_capture_identity(&self) -> Result<TailIdentity, StorageError> {
+    pub(super) fn tail_capture_identity(&self) -> Result<TailIdentity, StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
