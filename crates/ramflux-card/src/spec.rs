@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const MAX_INPUT: usize = 16 * 1024;
 pub(crate) const MAX_MODEL: usize = 4096;
 pub(crate) const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_COMPONENTS: usize = 32;
+const MAX_MODEL_FIELDS: usize = 32;
 
 /// The first closed declarative catalog. No scripts, URLs or authority fields.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,7 +84,7 @@ fn unique_model<'de, D: serde::Deserializer<'de>>(
         ) -> Result<Self::Value, A::Error> {
             let mut result = BTreeMap::new();
             while let Some((key, value)) = map.next_entry::<String, String>()? {
-                if result.len() >= 32 || result.insert(key, value).is_some() {
+                if result.len() >= MAX_MODEL_FIELDS || result.insert(key, value).is_some() {
                     return Err(serde::de::Error::custom("duplicate or excessive model keys"));
                 }
             }
@@ -105,10 +107,10 @@ impl CardSpec {
         if self.catalog != "rf-card/v1" {
             return Err(CardError::Invalid("catalog"));
         }
-        if self.components.is_empty() || self.components.len() > 32 {
+        if self.components.is_empty() || self.components.len() > MAX_COMPONENTS {
             return Err(CardError::Limit("components"));
         }
-        if self.model.len() > 32
+        if self.model.len() > MAX_MODEL_FIELDS
             || self.model.iter().any(|(k, v)| k.len() > 64 || v.len() > MAX_MODEL)
         {
             return Err(CardError::Limit("model fields"));
@@ -175,7 +177,7 @@ mod tests {
             "bindings must stay local"
         );
         let mut spec = CardSpec::parse(input.as_bytes()).expect("test: valid fixture");
-        spec.components = vec![spec.components[0].clone(); 33];
+        spec.components = vec![spec.components[0].clone(); MAX_COMPONENTS + 1];
         assert!(spec.validate().is_err(), "component limit must reject before VM allocation");
         spec = CardSpec::parse(input.as_bytes()).expect("test: fixture");
         spec.model.insert("name".into(), "x".repeat(MAX_MODEL));

@@ -12,6 +12,8 @@ pub(crate) const HEAP: usize = 32 * 1024 * 1024;
 pub(crate) const STACK: usize = 256 * 1024;
 const EVALUATION: Duration = Duration::from_millis(50);
 const CUMULATIVE: Duration = Duration::from_millis(100);
+const MAX_ADMISSIONS: usize = 128;
+const MAX_RESIDENT_VMS: usize = 2;
 const WINDOW: Duration = Duration::from_secs(1);
 static RESIDENT: AtomicUsize = AtomicUsize::new(0);
 
@@ -19,7 +21,9 @@ pub(crate) struct Resident;
 impl Resident {
     pub(crate) fn acquire() -> Result<Self, CardError> {
         RESIDENT
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_RESIDENT_VMS).then_some(n + 1)
+            })
             .map_err(|_| CardError::Limit("resident VMs"))?;
         Ok(Self)
     }
@@ -52,7 +56,7 @@ impl Budget {
             self.recent.pop_front();
         }
         let spent: Duration = self.recent.iter().map(|(_, time)| *time).sum();
-        if spent >= CUMULATIVE || self.recent.len() >= 128 {
+        if spent >= CUMULATIVE || self.recent.len() >= MAX_ADMISSIONS {
             return Err(CardError::Budget);
         }
         self.start = now;
@@ -96,7 +100,7 @@ mod tests {
         );
         assert_eq!(budget.recent.len(), 1, "failed work must remain in accounting");
         budget.recent.clear();
-        for _ in 0..128 {
+        for _ in 0..MAX_ADMISSIONS {
             budget.recent.push_back((Instant::now(), Duration::ZERO));
         }
         assert!(budget.begin().is_err(), "sub-clock calls must not grow bookkeeping without bound");

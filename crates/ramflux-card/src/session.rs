@@ -6,6 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+const MAX_QUEUED_EVENTS: usize = 32;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 /// Scoped to one session and one committed tree. Keys alone never authorize events.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -118,7 +119,7 @@ impl CardSession {
     /// # Errors
     /// Rejects queue overflow and oversized strings before allocating queue storage.
     pub fn enqueue(&mut self, event: Event) -> Result<(), CardError> {
-        if self.queue.len() >= 32 {
+        if self.queue.len() >= MAX_QUEUED_EVENTS {
             return Err(CardError::Limit("event queue"));
         }
         if event.token.key.len() > 80
@@ -297,7 +298,7 @@ mod tests {
             "third resident VM must be rejected"
         );
         let stale = event(&a, "profile:submit", EventKind::Submit);
-        for _ in 0..32 {
+        for _ in 0..MAX_QUEUED_EVENTS {
             a.enqueue(stale.clone()).expect("test: bounded queue admission");
         }
         assert!(a.enqueue(stale.clone()).is_err(), "queue must reject the 33rd event");

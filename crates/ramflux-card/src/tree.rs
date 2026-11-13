@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const MAX_TREE: usize = 64 * 1024;
+const MAX_EXPANDED_NODES: usize = 256;
 /// Only native form controls. Approval, HTML and navigation are absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,7 +115,7 @@ impl Tree {
     }
 }
 fn validate_node(node: &Node, depth: usize, keys: &mut BTreeSet<String>) -> Result<(), CardError> {
-    if depth > 16 || keys.len() >= 256 {
+    if depth > crate::spec::MAX_DEPTH || keys.len() >= MAX_EXPANDED_NODES {
         return Err(CardError::Limit("expanded nodes or depth"));
     }
     if node.key.len() > 80
@@ -171,7 +172,7 @@ mod tests {
         );
         let mut tree: Tree = serde_json::from_str(fixture).expect("test: typed fixture");
         let child = tree.root.children.first().expect("test: first form").clone();
-        tree.root.children = (0..256)
+        tree.root.children = (0..MAX_EXPANDED_NODES)
             .map(|index| {
                 let mut n = child.clone();
                 n.key = format!("form-{index}");
@@ -186,7 +187,7 @@ mod tests {
         );
     }
     #[test]
-    fn keyed_diff_orders_removal_and_reparenting() {
+    fn keyed_diff_orders_removals_and_skips_unchanged_nodes() {
         let tree: Tree = serde_json::from_str(include_str!("../fixtures/form.tree.json"))
             .expect("test: tree fixture");
         let mut changed = tree.clone();
