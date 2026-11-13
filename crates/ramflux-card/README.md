@@ -16,7 +16,8 @@ CPU accounting. These are engine limits, not RSS limits or OS isolation.
 The execution context has JSON/Promise intrinsics and no Eval compiler, loader,
 network or storage API. Before any package evaluates, a host-owned bootstrap
 freezes the global object and every reachable intrinsic/prototype, including
-function, async-function, generator and Promise chains. Hardening failure refuses
+function, async-function, generator, async-generator and Promise chains, plus
+array/string iterators and iterator helper/wrapper prototypes. Hardening failure refuses
 initialization. The bootstrap is compiled by the same pinned build engine with
 little-endian bytecode. Package source never reaches that compiler. The sole
 native JS bridge is immutable `__rf_commit`; the render function remains private

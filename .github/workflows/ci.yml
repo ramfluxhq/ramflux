@@ -228,15 +228,18 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            timeout: 15
           - os: macos-latest
             target: aarch64-apple-darwin
+            timeout: 15
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            timeout: 30
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -253,11 +256,11 @@ jobs:
           prefix-key: v0-rust-${{ runner.environment }}
           shared-key: card-runtime
       - name: Build C ABI and release compiler
-        run: cargo build -p ramflux-card --all-features --target ${{ matrix.target }}
+        run: cargo build --locked -p ramflux-card --all-features --target ${{ matrix.target }}
       - name: Check all card features and release compiler
-        run: cargo clippy -p ramflux-card --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --locked -p ramflux-card --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
       - name: Test C ABI, runtime and release packer
-        run: cargo test -p ramflux-card --all-features --target ${{ matrix.target }} -- --test-threads=1
+        run: cargo test --locked -p ramflux-card --all-features --target ${{ matrix.target }} -- --test-threads=1
       - name: Install pinned Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:

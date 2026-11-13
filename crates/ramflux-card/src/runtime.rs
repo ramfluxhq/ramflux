@@ -287,16 +287,33 @@ pub(crate) mod tests {
     fn host_bootstrap_freezes_reachable_intrinsics_before_package() {
         let _guard = guard();
         let probe = r"function probe(){
-            const roots=[Object,JSON,Array,Object.getPrototypeOf([]),Object.getPrototypeOf({}),String,Object.getPrototypeOf(''),Number,Object.getPrototypeOf(0),Boolean,Object.getPrototypeOf(true),Promise,Object.getPrototypeOf(Promise.resolve()),Reflect,Object.getPrototypeOf(function(){}),Object.getPrototypeOf(async function(){}),Object.getPrototypeOf(function*(){}),Object.getPrototypeOf(async function*(){})];
-            for(const root of roots){let value=root;while(value!==null){if(!Object.isFrozen(value))throw new Error('mutable intrinsic');value=Object.getPrototypeOf(value)}}
-            const prototype=Object.getPrototypeOf([]);const originalMap=prototype.map;let refused=false;
-            try{Object.defineProperty(prototype,'map',{value:function(){return []}})}catch(error){refused=true}
-            if(!refused || prototype.map!==originalMap || !Object.isFrozen(globalThis))throw new Error('descriptor write accepted');
+            const prototype=Object.getPrototypeOf;
+            const generator=prototype(prototype((function*(){yield 1})()));
+            const asyncGenerator=prototype(prototype((async function*(){yield 1})()));
+            const roots=[Object,JSON,Array,prototype([]),prototype({}),String,prototype(''),Number,prototype(0),Boolean,prototype(true),Promise,prototype(Promise.resolve()),Reflect,prototype(function(){}),prototype(async function(){}),prototype(function*(){}),prototype(async function*(){}),
+                prototype([].values()),prototype(''[Symbol.iterator]()),Iterator.prototype,
+                prototype(Iterator.from({next(){return {done:true}}})),
+                prototype([].values().map(value=>value)),generator,asyncGenerator,prototype(asyncGenerator)];
+            for(const root of roots){let value=root;while(value!==null){
+                if(!Object.isFrozen(value))throw new Error('mutable intrinsic');
+                const originalNext=Object.getOwnPropertyDescriptor(value,'next');
+                if(originalNext){let refused=false;try{Object.defineProperty(value,'next',{value:function(){return {done:true}}})}catch(error){refused=true}
+                    if(!refused || Object.getOwnPropertyDescriptor(value,'next').value!==originalNext.value)throw new Error('iterator next changed');}
+                let refused=false;try{Object.defineProperty(value,'__rf_probe',{value:true})}catch(error){refused=true}
+                if(!refused || Object.getOwnPropertyDescriptor(value,'__rf_probe'))throw new Error('intrinsic property added');
+                value=prototype(value);
+            }}
+            const arrayPrototype=prototype([]);const originalMap=arrayPrototype.map;let refused=false;
+            try{Object.defineProperty(arrayPrototype,'map',{value:function(){return []}})}catch(error){refused=true}
+            if(!refused || arrayPrototype.map!==originalMap || !Object.isFrozen(globalThis))throw new Error('descriptor write accepted');
+            if([...['a','b']].join('')!=='ab' || [...'A𝄞'].join('')!=='A𝄞')throw new Error('ordinary iteration changed');
+            if([...Iterator.from({next(){return {done:true}}})].length!==0 || [...[1,2].values().map(value=>value+1)].join(',')!=='2,3')throw new Error('helper iteration changed');
+            if([...(function*(){yield 1;yield 2})()].join(',')!=='1,2')throw new Error('generator iteration changed');
         }";
         let source = include_str!("../library/form.js")
             .replace("function render(", "function renderForm(")
             + probe
-            + "\nfunction render(input){probe();renderForm(input)}";
+            + "\nprobe();\nfunction render(input){probe();renderForm(input)}";
         let spec = fixture();
         let mut vm =
             CardRuntime::new(&package(&source), spec.clone()).expect("test: hardened module");

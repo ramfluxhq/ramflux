@@ -33,4 +33,13 @@ harden(function () {});
 harden(async function () {});
 harden(function* () {});
 harden(async function* () {});
+// BaseObjects creates iterator helper/wrapper and concrete iterator prototypes
+// separately from the global constructors. Instances are required to reach them.
+// Generator instances also reach the shared Generator / AsyncIterator chains.
+harden([].values());
+harden(""[Symbol.iterator]());
+harden(Iterator.from({ next() { return { done: true }; } }));
+harden([].values().map(value => value));
+harden((function* () {})());
+harden((async function* () {})());
 harden(global);
