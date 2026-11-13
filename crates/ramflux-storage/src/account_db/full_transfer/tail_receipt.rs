@@ -94,6 +94,38 @@ impl FullTailEndpoint<'_> {
             guard: self.stage.db.full_local_unlock_guard()?,
         })
     }
+    /// Accept original B's exact durable tail acknowledgement at the original source.
+    /// Own native/branch/lease admission precedes signature, chain and local marker changes.
+    /// # Errors
+    /// Refuses wrong roles/tail scope, incomplete/foreign chains, bad signatures or expiry.
+    pub fn record_source_receipt(
+        &mut self,
+        packet: &DataPacket,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        let DataPacket::DataVerified { manifest_hash: hash, .. } = packet else {
+            return Err(wrong());
+        };
+        self.require_tail(hash, now)?;
+        if self.stage.resume_record()?.role != PairingRole::Initiator {
+            return Err(wrong());
+        }
+        let identity = self.stage.tail_capture_identity()?;
+        if identity.operation != self.operation {
+            return Err(wrong());
+        }
+        let manifest = self.stage.forward_manifest(hash)?;
+        if manifest.manifest.snapshot_id != identity.snapshot
+            || manifest.manifest.snapshot_cut.0 != identity.ordinal
+        {
+            return Err(wrong());
+        }
+        self.stage.record_source_data_verified(packet, now)?;
+        super::stage::sync_stage(&self.stage.directory)?;
+        if self.stage.db.connection.execute("UPDATE pairing_full_tail SET tail_status='merged' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND record_hash=?5 AND cut_state='durable' AND tail_status IN('pending','merged')",
+            params![self.stage.db.local_account_id,self.operation,self.stage.reference().stage_id,identity.snapshot,identity.hash])? != 1 { return Err(wrong()); }
+        self.require_live(now)
+    }
     fn require_applied_tail(&self, hash: &str) -> Result<String, StorageError> {
         let record = self.stage.resume_record()?;
         if record.role != PairingRole::Responder {

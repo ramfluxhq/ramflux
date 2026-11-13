@@ -157,7 +157,7 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
     let mut client = std::ptr::null_mut();
     let mut error = std::ptr::null_mut();
     assert_eq!(
-        ramflux_client_new(config.as_ptr(), config.len(), &mut client, &mut error),
+        ramflux_client_new(config.as_ptr(), config.len(), &raw mut client, &raw mut error),
         0,
         "test: ABI rejected the configured pairing client"
     );
@@ -179,7 +179,7 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
     let body = request.to_wire_bytes().map_err(|error| error.to_string())?;
     let mut result = std::ptr::null_mut();
     assert_eq!(
-        ramflux_pairing_call(client.0, method.as_ptr(), body.as_ptr(), body.len(), &mut result),
+        ramflux_pairing_call(client.0, method.as_ptr(), body.as_ptr(), body.len(), &raw mut result),
         0,
         "test: ABI failed its actual attended raw-reply exchange"
     );
@@ -197,7 +197,13 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
     let body = stale.to_wire_bytes().map_err(|error| error.to_string())?;
     let mut refused = std::ptr::null_mut();
     assert_eq!(
-        ramflux_pairing_call(client.0, method.as_ptr(), body.as_ptr(), body.len(), &mut refused),
+        ramflux_pairing_call(
+            client.0,
+            method.as_ptr(),
+            body.as_ptr(),
+            body.len(),
+            &raw mut refused
+        ),
         25,
         "test: ABI sent or accepted a known stale operation generation"
     );
@@ -208,7 +214,11 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
         "test: stale ABI result lost its closed error body"
     );
     let mut event = std::ptr::null_mut();
-    assert_eq!(ramflux_pairing_event_poll(client.0, &mut event), 0, "test: ABI event poll failed");
+    assert_eq!(
+        ramflux_pairing_event_poll(client.0, &raw mut event),
+        0,
+        "test: ABI event poll failed"
+    );
     let event = Buffer(event);
     let bytes = event.bytes()?;
     assert!(LocalEvent::from_wire_bytes(&bytes).is_ok(), "test: ABI queued a foreign event schema");

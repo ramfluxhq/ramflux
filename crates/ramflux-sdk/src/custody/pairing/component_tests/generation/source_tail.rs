@@ -518,6 +518,11 @@ mod tests {
         endpoint.record_applied_receipt(&application, &packet, now)?;
         endpoint.record_applied_receipt(&application, &packet, now)?;
         drop(endpoint);
+        let mut source =
+            rig.source.client.account_db()?.open_full_tail_endpoint(operation, 1, current, now)?;
+        source.record_source_receipt(&packet, now)?;
+        source.record_source_receipt(&packet, now)?;
+        drop(source);
         let scope = db.full_installed_recipient_tail_scope(operation, 1, now)?;
         assert!(
             scope.merged,

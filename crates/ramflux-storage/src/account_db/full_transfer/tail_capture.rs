@@ -102,7 +102,7 @@ impl FullTransferStage<'_> {
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
             return Err(wrong());
         }
-        let (snapshot,operation,hash):(String,String,String)=self.db.connection.query_row("SELECT snapshot_id,operation_id,record_hash FROM pairing_full_tail WHERE account_id=?1 AND stage_id=?2 AND tail_status='pending'",rusqlite::params![self.db.local_account_id,self.reference().stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        let (snapshot,operation,hash):(String,String,String)=self.db.connection.query_row("SELECT snapshot_id,operation_id,record_hash FROM pairing_full_tail WHERE account_id=?1 AND stage_id=?2 AND tail_status IN('pending','merged')",rusqlite::params![self.db.local_account_id,self.reference().stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         for value in [&snapshot, &operation, &hash] {
             super::stage::raw32(value)?;
         }
@@ -139,7 +139,7 @@ impl FullTransferStage<'_> {
             }
         }
         let Some(DataPacket::DataVerified { manifest_hash: parent, .. }) =
-            self.source_last_data_verified()?
+            self.source_last_prepublication_data_verified()?
         else {
             return Err(wrong());
         };
@@ -169,7 +169,7 @@ impl FullTransferStage<'_> {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
         self.source_cut_schema(ordinal, &snapshot, super::full_transfer_catalog())?;
-        if self.db.connection.execute("UPDATE pairing_full_tail SET cut_state='durable' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status='pending'",rusqlite::params![self.db.local_account_id,identity.operation,self.reference().stage_id,snapshot])? != 1 { return Err(wrong()); }
+        if self.db.connection.execute("UPDATE pairing_full_tail SET cut_state='durable' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status IN('pending','merged')",rusqlite::params![self.db.local_account_id,identity.operation,self.reference().stage_id,snapshot])? != 1 { return Err(wrong()); }
         Ok(())
     }
 }

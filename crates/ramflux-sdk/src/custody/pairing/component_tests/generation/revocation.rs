@@ -29,7 +29,11 @@ async fn run() -> TestResult {
     let published = Box::pin(publication(&mut rig, &operation)).await?;
     let before = published.authority.clone();
     install_live_generation(&rig, &operation, published)?;
-    rig.now += 1;
+    rig.now = rig
+        .now
+        .max(before.publication.record.body.issued_at)
+        .checked_add(1)
+        .ok_or("test: revocation timestamp overflow")?;
     crate::time::FixedClock::advance_to(i64::try_from(rig.now)?);
     let old_source =
         custody::load_account(&rig.participant_a.root, &rig.participant_a.account_id, rig.now)?;

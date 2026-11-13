@@ -104,7 +104,7 @@ pub extern "C" fn ramflux_pairing_event_poll(
 /// Install or unregister (NULL callback) the client's attended input provider.
 /// Host output capacities are 1024 bytes; SDK storage is zeroized on every path.
 /// Replacement/unregister/close waits for previous callback invocations to finish.
-/// The host must keep user_data valid until that wait returns and must not reenter
+/// The host must keep `user_data` valid until that wait returns and must not reenter
 /// this client from its callback; cancel its own waiting UI before closing the client.
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_pairing_set_credential_provider(
