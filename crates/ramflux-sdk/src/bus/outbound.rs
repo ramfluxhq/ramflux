@@ -183,7 +183,7 @@ mod tests {
     use crate::bus::{connection, data_root_lock::DataRootLock, supervisor::Supervisor};
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn real_dispatcher_preserves_old_generation_after_close_and_reopen() {
         Box::pin(tokio::time::timeout(
             Duration::from_secs(10),
