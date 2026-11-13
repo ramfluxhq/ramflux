@@ -121,7 +121,7 @@ fn failed_policy_commit_preserves_live_and_persisted_policy_and_releases_slot() 
     store.save_state(&gateway_state(&state)?.clone())?;
     let original = gateway_state(&state)?.pre_auth_policy().per_source_ip_handshake_rate;
     let config = ramflux_node_core::GatewayPreAuthConfig {
-        per_source_ip_handshake_rate: original + 1,
+        per_source_ip_handshake_rate: 1,
         ..Default::default()
     };
     let request = ramflux_node_core::NodeHttpRequest {
