@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import {createRequire} from 'node:module';
-import {readFile,writeFile,mkdtemp,rm} from 'node:fs/promises';
+import {readFile,writeFile,mkdtemp,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 const require=createRequire(new URL('../library/package.json',import.meta.url));
 const {build}=require('esbuild');const {Window}=require('happy-dom');
 const deadline=setTimeout(()=>{process.stderr.write('DOM test deadline exceeded\n');process.exit(1)},30000);
-const directory=await mkdtemp(join(tmpdir(),'rf-card-dom-'));
+// Match Node ESM's canonical module location, including macOS temporary-directory aliases.
+const directory=await realpath(await mkdtemp(join(tmpdir(),'rf-card-dom #%-')));
 try{
- const bundle=await build({entryPoints:[new URL('./adapter.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false,platform:'browser'});
- const settings=await build({entryPoints:[new URL('./settings.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false,platform:'browser'});
+ const bundle=await build({entryPoints:[fileURLToPath(new URL('./adapter.ts',import.meta.url))],bundle:true,format:'esm',write:false,platform:'browser'});
+ const settings=await build({entryPoints:[fileURLToPath(new URL('./settings.ts',import.meta.url))],bundle:true,format:'esm',write:false,platform:'browser'});
  await writeFile(join(directory,'adapter.mjs'),bundle.outputFiles[0].text);await writeFile(join(directory,'settings.mjs'),settings.outputFiles[0].text);
  const window=new Window({url:'https://cards.example.test/'});
  for(const key of ['document','HTMLElement','HTMLInputElement','HTMLSelectElement','MessageChannel'])if(window[key])globalThis[key]=window[key];
@@ -19,8 +21,8 @@ try{
  class Port{onmessage=null;start(){}close(){this.closed=true}postMessage(data){this.sent.push(data)}sent=[];reply(data){this.onmessage?.({data})}}
  globalThis.MessageChannel=class{constructor(){this.port1=new Port();this.port2={owner:this.port1}}};
  globalThis.Worker=class{constructor(url){this.url=url;instances.push(this)}postMessage(data){this.port=data.port.owner;this.port.reply({ready:true})}terminate(){this.terminated=true}};
- const {CardView}=await import('file://'+join(directory,'adapter.mjs'));
- const {PresentationRegistry,HostSettings,contrast}=await import('file://'+join(directory,'settings.mjs'));
+ const {CardView}=await import(pathToFileURL(join(directory,'adapter.mjs')).href);
+ const {PresentationRegistry,HostSettings,contrast}=await import(pathToFileURL(join(directory,'settings.mjs')).href);
  const registry=new PresentationRegistry();const presentation=registry.resolve('en','light',false);
  assert.deepEqual(Object.keys(registry.resolve('zh-CN','dark',false).strings),Object.keys(presentation.strings));
  for(const name of ['light','dark']){const theme=registry.themes.get(name);assert(contrast(theme.text,theme.surface_white)>=4.5);assert(contrast(theme.on_primary,theme.primary)>=4.5);assert(contrast(theme.secondary,theme.surface_white)>=3)}
@@ -32,7 +34,12 @@ try{
  const settingsStore=new HostSettings(registry,{getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v)},system);
  let selected;settingsStore.subscribe(p=>selected=p);settingsStore.select('zh-CN','system');system.matches=true;system.cb();assert.equal(selected.tokens.text,registry.themes.get('dark').text);
  const restored=new HostSettings(registry,{getItem:k=>storage.get(k)??null,setItem(){}},system);assert.equal(restored.current().locale,'zh-CN');settingsStore.dispose();restored.dispose();
- const workerURL=new URL('file://'+join(directory,'worker.js'));
+ const workerURL=pathToFileURL(join(directory,'worker.js'));
+
+ for(const rejected of [new URL('./other-worker.js',workerURL),new URL(workerURL.href+'?foreign'),new URL(workerURL.href+'#foreign'),new URL('https://foreign.example/worker.js')]){
+  assert.throws(()=>new CardView(document.createElement('main'),rejected,()=>{},()=>{},()=>{},presentation),{message:presentation.strings.runtime_unavailable},'only the exact adjacent worker URL is accepted');
+ }
+ assert.equal(instances.length,0,'rejected worker URLs never allocate a worker');
  const failures=[],intents=[],slots=[];
  function view(){const root=document.createElement('main');document.body.append(root);return {root,card:new CardView(root,workerURL,(...a)=>intents.push(a),s=>slots.push(s),s=>failures.push(s),presentation),worker:instances.at(-1)}}
  const a=view(),b=view();assert.throws(()=>view(),new RegExp(presentation.strings.capacity));b.card.dispose();
