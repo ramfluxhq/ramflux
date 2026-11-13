@@ -7,11 +7,11 @@ use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
 use ramflux_node_core::{CustodyService, CustodyTlsContext};
 use ramflux_protocol::{custody::*, encode_base64url};
 
-pub(super) fn both_branches(rig: &Rig) -> TestResult {
+pub(super) fn participants(rig: &Rig, participants: &[&LocalPairingParticipant]) -> TestResult {
     let node = crate::custody::network_tests::node(rig.now, encode_base64url([29; 32]))
         .map_err(|error| error.to_string())?;
     let service = CustodyService::new(node, false, &rig.node.disk, crate::custody::network_now()?)?;
-    for participant in [&rig.participant_a, &rig.participant_b] {
+    for participant in participants {
         let scope = Scope {
             rig,
             service: &service,

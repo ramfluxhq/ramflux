@@ -3,7 +3,8 @@
 
 //! Message ordering requires its history owner before a nonempty family can transfer.
 use super::{
-    CellType, CodecRule, Disposition, FamilyRule, FamilySelector, FieldRule, MergeRule, U64,
+    CellRule, CellType, CodecRule, Disposition, FamilyRule, FamilySelector, FieldRule, MergeRule,
+    U64,
 };
 pub(super) const RULE: FamilyRule = table_rule!(
     "sql/runtime_message_sequence",

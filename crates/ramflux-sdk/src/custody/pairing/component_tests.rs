@@ -15,6 +15,7 @@ use ramflux_protocol::custody::pairing::local_dto::{
 use ramflux_protocol::custody::{CustodyAuthority, Publication, object_hash};
 use std::sync::{Arc, Mutex};
 
+mod branch_traffic;
 mod full_relay;
 mod generation;
 

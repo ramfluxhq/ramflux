@@ -3,7 +3,7 @@
 
 //! Real native handoff keeps every original supported data row and A's original credential.
 use super::*;
-mod traffic;
+
 type Rows = std::collections::BTreeMap<String, Vec<[u8; 32]>>;
 const DATA: [&str; 9] = [
     "account_mac_bundle",
@@ -93,7 +93,10 @@ async fn run() -> TestResult {
         )?,
         "test: primary transfer revoked A's installed secondary admission"
     );
-    traffic::both_branches(&rig)?;
+    crate::custody::pairing::component_tests::branch_traffic::participants(
+        &rig,
+        &[rig.participant_a.as_ref(), rig.participant_b.as_ref()],
+    )?;
     Ok(())
 }
 

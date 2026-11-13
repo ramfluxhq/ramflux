@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    mod third;
     use crate::custody::pairing::{PairingIdentity, PairingLocalWriterService};
     use ramflux_protocol::custody::{DeviceRef, object_hash};
     struct Linked {
@@ -12,6 +13,7 @@ mod tests {
         target: crate::RamfluxClient,
         source_service: PairingLocalWriterService,
         target_service: PairingLocalWriterService,
+        third: Option<third::Third>,
     }
     async fn exchange(rig: &mut Rig) -> Result<(String, String), SdkError> {
         rig.clock.advance_ms(1001);
@@ -96,11 +98,31 @@ mod tests {
         Err("test: original linked enrollment did not complete".into())
     }
     async fn open() -> Result<Linked, Box<dyn std::error::Error>> {
+        Box::pin(open_devices(false)).await
+    }
+    async fn open_devices(three: bool) -> Result<Linked, Box<dyn std::error::Error>> {
         let mut rig = Box::pin(Rig::open_profile(true)).await?;
         Box::pin(enroll(&mut rig)).await?;
+        let third = if three { Some(Box::pin(third::enroll(&mut rig)).await?) } else { None };
         let mut target = crate::RamfluxClient::new();
         rig.participant_b.return_client(&mut target)?;
         rig.participant_a.return_client(&mut rig.source.client)?;
+        if third.is_some() {
+            let native = crate::custody::load_account(
+                &rig.participant_b.root,
+                &rig.participant_b.account_id,
+                rig.now,
+            )?;
+            let authority = rig.node.current_authority(&native.record().body.account_anchor)?;
+            refresh_authority(
+                &rig.participant_b.root,
+                target.account_db()?,
+                rig.participant_b.vault.as_ref(),
+                &rig.participant_b.account_id,
+                &authority,
+                rig.now,
+            )?;
+        }
         let native = crate::custody::load_account(
             &rig.participant_b.root,
             &rig.participant_b.account_id,
@@ -149,7 +171,7 @@ mod tests {
         rig.secondary = secondary;
         let source_service = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
         let target_service = rig.secondary.bind_frontend_writer(target.account_db()?)?;
-        Ok(Linked { rig, target, source_service, target_service })
+        Ok(Linked { rig, target, source_service, target_service, third })
     }
     async fn drive<T>(
         work: impl std::future::Future<Output = Result<T, SdkError>>,
@@ -166,7 +188,7 @@ mod tests {
         }
     }
     async fn step(fixture: &mut Linked) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         rig.primary
             .service_full_transfer(rig.source.client.account_db()?)
             .map_err(|error| format!("test: linked source local I/O: {error}"))?;
@@ -204,7 +226,7 @@ mod tests {
         Ok(())
     }
     async fn bootstrap(fixture: &mut Linked) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         let native = crate::custody::load_account(
             &rig.participant_b.root,
             &rig.participant_b.account_id,
@@ -260,7 +282,7 @@ mod tests {
         confirm(fixture, &value.operation_id).await
     }
     async fn confirm(fixture: &mut Linked, operation: &str) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         let th = rig.primary.displayed_transcript()?;
         assert_eq!(th, rig.secondary.displayed_transcript()?, "test: linked full SAS mismatch");
         for primary in [true, false] {
@@ -303,7 +325,12 @@ mod tests {
         Box::pin(run_data_with_change(false)).await
     }
     async fn run_data_with_change(rebind: bool) -> Result<Linked, Box<dyn std::error::Error>> {
-        let mut fixture = Box::pin(open()).await?;
+        Box::pin(run_data_in(Box::pin(open()).await?, rebind)).await
+    }
+    async fn run_data_in(
+        mut fixture: Linked,
+        rebind: bool,
+    ) -> Result<Linked, Box<dyn std::error::Error>> {
         fixture.rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
             "source-veto",
             "source-manifest",
@@ -465,7 +492,10 @@ mod tests {
         Box::pin(run_install_scenario(rebind, 0)).await
     }
     async fn run_install_scenario(rebind: bool, races: u8) -> TestResult {
-        let mut fixture = Box::pin(run_data_with_change(rebind)).await?;
+        let fixture = Box::pin(run_data_with_change(rebind)).await?;
+        Box::pin(finish_install(fixture, races)).await
+    }
+    async fn finish_install(mut fixture: Linked, races: u8) -> TestResult {
         fixture.rig.secondary.set_install_races_for_test(races)?;
         let original = fixture.target.account_db()?.path.clone();
         let native = crate::custody::load_account(
@@ -558,13 +588,16 @@ mod tests {
                 .service_linked_installation(&mut fixture.target, &mut fixture.target_service,)?,
             "test: linked generation was handed back twice"
         );
+        if let Some(third) = &mut fixture.third {
+            third::verify(&fixture.rig, &fixture.target, third).await?;
+        }
         fixture.target.account_db()?.persist_actor_state("test/installed-linked-write", &1_u64)?;
         fixture.rig.primary.lock().await?;
         fixture.rig.secondary.lock().await?;
         Ok(())
     }
     async fn poll_management(fixture: &mut Linked, primary: bool) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         rig.clock.advance_ms(1001);
         let actor = if primary { &mut rig.primary } else { &mut rig.secondary };
         drive(
@@ -578,7 +611,7 @@ mod tests {
         Ok(())
     }
     async fn publish_linked(fixture: &mut Linked) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         let operation = target
             .account_db()?
             .pairing_live_rows()?
@@ -604,7 +637,7 @@ mod tests {
         for _ in 0..72 {
             poll_management(fixture, false).await?;
             poll_management(fixture, true).await?;
-            let Linked { rig, target, source_service, target_service } = fixture;
+            let Linked { rig, target, source_service, target_service, .. } = fixture;
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
             rig.secondary.service_full_transfer(target.account_db()?)?;
             if drive(
@@ -706,7 +739,7 @@ mod tests {
         Ok(service)
     }
     async fn cold_resume(fixture: &mut Linked) -> TestResult {
-        let Linked { rig, target, source_service, target_service } = fixture;
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
         let a = resume_request(&rig.source.client)?;
         let b = resume_request(target)?;
         assert_eq!(a.operation_id, b.operation_id, "test: unrelated local stages");
