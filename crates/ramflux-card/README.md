@@ -148,8 +148,10 @@ apply its existing CSP; browser hosting trust is unchanged.
 never HTML. It keeps native input identity/focus, applies keyed mutations in
 order, bounds in-flight requests to 32, forwards declarative intents to the host,
 and exposes untrusted host-slot references through a separate callback. Mount the
-card root independently of host security chrome. Use `suspend` for offscreen cards
-and `dispose`/worker termination on teardown or host lock/revoke.
+card root independently of host security chrome. The adapter admits at most two Worker instances, since each owns a distinct
+WASM heap. `suspend` releases its VM but retains its worker slot for resume;
+`dispose` terminates the worker and releases that slot. Dispose offscreen web
+cards when admitting another card, and on host lock/revoke.
 
 Build on the same engine/toolchain used by the release packer:
 
