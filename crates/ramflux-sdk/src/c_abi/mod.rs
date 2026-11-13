@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const ABI_VERSION_MAJOR: u32 = 1;
-const ABI_VERSION_MINOR: u32 = 0;
+const ABI_VERSION_MINOR: u32 = 1;
 const PROTOCOL_VERSION: u32 = 1;
 
 #[repr(i32)]
@@ -119,6 +119,7 @@ struct CAbiClientInner {
     event_bus: Arc<CAbiEventBus>,
     closing: AtomicBool,
     next_operation_id: AtomicU64,
+    pairing: pairing::State,
 }
 
 struct CAbiEventBus {
@@ -141,6 +142,10 @@ type CAbiResult<T> = Result<T, CAbiError>;
 #[derive(Deserialize)]
 struct ClientConfigJson {
     account_root: String,
+    #[serde(default)]
+    pairing_socket: Option<String>,
+    #[serde(default)]
+    pairing_account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -225,15 +230,21 @@ pub extern "C" fn ramflux_client_new(
         let mut client = RustRamfluxClient::new();
         client.open_account_index(&config.account_root).map_err(|error| map_sdk_error(&error))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .map_err(|source| CAbiError::new(RamfluxErrorCode::Internal, source.to_string()))?;
+        let pairing = pairing::State::new(
+            client.account_index().map_err(|error| map_sdk_error(&error))?.root().to_path_buf(),
+            config.pairing_socket,
+            config.pairing_account_id,
+        )?;
         let inner = Box::new(CAbiClientInner {
             runtime,
             client: Mutex::new(client),
             event_bus: Arc::new(CAbiEventBus { queue: Mutex::new(VecDeque::new()) }),
             closing: AtomicBool::new(false),
             next_operation_id: AtomicU64::new(1),
+            pairing,
         });
         write_out_ptr(out_client, Box::into_raw(inner).cast::<RamfluxClient>())
     })
@@ -282,7 +293,8 @@ pub extern "C" fn ramflux_buffer_free(buffer: *mut RamfluxBuffer) {
         if !buffer.ptr.is_null() && buffer.len > 0 {
             let slice = ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
             // SAFETY: write_buffer allocated this exact boxed slice and retained its length.
-            let _bytes = unsafe { Box::from_raw(slice) };
+            let mut bytes = unsafe { Box::from_raw(slice) };
+            zeroize::Zeroize::zeroize(bytes.as_mut());
         }
     }));
 }
@@ -670,6 +682,7 @@ fn close_inner(inner: &CAbiClientInner) {
     if inner.closing.swap(true, Ordering::AcqRel) {
         return;
     }
+    inner.pairing.close();
     let _entered = inner.runtime.enter();
     let _ignored = push_event(
         &inner.event_bus,
@@ -1179,3 +1192,9 @@ fn receive_reconcile_keeps_existing_abi_classes() {
 
 #[cfg(test)]
 mod pairing_error_tests;
+
+mod pairing;
+pub use pairing::{
+    CredentialCallback, ramflux_pairing_call, ramflux_pairing_event_poll,
+    ramflux_pairing_set_credential_provider,
+};

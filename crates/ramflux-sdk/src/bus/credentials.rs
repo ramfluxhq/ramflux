@@ -176,4 +176,4 @@ mod tests;
 pub(crate) mod contract_tests;
 
 #[cfg(test)]
-mod resume_tests;
+pub(crate) mod resume_tests;
