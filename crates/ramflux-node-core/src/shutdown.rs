@@ -63,13 +63,13 @@ impl Drop for InFlightGuard {
 }
 
 impl ServiceShutdown {
-    /// Validate configuration and register SIGTERM/SIGINT before service startup.
+    /// Validate configuration and install the coordinator before service startup.
+    ///
+    /// Unix registers SIGTERM and SIGINT. Other hosts stay up until the process is terminated.
     ///
     /// # Errors
     /// Returns an error for an invalid grace period, duplicate installation, or signal failure.
     pub fn install(service: &'static str) -> Result<Self, NodeCoreError> {
-        // Only the Unix signal handler uses the grace period; it is still validated everywhere.
-        #[cfg_attr(not(unix), allow(unused_variables))]
         let grace = shutdown_grace_period()?;
         let runtime = Arc::new(ShutdownRuntime {
             token: CancellationToken::new(),
@@ -115,10 +115,11 @@ impl ServiceShutdown {
         }
         #[cfg(not(unix))]
         {
-            let _ = service;
-            Err(NodeCoreError::ServiceShutdown(
-                "SIGTERM shutdown is supported only on Unix".to_owned(),
-            ))
+            let (sender, signal) = mpsc::sync_channel(1);
+            // No console-control handler is installed. The sender stays alive so
+            // `wait_and_finalize` blocks until the process is terminated.
+            hold_shutdown_sender(sender);
+            Ok(Self { service, grace, signal, runtime })
         }
     }
 
@@ -280,6 +281,13 @@ where
         runtime.workers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(handle);
     }
     Ok(())
+}
+
+/// Keep the non-Unix shutdown sender alive for the process lifetime.
+#[cfg(not(unix))]
+fn hold_shutdown_sender(sender: mpsc::SyncSender<i32>) {
+    static HOLDERS: Mutex<Vec<mpsc::SyncSender<i32>>> = Mutex::new(Vec::new());
+    HOLDERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(sender);
 }
 
 fn shutdown_grace_period() -> Result<Duration, NodeCoreError> {

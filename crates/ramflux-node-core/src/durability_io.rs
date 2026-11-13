@@ -31,7 +31,20 @@ pub(crate) fn sync_file(file: &File, path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
-    boundary(path, "directory_sync", || File::open(path)?.sync_all())
+    boundary(path, "directory_sync", || open_dir(path)?.sync_all())
+}
+
+#[cfg(windows)]
+fn open_dir(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_FLAG_BACKUP_SEMANTICS is required before a directory handle can be flushed.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)
+}
+
+#[cfg(not(windows))]
+fn open_dir(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 pub(crate) fn set_len(file: &File, path: &Path, len: u64) -> io::Result<()> {
