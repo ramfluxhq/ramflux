@@ -228,7 +228,6 @@ impl RamfluxClient {
         identity: &g::EventIdentity,
         exact: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
-        use prost::Message as _;
         let (source, content) = Self::decode_generated_inner(exact)?;
         if source != *identity {
             return Err(invalid("group reply identity mismatch"));
@@ -239,10 +238,7 @@ impl RamfluxClient {
             return Err(invalid("reply Message absent"));
         };
         self.capture_own_authored_group(group, &author.device_id, exact)?;
-        let cipher =
-            self.encrypt_group_message(group, &author.device_id, &message.encode_to_vec())?;
-        let cipher: SdkGroupEncryptedEnvelope = serde_json::from_slice(&cipher)?;
-        let wrapper = crate::client::generated_group::from_native(cipher, author)?;
+        let wrapper = self.encrypt_generated_group_message(group, &author.device_id, &message)?;
         Self::encode_generated_inner(
             identity.clone(),
             &g::Content { value: Some(g::content::Value::Message(wrapper)) },

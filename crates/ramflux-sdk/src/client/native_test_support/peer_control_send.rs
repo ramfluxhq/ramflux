@@ -461,10 +461,20 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
     let state =
         source.client.account_db()?.shared_group_state("conversation-group")?.ok_or("group")?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let snapshot = source
-        .client
-        .shared_group_packet_for_recipient(&state, &peer.client.owned_device_identity()?)?;
-    peer.receive(source.seal_inner_to(&peer, &snapshot)?, 1).await?;
+    let distribution = ramflux_protocol::parse_i_json(
+        &source
+            .client
+            .export_group_sender_key_distribution("conversation-group", &source.config.device_id)?,
+    )?;
+    let key = source.client.generated_group_key_inner(
+        "thread",
+        state.view().epoch,
+        &distribution,
+        &peer.client.owned_device_identity()?,
+    )?;
+    peer.receive(source.seal_inner_to(&peer, &key)?, 1)
+        .await
+        .map_err(|error| format!("key receive: {error}"))?;
     let mut identity = source.client.allocate_generated_identity("thread", 1000, false)?;
     identity.group_id = Some("conversation-group".into());
     identity.group_epoch = Some(state.view().epoch);
@@ -495,7 +505,9 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
             },
         )
         .await?;
-    peer.receive(accepted.envelope, 2).await?;
+    peer.receive(accepted.envelope, 2)
+        .await
+        .map_err(|error| format!("original group receive: {error}"))?;
     let mut request = crate::LocalBusFrame::request(
         "group-reply",
         Some("source".into()),
@@ -524,7 +536,9 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
             },
         )
         .await?;
-    peer.receive(accepted.envelope, 3).await?;
+    peer.receive(accepted.envelope, 3)
+        .await
+        .map_err(|error| format!("group reply receive: {error}"))?;
     let reply_id = ramflux_protocol::encode_base64url(&prepared.identity.id);
     let projection = peer
         .client
