@@ -32,10 +32,12 @@ mod tests {
         request: &ramflux_protocol::custody::pairing::local_dto::StatusRequest,
     ) -> TestResult {
         rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.primary.status(request)), service, &rig.source.client)
+        drive(Box::pin(rig.primary.sync_relay()), service, &rig.source.client)
             .await
             .map_err(|error| format!("test: source status: {error}"))?;
+        rig.primary.status(request).await?;
         rig.clock.advance_ms(1001);
+        rig.secondary.sync_relay().await.map_err(|error| format!("test: target relay: {error}"))?;
         rig.secondary
             .status(request)
             .await
@@ -50,6 +52,37 @@ mod tests {
         )
         .await
         .map_err(|error| format!("test: source begin: {error}"))?;
+        let request = Box::pin(confirm_both(rig, service, begun)).await?;
+        for _ in 0..32 {
+            Box::pin(exchange(rig, service, &request)).await?;
+            let linked = rig
+                .source
+                .client
+                .account_db()?
+                .pairing_live_rows()?
+                .into_iter()
+                .find(|row| row.operation_id == request.operation_id)
+                .is_some_and(|row| {
+                    row.full_stage_reference().is_ok_and(|reference| reference.is_some())
+                });
+            if linked
+                && rig.primary.full_epoch_ready_for_test()
+                && rig.secondary.full_epoch_ready_for_test()
+            {
+                return Ok(());
+            }
+            settle_stream_work(rig).await;
+        }
+        Err("test: frontend writer bootstrap did not reach its own original-key A3".into())
+    }
+    async fn confirm_both(
+        rig: &mut Rig,
+        service: &mut PairingLocalWriterService,
+        begun: ramflux_protocol::custody::pairing::local_dto::LocalResult,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::local_dto::StatusRequest,
+        Box<dyn std::error::Error>,
+    > {
         let Outcome::Begin { value } = begun.outcome else {
             return Err("test: missing source invitation".into());
         };
@@ -94,27 +127,7 @@ mod tests {
         drive(Box::pin(rig.primary.confirm(&confirmation)), service, &rig.source.client).await?;
         rig.clock.advance_ms(1001);
         rig.secondary.confirm(&confirmation).await?;
-        for _ in 0..32 {
-            Box::pin(exchange(rig, service, &request)).await?;
-            let linked = rig
-                .source
-                .client
-                .account_db()?
-                .pairing_live_rows()?
-                .into_iter()
-                .find(|row| row.operation_id == request.operation_id)
-                .is_some_and(|row| {
-                    row.full_stage_reference().is_ok_and(|reference| reference.is_some())
-                });
-            if linked
-                && rig.primary.full_epoch_ready_for_test()
-                && rig.secondary.full_epoch_ready_for_test()
-            {
-                return Ok(());
-            }
-            settle_stream_work(rig).await;
-        }
-        Err("test: frontend writer bootstrap did not reach its own original-key A3".into())
+        Ok(request)
     }
     #[tokio::test(start_paused = true)]
     async fn pairing_full_frontend_services_bootstrap_without_lending_writer_to_native_waits()
@@ -196,8 +209,8 @@ mod tests {
                     }
                 }
             };
-            let begun = result?;
-            let Outcome::Begin { value } = begun.outcome else {
+            let issued = result?;
+            let Outcome::Begin { value } = issued.outcome else {
                 return Err("test: registered frontend did not issue invitation".into());
             };
             let live = source.client.account_db()?.pairing_live_rows()?;
@@ -219,5 +232,275 @@ mod tests {
         .await;
         hold.finish().await?;
         result
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_add_device_publishes_and_completes_without_parking_frontend_writer()
+    -> TestResult {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+            let mut rig = Box::pin(Rig::open()).await?;
+            rig.participant_a.return_client(&mut rig.source.client)?;
+            let mut service = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
+            let begun = drive(
+                Box::pin(rig.primary.begin(Begin {
+                    schema: "ramflux.pairing.Begin.v2".into(),
+                    version: 2,
+                    capabilities: vec![
+                        "group".into(),
+                        "message".into(),
+                        "register".into(),
+                        "sync".into(),
+                    ],
+                    lease_not_before: rig.now,
+                    lease_expires_at: rig.now + 86_400,
+                    display_name: "source".into(),
+                })),
+                &mut service,
+                &rig.source.client,
+            )
+            .await?;
+            let request = Box::pin(confirm_both(&mut rig, &mut service, begun)).await?;
+            for _ in 0..16 {
+                Box::pin(exchange(&mut rig, &mut service, &request)).await?;
+                if phase(rig.primary.status(&request).await?)? == "proposal_pending" {
+                    break;
+                }
+            }
+            assert!(
+                !ordinary_session_admitted_for_participant(&rig.participant_b)?,
+                "test: unapproved enrollment admitted ordinary recipient traffic"
+            );
+            let approval = Approve {
+                schema: "ramflux.pairing.Approve.v2".into(),
+                version: 2,
+                operation_id: request.operation_id.clone(),
+                generation: request.generation,
+                transcript_hash: rig.primary.displayed_transcript()?,
+                proposal_hash: rig.primary.displayed_proposal()?,
+                approved: true,
+            };
+            drive(Box::pin(rig.primary.approve(&approval)), &mut service, &rig.source.client)
+                .await?;
+            for _ in 0..16 {
+                Box::pin(exchange(&mut rig, &mut service, &request)).await?;
+                if phase(rig.primary.status(&request).await?)? == "completed"
+                    && phase(rig.secondary.status(&request).await?)? == "completed"
+                {
+                    break;
+                }
+            }
+            assert_eq!(
+                phase(rig.primary.status(&request).await?)?,
+                "completed",
+                "test: source short writer did not finish the native enrollment acknowledgement"
+            );
+            assert!(
+                ordinary_session_admitted_for_participant(&rig.participant_b)?,
+                "test: exact real native publication did not activate enrolled B"
+            );
+            assert!(
+                rig.participant_a.db.lock().map_err(|_| "test: source owner")?.is_none(),
+                "test: enrollment retained the actual frontend writer across native I/O"
+            );
+            assert!(
+                rig.source.client.account_db()?.pairing_head()?.is_none(),
+                "test: completed enrollment left a pending source head"
+            );
+            rig.primary.lock().await?;
+            rig.secondary.lock().await?;
+            Ok(())
+        }))
+        .await;
+        hold.finish().await?;
+        result
+    }
+    async fn deliver_candidate_and_ready(rig: &mut Rig, operation: &str) -> TestResult {
+        let request = ramflux_protocol::custody::pairing::local_dto::Prepare {
+            schema: "ramflux.pairing.Prepare.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: 1,
+            transcript_hash: rig.secondary.displayed_transcript()?,
+        };
+        Box::pin(rig.secondary.prepare_full_transfer(&request)).await?;
+        let mut retained = false;
+        for _ in 0..72 {
+            Box::pin(rig.secondary.poll_full_management_control()).await?;
+            Box::pin(rig.primary.poll_full_management_control()).await?;
+            rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+            {
+                let slot = rig.participant_b.db.lock().map_err(|_| "test: B ready writer")?;
+                let db = slot.as_ref().ok_or("test: B ready writer missing")?;
+                rig.secondary.service_full_transfer(db)?;
+                let stage = db.open_full_transfer_stage(
+                    operation,
+                    ramflux_crypto::custody::pairing::PairingRole::Responder,
+                    crate::custody::network_now()?,
+                )?;
+                let source = crate::custody::load_data_account(
+                    &rig.participant_a.root,
+                    &rig.participant_a.account_id,
+                    crate::custody::network_now()?,
+                )?;
+                let head = db.pairing_head()?.ok_or("test: candidate head missing")?;
+                let candidate: ramflux_protocol::custody::Publication =
+                    ramflux_protocol::parse_i_json(&head.candidate)?;
+                retained = stage
+                    .retained_destination_after_native_ack(
+                        source.record(),
+                        &candidate.record,
+                        crate::custody::network_now()?,
+                    )?
+                    .is_some();
+            }
+            if retained {
+                break;
+            }
+        }
+        assert!(retained, "test: encrypted source ready was not independently retained by B");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_frontend_publication_commits_j6_tail_cut_and_retires_only_old_primary()
+    -> TestResult {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+            let mut rig = Box::pin(Rig::open_profile(true)).await?;
+            let old = crate::custody::load_account(
+                &rig.participant_a.root,
+                &rig.participant_a.account_id,
+                rig.now,
+            )?;
+            let source_ref = old.record().body.master_certificate.body.primary_device_ref.clone();
+            let old_primary = old.primary_vault_ref().to_owned();
+            let branch = rig.participant_a.public_keys(&source_ref)?;
+            rig.participant_a.return_client(&mut rig.source.client)?;
+            let original_path = rig.source.client.account_db()?.path.clone();
+            let mut service = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
+            Box::pin(bootstrap(&mut rig, &mut service)).await?;
+            Box::pin(finish_owned_stream(&mut rig)).await?;
+            let operation = rig
+                .source
+                .client
+                .account_db()?
+                .pairing_live_rows()?
+                .into_iter()
+                .next()
+                .ok_or("test: source invitation row missing")?
+                .operation_id;
+            Box::pin(deliver_candidate_and_ready(&mut rig, &operation)).await?;
+            assert!(
+                drive(
+                    Box::pin(rig.primary.advance_full_source_publication()),
+                    &mut service,
+                    &rig.source.client
+                )
+                .await?,
+                "test: actual source writer never published its attended candidate"
+            );
+            assert!(
+                !drive(
+                    Box::pin(rig.primary.advance_full_source_publication()),
+                    &mut service,
+                    &rig.source.client
+                )
+                .await?,
+                "test: completed source publication reused a consumed approval"
+            );
+            let current = crate::custody::load_account(
+                &rig.participant_a.root,
+                &rig.participant_a.account_id,
+                crate::custody::network_now()?,
+            )?;
+            assert_ne!(
+                current.record().body.master_certificate.body.primary_device_ref,
+                source_ref,
+                "test: source retained native primary authority after exact J6"
+            );
+            assert_eq!(
+                rig.participant_a.public_keys(&source_ref)?,
+                branch,
+                "test: source demotion changed its branch or agreement identity"
+            );
+            assert_eq!(
+                rig.source.client.account_db()?.path,
+                original_path,
+                "test: source retirement replaced the ordinary data generation"
+            );
+            assert!(
+                rig.participant_a.vault.load_primary(&old_primary).is_err(),
+                "test: exact native handback retained the obsolete management key"
+            );
+            assert_eq!(
+                rig.source
+                    .client
+                    .account_db()?
+                    .full_source_retirement_owner(
+                        &operation,
+                        &ramflux_protocol::custody::object_hash(current.record())?,
+                        crate::custody::network_now()?,
+                    )?
+                    .reference(),
+                old_primary,
+                "test: source retirement lost its independent positive cleanup receipt"
+            );
+            assert!(
+                rig.participant_a.db.lock().map_err(|_| "test: source DB slot")?.is_none(),
+                "test: native full publication parked the original account database"
+            );
+            Box::pin(complete_full_installation(&mut rig, &operation)).await?;
+            rig.primary.lock().await?;
+            rig.secondary.lock().await?;
+            Ok(())
+        }))
+        .await;
+        hold.finish().await?;
+        result
+    }
+    async fn complete_full_installation(rig: &mut Rig, operation: &str) -> TestResult {
+        for _ in 0..8 {
+            Box::pin(rig.primary.poll_full_management_control()).await?;
+            Box::pin(rig.secondary.poll_full_management_control()).await?;
+            let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: operation.into(),
+                generation: 1,
+            };
+            if phase(rig.primary.status(&request).await?)? == "completed"
+                && phase(rig.secondary.status(&request).await?)? == "completed"
+            {
+                break;
+            }
+        }
+        assert!(
+            ordinary_session_admitted_for_participant(&rig.participant_b)?,
+            "test: own native publication plus actual G1/G2/G3 did not admit the new primary"
+        );
+        let native = crate::custody::load_account(
+            &rig.participant_b.root,
+            &rig.participant_b.account_id,
+            crate::custody::network_now()?,
+        )?;
+        assert_eq!(
+            native.local_device_id()?,
+            native.record().body.master_certificate.body.primary_device_ref.device_id,
+            "test: full destination installed a foreign primary reference"
+        );
+        assert!(
+            native.group_primary(rig.participant_b.vault.as_ref()).is_ok(),
+            "test: new primary cannot load its own locally generated management key"
+        );
+        let slot = rig.participant_b.db.lock().map_err(|_| "test: selected B writer")?;
+        let db = slot.as_ref().ok_or("test: selected B writer missing")?;
+        let selected = ramflux_storage::AccountIndex::open(&rig.participant_b.root)?
+            .account(&rig.participant_b.account_id)?;
+        assert_eq!(
+            db.path,
+            rig.participant_b.root.join(selected.db_relative_path),
+            "test: recipient actor retained the pre-G2 database"
+        );
+        Ok(())
     }
 }

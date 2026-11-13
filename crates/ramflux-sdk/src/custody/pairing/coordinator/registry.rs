@@ -23,7 +23,7 @@ pub(super) struct Entry {
     credential_provider: Option<Arc<dyn crate::custody::pairing::LocalCredentialProvider>>,
     full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
     work: Arc<tokio::sync::Notify>,
-    writer: Option<Mutex<super::PairingLocalWriterService>>,
+    writer: Mutex<Option<super::PairingLocalWriterService>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Entry {
@@ -79,11 +79,11 @@ pub(crate) fn install_actor_with_writer(
         credential_provider,
         full_runtime,
         cancelled: AtomicBool::new(false),
-        work: writer
-            .as_ref()
-            .map(super::PairingLocalWriterService::work_signal)
-            .unwrap_or_else(|| Arc::new(tokio::sync::Notify::new())),
-        writer: writer.map(Mutex::new),
+        work: writer.as_ref().map_or_else(
+            || Arc::new(tokio::sync::Notify::new()),
+            super::PairingLocalWriterService::work_signal,
+        ),
+        writer: Mutex::new(writer),
         pump: Mutex::new(None),
     });
     owners.insert(key, entry.clone());
@@ -107,10 +107,19 @@ pub(crate) fn install_actor_with_writer(
                     if let Err(error) = progress {
                         actor.note_background_error(&error);
                     }
-                    if actor.candidate_control_ready()
-                        && let Err(error) = actor.poll_full_management_control().await
-                    {
-                        actor.note_background_error(&error);
+                    if actor.candidate_control_ready() {
+                        if let Err(error) = Box::pin(actor.poll_full_management_control()).await {
+                            actor.note_background_error(&error);
+                        }
+                        if let Err(error) = Box::pin(actor.advance_full_source_publication()).await
+                        {
+                            actor.note_background_error(&error);
+                        }
+                        if let Err(error) =
+                            Box::pin(actor.advance_full_destination_installation()).await
+                        {
+                            actor.note_background_error(&error);
+                        }
                     }
                 }
                 entry.work.notify_one();
@@ -187,15 +196,54 @@ pub(crate) fn service_full_transfer(
         Err(error) => return Err(error),
     };
     entry.require_live()?;
-    let applied = match &entry.writer {
-        Some(writer) => {
-            writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.try_apply(db)?
-        }
+    let applied = match entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.as_mut()
+    {
+        Some(writer) => writer.try_apply(db)?,
         None => false,
     };
     let Ok(mut actor) = entry.actor.try_lock() else { return Ok(applied) };
     actor.service_full_transfer(db).map(|progress| progress || applied)
 }
+/// Move only the admitted new recipient's actual selected writer into its ordinary frontend.
+pub(crate) fn take_installed_recipient(
+    root: &Path,
+    account: &str,
+) -> Result<Option<crate::RamfluxClient>, SdkError> {
+    let entry = match find(root, account) {
+        Ok(entry) => entry,
+        Err(SdkError::PairingCode("NotFound")) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    entry.require_live()?;
+    let Ok(mut actor) = entry.actor.try_lock() else { return Ok(None) };
+    if !actor.full_new_recipient_installed() || actor.local_writer.is_some() {
+        return Ok(None);
+    }
+    let mut services = entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?;
+    if services.is_some() {
+        return Ok(None);
+    }
+    let participant = actor.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+    let mut client = crate::RamfluxClient::new();
+    participant.return_client(&mut client)?;
+    let bind = (|| {
+        if !crate::custody::pairing::ordinary_session_admitted(&client, account)? {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        actor.bind_installed_frontend_writer(client.account_db()?, entry.work.clone())
+    })();
+    match bind {
+        Ok(service) => {
+            *services = Some(service);
+            Ok(Some(client))
+        }
+        Err(error) => {
+            participant.take_client(&mut client)?;
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn settle_actor_data_for_test(
     root: &Path,

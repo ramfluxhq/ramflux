@@ -137,6 +137,15 @@ impl LocalPairingParticipant {
     ) -> Result<(), SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.finish_install_in(db, operation_id, record_hash)
+    }
+    pub(crate) fn finish_install_in(
+        &self,
+        db: &AccountDb,
+        operation_id: &str,
+        record_hash: &str,
+    ) -> Result<(), SdkError> {
+        self.full_selected_db(db, None)?;
         let live = db.pairing_live_rows()?.into_iter().find(|row| row.operation_id == operation_id);
         let Some(live) = live else {
             if db.pairing_terminal_rows()?.iter().any(|row| {
@@ -416,6 +425,15 @@ impl LocalPairingParticipant {
     ) -> Result<(), SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.save_context_in(db, context, proposal)
+    }
+    pub(crate) fn save_context_in(
+        &self,
+        db: &AccountDb,
+        context: &ParticipantContext,
+        proposal: &Envelope<EnrollmentBody>,
+    ) -> Result<(), SdkError> {
+        self.full_selected_db(db, None)?;
         let mut live = db
             .pairing_live_rows()?
             .into_iter()
@@ -436,63 +454,13 @@ impl LocalPairingParticipant {
         context: &ParticipantContext,
         proposal: &Envelope<EnrollmentBody>,
     ) -> Result<PublishedHead, SdkError> {
-        let p = &proposal.body;
-        ramflux_crypto::verify_canonical_signature(
-            &signing_bytes(&p.schema, p)?,
-            &proposal.signature,
-            &p.branch_signing_key,
-        )?;
-        let account = custody::load_account(&self.root, &self.account_id, custody::network_now()?)?;
-        let common = &context.transcript.initiator.common;
-        if object_hash(account.record())? != common.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
-        }
-        let primary = account.group_primary(self.vault.as_ref())?;
-        let certificate = primary.certify_branch(BranchCertificate {
-            schema: ramflux_protocol::domain::CUSTODY_BRANCH_CERTIFICATE.into(),
-            version: 1,
-            account_anchor: common.account_anchor.clone(),
-            master_certificate_hash: object_hash(&account.record().body.master_certificate)?,
-            device_id: p.recipient_ref.device_id.clone(),
-            device_epoch: p.recipient_ref.device_epoch,
-            principal_kind: account.record().body.principal_kind,
-            branch_signing_public_key: p.branch_signing_key.clone(),
-            agreement_identity_public_key: p.agreement_key.clone(),
-            capabilities: p.capabilities.clone(),
-            not_before: common.lease_not_before,
-            expires_at: p.lease_expires_at,
-            cert_id: ramflux_protocol::encode_base64url(*super::super::random()?),
-        })?;
-        drop(primary); // The public certificate goes to a separate head signing owner.
         let mut slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.take().ok_or(SdkError::AccountDbNotUnlocked)?;
         let db = Mutex::new(db);
         let result = (|| {
-            let live = db
-                .lock()
-                .map_err(|_| SdkError::PairingCode("Busy"))?
-                .pairing_live_rows()?
-                .into_iter()
-                .find(|row| row.operation_id == context.invitation.body.request_id)
-                .ok_or(SdkError::PairingField("operation_id"))?;
-            let write = HeadWrite {
-                account_id: self.account_id.clone(),
-                operation_id: live.operation_id,
-                invitation_id: Some(live.invitation_id),
-                generation: live.generation,
-                issuer_seq: live.issuer_seq,
-                local_seq: live.local_seq,
-                kind: HeadKind::Enroll,
-                publisher_ref: context.transcript.initiator.device_ref.clone(),
-                local_ref: context.transcript.initiator.device_ref.clone(),
-                recipient_ref: Some(p.recipient_ref.clone()),
-                revoked_id: None,
-                certificate: Some(certificate),
-                display_name: None,
-                now: custody::network_now()?,
-                branch_vault_ref: account.branch_vault_ref().into(),
-                data_vault_ref: ramflux_storage::FileVaultSecretSource::owner_ref(&self.account_id),
-                primary_vault_ref: Some(account.primary_vault_ref().into()),
+            let write = {
+                let held = db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+                self.enrollment_write(&held, context, proposal)?
             };
             super::publication::publish_ceremony_head(
                 &db,
@@ -580,3 +548,5 @@ pub use full::{
     FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
     retry_full_source_cleanup,
 };
+
+mod enrollment;

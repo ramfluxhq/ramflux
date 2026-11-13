@@ -24,12 +24,25 @@ pub(super) struct FullManagement {
     candidate: CandidateAssembly,
     outbound: VecDeque<FullControlPayload>,
     role: PairingRole,
+    pub(super) source_ready_sent: bool,
 }
 enum Input {
     Candidate(Box<Envelope<DeviceSet>>),
     Ready(FullControlPayload),
+    Completion(FullControlPayload),
 }
 impl FullManagement {
+    pub(super) fn queue_local_control(
+        &mut self,
+        payload: FullControlPayload,
+    ) -> Result<(), SdkError> {
+        payload.require_sender(self.role.as_str()).map_err(|_| wrong())?;
+        if self.outbound.len() >= 66 {
+            return Err(SdkError::PairingCode("Busy"));
+        }
+        self.outbound.push_back(payload);
+        Ok(())
+    }
     fn queue_candidate(
         &mut self,
         invitation: &str,
@@ -73,8 +86,12 @@ impl FullManagement {
         origin: &str,
     ) -> Result<Option<Input>, SdkError> {
         if let Some(payload) = self.outbound.pop_front() {
+            let sends_ready = matches!(&payload, FullControlPayload::TransferReadyFull { .. });
             let encrypted = self.packet.seal_packet(&DataPacket::Control { payload })?;
             self.packet.send(relay, origin, encrypted).await?;
+            if sends_ready {
+                self.source_ready_sent = true;
+            }
             return Ok(None);
         }
         let Some(encrypted) = self.packet.poll(relay, origin).await? else {
@@ -89,6 +106,17 @@ impl FullManagement {
         let sender = if self.role == PairingRole::Initiator { "responder" } else { "initiator" };
         payload.require_sender(sender).map_err(|_| wrong())?;
         match self.role {
+            PairingRole::Initiator if matches!(payload, FullControlPayload::Installed { .. }) => {
+                Ok(Some(Input::Completion(payload)))
+            }
+            PairingRole::Responder
+                if matches!(
+                    payload,
+                    FullControlPayload::Published { .. } | FullControlPayload::Completed { .. }
+                ) =>
+            {
+                Ok(Some(Input::Completion(payload)))
+            }
             PairingRole::Initiator => self
                 .candidate
                 .push(&payload)
@@ -105,14 +133,16 @@ impl FullManagement {
 impl PairingActor {
     pub(in crate::custody::pairing::coordinator) fn candidate_control_ready(&self) -> bool {
         self.ceremony.as_ref().is_some_and(|c| {
-            !super::super::terminal(&c.phase)
+            c.full.as_ref().is_some_and(|full| {
+                full.management.as_ref().is_some_and(|management| !management.outbound.is_empty())
+            }) || (!super::super::terminal(&c.phase)
                 && c.full.as_ref().is_some_and(|full| {
                     full.bootstrap
                         .as_ref()
                         .and_then(|state| state.stream.as_ref())
                         .is_some_and(|stream| stream.complete.is_some())
                         && (c.role == PairingRole::Initiator || full.candidate.is_some())
-                })
+                }))
         })
     }
     /// Advance one encrypted candidate-control packet after durable forward and reverse DV.
@@ -157,6 +187,10 @@ impl PairingActor {
             }
             Some(Input::Ready(payload)) => {
                 self.queue_destination_ready(payload)?;
+                Ok(true)
+            }
+            Some(Input::Completion(payload)) => {
+                Box::pin(self.accept_full_completion_control(payload)).await?;
                 Ok(true)
             }
             None => Ok(false),
@@ -257,6 +291,7 @@ impl PairingActor {
                 candidate: CandidateAssembly::new(invitation.clone(), transfer.clone()),
                 outbound: VecDeque::new(),
                 role: c.role,
+                source_ready_sent: false,
             });
             if let Some(candidate) = &full.candidate {
                 management.queue_candidate(&invitation, &transfer, candidate.publication())?;

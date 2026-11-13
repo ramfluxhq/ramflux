@@ -21,8 +21,10 @@ mod affirm;
 mod bootstrap;
 pub(super) mod cancel;
 mod candidate_assembly;
+mod completion;
 mod epoch;
 mod management;
+mod publication;
 mod source_observation;
 mod status;
 mod stream;
@@ -45,6 +47,7 @@ pub(super) struct FullCeremony {
     management: Option<Box<management::FullManagement>>,
     pending_ready: Option<Box<crate::custody::pairing::participant::FullDestinationReady>>,
     ready_retained: bool,
+    publication: publication::FullPublication,
 }
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
@@ -78,6 +81,7 @@ impl FullCeremony {
             management: None,
             pending_ready: None,
             ready_retained: false,
+            publication: publication::FullPublication::default(),
         }
     }
 }

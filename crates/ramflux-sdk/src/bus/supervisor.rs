@@ -395,7 +395,7 @@ impl Supervisor {
     }
     async fn route(
         &self,
-        mut request: LocalBusFrame,
+        request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
@@ -447,6 +447,14 @@ impl Supervisor {
             }
             return Ok(response);
         }
+        Box::pin(self.route_account(request, connection)).await
+    }
+
+    async fn route_account(
+        &self,
+        mut request: LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<ActorResponse, SdkError> {
         self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
         if self.installing.borrow().contains(&id) {

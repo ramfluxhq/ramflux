@@ -246,7 +246,7 @@ impl PairingActor {
                         (scope, approved.observation),
                         runtime,
                         cancelled,
-                        approved.preservation,
+                        &approved.preservation,
                     )
                 })
                 .await;

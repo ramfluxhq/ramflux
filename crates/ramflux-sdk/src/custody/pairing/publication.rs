@@ -166,6 +166,24 @@ pub(crate) fn prepare_head_submission(
     vault: &dyn PrimaryVault,
     write: &HeadWrite,
 ) -> Result<Publication, SdkError> {
+    prepare_submission(db, root, vault, write)
+}
+
+pub(crate) fn prepare_head_submission_in(
+    db: &AccountDb,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<Publication, SdkError> {
+    prepare_submission(db, root, vault, write)
+}
+
+fn prepare_submission(
+    db: &impl Journal,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<Publication, SdkError> {
     with_pending_head_fence(db, &write.account_id, &write.operation_id, || {
         let mut head = prepare_candidate(db, root, vault, write)?;
         let _lock = super::activate::authority_lock(root, &write.account_id)?;
@@ -181,8 +199,45 @@ pub(crate) fn prepare_head_submission(
     })
 }
 
+/// Apply an exact own native observation after the network owner has released its work.
+pub(crate) fn acknowledge_ceremony_in(
+    db: &AccountDb,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+    authority: &CustodyAuthority,
+) -> Result<PublishedHead, SdkError> {
+    let acknowledgement_fence = super::activate::authority_lock(root, &write.account_id)?;
+    let now = crate::custody::network_now()?;
+    let verified = ramflux_crypto::custody::verify_publication(authority, now)?;
+    let hash = object_hash(verified.envelope())?;
+    let mut head = db.pairing_head()?.ok_or(SdkError::PairingField("state"))?;
+    if head.operation_id != write.operation_id
+        || head.kind != kind_label(write.kind)
+        || !matches!(head.state.as_str(), "submitted" | "acknowledged")
+        || head.candidate_hash != hash
+        || canonical_json_bytes(&authority.publication)? != head.candidate
+        || decode_ref(&head.publisher_ref)? != write.local_ref
+        || write.publisher_ref != write.local_ref
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    validate_head_advance(&head.state, "acknowledged", &write.publisher_ref, &write.local_ref)?;
+    head.state = "acknowledged".into();
+    head.ack = Some(ack_bytes(&hash, verified.envelope().body.device_set_epoch)?);
+    db.commit_pairing_head(&head)?;
+    // refresh_authority takes its own file fence, so release this short acknowledgement fence first.
+    drop(acknowledgement_fence);
+    super::activate::refresh_authority(root, db, vault, &write.account_id, authority, now)?;
+    Ok(PublishedHead {
+        record_hash: hash,
+        record: verified.envelope().clone(),
+        epoch: verified.envelope().body.device_set_epoch,
+    })
+}
+
 fn prepare_candidate(
-    db: &Mutex<AccountDb>,
+    db: &impl Journal,
     root: &Path,
     vault: &dyn PrimaryVault,
     write: &HeadWrite,
@@ -259,7 +314,7 @@ fn require_resume_primary(
 }
 
 fn submit_and_ack(
-    db: &Mutex<AccountDb>,
+    db: &impl Journal,
     root: &Path,
     vault: &dyn PrimaryVault,
     write: &HeadWrite,
@@ -420,7 +475,7 @@ fn require_primary(
 }
 
 fn with_pending_head_fence<T>(
-    db: &Mutex<AccountDb>,
+    db: &impl Journal,
     account_id: &str,
     operation_id: &str,
     write: impl FnOnce() -> Result<T, SdkError>,
@@ -434,7 +489,7 @@ fn with_pending_head_fence<T>(
     write()
 }
 
-fn refuse_foreign_head(db: &Mutex<AccountDb>, operation_id: &str) -> Result<(), SdkError> {
+fn refuse_foreign_head(db: &impl Journal, operation_id: &str) -> Result<(), SdkError> {
     journal(db, |db| {
         let pending = db.pairing_head()?.map(|head| head.operation_id);
         if pending_head_fence_blocks(pending.as_deref(), operation_id) {
@@ -453,14 +508,32 @@ fn account_gate(account_id: &str) -> Arc<Mutex<()>> {
     Arc::clone(map.entry(account_id.to_owned()).or_insert_with(|| Arc::new(Mutex::new(()))))
 }
 
+trait Journal {
+    fn apply<T>(&self, body: impl FnOnce(&AccountDb) -> Result<T, SdkError>)
+    -> Result<T, SdkError>;
+}
+impl Journal for AccountDb {
+    fn apply<T>(
+        &self,
+        body: impl FnOnce(&AccountDb) -> Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        body(self)
+    }
+}
+impl Journal for Mutex<AccountDb> {
+    fn apply<T>(
+        &self,
+        body: impl FnOnce(&AccountDb) -> Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        let held = self.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        body(&held)
+    }
+}
 fn journal<T>(
-    db: &Mutex<AccountDb>,
+    db: &impl Journal,
     body: impl FnOnce(&AccountDb) -> Result<T, SdkError>,
 ) -> Result<T, SdkError> {
-    let Ok(held) = db.lock() else {
-        return Err(SdkError::PairingCode("Busy"));
-    };
-    body(&held)
+    db.apply(body)
 }
 
 fn next_body(current: &VerifiedRecord, now: u64) -> Result<DeviceSet, SdkError> {

@@ -190,6 +190,24 @@ impl PairingActor {
         if self.local_writer.is_some() || self.ceremony.is_some() {
             return Err(SdkError::PairingCode("Busy"));
         }
+        self.bind_selected_writer(db, Arc::new(tokio::sync::Notify::new()))
+    }
+    pub(super) fn bind_installed_frontend_writer(
+        &mut self,
+        db: &AccountDb,
+        signal: Arc<tokio::sync::Notify>,
+    ) -> Result<PairingLocalWriterService, SdkError> {
+        self.require_open()?;
+        if self.local_writer.is_some() || !self.full_new_recipient_installed() {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        self.bind_selected_writer(db, signal)
+    }
+    fn bind_selected_writer(
+        &mut self,
+        db: &AccountDb,
+        signal: Arc<tokio::sync::Notify>,
+    ) -> Result<PairingLocalWriterService, SdkError> {
         let participant = self.participant.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?;
         let scope = Arc::new(Scope {
             root: std::fs::canonicalize(&participant.root)?,
@@ -198,7 +216,7 @@ impl PairingActor {
             path: std::fs::canonicalize(&db.path)?,
             unlock: db.full_local_unlock_guard()?,
             runtime: self.full_runtime.clone(),
-            work: Arc::new(tokio::sync::Notify::new()),
+            work: signal,
         });
         scope.require_db(db)?;
         let (sender, receiver) = mpsc::channel(1);
