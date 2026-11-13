@@ -51,6 +51,7 @@ pub(super) struct FullCeremony {
     pending_ready: Option<Box<crate::custody::pairing::participant::FullDestinationReady>>,
     ready_retained: bool,
     publication: publication::FullPublication,
+    data_retry_at: Option<tokio::time::Instant>,
 }
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
@@ -85,6 +86,7 @@ impl FullCeremony {
             pending_ready: None,
             ready_retained: false,
             publication: publication::FullPublication::default(),
+            data_retry_at: None,
         }
     }
 }

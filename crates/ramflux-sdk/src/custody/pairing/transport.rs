@@ -714,7 +714,11 @@ async fn post(
 }
 
 fn http_error(error: reqwest::Error) -> SdkError {
-    SdkError::LocalBus(error.without_url().to_string())
+    if error.is_connect() || error.is_timeout() {
+        SdkError::PairingCode("ResumeRequired")
+    } else {
+        SdkError::LocalBus(error.without_url().to_string())
+    }
 }
 
 const _: () = assert!(POLL_SECS >= 1);

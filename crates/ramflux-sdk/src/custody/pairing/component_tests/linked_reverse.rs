@@ -580,4 +580,290 @@ mod tests {
         }
         Err("test: linked candidate did not reach actual native publication".into())
     }
+    fn resume_request(
+        client: &crate::RamfluxClient,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::local_dto::StatusRequest,
+        Box<dyn std::error::Error>,
+    > {
+        let row = client
+            .account_db()?
+            .pairing_live_rows()?
+            .into_iter()
+            .next()
+            .ok_or("test: retained live row")?;
+        Ok(ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: row.operation_id,
+            generation: row.generation,
+        })
+    }
+    async fn reopen_actor(
+        actor: &mut PairingActor,
+        participant: &std::sync::Arc<LocalPairingParticipant>,
+        client: &mut crate::RamfluxClient,
+        password: &[u8],
+        primary: bool,
+    ) -> Result<PairingLocalWriterService, Box<dyn std::error::Error>> {
+        let mut relay = None;
+        actor.wrap_transport_for_test(|inner| {
+            relay = Some(inner.clone());
+            inner
+        });
+        actor.lock().await?;
+        drop(client.active_account_db.take());
+        client.unlock_account(&participant.account_id, password)?;
+        let now = crate::custody::network_now()?;
+        let native = crate::custody::load_account(&participant.root, &participant.account_id, now)?;
+        let id = native.local_device_id()?;
+        let device = native
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|device| device.device_id == id)
+            .ok_or("test: reopened branch")?;
+        let mut reopened = PairingActor::new(
+            PairingIdentity {
+                account_id: participant.account_id.clone(),
+                local_ref: DeviceRef {
+                    account_anchor: native.record().body.account_anchor.clone(),
+                    device_id: id.into(),
+                    device_epoch: device.device_epoch,
+                },
+                master_public_key: Some(
+                    native.record().body.master_certificate.body.master_public_key.clone(),
+                ),
+                base_record_hash: object_hash(native.record())?,
+                base_epoch: native.record().body.device_set_epoch,
+                is_primary: primary,
+            },
+            None,
+            relay.ok_or("test: retained relay")?,
+            PairingConfig { enabled: true, extra_root_ca_pem: None },
+        );
+        reopened.set_participant(participant.clone());
+        reopened.set_full_node(
+            crate::custody::network_tests::node(now, ramflux_protocol::encode_base64url([29; 32]))
+                .map_err(|error| error.to_string())?,
+        );
+        let service = reopened.bind_frontend_writer(client.account_db()?)?;
+        *actor = reopened;
+        Ok(service)
+    }
+    async fn cold_resume(fixture: &mut Linked) -> TestResult {
+        let Linked { rig, target, source_service, target_service } = fixture;
+        let a = resume_request(&rig.source.client)?;
+        let b = resume_request(target)?;
+        assert_eq!(a.operation_id, b.operation_id, "test: unrelated local stages");
+        *source_service = reopen_actor(
+            &mut rig.primary,
+            &rig.participant_a,
+            &mut rig.source.client,
+            b"fresh-source-data",
+            true,
+        )
+        .await?;
+        *target_service = reopen_actor(
+            &mut rig.secondary,
+            &rig.participant_b,
+            target,
+            b"component-recipient-passphrase",
+            false,
+        )
+        .await?;
+        drive(
+            Box::pin(rig.primary.resume_full_data(&a)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            target,
+        )
+        .await?;
+        drive(
+            Box::pin(rig.secondary.resume_full_data(&b)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            target,
+        )
+        .await?;
+        for (actor, request) in [(&mut rig.primary, &a), (&mut rig.secondary, &b)] {
+            let stale = Confirm {
+                schema: "ramflux.pairing.Confirm.v2".into(),
+                version: 2,
+                operation_id: request.operation_id.clone(),
+                generation: request.generation,
+                transcript_hash: actor.displayed_transcript()?,
+                r#match: true,
+            };
+            assert!(
+                actor.confirm(&stale).await.is_err(),
+                "test: data resume accepted a stale SAS callback"
+            );
+            assert!(
+                actor.displayed_proposal().is_err(),
+                "test: data resume restored publication approval"
+            );
+        }
+        Ok(())
+    }
+    fn retained_current(fixture: &Linked) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let db = fixture.rig.source.client.account_db()?;
+        let request = resume_request(&fixture.rig.source.client)?;
+        let stage = match db.open_full_transfer_stage(
+            &request.operation_id,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            crate::custody::network_now()?,
+        ) {
+            Ok(stage) => stage,
+            Err(ramflux_storage::StorageError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let ramflux_storage::FullForwardResumePosition::Streaming {
+            manifest,
+            last_verified: Some(previous),
+        } = stage.forward_resume_position()?
+        {
+            assert_eq!(
+                manifest.manifest.snapshot_cut.0,
+                previous.manifest.snapshot_cut.0 + 1,
+                "test: retained CURRENT skipped a cut"
+            );
+            return Ok(Some(ramflux_protocol::encode_base64url(
+                ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+            )));
+        }
+        Ok(None)
+    }
+    fn assert_fresh_resume_keys(fixture: &Linked) -> TestResult {
+        let seen = fixture.rig.full_hellos.lock().map_err(|_| "test: hello observations")?;
+        assert_eq!(seen.len(), 4, "test: missing original-branch reconnect proofs");
+        for role in ["initiator", "responder"] {
+            let mut own = seen.iter().filter(|hello| hello.role == role);
+            let old = own.next().ok_or("test: initial proof")?;
+            let new = own.next().ok_or("test: resumed proof")?;
+            assert_ne!(old.epoch, new.epoch, "test: reconnect reused epoch");
+            assert_ne!(old.hpke_key, new.hpke_key, "test: reconnect reused HPKE key");
+            assert_eq!(
+                old.lease.body.lease_id, new.lease.body.lease_id,
+                "test: reconnect changed retained lease"
+            );
+        }
+        Ok(())
+    }
+    async fn finish_resumed_data(fixture: &mut Linked) -> TestResult {
+        let publications =
+            fixture.rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire);
+        for _ in 0..256 {
+            step(fixture).await?;
+            if fixture.rig.primary.full_base_disk_complete_for_test()
+                && fixture.rig.secondary.full_base_disk_complete_for_test()
+            {
+                assert_fresh_resume_keys(fixture)?;
+                assert_eq!(
+                    fixture.rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire),
+                    publications,
+                    "test: data resume published authority without fresh attendance"
+                );
+                return Ok(());
+            }
+        }
+        Err("test: cold data resume did not reach durable duplex".into())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_resume_first_object_is_current_manifest() -> TestResult {
+        let hold = ClockHold::new();
+        let result =
+            crate::bus::credentials::contract_tests::deadline(Box::pin(resume_current())).await;
+        hold.finish().await?;
+        result
+    }
+    async fn resume_current() -> TestResult {
+        let mut fixture = Box::pin(open()).await?;
+        Box::pin(bootstrap(&mut fixture)).await?;
+        let mut current = None;
+        for _ in 0..256 {
+            step(&mut fixture).await?;
+            current = retained_current(&fixture)?;
+            if current.is_some() {
+                break;
+            }
+        }
+        let hash = current.ok_or("test: no unverified retained CURRENT after base DV")?;
+        Box::pin(cold_resume(&mut fixture)).await?;
+        Box::pin(finish_resumed_data(&mut fixture)).await?;
+        assert_eq!(
+            fixture.rig.secondary.first_forward_position_for_test(),
+            Some(crate::custody::pairing::full_epoch::FirstForwardPosition::Manifest {
+                hash,
+                counter: 0
+            }),
+            "test: reconnect restarted from historical base"
+        );
+        fixture.rig.primary.lock().await?;
+        fixture.rig.secondary.lock().await?;
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_resume_idle_uses_own_dv_without_recutting_b_reverse() -> TestResult {
+        let hold = ClockHold::new();
+        let result =
+            crate::bus::credentials::contract_tests::deadline(Box::pin(resume_idle())).await;
+        hold.finish().await?;
+        result
+    }
+    async fn resume_idle() -> TestResult {
+        let mut fixture = Box::pin(run_data()).await?;
+        let hash = {
+            let db = fixture.rig.source.client.account_db()?;
+            let request = resume_request(&fixture.rig.source.client)?;
+            let stage = db.open_full_transfer_stage(
+                &request.operation_id,
+                ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                crate::custody::network_now()?,
+            )?;
+            let ramflux_storage::FullForwardResumePosition::Idle { manifest } =
+                stage.forward_resume_position()?
+            else {
+                return Err("test: completed cut lacks own signed DV".into());
+            };
+            ramflux_protocol::encode_base64url(
+                ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+            )
+        };
+        fixture.target.account_db()?.seed_full_transfer_object_veto_for_test(
+            "later-b-veto",
+            "later-b-manifest",
+            9,
+        )?;
+        Box::pin(cold_resume(&mut fixture)).await?;
+        Box::pin(finish_resumed_data(&mut fixture)).await?;
+        assert_eq!(
+            fixture.rig.secondary.first_forward_position_for_test(),
+            Some(crate::custody::pairing::full_epoch::FirstForwardPosition::Idle {
+                last_verified: hash,
+                counter: 0
+            }),
+            "test: completed forward input was retransmitted"
+        );
+        assert_eq!(
+            fixture.rig.source.client.account_db()?.privacy_erasure_generation()?,
+            7,
+            "test: reconnect recut B reverse after its original signed manifest"
+        );
+        assert_eq!(
+            fixture.target.account_db()?.privacy_erasure_generation()?,
+            9,
+            "test: data resume lost B's newer ordinary veto"
+        );
+        fixture.rig.primary.lock().await?;
+        fixture.rig.secondary.lock().await?;
+        Ok(())
+    }
 }

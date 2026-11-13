@@ -378,6 +378,12 @@ impl Drop for FullResumeKeyOwner {
     }
 }
 impl FullResumeKeyOwner {
+    /// Whether the next attempt consumes this endpoint's still-unused SAS private half.
+    /// This memory-only observation grants no restored approval or peer-key trust.
+    #[must_use]
+    pub fn next_uses_sas_key(&self) -> bool {
+        self.unused_sas.is_some()
+    }
     /// # Errors
     /// Refuses unavailable CSPRNG entropy when the SAS private half is already gone.
     pub fn next_key(&mut self) -> Result<HpkeSecrets> {

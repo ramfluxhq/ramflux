@@ -164,6 +164,7 @@ enum SasHold {
 impl PairingActor {
     pub(super) fn note_background_error(&mut self, error: &SdkError) {
         let code = Self::background_error_code(error);
+        self.schedule_full_data_retry(error);
         if let Some(c) = &mut self.ceremony {
             if c.full.is_some() {
                 c.full_error = Some(
@@ -528,8 +529,16 @@ impl PairingActor {
             self.clear_completed_secrets();
             return self.status_update();
         }
-        if self.advance_full_epoch().await? {
+        if self.retry_full_data_if_due().await? {
             return self.status_update();
+        }
+        match self.advance_full_epoch().await {
+            Ok(true) => return self.status_update(),
+            Ok(false) => {}
+            Err(error) => {
+                self.note_background_error(&error);
+                return Err(error);
+            }
         }
         for _ in 0..SYNC_STEPS {
             self.flush_send().await?;
@@ -1590,7 +1599,14 @@ pub async fn handle_bus(
         "device.transfer.begin" => Box::pin(actor.begin_full(bus_body(body)?)).await,
         "device.transfer.prepare" => Box::pin(actor.prepare_full_transfer(&bus_body(body)?)).await,
         "device.transfer.affirm" => Box::pin(actor.affirm_full_transfer(&bus_body(body)?)).await,
-        "device.transfer.status" => Box::pin(actor.transfer_status(&bus_body(body)?)).await,
+        "device.transfer.status" => {
+            let request = bus_body(body)?;
+            if actor.ceremony.is_none() {
+                Box::pin(actor.resume_full_data(&request)).await
+            } else {
+                Box::pin(actor.transfer_status(&request)).await
+            }
+        }
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
     };
     if entry.require_live().is_err() {

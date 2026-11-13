@@ -5,6 +5,7 @@
 use super::{FullCeremony, PairingActor, PairingRole, SdkError, bootstrap::BootstrapState};
 use crate::custody::pairing::coordinator::CeremonyOpen;
 use ramflux_protocol::custody::pairing::local_dto::{LocalResult, StatusRequest};
+use zeroize::Zeroize as _;
 impl PairingActor {
     /// Reopen one exact locally unlocked full-data stage with fresh two-branch proof/HPKE.
     /// This does not restore SAS confirmations, management approval, tokens or counters.
@@ -60,6 +61,61 @@ impl PairingActor {
         };
         self.accept_data_resume(snapshot, node)?;
         self.transfer_status(request).await
+    }
+    pub(in crate::custody::pairing::coordinator) fn schedule_full_data_retry(
+        &mut self,
+        error: &SdkError,
+    ) {
+        let transient = matches!(
+            error,
+            SdkError::PairingCode("ResumeRequired" | "Busy")
+                | SdkError::NodeTimeout { .. }
+                | SdkError::NodeUnreachable { .. }
+                | SdkError::GatewayWriterBusy
+        ) || matches!(error, SdkError::Io(error) if matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe));
+        let Some(ceremony) = &mut self.ceremony else { return };
+        let Some(full) = &mut ceremony.full else { return };
+        if !transient
+            || ceremony.phase != "mutually_confirmed"
+            || full.candidate.is_some()
+            || full.publication.is_publishing()
+        {
+            full.data_retry_at = None;
+            return;
+        }
+        if full.bootstrap.is_some() || full.data_retry_at.is_some() {
+            full.data_retry_at.get_or_insert_with(|| {
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10)
+            });
+        }
+    }
+    pub(in crate::custody::pairing::coordinator) async fn retry_full_data_if_due(
+        &mut self,
+    ) -> Result<bool, SdkError> {
+        let Some(ceremony) = &self.ceremony else { return Ok(false) };
+        let Some(deadline) = ceremony.full.as_ref().and_then(|full| full.data_retry_at) else {
+            return Ok(false);
+        };
+        if tokio::time::Instant::now() < deadline {
+            return Ok(true);
+        }
+        let request = StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: ceremony.operation_id.clone(),
+            generation: ceremony.generation,
+        };
+        if let Err(error) = Box::pin(self.resume_full_data(&request)).await {
+            // Retaining the minimal ceremony scope allows another bounded attempt after
+            // a native observation failure; no SAS/HPKE/approval survives retirement.
+            if let Some(full) = self.ceremony.as_mut().and_then(|ceremony| ceremony.full.as_mut()) {
+                full.data_retry_at =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+            }
+            self.note_background_error(&error);
+            return Err(error);
+        }
+        Ok(true)
     }
     fn accept_data_resume(
         &mut self,
@@ -145,7 +201,24 @@ impl PairingActor {
                 job.abort_and_drain().await;
             }
         }
-        self.ceremony.take();
+        if let Some(ceremony) = &mut self.ceremony {
+            match &mut ceremony.sas {
+                super::SasHold::Pending(sas) => sas.cleanup(),
+                super::SasHold::Established(sas) => sas.cleanup(),
+                super::SasHold::None => {}
+            }
+            ceremony.sas = super::SasHold::None;
+            ceremony.token.zeroize();
+            ceremony.emoji = None;
+            ceremony.local_confirmed = false;
+            ceremony.peer_mac_ok = false;
+            ceremony.outbound.clear();
+            if let Some(full) = &mut ceremony.full {
+                full.bootstrap.take();
+                full.management.take();
+                full.hpke.take();
+            }
+        }
         self.full_runtime.drain_local_jobs().await;
     }
 }

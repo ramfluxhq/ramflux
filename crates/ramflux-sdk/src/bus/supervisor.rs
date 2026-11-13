@@ -493,7 +493,10 @@ impl Supervisor {
         request.nodes = Some(self.nodes.borrow().clone());
         let response = if matches!(
             request.request.method.as_str(),
-            "device.transfer.begin" | "device.pair.join" | "device.transfer.join"
+            "device.transfer.begin"
+                | "device.transfer.status"
+                | "device.pair.join"
+                | "device.transfer.join"
         ) {
             // Source preparation and attended recipient input belong to the initiating
             // connection/account lifecycle, beyond the ordinary command deadline.
