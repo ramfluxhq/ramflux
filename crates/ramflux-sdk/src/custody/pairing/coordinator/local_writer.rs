@@ -73,6 +73,8 @@ struct Scope {
     unlock: FullLocalUnlockGuard,
     runtime: Arc<FullRuntimeCancel>,
     work: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    install_races: std::sync::atomic::AtomicU8,
 }
 impl Scope {
     fn live(&self) -> Result<(), SdkError> {
@@ -280,6 +282,8 @@ impl PairingActor {
             unlock: db.full_local_unlock_guard()?,
             runtime: self.full_runtime.clone(),
             work: signal,
+            #[cfg(test)]
+            install_races: std::sync::atomic::AtomicU8::new(0),
         });
         scope.require_db(db)?;
         let (sender, receiver) = mpsc::channel(1);

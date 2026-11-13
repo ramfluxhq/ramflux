@@ -15,6 +15,7 @@ impl FullLocalUnlockGuard {
     /// # Errors
     /// Refuses a locked/dead writer, a removed account or a changed selected generation.
     pub fn require_unlocked(&self) -> Result<(), StorageError> {
+        crate::database::require_generation_rebase_deadline()?;
         self.0.require()
     }
 }

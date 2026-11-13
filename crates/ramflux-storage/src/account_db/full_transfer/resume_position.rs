@@ -23,7 +23,7 @@ fn wrong() -> StorageError {
     StorageError::PairingField("ManifestMismatch")
 }
 impl FullTransferStage<'_> {
-    /// Select the first cut without this endpoint's signed DataVerified, otherwise Idle.
+    /// Select the first cut without this endpoint's signed `DataVerified`, otherwise Idle.
     /// Every advertised Idle hash is backed by the original B signature over its full chain.
     /// # Errors
     /// Refuses corrupt/forked metadata, a missing receipt, a tail or a stale local unlock.

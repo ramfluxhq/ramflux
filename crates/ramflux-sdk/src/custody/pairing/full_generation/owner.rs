@@ -139,7 +139,15 @@ impl FullGenerationPreparation {
     /// Refuses lock/cancel, unsupported payload owners, low space or durability errors.
     pub fn prepare(self) -> Result<FullGenerationPrepared, SdkError> {
         let Self { database, directory, install } = self;
-        Ok(FullGenerationPrepared { database: database.prepare()?, directory, install })
+        match database.prepare() {
+            Ok(database) => Ok(FullGenerationPrepared { database, directory, install }),
+            Err(error) => {
+                if error.is_writer_busy() {
+                    directory.discard_unselected(&install)?;
+                }
+                Err(error.into())
+            }
+        }
     }
 }
 impl FullGenerationPrepared {
@@ -191,7 +199,7 @@ impl FullGenerationPrepared {
         let full = self.install.full_transfer.as_ref().ok_or_else(pending)?;
         let index = ramflux_storage::AccountIndex::open(local.root)?;
         let wrapped = index.load_wrapped_db_key(&self.install.account_id)?.ok_or_else(pending)?;
-        let data = stage.select(
+        let selected = stage.select(
             self.database,
             &ramflux_storage::BackupIndexInstall {
                 account_id: &self.install.account_id,
@@ -202,7 +210,18 @@ impl FullGenerationPrepared {
                 wrapped_key: &wrapped,
             },
             local.now,
-        )?;
+        );
+        let data = match selected {
+            Ok(data) => data,
+            Err(error) => {
+                if matches!(error, SdkError::PairingCode("Busy"))
+                    || matches!(&error, SdkError::Storage(error) if error.is_writer_busy())
+                {
+                    self.directory.discard_unselected(&self.install)?;
+                }
+                return Err(error);
+            }
+        };
         Ok(FullGenerationCommitted { data, directory: self.directory, install: self.install })
     }
 }

@@ -133,6 +133,13 @@ impl StorageError {
         }
     }
 
+    /// Whether an account write or target-generation recheck can be retried later.
+    #[must_use]
+    pub fn is_writer_busy(&self) -> bool {
+        matches!(self, Self::AccountWriterBusy(_) | Self::PairingField("Busy"))
+            || matches!(self, Self::Sqlite(error) if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)))
+    }
+
     /// Whether a storage operation exhausted its filesystem or SQLite page budget.
     #[must_use]
     pub fn is_insufficient_space(&self) -> bool {

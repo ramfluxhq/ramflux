@@ -9,6 +9,11 @@ use crate::custody::pairing::{
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::CustodyAuthority;
 
+pub(super) fn install_busy(error: &SdkError) -> bool {
+    matches!(error, SdkError::PairingCode("Busy"))
+        || matches!(error, SdkError::Storage(error) if error.is_writer_busy())
+}
+
 impl PairingActor {
     pub(super) async fn install_linked_full_generation(
         &self,
@@ -26,10 +31,49 @@ impl PairingActor {
             .await?;
         let observation = self.full_runtime.clone().run_blocking(move || query.observe()).await?;
         let authority = observation.authority().clone();
+        writer.request(move |db| observation.acknowledge(db)).await?;
+        let mut committed = None;
+        for _ in 0..3 {
+            let attempt = async {
+                let prepared =
+                    Box::pin(self.prepare_linked_generation(install.clone(), authority.clone()))
+                        .await?;
+                writer
+                    .select_full_generation(participant.clone(), prepared, authority.clone())
+                    .await
+            }
+            .await;
+            match attempt {
+                Ok(selected) => {
+                    committed = Some(selected);
+                    break;
+                }
+                Err(error) if install_busy(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let committed = match committed {
+            Some(selected) => selected,
+            None => {
+                writer
+                    .rebase_full_generation(participant.clone(), install, authority.clone())
+                    .await?
+            }
+        };
+        self.finish_linked_generation(committed, authority.clone()).await?;
+        Ok(authority)
+    }
+    async fn prepare_linked_generation(
+        &self,
+        install: Install,
+        authority: CustodyAuthority,
+    ) -> Result<crate::custody::pairing::full_generation::owner::FullGenerationPrepared, SdkError>
+    {
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let writer = self.local_writer.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let operation = install.operation_id.clone();
         let pinned = writer
             .request(move |db| {
-                observation.acknowledge(db)?;
                 let stage = db.open_full_transfer_stage(
                     &operation,
                     PairingRole::Responder,
@@ -69,8 +113,14 @@ impl PairingActor {
             .await?;
         let prepared =
             self.full_runtime.clone().run_blocking(move || preparation.prepare()).await?;
-        let committed =
-            writer.select_full_generation(participant.clone(), prepared, authority.clone()).await?;
+        Ok(prepared)
+    }
+    async fn finish_linked_generation(
+        &self,
+        committed: crate::custody::pairing::full_generation::owner::FullGenerationCommitted,
+        authority: CustodyAuthority,
+    ) -> Result<(), SdkError> {
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let native = authority.clone();
         self.full_runtime
             .clone()
@@ -93,7 +143,7 @@ impl PairingActor {
                 Ok(())
             })
             .await?;
-        Ok(authority)
+        Ok(())
     }
 }
 

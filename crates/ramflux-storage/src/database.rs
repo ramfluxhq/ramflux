@@ -13,29 +13,39 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
+mod generation_fence;
+pub(crate) use generation_fence::require_deadline as require_generation_rebase_deadline;
+
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 
 #[derive(Clone)]
 pub(crate) struct Connection {
     inner: std::sync::Arc<Worker>,
+    rebase: Option<generation_fence::Permit>,
 }
 #[derive(Clone)]
 pub(crate) struct WeakConnection {
     inner: std::sync::Weak<Worker>,
+    rebase: Option<generation_fence::Permit>,
 }
 impl WeakConnection {
     pub(crate) fn upgrade_account_writer(&self) -> Option<Connection> {
-        self.inner
-            .upgrade()
-            .filter(|inner| {
-                inner.account_writer.as_ref().is_some_and(|owner| {
-                    owner
-                        .generation
-                        .read()
-                        .is_ok_and(|selected| *selected == inner.account_generation)
-                })
-            })
-            .map(|inner| Connection { inner })
+        let inner = self.inner.upgrade()?;
+        let owner = inner.account_writer.as_ref()?;
+        let permit = match &self.rebase {
+            Some(permit) => Some(permit.clone()),
+            None => generation_fence::current(owner).ok()?,
+        };
+        if let Some(permit) = &permit {
+            permit.require_live(inner.account_generation).ok()?;
+        } else if !owner
+            .generation
+            .read()
+            .is_ok_and(|selected| *selected == inner.account_generation)
+        {
+            return None;
+        }
+        Some(Connection { inner, rebase: permit })
     }
 }
 
@@ -86,7 +96,13 @@ impl Connection {
         &self.inner.path
     }
     pub(crate) fn downgrade(&self) -> WeakConnection {
-        WeakConnection { inner: std::sync::Arc::downgrade(&self.inner) }
+        let rebase = self.rebase.clone().or_else(|| {
+            self.inner
+                .account_writer
+                .as_ref()
+                .and_then(|owner| generation_fence::current(owner).ok().flatten())
+        });
+        WeakConnection { inner: std::sync::Arc::downgrade(&self.inner), rebase }
     }
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_flags(path, OpenFlags::default())
@@ -176,7 +192,7 @@ impl Connection {
                                 if let Some(owner) = &checkpoint_writer {
                                     // Maintenance can clear a durable privacy marker too.
                                     // It obeys the same G2 fence and never mutates a retired DB.
-                                    if let Ok(selected) = owner.generation.read()
+                                    if let Ok(selected) = owner.generation.try_read()
                                         && *selected == account_generation
                                     {
                                         worker_checkpoints.maintain(&db);
@@ -195,6 +211,7 @@ impl Connection {
             .map_err(|_| Error::InvalidQuery)?;
         let checkpoints = ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
         Ok(Self {
+            rebase: None,
             inner: std::sync::Arc::new(Worker {
                 id: connection_id,
                 path,
@@ -217,14 +234,29 @@ impl Connection {
     ) -> Result<T> {
         let owner = self.inner.account_writer.clone();
         let epoch = self.inner.account_generation;
+        let permit = self.rebase.clone().or(owner
+            .as_ref()
+            .map(generation_fence::current)
+            .transpose()?
+            .flatten());
         self.dispatch(move |db| {
+            // Rebase requests carry only a same-thread, memory-scoped permit. Ordinary
+            // queued jobs refuse Busy instead of blocking the fenced owner's worker.
+            if let Some(permit) = permit {
+                permit.require_live(epoch)?;
+                return f(db);
+            }
             // Acquired on the actual worker, covering SQLite lock waits as well as SQL.
             // A queued old-generation write cannot cross a successful G2 selection.
-            let guard = owner
-                .as_ref()
-                .map(|owner| owner.generation.read())
-                .transpose()
-                .map_err(|_| Error::InvalidQuery)?;
+            let guard =
+                owner.as_ref().map(|owner| owner.generation.try_read()).transpose().map_err(
+                    |_| {
+                        Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                            None,
+                        )
+                    },
+                )?;
             if guard.as_ref().is_some_and(|selected| **selected != epoch) {
                 return Err(Error::InvalidQuery);
             }
@@ -241,6 +273,19 @@ impl Connection {
     ) -> Result<T> {
         let owner = self.inner.account_writer.clone().ok_or(Error::InvalidQuery)?;
         let epoch = self.inner.account_generation;
+        if let Some(permit) = self.rebase.clone().or(generation_fence::current(&owner)?) {
+            return self.dispatch(move |db| {
+                permit.require_live(epoch)?;
+                if !db.is_autocommit() {
+                    return Err(Error::InvalidQuery);
+                }
+                let (result, retire) = f(db);
+                if retire {
+                    permit.retire();
+                }
+                result
+            });
+        }
         self.dispatch(move |db| {
             let mut selected = owner.generation.try_write().map_err(|_| {
                 Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), None)
