@@ -66,6 +66,8 @@ fn map_cabi_error(error: CAbiError) -> AdapterError {
 }
 
 // Generated entrypoints use the generated error namespace, without renumbering legacy APIs.
+// Expected failures return AdapterError. Catching an unwind is only FFI defence in depth;
+// no caller or test relies on recovery, and release builds abort on a panic.
 fn generated_ffi_result(
     out_error_json: *mut *mut RamfluxBuffer,
     function: impl FnOnce() -> Result<(), AdapterError>,

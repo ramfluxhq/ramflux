@@ -13,10 +13,7 @@ impl RamfluxClient {
         _event: &A2iControlEvent,
         _target_delivery_id: Option<String>,
     ) -> impl std::future::Future<Output = Result<GatewayInboxEntry, SdkError>> {
-        std::future::ready(
-            Self::require_a2i_binding_authority()
-                .map(|()| unreachable!("native A2I grant authority is closed")),
-        )
+        std::future::ready(Self::refuse_a2i_binding_authority())
     }
 
     /// # Errors
@@ -26,10 +23,7 @@ impl RamfluxClient {
         _engine: &mut impl GatewaySessionAccess,
         _limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<A2iControlEvent>, SdkError>> {
-        std::future::ready(
-            Self::require_a2i_binding_authority()
-                .map(|()| unreachable!("native A2I grant authority is closed")),
-        )
+        std::future::ready(Self::refuse_a2i_binding_authority())
     }
 
     pub(crate) fn legacy_a2i_receipt_key(

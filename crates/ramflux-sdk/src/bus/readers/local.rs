@@ -296,8 +296,7 @@ fn verification(
 }
 
 fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {
-    RamfluxClient::require_a2i_binding_authority()
-        .map(|()| unreachable!("native A2I grant authority is closed"))
+    RamfluxClient::refuse_a2i_binding_authority()
 }
 
 fn upload_status(

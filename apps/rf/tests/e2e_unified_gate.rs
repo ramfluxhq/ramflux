@@ -329,66 +329,79 @@ fn assert_tampered_absent(
     Ok(())
 }
 
-fn expect_a2i_authority_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
-    let error = match rf_json(&daemon.socket, args) {
-        Ok(value) => return Err(format!("B9 approval unexpectedly succeeded: {value}").into()),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains("generated_authority"), "typed Authority reason missing: {error}");
-    assert!(error.contains("exit status: 1"), "refusal must be a normal CLI exit: {error}");
-    eprintln!("B9 expected Control 11 Authority refusal: {error}");
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[ignore = "real-process Demo B B9 Authority refusal; explicit CLI e2e gate"]
-#[test]
-fn b9_a2i_approval_is_typed_refused_and_never_actionable_after_restart() -> e2e::Result<()> {
-    let stack = boot_stack()?;
-    let daemon = start_daemon(&stack, "b9-authority")?;
-    configure_node(&daemon, &stack.discovery_url)?;
-    let account = create_account(&daemon, "B9 Authority Refusal")?;
-    let event = unique("b9-no-grant");
-    expect_a2i_authority_refusal(
-        &daemon,
-        &[
-            "a2i",
-            "append",
-            "--account",
-            &account.id,
-            "--event",
-            &event,
-            "--type",
-            "a2i.control",
-            "--source-device",
-            &account.device_id,
-            "--target-device",
-            &account.device_id,
-            "--control-domain",
-            "mcp.approval",
-            "--action",
-            "grant",
-            "--subject",
-            "demo-b-no-grant",
-        ],
-    )?;
-    for args in [
-        vec!["a2i", "list", "--account", &account.id],
-        vec!["a2i", "ack", "--account", &account.id, "--event", &event],
-    ] {
-        expect_a2i_authority_refusal(&daemon, &args)?;
+    fn expect_a2i_authority_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
+        let error = match rf_json(&daemon.socket, args) {
+            Ok(value) => return Err(format!("B9 approval unexpectedly succeeded: {value}").into()),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("generated_authority"), "typed Authority reason missing: {error}");
+        assert!(error.contains("exit status: 1"), "refusal must be a normal CLI exit: {error}");
+        eprintln!("B9 expected Control 11 Authority refusal: {error}");
+        Ok(())
     }
-    let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
-    assert_eq!(status["principal_id"], account.principal_id);
-    let (socket, root) = e2e::shutdown_daemon(daemon)?;
-    let daemon = start_daemon_at(socket, root)?;
-    unlock_account_with_timeout(&daemon, &account, Duration::from_secs(20))?;
-    for args in [
-        vec!["a2i", "list", "--account", &account.id],
-        vec!["a2i", "ack", "--account", &account.id, "--event", &event],
-    ] {
-        expect_a2i_authority_refusal(&daemon, &args)?;
+
+    #[ignore = "real-process Demo B B9 Authority refusal; explicit CLI e2e gate"]
+    #[test]
+    fn b9_a2i_approval_is_typed_refused_and_never_actionable_after_restart() -> e2e::Result<()> {
+        let stack = boot_stack()?;
+        let daemon = start_daemon(&stack, "b9-authority")?;
+        configure_node(&daemon, &stack.discovery_url)?;
+        let account = create_account(&daemon, "B9 Authority Refusal")?;
+        let event = unique("b9-no-grant");
+        expect_a2i_authority_refusal(
+            &daemon,
+            &[
+                "a2i",
+                "append",
+                "--account",
+                &account.id,
+                "--event",
+                &event,
+                "--type",
+                "a2i.control",
+                "--source-device",
+                &account.device_id,
+                "--target-device",
+                &account.device_id,
+                "--control-domain",
+                "mcp.approval",
+                "--action",
+                "grant",
+                "--subject",
+                "demo-b-no-grant",
+            ],
+        )?;
+        for args in [
+            vec!["a2i", "list", "--account", &account.id],
+            vec!["a2i", "ack", "--account", &account.id, "--event", &event],
+        ] {
+            expect_a2i_authority_refusal(&daemon, &args)?;
+        }
+        let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
+        assert_eq!(
+            status.get("principal_id").and_then(Value::as_str),
+            Some(account.principal_id.as_str()),
+            "B9 refusal must preserve the active account and a usable daemon",
+        );
+        let (socket, root) = e2e::shutdown_daemon(daemon)?;
+        let daemon = start_daemon_at(socket, root)?;
+        unlock_account_with_timeout(&daemon, &account, Duration::from_secs(20))?;
+        for args in [
+            vec!["a2i", "list", "--account", &account.id],
+            vec!["a2i", "ack", "--account", &account.id, "--event", &event],
+        ] {
+            expect_a2i_authority_refusal(&daemon, &args)?;
+        }
+        let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
+        assert_eq!(
+            status.get("principal_id").and_then(Value::as_str),
+            Some(account.principal_id.as_str()),
+            "B9 refusal must preserve the active account and a usable daemon",
+        );
+        Ok(())
     }
-    let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
-    assert_eq!(status["principal_id"], account.principal_id);
-    Ok(())
 }

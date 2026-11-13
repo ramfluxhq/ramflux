@@ -4,6 +4,7 @@
 //! Peer-authored generated controls (`GROUP_KEY`, RECOVERY, A2I, `OBJECT_REVOKE`): one exact-replay
 //! ledger shared by the four native executors. Each executor lives in its own module.
 pub(super) mod a2i;
+mod a2i_authority;
 mod delivery;
 mod group_key;
 mod guardian;
@@ -137,13 +138,6 @@ impl RamfluxClient {
             db.persist_actor_state(&key, &digest)?;
             Ok(true)
         })
-    }
-}
-
-impl RamfluxClient {
-    /// A signed document is not a durable native binding/grant authorization.
-    pub(crate) fn require_a2i_binding_authority() -> Result<(), SdkError> {
-        Err(authority("a2i native binding/grant authority is not installed"))
     }
 }
 

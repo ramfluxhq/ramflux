@@ -10,10 +10,7 @@ pub(crate) fn dispatch_a2i_bus_request(
     _state: &mut LocalBusDaemonState,
 ) -> impl std::future::Future<Output = Result<LocalBusDispatchResult, SdkError>> {
     // Retained legacy rows cannot supply the missing native binding/grant authority.
-    std::future::ready(
-        RamfluxClient::require_a2i_binding_authority()
-            .map(|()| unreachable!("native A2I grant authority is closed")),
-    )
+    std::future::ready(RamfluxClient::refuse_a2i_binding_authority())
 }
 
 pub(crate) fn dispatch_a2ui_bus_request(
