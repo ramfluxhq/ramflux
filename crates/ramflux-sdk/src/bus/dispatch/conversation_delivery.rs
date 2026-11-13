@@ -75,7 +75,7 @@ async fn routes(
             source_principal_id: None,
             target_delivery_id: None,
             federation: None,
-            ttl: None,
+            ttl: Some(account.client.content_ttl()?),
         };
         return super::super::group_delivery::resolve_current(account, &body).await;
     }
