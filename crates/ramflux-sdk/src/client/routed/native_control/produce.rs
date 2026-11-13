@@ -190,7 +190,7 @@ impl RamfluxClient {
                     accept,
                 ))),
             }),
-            &format!("guardian-accept/{}", accept.invite_id),
+            &format!("guardian-accept/{owner_root}/{}", accept.invite_id),
         )
     }
 

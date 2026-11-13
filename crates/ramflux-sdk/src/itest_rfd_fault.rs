@@ -117,7 +117,8 @@ pub(crate) fn tamper_received_binding(
     };
     let mut bytes = ramflux_protocol::decode_base64url(commitment)
         .map_err(|_| crate::SdkError::LocalBus("test commitment malformed".into()))?;
-    let first = bytes.first_mut()
+    let first = bytes
+        .first_mut()
         .ok_or_else(|| crate::SdkError::LocalBus("test commitment empty".into()))?;
     *first ^= 1;
     let mut changed = entry.clone();

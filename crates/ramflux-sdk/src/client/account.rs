@@ -186,7 +186,7 @@ impl RamfluxClient {
         *self.self_sync_restore_clock.borrow_mut() = None;
         self.self_sync_live_generation.set(None);
         *self.typing_receiver.borrow_mut() = super::typing::TypingReceiver::default();
-        *self.typing_sender.borrow_mut() = super::typing::sender::Sender::default();
+        *self.typing_sender.borrow_mut() = super::typing::sender::TypingSender::default();
         self.bind_object_retirement()?;
         Ok(())
     }

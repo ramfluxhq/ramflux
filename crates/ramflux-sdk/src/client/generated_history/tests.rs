@@ -5,12 +5,12 @@ use crate::custody::tests::{Root, TestVault, create};
 use ramflux_protocol::custody::{CustodyManifest, Publication};
 use serde_json::json;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-struct Sender {
+struct HistorySenderFixture {
     author: g::QualifiedDevice,
     manifest: g::NativeCustodyManifest,
     branch: ramflux_crypto::DeviceBranch,
 }
-fn sender(root: &Root, id: &str, now: u64) -> TestResult<Sender> {
+fn sender(root: &Root, id: &str, now: u64) -> TestResult<HistorySenderFixture> {
     let vault = TestVault::default();
     let account = create(&root.0, id, &vault, now)?;
     let (device, credentials) = account.credentials(&vault, "primary", now)?;
@@ -19,7 +19,7 @@ fn sender(root: &Root, id: &str, now: u64) -> TestResult<Sender> {
         custodian_publication: None,
         devices: Vec::new(),
     };
-    Ok(Sender {
+    Ok(HistorySenderFixture {
         author: g::QualifiedDevice {
             account_anchor: device.account_anchor,
             device_id: device.device_id,
@@ -31,7 +31,7 @@ fn sender(root: &Root, id: &str, now: u64) -> TestResult<Sender> {
         branch: credentials.signing,
     })
 }
-fn identity(sender: &Sender, sequence: u64) -> TestResult<g::EventIdentity> {
+fn identity(sender: &HistorySenderFixture, sequence: u64) -> TestResult<g::EventIdentity> {
     Ok(g::EventIdentity {
         id: g::identity::derive(&sender.author, "conversation", sequence)?.to_vec(),
         conversation_id: "conversation".into(),
@@ -41,15 +41,23 @@ fn identity(sender: &Sender, sequence: u64) -> TestResult<g::EventIdentity> {
         ..Default::default()
     })
 }
-fn inner(sender: &Sender, sequence: u64, content: g::content::Value) -> TestResult<g::Inner> {
+fn inner(
+    sender: &HistorySenderFixture,
+    sequence: u64,
+    content: g::content::Value,
+) -> TestResult<g::Inner> {
     let (kind, body) = g::registry::encode_body(&g::Content { value: Some(content) })?;
     Ok(g::Inner { layer: 2, kind, identity: Some(identity(sender, sequence)?), body })
 }
-fn evidence(sender: &Sender, inner: &g::Inner, now: u64) -> TestResult<g::HistoryOriginEvidence> {
+fn evidence(
+    sender: &HistorySenderFixture,
+    inner: &g::Inner,
+    now: u64,
+) -> TestResult<g::HistoryOriginEvidence> {
     evidence_with_policy(sender, inner, now, "durable", "message")
 }
 fn evidence_with_policy(
-    sender: &Sender,
+    sender: &HistorySenderFixture,
     inner: &g::Inner,
     now: u64,
     mode: &str,
@@ -91,7 +99,11 @@ fn evidence_with_policy(
         ..Default::default()
     })
 }
-fn item(original: &Sender, edit_author: &Sender, now: u64) -> TestResult<g::HistoryItem> {
+fn item(
+    original: &HistorySenderFixture,
+    edit_author: &HistorySenderFixture,
+    now: u64,
+) -> TestResult<g::HistoryItem> {
     item_with_message(
         original,
         edit_author,
@@ -100,8 +112,8 @@ fn item(original: &Sender, edit_author: &Sender, now: u64) -> TestResult<g::Hist
     )
 }
 fn item_with_message(
-    original: &Sender,
-    edit_author: &Sender,
+    original: &HistorySenderFixture,
+    edit_author: &HistorySenderFixture,
     now: u64,
     message: g::Message,
 ) -> TestResult<g::HistoryItem> {
@@ -185,7 +197,10 @@ fn edited_import_without_original_evidence_refused_no_fabricated_header() -> Tes
     Ok(())
 }
 
-fn same_root_senders(root: &Root, now: u64) -> TestResult<(Sender, Sender)> {
+fn same_root_senders(
+    root: &Root,
+    now: u64,
+) -> TestResult<(HistorySenderFixture, HistorySenderFixture)> {
     let vault = TestVault::default();
     let account = create(&root.0, "same-root", &vault, now)?;
     let (device, credentials) = account.credentials(&vault, "primary", now)?;
@@ -227,7 +242,7 @@ fn same_root_senders(root: &Root, now: u64) -> TestResult<(Sender, Sender)> {
         })
     };
     Ok((
-        Sender {
+        HistorySenderFixture {
             author: g::QualifiedDevice {
                 account_anchor: device.account_anchor.clone(),
                 device_id: device.device_id,
@@ -236,7 +251,7 @@ fn same_root_senders(root: &Root, now: u64) -> TestResult<(Sender, Sender)> {
             manifest: manifest(account.record().clone())?,
             branch: credentials.signing,
         },
-        Sender {
+        HistorySenderFixture {
             author: g::QualifiedDevice {
                 account_anchor: device.account_anchor,
                 device_id: "sibling".into(),
@@ -336,7 +351,7 @@ fn apply_claim(client: &RamfluxClient, item: &g::HistoryItem) -> TestResult<bool
 }
 
 fn revise(
-    sender: &Sender,
+    sender: &HistorySenderFixture,
     item: &g::HistoryItem,
     revision: u64,
     now: u64,
@@ -610,7 +625,7 @@ fn retained_origin_uses_first_hand_native_proof_and_rejects_body_identity_and_ro
 
 fn retain_upgrade_candidate(
     client: &RamfluxClient,
-    sender: &Sender,
+    sender: &HistorySenderFixture,
     candidate: &g::Inner,
     mode: &str,
     now: u64,
@@ -857,7 +872,7 @@ mod producer_rows {
 
     fn install(
         client: &RamfluxClient,
-        author: &Sender,
+        author: &HistorySenderFixture,
         sequence: u64,
         now: u64,
         text: &str,

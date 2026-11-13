@@ -30,7 +30,7 @@ struct Target {
     offline_until: Option<Instant>,
 }
 #[derive(Default)]
-pub(crate) struct Sender {
+pub(crate) struct TypingSender {
     focused: Option<String>,
     requests: BTreeMap<Vec<u8>, Cached>,
     targets: BTreeMap<(String, String), Target>,
@@ -39,7 +39,7 @@ pub(crate) struct Sender {
 fn error(code: GeneratedErrorCode, reason: &str) -> SdkError {
     AdapterError::new(code, reason).into()
 }
-impl Sender {
+impl TypingSender {
     pub(crate) fn focus(&mut self, conversation: Option<&str>) -> Result<Option<String>, SdkError> {
         if conversation.is_some_and(|value| value.len() > MAX_BYTES.saturating_sub(self.bytes())) {
             return Err(error(GeneratedErrorCode::RateLimited, "typing memory budget exhausted"));
@@ -237,7 +237,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     #[test]
     fn typing_rate_limits_are_per_peer_and_conversation() -> TestResult {
-        let mut sender = Sender::default();
+        let mut sender = TypingSender::default();
         let start = Instant::now();
         sender.focus(Some("c"))?;
         for index in 0..10 {
@@ -257,7 +257,7 @@ mod tests {
     }
     #[test]
     fn typing_offline_suppression_expires_or_peer_progress_clears_it() -> TestResult {
-        let mut sender = Sender::default();
+        let mut sender = TypingSender::default();
         let start = Instant::now();
         sender.focus(Some("c"))?;
         sender.sealed("c", "peer", true, start);
@@ -273,7 +273,7 @@ mod tests {
     }
     #[test]
     fn typing_duplicate_keeps_original_lifetime_until_generation_drops() -> TestResult {
-        let mut sender = Sender::default();
+        let mut sender = TypingSender::default();
         let operation = vec![1; 16];
         sender.reserve(&operation, [1; 32], 512)?;
         let update = g::MessageUpdate {
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(sender.lookup(&operation, &[1; 32])?, Some(update));
         assert!(sender.lookup(&operation, &[2; 32]).is_err());
         assert!(sender.reserve(&[2; 16], [2; 32], MAX_BYTES).is_err());
-        assert_eq!(Sender::default().lookup(&operation, &[1; 32])?, None);
+        assert_eq!(TypingSender::default().lookup(&operation, &[1; 32])?, None);
         Ok(())
     }
 }

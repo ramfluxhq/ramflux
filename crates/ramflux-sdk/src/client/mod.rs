@@ -94,7 +94,7 @@ use crate::prelude::*;
 
 pub struct RamfluxClient {
     pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
-    pub(crate) typing_sender: std::cell::RefCell<typing::sender::Sender>,
+    pub(crate) typing_sender: std::cell::RefCell<typing::sender::TypingSender>,
     pub(crate) self_sync_live_generation: std::cell::Cell<Option<u64>>,
     pub(crate) self_sync_restore_clock:
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
