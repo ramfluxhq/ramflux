@@ -28,7 +28,7 @@ pub(crate) enum TransferAction {
         lease_expires_at: u64,
         #[arg(long)]
         invitation_out: PathBuf,
-        #[arg(long, requires = "destination_epoch")]
+        #[arg(long, requires_all = ["destination_epoch", "account_anchor"])]
         destination_device: Option<String>,
         #[arg(long, requires = "destination_device")]
         destination_epoch: Option<u64>,

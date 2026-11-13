@@ -195,6 +195,7 @@ async fn prepare_candidate(
         "source native observation accepted an ordinary database loan"
     );
     let source_submission = rig.primary.prepare_full_source_submission(observation).await?;
+    retain_destination_approval(rig, operation, &publication)?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     let source =
         custody::load_account(&rig.participant_a.root, &rig.participant_a.account_id, rig.now)?;
@@ -212,6 +213,44 @@ async fn prepare_candidate(
     assert!(rig.participant_a.db.lock().map_err(|_| "off-loan source")?.is_none());
     Ok(Prepared { publication, install, head, source_submission })
 }
+fn retain_destination_approval(
+    rig: &Rig,
+    operation: &str,
+    publication: &ramflux_protocol::custody::Publication,
+) -> TestResult {
+    let source = custody::load_data_account(
+        &rig.participant_a.root,
+        &rig.participant_a.account_id,
+        rig.now,
+    )?;
+    let signed = {
+        let slot = rig.participant_a.db.lock().map_err(|_| "test: source preservation writer")?;
+        let db = slot.as_ref().ok_or("test: source preservation writer missing")?;
+        let stage = db.open_full_transfer_stage(
+            operation,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+            rig.now,
+        )?;
+        stage
+            .retained_source_full_preservation(source.record(), &publication.record, rig.now)?
+            .ok_or("test: missing source approval")?
+    };
+    let slot = rig.participant_b.db.lock().map_err(|_| "test: destination preservation writer")?;
+    let db = slot.as_ref().ok_or("test: destination preservation writer missing")?;
+    let stage = db.open_full_transfer_stage(
+        operation,
+        ramflux_crypto::custody::pairing::PairingRole::Responder,
+        rig.now,
+    )?;
+    stage.retain_destination_full_preservation(
+        source.record(),
+        &publication.record,
+        &signed,
+        rig.now,
+    )?;
+    Ok(())
+}
+
 async fn publication(
     rig: &mut Rig,
     operation: &str,

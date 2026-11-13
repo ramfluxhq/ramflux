@@ -43,6 +43,8 @@ mod tests {
             .find(|row| row.operation_id == operation)
             .ok_or("B live")?;
         live.phase = value.into();
+        live.proposal_hash =
+            if value == "proposal_pending" { Some(encode_base64url([92; 32])) } else { None };
         db.put_pairing_live(&live)?;
         Ok(())
     }
@@ -150,7 +152,6 @@ mod tests {
                     .is_none(),
                 "test: B preparation bypassed live role, stage or callback ownership"
             );
-            eprintln!("test: private input worker reply {changed}");
             let result = worker.await?;
             if changed {
                 assert!(result.is_err(), "phase changed during input released a candidate");
@@ -187,12 +188,9 @@ mod tests {
     async fn pairing_private_reply_demux_and_phrase_scope() -> TestResult {
         let hold = ClockHold::new();
         let outcome = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
-            eprintln!("test: private input demux");
             crate::bus::credentials::contract_tests::required_demux_cases().await?;
-            eprintln!("test: private input fixture");
             let (mut rig, operation) = Box::pin(attended_rig()).await?;
             let owner = rig.participant_b.clone();
-            eprintln!("test: private input candidate scope");
             let request = request(&rig, &operation)?;
             let reservation = custody::pairing::load_reservation(&owner.root, &owner.account_id)?
                 .ok_or("B reservation")?;
@@ -200,7 +198,6 @@ mod tests {
             let input = crate::bus::credentials::connection(owner.root.clone(), 71, outbound);
             let channel = input.channel();
             refuses_unattended(&rig, &request, reservation.frontend_generation, &mut prompts)?;
-            eprintln!("test: private input phrase worker");
             Box::pin(consume_phrase(
                 &mut rig,
                 &request,

@@ -3,7 +3,7 @@
 
 //! Shared data-install operations for live and terminal-reconciliation stage owners.
 use crate::SdkError;
-use ramflux_protocol::custody::DeviceRef;
+use ramflux_protocol::custody::{DeviceRef, DeviceSet, Envelope};
 use ramflux_storage::{
     AdoptionRow, BackupIndexInstall, FullDuplexReceipt, FullPreparedReceiverDatabase,
     FullReceiverBaseCopy, FullReceiverDatabaseWork, FullRecipientInstallStage,
@@ -15,6 +15,7 @@ pub(super) trait InstallStage {
     fn destination(&self) -> Result<DeviceRef, SdkError>;
     fn reference(&self) -> &FullStageReference;
     fn duplex(&self, now: u64) -> Result<FullDuplexReceipt, SdkError>;
+    fn preservation(&self, candidate: &Envelope<DeviceSet>, now: u64) -> Result<(), SdkError>;
     fn prepare(
         &self,
         copy: FullReceiverBaseCopy,
@@ -30,6 +31,10 @@ pub(super) trait InstallStage {
     ) -> Result<FullSelectedReceiverGeneration, SdkError>;
 }
 impl InstallStage for FullTransferStage<'_> {
+    fn preservation(&self, candidate: &Envelope<DeviceSet>, now: u64) -> Result<(), SdkError> {
+        Ok(self.require_destination_preservation_after_native_ack(candidate, now)?)
+    }
+
     fn destination(&self) -> Result<DeviceRef, SdkError> {
         Ok(self.resume_record()?.grant.destination_ref)
     }
@@ -58,6 +63,10 @@ impl InstallStage for FullTransferStage<'_> {
     }
 }
 impl InstallStage for FullRecipientInstallStage<'_> {
+    fn preservation(&self, candidate: &Envelope<DeviceSet>, _now: u64) -> Result<(), SdkError> {
+        Ok(self.require_preservation_after_native_ack(candidate)?)
+    }
+
     fn destination(&self) -> Result<DeviceRef, SdkError> {
         Ok(self.destination_ref()?)
     }

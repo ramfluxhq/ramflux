@@ -216,3 +216,6 @@ async fn execute(socket: PathBuf, command: TransferCommand) -> Result<(), RfErro
     output::print(&serde_json::to_value(result)?)?;
     if exit == 0 { Ok(()) } else { Err(RfError::PairingExit { code: exit }) }
 }
+
+#[cfg(test)]
+mod tests;

@@ -20,7 +20,9 @@ use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
 mod affirm;
 mod bootstrap;
 pub(super) mod cancel;
+mod candidate_assembly;
 mod epoch;
+mod management;
 mod source_observation;
 mod status;
 mod stream;
@@ -40,6 +42,9 @@ pub(super) struct FullCeremony {
     pending_affirmation: Option<Box<crate::custody::pairing::FullSourceCandidateObservation>>,
     affirmed: Option<Box<affirm::AffirmedCandidate>>,
     affirmation_used: bool,
+    management: Option<Box<management::FullManagement>>,
+    pending_ready: Option<Box<crate::custody::pairing::participant::FullDestinationReady>>,
+    ready_retained: bool,
 }
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
@@ -70,6 +75,9 @@ impl FullCeremony {
             pending_affirmation: None,
             affirmed: None,
             affirmation_used: false,
+            management: None,
+            pending_ready: None,
+            ready_retained: false,
         }
     }
 }

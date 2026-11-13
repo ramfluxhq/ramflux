@@ -15,7 +15,7 @@ fn pairing_full_j6_ack_and_tail_cut_bind_the_exact_pre_ack_view() -> TestResult 
         AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
     db.connection.execute_batch("CREATE TRIGGER runtime_pairing_full_tail_insert AFTER INSERT ON pairing_full_tail BEGIN SELECT NEW.rowid; END;")?;
     drop(db);
-    let index = AccountIndex::open(&root)?;
+    let index = AccountIndex::open(root)?;
     let db =
         AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
     let trigger_count:u64=db.connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'runtime_pairing_full_tail_%'",[],|row|row.get(0))?;
@@ -80,6 +80,14 @@ fn pairing_full_j6_ack_and_tail_cut_bind_the_exact_pre_ack_view() -> TestResult 
     drop(private);
     drop(db);
     drop(index);
+    require_independent_cleanup_receipt(root, &head, &owner)?;
+    Ok(())
+}
+fn require_independent_cleanup_receipt(
+    root: &std::path::Path,
+    head: &crate::HeadRow,
+    owner: &crate::FullSourcePrimaryOwner,
+) -> TestResult {
     let db = AccountDb::open(
         &AccountIndex::open(root)?,
         "acct",

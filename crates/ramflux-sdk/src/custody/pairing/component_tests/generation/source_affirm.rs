@@ -53,6 +53,12 @@ mod tests {
     }
     async fn setup()
     -> Result<(Rig, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>> {
+        Box::pin(setup_with_original_approval(false)).await
+    }
+    async fn setup_with_original_approval(
+        original: bool,
+    ) -> Result<(Rig, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>>
+    {
         let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
         rig.primary.sync_relay().await?;
         rig.participant_a.return_client(&mut rig.source.client)?;
@@ -72,7 +78,9 @@ mod tests {
         });
         rig.primary.set_participant(owner.clone());
         rig.participant_a = owner;
-        rig.primary.replace_full_confirmations_for_test((false, false))?;
+        if !original {
+            rig.primary.replace_full_confirmations_for_test((false, false))?;
+        }
         Ok((rig, operation, recipient, vault))
     }
     fn request(
@@ -199,6 +207,192 @@ mod tests {
             "test: source affirmation revived SAS flags"
         );
         Ok(())
+    }
+    async fn deliver_source_ready(
+        rig: &mut Rig,
+        request: &TransferAffirm,
+        recipient: &RecipientPrepared,
+    ) -> TestResult {
+        rig.primary.affirm_full_transfer(request).await?;
+        assert!(
+            rig.primary.service_full_transfer(rig.source.client.account_db()?)?,
+            "test: source signing service did not run"
+        );
+        rig.primary
+            .poll_full_management_control()
+            .await
+            .map_err(|error| format!("test: A ready sender: {error}"))?;
+        assert!(
+            rig.secondary
+                .poll_full_management_control()
+                .await
+                .map_err(|error| format!("test: B ready receiver: {error}"))?,
+            "test: destination did not receive encrypted full preservation"
+        );
+        let signed = rig.primary.affirmed_full_source_preservation()?.clone();
+        let source = custody::load_data_account(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id,
+            rig.now,
+        )?
+        .record()
+        .clone();
+        let slot = rig.participant_b.db.lock().map_err(|_| "test: B writer")?;
+        let db = slot.as_ref().ok_or("test: B staged writer")?;
+        let stage = db.open_full_transfer_stage(
+            &request.operation_id,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            rig.now,
+        )?;
+        assert!(
+            stage
+                .retained_destination_after_native_ack(
+                    &source,
+                    &recipient.publication.record,
+                    rig.now
+                )?
+                .is_none(),
+            "test: wire receipt skipped the destination's durable writer service"
+        );
+        let mut substituted = signed.clone();
+        substituted.body.target_restrictions_root = encode_base64url([93; 32]);
+        assert!(
+            stage
+                .retain_destination_full_preservation(
+                    &source,
+                    &recipient.publication.record,
+                    &substituted,
+                    rig.now
+                )
+                .is_err(),
+            "test: B trusted source roots without its own durable reverse proof"
+        );
+        drop(stage);
+        let before = rig.node.query_calls.load(Ordering::Relaxed);
+        assert!(
+            rig.secondary
+                .service_full_transfer(db)
+                .map_err(|error| format!("test: B ready persistence: {error}"))?,
+            "test: B did not persist the exact ready control"
+        );
+        assert_eq!(
+            rig.node.query_calls.load(Ordering::Relaxed),
+            before,
+            "test: B's short writer loan crossed native I/O"
+        );
+        let stage = db.open_full_transfer_stage(
+            &request.operation_id,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+            rig.now,
+        )?;
+        let saved = stage
+            .retained_destination_after_native_ack(&source, &recipient.publication.record, rig.now)?
+            .ok_or("test: missing durable B preservation")?;
+        assert_eq!(
+            canonical_json_bytes(&saved)?,
+            canonical_json_bytes(&signed)?,
+            "test: B retained different source approval bytes"
+        );
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_uninterrupted_sas_approval_only_signs_through_original_writer_service()
+    -> TestResult {
+        let hold = ClockHold::new();
+        let outcome = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+            let (mut rig, operation, recipient, vault) =
+                Box::pin(setup_with_original_approval(true)).await?;
+            let expected = request(&rig, &operation, &recipient)?;
+            let mut delivered = false;
+            for _ in 0..66 {
+                rig.secondary
+                    .poll_full_management_control()
+                    .await
+                    .map_err(|error| format!("test: B candidate control: {error}"))?;
+                if rig
+                    .primary
+                    .poll_full_management_control()
+                    .await
+                    .map_err(|error| format!("test: A candidate review: {error}"))?
+                {
+                    delivered = true;
+                    break;
+                }
+            }
+            assert!(delivered, "test: original confirmed source did not receive candidate");
+            assert_eq!(
+                vault.primary_reads.load(Ordering::Relaxed),
+                0,
+                "test: native/relay phase loaded management key"
+            );
+            assert!(
+                rig.primary.affirmed_full_source_preservation().is_err(),
+                "test: original approval skipped writer service"
+            );
+            assert!(
+                rig.primary.affirm_full_transfer(&expected).await.is_err(),
+                "test: original SAS approval accepted a second candidate grant"
+            );
+            let before = rig.node.query_calls.load(Ordering::Relaxed);
+            assert!(
+                rig.primary.service_full_transfer(rig.source.client.account_db()?)?,
+                "test: original writer did not consume its approved work"
+            );
+            assert_eq!(
+                rig.node.query_calls.load(Ordering::Relaxed),
+                before,
+                "test: signing crossed native I/O under writer loan"
+            );
+            assert_eq!(
+                vault.primary_reads.load(Ordering::Relaxed),
+                1,
+                "test: source did not sign exactly once"
+            );
+            assert_eq!(
+                rig.primary.affirmed_full_source_preservation()?.body.new_record_hash,
+                expected.new_record_hash,
+                "test: original approval signed a different candidate"
+            );
+            rig.primary.lock().await?;
+            rig.secondary.lock().await?;
+            Ok(())
+        }))
+        .await;
+        hold.finish().await?;
+        outcome
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_candidate_control_reaches_source_review_without_approval() -> TestResult {
+        let hold = ClockHold::new();
+        let outcome = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+            let (mut rig, operation, recipient, vault) = Box::pin(setup()).await?;
+            let expected = request(&rig, &operation, &recipient)?;
+            let mut delivered = false;
+            for _ in 0..66 {
+                rig.secondary.poll_full_management_control().await.map_err(|error|format!("test: B candidate control: {error}"))?;
+                if rig.primary.poll_full_management_control().await.map_err(|error|format!("test: A candidate review: {error}"))? {
+                    delivered = true;
+                    break;
+                }
+            }
+            assert!(delivered,"test: encrypted candidate controls did not reach original source");
+            let status=rig.primary.status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+                schema:"ramflux.pairing.StatusRequest.v2".into(),version:2,
+                operation_id:operation,generation:expected.generation,
+            }).await?;
+            assert!(matches!(status.outcome,Outcome::Update {value} if value.phase=="proposal_pending"
+                && value.proposal_hash.as_deref()==Some(expected.new_record_hash.as_str())
+                && value.peer_ref.as_ref()==Some(&recipient.install.recipient_ref)
+                && value.emoji_indices.is_none()),"test: source review did not bind decrypted candidate to its own native/base context");
+            assert_eq!(vault.primary_reads.load(Ordering::Relaxed),0,"test: encrypted peer message granted management signing approval");
+            assert!(rig.primary.affirmed_full_source_preservation().is_err(),"test: relay candidate minted source preservation");
+            Box::pin(deliver_source_ready(&mut rig,&expected,&recipient)).await?;
+            rig.primary.lock().await?;
+            rig.secondary.lock().await?;
+            Ok(())
+        })).await;
+        hold.finish().await?;
+        outcome
     }
     #[tokio::test(start_paused = true)]
     async fn pairing_source_affirmation_is_one_shot_and_keeps_sas_retired() -> TestResult {

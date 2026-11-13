@@ -89,6 +89,11 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
                     if let Err(error) = progress {
                         actor.note_background_error(&error);
                     }
+                    if actor.candidate_control_ready()
+                        && let Err(error) = actor.poll_full_management_control().await
+                    {
+                        actor.note_background_error(&error);
+                    }
                 }
                 entry.work.notify_one();
                 drop(entry);

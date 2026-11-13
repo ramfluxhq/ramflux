@@ -32,7 +32,13 @@ impl FullTransferStage<'_> {
         candidate: &Envelope<DeviceSet>,
         now: u64,
     ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
-        self.read_source_preservation(previous, candidate, now, ApprovalTime::BeforePublish)
+        self.read_preservation(
+            previous,
+            candidate,
+            now,
+            ApprovalTime::BeforePublish,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+        )
     }
     // An expired local approval cannot undo an independently confirmed native
     // publication. This is exact submitted-candidate reconciliation, never signing.
@@ -42,7 +48,13 @@ impl FullTransferStage<'_> {
         candidate: &Envelope<DeviceSet>,
         now: u64,
     ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
-        self.read_source_preservation(previous, candidate, now, ApprovalTime::AfterNativeAck)
+        self.read_preservation(
+            previous,
+            candidate,
+            now,
+            ApprovalTime::AfterNativeAck,
+            ramflux_crypto::custody::pairing::PairingRole::Initiator,
+        )
     }
     pub(super) fn source_published_candidate_hash(&self) -> Result<String, StorageError> {
         let (base,candidate):(Vec<u8>,Vec<u8>)=self.connection.query_row("SELECT base_record,candidate FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288 AND length(candidate)<=524288",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
@@ -54,12 +66,13 @@ impl FullTransferStage<'_> {
         self.retained_source_after_native_ack(&base, &candidate, when)?.ok_or_else(wrong)?;
         Ok(object_hash(&candidate)?)
     }
-    fn read_source_preservation(
+    fn read_preservation(
         &self,
         previous: &Envelope<DeviceSet>,
         candidate: &Envelope<DeviceSet>,
         now: u64,
         validity: ApprovalTime,
+        role: ramflux_crypto::custody::pairing::PairingRole,
     ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
         self.require_io()?;
         let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self
@@ -81,7 +94,7 @@ impl FullTransferStage<'_> {
         if canonical_json_bytes(&signed)? != bytes {
             return Err(wrong());
         }
-        self.check_source_preservation(previous, candidate, &signed, now, validity)?;
+        self.check_preservation(previous, candidate, &signed, now, (role, validity))?;
         Ok(Some(signed))
     }
     /// Fsync A's exact signed preservation before releasing `TransferReadyFull`.
@@ -104,6 +117,67 @@ impl FullTransferStage<'_> {
             now,
             ApprovalTime::BeforePublish,
         )?;
+        self.retain_preservation_bytes(previous, candidate, signed)
+    }
+    /// Retain B's independently checked exact source signature against B's own duplex.
+    /// This grants no native publication receipt or authority to sign.
+    /// # Errors
+    /// Refuses a foreign base/candidate/source key, wrong local role or application roots.
+    pub fn retain_destination_full_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        signed: &Envelope<PreservationFull>,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        self.check_preservation(
+            previous,
+            candidate,
+            signed,
+            now,
+            (ramflux_crypto::custody::pairing::PairingRole::Responder, ApprovalTime::BeforePublish),
+        )?;
+        self.retain_preservation_bytes(previous, candidate, signed)
+    }
+    /// Read B's retained source approval only after separately obtaining its own native J6.
+    /// Expired approval cannot undo a publication already verified by the native owner.
+    /// # Errors
+    /// Refuses missing/mismatched local proof or a signature from another source key.
+    pub fn retained_destination_after_native_ack(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        now: u64,
+    ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
+        self.read_preservation(
+            previous,
+            candidate,
+            now,
+            ApprovalTime::AfterNativeAck,
+            ramflux_crypto::custody::pairing::PairingRole::Responder,
+        )
+    }
+    /// Require B's exact retained source signature in addition to a caller's own J6.
+    /// This reads historical data proof only and never restores signing approval.
+    /// # Errors
+    /// Refuses missing/changed candidate bytes, wrong role or corrupt source/duplex proof.
+    pub fn require_destination_preservation_after_native_ack(
+        &self,
+        candidate: &Envelope<DeviceSet>,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        self.require_io()?;
+        let old:Vec<u8>=self.connection.query_row("SELECT base_record FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288",[],|row|row.get(0))?;
+        let previous: Envelope<DeviceSet> = ramflux_protocol::custody::decode(&old, 524_288)?;
+        self.retained_destination_after_native_ack(&previous, candidate, now)?.ok_or_else(wrong)?;
+        Ok(())
+    }
+    fn retain_preservation_bytes(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        signed: &Envelope<PreservationFull>,
+    ) -> Result<(), StorageError> {
         let old = canonical_json_bytes(previous)?;
         let candidate = canonical_json_bytes(candidate)?;
         let bytes = canonical_json_bytes(signed)?;
@@ -126,6 +200,22 @@ impl FullTransferStage<'_> {
         now: u64,
         validity: ApprovalTime,
     ) -> Result<(), StorageError> {
+        self.check_preservation(
+            previous,
+            candidate,
+            signed,
+            now,
+            (ramflux_crypto::custody::pairing::PairingRole::Initiator, validity),
+        )
+    }
+    fn check_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        signed: &Envelope<PreservationFull>,
+        now: u64,
+        (role, validity): (ramflux_crypto::custody::pairing::PairingRole, ApprovalTime),
+    ) -> Result<(), StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
         let proof = self.verified_duplex(now)?;
@@ -136,7 +226,7 @@ impl FullTransferStage<'_> {
             .map_err(|_| wrong())?;
         let body = &signed.body;
         body.validate().map_err(|_| wrong())?;
-        if record.role != ramflux_crypto::custody::pairing::PairingRole::Initiator
+        if record.role != role
             || previous.body.master_certificate.body.primary_device_ref != record.grant.source_ref
             || object_hash(previous)? != record.base_record_hash
             || body.recipient_mode != context.initiator.common.recipient_mode
