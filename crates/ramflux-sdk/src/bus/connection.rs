@@ -173,6 +173,16 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
+                #[cfg(feature = "c-abi")]
+                if request.method == "subscription.close" {
+                    supervisor.disconnect(id);
+                    connection.topics.clear();
+                    connection.attended_account_id = None;
+                    outbound.send(local_bus_response(&request, serde_json::json!({"subscribed":false})))
+                        .await.map_err(|_| closed())?;
+                    inflight.remove(&request.request_id);
+                    continue;
+                }
                 if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
                         outbound.send(local_bus_error(&request,&error)).await.map_err(|_|closed())?;
