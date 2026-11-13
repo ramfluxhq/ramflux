@@ -228,6 +228,19 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        let _credential_call =
+            super::credentials::call(&self.config.data_root, &request, connection)?;
+        if request.method == "account.lock" {
+            crate::custody::pairing::private_credential::cancel_call(
+                &self.config.data_root,
+                request_account_id(&request)?,
+            )?;
+        }
+        if request.method == "account.unlock"
+            && let Some(call) = &_credential_call
+        {
+            return self.private_unlock(&request, call).await;
+        }
         if !super::lifecycle::handles(&request.method) {
             return self.route(request, connection).await;
         }
@@ -281,6 +294,41 @@ impl Supervisor {
         }
         self.lifecycle_changed.notify_one();
         super::lifecycle_registry::wait(receive).await
+    }
+
+    async fn private_unlock(
+        &self,
+        request: &LocalBusFrame,
+        call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+    ) -> Result<ActorResponse, SdkError> {
+        self.ensure_request_allowed(request)?;
+        if request.body.as_object().is_none_or(|body| !body.is_empty()) {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        let id = request_account_id(request)?.to_owned();
+        self.require_restore_ready(&id, true)?;
+        let secret =
+            super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
+        call.require_live()?;
+        let existing = self.accounts.borrow().get(&id).cloned();
+        let actor = if let Some(actor) = existing {
+            actor
+        } else {
+            let actor = AccountActor::start(
+                id.clone(),
+                self.config.clone(),
+                self.nodes.borrow().clone(),
+                self.index.clone(),
+                self.events.clone(),
+            )?;
+            self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            actor
+        };
+        let result = actor.unlock_native(secret, None).await?;
+        self.restore_states.borrow_mut().remove(&id);
+        self.set_active(&id).await?;
+        self.set_unlocked(&id, true).await?;
+        Ok(reply(serde_json::to_value(result)?))
     }
 
     async fn lifecycle_request(

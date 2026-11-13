@@ -64,3 +64,47 @@ fn pairing_invitation_output_is_private_exclusive_and_cleans_failed_writes() -> 
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn pairing_owned_registry_reopens_and_refuses_replaced_files() -> TestResult {
+    let root = std::env::temp_dir().join(format!(
+        "rf-pair-registry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    std::fs::create_dir(&root)?;
+    let socket = root.join("bus.sock");
+    let operation = ramflux_protocol::encode_base64url([19; 32]);
+    let intended = root.join("invitation");
+    let mut output = InvitationOutput::create(intended.clone())?;
+    output.commit(b"invitation-private-canary")?;
+    registry::Registry::open(&socket)?.register(&operation, &output)?;
+    let sidecar = root.join("invitation.op");
+    assert_eq!(std::fs::read(&sidecar)?, operation.as_bytes());
+    let saved = root.join("original");
+    std::fs::rename(&intended, &saved)?;
+    std::fs::write(&intended, b"unrelated same-path replacement")?;
+    assert!(registry::Registry::open(&socket)?.cleanup(&operation).is_err());
+    assert_eq!(std::fs::read(&intended)?, b"unrelated same-path replacement");
+    assert!(sidecar.exists());
+    std::fs::remove_file(&intended)?;
+    std::os::unix::fs::symlink(&saved, &intended)?;
+    assert!(registry::Registry::open(&socket)?.cleanup(&operation).is_err());
+    assert!(saved.exists());
+    std::fs::remove_file(&intended)?;
+    std::fs::rename(&saved, &intended)?;
+    registry::Registry::open(&socket)?.cleanup(&operation)?;
+    assert!(!intended.exists());
+    assert!(!sidecar.exists());
+    registry::Registry::open(&socket)?.cleanup(&operation)?;
+    let joined = root.join("joined");
+    let mut output = InvitationOutput::create(joined.clone())?;
+    output.commit(b"joined bearer")?;
+    registry::Registry::open(&socket)?.register(&operation, &output)?;
+    registry::JoinedFile::open(&joined)?.remove()?;
+    assert!(!joined.exists());
+    registry::Registry::open(&socket)?.cleanup(&operation)?;
+    assert!(!root.join("joined.op").exists());
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

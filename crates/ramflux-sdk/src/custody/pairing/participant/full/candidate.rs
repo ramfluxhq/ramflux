@@ -125,17 +125,21 @@ impl LocalPairingParticipant {
         if stored.frontend_generation != frontend_generation {
             return Err(wrong());
         }
-        let secret = local_credential::acquire_phrase(
-            &self.root,
-            &CredentialRequest {
-                local_account_id: self.account_id.clone(),
-                reservation_id: stored.reservation_id.clone(),
-                frontend_generation,
-                action: "phrase".into(),
-            },
-            self.provider.as_ref(),
-            &stored,
+        let expected = CredentialRequest {
+            local_account_id: self.account_id.clone(),
+            reservation_id: stored.reservation_id.clone(),
+            frontend_generation,
+            action: "phrase".into(),
+        };
+        let binding = crate::custody::pairing::private_credential::PrivateCredentialScope::phrase(
+            expected.clone(),
+            request.operation_id.clone(),
+            None,
+            &scope.live.role,
+            "awaiting_prepare",
         )?;
+        let provider = local_credential::scoped(self.provider.as_ref(), binding);
+        let secret = local_credential::acquire_phrase(&self.root, &expected, &provider, &stored)?;
         let phrase =
             RecoveryPhrase::parse(std::str::from_utf8(secret.as_bytes()).map_err(|_| wrong())?)?;
         let master = MasterKey::from_phrase(&phrase)?;

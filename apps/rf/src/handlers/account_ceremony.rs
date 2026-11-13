@@ -11,13 +11,13 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-struct Terminal {
+pub(super) struct Terminal {
     input: File,
     output: File,
     echo_disabled: bool,
 }
 impl Terminal {
-    fn open() -> Result<Self, RfError> {
+    pub(super) fn open() -> Result<Self, RfError> {
         let terminal =
             OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| {
                 RfError::Message("This ceremony requires a local interactive terminal.".into())
@@ -40,7 +40,11 @@ impl Terminal {
         self.echo_disabled = !enabled;
         Ok(())
     }
-    fn line(&mut self, prompt: &str, hidden: bool) -> Result<Zeroizing<String>, RfError> {
+    pub(super) fn line(
+        &mut self,
+        prompt: &str,
+        hidden: bool,
+    ) -> Result<Zeroizing<String>, RfError> {
         if hidden {
             self.echo(false)?;
         }

@@ -281,7 +281,12 @@ fn setup_secret(request: &StageNew<'_>, reservation_id: &str) -> Result<SecretUt
         return Err(SdkError::PairingField("credential_reservation"));
     }
     let expected = credential_request(request, reservation_id, "setup")?;
-    acquire_setup(request.root, &expected, request.provider, &stored)
+    let binding = super::private_credential::PrivateCredentialScope::data(
+        expected.clone(),
+        Some(request.invitation.body.request_id.clone()),
+    )?;
+    let provider = super::local_credential::scoped(request.provider, binding);
+    acquire_setup(request.root, &expected, &provider, &stored)
 }
 
 fn commit_new(
@@ -479,7 +484,12 @@ fn unlock_existing(
     let expected = credential_request(&request.new, &reservation_id, "unlock")?;
     expected.validate_recipient_mode("existing").map_err(|error| wire(&error))?;
     client.open_account_index(request.new.root)?;
-    let secret = match acquire_unlock(request.new.root, &expected, request.new.provider, &stored) {
+    let binding = super::private_credential::PrivateCredentialScope::data(
+        expected.clone(),
+        Some(request.new.invitation.body.request_id.clone()),
+    )?;
+    let provider = super::local_credential::scoped(request.new.provider, binding);
+    let secret = match acquire_unlock(request.new.root, &expected, &provider, &stored) {
         Ok(secret) => secret,
         Err(error) => {
             let _ = remove_reservation(request.new.root, request.new.account_id);

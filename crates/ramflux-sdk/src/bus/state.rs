@@ -682,6 +682,9 @@ impl LocalBusAccountState {
 }
 #[derive(Clone)]
 pub(crate) struct LocalBusConnectionState {
+    pub(crate) credential_channel: Option<
+        std::sync::Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    >,
     pub(crate) connection_id: u64,
     pub(crate) outbound: mpsc::Sender<LocalBusFrame>,
     pub(crate) topics: BTreeSet<String>,
@@ -692,6 +695,7 @@ pub(crate) struct LocalBusConnectionState {
 impl LocalBusConnectionState {
     pub(crate) fn new(connection_id: u64, outbound: mpsc::Sender<LocalBusFrame>) -> Self {
         Self {
+            credential_channel: None,
             connection_id,
             outbound,
             topics: BTreeSet::new(),

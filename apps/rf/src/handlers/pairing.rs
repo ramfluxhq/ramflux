@@ -11,7 +11,7 @@ use ramflux_protocol::custody::pairing::{
     local_dto::{Approve, Begin, Cancel, Confirm, Join, LocalResult, Outcome, StatusRequest},
     native::InviteToken,
 };
-use ramflux_sdk::LocalBusClient;
+use ramflux_sdk::custody::pairing::private_credential::PairingBusClient;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -19,9 +19,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+mod registry;
 
 pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(), RfError> {
-    let mut bus = LocalBusClient::connect(socket).await?;
+    let mut bus = PairingBusClient::connect(&socket, std::sync::Arc::new(TerminalProvider)).await?;
     let full_status = matches!(&command.action, PairingAction::TransferStatus(_));
     match command.action {
         PairingAction::Begin {
@@ -43,6 +44,7 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
                     lease_expires_at,
                 },
                 invitation_out,
+                &socket,
             )
             .await
         }
@@ -50,7 +52,8 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
         PairingAction::Join { display_name, invitation_file } => {
             join(&mut bus, &command.account, display_name, &invitation_file).await
         }
-        PairingAction::Confirm { operation, transcript_hash, matches } => show(
+        PairingAction::Confirm { operation, transcript_hash, matches } => finish(
+            &socket,
             invoke(
                 &mut bus,
                 &command.account,
@@ -66,7 +69,8 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
             )
             .await?,
         ),
-        PairingAction::Approve { operation, transcript_hash, proposal_hash, approved } => show(
+        PairingAction::Approve { operation, transcript_hash, proposal_hash, approved } => finish(
+            &socket,
             invoke(
                 &mut bus,
                 &command.account,
@@ -83,7 +87,8 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
             )
             .await?,
         ),
-        PairingAction::Status(operation) | PairingAction::TransferStatus(operation) => show(
+        PairingAction::Status(operation) | PairingAction::TransferStatus(operation) => finish(
+            &socket,
             invoke(
                 &mut bus,
                 &command.account,
@@ -97,7 +102,8 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
             )
             .await?,
         ),
-        PairingAction::Cancel(operation) => show(
+        PairingAction::Cancel(operation) => finish(
+            &socket,
             invoke(
                 &mut bus,
                 &command.account,
@@ -114,21 +120,24 @@ pub(crate) async fn handle(socket: PathBuf, command: PairingCommand) -> Result<(
     }
 }
 async fn join(
-    bus: &mut LocalBusClient,
+    bus: &mut PairingBusClient,
     account: &str,
     display_name: String,
     path: &Path,
 ) -> Result<(), RfError> {
+    let owned = registry::JoinedFile::open(path)?;
     let token = read_invitation(path)?;
-    show(
-        invoke(
-            bus,
-            account,
-            "join",
-            &Join { schema: "ramflux.pairing.Join.v2".into(), version: 2, token, display_name },
-        )
-        .await?,
+    let result = invoke(
+        bus,
+        account,
+        "join",
+        &Join { schema: "ramflux.pairing.Join.v2".into(), version: 2, token, display_name },
     )
+    .await?;
+    if matches!(&result.outcome, Outcome::Update { value } if value.result.is_none()) {
+        owned.remove()?;
+    }
+    show(result)
 }
 
 struct InvitationOutput {
@@ -165,17 +174,22 @@ impl Drop for InvitationOutput {
     }
 }
 async fn begin(
-    bus: &mut LocalBusClient,
+    bus: &mut PairingBusClient,
     account: &str,
     mut request: Begin,
     path: PathBuf,
+    socket: &Path,
 ) -> Result<(), RfError> {
     let mut output = InvitationOutput::create(path)?;
     request.normalize();
     let result = invoke(bus, account, "begin", &request).await?;
     let LocalResult { outcome: Outcome::Begin { value }, .. } = result else { return show(result) };
     let bytes = Zeroizing::new(value.invite_token.to_wire_bytes().map_err(|_| invalid())?);
-    if let Err(error) = output.commit(&bytes) {
+    if let Err(error) = output
+        .commit(&bytes)
+        .and_then(|()| registry::Registry::open(socket)?.register(&value.operation_id, &output))
+    {
+        output.keep = false;
         let _ = invoke(
             bus,
             account,
@@ -199,7 +213,7 @@ fn invalid() -> RfError {
     RfError::Message("Invalid pairing response or invitation.".into())
 }
 async fn invoke<T: PairingWire + serde::Serialize>(
-    bus: &mut LocalBusClient,
+    bus: &mut PairingBusClient,
     account: &str,
     action: &str,
     request: &T,
@@ -219,6 +233,43 @@ async fn invoke<T: PairingWire + serde::Serialize>(
         .map_err(|_| invalid())?;
     Ok(result)
 }
+fn finish(socket: &Path, result: LocalResult) -> Result<(), RfError> {
+    let terminal = match &result.outcome {
+        Outcome::Update { value }
+            if matches!(
+                value.phase.as_str(),
+                "completed" | "cancelled" | "expired" | "rejected"
+            ) =>
+        {
+            Some((&value.operation_id, value.phase == "expired"))
+        }
+        Outcome::FullStatus { value }
+            if matches!(
+                value.stage,
+                ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Installed
+                    | ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Cancelled
+                    | ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Expired
+            ) =>
+        {
+            Some((
+                &value.operation_id,
+                value.stage
+                    == ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Expired,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((operation, expired)) = terminal {
+        registry::Registry::open(socket)?.cleanup(operation)?;
+        if expired {
+            eprintln!(
+                "Expired invitation files contain dead tokens; remove any unmanaged copies. Cleanup does not run while rf is absent."
+            );
+        }
+    }
+    show(result)
+}
+
 fn show(result: LocalResult) -> Result<(), RfError> {
     if matches!(result.outcome, Outcome::Begin { .. }) {
         return Err(invalid());
@@ -266,3 +317,36 @@ fn read_invitation(path: &Path) -> Result<InviteToken, RfError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Secrets come exclusively from the controlling terminal, including phone-primary phrase input.
+struct TerminalProvider;
+impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider {
+    fn provide(
+        &self,
+        request: &ramflux_protocol::custody::pairing::local_dto::CredentialRequest,
+    ) -> Result<ramflux_sdk::custody::pairing::CredentialOutcome, ramflux_sdk::SdkError> {
+        use ramflux_sdk::custody::pairing::{CredentialOutcome, SecretUtf8};
+        let read = || -> Result<CredentialOutcome, RfError> {
+            let mut terminal = super::account_ceremony::Terminal::open()?;
+            let prompt = match request.action.as_str() {
+                "setup" => "New local data passphrase (hidden): ",
+                "unlock" => "Local data passphrase (hidden): ",
+                "phrase" => "Recovery phrase for this primary transfer (hidden): ",
+                _ => return Ok(CredentialOutcome::Refused),
+            };
+            let pass = terminal.line(prompt, true)?;
+            let confirmation = if request.action == "setup" {
+                let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
+                Some(SecretUtf8::from_bytes(repeated.as_bytes())?)
+            } else {
+                None
+            };
+            Ok(CredentialOutcome::Provided {
+                passphrase: SecretUtf8::from_bytes(pass.as_bytes())?,
+                confirmation,
+            })
+        };
+        // UI refusal/EOF/unavailable controlling terminal never falls back to stdin or env.
+        Ok(read().unwrap_or(CredentialOutcome::Refused))
+    }
+}
