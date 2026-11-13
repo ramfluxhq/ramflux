@@ -1415,6 +1415,28 @@ async fn route_non_durable_submit(
     Ok(())
 }
 
+async fn validate_durable_submit(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> anyhow::Result<ramflux_protocol::Envelope> {
+    let owned_runtime = runtime.clone();
+    let owned_submit = submit.clone();
+    crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+        let envelope = crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
+        validate_gateway_session_signed_request(
+            context,
+            &owned_runtime,
+            &owned_submit.signed_request,
+            "POST",
+            "/gateway/session/submit",
+            &owned_submit.envelope,
+        )?;
+        Ok(envelope)
+    })
+    .await
+}
+
 pub(crate) async fn handle_gateway_submit(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
@@ -1424,23 +1446,7 @@ pub(crate) async fn handle_gateway_submit(
     if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
         return route_non_durable_submit(send, context, runtime, submit).await;
     }
-    let owned_runtime = runtime.clone();
-    let owned_submit = submit.clone();
-    let validated =
-        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
-            let envelope =
-                crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
-            validate_gateway_session_signed_request(
-                context,
-                &owned_runtime,
-                &owned_submit.signed_request,
-                "POST",
-                "/gateway/session/submit",
-                &owned_submit.envelope,
-            )?;
-            Ok(envelope)
-        })
-        .await;
+    let validated = validate_durable_submit(context, runtime, submit).await;
     let mut envelope = match validated {
         Ok(envelope) => envelope,
         Err(error) => {

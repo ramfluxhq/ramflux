@@ -53,7 +53,7 @@ mod tests {
             let worker_root = noisy.clone();
             let worker = tokio::spawn(async move {
                 run(&worker_context, Some(&worker_root), move |context| {
-                    started.send(()).map_err(|_| anyhow::anyhow!("observer gone"))?;
+                    started.send(()).map_err(|()| anyhow::anyhow!("observer gone"))?;
                     waiting.recv_timeout(Duration::from_secs(5))?;
                     let writer = context.store.write_guard()?;
                     let snapshot = { crate::gateway_state(&context.state)?.clone() };
