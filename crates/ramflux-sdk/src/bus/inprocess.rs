@@ -78,6 +78,22 @@ pub(crate) async fn serve(
         }
     }
     supervisor.close_lifecycle_admission();
+    let stop_result = if *stopping.borrow() {
+        let mut response = supervisor.stop_response();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !*response.borrow() {
+                response
+                    .changed()
+                    .await
+                    .map_err(|_| SdkError::LocalBus("stop response lost".into()))?;
+            }
+            Ok::<_, SdkError>(())
+        })
+        .await
+        .map_err(|_| SdkError::LocalBus("stop response timed out".into()))?
+    } else {
+        Ok(())
+    };
     #[cfg(test)]
     if let Some(gate) = gate {
         let _ = gate.entered.try_send(());
@@ -91,7 +107,8 @@ pub(crate) async fn serve(
     supervisor.disconnect(1);
     background.abort_all();
     while background.join_next().await.is_some() {}
-    supervisor.shutdown().await
+    supervisor.shutdown().await?;
+    stop_result
 }
 
 pub(crate) fn method_names() -> Vec<&'static str> {

@@ -288,6 +288,7 @@ async fn read_responses(
         let legacy = frame.get("protocol").and_then(serde_json::Value::as_str)
             == Some("ramflux.local_bus.custody.v1");
         let kind = frame.get("kind").and_then(serde_json::Value::as_str);
+        let mut stop_requested = false;
         if legacy || matches!(kind, Some("response" | "error")) {
             if let Some(id) = frame
                 .get("request_id")
@@ -309,12 +310,18 @@ async fn read_responses(
                 let code = error
                     .and_then(serde_json::Value::as_str)
                     .map_or(if failed { 16 } else { 0 }, super::error_code);
+                stop_requested = code == 0
+                    && frame.get("method").and_then(serde_json::Value::as_str)
+                        == Some("daemon.stop");
                 shared.complete(id, serde_json::json!({"code":code,"response":frame}));
             }
         } else {
             shared.push_event(bytes.to_vec());
         }
         crate::bus::inprocess::erase_value(&mut frame);
+        if stop_requested {
+            break Ok(());
+        }
     }
 }
 

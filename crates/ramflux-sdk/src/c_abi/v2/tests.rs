@@ -4,9 +4,11 @@
 use super::runtime::{Client, Command};
 use super::state::{self, MAX_FRAME_BYTES, MAX_OPERATIONS, Operation};
 use super::*;
+use crate::c_abi::RamfluxBuffer;
 use crate::{LocalBusConfig, LocalBusFrame};
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn take_buffer(ptr: *mut RamfluxBuffer) -> Value {
@@ -508,4 +510,16 @@ fn wait_result(handle: u64, operation: u64) -> Value {
         assert!(Instant::now() < deadline, "real supervisor request exceeded test deadline");
         std::thread::yield_now();
     }
+}
+
+#[test]
+fn daemon_stop_preserves_its_reply_before_releasing_the_supervisor() {
+    let fixture = Fixture::open();
+    let id = fixture.submit("daemon.stop", deadline());
+    let response = fixture.result(id);
+    assert_eq!(response["code"], 0, "shared daemon stop must retain its terminal response");
+    assert_eq!(
+        response["response"]["body"]["stopping"], true,
+        "the stop acknowledgement must arrive before carrier disconnect"
+    );
 }
