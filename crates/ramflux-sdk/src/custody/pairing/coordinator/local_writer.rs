@@ -252,7 +252,9 @@ impl PairingActor {
         db: &AccountDb,
     ) -> Result<PairingLocalWriterService, SdkError> {
         self.require_open()?;
-        if self.local_writer.is_some() || self.ceremony.is_some() {
+        if self.local_writer.is_some()
+            || self.ceremony.as_ref().is_some_and(|ceremony| !super::terminal(&ceremony.phase))
+        {
             return Err(SdkError::PairingCode("Busy"));
         }
         self.bind_selected_writer(db, Arc::new(tokio::sync::Notify::new()))

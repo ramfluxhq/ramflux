@@ -5,6 +5,7 @@
 use crate::StorageError;
 use std::path::Path;
 #[derive(PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub(super) struct FileSeal {
     device: u64,
     inode: u64,
@@ -26,12 +27,22 @@ impl FileSeal {
             || metadata.nlink() != 1
             || metadata.mode() & 0o077 != 0
         {
+            #[cfg(test)]
+            eprintln!(
+                "test: invalid private-file metadata: mode={} links={}",
+                metadata.mode(),
+                metadata.nlink()
+            );
             return Err(wrong());
         }
         for suffix in ["db-wal", "db-shm", "db-journal"] {
             match std::fs::symlink_metadata(path.with_extension(suffix)) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Err(wrong()),
+                _ => {
+                    #[cfg(test)]
+                    eprintln!("test: private-file attestation found sidecar {suffix}");
+                    return Err(wrong());
+                }
             }
         }
         Ok(Self {
@@ -48,7 +59,10 @@ impl FileSeal {
         Err(StorageError::AuthorizationRejected)
     }
     pub(super) fn require(&self, path: &Path) -> Result<(), StorageError> {
-        if Self::capture(path)? != *self {
+        let actual = Self::capture(path)?;
+        if actual != *self {
+            #[cfg(test)]
+            eprintln!("test: immutable-file observation changed: {self:?} -> {actual:?}");
             return Err(wrong());
         }
         Ok(())

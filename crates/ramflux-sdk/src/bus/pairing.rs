@@ -125,10 +125,12 @@ async fn install_source(
     recipient: Option<&Join>,
     resume: Option<&StatusRequest>,
 ) -> Result<(), SdkError> {
-    let config = state.config.pairing.clone().ok_or(SdkError::PairingCode("NotFound"))?;
-    if !config.enabled {
-        return Err(SdkError::PairingCode("NotFound"));
-    }
+    let config = state
+        .config
+        .pairing
+        .clone()
+        .filter(|config| config.enabled)
+        .ok_or(SdkError::PairingCode("NotFound"))?;
     let account = state
         .accounts
         .get(account_id)

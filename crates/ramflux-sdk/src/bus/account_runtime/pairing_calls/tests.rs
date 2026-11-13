@@ -41,15 +41,18 @@ impl PairingNative for HoldIssue {
         Box::pin(async { Err(SdkError::PairingCode("WrongContext")) })
     }
 }
-struct NoPublication;
+struct NoPublication(CustodyAuthority);
 impl NodeHeadPersist for NoPublication {
     fn persist_head(&self, _: &Publication, _: u64) -> Result<String, SdkError> {
         Err(SdkError::PairingCode("WrongContext"))
     }
 }
 impl PairingAuthorityQuery for NoPublication {
-    fn current_authority(&self, _: &str) -> Result<CustodyAuthority, SdkError> {
-        Err(SdkError::PairingCode("WrongContext"))
+    fn current_authority(&self, anchor: &str) -> Result<CustodyAuthority, SdkError> {
+        if anchor != self.0.publication.record.body.account_anchor {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        Ok(self.0.clone())
     }
 }
 struct NoCredential;
@@ -119,6 +122,10 @@ async fn run() -> TestResult {
     loop {
         tokio::select! {
             entered=&mut issue=>{entered?;break;},
+            finished=&mut result=>{return match finished {
+                Ok(Err(error))=>Err(format!("test: source begin refused before held native Issue: {error}").into()),
+                _=>Err("test: source begin ended before its held native Issue".into()),
+            };},
             ()=signal.notified()=>Box::pin(runtime.service_pairing_data()).await,
         }
     }
@@ -194,14 +201,18 @@ fn prepare_source(
     client.open_account_index(root)?;
     client.seal_new_account_data(id, &anchor, b"source-courier-original-password")?;
     client.unlock_account(id, b"source-courier-original-password")?;
+    let head = Arc::new(NoPublication(CustodyAuthority {
+        publication: native.publication(),
+        custodian_publication: None,
+    }));
     let participant = Arc::new(LocalPairingParticipant {
         root: root.into(),
         account_id: id.into(),
         vault,
         provider: Arc::new(NoCredential),
         db: Mutex::new(None),
-        persist: Arc::new(NoPublication),
-        query: Arc::new(NoPublication),
+        persist: head.clone(),
+        query: head,
     });
     let (entered, issue) = oneshot::channel();
     let config = PairingConfig { enabled: true, extra_root_ca_pem: None };
