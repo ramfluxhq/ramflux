@@ -69,6 +69,8 @@ mod tail;
 mod tail_apply;
 mod tail_receipt;
 pub use tail_receipt::FullTailAppliedReceipt;
+mod completion;
+mod completion_gc;
 mod source_tail_status;
 mod tail_abandon;
 mod tail_capture;

@@ -11,7 +11,7 @@ fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
 }
 impl AccountDb {
-    fn source_tail_status_stage(
+    pub(super) fn source_tail_status_stage(
         &self,
         operation: &str,
         generation: u64,
@@ -59,6 +59,9 @@ impl AccountDb {
         generation: u64,
         now: u64,
     ) -> Result<Option<FullInstalledTailScope>, StorageError> {
+        if let Some(completion) = self.full_completion(operation, generation, "initiator", now)? {
+            return Ok(Some(completion.scope()));
+        }
         let Some((stage, status)) = self.source_tail_status_stage(operation, generation, now)?
         else {
             return Ok(None);
@@ -88,6 +91,9 @@ impl AccountDb {
         current: &VerifiedRecord,
         now: u64,
     ) -> Result<(), StorageError> {
+        if self.full_completion(operation, generation, "initiator", now)?.is_some() {
+            return Ok(());
+        }
         let Some((mut stage, _)) = self.source_tail_status_stage(operation, generation, now)?
         else {
             return Err(wrong());

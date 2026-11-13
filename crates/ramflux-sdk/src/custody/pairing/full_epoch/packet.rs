@@ -287,6 +287,23 @@ impl FullPacketEpoch {
         origin: &str,
         packet: EncryptedPacket,
     ) -> Result<(), SdkError> {
+        self.send_owned(relay, origin, packet, true).await
+    }
+    pub(crate) async fn send_retained_packet(
+        &mut self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+        packet: EncryptedPacket,
+    ) -> Result<(), SdkError> {
+        self.send_owned(relay, origin, packet, false).await
+    }
+    async fn send_owned(
+        &mut self,
+        relay: &dyn FullPairingTransport,
+        origin: &str,
+        packet: EncryptedPacket,
+        release: bool,
+    ) -> Result<(), SdkError> {
         let result = async {
             if packet.lease_id != self.lease_id
                 || packet.epoch != self.epoch
@@ -323,7 +340,9 @@ impl FullPacketEpoch {
             if sent.counter.0 != counter {
                 return Err(wrong());
             }
-            self.channel()?.acknowledge_packet(counter)?;
+            if release {
+                self.channel()?.acknowledge_packet(counter)?;
+            }
             Ok(())
         }
         .await;

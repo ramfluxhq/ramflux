@@ -39,4 +39,14 @@ CREATE TABLE IF NOT EXISTS pairing_full_tail_dependency(
  PRIMARY KEY(operation_id,owner,parent_commitment,child_commitment),
  FOREIGN KEY(operation_id) REFERENCES pairing_full_tail_apply(operation_id) ON DELETE CASCADE
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pairing_full_completion(
+ operation_id TEXT NOT NULL PRIMARY KEY CHECK(length(operation_id)=43),
+ generation INTEGER NOT NULL CHECK(generation BETWEEN 1 AND 9007199254740991),
+ role TEXT NOT NULL CHECK(role IN('initiator','responder')),
+ stage_id TEXT NOT NULL CHECK(length(stage_id)=43),
+ receipt BLOB NOT NULL CHECK(length(receipt) BETWEEN 1 AND 16384),
+ finished_at INTEGER NOT NULL CHECK(finished_at BETWEEN 0 AND 9007199254740991),
+ cleanup_state TEXT NOT NULL DEFAULT 'pending' CHECK(cleanup_state IN('pending','done'))
+) WITHOUT ROWID;
+
 ";

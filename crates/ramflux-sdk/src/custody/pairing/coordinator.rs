@@ -620,6 +620,26 @@ impl PairingActor {
     /// # Errors
     /// No live ceremony.
     pub async fn lock(&mut self) -> Result<LocalResult, SdkError> {
+        if let Some(status) = self.recovered_tail_status.take() {
+            self.retire_owned_runtime().await;
+            return Ok(LocalResult {
+                schema: "ramflux.pairing.LocalResult.v2".into(),
+                version: 2,
+                outcome: Outcome::FullStatus { value: Box::new(status) },
+            });
+        }
+        if self.ceremony.is_none()
+            && let Some((operation, job)) = self.tail_jobs.iter().next_back()
+        {
+            let result = job.result(&StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: operation.clone(),
+                generation: job.generation(),
+            })?;
+            self.retire_owned_runtime().await;
+            return Ok(result);
+        }
         if let Some(recovered) = self.recovered_installation.take() {
             self.retire_owned_runtime().await;
             return recovered.local_result();

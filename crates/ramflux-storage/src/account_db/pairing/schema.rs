@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const TABLES: [&str; 9] = [
+pub(crate) const TABLES: [&str; 10] = [
     "pairing_floor",
     "pairing_live",
     "pairing_head",
@@ -15,6 +15,7 @@ pub(crate) const TABLES: [&str; 9] = [
     "pairing_source_cleanup",
     "pairing_full_tail_apply",
     "pairing_full_tail_dependency",
+    "pairing_full_completion",
 ];
 
 pub(crate) const LIVE_CAP: i64 = 3;

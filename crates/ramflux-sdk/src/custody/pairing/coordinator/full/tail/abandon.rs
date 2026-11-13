@@ -44,6 +44,12 @@ impl PairingActor {
             Ok(db.abandon_full_tail(&op, generation, crate::custody::network_now()?)?)
         })
         .await?;
+        let op = request.operation_id.clone();
+        self.installation_loan(move |db| {
+            db.reclaim_full_tail_stage(&op, generation, crate::custody::network_now()?)?;
+            Ok(())
+        })
+        .await?;
         if let Some(job) = self.tail_jobs.get_mut(&request.operation_id) {
             job.abandoned = true;
             job.error = None;

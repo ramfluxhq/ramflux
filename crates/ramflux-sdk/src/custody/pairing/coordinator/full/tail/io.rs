@@ -84,6 +84,53 @@ impl TailIo {
     pub(super) async fn fresh(&self) -> Result<(), SdkError> {
         self.endpoint(|_, _| Ok(())).await
     }
+    pub(super) async fn cached_admission(&self) -> Result<(), SdkError> {
+        self.runtime.require_live()?;
+        let local = self.participant.clone();
+        let anchor = self.anchor.clone();
+        let current =
+            self.runtime.clone().run_blocking(move || local.full_native_head(&anchor)).await?;
+        let operation = self.operation.clone();
+        let generation = self.generation;
+        self.writer
+            .request(move |db| {
+                Ok(db.admit_cached_full_tail_reply(
+                    &operation,
+                    generation,
+                    &current,
+                    crate::custody::network_now()?,
+                )?)
+            })
+            .await
+    }
+    pub(super) async fn expire_source(&self) -> Result<(), SdkError> {
+        self.cancelled.cancel();
+        self.runtime.drain_local_jobs().await;
+        self.runtime.drain_local_work();
+        let operation = self.operation.clone();
+        let generation = self.generation;
+        self.writer
+            .request(move |db| {
+                let now = crate::custody::network_now()?;
+                db.expire_full_source_tail(&operation, generation, now)?;
+                db.reclaim_full_tail_stage(&operation, generation, now)?;
+                Ok(())
+            })
+            .await
+    }
+    pub(super) async fn reclaim(&self) -> Result<(), SdkError> {
+        self.cancelled.cancel();
+        self.runtime.drain_local_jobs().await;
+        self.runtime.drain_local_work();
+        let operation = self.operation.clone();
+        let generation = self.generation;
+        self.writer
+            .request(move |db| {
+                db.reclaim_full_tail_stage(&operation, generation, crate::custody::network_now()?)?;
+                Ok(())
+            })
+            .await
+    }
     pub(super) async fn source_manifest(
         &self,
     ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {

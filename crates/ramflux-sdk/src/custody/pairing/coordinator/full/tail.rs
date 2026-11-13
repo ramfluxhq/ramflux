@@ -43,6 +43,12 @@ pub(in crate::custody::pairing::coordinator) struct TailJob {
     phase: Phase,
     manifest: Option<SourceManifest>,
     assembler: ManifestAssembler,
+    cached_reply: Option<ramflux_protocol::custody::pairing::full_transfer::relay::EncryptedPacket>,
+    cleanup_pending: bool,
+    expired: bool,
+    cached_request:
+        Option<ramflux_protocol::custody::pairing::full_transfer::relay::EncryptedPacket>,
+    dv_retry_at: Option<tokio::time::Instant>,
     status: ramflux_protocol::custody::pairing::local_dto::FullStatus,
     next: u64,
     abandoned: bool,
@@ -123,6 +129,8 @@ impl TailJob {
     fn finish(&mut self) {
         self.phase = Phase::Finished;
         self.packet = None;
+        self.cached_request = None;
+        self.dv_retry_at = None;
         self.io.cancelled.cancel();
     }
 }
@@ -133,6 +141,33 @@ impl PairingActor {
         self.start_completed_tail().await?;
         for job in self.tail_jobs.values_mut() {
             if !job.merged()
+                && !job.abandoned
+                && !job.expired
+                && job.status.role == "initiator"
+                && crate::custody::network_now()? >= job.status.lease_expires_at
+            {
+                job.expired = true;
+                job.error = Some(
+                    ramflux_protocol::custody::pairing::full_transfer::FullError::LeaseExpired,
+                );
+                job.packet = None;
+                job.cached_request = None;
+                job.io.cancelled.cancel();
+                job.cleanup_pending = true;
+            }
+            if job.cleanup_pending {
+                let result =
+                    if job.expired { job.io.expire_source().await } else { job.io.reclaim().await };
+                if result.is_ok() {
+                    job.cleanup_pending = false;
+                }
+            }
+            if job.merged() && job.packet.is_some() && job.cached_retry().await.is_err() {
+                job.packet = None;
+                job.cached_reply = None;
+            }
+            if !job.merged()
+                && !job.abandoned
                 && job.error.is_none()
                 && let Err(error) = job.advance().await
             {
@@ -196,8 +231,13 @@ impl PairingActor {
             .await?;
         self.full_runtime.register_tail_stage(cancelled.clone())?;
         let c = self.ceremony.as_mut().ok_or_else(wrong)?;
-        let management = c.full.as_mut().and_then(|f| f.management.take()).ok_or_else(wrong)?;
+        let full = c.full.as_mut().ok_or_else(wrong)?;
+        let management = full.management.take().ok_or_else(wrong)?;
         let packet = management.into_tail_packet()?;
+        // Release completed prepublication decrypt-only workers before terminal GC.
+        full.bootstrap.take();
+        full.hpke.take();
+        full.prepared.take();
         self.tail_jobs.insert(
             operation.clone(),
             TailJob {
@@ -221,6 +261,11 @@ impl PairingActor {
                 },
                 manifest: None,
                 assembler: ManifestAssembler::default(),
+                cached_reply: None,
+                cleanup_pending: false,
+                expired: false,
+                cached_request: None,
+                dv_retry_at: None,
                 status,
                 next: 0,
                 error: None,

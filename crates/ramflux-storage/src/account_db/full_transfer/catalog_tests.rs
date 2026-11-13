@@ -214,7 +214,7 @@ fn primary_transfer_full_census_every_family() -> TestResult {
     let rules = full_transfer_catalog();
     assert_eq!(
         rules.len(),
-        166,
+        167,
         "test: cleanup ledger exclusion is missing from the declared census"
     );
     let census = match db.inspect_full_transfer_schema(rules) {
@@ -236,7 +236,7 @@ fn primary_transfer_full_census_every_family() -> TestResult {
             FamilySelector::ActorPrefix(_) => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(tables.len(), 160, "test: cleanup ledger table is absent from schema coverage");
+    assert_eq!(tables.len(), 161, "test: cleanup ledger table is absent from schema coverage");
     assert!(
         matches!(
             census.require_typed_owners(rules),

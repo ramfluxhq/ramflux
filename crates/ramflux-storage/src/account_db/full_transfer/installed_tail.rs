@@ -83,6 +83,9 @@ impl AccountDb {
         generation: u64,
         now: u64,
     ) -> Result<FullInstalledTailScope, StorageError> {
+        if let Some(completion) = self.full_completion(operation, generation, "responder", now)? {
+            return Ok(completion.scope());
+        }
         let stage = self.installed_tail_stage(operation, generation, now)?;
         let merged: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.operation_id=?1 AND t.tail_status='merged' AND t.phase=2)",
@@ -119,6 +122,9 @@ impl AccountDb {
         current: &VerifiedRecord,
         now: u64,
     ) -> Result<(), StorageError> {
+        if self.full_completion(operation, generation, "responder", now)?.is_some() {
+            return Ok(());
+        }
         self.installed_tail_stage(operation, generation, now)?.observe_full_native_head(current)
     }
 }

@@ -57,6 +57,7 @@ struct FullEpochWork {
     trust: FullResumeTrust,
     keys: FullResumeKeyOwner,
 }
+#[derive(Clone, Copy)]
 enum EpochScope {
     Ceremony,
     Tail,

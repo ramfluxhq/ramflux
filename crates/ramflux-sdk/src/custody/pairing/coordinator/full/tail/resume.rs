@@ -56,9 +56,78 @@ impl PairingActor {
             return Ok(None);
         };
         let participant = self.participant.clone().ok_or_else(wrong)?;
-        let local = participant.clone();
         let anchor = scope.grant.source_ref.account_anchor.clone();
-        let query_anchor = anchor.clone();
+        let current = self.observe_tail_native(request, &anchor, role, unlock).await?;
+        let result = if scope.merged || scope.abandoned {
+            None
+        } else {
+            super::super::installed_status::installed_authority_result(
+                &scope.grant,
+                &current,
+                crate::custody::network_now()?,
+                scope.lease_expires_at,
+            )
+        };
+        let mut status = super::super::installed_status::installed_progress(
+            request,
+            scope.lease_expires_at,
+            scope.bytes_total,
+            scope.cut,
+            result,
+            if scope.abandoned {
+                FullTailStatus::Abandoned
+            } else if scope.merged {
+                FullTailStatus::Merged
+            } else {
+                FullTailStatus::Pending
+            },
+        );
+        status.role = role.as_str().into();
+        if (role == PairingRole::Initiator
+            && result
+                == Some(ramflux_protocol::custody::pairing::full_transfer::FullError::LeaseExpired))
+            || scope.merged
+            || scope.abandoned
+        {
+            self.reclaim_retained_completion(
+                request,
+                role == PairingRole::Initiator && !scope.merged && !scope.abandoned,
+            )
+            .await;
+        }
+        if scope.merged || scope.abandoned || result.is_some() || self.local_writer.is_none() {
+            self.recovered_tail_status = Some(status.clone());
+            return local_result(status).map(Some);
+        }
+        let node = match &self.full_node {
+            Some(node) => node.clone(),
+            None => {
+                self.native
+                    .as_ref()
+                    .ok_or(SdkError::PairingCode("UpdateRequired"))?
+                    .full_node()
+                    .await?
+            }
+        };
+        let owned = request.clone();
+        let resume = self
+            .installation_loan(move |db| {
+                participant.restore_full_tail_in(db, &owned, &node, &current)
+            })
+            .await?;
+        self.start_resumed_tail(request, status.clone(), anchor, resume)?;
+        self.recovered_tail_status = None;
+        local_result(status).map(Some)
+    }
+    async fn observe_tail_native(
+        &self,
+        request: &StatusRequest,
+        anchor: &str,
+        role: PairingRole,
+        unlock: ramflux_storage::FullLocalUnlockGuard,
+    ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        let local = self.participant.clone().ok_or_else(wrong)?;
+        let query_anchor = anchor.to_owned();
         let current = self
             .full_runtime
             .clone()
@@ -90,54 +159,28 @@ impl PairingActor {
             Ok(())
         })
         .await?;
-        let result = if scope.merged || scope.abandoned {
-            None
-        } else {
-            super::super::installed_status::installed_authority_result(
-                &scope.grant,
-                &current,
-                crate::custody::network_now()?,
-                scope.lease_expires_at,
-            )
-        };
-        let mut status = super::super::installed_status::installed_progress(
-            request,
-            scope.lease_expires_at,
-            scope.bytes_total,
-            scope.cut,
-            result,
-            if scope.abandoned {
-                FullTailStatus::Abandoned
-            } else if scope.merged {
-                FullTailStatus::Merged
-            } else {
-                FullTailStatus::Pending
-            },
-        );
-        status.role = role.as_str().into();
-        if scope.merged || scope.abandoned || result.is_some() || self.local_writer.is_none() {
-            self.recovered_tail_status = Some(status.clone());
-            return local_result(status).map(Some);
-        }
-        let node = match &self.full_node {
-            Some(node) => node.clone(),
-            None => {
-                self.native
-                    .as_ref()
-                    .ok_or(SdkError::PairingCode("UpdateRequired"))?
-                    .full_node()
-                    .await?
-            }
-        };
+        Ok(current)
+    }
+    async fn reclaim_retained_completion(&self, request: &StatusRequest, expire_source: bool) {
+        self.full_runtime.drain_local_jobs().await;
+        self.full_runtime.drain_local_work();
         let owned = request.clone();
-        let resume = self
+        let result = self
             .installation_loan(move |db| {
-                participant.restore_full_tail_in(db, &owned, &node, &current)
+                let now = crate::custody::network_now()?;
+                if expire_source {
+                    db.expire_full_source_tail(&owned.operation_id, owned.generation, now)?;
+                }
+                db.reclaim_full_tail_stage(&owned.operation_id, owned.generation, now)?;
+                Ok(())
             })
-            .await?;
-        self.start_resumed_tail(request, status.clone(), anchor, resume)?;
-        self.recovered_tail_status = None;
-        local_result(status).map(Some)
+            .await;
+        if let Err(error) = result {
+            tracing::debug!(
+                error_code = Self::background_error_code(&error),
+                "terminal tail stage cleanup deferred"
+            );
+        }
     }
     async fn existing_tail_or_retry(
         &mut self,
@@ -151,12 +194,11 @@ impl PairingActor {
                 return Err(wrong());
             }
         }
-        if self.tail_jobs.get(&request.operation_id).is_some_and(|job| job.error.is_some()) {
-            if let Some(mut job) = self.tail_jobs.remove(&request.operation_id)
-                && let Some(epoch) = job.epoch.take()
-            {
-                epoch.abort_and_drain().await;
-            }
+        if self.tail_jobs.get(&request.operation_id).is_some_and(|job| job.error.is_some())
+            && let Some(mut job) = self.tail_jobs.remove(&request.operation_id)
+            && let Some(epoch) = job.epoch.take()
+        {
+            epoch.abort_and_drain().await;
         }
         Ok(None)
     }
@@ -260,7 +302,13 @@ impl PairingActor {
                     Phase::Manifest
                 },
                 manifest: None,
-                assembler: Default::default(),
+                assembler:
+                    ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default(),
+                cached_reply: None,
+                cleanup_pending: false,
+                expired: false,
+                cached_request: None,
+                dv_retry_at: None,
                 status,
                 next: 0,
                 abandoned: false,

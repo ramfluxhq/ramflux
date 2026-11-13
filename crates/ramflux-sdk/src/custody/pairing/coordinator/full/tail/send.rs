@@ -64,6 +64,10 @@ impl TailJob {
         } else {
             Phase::SourceChunk
         };
+        if self.phase == Phase::SourceDv {
+            self.dv_retry_at =
+                Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+        }
         Ok(())
     }
     pub(super) async fn source_chunk(&mut self) -> Result<(), SdkError> {
@@ -84,13 +88,36 @@ impl TailJob {
             bytes: SecretBase64::from_bytes(&bytes),
         };
         drop(bytes);
-        self.send(data).await?;
+        if index + 1 == self.manifest.as_ref().ok_or_else(wrong)?.manifest.chunk_count.0 {
+            self.io.fresh().await?;
+            let encrypted = self.packet.as_mut().ok_or_else(wrong)?.seal_packet(&data)?;
+            drop(data);
+            self.cached_request = Some(encrypted.clone());
+            self.packet
+                .as_mut()
+                .ok_or_else(wrong)?
+                .send_retained_packet(self.relay.as_ref(), &self.origin, encrypted)
+                .await?;
+        } else {
+            self.send(data).await?;
+        }
         self.next += 1;
         self.phase = Phase::SourceReceipt;
         Ok(())
     }
     pub(super) async fn source_dv(&mut self) -> Result<(), SdkError> {
         let Some(data) = self.poll().await? else {
+            if self.dv_retry_at.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                self.io.fresh().await?;
+                let retry = self.cached_request.as_ref().ok_or_else(wrong)?.clone();
+                self.packet
+                    .as_mut()
+                    .ok_or_else(wrong)?
+                    .send_retained_packet(self.relay.as_ref(), &self.origin, retry)
+                    .await?;
+                self.dv_retry_at =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+            }
             return Ok(());
         };
         let DataPacket::DataVerified { manifest_hash, .. } = &data else {
@@ -103,6 +130,10 @@ impl TailJob {
             .endpoint(move |mut endpoint, now| Ok(endpoint.record_source_receipt(&data, now)?))
             .await?;
         self.finish();
+        self.cleanup_pending = true;
+        if self.io.reclaim().await.is_ok() {
+            self.cleanup_pending = false;
+        }
         Ok(())
     }
 }

@@ -12,24 +12,8 @@ async fn primary_transfer_full_catch_up_and_tail_cover_post_cut() -> TestResult 
     result
 }
 async fn run() -> TestResult {
-    let (mut rig, mut source, client, mut target, request) = setup().await?;
-    let mut merged = false;
-    for _ in 0..96 {
-        rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await?;
-        rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.secondary.sync_relay()), &mut target, &client).await?;
-        let a = rig.primary.transfer_status(&request).await?;
-        let b = rig.secondary.transfer_status(&request).await?;
-        if is_merged(&a) && is_merged(&b) {
-            merged = true;
-            break;
-        }
-    }
-    assert!(
-        merged,
-        "test: bounded full production driver never committed both tail acknowledgements"
-    );
+    let (mut rig, mut source, client, mut target, request) = Box::pin(setup()).await?;
+    Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;
     let db = client.account_db()?;
     for key in ["driver-tail", "driver-independent-b"] {
         assert!(
@@ -129,7 +113,7 @@ async fn pairing_full_tail_lease_margin_and_head_change_outcome() -> TestResult 
 }
 async fn unavailable() -> TestResult {
     use ramflux_protocol::custody::pairing::{full_transfer::FullError, local_dto::Cancel};
-    let (mut rig, mut source, mut client, mut target, request) = setup().await?;
+    let (mut rig, mut source, mut client, mut target, request) = Box::pin(setup()).await?;
     let before = rig.source.client.account_db()?.privacy_erasure_generation()?;
     let native = crate::custody::load_account(
         &rig.participant_a.root,
@@ -206,5 +190,160 @@ async fn unavailable() -> TestResult {
     );
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
+    Ok(())
+}
+
+async fn merge(
+    rig: &mut Rig,
+    source: &mut PairingLocalWriterService,
+    client: &crate::RamfluxClient,
+    target: &mut PairingLocalWriterService,
+    request: &StatusRequest,
+) -> TestResult {
+    let mut merged = false;
+    for _ in 0..96 {
+        rig.clock.advance_ms(1001);
+        drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
+        rig.clock.advance_ms(1001);
+        drive(Box::pin(rig.secondary.sync_relay()), target, client).await?;
+        let a = rig.primary.transfer_status(request).await?;
+        let b = rig.secondary.transfer_status(request).await?;
+        if is_merged(&a) && is_merged(&b) {
+            merged = true;
+            break;
+        }
+    }
+    assert!(
+        merged,
+        "test: bounded full production driver never committed both tail acknowledgements"
+    );
+    Ok(())
+}
+#[tokio::test(start_paused = true)]
+async fn pairing_stage_unlock_snapshot_resume_and_cleanup() -> TestResult {
+    let hold = ClockHold::new();
+    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(cold_cleanup())).await;
+    hold.finish().await?;
+    result
+}
+async fn cold_cleanup() -> TestResult {
+    let (mut rig, mut source, client, mut target, request) = Box::pin(setup()).await?;
+    Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;
+    for (participant, db) in [
+        (&rig.participant_a, rig.source.client.account_db()?),
+        (&rig.participant_b, client.account_db()?),
+    ] {
+        let row = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == request.operation_id)
+            .ok_or("test: terminal operation missing")?;
+        let reference = row.full_stage_reference()?.ok_or("test: terminal stage link missing")?;
+        let path = participant
+            .root
+            .join("custody_accounts")
+            .join(&participant.account_id)
+            .join("full-transfer")
+            .join(reference.stage_id);
+        assert!(
+            !path.try_exists()?,
+            "test: merged operation retained its stage files and wrapped data key"
+        );
+    }
+    let mut source_relay = None;
+    let mut target_relay = None;
+    rig.primary.wrap_transport_for_test(|relay| {
+        source_relay = Some(relay.clone());
+        relay
+    });
+    rig.secondary.wrap_transport_for_test(|relay| {
+        target_relay = Some(relay.clone());
+        relay
+    });
+    rig.primary.lock().await?;
+    rig.secondary.lock().await?;
+    rig.source.client = crate::RamfluxClient::new();
+    drop(client);
+    let source_client = reopen(&rig.participant_a, b"fresh-source-data")?;
+    let target_client = reopen(&rig.participant_b, b"component-recipient-passphrase")?;
+    Box::pin(cold_status(
+        rig.participant_a.clone(),
+        &source_client,
+        source_relay.ok_or("test: source relay")?,
+        &request,
+    ))
+    .await?;
+    Box::pin(cold_status(
+        rig.participant_b.clone(),
+        &target_client,
+        target_relay.ok_or("test: target relay")?,
+        &request,
+    ))
+    .await?;
+    assert_eq!(
+        source_client.account_db()?.privacy_erasure_generation()?,
+        401,
+        "test: source cleanup changed its ordinary data"
+    );
+    assert_eq!(
+        target_client.account_db()?.privacy_erasure_generation()?,
+        500,
+        "test: target cleanup changed independent B data"
+    );
+    Ok(())
+}
+fn reopen(
+    participant: &LocalPairingParticipant,
+    password: &[u8],
+) -> Result<crate::RamfluxClient, Box<dyn std::error::Error>> {
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(&participant.root)?;
+    assert!(
+        client.unlock_account(&participant.account_id, b"wrong-stage-reopen-password").is_err(),
+        "test: removed stage bypassed original data wrapping"
+    );
+    client.unlock_account(&participant.account_id, password)?;
+    Ok(client)
+}
+async fn cold_status(
+    participant: Arc<LocalPairingParticipant>,
+    client: &crate::RamfluxClient,
+    relay: Arc<dyn PairingTransport>,
+    request: &StatusRequest,
+) -> TestResult {
+    let native = crate::custody::load_data_account(
+        &participant.root,
+        &participant.account_id,
+        crate::custody::network_now()?,
+    )?;
+    let adoption =
+        client.account_db()?.pairing_adoption()?.ok_or("test: terminal adoption missing")?;
+    let reference: DeviceRef = ramflux_protocol::parse_i_json(&adoption.local_ref)?;
+    let mut actor = PairingActor::new(
+        PairingIdentity {
+            account_id: participant.account_id.clone(),
+            is_primary: reference
+                == native.record().body.master_certificate.body.primary_device_ref,
+            local_ref: reference,
+            master_public_key: Some(
+                native.record().body.master_certificate.body.master_public_key.clone(),
+            ),
+            base_record_hash: object_hash(native.record())?,
+            base_epoch: native.record().body.device_set_epoch,
+        },
+        None,
+        relay,
+        PairingConfig { enabled: true, extra_root_ca_pem: None },
+    );
+    actor.set_participant(participant);
+    let mut service = actor.bind_frontend_writer(client.account_db()?)?;
+    let result = drive(Box::pin(actor.transfer_status(request)), &mut service, client).await?;
+    assert!(is_merged(&result), "test: removed stage lost durable terminal status");
+    assert!(
+        actor.displayed_transcript().is_err(),
+        "test: terminal cold status restored SAS context"
+    );
+    assert!(actor.displayed_proposal().is_err(), "test: terminal cold status restored approval");
+    actor.lock().await?;
     Ok(())
 }

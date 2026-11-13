@@ -79,6 +79,20 @@ impl TailJob {
         }
         self.receipt(hash, Some(index.0)).await
     }
+    pub(super) async fn cached_retry(&mut self) -> Result<(), SdkError> {
+        self.io.cached_admission().await?;
+        let packet = self.packet.as_mut().ok_or_else(wrong)?;
+        let Some(encrypted) = packet.poll(self.relay.as_ref(), &self.origin).await? else {
+            return Ok(());
+        };
+        // Only authenticated identical retries are eligible. Any new packet at a
+        // completed endpoint ends this existing channel, without reopening local data.
+        if packet.open_packet(&encrypted)?.is_some() {
+            return Err(wrong());
+        }
+        let response = self.cached_reply.as_ref().ok_or_else(wrong)?.clone();
+        packet.send_retained_packet(self.relay.as_ref(), &self.origin, response).await
+    }
     pub(super) async fn commit(&mut self) -> Result<(), SdkError> {
         let hash = hash(self.manifest.as_ref().ok_or_else(wrong)?)?;
         let packet = self
@@ -87,8 +101,23 @@ impl TailJob {
                 participant.commit_full_tail_receipt(db, context, &hash)
             })
             .await?;
-        self.send(packet).await?;
-        self.finish();
+        // B is durably merged even when A loses this reply. Keep only the existing
+        // epoch's exact ciphertext cache; the terminal ledger refuses every fresh epoch.
+        self.phase = Phase::Finished;
+        self.io.cancelled.cancel();
+        self.cleanup_pending = true;
+        self.io.cached_admission().await?;
+        let encrypted = self.packet.as_mut().ok_or_else(wrong)?.seal_packet(&packet)?;
+        drop(packet);
+        self.cached_reply = Some(encrypted.clone());
+        self.packet
+            .as_mut()
+            .ok_or_else(wrong)?
+            .send_retained_packet(self.relay.as_ref(), &self.origin, encrypted)
+            .await?;
+        if self.io.reclaim().await.is_ok() {
+            self.cleanup_pending = false;
+        }
         Ok(())
     }
 }

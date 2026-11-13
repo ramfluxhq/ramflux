@@ -285,6 +285,18 @@ fn retained_data_role(
         }
         return Err(SdkError::PairingCode("PublicationPending"));
     }
+    if row.role == "initiator"
+        && let Some(scope) = db.full_installed_source_tail_scope(
+            &request.operation_id,
+            request.generation,
+            crate::custody::network_now()?,
+        )?
+    {
+        if scope.grant.source_ref != *reference {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        return Ok(reference == &record.body.master_certificate.body.primary_device_ref);
+    }
     if row.role == "responder"
         && db.pairing_adoption()?.is_some_and(|adoption| adoption.full_generation_nonce.is_some())
     {

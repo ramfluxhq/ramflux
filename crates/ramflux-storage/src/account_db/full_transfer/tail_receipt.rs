@@ -122,8 +122,17 @@ impl FullTailEndpoint<'_> {
         }
         self.stage.record_source_data_verified(packet, now)?;
         super::stage::sync_stage(&self.stage.directory)?;
+        let completion = super::completion::Completion::from_stage(
+            &self.stage,
+            &self.operation,
+            "merged",
+            Some(packet),
+        )?;
+        self.stage.db.write_transaction(|| {
         if self.stage.db.connection.execute("UPDATE pairing_full_tail SET tail_status='merged' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND record_hash=?5 AND cut_state='durable' AND tail_status IN('pending','merged')",
             params![self.stage.db.local_account_id,self.operation,self.stage.reference().stage_id,identity.snapshot,identity.hash])? != 1 { return Err(wrong()); }
+            self.stage.db.retain_full_completion(&completion, now)
+        })?;
         self.require_live(now)
     }
     fn require_applied_tail(&self, hash: &str) -> Result<String, StorageError> {
@@ -165,8 +174,17 @@ impl FullTailEndpoint<'_> {
         verify_signature(packet, &application.branch)?;
         let bytes = packet.encode_secret().map_err(|_| wrong())?;
         retain_receipt(&self.stage, application, &bytes)?;
+        let completion = super::completion::Completion::from_stage(
+            &self.stage,
+            &self.operation,
+            "merged",
+            Some(packet),
+        )?;
+        self.stage.db.write_transaction(|| {
         if self.stage.db.connection.execute("UPDATE pairing_full_tail_apply SET tail_status='merged' WHERE operation_id=?1 AND generation_nonce=?2 AND stage_digest=?3 AND tail_hash=?4 AND phase=2 AND tail_status IN('pending','merged')",
             params![self.operation,application.nonce,application.digest.as_slice(),application.hash])? != 1 { return Err(wrong()); }
+            self.stage.db.retain_full_completion(&completion, now)
+        })?;
         self.require_live(now)
     }
 }

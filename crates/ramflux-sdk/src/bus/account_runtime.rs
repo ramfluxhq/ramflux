@@ -341,6 +341,36 @@ impl AccountRuntime {
         self.reap_fetch_jobs();
     }
 
+    async fn service_courier_outcome(
+        &mut self,
+        outcome: Option<super::task_courier::Outcome>,
+    ) -> Result<(), SdkError> {
+        if let Some(outcome) = outcome {
+            self.apply_courier_outcome(outcome)?;
+        } else {
+            tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
+            self.stop_courier().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            self.start_connection()?;
+            self.start_courier();
+        }
+        Ok(())
+    }
+
+    fn maintain_expired_object_holds(&self) {
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && let Err(error) = account
+                .client
+                .account_db()
+                .and_then(|db| db.maintain_expired_object_holds().map_err(SdkError::from))
+        {
+            tracing::warn!(
+                error_code = local_bus_error_code(&error),
+                "expired object cleanup deferred; account remains open"
+            );
+        }
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
@@ -395,12 +425,7 @@ impl AccountRuntime {
                     continue;
                 },
                 command = self.receiver.recv() => command,
-                () = async {
-                    match pairing {
-                        Some(signal) => signal.notified().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
+                () = wait_pairing_signal(pairing) => {
                     Box::pin(self.service_pairing_data()).await;
                     continue;
                 },
@@ -410,22 +435,11 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(outcome) = outcome {
-                        self.apply_courier_outcome(outcome)?;
-                    } else {
-                        tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
-                        self.stop_courier().await;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        self.start_connection()?;
-                        self.start_courier();
-                    }
+                    self.service_courier_outcome(outcome).await?;
                     continue;
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
-                    if let Some(account)=self.state.accounts.get(&self.id)
-                        && let Err(error)=account.client.account_db().and_then(|db|db.maintain_expired_object_holds().map_err(SdkError::from)) {
-                        tracing::warn!(error_code=local_bus_error_code(&error),"expired object cleanup deferred; account remains open");
-                    }
+                    self.maintain_expired_object_holds();
                     let mut shutdown = self.shutdown.clone();
                     let active = tokio::select! {
                         _ = shutdown.changed() => break,
@@ -514,3 +528,10 @@ pub mod testing_calls;
 
 #[cfg(feature = "test-support")]
 mod testing_authority;
+
+async fn wait_pairing_signal(signal: Option<std::sync::Arc<tokio::sync::Notify>>) {
+    match signal {
+        Some(signal) => signal.notified().await,
+        None => std::future::pending().await,
+    }
+}
