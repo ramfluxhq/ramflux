@@ -131,6 +131,15 @@ impl Device {
                 wall()?,
             )?;
         }
+        {
+            let slot = self.participant.db.lock().map_err(|_| "test: local SDK writer mutex")?;
+            let db = slot.as_ref().ok_or("test: local SDK writer missing")?;
+            assert_eq!(
+                db.next_pairing_own_sync()?.is_some(),
+                self.vault.primary_entries()? == 1,
+                "test: own-history attempt is queued only by the approving primary"
+            );
+        }
         self.participant.return_client(&mut self.client)?;
         let (_, _, reference) = self.vault.local_branch(account.record())?;
         let vault = self.vault.clone();

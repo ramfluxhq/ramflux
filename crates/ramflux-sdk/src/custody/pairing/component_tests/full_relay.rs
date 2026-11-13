@@ -131,11 +131,10 @@ impl FullPairingTransport for FullNativeFixture {
     claim!(prove_full, ProveFull, FullProofReply, Proof, FullProofReply::from_wire_bytes);
     fn send_full<'a>(&'a self, _: &'a str, request: &'a SendFull) -> FullPortFuture<'a, SentFull> {
         Box::pin(async move {
-            let encrypted = request
-                .packet
-                .ciphertext
-                .decode(ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES)
-                .map_err(|error| wire(&error))?;
+            let encrypted = Zeroizing::new(
+                ramflux_protocol::decode_base64url(&request.packet.ciphertext)
+                    .map_err(|error| wire(&error))?,
+            );
             self.wire_evidence.observe(&encrypted);
             self.wire_evidence.sent(encrypted.len());
             match self.full_request(request, FullArm::Send)? {
@@ -247,7 +246,9 @@ impl PairingTransport for FullNativeFixture {
                 ..
             } = &request.frame
             {
-                let decoded = Zeroizing::new(ramflux_protocol::decode_base64url(ciphertext)?);
+                let decoded = Zeroizing::new(
+                    ramflux_protocol::decode_base64url(ciphertext).map_err(|error| wire(&error))?,
+                );
                 evidence.observe(&decoded);
                 evidence.sent(decoded.len());
             }

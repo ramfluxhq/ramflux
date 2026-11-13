@@ -79,14 +79,6 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
             bk.signing_key.verifying_key(),
             "test: enrolled phone reused source signing key"
         );
-        assert!(
-            a.client.account_db()?.next_pairing_own_sync()?.is_some(),
-            "test: completed enrollment did not queue existing own-history export"
-        );
-        assert!(
-            b.client.account_db()?.next_pairing_own_sync()?.is_none(),
-            "test: recipient queued an unsolicited export"
-        );
         wire.primary.lock().await?;
         wire.recipient.lock().await?;
         Ok(())
@@ -95,9 +87,9 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
 }
 
 async fn begin_native(wire: &mut Continuity) -> TestResult<(String, u64)> {
-    let mut begin = begin_body()?;
-    begin.capabilities = vec!["message".into(), "group".into(), "sync".into(), "register".into()];
-    let begun = begin_result(wire.primary.begin(begin).await?)?;
+    let mut request = begin_body()?;
+    request.capabilities = vec!["message".into(), "group".into(), "sync".into(), "register".into()];
+    let begun = begin_result(wire.primary.begin(request).await?)?;
     let operation = begun.operation_id.clone();
     let generation = begun.generation;
     wire.recipient

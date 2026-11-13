@@ -16,8 +16,8 @@ fn primary_transfer_full_excludes_device_secrets() -> TestResult {
     ];
     let private = zeroize::Zeroizing::new(serde_json::to_string(&canaries)?);
     db.connection.execute(
-        "INSERT INTO runtime_operation(operation_id,fingerprint,response_json,operation_kind) VALUES('secret-boundary-fixture','local-only',?1,'local-private-owner')",
-        rusqlite::params![private.as_str()],
+        "INSERT INTO pairing_own_sync(operation_id,fingerprint,response_json,operation_kind) VALUES('secret-boundary-fixture',?2,?1,'pairing_own_sync_v1')",
+        rusqlite::params![private.as_str(), ramflux_protocol::encode_base64url([91; 32])],
     )?;
     let positive = ramflux_protocol::encode_base64url([77; 32]);
     db.connection.execute(
@@ -38,7 +38,7 @@ fn primary_transfer_full_excludes_device_secrets() -> TestResult {
         .schema
         .families
         .iter()
-        .find(|family| family.id == "sql/runtime_operation")
+        .find(|family| family.id == "sql/pairing_own_sync")
         .ok_or("test: local operation census absent")?;
     assert_eq!(
         local.source_rows.0, 1,
@@ -56,7 +56,7 @@ fn primary_transfer_full_excludes_device_secrets() -> TestResult {
     let mut positive_records = 0;
     while let Some(header) = read_record_header(&mut input)? {
         assert_ne!(
-            header.family, "sql/runtime_operation",
+            header.family, "sql/pairing_own_sync",
             "test: local-only owner emitted a record"
         );
         if header.family == "sql/object_identity_replacement" {

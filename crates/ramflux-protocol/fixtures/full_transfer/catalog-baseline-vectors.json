@@ -1,5 +1,5 @@
 {
-  "census_hash": "o48HIfY5HDkFceX32r4FyWp-PNyuucin6XoHstpI7XE",
+  "census_hash": "bzmx3UIbXnjeDHJ8ZOtM5Z1Esz2-qDnw8fuhLIs1ckk",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -499,7 +499,7 @@
       "id": "sql/raw_envelope_log"
     },
     {
-      "hash": "yvMIaMq-joYzoGw5fiOot0SAUOYeW01ARPC-64ayllM",
+      "hash": "0EoojcRjKgJntiFx83NYdQPqXOz4AzOo-KGJymz5KV8",
       "id": "sql/raw_inner_copy"
     },
     {
@@ -613,6 +613,10 @@
     {
       "hash": "T3XhGDRvZP-L5_5e6GxgxtB-xE-ICws7Q-Fh0E12eVA",
       "id": "sql/runtime_message_content"
+    },
+    {
+      "hash": "seugUiz70ErWy0XTbQ44fOrZxwGmSYe6TXfDZV9sbXE",
+      "id": "sql/runtime_message_sequence"
     },
     {
       "hash": "yzYOt5UhnfqxggwCN4ASOW9Zn1viAzcabGF34-bvsM8",

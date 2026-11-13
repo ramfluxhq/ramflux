@@ -2487,6 +2487,22 @@ pub(super) const RULE_115: FamilyRule = table_rule!(
             Immutable,
             CodecRule::Scalar { cell_type: CellType::Bytes }
         ),
+        (
+            "attempted_decoder",
+            Utf8,
+            false,
+            Transfer,
+            Immutable,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
+        (
+            "copy_metadata",
+            Bytes,
+            false,
+            Transfer,
+            Immutable,
+            CodecRule::Scalar { cell_type: CellType::Bytes }
+        ),
     ]
 );
 pub(super) const RULE_116: FamilyRule = table_rule!(

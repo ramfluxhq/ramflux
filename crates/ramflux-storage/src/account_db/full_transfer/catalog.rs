@@ -572,6 +572,7 @@ macro_rules! table_rule {
 
 mod cleanup_local;
 mod completion_local;
+mod message_sequence;
 mod own_sync_local;
 mod tables_0;
 mod tables_1;
@@ -740,19 +741,20 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     tables_3::RULE_141,     // sql/runtime_journal
     tables_3::RULE_142,     // sql/runtime_journal_bounds
     tables_3::RULE_143,     // sql/runtime_message_content
-    tables_3::RULE_144,     // sql/runtime_operation
-    tables_3::RULE_145,     // sql/runtime_outbox
-    tables_3::RULE_146,     // sql/runtime_own_copy_state
-    tables_3::RULE_147,     // sql/runtime_own_copy_usage
-    tables_3::RULE_148,     // sql/runtime_privacy_maintenance
-    tables_3::RULE_149,     // sql/runtime_receipt_retention
-    tables_3::RULE_150,     // sql/runtime_scoped_ack
-    tables_3::RULE_151,     // sql/runtime_unrouted
-    tables_3::RULE_152,     // sql/schema_migration
-    tables_3::RULE_153,     // sql/self_device_control_log
-    tables_3::RULE_154,     // sql/session_capability_cache
-    tables_3::RULE_155,     // sql/shared_group_floor_generation
-    tables_3::RULE_156,     // sql/shared_group_member_projection
-    tables_3::RULE_157,     // sql/shared_group_removal_floor
-    tables_3::RULE_158,     // sql/sync_checkpoint
+    message_sequence::RULE,
+    tables_3::RULE_144, // sql/runtime_operation
+    tables_3::RULE_145, // sql/runtime_outbox
+    tables_3::RULE_146, // sql/runtime_own_copy_state
+    tables_3::RULE_147, // sql/runtime_own_copy_usage
+    tables_3::RULE_148, // sql/runtime_privacy_maintenance
+    tables_3::RULE_149, // sql/runtime_receipt_retention
+    tables_3::RULE_150, // sql/runtime_scoped_ack
+    tables_3::RULE_151, // sql/runtime_unrouted
+    tables_3::RULE_152, // sql/schema_migration
+    tables_3::RULE_153, // sql/self_device_control_log
+    tables_3::RULE_154, // sql/session_capability_cache
+    tables_3::RULE_155, // sql/shared_group_floor_generation
+    tables_3::RULE_156, // sql/shared_group_member_projection
+    tables_3::RULE_157, // sql/shared_group_removal_floor
+    tables_3::RULE_158, // sql/sync_checkpoint
 ];
