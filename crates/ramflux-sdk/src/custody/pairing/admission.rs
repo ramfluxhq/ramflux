@@ -15,6 +15,10 @@ pub(crate) fn require_network_admission(
     now: u64,
 ) -> Result<(), SdkError> {
     let installed = install_store::read_installed(&config.account_root, &config.account_id)?;
+    let pending = install_store::list_pending(&config.account_root, &config.account_id)?;
+    if install_store::pending_blocks_network(&pending, installed.as_ref()) {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
     if installed.is_none() && !account.pairing_adoption_required() {
         return Ok(());
     }

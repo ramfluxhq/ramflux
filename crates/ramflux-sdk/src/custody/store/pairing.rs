@@ -220,10 +220,12 @@ fn matches_authority_owners(account: &BornAccount, install: &Install) -> Result<
 pub(super) fn require_installed_marker(root: &Path, account: &BornAccount) -> Result<(), SdkError> {
     use crate::custody::pairing::install_store;
     let id = account.local_account_id();
-    if !install_store::list_pending(root, id)?.is_empty() {
+    let pending = install_store::list_pending(root, id)?;
+    let installed = install_store::read_installed(root, id)?;
+    if install_store::pending_blocks_network(&pending, installed.as_ref()) {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
-    match install_store::read_installed(root, id)? {
+    match installed {
         Some(row)
             if row.full_transfer.is_some()
                 || crate::custody::pairing::full_generation::has_selected_full_generation(

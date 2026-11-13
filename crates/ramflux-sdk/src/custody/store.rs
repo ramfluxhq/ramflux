@@ -247,6 +247,19 @@ impl BornAccount {
         }
         Ok(())
     }
+    fn require_unfenced_primary_snapshot(&self) -> Result<std::fs::File, SdkError> {
+        self.require_current_snapshot()?;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        let lock = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
+        Ok(lock)
+    }
     /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
     /// The caller may publish the returned candidate only through an explicit later action.
     /// # Errors
@@ -261,11 +274,9 @@ impl BornAccount {
         validity: super::DeclarationValidity,
     ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
         use ramflux_protocol::custody::{decode_epoch, encode_epoch};
+        let _signing = self.require_unfenced_primary_snapshot()?;
         let now = validity.issued_at;
         let expires_at = validity.expires_at;
-        if self.branch_pending() || self.authority_blocked {
-            return Err(SdkError::NetworkingPending);
-        }
         require_current_authority(&self.stored.pins, &self.verified)?;
         let current = self.record();
         let body = &current.body;
@@ -366,7 +377,7 @@ impl BornAccount {
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,
-    ) -> Result<ramflux_crypto::custody::SelfSigningKey, SdkError> {
+    ) -> Result<super::PrimarySigningLease, SdkError> {
         self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
@@ -378,13 +389,20 @@ impl BornAccount {
         {
             return Err(SdkError::PairingCode("PrimaryRequired"));
         }
+        let lock = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
         let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        self.require_current_snapshot()?;
         if primary.public_key()
             != self.record().body.master_certificate.body.self_signing_public_key
         {
             return Err(SdkError::CustodyVaultUnavailable);
         }
-        Ok(primary)
+        Ok(super::PrimarySigningLease::new(primary, lock))
     }
     pub(crate) fn sign_contact_card(
         &self,
@@ -469,6 +487,21 @@ impl BornAccount {
         ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
         SdkError,
     > {
+        self.require_current_snapshot()?;
+        if self.stored.primary_vault_ref.is_empty()
+            || self.record().body.master_certificate.body.primary_device_ref.device_id
+                != self.local_device_id()?
+        {
+            return Err(super::home_authorization::refused(
+                ramflux_protocol::home_migration::Refusal::CustodyApprovalRequired,
+            ));
+        }
+        let _primary_barrier = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
         vault.home_authorization_preflight()?;
         let (actor, credentials) = self.credentials(vault, &body.actor.device_id, now)?;
         if actor != body.actor {
@@ -957,7 +990,7 @@ impl BornAccount {
         {
             return Err(invalid());
         }
-        let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        let primary = self.group_primary(vault)?;
         if primary.public_key()
             != current.envelope().body.master_certificate.body.self_signing_public_key
         {

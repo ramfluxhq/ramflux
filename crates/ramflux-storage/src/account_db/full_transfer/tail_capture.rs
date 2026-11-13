@@ -46,12 +46,11 @@ impl FullSourceTailCut {
         stage: FullTransferStage<'_>,
     ) -> Result<FullSourceTailWork, StorageError> {
         stage.require_io()?;
-        let (snapshot, ordinal) = stage.tail_capture_identity()?;
-        let head = stage.db.pairing_head()?.ok_or_else(wrong)?;
-        if self.operation != head.operation_id
+        let identity = stage.tail_capture_identity()?;
+        if self.operation != identity.operation
             || self.stage != stage.reference().stage_id
-            || self.snapshot != snapshot
-            || self.hash != head.candidate_hash
+            || self.snapshot != identity.snapshot
+            || self.hash != identity.hash
         {
             return Err(wrong());
         }
@@ -65,8 +64,8 @@ impl FullSourceTailCut {
             directory: stage.directory,
             cancelled: stage.source_cancelled,
             cut: self.cut,
-            snapshot,
-            ordinal,
+            snapshot: identity.snapshot,
+            ordinal: identity.ordinal,
         })
     }
 }
@@ -90,47 +89,74 @@ impl FullSourceTailWork {
         source.require_source_live()
     }
 }
+struct TailIdentity {
+    snapshot: String,
+    operation: String,
+    hash: String,
+    ordinal: u64,
+}
 impl FullTransferStage<'_> {
-    fn tail_capture_identity(&self) -> Result<(String, u64), StorageError> {
+    fn tail_capture_identity(&self) -> Result<TailIdentity, StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
             return Err(wrong());
         }
-        let head = self.db.pairing_head()?.ok_or_else(wrong)?;
-        if head.state != "acknowledged" || head.kind != "transfer" {
+        let (snapshot,operation,hash):(String,String,String)=self.db.connection.query_row("SELECT snapshot_id,operation_id,record_hash FROM pairing_full_tail WHERE account_id=?1 AND stage_id=?2 AND tail_status='pending'",rusqlite::params![self.db.local_account_id,self.reference().stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        for value in [&snapshot, &operation, &hash] {
+            super::stage::raw32(value)?;
+        }
+        if self.source_published_candidate_hash()? != hash {
             return Err(wrong());
         }
         let live = self
             .db
             .pairing_live_rows()?
             .into_iter()
-            .find(|row| row.operation_id == head.operation_id)
+            .find(|row| row.operation_id == operation)
             .ok_or_else(wrong)?;
-        if live.full_stage_reference()?.as_ref() != Some(self.reference()) {
+        if live.role != "initiator"
+            || !matches!(live.phase.as_str(), "acknowledged" | "locally_installed")
+            || live.full_stage_reference()?.as_ref() != Some(self.reference())
+        {
             return Err(wrong());
         }
-        let snapshot: String = self.db.connection.query_row(
-            "SELECT snapshot_id FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND record_hash=?4 AND tail_status='pending'",
-            rusqlite::params![self.db.local_account_id,head.operation_id,self.reference().stage_id,head.candidate_hash],|row|row.get(0))?;
-        super::stage::raw32(&snapshot)?;
-        let Some(DataPacket::DataVerified { manifest_hash: hash, .. }) =
+        if let Some(head) = self.db.pairing_head()? {
+            if head.operation_id != operation
+                || head.state != "acknowledged"
+                || head.kind != "transfer"
+                || head.candidate_hash != hash
+            {
+                return Err(wrong());
+            }
+        } else {
+            let adoption = self.db.pairing_adoption()?.ok_or_else(wrong)?;
+            if adoption.local_role != "secondary"
+                || adoption.local_ref
+                    != ramflux_protocol::canonical_json_bytes(&record.grant.source_ref)?
+            {
+                return Err(wrong());
+            }
+        }
+        let Some(DataPacket::DataVerified { manifest_hash: parent, .. }) =
             self.source_last_data_verified()?
         else {
             return Err(wrong());
         };
-        let parent: SourceManifest = self.forward_manifest(&hash)?;
+        let parent: SourceManifest = self.forward_manifest(&parent)?;
         if !parent.manifest.is_last_prepublication_delta() {
             return Err(wrong());
         }
-        Ok((snapshot, parent.manifest.snapshot_cut.0 + 1))
+        Ok(TailIdentity { snapshot, operation, hash, ordinal: parent.manifest.snapshot_cut.0 + 1 })
     }
     /// Complete/reconcile only the exact already-keyed J6 cut after the off-loan copy.
     /// Missing bytes/key explicitly invalidate the opportunity; this never pins a new view.
     /// # Errors
     /// Refuses a missing/corrupt immutable cut, changed J6 or unavailable original unlock.
     pub fn finish_source_tail_capture(&self) -> Result<(), StorageError> {
-        let (snapshot, ordinal) = self.tail_capture_identity()?;
+        let identity = self.tail_capture_identity()?;
+        let snapshot = identity.snapshot;
+        let ordinal = identity.ordinal;
         let saved: Option<String> = self
             .connection
             .query_row(
@@ -143,7 +169,7 @@ impl FullTransferStage<'_> {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
         self.source_cut_schema(ordinal, &snapshot, super::full_transfer_catalog())?;
-        if self.db.connection.execute("UPDATE pairing_full_tail SET cut_state='durable' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status='pending'",rusqlite::params![self.db.local_account_id,self.db.pairing_head()?.ok_or_else(wrong)?.operation_id,self.reference().stage_id,snapshot])? != 1 { return Err(wrong()); }
+        if self.db.connection.execute("UPDATE pairing_full_tail SET cut_state='durable' WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND snapshot_id=?4 AND tail_status='pending'",rusqlite::params![self.db.local_account_id,identity.operation,self.reference().stage_id,snapshot])? != 1 { return Err(wrong()); }
         Ok(())
     }
 }

@@ -537,5 +537,5 @@ mod full;
 pub(crate) use full::FullProofSigner;
 pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
-    FullSourcePublished, FullSourceSubmission,
+    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
 };

@@ -6,7 +6,7 @@
 use super::coordinator::validate_head_advance;
 use crate::SdkError;
 use crate::custody::{PrimaryVault, load_account, load_data_account, pending_head_fence_blocks};
-use ramflux_crypto::custody::{SelfSigningKey, VerifiedRecord};
+use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::{
     BranchCertificate, CustodyAuthority, DeviceRef, DeviceSet, Envelope, Publication, decode_epoch,
     encode_epoch, object_hash,
@@ -248,11 +248,10 @@ fn require_resume_primary(
     }
     if account.local_device_id()? != publisher.device_id
         || account.record().body.master_certificate.body.primary_device_ref != publisher
-        || vault.load_primary(account.primary_vault_ref())?.public_key()
-            != account.record().body.master_certificate.body.self_signing_public_key
     {
         return Err(SdkError::PairingCode("PrimaryRequired"));
     }
+    drop(account.group_primary(vault)?);
     Ok(())
 }
 
@@ -405,7 +404,7 @@ fn require_primary(
     vault: &dyn PrimaryVault,
     publisher_ref: &DeviceRef,
     local_ref: &DeviceRef,
-) -> Result<SelfSigningKey, SdkError> {
+) -> Result<crate::custody::PrimarySigningLease, SdkError> {
     if publisher_ref != local_ref {
         return Err(SdkError::PairingCode("PrimaryRequired"));
     }

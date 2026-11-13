@@ -15,6 +15,8 @@ pub use candidate::FullPreparedTransferCandidate;
 mod preservation;
 mod recipient_reconciliation;
 pub use recipient_reconciliation::{FullRecipientNativeObservation, FullRecipientPublicationQuery};
+mod retirement;
+pub use retirement::FullSourceRetirementOutcome;
 mod submission;
 pub use submission::{FullSourcePublished, FullSourceSubmission};
 mod proof_signer;
