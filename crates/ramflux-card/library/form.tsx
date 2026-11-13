@@ -3,9 +3,9 @@
 declare function __rf_commit(tree: string): void;
 type Kind = "column" | "form" | "text_field" | "submit";
 type Node = { key: string; kind: Kind; text: string; value: string; action: string | null; children: Node[] };
-type Props = { key: string; text?: string; value?: string; action?: string };
+type Props = { key: string; text?: string; value?: string; action?: string; children?: Node | Node[] };
 type Form = Readonly<{ id: string; title: string; label: string; value: string; submit: string }>;
-declare global { namespace JSX { interface IntrinsicElements {
+declare global { namespace JSX { type Element = Node; interface ElementChildrenAttribute { children: unknown } interface IntrinsicElements {
   column: Props; form: Props; text_field: Props; submit: Props;
 } } }
 function h(kind: Kind, props: Props, ...children: Node[]): Node {
