@@ -203,9 +203,17 @@ impl LocalBusAccountState {
 
     pub(crate) fn disconnected(
         client: RamfluxClient,
-        gateway_config: GatewaySessionConfig,
+        mut gateway_config: GatewaySessionConfig,
         principal_commitment: String,
     ) -> Self {
+        // Actor handoff may reopen a new writer after the caller's old DB closes.
+        // Bind networking to this actual owner rather than retaining its dead weak reader.
+        if client.born_v3_account.is_some()
+            && let Some(db) = client.active_account_db.as_ref()
+        {
+            gateway_config.pairing_admission =
+                Some(std::sync::Arc::new(db.pairing_admission_reader()));
+        }
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
             timeouts: super::runtime_limits::RuntimeTimeouts::default(),

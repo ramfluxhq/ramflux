@@ -20,7 +20,7 @@ pub use source_reconciliation::{FullSourceNativeObservation, FullSourcePublicati
 mod recipient_reconciliation;
 pub use recipient_reconciliation::{FullRecipientNativeObservation, FullRecipientPublicationQuery};
 mod retirement;
-pub use retirement::FullSourceRetirementOutcome;
+pub use retirement::{FullSourceRetirementOutcome, retry_full_source_cleanup};
 mod submission;
 pub use submission::{FullSourcePublished, FullSourceSubmission};
 mod proof_signer;

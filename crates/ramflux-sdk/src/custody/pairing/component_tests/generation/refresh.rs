@@ -4,7 +4,8 @@
 //! Ordinary native profile refresh keeps an already installed full data generation.
 use super::{
     ClockHold, CustodyAuthority, Rig, TestResult, admits_exact_g3, bootstrap_full_rig,
-    canonical_json_bytes, custody, finish_owned_stream, install_live_generation, publication,
+    canonical_json_bytes, custody, finish_owned_stream, install_live_generation,
+    publication_with_cleanup,
 };
 use crate::custody::pairing::{
     LocalPairingParticipant, PairingAuthorityQuery, publication::NodeHeadPersist,
@@ -18,7 +19,8 @@ async fn pairing_full_profile_refresh_preserves_selected_generation_and_source_s
     rig.primary.sync_relay().await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     Box::pin(finish_owned_stream(&mut rig)).await?;
-    let published = Box::pin(publication(&mut rig, &operation)).await?;
+    let mut published = Box::pin(publication_with_cleanup(&mut rig, &operation, true)).await?;
+    let cleanup = published.source_cleanup.take().ok_or("source cleanup receipt")?;
     install_live_generation(&rig, &operation, published)?;
     let old =
         custody::load_account(&rig.participant_b.root, &rig.participant_b.account_id, rig.now)?;
@@ -44,6 +46,7 @@ async fn pairing_full_profile_refresh_preserves_selected_generation_and_source_s
     rig.participant_a.take_client(&mut rig.source.client)?;
     refresh_participant(&rig.participant_a, &observed, rig.now)
         .map_err(|e| format!("A secondary refresh: {e}"))?;
+    finish_deferred_source_cleanup(&rig, &cleanup, &operation)?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     let selected_after = ramflux_storage::AccountIndex::open(&rig.participant_b.root)?
         .account_generation_selection(&rig.participant_b.account_id)?;
@@ -140,5 +143,54 @@ fn require_refreshed_owners(
         source.group_primary(rig.participant_a.vault.as_ref()),
         Err(crate::SdkError::PairingCode("PrimaryRequired"))
     ));
+    Ok(())
+}
+
+fn finish_deferred_source_cleanup(
+    rig: &Rig,
+    cleanup: &crate::custody::pairing::FullSourcePublished,
+    operation: &str,
+) -> TestResult {
+    let slot = rig.participant_a.db.lock().map_err(|_| "source refreshed cleanup")?;
+    let db = slot.as_ref().ok_or("source refreshed writer")?;
+    let before = db.pairing_adoption()?.ok_or("source refreshed receipt")?;
+    let unavailable = super::source_tail::DeleteUnavailable(rig.participant_a.vault.as_ref());
+    assert_eq!(
+        cleanup.retire_source(&crate::custody::pairing::Installation {
+            root: &rig.participant_a.root,
+            db,
+            vault: &unavailable,
+            now: rig.now,
+        })?,
+        crate::custody::pairing::FullSourceRetirementOutcome::CleanupPending
+    );
+    let local = crate::custody::pairing::Installation {
+        root: &rig.participant_a.root,
+        db,
+        vault: rig.participant_a.vault.as_ref(),
+        now: rig.now,
+    };
+    // Unlock/hourly/status work needs only the durable positive cleanup owner.
+    assert_eq!(
+        crate::custody::pairing::retry_full_source_cleanup(&local, operation)?,
+        crate::custody::pairing::FullSourceRetirementOutcome::Complete
+    );
+    assert_eq!(
+        crate::custody::pairing::retry_full_source_cleanup(&local, operation)?,
+        crate::custody::pairing::FullSourceRetirementOutcome::Complete
+    );
+    assert_eq!(
+        db.pairing_adoption()?.ok_or("source post-cleanup receipt")?,
+        before,
+        "old key cleanup rewrote a later native head"
+    );
+    assert_eq!(
+        super::super::super::install_store::list_pending(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id
+        )?
+        .len(),
+        0
+    );
     Ok(())
 }

@@ -540,4 +540,5 @@ pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
     FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
     FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
+    retry_full_source_cleanup,
 };
