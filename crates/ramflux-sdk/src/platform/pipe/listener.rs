@@ -23,7 +23,6 @@ use crate::SdkError;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_PIPE_BUSY: i32 = 231;
-const ERROR_NO_DATA: i32 = 232;
 const BUSY_RETRY: Duration = Duration::from_millis(50);
 const BUSY_ATTEMPTS: u32 = 100;
 
@@ -176,8 +175,9 @@ pub(crate) struct PipeBusListener {
     descriptor: SecurityDescriptor,
     owner: Sid,
     /// The instance waiting for the next client. One always exists while the listener lives,
-    /// so the name never becomes free for another process to create.
-    pending: tokio::sync::Mutex<NamedPipeServer>,
+    /// so the name never becomes free for another process to create. It is not registered
+    /// with the runtime until `accept` has finished `ConnectNamedPipe`.
+    pending: tokio::sync::Mutex<win32::ListeningPipe>,
     name_file: Option<(PathBuf, String)>,
 }
 
@@ -188,7 +188,7 @@ impl PipeBusListener {
     /// Returns [`SdkError::DataRootInUse`] when the name already exists.
     pub(super) fn create(name: OsString, user_sid: &str, owner: Sid) -> Result<Self, SdkError> {
         let descriptor = SecurityDescriptor::from_sddl(&name::pipe_sddl(user_sid))?;
-        let first = win32::create_instance(&name, &descriptor, true).map_err(|error| {
+        let first = win32::create_instance(&name, &descriptor, &owner, true).map_err(|error| {
             if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
                 SdkError::DataRootInUse
             } else {
@@ -231,19 +231,13 @@ impl BusListener for PipeBusListener {
 
     async fn accept(&self) -> std::io::Result<Self::Stream> {
         let mut pending = self.pending.lock().await;
-        loop {
-            match pending.connect().await {
-                Ok(()) => break,
-                // The client opened and closed before the connect: recycle the instance.
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
-                    pending.disconnect()?
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        // The next instance is created before the connected one leaves the listener.
-        let next = win32::create_instance(&self.name, &self.descriptor, false)?;
-        Ok(PipeServerStream { inner: std::mem::replace(&mut *pending, next) })
+        // One instance is listening. A client that already opened it, including one that has
+        // already closed, completes this wait. The next instance is created only afterwards,
+        // so the client cannot attach to an instance this call is not connecting.
+        win32::connect_server(&pending).await?;
+        let next = win32::create_instance(&self.name, &self.descriptor, &self.owner, false)?;
+        let current = std::mem::replace(&mut *pending, next);
+        Ok(PipeServerStream { inner: current.into_server()? })
     }
 
     fn endpoint(&self) -> Result<Option<EndpointId>, SdkError> {

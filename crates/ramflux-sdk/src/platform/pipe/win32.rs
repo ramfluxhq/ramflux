@@ -6,24 +6,23 @@
 //! `unsafe` block of the carrier lives in this file.
 #![allow(unsafe_code)]
 
-use std::ffi::{OsStr, c_void};
+use std::cell::UnsafeCell;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tokio::net::windows::named_pipe::{
-    ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
-};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode};
 use windows_sys::Win32::Foundation::{
-    ERROR_NOT_ALL_ASSIGNED, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LUID,
-    LocalFree, SetLastError,
+    ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_ALL_ASSIGNED, ERROR_PIPE_CONNECTED, GENERIC_WRITE,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree, SetLastError,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, CopySid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
@@ -34,12 +33,17 @@ use windows_sys::Win32::Security::{
     TokenIsAppContainer, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, SECURITY_IDENTIFICATION,
+    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, WRITE_OWNER,
 };
-use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, ImpersonateNamedPipeClient};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, ImpersonateNamedPipeClient,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken, OpenThreadToken,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 
 /// `SECURITY_MAX_SID_SIZE`: the largest binary SID.
@@ -399,27 +403,226 @@ impl Drop for RestorePrivilege {
     }
 }
 
+/// One listening pipe instance. It is not registered with the runtime until
+/// [`ListeningPipe::into_server`], which happens only after `ConnectNamedPipe` has finished.
+/// Registering earlier loses the completion: the runtime treats a second connect attempt as
+/// not-ready and clears the wakeup.
+pub(super) struct ListeningPipe {
+    handle: OwnedHandle,
+}
+
+impl ListeningPipe {
+    fn raw(&self) -> HANDLE {
+        self.handle.as_raw_handle()
+    }
+
+    /// Wrap the connected instance as a runtime pipe.
+    ///
+    /// # Errors
+    /// Returns an error when this is called outside a runtime that polls I/O.
+    pub(super) fn into_server(self) -> io::Result<NamedPipeServer> {
+        let raw = self.handle.into_raw_handle();
+        // SAFETY: `raw` is an overlapped pipe handle this value owns, and no I/O is in flight.
+        // `from_raw_handle` takes ownership and closes the handle on failure.
+        unsafe { NamedPipeServer::from_raw_handle(raw) }
+    }
+}
+
+/// Make `owner` the owner of `handle`. An elevated token's default owner is Administrators, and
+/// a descriptor's `O:` entry is not always stored; this call is what the owner check reads back.
+///
+/// # Errors
+/// Returns the OS error when the owner cannot be set.
+pub(super) fn set_handle_owner(
+    handle: RawHandle,
+    kind: SE_OBJECT_TYPE,
+    owner: &Sid,
+) -> io::Result<()> {
+    // SAFETY: `handle` is open with WRITE_OWNER (or the restore privilege stands in for it).
+    // `owner` is a SID that outlives the call.
+    let status = unsafe {
+        SetSecurityInfo(
+            handle,
+            kind,
+            OWNER_SECURITY_INFORMATION,
+            owner.as_psid(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(os_error(status)) }
+}
+
+/// Wait until a client connects to `pipe`, or until the wait is cancelled.
+///
+/// `ERROR_PIPE_CONNECTED` and `ERROR_NO_DATA` are a finished connect: the client is already
+/// there, or it opened the pipe and left. The caller still receives that instance.
+///
+/// # Errors
+/// Returns the OS error when `ConnectNamedPipe` fails for another reason, or when the wait is
+/// cancelled.
+pub(super) async fn connect_server(pipe: &ListeningPipe) -> io::Result<()> {
+    let event = manual_event()?;
+    let mut overlapped = OVERLAPPED::default();
+    overlapped.hEvent = event.as_raw_handle();
+    let operation = Arc::new(ConnectOperation { event, overlapped: UnsafeCell::new(overlapped) });
+    // The kernel writes this overlapped until the wait below drops `operation`. No Rust
+    // reference reads those fields. `UnsafeCell::get` is the pointer `ConnectNamedPipe` stores.
+    let overlapped_ptr = operation.overlapped.get();
+    // SAFETY: `pipe` is the listening instance and `overlapped_ptr` points into `operation`,
+    // which stays alive through this call. A pending operation keeps it alive in `ConnectWait`.
+    let code = unsafe { issued_connect(pipe.raw(), overlapped_ptr) };
+    if code != ERROR_IO_PENDING {
+        return finished_connect(code);
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // `HANDLE` is a raw pointer, so the wait thread receives it as an address.
+    let pipe_handle = pipe.raw() as usize;
+    let waited = Arc::clone(&operation);
+    let thread = std::thread::spawn(move || {
+        let _ = sender.send(wait_for_connect(pipe_handle as HANDLE, &waited));
+    });
+    let mut wait =
+        ConnectWait { pipe: pipe_handle, operation, thread: Some(thread), finished: false };
+    let result = receiver
+        .await
+        .unwrap_or_else(|_| Err(io::Error::other("pipe connect wait ended before a result")));
+    wait.finished = true;
+    result
+}
+
+/// The overlapped and its event. Both stay allocated until the wait thread and the cancelling
+/// task have finished with them.
+struct ConnectOperation {
+    event: OwnedHandle,
+    overlapped: UnsafeCell<OVERLAPPED>,
+}
+
+// SAFETY: the wait thread and the task that drops `ConnectWait` share this value. The kernel is
+// the only writer of the overlapped, the event handle is waited and signalled, and the value is
+// not moved. Both sides hold the `Arc` until after `GetOverlappedResult` returns. `Send` is
+// automatic; `Sync` is not, because of the `UnsafeCell`.
+unsafe impl Sync for ConnectOperation {}
+
+struct ConnectWait {
+    pipe: usize,
+    operation: Arc<ConnectOperation>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    finished: bool,
+}
+
+impl Drop for ConnectWait {
+    fn drop(&mut self) {
+        if !self.finished {
+            // SAFETY: `overlapped` points into `operation`, which this value still holds. The
+            // pipe address is the listening instance, which the caller keeps open until after
+            // this join. Cancel completes the pending call and signals the manual-reset event,
+            // including when the wait thread has not entered `WaitForSingleObject` yet.
+            unsafe {
+                CancelIoEx(self.pipe as HANDLE, self.operation.overlapped.get());
+            }
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn manual_event() -> io::Result<OwnedHandle> {
+    // SAFETY: a null name creates an unnamed event. On success the handle is owned here.
+    let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    if event.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: `CreateEventW` returned a live handle. This owner closes it.
+        Ok(unsafe { OwnedHandle::from_raw_handle(event) })
+    }
+}
+
+/// SAFETY: `pipe` is a named-pipe server handle and `overlapped` stays valid through the call.
+unsafe fn issued_connect(pipe: HANDLE, overlapped: *mut OVERLAPPED) -> u32 {
+    // SAFETY: the caller guarantees the pointer and the handle. `SetLastError` makes a
+    // synchronous success distinguishable from a stale code.
+    unsafe {
+        SetLastError(0);
+        if ConnectNamedPipe(pipe, overlapped) != 0 { 0 } else { GetLastError() }
+    }
+}
+
+fn finished_connect(code: u32) -> io::Result<()> {
+    match code {
+        0 | ERROR_PIPE_CONNECTED | ERROR_NO_DATA => Ok(()),
+        other => Err(os_error(other)),
+    }
+}
+
+fn wait_for_connect(pipe: HANDLE, operation: &ConnectOperation) -> io::Result<()> {
+    let overlapped = operation.overlapped.get();
+    // SAFETY: `event` is the manual-reset event stored in `overlapped`. It stays open while
+    // this thread and `ConnectWait` both hold the operation. The kernel signals it when the
+    // connect finishes or is cancelled, and a manual-reset event stays signaled if that
+    // happened before this wait.
+    unsafe {
+        WaitForSingleObject(operation.event.as_raw_handle(), INFINITE);
+    }
+    // SAFETY: `overlapped` is the operation started on `pipe`. `bWait` is false because the
+    // event has already been signaled.
+    let mut transferred = 0_u32;
+    let ok = unsafe { GetOverlappedResult(pipe, overlapped, &raw mut transferred, 0) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        // SAFETY: `GetOverlappedResult` just failed, and no call since then replaced the error.
+        finished_connect(unsafe { GetLastError() })
+    }
+}
+
+fn os_error(code: u32) -> io::Error {
+    match i32::try_from(code) {
+        Ok(code) => io::Error::from_raw_os_error(code),
+        Err(error) => io::Error::other(error),
+    }
+}
+
 /// Create one byte-mode, duplex, local-only pipe instance with an explicit security descriptor.
-/// `first` requests `FILE_FLAG_FIRST_PIPE_INSTANCE`.
+/// `first` requests `FILE_FLAG_FIRST_PIPE_INSTANCE`. The returned instance is listening and is
+/// not yet registered with the runtime.
 ///
 /// # Errors
 /// Returns the OS error; `ERROR_ACCESS_DENIED` when `first` is set and the name already exists.
 pub(super) fn create_instance(
     name: &OsStr,
     descriptor: &SecurityDescriptor,
+    owner: &Sid,
     first: bool,
-) -> io::Result<NamedPipeServer> {
+) -> io::Result<ListeningPipe> {
+    let wide = wide(name);
     let mut attributes = descriptor.attributes()?;
-    let mut options = ServerOptions::new();
-    options
-        .first_pipe_instance(first)
-        .reject_remote_clients(true)
-        .pipe_mode(PipeMode::Byte)
-        .access_inbound(true)
-        .access_outbound(true);
-    // SAFETY: `attributes` is a valid SECURITY_ATTRIBUTES whose descriptor outlives the call.
+    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_OWNER;
+    if first {
+        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+    }
+    let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS;
+    // SAFETY: `wide` is NUL-terminated. `attributes` and its descriptor outlive the call. The
+    // returned handle is owned by `ListeningPipe`, which closes it.
     assigning_owner(|| unsafe {
-        options.create_with_security_attributes_raw(name, (&raw mut attributes).cast::<c_void>())
+        let handle = CreateNamedPipeW(
+            wide.as_ptr(),
+            open_mode,
+            pipe_mode,
+            PIPE_UNLIMITED_INSTANCES,
+            65_536,
+            65_536,
+            0,
+            &raw const attributes,
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let owned = OwnedHandle::from_raw_handle(handle);
+        set_handle_owner(owned.as_raw_handle(), SE_KERNEL_OBJECT, owner)?;
+        Ok(ListeningPipe { handle: owned })
     })
 }
 
@@ -509,12 +712,13 @@ pub(super) fn server_process_user(pipe: &NamedPipeClient) -> io::Result<Sid> {
 pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> io::Result<File> {
     let wide = wide(path.as_os_str());
     let attributes = descriptor.attributes()?;
+    let owner = process_facts()?.user;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
     // returned handle is owned by the `File`.
     assigning_owner(|| unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
-            GENERIC_WRITE,
+            GENERIC_WRITE | WRITE_OWNER,
             0,
             &raw const attributes,
             CREATE_NEW,
@@ -524,7 +728,13 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        Ok(File::from_raw_handle(handle))
+        let owned = OwnedHandle::from_raw_handle(handle);
+        if let Err(error) = set_handle_owner(owned.as_raw_handle(), SE_FILE_OBJECT, &owner) {
+            drop(owned);
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(File::from_raw_handle(owned.into_raw_handle()))
     })
 }
 
