@@ -301,7 +301,7 @@ fn atomic_child(root: std::ffi::OsString) -> Result {
     let store = test_store(&root, mode, 1 << 20)?;
     let router = seed(&store, 3, mode, false)?;
     let _observer = crate::durability_test_hooks::observe(
-        root.to_path_buf(),
+        root.clone(),
         Arc::new(move |_, op, done| {
             if op == "direct_commit" {
                 if cut == "failed" && !done {

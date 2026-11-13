@@ -2731,7 +2731,6 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert!(matches!(result, Err(TransportError::Protocol(_))), "{result:?}");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

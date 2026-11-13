@@ -10,8 +10,7 @@ pub(super) use crate::test_support::federation_fixtures::{
 
 #[test]
 fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_0 = temp_store_path("federation_redb_store_restores_trust_state")?;
-    let path = _store_directory_0.to_path_buf();
+    let path = temp_store_path("federation_redb_store_restores_trust_state")?;
     let store = FederationRedbStore::open(&path)?;
     let mut state = FederationTrustState::new();
     state.upsert_route(federation_route("node_b.example", FederationTrustStatus::Active));
@@ -56,9 +55,9 @@ fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error
 #[test]
 fn federation_redb_store_never_persists_node_signing_seed() -> Result<(), Box<dyn std::error::Error>>
 {
-    let _store_directory_1 =
+    let store_directory_1 =
         temp_store_path("federation_redb_store_never_persists_node_signing_seed")?;
-    let path = _store_directory_1.to_path_buf();
+    let path = store_directory_1.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut state = FederationTrustState::new();
     let seed = seed_from_nonce(0x77, 11);
@@ -77,9 +76,9 @@ fn federation_redb_store_never_persists_node_signing_seed() -> Result<(), Box<dy
 #[test]
 fn federation_redb_store_spools_retries_and_expires_outbound_forward()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_2 =
+    let store_directory_2 =
         temp_store_path("federation_redb_store_spools_retries_and_expires_outbound_forward")?;
-    let path = _store_directory_2.to_path_buf();
+    let path = store_directory_2.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let forward_a = federation_forward_request("env_spool_a", "target_spool_a");
     let forward_b = federation_forward_request("env_spool_b", "target_spool_b");
@@ -110,9 +109,9 @@ fn federation_redb_store_spools_retries_and_expires_outbound_forward()
 #[test]
 fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_3 =
+    let store_directory_3 =
         temp_store_path("federation_redb_store_dedups_inbound_forward_replay_persistently")?;
-    let path = _store_directory_3.to_path_buf();
+    let path = store_directory_3.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut forward_a = federation_forward_request("env_inbound_a", "target_inbound_a");
     let mut forward_b = federation_forward_request("env_inbound_b", "target_inbound_a");
@@ -140,9 +139,9 @@ fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 #[test]
 fn inbound_forward_seen_record_survives_only_a_real_router_commit()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_4 =
+    let store_directory_4 =
         temp_store_path("inbound_forward_seen_record_survives_only_a_real_router_commit")?;
-    let path = _store_directory_4.to_path_buf();
+    let path = store_directory_4.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut forward = federation_forward_request("env_inbound_commit", "target_inbound_commit");
     forward.envelope = forwarded_source_envelope(forward.envelope)?;
@@ -203,8 +202,7 @@ fn inbound_forward_seen_record_survives_only_a_real_router_commit()
 #[test]
 fn concurrent_inbound_forward_retry_is_pending_until_the_holder_commits()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_5 = temp_store_path("concurrent_inbound_forward_retry_is_pending")?;
-    let path = _store_directory_5.to_path_buf();
+    let path = temp_store_path("concurrent_inbound_forward_retry_is_pending")?;
     let store = std::sync::Arc::new(FederationRedbStore::open(&path)?);
     let mut forward = federation_forward_request("env_inbound_pending", "target_inbound_pending");
     forward.envelope = forwarded_source_envelope(forward.envelope)?;
@@ -259,8 +257,7 @@ fn concurrent_inbound_forward_retry_is_pending_until_the_holder_commits()
 #[test]
 fn expired_inbound_forward_lease_is_reclaimed_after_lost_holder()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_6 = temp_store_path("expired_inbound_forward_lease_is_reclaimed")?;
-    let path = _store_directory_6.to_path_buf();
+    let path = temp_store_path("expired_inbound_forward_lease_is_reclaimed")?;
     let store = FederationRedbStore::open(&path)?;
     let mut forward = federation_forward_request("env_inbound_expired", "target_inbound_expired");
     forward.envelope = forwarded_source_envelope(forward.envelope)?;
@@ -623,8 +620,7 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
 #[test]
 fn federated_replay_is_root_scoped_even_for_copied_device_and_branch_keys()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_7 = temp_store_path("forwarded-root-scope")?;
-    let path = _store_directory_7.to_path_buf();
+    let path = temp_store_path("forwarded-root-scope")?;
     let store = FederationRedbStore::open(&path)?;
     let bob_root = ramflux_crypto::create_identity_root("bob", [0xb1; 32]);
     let mallory_root = ramflux_crypto::create_identity_root("mallory", [0xb2; 32]);
@@ -669,8 +665,7 @@ fn federated_replay_is_root_scoped_even_for_copied_device_and_branch_keys()
 #[test]
 fn forwarded_old_authority_cannot_resurrect_a_revoked_device_after_restart()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_8 = temp_store_path("forwarded-root-head")?;
-    let path = _store_directory_8.to_path_buf();
+    let path = temp_store_path("forwarded-root-head")?;
     let store = FederationRedbStore::open(&path)?;
     let root = ramflux_crypto::create_identity_root("bob", [0xb1; 32]);
     let old = root_bound_forward(&root, "bob", None, "old-bob-envelope")?;
@@ -708,8 +703,7 @@ fn forwarded_old_authority_cannot_resurrect_a_revoked_device_after_restart()
             )
             .is_err()
     );
-    let _store_directory_9 = temp_store_path("router-forwarded-root-head")?;
-    let router_path = _store_directory_9.to_path_buf();
+    let router_path = temp_store_path("router-forwarded-root-head")?;
     let router_store = crate::RouterRedbStore::open(&router_path)?;
     let durable_router = RouterCore::new();
     durable_router.authenticated_envelope_source_from(
@@ -773,10 +767,8 @@ fn foreign_epoch_fences_survive_capacity_and_restart_and_gateway_cannot_assert_a
         "victim-new",
     )?;
     let (_, live_source) = DeviceAuthKeyResponse::forwarded_envelope_source(&latest.envelope)?;
-    let _store_directory_10 = temp_store_path("foreign-capacity-router")?;
-    let router_path = _store_directory_10.to_path_buf();
-    let _store_directory_11 = temp_store_path("foreign-capacity-federation")?;
-    let federation_path = _store_directory_11.to_path_buf();
+    let router_path = temp_store_path("foreign-capacity-router")?;
+    let federation_path = temp_store_path("foreign-capacity-federation")?;
     let router_store = crate::RouterRedbStore::open(&router_path)?;
     let federation_store = FederationRedbStore::open(&federation_path)?;
     let router = RouterCore::new();

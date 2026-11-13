@@ -3,7 +3,6 @@
 
 //! Background process redirection must retain real daemon lifecycle diagnostics.
 use std::{
-    path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };

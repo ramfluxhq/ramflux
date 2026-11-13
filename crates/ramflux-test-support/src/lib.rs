@@ -29,6 +29,12 @@ impl TestPath {
         Ok(Self { path, directory })
     }
 
+    /// Copy the path while keeping this cleanup owner in the caller's scope.
+    #[must_use]
+    pub fn to_path_buf(&self) -> PathBuf {
+        self.path.clone()
+    }
+
     /// Derive a path without giving up the cleanup owner.
     pub fn child(&self, path: impl AsRef<Path>) -> Self {
         Self { path: self.path.join(path), directory: Arc::clone(&self.directory) }

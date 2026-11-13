@@ -371,7 +371,7 @@ mod tests {
         path::Path,
     };
 
-    struct TestRoot(std::path::PathBuf);
+    struct TestRoot(ramflux_test_support::TestPath);
 
     impl TestRoot {
         fn new() -> anyhow::Result<Self> {

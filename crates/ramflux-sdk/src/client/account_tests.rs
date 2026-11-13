@@ -25,7 +25,7 @@ fn wrapped_db_key(
     local_account_id: &str,
     secret: &[u8],
 ) -> Result<AccountDbKey, SdkError> {
-    let index = AccountIndex::open(&root)?;
+    let index = AccountIndex::open(root)?;
     let vault_secret = FileVaultSecretSource::new(index.root()).vault_secret(local_account_id)?;
     let wrapped = index
         .load_wrapped_db_key(local_account_id)?
@@ -105,7 +105,6 @@ fn first_unlock_does_not_write_a_wrapped_key_before_process_ownership()
     );
 
     drop(holder);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -133,7 +132,6 @@ fn secret_verification_does_not_create_vault_material_before_process_ownership()
     );
 
     drop(holder);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -187,7 +185,6 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
         Err(SdkError::Storage(StorageError::Integrity(_)))
     ));
 
-    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -248,7 +245,6 @@ fn concurrent_account_writers_avoid_deferred_upgrade_locks_for_fifty_cycles() ->
         );
     }
     drop(actor);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -282,6 +278,5 @@ fn persist_gateway_receive_cursor_refuses_activated_ledger() -> Result<(), SdkEr
         "{refused:?}"
     );
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

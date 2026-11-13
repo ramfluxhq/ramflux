@@ -29,7 +29,7 @@ const AUDIT_STRUCTURAL_TABLES: &[&str] = &["schema_migration"];
 
 #[test]
 fn message_copy_upserts_keep_registration_idempotent() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-upsert")?;
+    let (_root, db) = crate::tests::test_db("footprint-upsert")?;
     db.send_direct_message("thread", "message", "peer", b"content")?;
     for attempt in 0..3 {
         db.persist_actor_state(
@@ -51,7 +51,6 @@ fn message_copy_upserts_keep_registration_idempotent() -> Result<(), StorageErro
     assert!(!db.actor_state_exists("routed/committed/receipt")?);
     assert!(!db.actor_state_exists("delivery-receipt/pending/receipt")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -307,7 +306,7 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
 #[test]
 fn footprint_registration_rolls_back_and_late_copies_cannot_recreate_deleted_content()
 -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-rollback-late")?;
+    let (_root, db) = crate::tests::test_db("footprint-rollback-late")?;
     db.send_direct_message("thread", "message", "peer", b"secret")?;
     let result: Result<(), StorageError> = db.write_transaction(|| {
         db.persist_actor_state("routed/message-owner/message", &"private-source")?;
@@ -324,7 +323,6 @@ fn footprint_registration_rolls_back_and_late_copies_cannot_recreate_deleted_con
     assert!(!db.actor_state_exists("routed/message-owner/message")?);
     assert!(!db.actor_state_exists("delivery-receipt/pending/late")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -362,7 +360,7 @@ fn dropping_explicit_registration_is_detected_as_an_erasure_residual() -> Result
 
 #[test]
 fn equal_wire_ids_do_not_share_routed_copy_ownership() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-wire-collision")?;
+    let (_root, db) = crate::tests::test_db("footprint-wire-collision")?;
     for (message, payload) in [("first", "payload-one"), ("second", "payload-two")] {
         db.send_direct_message("thread", message, "peer", b"secret")?;
         db.persist_actor_state(&format!("routed/committed/{message}"),&json!({"routing":{"message_id":message},"entry":{"envelope":{"envelope_id":"shared-wire-id","payload_hash":payload}}}))?;
@@ -372,13 +370,12 @@ fn equal_wire_ids_do_not_share_routed_copy_ownership() -> Result<(), StorageErro
     assert!(db.actor_state_exists("routed/committed/second")?);
     assert!(!db.message_is_deleted("second")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn removing_retry_work_removes_its_provisional_footprints() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-retry-retirement")?;
+    let (_root, db) = crate::tests::test_db("footprint-retry-retirement")?;
     let entry = serde_json::to_vec(
         &json!({"envelope":{"envelope_id":"wire","payload_hash":"hash","encrypted_payload":"bytes"}}),
     )?;
@@ -393,13 +390,12 @@ fn removing_retry_work_removes_its_provisional_footprints() -> Result<(), Storag
         0
     );
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn sent_copy_envelopes_do_not_claim_an_unrelated_message_owner() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-sent-copy-owner")?;
+    let (_root, db) = crate::tests::test_db("footprint-sent-copy-owner")?;
     for message in ["logical", "envelope"] {
         db.send_direct_message("thread", message, "sender", b"body")?;
     }
@@ -419,14 +415,13 @@ fn sent_copy_envelopes_do_not_claim_an_unrelated_message_owner() -> Result<(), S
     db.delete_direct_message("thread", "envelope", "local", "delete-envelope")?;
     assert!(!db.actor_state_exists("own-device/send/surface")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn deleting_a_pointer_target_preserves_unread_and_other_message_receipts()
 -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-conversation-pointers")?;
+    let (_root, db) = crate::tests::test_db("footprint-conversation-pointers")?;
     let identity = ramflux_crypto::create_identity_root("reader", [0x73; 32]);
     let reader =
         ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&identity, "device")?;
@@ -470,7 +465,6 @@ fn deleting_a_pointer_target_preserves_unread_and_other_message_receipts()
         );
     }
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -518,7 +512,6 @@ fn replay_quarantine_envelope_is_footprinted_and_erased() -> Result<(), StorageE
     assert!(!db.actor_state_exists(&quarantined)?);
     assert_erased(&db, &["quarantined-private-content".to_owned(), "wire-private-id".to_owned()])?;
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -580,7 +573,6 @@ fn admits_predicate_controls_are_isolated() -> Result<(), StorageError> {
     assert!(!db.actor_state_exists("zz-new/x")?);
     assert!(db.actor_state_exists("zz-new/incomplete")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -636,20 +628,18 @@ fn envelope_writers_are_registered() -> Result<(), StorageError> {
     assert!(!db.actor_state_exists("zz-new/x")?);
     assert_eq!(audit(&db)?, Vec::<String>::new());
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn envelope_audit_reports_an_unregistered_copy() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-envelope-audit")?;
+    let (_root, db) = crate::tests::test_db("footprint-envelope-audit")?;
     db.connection.execute(
         "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('zz-new/raw',?1)",
         params![serde_json::to_vec(&envelope_value("message"))?],
     )?;
     assert_eq!(audit(&db)?, vec!["runtime_actor_state:zz-new/raw".to_owned()]);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -682,30 +672,27 @@ fn envelope_merge_import_leaves_no_unregistered_copy() -> Result<(), StorageErro
     drop(merged);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn envelope_history_import_leaves_no_unregistered_copy() -> Result<(), StorageError> {
-    let (source_root, source, _device) = crate::tests::signed_test_db("footprint-history-source")?;
+    let (_source_root, source, _device) = crate::tests::signed_test_db("footprint-history-source")?;
     source.append_event("history-envelope", "text", &serde_json::to_vec(&full_envelope())?)?;
     let bundle = source.export_history_bundle("device", "target-device")?;
     assert_eq!(bundle.encrypted_event_batch.len(), 1);
-    let (target_root, target) = crate::tests::test_db("footprint-history-target")?;
+    let (_target_root, target) = crate::tests::test_db("footprint-history-target")?;
     target.import_history_bundle(&bundle)?;
     assert!(target.event_body("history-envelope")?.is_some());
     assert_eq!(audit(&target)?, Vec::<String>::new());
     drop(target);
     drop(source);
-    std::fs::remove_dir_all(target_root)?;
-    std::fs::remove_dir_all(source_root)?;
     Ok(())
 }
 
 #[test]
 fn envelope_audit_honours_its_limit() -> Result<(), StorageError> {
-    let (root, db) = crate::tests::test_db("footprint-envelope-audit-limit")?;
+    let (_root, db) = crate::tests::test_db("footprint-envelope-audit-limit")?;
     let found = |db: &AccountDb, limit: usize| -> Result<Vec<String>, StorageError> {
         Ok(db.connection.call(move |raw| audit::unregistered_envelope_copies(raw, limit))?)
     };
@@ -721,7 +708,6 @@ fn envelope_audit_honours_its_limit() -> Result<(), StorageError> {
     assert_eq!(found(&db, 2)?.len(), 2);
     assert_eq!(found(&db, 16)?.len(), 3);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -820,7 +806,6 @@ fn envelope_merge_relocates_incoming_archive_rows_and_erases_them() -> Result<()
     }
     drop(reopened);
     drop(dbs);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -935,7 +920,6 @@ fn archive_footprint_triggers_renewed_on_open() -> Result<(), StorageError> {
     let db = reopen(&root, db)?;
     assert_eq!(archive_row_count(&db, "zz-new/inserted")?, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -957,7 +941,6 @@ fn archive_footprint_triggers_renewed_on_open_registers_existing_rows() -> Resul
     db.delete_direct_message("thread", "live", "local", "delete")?;
     assert_eq!(archive_row_count(&db, "zz-new/existing")?, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -982,7 +965,6 @@ fn lazily_created_archive_registers_retired_outbound_copies() -> Result<(), Stor
     let db = reopen(&root, db)?;
     assert_eq!(archive_row_count(&db, "own-device/send/x")?, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1032,7 +1014,6 @@ fn lazily_created_archive_registers_merge_local_copies() -> Result<(), StorageEr
     drop(reopened);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1091,7 +1072,7 @@ fn envelope_sql_predicate_matches_the_rust_predicate() -> Result<(), StorageErro
         "complete beside incomplete".into(),
         serde_json::to_vec(&json!({"envelope":{"ttl":1},"entry":{"envelope":full_envelope()}}))?,
     ));
-    let (root, db) = crate::tests::test_db("footprint-envelope-parity")?;
+    let (_root, db) = crate::tests::test_db("footprint-envelope-parity")?;
     db.connection.execute_batch("CREATE TEMP TABLE parity(state_json BLOB);")?;
     let sql = format!(
         "SELECT {} FROM parity",
@@ -1117,6 +1098,5 @@ fn envelope_sql_predicate_matches_the_rust_predicate() -> Result<(), StorageErro
     // created_at and the complete-beside-incomplete case; every other control is rejected.
     assert_eq!(accepted, 23);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

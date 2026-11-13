@@ -157,7 +157,6 @@ fn mac_subkey_bundle_migration_preserves_all_caller_bytes_and_replays() -> TestR
         assert_eq!(index.binding(), Some(expected[3].as_str()));
         drop(db);
     }
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -194,7 +193,6 @@ fn mac_subkey_bundle_migration_is_atomic_on_interruption() -> TestResult {
         "7tkgKbZENWssE__yM22Lxml0UyZPLzZFfPBKNe9YgSg"
     );
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -245,8 +243,6 @@ fn mac_subkey_bundle_new_accounts_use_independent_random_subkeys() -> TestResult
         assert_eq!(caller_outputs(&db)?, expected, "new account authority changed on reopen");
         drop(db);
     }
-    std::fs::remove_dir_all(first_root)?;
-    std::fs::remove_dir_all(second_root)?;
     Ok(())
 }
 
@@ -329,7 +325,6 @@ fn rekey_keeps_deleted_messages_deleted() -> TestResult {
         assert_eq!(persisted_rows(&db)?, before, "rekey/failed wrapping rewrote marker rows");
     }
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -360,7 +355,6 @@ fn mac_subkey_bundle_snapshot_restore_round_trip() -> TestResult {
     drop(copied);
     drop(snapshot_db);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -404,7 +398,6 @@ fn rekey_preserves_routed_seen_replay_refusal() -> TestResult {
         db.connection.execute("DELETE FROM runtime_unrouted", [])?;
     }
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -502,6 +495,5 @@ fn existing_empty_account_file_still_gets_independent_random_subkeys() -> TestRe
         "existing empty file used its DB key as a seed"
     );
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

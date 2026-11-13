@@ -30,8 +30,7 @@ async fn refusal_frames_carry_hint_over_tcp_and_quic() -> Result {
     let node = authority(now)?.node;
     let service = Arc::new(CustodyService::new(node.clone(), false, &store, now)?);
     let (mesh, serving) = gateway::start_mesh(&fixture.root, Arc::clone(&router), store, service)?;
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let mut context = fixture_value_0;
+    let (_fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
     context.router = mesh;
     context.node_id = "test-node".into();
     context.remote_addr = "127.0.0.1:12345".parse()?;

@@ -75,6 +75,5 @@ fn shared_relay_store_handles_concurrent_save_and_expiry_without_reopen() -> Res
 
     drop(state);
     drop(store);
-    let _ = std::fs::remove_file(store_path);
     Ok(())
 }

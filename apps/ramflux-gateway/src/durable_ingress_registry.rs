@@ -221,7 +221,7 @@ async fn drive_marked_gateway_edge(
     runtime: &crate::GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let capture = capture_path(ordinal);
+    let (_capture_directory, capture) = capture_path(ordinal);
     match entry {
         "session.rs:handle_gateway_submit" => {
             let (_fixture_directory_3, fixture_value_3) =
@@ -322,8 +322,7 @@ fn drive_itest_http_control(
     entry: &str,
     control: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_fixture_directory_6, fixture_value_6) = crate::session::tests::test_gateway_context()?;
-    let context = fixture_value_6;
+    let (_fixture_directory_6, context) = crate::session::tests::test_gateway_context()?;
     let (mut server, mut client) = loopback()?;
     let request = envelope_http_request(&control.envelope)?;
     match crate::itest_http::dispatch_protected_itest_request(
@@ -358,8 +357,7 @@ fn drive_itest_http_marked(
     entry: &str,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_fixture_directory_7, fixture_value_7) = crate::session::tests::test_gateway_context()?;
-    let context = fixture_value_7;
+    let (_fixture_directory_7, context) = crate::session::tests::test_gateway_context()?;
     let (mut server, mut client) = loopback()?;
     let request = envelope_http_request(&submit.envelope)?;
     crate::itest_http::dispatch_protected_itest_request(
@@ -478,15 +476,15 @@ fn resign_submit(
     Ok(())
 }
 
-fn capture_path(ordinal: u64) -> ramflux_test_support::TestPath {
-    std::env::var_os("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON").map_or_else(
-        || {
-            ramflux_test_support::TestPath::new()
-                .expect("test: allocate fixture directory")
-                .child(format!("ramflux-s6c-p03-capture-{ordinal}-{}.jsonl", std::process::id()))
-        },
-        PathBuf::from,
-    )
+fn capture_path(ordinal: u64) -> (Option<ramflux_test_support::TestPath>, PathBuf) {
+    if let Some(path) = std::env::var_os("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON") {
+        return (None, PathBuf::from(path));
+    }
+    let owner = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-s6c-p03-capture-{ordinal}-{}.jsonl", std::process::id()));
+    let path = owner.to_path_buf();
+    (Some(owner), path)
 }
 
 fn first_statement_has_mode_guard(

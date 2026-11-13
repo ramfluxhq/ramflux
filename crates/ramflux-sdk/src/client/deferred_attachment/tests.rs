@@ -78,14 +78,14 @@ impl Fixture {
             object,
             key_slot: slot,
         };
-        Ok(Self { client, root, reference, package })
+        Ok(Self { client, reference, package, root })
     }
 }
 fn open(root: &Path, create: bool) -> Result<RamfluxClient, SdkError> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("recipient", [0x21; 32]);
     client.create_device_branch("recipient", "recipient-device", 1, [0x22; 32]);
-    client.open_account_index(&root)?;
+    client.open_account_index(root)?;
     if create {
         client.create_account("account", "commitment")?;
     }

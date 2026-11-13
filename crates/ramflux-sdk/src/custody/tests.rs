@@ -29,7 +29,7 @@ pub(crate) struct TestVault {
     pub(crate) fail: AtomicBool,
     fail_branch: AtomicBool,
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
-    commit_obstacle: Mutex<Option<ramflux_test_support::TestPath>>,
+    commit_obstacle: Mutex<Option<PathBuf>>,
 }
 impl TestVault {
     pub(crate) fn entry_count(&self) -> std::result::Result<usize, SdkError> {

@@ -307,7 +307,7 @@ mod t24b1_client_db_reopen_tests {
 
     fn open_client(root: &std::path::Path, create: bool) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
-        client.open_account_index(&root)?;
+        client.open_account_index(root)?;
         if create {
             client.create_account("acct", "principal")?;
         }
@@ -345,7 +345,6 @@ mod t24b1_client_db_reopen_tests {
         );
         assert!(reopened.recv_session_checkpoint_at("conv-reopen", "env-recv-1")?);
         assert_eq!(reopened.gateway_receive_cursor("delivery-reopen")?, 41);
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -367,7 +366,6 @@ mod t24b1_client_db_reopen_tests {
         let reopened = open_client(&root, false)?;
         reopened.persist_dm_session_snapshot("conv-orphan", "env-orphan-1", "recv", &snapshot)?;
         assert!(reopened.recv_session_checkpoint_at("conv-orphan", "env-orphan-1")?);
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -395,7 +393,6 @@ mod t24b1_client_db_reopen_tests {
                 != serde_json::to_vec(&accepted_but_unpersisted.snapshot())?,
             "the reopened sender reuses the pre-send ratchet state"
         );
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

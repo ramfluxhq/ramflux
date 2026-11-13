@@ -9,7 +9,7 @@ use super::helpers::{
     TestResult, acknowledged_head, adoption, floor, h, head, live_phase, submitted_head, terminal,
 };
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn reopen(root: &Path) -> Result<AccountDb, StorageError> {
     AccountDb::open(

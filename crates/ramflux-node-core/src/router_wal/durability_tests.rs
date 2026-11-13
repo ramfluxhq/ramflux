@@ -163,7 +163,7 @@ fn segment_directory_before_ack() -> TestResult {
                 events
                     .iter()
                     .skip(sync + 1)
-                    .any(|e| e == &(writer.root.to_path_buf(), "directory_sync".into()))
+                    .any(|e| e == &(writer.root.clone(), "directory_sync".into()))
             );
         }
         drop(writer);
@@ -207,7 +207,6 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     release_tx.send(())?;
     drop(worker.join().expect("worker"));
     done_rx.recv_timeout(Duration::from_secs(5))?;
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -324,7 +323,7 @@ fn wait_for_abort(mut child: std::process::Child) -> TestResult {
 }
 
 fn record_k_child(root: PathBuf) -> TestResult {
-    let mut writer = RouterWalWriterState::open(root.to_path_buf(), 2, 0, u64::MAX)?;
+    let mut writer = RouterWalWriterState::open(root.clone(), 2, 0, u64::MAX)?;
     let record_count = std::sync::atomic::AtomicUsize::new(0);
     let _guard = observe(
         root,

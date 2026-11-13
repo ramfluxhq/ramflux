@@ -12,8 +12,8 @@ struct Mailbox {
     _directory: ramflux_test_support::TestPath,
 }
 fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
-    let _store_directory_0 = temp_store_path("root-qualified-mailbox")?;
-    let path = _store_directory_0.to_path_buf();
+    let store_directory_0 = temp_store_path("root-qualified-mailbox")?;
+    let path = store_directory_0.to_path_buf();
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -43,7 +43,7 @@ fn populated_mailbox() -> Result<Mailbox, Box<dyn std::error::Error>> {
         store.record_submission_increment(&key, expiry, Some(&queued.entry))?;
     }
     assert_eq!(router.resume("root-replay-target", 0, 10).len(), 2);
-    Ok(Mailbox { path, store, router, _directory: _store_directory_0 })
+    Ok(Mailbox { path, store, router, _directory: store_directory_0 })
 }
 
 #[test]

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -73,6 +72,5 @@ fn daemon_stop_exits_the_foreground_server_and_removes_its_socket()
     assert_eq!(response["stopping"], true);
     assert!(wait(&mut daemon.0)?.success());
     assert!(!socket.exists(), "graceful shutdown must remove its socket");
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

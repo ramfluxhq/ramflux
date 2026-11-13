@@ -125,7 +125,6 @@ async fn agent_export_refuses_wrong_custodian_with_named_reason() -> Result {
     assert!(!destination.exists());
     drop(bus);
     server.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

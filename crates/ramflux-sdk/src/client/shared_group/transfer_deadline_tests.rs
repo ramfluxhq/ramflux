@@ -57,7 +57,7 @@ impl Fixture {
             issued_at: now,
             expires_at: now + 60,
         };
-        Ok(Self { path, phone, laptop, next, base, probe })
+        Ok(Self { phone, laptop, next, base, probe, path })
     }
     fn pending(&self, probe: &TransferProbe) -> Result<(), SdkError> {
         self.phone.reserve_group_transfer(probe, &self.base)?;

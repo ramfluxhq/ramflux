@@ -80,7 +80,7 @@ fn entry(seq: u64) -> InboxEntry {
 }
 
 fn reopen(path: &Path) -> std::result::Result<RouterRedbStore, NodeCoreError> {
-    RouterRedbStore::open_without_wal(&path)
+    RouterRedbStore::open_without_wal(path)
 }
 
 #[test]
@@ -132,7 +132,6 @@ fn inbox_incarnation_lifecycle() -> Result {
     assert_eq!(stored(&store, "empty")?.expect("empty cursor").inbox_incarnation_id, Some(empty));
     assert!(stored(&store, "unknown")?.is_none());
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -182,7 +181,6 @@ fn pre_s6_store_upgrade() -> Result {
     assert_eq!(stored(&store, "target")?.expect("cursor").inbox_incarnation_id, Some(id));
     assert_eq!(stored(&store, "target")?.expect("cursor").cursor.settled_inbox_seq, 49);
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

@@ -97,7 +97,6 @@ fn retirement_outbox_seals_complete_fanout_and_reopens_with_indexed_pages() -> R
     db.bind_native_grant("message", "ref", &association(&g)?)?;
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -216,7 +215,6 @@ fn restore_keeps_target_attachment_authority_and_recounts_its_budgets() -> Resul
     drop(candidate);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

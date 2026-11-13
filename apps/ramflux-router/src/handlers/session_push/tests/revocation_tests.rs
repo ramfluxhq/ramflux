@@ -147,7 +147,7 @@ fn revoked_set(
 
 #[test]
 fn incarnation_mismatch_precedes_future_sequence() -> anyhow::Result<()> {
-    let (router, path, accepted) = seed("E-before-sequence")?;
+    let (_path, router, accepted) = seed("E-before-sequence")?;
     let wrong = "ffffffffffffffffffffffffffffffff";
     for seq in [1, 2, ramflux_protocol::MAX_SAFE_JSON_INTEGER] {
         let batch = call(
@@ -176,6 +176,5 @@ fn incarnation_mismatch_precedes_future_sequence() -> anyhow::Result<()> {
     }
     assert_eq!(router.state().resume("target", 0, 10).len(), 1);
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }

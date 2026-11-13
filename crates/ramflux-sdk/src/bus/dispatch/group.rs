@@ -1754,7 +1754,6 @@ pub(crate) mod history;
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::time::SystemTime;
 
     #[test]
     fn group_wrapper_preserves_existing_typed_error_contracts() {

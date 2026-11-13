@@ -77,7 +77,6 @@ fn c_abi_smoke_runs_real_sdk_storage_and_event_queue() -> Result<(), Box<dyn std
         return Err(format!("C smoke did not report success: {stdout}").into());
     }
 
-    let _ = std::fs::remove_dir_all(temp_root);
     Ok(())
 }
 

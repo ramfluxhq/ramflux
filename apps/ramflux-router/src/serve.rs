@@ -1332,7 +1332,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn raw_submit_bridge_returns_committed_mesh_metadata() -> anyhow::Result<()> {
-        let (path, state, store) = crate::router_runtime::tests::test_router("compio-metadata")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("compio-metadata")?;
         let router =
             std::sync::Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
         let bridge = super::RouterSubmitBridge {
@@ -1361,7 +1361,6 @@ mod tests {
         assert!(wire["retain_until"].as_i64().is_some());
         drop(bridge);
         drop(router);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 

@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn legacy_private_keys_need_retained_signed_root_authority_and_preserve_their_keys()
     -> Result<(), SdkError> {
-        let (path, client) = account()?;
+        let (_path, client) = account()?;
         let device = client.owned_device_identity()?;
         legacy(&client, &device)?;
         assert!(client.legacy_owned_private_prekey(&device).is_err());
@@ -162,13 +162,12 @@ mod tests {
         assert_eq!(before.signed_prekey_seed, migrated.signed_prekey_seed);
         assert_eq!(before.bundle, migrated.bundle);
         drop(client);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
     fn same_name_under_a_foreign_root_cannot_select_or_overwrite_owned_private_keys()
     -> Result<(), SdkError> {
-        let (path, client) = account()?;
+        let (_path, client) = account()?;
         let foreign = RootQualifiedDeviceRef::for_owned_account_device(
             &ramflux_crypto::create_identity_root("alice", [51; 32]),
             "phone",
@@ -183,7 +182,6 @@ mod tests {
             Some(own.root_commitment())
         );
         drop(client);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }

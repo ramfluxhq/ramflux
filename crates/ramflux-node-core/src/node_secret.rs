@@ -182,7 +182,6 @@ mod tests {
                 .map_err(|_| invalid())?;
             assert_eq!(NodeSecret::from_file(&path).is_ok(), accepted, "mode {mode:o}");
         }
-        std::fs::remove_file(&path).map_err(|_| invalid())?;
         Ok(())
     }
 }

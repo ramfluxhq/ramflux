@@ -153,8 +153,7 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
 
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
+    let root = ramflux_test_support::TestPath::new()?
         .child(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
     let mut guard = RootGuard { path: root.clone(), keep: false };
     std::fs::create_dir_all(root.join("secrets"))?;
@@ -457,7 +456,7 @@ pub fn spawn_daemon_with_env(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    Ok(Daemon { socket, data_root, child })
+    Ok(Daemon { child, socket, data_root })
 }
 
 pub fn configure_node(daemon: &Daemon, discovery_url: &str) -> Result<String> {
@@ -1887,13 +1886,11 @@ fn wait_leader_reaped(group: &mut proc::ProcessGroup, budget: Duration) -> Resul
 
 /// Harness proof: Drop of an unresponsive daemon returns inside `budget` with no leftovers.
 pub fn prove_unresponsive_daemon_drop_within(budget: Duration) -> Result<()> {
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!(
-            "rf-cli-e2e-hung-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
-        ));
+    let root = ramflux_test_support::TestPath::new()?.child(format!(
+        "rf-cli-e2e-hung-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
     std::fs::create_dir_all(&root)?;
     let socket = root.join("hung.sock");
     let data_root = root.join("data");
@@ -1902,7 +1899,7 @@ pub fn prove_unresponsive_daemon_drop_within(budget: Duration) -> Result<()> {
     command.arg("60");
     let child = ChildGuard::spawn("hung-daemon".into(), command, data_root.join("daemon.log"))?;
     let pid = child.pid();
-    let daemon = Daemon { socket, data_root, child };
+    let daemon = Daemon { child, socket, data_root };
     let started = Instant::now();
     drop(daemon);
     let gone = proc::wait_process_group_gone(pid, budget);

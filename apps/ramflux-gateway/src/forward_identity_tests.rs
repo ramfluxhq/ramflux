@@ -13,7 +13,7 @@ use ramflux_transport::{MeshQuicServer, MeshTlsConfig, TransportError};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::mpsc;

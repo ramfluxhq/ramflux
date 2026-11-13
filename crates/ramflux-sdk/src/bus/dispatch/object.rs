@@ -2249,7 +2249,6 @@ mod spool_tests {
             Err(SdkError::ObjectErased)
         ));
         drop(state);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

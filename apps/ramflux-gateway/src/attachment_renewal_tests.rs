@@ -633,7 +633,6 @@ mod relay_clamp {
         let clamped = sign(minted.expires_at)?;
         assert_eq!(clamped.attestation.expires_at, minted.expires_at);
         assert!(admit(&clamped, 2).is_ok());
-        let _ = std::fs::remove_dir_all(&path);
         Ok(())
     }
 }

@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn selected_franking_evidence_is_built_from_stored_message_metadata() -> Result<(), SdkError> {
-        let (root, client) = test_client("franking-evidence")?;
+        let (_root, client) = test_client("franking-evidence")?;
         let metadata = MessageMetadata {
             franking_report: Some(FrankingReportMetadata {
                 node_id: "localhost".to_owned(),
@@ -933,7 +933,6 @@ mod tests {
         assert_eq!(evidence.franking_tag, "node-tag");
         assert_eq!(evidence.franking_timestamp, 1_760_001_234_567);
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -941,7 +940,7 @@ mod tests {
 
     fn reopen_client(root: &std::path::Path) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
-        client.open_account_index(&root)?;
+        client.open_account_index(root)?;
         client.unlock_account("acct", b"test-secret")?;
         Ok(client)
     }
@@ -955,7 +954,7 @@ mod tests {
     // by the storage-level idempotency regression.
     #[test]
     fn dm_session_reappend_with_changed_snapshot_is_rejected_fail_closed() -> Result<(), SdkError> {
-        let (root, client) = test_client("b1a-event-replay")?;
+        let (_root, client) = test_client("b1a-event-replay")?;
         let first = seed_session(1)?;
         client.persist_dm_session("conv_x", "env_1", "recv", &first)?;
         assert!(client.recv_session_checkpoint_at("conv_x", "env_1")?);
@@ -975,7 +974,6 @@ mod tests {
         // The originally-committed row must be unchanged (checkpoint still points at env_1).
         assert!(client.recv_session_checkpoint_at("conv_x", "env_1")?);
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -1015,7 +1013,6 @@ mod tests {
             "projection present but checkpoint not current must still re-decrypt"
         );
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -1042,7 +1039,6 @@ mod tests {
             "reopen must reload the persisted counter, not the un-persisted in-flight advance"
         );
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -1075,7 +1071,6 @@ mod tests {
         );
         assert_ne!(ca.ciphertext, cb.ciphertext, "different plaintext under the reused nonce");
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

@@ -103,7 +103,6 @@ mod tests {
         assert_eq!(db.load_actor_state::<i64>("group-message/upgrade-start")?, Some(12345));
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

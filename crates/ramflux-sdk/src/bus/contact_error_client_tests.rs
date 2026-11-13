@@ -77,6 +77,5 @@ async fn contact_confirmation_details_and_retry_hints_survive_the_sdk_client_rou
         matches!(old_api,Err(SdkError::LocalBus(message)) if message=="ValidationFailed: confirmation required")
     );
     server.await.map_err(|e| SdkError::LocalBus(e.to_string()))??;
-    std::fs::remove_file(path)?;
     Ok(())
 }

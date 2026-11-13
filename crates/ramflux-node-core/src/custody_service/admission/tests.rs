@@ -86,7 +86,6 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
             "a refused frame must not have authenticated its principal"
         );
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -146,7 +145,6 @@ fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn 
         let next = pool.acquire("192.0.2.1".parse()?, None, tick)?;
         next.mark_authenticated("two")?;
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -185,6 +183,5 @@ fn require_current_primary_rejects_either_mismatched_half() -> Result<(), Box<dy
             Err(CustodyRefusal::BindingRefused)
         );
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }

@@ -285,7 +285,6 @@ mod tests {
                     .is_none()
             );
         }
-        std::fs::remove_file(path)?;
         Ok(())
     }
 }

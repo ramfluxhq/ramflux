@@ -2164,7 +2164,7 @@ mod t21a1_tests {
     #[test]
     fn decrypt_object_key_slot_defers_slot_session_commit_until_committed() -> Result<(), SdkError>
     {
-        let (root, client) = slot_test_client("defer-commit")?;
+        let (_root, client) = slot_test_client("defer-commit")?;
         let object_id = "object_slot_defer";
         let slot_conversation_id = "conv_slot_defer";
         let recipient_device_id = "recipient_device_slot";
@@ -2222,7 +2222,6 @@ mod t21a1_tests {
             dm_session_event_id(slot_conversation_id, "recv", &format!("object-slot:{object_id}"));
         assert_eq!(client.projection_checkpoint(&checkpoint_name)?, Some(expected));
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

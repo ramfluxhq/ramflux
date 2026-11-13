@@ -342,7 +342,6 @@ fn pin_lookup_is_empty_unless_advertised_and_unadmitted_nodes_are_source_unknown
         pin_answer_for(&state, &store, true, "node-a")?,
         ramflux_node_core::PinAnswer::SourceUnknown
     );
-    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 

@@ -126,8 +126,7 @@ pub(super) fn accepted(id: &str) -> Value {
 /// I-NP: a correctly signed submit, accepted or refused by admission, writes no gateway state.
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_ingress_persists_nothing() -> TestResult {
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let context = fixture_value_0;
+    let (_fixture_directory_0, context) = crate::session::tests::test_gateway_context()?;
     let runtime = test_runtime()?;
     let before = snapshot(&context)?;
 

@@ -451,7 +451,6 @@ fn fanout_reservation_is_atomic() -> Result {
     assert_eq!(core.view("target", &id), (2, vec![(1, 2)]));
     drop(core);
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -472,7 +471,6 @@ fn request_guard_does_not_own_storage_shutdown() -> Result {
     let store = test_store(&root, 0, 1024 * 1024)?;
     assert_eq!(store.publication_core()?.view("target", &id), (1, vec![(1, 1)]));
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

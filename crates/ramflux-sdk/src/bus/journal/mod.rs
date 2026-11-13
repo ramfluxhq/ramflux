@@ -170,7 +170,6 @@ mod tests {
         assert!(topics.contains("mcp.approval.request"));
         assert!(topics.contains("ramflux.a2ui.action_submitted"));
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -199,7 +198,6 @@ mod receipt_topics {
         assert!(events.iter().any(|(topic, _, _)| topic == "message.received"));
         assert!(!serde_json::to_string(&events)?.contains("PRIVATE_BODY"));
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -201,7 +201,6 @@ fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
     }
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 fn proof_negatives(
@@ -454,7 +453,6 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
     }
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

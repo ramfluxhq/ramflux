@@ -541,7 +541,6 @@ mod tests {
         let path = local_bus_account_manifest_path(&root, &manifest.local_account_id);
         assert!(crate::bus::daemon::account_manifest_available(&path));
         assert_eq!(read_local_bus_account_manifest(&path)?.device_id, manifest.device_id);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[tokio::test]
@@ -593,7 +592,6 @@ mod tests {
         assert_eq!(status["device_id"], "device_alice");
         assert_eq!(status["principal_id"], "principal_alice");
         assert_eq!(status["target_delivery_id"], "target_alice");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

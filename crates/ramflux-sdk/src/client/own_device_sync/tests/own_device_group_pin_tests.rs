@@ -6,9 +6,9 @@ use super::*;
 #[test]
 fn own_device_history_restores_member_pins_before_sender_keys_without_conflating_siblings()
 -> Result<(), SdkError> {
-    let (source_root, source) =
+    let (_source_root, source) =
         client_with_account("group-pins-source", "principal_sync", "source_device_sync")?;
-    let (target_root, mut target) =
+    let (_target_root, mut target) =
         client_with_account("group-pins-target", "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
     source.create_group("sync_group", "source_device_sync")?;
@@ -77,17 +77,15 @@ fn own_device_history_restores_member_pins_before_sender_keys_without_conflating
     );
     drop(source);
     drop(target);
-    std::fs::remove_dir_all(source_root)?;
-    std::fs::remove_dir_all(target_root)?;
     Ok(())
 }
 
 #[test]
 fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_membership()
 -> Result<(), SdkError> {
-    let (source_root, source) =
+    let (_source_root, source) =
         client_with_account("group-pin-conflict-source", "principal_sync", "source_device_sync")?;
-    let (target_root, mut target) =
+    let (_target_root, mut target) =
         client_with_account("group-pin-conflict-target", "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
     source.create_group("sync_group", "source_device_sync")?;
@@ -155,7 +153,5 @@ fn conflicting_own_device_member_pins_skip_unsafe_history_and_preserve_local_mem
     assert!(target.direct_message_by_id("snapshot_message")?.is_none());
     drop(source);
     drop(target);
-    std::fs::remove_dir_all(source_root)?;
-    std::fs::remove_dir_all(target_root)?;
     Ok(())
 }

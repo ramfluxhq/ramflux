@@ -181,7 +181,6 @@ mod tests {
         query.body = serde_json::json!({"since_seq":3});
         assert_eq!(read(db, &query)?["resync_required"], true);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

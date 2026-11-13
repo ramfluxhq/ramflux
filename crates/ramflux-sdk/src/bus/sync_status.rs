@@ -189,7 +189,6 @@ mod tests {
         assert!(page.get("status").is_none());
         drop(reopened);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

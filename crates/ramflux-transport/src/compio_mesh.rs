@@ -1390,7 +1390,6 @@ mod tests {
             .join()
             .map_err(|_| test_error("compio I-JSON server thread panicked"))?
             .map_err(test_error)?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

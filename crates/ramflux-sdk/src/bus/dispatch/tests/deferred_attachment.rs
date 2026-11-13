@@ -21,7 +21,7 @@ fn make_state(root: &Path) -> Result<LocalBusDaemonState, SdkError> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("recipient", [0x51; 32]);
     client.create_device_branch("recipient", "device", 1, [0x52; 32]);
-    client.open_account_index(&root)?;
+    client.open_account_index(root)?;
     client.create_account("account", "commitment")?;
     client.unlock_account("account", b"secret")?;
     client.account_db()?.persist_actor_state("attachment/reference/object", &json!({"reference":{
@@ -124,7 +124,6 @@ async fn deleted_attachment_receipt_is_not_retried() -> Result<(), SdkError> {
         Vec::<String>::new()
     );
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -148,7 +147,6 @@ async fn object_get_preserves_tombstoned_error_for_a_locally_deleted_ordinary_ob
             .await;
     assert!(matches!(result, Err(SdkError::Sync(SyncError::ObjectTombstoned))));
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -180,7 +178,6 @@ async fn deleted_attachment_page_fetch_preserves_typed_error() -> Result<(), Sdk
     assert_eq!(crate::bus::io::local_bus_error_code(&error), "AttachmentDeleted");
     assert_eq!(error.to_string(), crate::error::ATTACHMENT_DELETED);
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -246,7 +243,6 @@ async fn frame_receipt_cache_does_not_make_a_fetch_failure_terminal() -> Result<
         Box::pin(crate::bus::mutations::execute(&mut state, "account", &command)).await.is_err()
     );
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -275,7 +271,6 @@ async fn deleted_attachment_receipt_survives_scheduler_deadline() -> Result<(), 
     );
     assert!(account.has_pooled_engine());
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -328,7 +323,6 @@ async fn fetched_attachment_reads_are_local_with_a_saved_node_profile() -> Resul
             .await?;
     assert_eq!(begin.response_body["total_len"], b"local bytes".len());
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -366,7 +360,6 @@ async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gatewa
     assert_eq!(saved["previous_session_id"], "current-session");
     assert_eq!(saved["resume_token"], "current-resume");
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -433,7 +426,6 @@ async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry(
     assert!(account.has_pooled_engine());
     drop(account);
     drop(spare);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

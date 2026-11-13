@@ -192,7 +192,6 @@ mod tests {
         assert_eq!(db.load_actor_state::<u64>(&floor)?, Some(912));
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

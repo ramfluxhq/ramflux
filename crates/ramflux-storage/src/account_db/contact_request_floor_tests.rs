@@ -40,7 +40,6 @@ fn legacy_floor_rows_reopen_unchanged_and_oldest_expired_slots_are_reused() -> T
     assert_eq!(db.contact_request_authority_floor_usage(100)?, (4096, 4096));
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -84,6 +83,5 @@ fn clearing_retired_floors_preserves_pending_authority_and_consent_fences() -> T
     assert_eq!(db.retained_contact_request_fence("declined")?, declined);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

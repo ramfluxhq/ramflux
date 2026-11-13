@@ -198,7 +198,6 @@ mod tests {
         assert!(older.join("account.db").exists());
         assert_eq!(std::fs::read(complete)?, b"complete archive");
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

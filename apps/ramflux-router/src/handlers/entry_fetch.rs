@@ -33,7 +33,7 @@ pub(super) fn value(
 mod tests {
     #[test]
     fn point_entry_mesh_contract() -> anyhow::Result<()> {
-        let (path, state, store) = crate::router_runtime::tests::test_router("point-entry-mesh")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("point-entry-mesh")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state.clone(), store.clone(), None);
         let response = super::super::handle_mesh_request_value(
             ramflux_transport::MeshHttpRequest {
@@ -78,7 +78,6 @@ mod tests {
         drop(handle);
         drop(store);
         drop(state);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 }

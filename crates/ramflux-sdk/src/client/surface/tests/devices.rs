@@ -3,9 +3,10 @@
 
 use super::*;
 use crate::client::surface::{ControlKind, control::SurfaceControl};
+use std::path::PathBuf;
 pub(super) struct Terminals {
     pub(super) clients: Vec<RamfluxClient>,
-    root: ramflux_test_support::TestPath,
+    _root: ramflux_test_support::TestPath,
 }
 impl Terminals {
     pub(super) fn new() -> Result<Self, SdkError> {
@@ -62,7 +63,7 @@ impl Terminals {
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
         }
-        Ok(Self { root, clients })
+        Ok(Self { clients, _root: root })
     }
 }
 impl Drop for Terminals {

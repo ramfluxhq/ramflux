@@ -82,7 +82,6 @@ mod tests {
         assert_eq!(value["objects"][1]["object_id"], "second");
         server.await??;
         drop(bus);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

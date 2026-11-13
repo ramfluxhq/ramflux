@@ -31,7 +31,7 @@ fn staged(
         },
         archive_bytes: 42,
         checks: BackupAttachmentChecks { verified: 3, ..BackupAttachmentChecks::default() },
-        staging: VerifiedBackupStaging::new(path.to_path_buf(), [91; 32], now)?,
+        staging: VerifiedBackupStaging::new(path, [91; 32], now)?,
     })
 }
 #[test]

@@ -80,8 +80,7 @@ fn server_retention_gateway_keeps_live_sinks_and_drops_expired_metadata()
 #[test]
 fn server_retention_router_gc_is_dry_run_safe_and_survives_restart()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_0 = temp_store_path("server_retention_router")?;
-    let path = _store_directory_0.to_path_buf();
+    let path = temp_store_path("server_retention_router")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
@@ -105,8 +104,7 @@ fn server_retention_router_gc_is_dry_run_safe_and_survives_restart()
 #[test]
 fn server_retention_federation_gc_and_public_key_pin_survive_restart()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_1 = temp_store_path("server_retention_federation")?;
-    let path = _store_directory_1.to_path_buf();
+    let path = temp_store_path("server_retention_federation")?;
     let store = FederationRedbStore::open(&path)?;
     let mut forward = super::federation::federation_forward_request("retire", "mailbox");
     forward.envelope.created_at = 100;
@@ -128,8 +126,7 @@ fn server_retention_federation_gc_and_public_key_pin_survive_restart()
 #[test]
 fn server_retention_push_routes_encrypt_rotate_and_revoke_on_current_authority()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_2 = temp_store_path("server_retention_push")?;
-    let path = _store_directory_2.to_path_buf();
+    let path = temp_store_path("server_retention_push")?;
     let key = NodeSecret::ephemeral()?;
     let mut open = gateway_open_frame("phone", "stream");
     open.target_delivery_id = "delivery".into();
@@ -190,8 +187,7 @@ fn server_retention_push_routes_encrypt_rotate_and_revoke_on_current_authority()
 #[test]
 fn server_retention_notify_terminal_rows_and_raw_collapse_are_not_exposed()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_3 = temp_store_path("server_retention_notify")?;
-    let path = _store_directory_3.to_path_buf();
+    let path = temp_store_path("server_retention_notify")?;
     let store = NotifyRedbStore::open_without_wal(&path)?;
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("delivery", "web");
@@ -218,8 +214,7 @@ fn server_retention_notify_terminal_rows_and_raw_collapse_are_not_exposed()
 #[test]
 fn server_retention_legacy_federation_seed_is_removed_and_compacted()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_4 = temp_store_path("server_retention_seed_migration")?;
-    let path = _store_directory_4.to_path_buf();
+    let path = temp_store_path("server_retention_seed_migration")?;
     let seed = [77; 32];
     let encoded = serde_json::to_vec(&Some(seed))?;
     {
@@ -280,8 +275,7 @@ fn server_retention_signed_push_control_rejects_forgery_expiry_and_selector_inje
 #[test]
 fn server_retention_router_wal_does_not_resurrect_expired_entries()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_5 = temp_store_path("server_retention_router_wal")?;
-    let path = _store_directory_5.to_path_buf();
+    let path = temp_store_path("server_retention_router_wal")?;
     let wal = path.with_extension("wal");
     let now = i64::try_from(now_unix_seconds())?;
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
@@ -314,8 +308,7 @@ fn server_retention_router_wal_does_not_resurrect_expired_entries()
 #[test]
 fn server_retention_notify_wal_prunes_expired_work_and_bounded_diagnostics()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_6 = temp_store_path("server_retention_notify_wal")?;
-    let path = _store_directory_6.to_path_buf();
+    let path = temp_store_path("server_retention_notify_wal")?;
     let wal = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal)?;
     let now = now_unix_seconds();
@@ -346,8 +339,7 @@ fn server_retention_notify_wal_prunes_expired_work_and_bounded_diagnostics()
 #[test]
 fn server_retention_retired_notify_routes_are_refused_without_rewriting()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_7 = temp_store_path("server_retention_retired_push")?;
-    let path = _store_directory_7.to_path_buf();
+    let path = temp_store_path("server_retention_retired_push")?;
     let mut state = NotifyQueueState::new();
     let mut route = notify_webpush_route("retired-delivery", "web");
     route.token = "retired-provider-token".into();

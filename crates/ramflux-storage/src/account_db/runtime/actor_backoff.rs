@@ -118,7 +118,6 @@ mod tests {
         assert!(!db.actor_state_exists("retry/lease/missing")?);
         assert_eq!(db.load_actor_state::<serde_json::Value>("lease/a")?, Some(value));
         drop((db, index));
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

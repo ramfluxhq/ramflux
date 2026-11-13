@@ -146,7 +146,7 @@ impl Fixture {
             "thread",
             &json!({"kind":"direct","participants":[client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id]}),
         )?;
-        Ok(Self { root, client })
+        Ok(Self { client, root })
     }
 }
 

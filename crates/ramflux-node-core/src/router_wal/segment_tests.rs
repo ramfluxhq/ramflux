@@ -25,10 +25,11 @@ pub(super) fn matrix() -> Result {
     }
     Ok(())
 }
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate segment fixture").child(name)
+}
 fn held_boundary(pipeline: bool, roll: bool, operation: &'static str) -> Result {
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!("segment-matrix-{}-{pipeline}-{roll}-{operation}", std::process::id()));
+    let root = fixture(&format!("segment-matrix-{pipeline}-{roll}-{operation}"));
     fs::create_dir_all(&root)?;
     let shard = router_wal_shard_root(&root, 0);
     fs::create_dir_all(&shard)?;
@@ -166,7 +167,7 @@ fn new_ancestor_order(pipeline: bool) -> Result {
         .iter()
         .enumerate()
         .skip(shard_mkdir + 1)
-        .find(|(_, event)| *event == &(root.to_path_buf(), "directory_sync".into()))
+        .find(|(_, event)| *event == &(root.clone(), "directory_sync".into()))
         .expect("new shard parent sync")
         .0;
     assert!(shard_mkdir < parent_sync);

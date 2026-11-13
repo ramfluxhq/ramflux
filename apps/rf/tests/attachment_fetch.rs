@@ -58,6 +58,5 @@ async fn attachment_fetch_prints_deleted_receipt_and_exits_one()
     assert_eq!(receipt["last_error"], "attachment deleted");
     assert_eq!(receipt["retryable"], false);
     assert!(String::from_utf8(output.stderr)?.contains("attachment deleted"));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

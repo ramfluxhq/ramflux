@@ -471,7 +471,7 @@ mod tests {
     use super::*;
     #[test]
     fn generated_page_reader_returns_bounds_and_shared_errors() -> Result<(), SdkError> {
-        let (root, client) = crate::client::own_device_sync::tests::client_with_account(
+        let (_root, client) = crate::client::own_device_sync::tests::client_with_account(
             "generated-page-reader",
             "principal_sync",
             "local",
@@ -491,7 +491,6 @@ mod tests {
             assert_eq!(error.code, code);
         }
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -549,7 +548,6 @@ mod tests {
             assert_eq!(row["body_utf8"], "[Task]");
         }
         drop(client);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
@@ -576,7 +574,6 @@ mod tests {
             "failed"
         );
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[tokio::test]
@@ -625,7 +622,6 @@ mod tests {
         assert_eq!(second["conversations"][0]["unread_count"], 1);
         readers.stop().await;
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -640,7 +636,7 @@ mod read_model_selector_tests {
     fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
     -> Result<(), Box<dyn std::error::Error>> {
         let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-        let (root, client) = crate::client::own_device_sync::tests::client_with_account(
+        let (_root, client) = crate::client::own_device_sync::tests::client_with_account(
             "reader-selectors",
             "principal_sync",
             "local",
@@ -685,7 +681,6 @@ mod read_model_selector_tests {
         let bare = generated_page(&client, &json!({"conversation_id":"c"}))?;
         assert!(bare.get("schema").is_none(), "bare generated page keeps its existing shape");
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

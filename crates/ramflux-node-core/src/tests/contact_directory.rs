@@ -432,9 +432,8 @@ fn reopening_legacy_registration_policies_restores_finite_admission_and_keeps_op
     for (limit, window, expected_limit, expected_window) in
         [(u32::MAX, 60, 120, 60), (0, 60, 120, 60), (3, 0, 3, 60), (3, 90, 3, 90)]
     {
-        let _store_directory_0 =
-            temp_store_path(&format!("registration-upgrade-{limit}-{window}"))?;
-        let path = _store_directory_0.to_path_buf();
+        let store_directory_0 = temp_store_path(&format!("registration-upgrade-{limit}-{window}"))?;
+        let path = store_directory_0.to_path_buf();
         let router = RouterCore::new();
         router.upsert_session(session("upgrade-session", SessionLifecycle::Live, 1, 1))?;
         router.mvp6_set_registration_policy(RegistrationPolicy {

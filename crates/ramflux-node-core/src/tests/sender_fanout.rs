@@ -7,8 +7,7 @@ type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result {
     for mode in 0..3 {
-        let _store_directory_0 = temp_store_path(&format!("sender-fanout-{mode}"))?;
-        let root = _store_directory_0.to_path_buf();
+        let root = temp_store_path(&format!("sender-fanout-{mode}"))?;
         let store = crate::publication::open_durability_fixture(&root, mode)?;
         let router = RouterCore::new();
         store.bootstrap_router(&router)?;

@@ -5,8 +5,7 @@ use super::{Carrier, Outcome, PayloadKind, key};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{
     A2uiConversationCommand as C, CreateSurfaceCommand, DeleteSurfaceCommand, PatchSurfaceCommand,
-    StreamAppendCommand, SurfacePatchOp, SurfaceType, path::PathBuf, surface_args_hash,
-    surface_snapshot_hash,
+    StreamAppendCommand, SurfacePatchOp, SurfaceType, surface_args_hash, surface_snapshot_hash,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +19,7 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
     let mut client = RamfluxClient::new();
     client.create_identity_root(id, [seed; 32]);
     client.create_device_branch(id, &format!("{id}-device"), 1, [seed + 1; 32]);
-    client.open_account_index(&root)?;
+    client.open_account_index(root)?;
     client.create_account(id, "surface-test-commitment")?;
     client.unlock_account(id, b"surface-test-secret")?;
     Ok(client)
@@ -47,7 +46,7 @@ impl Fixture {
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
         }
-        Ok(Self { root, author, human })
+        Ok(Self { author, human, root })
     }
 }
 impl Drop for Fixture {

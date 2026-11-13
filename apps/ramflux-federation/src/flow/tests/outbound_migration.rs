@@ -88,6 +88,5 @@ fn outbound_spool_accepted_before_commit_still_delivers_without_extra_hop()
     assert_eq!(store.list_pending_outbound(64)?, []);
     drop(store);
     drop(router);
-    std::fs::remove_dir_all(directory)?;
     Ok(())
 }

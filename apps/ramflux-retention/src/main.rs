@@ -972,7 +972,6 @@ mod tests {
         assert_eq!(request.owner_service, "router");
         assert!(request.sweep_id.starts_with("retention_gc:router:"));
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -998,7 +997,6 @@ mod tests {
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.owner_service, "router");
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1024,7 +1022,6 @@ mod tests {
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.owner_service, "router");
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1056,7 +1053,6 @@ mod tests {
         assert_eq!(request.owner_service, "federation");
         assert!(request.sweep_id.starts_with("retention_gc:federation:"));
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1087,7 +1083,6 @@ mod tests {
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.owner_service, "federation");
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1118,7 +1113,6 @@ mod tests {
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.owner_service, "federation");
         cleanup_store(&store_path);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

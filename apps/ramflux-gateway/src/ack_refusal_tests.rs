@@ -12,8 +12,11 @@ fn ack() -> anyhow::Result<ramflux_protocol::Ack> {
         "received_at":1_760_000_010,"ext":{"inbox_seq":1}
     }))?)
 }
-type RefusalRouter =
-    (crate::RouterMeshClient, std::thread::JoinHandle<Result<(), String>>, std::path::PathBuf);
+type RefusalRouter = (
+    ramflux_test_support::TestPath,
+    crate::RouterMeshClient,
+    std::thread::JoinHandle<Result<(), String>>,
+);
 fn refusal_router() -> anyhow::Result<RefusalRouter> {
     use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
     let root =
@@ -57,13 +60,12 @@ fn refusal_router() -> anyhow::Result<RefusalRouter> {
         }
         Ok(())
     });
-    Ok((client, task, root))
+    Ok((root, client, task))
 }
 #[tokio::test]
 async fn legacy_ack_relays_forward_backpressure() -> anyhow::Result<()> {
-    let (router, task, root) = refusal_router()?;
-    let (_fixture_directory_0, fixture_value_0) = super::super::tests::test_gateway_context()?;
-    let mut context = fixture_value_0;
+    let (_root, router, task) = refusal_router()?;
+    let (_fixture_directory_0, mut context) = super::super::tests::test_gateway_context()?;
     context.router = router;
     let (send, frames) = sink();
     super::super::handle_gateway_ack(&send, &context, &test_runtime()?, &ack()?).await?;
@@ -94,7 +96,6 @@ async fn legacy_ack_relays_forward_backpressure() -> anyhow::Result<()> {
     #[cfg(feature = "itest-http")]
     http_refusal(&context.router)?;
     task.join().map_err(|_| anyhow::anyhow!("router thread"))?.map_err(anyhow::Error::msg)?;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[cfg(feature = "itest-http")]

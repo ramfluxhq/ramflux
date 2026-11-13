@@ -152,8 +152,7 @@ fn notify_commit_writer_throughput_bench() -> Result<(), Box<dyn std::error::Err
 
     let thread_count = notify_bench_env_usize("RAMFLUX_NOTIFY_BENCH_THREADS", 64).max(1);
     let total_ops = notify_bench_env_usize("RAMFLUX_NOTIFY_BENCH_TOTAL", 200_000).max(1);
-    let _store_directory_0 = temp_store_path("notify_commit_writer_throughput_bench")?;
-    let store_path = _store_directory_0.to_path_buf();
+    let store_path = temp_store_path("notify_commit_writer_throughput_bench")?;
     let store = std::sync::Arc::new(NotifyRedbStore::open(&store_path)?);
     let started = std::sync::Arc::new(std::sync::Barrier::new(thread_count + 1));
     let ops_per_thread = total_ops.div_ceil(thread_count);

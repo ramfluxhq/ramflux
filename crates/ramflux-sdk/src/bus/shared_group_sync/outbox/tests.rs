@@ -95,7 +95,6 @@ fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backof
         rejoined.view().epoch
     );
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -147,7 +146,6 @@ fn shared_group_revoked_membership_discards_the_pending_broadcast() -> Result<()
     assert!(prepare_intent(&account.client, &mut intent, "target")?.is_none());
     assert!(!account.client.account_db()?.actor_state_exists(&id)?);
     drop((account, owner));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -185,7 +183,6 @@ async fn shared_group_bad_snapshot_does_not_prevent_another_group_getting_its_tu
         .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(good.attempt, 1, "one invalid group cannot abort the next group's turn");
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -262,7 +259,6 @@ fn shared_group_device_removal_keeps_its_boundary_when_the_root_is_removed_later
         root_removed.view().epoch
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -300,7 +296,6 @@ fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
     assert_eq!(coalesced.next_at, next);
     assert_eq!(coalesced.snapshot.epoch, 2);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -328,7 +323,6 @@ fn shared_group_same_head_coalescing_preserves_device_delivery_progress() -> Res
     assert!(wire["snapshot"].get("operations").is_none());
     assert!(wire["snapshot"].get("checkpoint").is_none());
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -404,6 +398,5 @@ async fn shared_group_remove_commits_above_recovery_capacity_and_is_selected_fir
     assert!(retained.expires_at > now_unix_timestamp() + 6 * 86400);
     assert!(account.client.account_db()?.actor_state_exists(&boundary_key("group-39"))?);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -232,7 +232,7 @@ jobs:
             timeout: 15
           - os: macos-latest
             target: aarch64-apple-darwin
-            timeout: 15
+            timeout: 30
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             timeout: 30

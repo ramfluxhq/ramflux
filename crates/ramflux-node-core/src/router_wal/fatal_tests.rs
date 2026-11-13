@@ -407,7 +407,6 @@ fn expected_redb_error_waits_for_held_supervisor() -> TestResult {
     let store = RouterRedbStore::open_without_wal(root.join("db"))?;
     assert!(store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 1));
     drop(store);
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 

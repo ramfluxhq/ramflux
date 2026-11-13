@@ -71,8 +71,8 @@ fn nacked_mailbox_head_does_not_stall_later_acks() -> Result<(), Box<dyn std::er
 #[test]
 fn idle_router_wal_segment_survives_retention_then_recovers_new_writes()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_0 = temp_store_path("server_retention_idle_wal")?;
-    let root = _store_directory_0.to_path_buf().with_extension("wal");
+    let store_directory_0 = temp_store_path("server_retention_idle_wal")?;
+    let root = store_directory_0.to_path_buf().with_extension("wal");
     let store = RouterWalStore::open(&root)?;
     let old = std::time::SystemTime::now() - Duration::from_hours(8 * 24);
     let mut segments = Vec::new();
@@ -116,8 +116,7 @@ fn idle_router_wal_segment_survives_retention_then_recovers_new_writes()
 #[test]
 fn router_restart_never_reuses_an_expired_logged_sequence() -> Result<(), Box<dyn std::error::Error>>
 {
-    let _store_directory_1 = temp_store_path("server_retention_seq_reuse")?;
-    let path = _store_directory_1.to_path_buf();
+    let path = temp_store_path("server_retention_seq_reuse")?;
     let wal = path.with_extension("wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
     let mut message = envelope("expired-before-checkpoint", "mailbox", DeliveryClass::OpaqueEvent);
@@ -143,14 +142,12 @@ fn authorized_store(
     name: &str,
     live: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ramflux_test_support::Fixture<NotifyRedbStore>, Box<dyn std::error::Error>> {
-    let _store_directory_2 = temp_store_path(name)?;
-    let mut store = NotifyRedbStore::open_with_route_key(
-        _store_directory_2.to_path_buf(),
-        NodeSecret::ephemeral()?,
-    )?;
+    let store_directory_2 = temp_store_path(name)?;
+    let mut store =
+        NotifyRedbStore::open_with_route_key(&store_directory_2, NodeSecret::ephemeral()?)?;
     let live = std::sync::Arc::clone(live);
     store.set_push_route_authorizer(move |_| Ok(live.load(std::sync::atomic::Ordering::SeqCst)));
-    Ok(ramflux_test_support::Fixture::new(store, _store_directory_2))
+    Ok(ramflux_test_support::Fixture::new(store, store_directory_2))
 }
 
 fn owner(target: &str) -> Result<DeviceAuthKeyResponse, Box<dyn std::error::Error>> {
@@ -197,11 +194,9 @@ fn provider_collapse_value_is_keyed_per_node() -> Result<(), Box<dyn std::error:
     let now = now_unix_seconds();
     let mut hashes = Vec::new();
     for name in ["server_retention_collapse_a", "server_retention_collapse_b"] {
-        let _store_directory_3 = temp_store_path(name)?;
-        let store = NotifyRedbStore::open_with_route_key(
-            _store_directory_3.to_path_buf(),
-            NodeSecret::ephemeral()?,
-        )?;
+        let store_directory_3 = temp_store_path(name)?;
+        let store =
+            NotifyRedbStore::open_with_route_key(&store_directory_3, NodeSecret::ephemeral()?)?;
         let mut route = notify_webpush_route("delivery", "web");
         route.registered_at = now;
         route.expires_at = now + 600;
@@ -241,11 +236,9 @@ fn ownerless_retired_routes_are_refused_in_production() -> Result<(), Box<dyn st
 #[test]
 fn revocation_sweep_bounds_authority_lookups_per_pass() -> Result<(), Box<dyn std::error::Error>> {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let _store_directory_4 = temp_store_path("server_retention_revocation_bound")?;
-    let mut store = NotifyRedbStore::open_with_route_key(
-        _store_directory_4.to_path_buf(),
-        NodeSecret::ephemeral()?,
-    )?;
+    let store_directory_4 = temp_store_path("server_retention_revocation_bound")?;
+    let mut store =
+        NotifyRedbStore::open_with_route_key(&store_directory_4, NodeSecret::ephemeral()?)?;
     let counter = std::sync::Arc::clone(&calls);
     store.set_push_route_authorizer(move |_| {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

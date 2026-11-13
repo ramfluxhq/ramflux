@@ -6,7 +6,7 @@ use super::*;
 use ramflux_sdk::custody::{
     CreateInput, CreationCeremony, CreationState, CustodyConnection, CustodyNetworkConfig,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[path = "custody_test_vault.rs"]
 mod vault;
 
@@ -55,9 +55,7 @@ impl Gateway {
             start_mesh(&public.root, Arc::clone(&router), Arc::clone(&store), service)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let (_fixture_directory_0, fixture_value_0) =
-            crate::session::tests::test_gateway_context()?;
-        let mut context = fixture_value_0;
+        let (fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
         context.router = client;
         let context = crate::serve::GatewayListenerContext {
             custody: crate::custody::initialize()?,
@@ -86,7 +84,7 @@ impl Gateway {
             store,
             serving,
             mesh,
-            _context_directory: _fixture_directory_0,
+            _context_directory: fixture_directory_0,
         })
     }
     fn config(&self, id: &str) -> CustodyNetworkConfig {

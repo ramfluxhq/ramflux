@@ -98,8 +98,7 @@ fn gateway_rejects_root_claim_and_committed_key_substitution_before_recording_re
 
 #[test]
 fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_0 = temp_store_path("gateway-replay-durable")?;
-    let path = _store_directory_0.to_path_buf();
+    let path = temp_store_path("gateway-replay-durable")?;
     let open = gateway_open_frame("bob", "restart-nonce");
     let auth = gateway_auth_frame(&open, "restart-request", 1_760_000_000)?;
     let registered = gateway_registered_key(&open)?;
@@ -125,7 +124,6 @@ fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>
         ));
         store.save_state(&state)?;
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -194,15 +192,13 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
     let restored = store.load_state()?.ok_or("missing pruned checkpoint")?;
     assert!(restored.session("session-7").is_none(), "pruned overlays must not resurrect sessions");
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
 #[test]
 fn signed_request_capacity_is_root_scoped_and_survives_restore()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_1 = temp_store_path("gateway-small-shares")?;
-    let path = _store_directory_1.to_path_buf();
+    let path = temp_store_path("gateway-small-shares")?;
     let config = GatewayReplayConfig {
         root_budget: 2,
         per_root_share: 4,
@@ -228,7 +224,6 @@ fn signed_request_capacity_is_root_scoped_and_survives_restore()
     let (open, auth, registered, _) = rooted_auth(2, "bob", "other-root", now)?;
     store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1)?;
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -298,8 +293,7 @@ fn rooted_auth(
 #[test]
 pub(crate) fn gateway_root_admission_preserves_honest_auth_and_submit_after_saturation()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_2 = temp_store_path("gateway-more-than64-roots")?;
-    let path = _store_directory_2.to_path_buf();
+    let path = temp_store_path("gateway-more-than64-roots")?;
     let config = GatewayReplayConfig {
         root_budget: 70,
         per_root_share: 4,

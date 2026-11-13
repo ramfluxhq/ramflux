@@ -189,7 +189,6 @@ mod tests {
         assert!(db.actor_state_usage("").is_err());
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -47,7 +47,7 @@ pub(crate) fn temp_store_path(_name: &str) -> io::Result<ramflux_test_support::T
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(directory.to_path_buf());
-    Ok(directory.join("store.redb"))
+    Ok(directory.child("store.redb"))
 }
 
 pub(crate) fn remove_store_path(path: &Path) -> io::Result<()> {

@@ -128,7 +128,6 @@ mod tests {
         assert_eq!(db.connection.query_row("SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='dm-pair/session/old'",[],|r|r.get::<_,u64>(0))?,0);
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

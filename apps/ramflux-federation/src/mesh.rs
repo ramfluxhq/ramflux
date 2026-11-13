@@ -959,7 +959,7 @@ pub(crate) mod tests {
         ] {
             let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
             let endpoint = server.local_addr()?.to_string();
-            let (mut context, store_path) = test_mesh_server_context("federation-ijson-mesh-http")?;
+            let (store_path, mut context) = test_mesh_server_context("federation-ijson-mesh-http")?;
             let router_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
             router_listener.set_nonblocking(true)?;
             Arc::make_mut(&mut context.router).endpoint = router_listener.local_addr()?.to_string();
@@ -1006,7 +1006,6 @@ pub(crate) mod tests {
             cleanup_store(&store_path);
         }
 
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1171,7 +1170,7 @@ pub(crate) mod tests {
         let mutated_text = duplicate_x_probe_member(&valid_text)?;
 
         for (text, accepted) in [(mutated_text, false), (valid_text, true)] {
-            let (mut context, store_path) =
+            let (store_path, mut context) =
                 test_mesh_server_context("federation-ijson-signed-forward")?;
             context.state = Arc::new(crate::SharedFederationTrustState::new(
                 admitted_forward_source(source_seed)?,
@@ -1233,7 +1232,6 @@ pub(crate) mod tests {
             cleanup_store(&store_path);
         }
 
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1332,7 +1330,7 @@ pub(crate) mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
 
         for (label, text, expected) in rows {
-            let (mut context, store_path) =
+            let (store_path, mut context) =
                 test_mesh_server_context("federation-ijson-compio-quic")?;
             context.state = Arc::new(crate::SharedFederationTrustState::new(
                 admitted_forward_source(source_seed)?,
@@ -1650,12 +1648,12 @@ pub(crate) mod tests {
     }
 
     struct TestMeshContext {
-        store_path: PathBuf,
         state: crate::SharedFederationTrustState,
         store: ramflux_node_core::FederationRedbStore,
         router: RouterMeshClient,
         discovery: FederationDiscoverySurface,
         observability: SharedMeshObservability,
+        _store_path: ramflux_test_support::TestPath,
     }
 
     impl TestMeshContext {
@@ -1671,7 +1669,6 @@ pub(crate) mod tests {
                 service_key: PathBuf::from("federation-key.pem"),
             };
             Ok(Self {
-                store_path,
                 state,
                 store,
                 router: RouterMeshClient {
@@ -1693,6 +1690,7 @@ pub(crate) mod tests {
                     attachment_authority: None,
                 },
                 observability: Arc::new(crate::FederationMeshObservability::default()),
+                _store_path: store_path,
             })
         }
 
@@ -1714,12 +1712,6 @@ pub(crate) mod tests {
         }
     }
 
-    impl Drop for TestMeshContext {
-        fn drop(&mut self) {
-            let _removed = crate::test_directories::remove_store_path(&self.store_path);
-        }
-    }
-
     fn spawn_federation_gc_quic_server(
         server_tls: ramflux_transport::MeshTlsConfig,
         trusted_retention_ca: String,
@@ -1732,7 +1724,7 @@ pub(crate) mod tests {
                     .enable_all()
                     .build()
                     .map_err(|source| source.to_string())?;
-                let (context, store_path) =
+                let (store_path, context) =
                     test_mesh_server_context("federation_tokio_quic_server")
                         .map_err(|source| source.to_string())?;
                 let result = runtime.block_on(async move {
@@ -1771,7 +1763,8 @@ pub(crate) mod tests {
 
     fn test_mesh_server_context(
         test_name: &str,
-    ) -> Result<(MeshServerContext, PathBuf), Box<dyn std::error::Error>> {
+    ) -> Result<(ramflux_test_support::TestPath, MeshServerContext), Box<dyn std::error::Error>>
+    {
         let store_path = temp_path(test_name)?;
         let store = Arc::new(ramflux_node_core::FederationRedbStore::open(&store_path)?);
         let tls = ramflux_transport::MeshTlsConfig {
@@ -1804,10 +1797,12 @@ pub(crate) mod tests {
                 attachment_authority: None,
             },
         };
-        Ok((context, store_path))
+        Ok((store_path, context))
     }
 
-    fn temp_path(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_path(
+        test_name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         Ok(crate::test_directories::temp_store_path(test_name)?)
     }
 

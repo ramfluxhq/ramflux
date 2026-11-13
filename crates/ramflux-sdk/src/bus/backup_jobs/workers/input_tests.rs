@@ -37,7 +37,6 @@ fn candidate_input_checks_authenticated_counts_before_private_changes()
     }
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

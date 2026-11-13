@@ -158,13 +158,7 @@ mod tests {
         Ok(())
     }
     fn native_exclusions(candidate: bool) -> TestResult {
-        let root = ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(format!(
-                "rf-native-merge-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-            ));
+        let root = crate::tests::temp_root("native-merge");
         let source_index = AccountIndex::open(root.join("source"))?;
         let local_index = AccountIndex::open(root.join("local"))?;
         source_index.create_account("account", "anchor")?;

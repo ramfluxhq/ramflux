@@ -42,7 +42,6 @@ fn account_index_reservation_preserves_every_legacy_row_and_wrapped_key_byte()
     assert_eq!(snapshot(&index, "existing")?, before);
     assert!(matches!(result, Err(StorageError::AccountAlreadyExists(_))));
     drop(index);
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -69,6 +68,5 @@ fn account_index_release_never_deletes_a_different_owner_or_a_wrapped_key()
     assert!(index.release_unwrapped_reservation("unwrapped", "another-anchor")?);
     assert!(matches!(index.account("unwrapped"), Err(StorageError::AccountNotFound(_))));
     drop(index);
-    fs::remove_dir_all(root)?;
     Ok(())
 }

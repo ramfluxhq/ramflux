@@ -379,7 +379,6 @@ mod removal_tests {
         assert!(events[0].1.get("snapshot").is_none());
         assert!(events[0].1.get("fallback_text").is_none());
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -423,7 +422,6 @@ mod removal_tests {
         assert_eq!(events[0].1["reason"], "expired");
         assert!(events[0].1.get("pad").is_none());
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

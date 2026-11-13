@@ -104,7 +104,6 @@ fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_miss
     drop(local);
     drop(source_index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -156,7 +155,6 @@ fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

@@ -15,7 +15,7 @@ use ramflux_protocol::custody::pairing::relay::{
     Claim, Claimed, Close, Closed, Poll, Polled, RelayFrame, Send, Sent,
 };
 use ramflux_protocol::encode_base64url;
-use std::path::PathBuf;
+
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -304,11 +304,10 @@ fn wired_handle(
 
 #[test]
 fn pairing_mesh_requires_federation_peer() -> TestResult {
-    let (path, state, store) = crate::router_runtime::tests::test_router("pairing-mesh-peer")?;
+    let (_path, state, store) = crate::router_runtime::tests::test_router("pairing-mesh-peer")?;
     let handle = RouterHandle::tokio(state, store, None);
     let response = mesh(&handle, "ramflux-gateway", PAIRING_CLAIM_PATH, b"{}")?;
     assert_eq!(response.status, "403 Forbidden");
-    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
@@ -337,14 +336,12 @@ fn enable_custody_requires_ticket_key_match() -> TestResult {
         "{error}"
     );
     drop(env);
-    let _ = std::fs::remove_file(redb);
-    let _ = std::fs::remove_file(record);
     Ok(())
 }
 
 #[test]
 fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
-    let (redb, record, handle, env, public) = wired_handle("pairing-mesh-wiring")?;
+    let (_redb, _record, handle, env, public) = wired_handle("pairing-mesh-wiring")?;
     let (created, node_key) = native_create(&handle, 1)?;
     assert_eq!(node_key, public);
     relay_cycle(&handle, &created)?;
@@ -355,7 +352,5 @@ fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
     assert_eq!(absent.status, "200 OK");
     assert_eq!(inner_reply(&absent)?.status, "404 Not Found");
     drop(env);
-    let _ = std::fs::remove_file(redb);
-    let _ = std::fs::remove_file(record);
     Ok(())
 }

@@ -93,7 +93,8 @@ async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears
         fixture.config,
         fixture.manifest.principal_commitment,
     );
-    let mut setup = LocalBusConfig::new(fixture.root.0.join("bus.sock"), fixture.root.0.clone());
+    let mut setup =
+        LocalBusConfig::new(fixture.root.0.join("bus.sock"), fixture.root.0.to_path_buf());
     setup.custody_vault = Some(fixture.vault);
     account.native_setup = Some(setup);
     let mut state = daemon(account, &fixture.root.0);

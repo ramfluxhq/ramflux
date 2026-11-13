@@ -859,7 +859,6 @@ mod tests {
         })?;
         assert_eq!(store.list_pending_outbound(64)?.len(), 63);
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
     #[test]
@@ -929,7 +928,6 @@ mod tests {
         assert_eq!(store.outbound_dead_letter_count()?, 1);
         assert_eq!(store.list_pending_outbound(64)?.len(), 0);
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -1106,7 +1104,6 @@ mod tests {
         assert_eq!(duplicate.delivery.outcome, "duplicate_federated_forward");
         assert_eq!(router.resume("peer", 0, 10).len(), 1);
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
     #[test]
@@ -1183,7 +1180,6 @@ mod tests {
             assert_eq!(result.delivery.outcome, outcome);
         }
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
     #[test]

@@ -8,7 +8,7 @@ use ramflux_crypto::custody::{
     sign_node_identity_record,
 };
 use ramflux_protocol::custody::*;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 struct Fixture {
@@ -33,7 +33,7 @@ impl Fixture {
         std::fs::write(&tls.ca_cert, cert.cert.pem())?;
         std::fs::write(&tls.service_cert, cert.cert.pem())?;
         std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
-        Ok(Self { root, tls })
+        Ok(Self { tls, root })
     }
 }
 struct AuthorityFixture {

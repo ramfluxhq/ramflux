@@ -50,7 +50,6 @@ mod tests {
         let key = ramflux_node_core::NodeSecret::from_file(&path)?;
         assert_eq!(key.with_bytes(|bytes| *bytes), [79; 32]);
         assert!(super::export(&state, path.to_str().ok_or("key path")?).is_err());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

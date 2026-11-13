@@ -16,8 +16,7 @@ fn current_envelope(
 #[test]
 fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_0 = temp_store_path("router_redb_store_restores_router_snapshot")?;
-    let path = _store_directory_0.to_path_buf();
+    let path = temp_store_path("router_redb_store_restores_router_snapshot")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
@@ -55,8 +54,7 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
 #[test]
 fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_1 = temp_store_path("router_redb_incremental_replay_survives_restart")?;
-    let path = _store_directory_1.to_path_buf();
+    let path = temp_store_path("router_redb_incremental_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -87,9 +85,9 @@ fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::
 fn router_wal_submission_restores_replay_and_inbox_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_2 =
+    let store_directory_2 =
         temp_store_path("router_wal_submission_restores_replay_and_inbox_atomically")?;
-    let path = _store_directory_2.to_path_buf();
+    let path = store_directory_2.to_path_buf();
     let wal_root = path.with_extension("submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
@@ -144,7 +142,6 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
     )?);
     let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
@@ -152,9 +149,9 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
 fn router_wal_async_submission_restores_replay_and_inbox_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_3 =
+    let store_directory_3 =
         temp_store_path("router_wal_async_submission_restores_replay_and_inbox_atomically")?;
-    let path = _store_directory_3.to_path_buf();
+    let path = store_directory_3.to_path_buf();
     let wal_root = path.with_extension("async_submission.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
@@ -191,7 +188,6 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
     assert_eq!(restored.resume("target_router_wal_async", 0, 10).len(), 1);
     let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
@@ -199,9 +195,9 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
 fn router_wal_submission_respects_redb_ack_cursor_on_restore()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_4 =
+    let store_directory_4 =
         temp_store_path("router_wal_submission_respects_redb_ack_cursor_on_restore")?;
-    let path = _store_directory_4.to_path_buf();
+    let path = store_directory_4.to_path_buf();
     let wal_root = path.with_extension("ack.wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
@@ -235,15 +231,13 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
     );
     let replay = restored.submit_envelope_at(&source_identity, submitted, replay_expires_at - 1);
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
 #[test]
 fn router_redb_expired_replay_tuple_is_purged_on_load() -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_5 = temp_store_path("router_redb_expired_replay_tuple_is_purged_on_load")?;
-    let path = _store_directory_5.to_path_buf();
+    let path = temp_store_path("router_redb_expired_replay_tuple_is_purged_on_load")?;
     let store = RouterRedbStore::open(&path)?;
     let mut expired =
         current_envelope("env_replay_expired_on_disk", "target_replay", DeliveryClass::OpaqueEvent);
@@ -266,8 +260,7 @@ fn router_redb_expired_replay_tuple_is_purged_on_load() -> Result<(), Box<dyn st
 
 #[test]
 fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_6 = temp_store_path("router_redb_fanout_replay_survives_restart")?;
-    let path = _store_directory_6.to_path_buf();
+    let path = temp_store_path("router_redb_fanout_replay_survives_restart")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -359,9 +352,9 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
 fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_7 =
+    let store_directory_7 =
         temp_store_path("router_redb_incremental_ack_survives_restart_without_duplicate_delivery")?;
-    let path = _store_directory_7.to_path_buf();
+    let path = store_directory_7.to_path_buf();
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -399,9 +392,7 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
 fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn std::error::Error>>
 {
     let source_identity = replay_source("alice_device")?;
-    let _store_directory_8 =
-        temp_store_path("router_redb_per_key_state_round_trip_restores_router")?;
-    let path = _store_directory_8.to_path_buf();
+    let path = temp_store_path("router_redb_per_key_state_round_trip_restores_router")?;
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
 
@@ -512,9 +503,9 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
 #[test]
 fn retention_redb_store_restores_incidents_and_rate_limits()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_9 =
+    let store_directory_9 =
         temp_store_path("retention_redb_store_restores_incidents_and_rate_limits")?;
-    let path = _store_directory_9.to_path_buf();
+    let path = store_directory_9.to_path_buf();
     let store = RetentionRedbStore::open(&path)?;
     store.report_incident(security_incident("incident_1"))?;
     store.record_rate_limit_abuse(rate_limit_abuse("bucket_1"))?;
@@ -538,8 +529,7 @@ fn retention_redb_store_restores_incidents_and_rate_limits()
 
 #[test]
 fn notify_redb_store_restores_wake_queue() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_10 = temp_store_path("notify_redb_store_restores_wake_queue")?;
-    let path = _store_directory_10.to_path_buf();
+    let path = temp_store_path("notify_redb_store_restores_wake_queue")?;
     let store = NotifyRedbStore::open(&path)?;
     let entry =
         store.queue_wake(notification_wake("wake_1", 60), "push_alias_hash", 1_760_000_000)?;
@@ -565,8 +555,7 @@ fn notify_redb_store_restores_wake_queue() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn notify_redb_incremental_attempt_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_11 = temp_store_path("notify_redb_incremental_attempt_survives_restart")?;
-    let path = _store_directory_11.to_path_buf();
+    let path = temp_store_path("notify_redb_incremental_attempt_survives_restart")?;
     let store = NotifyRedbStore::open_without_wal(&path)?;
     store.queue_wake(
         notification_wake("wake_incremental_attempt", 60),
@@ -592,9 +581,9 @@ fn notify_redb_incremental_attempt_survives_restart() -> Result<(), Box<dyn std:
 #[test]
 fn notify_redb_retired_full_snapshot_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     for with_current_rows in [false, true] {
-        let _store_directory_12 =
+        let store_directory_12 =
             temp_store_path(&format!("notify_retired_snapshot_{with_current_rows}"))?;
-        let path = _store_directory_12.to_path_buf();
+        let path = store_directory_12.to_path_buf();
         let store = NotifyRedbStore::open_without_wal(&path)?;
         let mut state = NotifyQueueState::new();
         state.queue_wake(
@@ -620,8 +609,7 @@ fn notify_redb_retired_full_snapshot_is_refused() -> Result<(), Box<dyn std::err
 fn notify_redb_retired_json_rows_are_refused() -> Result<(), Box<dyn std::error::Error>> {
     // Test each table independently: refusing a queue entry cannot mask an attempt decoder.
     for queue_entry in [false, true] {
-        let _store_directory_13 = temp_store_path(&format!("notify_retired_json_{queue_entry}"))?;
-        let path = _store_directory_13.to_path_buf();
+        let path = temp_store_path(&format!("notify_retired_json_{queue_entry}"))?;
         let store = NotifyRedbStore::open_without_wal(&path)?;
         let mut state = NotifyQueueState::new();
         let entry = state.queue_wake(
@@ -646,8 +634,7 @@ fn notify_redb_retired_json_rows_are_refused() -> Result<(), Box<dyn std::error:
 #[test]
 fn notify_redb_retired_routes_and_fences_are_refused() -> Result<(), Box<dyn std::error::Error>> {
     for old_fence in [false, true] {
-        let _store_directory_14 = temp_store_path(&format!("notify_retired_route_{old_fence}"))?;
-        let path = _store_directory_14.to_path_buf();
+        let path = temp_store_path(&format!("notify_retired_route_{old_fence}"))?;
         drop(NotifyRedbStore::open_without_wal(&path)?);
         let db = redb::Database::open(&path)?;
         let txn = db.begin_write()?;
@@ -724,8 +711,7 @@ fn notify_redb_incremental_routes_and_credentials_survive_restart()
 
 #[test]
 fn notify_wal_store_restores_pending_async_wakes() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_15 = temp_store_path("notify_wal_store_restores_pending_async_wakes")?;
-    let path = _store_directory_15.to_path_buf();
+    let path = temp_store_path("notify_wal_store_restores_pending_async_wakes")?;
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
     let entry = store.queue_wake_for_async_accept(
@@ -741,14 +727,12 @@ fn notify_wal_store_restores_pending_async_wakes() -> Result<(), Box<dyn std::er
     let pending = reopened.pending_entries_without_attempts(10)?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].queue_id, "wake_notify_wal_restore");
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
 #[test]
 fn notify_wal_store_replays_delivered_tombstones() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_16 = temp_store_path("notify_wal_store_replays_delivered_tombstones")?;
-    let path = _store_directory_16.to_path_buf();
+    let path = temp_store_path("notify_wal_store_replays_delivered_tombstones")?;
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
     store.queue_wake_for_async_accept(
@@ -766,14 +750,12 @@ fn notify_wal_store_replays_delivered_tombstones() -> Result<(), Box<dyn std::er
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("notify_wal_delivered".to_owned()))?;
     assert_eq!(state.provider_attempts("wake_notify_wal_delivered").len(), 1);
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
 #[test]
 fn notify_wal_store_restores_raw_async_wakes() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_17 = temp_store_path("notify_wal_store_restores_raw_async_wakes")?;
-    let path = _store_directory_17.to_path_buf();
+    let path = temp_store_path("notify_wal_store_restores_raw_async_wakes")?;
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
     let raw = serde_json::to_vec(&serde_json::json!({
@@ -794,16 +776,15 @@ fn notify_wal_store_restores_raw_async_wakes() -> Result<(), Box<dyn std::error:
     assert_eq!(pending[0].queue_id, raw.queue_id);
     assert_eq!(pending[0].device_delivery_id, "device_notify_wal_raw");
     assert_eq!(pending[0].wake.wake_id, "wake_notify_wal_raw");
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
 #[test]
 fn notify_wal_store_async_accept_uses_server_time_for_expiry()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_18 =
+    let store_directory_18 =
         temp_store_path("notify_wal_store_async_accept_uses_server_time_for_expiry")?;
-    let path = _store_directory_18.to_path_buf();
+    let path = store_directory_18.to_path_buf();
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
     let old_client_queued_at = 1_760_000_000;
@@ -818,7 +799,6 @@ fn notify_wal_store_async_accept_uses_server_time_for_expiry()
     assert_ne!(entry.queued_at, old_client_queued_at);
     assert_eq!(entry.expires_at, entry.queued_at.saturating_add(60));
     assert!(entry.expires_at > now_unix_seconds());
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
@@ -862,9 +842,9 @@ fn notify_wal_store_prepares_recovered_raw_wake_for_provider_push()
 #[test]
 fn notify_wal_store_recovers_existing_shards_when_configured_count_shrinks()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_19 =
+    let store_directory_19 =
         temp_store_path("notify_wal_store_recovers_existing_shards_when_configured_count_shrinks")?;
-    let path = _store_directory_19.to_path_buf();
+    let path = store_directory_19.to_path_buf();
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal_shard_count(&path, &wal_root, 4)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -897,16 +877,15 @@ fn notify_wal_store_recovers_existing_shards_when_configured_count_shrinks()
             "wake_notify_wal_shard_3"
         ])
     );
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
 #[test]
 fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn std::error::Error>>
 {
-    let _store_directory_20 =
+    let store_directory_20 =
         temp_store_path("notify_wal_store_drops_bad_raw_wake_without_repeating")?;
-    let path = _store_directory_20.to_path_buf();
+    let path = store_directory_20.to_path_buf();
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -931,7 +910,6 @@ fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn
         .load_state()?
         .ok_or_else(|| NodeCoreError::SessionNotFound("notify_raw_attempt_reopen".to_owned()))?;
     assert_eq!(state.provider_attempts(&raw.queue_id).len(), 1);
-    let _removed = std::fs::remove_dir_all(wal_root);
     Ok(())
 }
 
@@ -940,8 +918,7 @@ fn notify_wal_store_drops_bad_raw_wake_without_repeating() -> Result<(), Box<dyn
 fn relay_redb_store_opens_with_production_cache_cap() -> Result<(), Box<dyn std::error::Error>> {
     // The default/production build caps the redb page cache at 16 MiB (no env, no override path);
     // opening must succeed and round-trip a chunk exactly as before.
-    let _store_directory_21 = temp_store_path("relay_redb_store_opens_with_production_cache_cap")?;
-    let path = _store_directory_21.to_path_buf();
+    let path = temp_store_path("relay_redb_store_opens_with_production_cache_cap")?;
     let store = RelayRedbStore::open(&path)?;
     store.put_chunk(&relay_chunk("chunk_cap", 1_760_000_000, 60))?;
     drop(store);
@@ -970,8 +947,7 @@ fn relay_redb_probe_cache_resolution() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn relay_redb_store_restores_encrypted_chunk_cache() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_22 = temp_store_path("relay_redb_store_restores_encrypted_chunk_cache")?;
-    let path = _store_directory_22.to_path_buf();
+    let path = temp_store_path("relay_redb_store_restores_encrypted_chunk_cache")?;
     let store = RelayRedbStore::open(&path)?;
     store.put_chunk(&relay_chunk("chunk_1", 1_760_000_000, 60))?;
     drop(store);
@@ -998,8 +974,7 @@ fn relay_redb_store_restores_encrypted_chunk_cache() -> Result<(), Box<dyn std::
 
 #[test]
 fn relay_redb_incremental_tombstone_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_23 = temp_store_path("relay_redb_incremental_tombstone_survives_restart")?;
-    let path = _store_directory_23.to_path_buf();
+    let path = temp_store_path("relay_redb_incremental_tombstone_survives_restart")?;
     let service_key = b"relay service key for object chunks";
     let now = 1_760_000_000;
     let store = RelayRedbStore::open(&path)?;
@@ -1046,8 +1021,7 @@ fn relay_redb_incremental_tombstone_survives_restart() -> Result<(), Box<dyn std
 fn relay_redb_refuses_retired_snapshot_even_with_current_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     for current_rows in [false, true] {
-        let _store_directory_24 = temp_store_path("relay_retired_snapshot_refused")?;
-        let path = _store_directory_24.to_path_buf();
+        let path = temp_store_path("relay_retired_snapshot_refused")?;
         let store = RelayRedbStore::open(&path)?;
         if current_rows {
             store.record_relay_chunk_entry(&relay_chunk("current", 1_760_000_000, 120))?;
@@ -1070,8 +1044,7 @@ fn relay_redb_refuses_retired_snapshot_even_with_current_rows()
 
 #[test]
 fn relay_redb_expiry_removes_incremental_chunk_key() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_25 = temp_store_path("relay_redb_expiry_removes_incremental_chunk_key")?;
-    let path = _store_directory_25.to_path_buf();
+    let path = temp_store_path("relay_redb_expiry_removes_incremental_chunk_key")?;
     let store = RelayRedbStore::open(&path)?;
     store.put_chunk(&relay_chunk("chunk_expire_incremental", 1_760_000_000, 60))?;
     let mut state = store
@@ -1232,8 +1205,7 @@ fn object_relay_persisted_rows_refuse_missing_or_empty_owner_bindings()
             "missing {field} accepted"
         );
     }
-    let _store_directory_26 = temp_store_path("relay_empty_owner_refused")?;
-    let path = _store_directory_26.to_path_buf();
+    let path = temp_store_path("relay_empty_owner_refused")?;
     let store = RelayRedbStore::open(&path)?;
     let mut empty = bound;
     empty.owner_public_key.clear();
@@ -1251,7 +1223,6 @@ fn object_relay_persisted_rows_refuse_missing_or_empty_owner_bindings()
         Err(NodeCoreError::UnsupportedPersistedFormat("relay chunk owner binding"))
     ));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -1420,8 +1391,7 @@ fn object_relay_tombstone_rejects_changed_replay() -> Result<(), Box<dyn std::er
 // durable write, replaying and re-recording leaves the persisted redb rows byte-identical.
 #[test]
 fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_27 = temp_store_path("object_relay_tombstone_redb_replay_no_rewrite")?;
-    let path = _store_directory_27.to_path_buf();
+    let path = temp_store_path("object_relay_tombstone_redb_replay_no_rewrite")?;
     let service_key = b"relay service key for object chunks";
     let now = 1_760_000_000;
     let expires_at = now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS;
@@ -1465,7 +1435,6 @@ fn object_relay_tombstone_redb_replay_no_rewrite() -> Result<(), Box<dyn std::er
         .ok_or_else(|| NodeCoreError::SessionNotFound("relay_tombstone_after".to_owned()))?;
     assert_eq!(after.tombstone("object_relay_1"), baseline.tombstone("object_relay_1"));
     assert_eq!(after.chunk_entry("chunk_relay_1"), baseline.chunk_entry("chunk_relay_1"));
-    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
@@ -1660,8 +1629,7 @@ fn relay_resident_budget_admission_boundaries() -> Result<(), Box<dyn std::error
 // rejected by the store byte comparison; a cross-owner overwrite is rejected.
 #[test]
 fn relay_store_put_read_through_and_idempotency() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_28 = temp_store_path("relay_store_put_read_through_and_idempotency")?;
-    let path = _store_directory_28.to_path_buf();
+    let path = temp_store_path("relay_store_put_read_through_and_idempotency")?;
     let service_key = b"relay service key for object chunks";
     let now = 1_760_000_000;
     let store = RelayRedbStore::open(&path)?;
@@ -1712,8 +1680,7 @@ fn relay_store_put_read_through_and_idempotency() -> Result<(), Box<dyn std::err
 // snapshot: the post-read recheck fails closed.
 #[test]
 fn relay_store_read_through_rejects_stale() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_29 = temp_store_path("relay_store_read_through_rejects_stale")?;
-    let path = _store_directory_29.to_path_buf();
+    let path = temp_store_path("relay_store_read_through_rejects_stale")?;
     let service_key = b"relay service key for object chunks";
     let now = 1_760_000_000;
     let store = RelayRedbStore::open(&path)?;
@@ -1745,8 +1712,7 @@ fn relay_store_read_through_rejects_stale() -> Result<(), Box<dyn std::error::Er
 // row fails closed (never an empty payload).
 #[test]
 fn relay_point_read_existing_missing_corrupt() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_30 = temp_store_path("relay_point_read_existing_missing_corrupt")?;
-    let path = _store_directory_30.to_path_buf();
+    let path = temp_store_path("relay_point_read_existing_missing_corrupt")?;
     let store = RelayRedbStore::open(&path)?;
     store.put_chunk(&relay_chunk("chunk_exists", 1_760_000_000, 60))?;
     assert_eq!(
@@ -1763,8 +1729,7 @@ fn relay_point_read_existing_missing_corrupt() -> Result<(), Box<dyn std::error:
 // configured budget, load_state fails (no partial load).
 #[test]
 fn relay_startup_over_cap_fails() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_31 = temp_store_path("relay_startup_over_cap_fails")?;
-    let path = _store_directory_31.to_path_buf();
+    let path = temp_store_path("relay_startup_over_cap_fails")?;
     let store = RelayRedbStore::open(&path)?;
     for index in 0..8 {
         store.put_chunk(&relay_chunk(&format!("chunk_over_{index}"), 1_760_000_000, 600))?;
@@ -1783,8 +1748,7 @@ fn relay_startup_over_cap_fails() -> Result<(), Box<dyn std::error::Error>> {
 // charge after storing many 64 KiB chunks grows only with metadata, never with payload bytes.
 #[test]
 fn relay_resident_charge_excludes_payload_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let _store_directory_32 = temp_store_path("relay_resident_charge_excludes_payload_bytes")?;
-    let path = _store_directory_32.to_path_buf();
+    let path = temp_store_path("relay_resident_charge_excludes_payload_bytes")?;
     let service_key = b"relay service key for object chunks";
     let now = 1_760_000_000;
     let store = RelayRedbStore::open(&path)?;
@@ -2155,8 +2119,7 @@ fn a1a_concurrent_puts_respect_hard_cap() -> Result<(), Box<dyn std::error::Erro
     use std::sync::{Arc, Barrier};
     let service_key: &'static [u8] = b"relay service key for object chunks";
     let now = 1_760_000_000;
-    let _store_directory_33 = temp_store_path("a1a_concurrent_puts_respect_hard_cap")?;
-    let path = _store_directory_33.to_path_buf();
+    let path = temp_store_path("a1a_concurrent_puts_respect_hard_cap")?;
     let store = Arc::new(RelayRedbStore::open(&path)?);
 
     // One chunk's charge, to size the cap to exactly K = 3 admissions.

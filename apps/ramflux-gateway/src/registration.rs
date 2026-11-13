@@ -228,9 +228,9 @@ mod tests {
             endpoint: "127.0.0.1:1".into(),
             server_name: "router".into(),
             tls: ramflux_transport::MeshTlsConfig {
-                ca_cert: path.clone(),
-                service_cert: path.clone(),
-                service_key: path,
+                ca_cert: path.to_path_buf(),
+                service_cert: path.to_path_buf(),
+                service_key: path.to_path_buf(),
             },
             client: ramflux_transport::MeshHttpClient::new(),
             async_mesh: None,

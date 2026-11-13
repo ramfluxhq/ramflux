@@ -8,8 +8,7 @@ type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 fn entry_admission_all_origins_fanout() -> Result {
     for mode in 0..=1 {
         for over in [false, true] {
-            let _store_directory_0 = temp_store_path(&format!("fanout-entry-bound-{mode}-{over}"))?;
-            let root = _store_directory_0.to_path_buf();
+            let root = temp_store_path(&format!("fanout-entry-bound-{mode}-{over}"))?;
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;
@@ -107,9 +106,9 @@ fn legacy_retry(
 fn legacy_fanout_prepares_and_measures_each_child_once() -> Result {
     for mode in 0..=1 {
         for leased in [false, true] {
-            let _store_directory_1 =
+            let store_directory_1 =
                 temp_store_path(&format!("legacy-fanout-once-{mode}-{leased}"))?;
-            let root = _store_directory_1.to_path_buf();
+            let root = store_directory_1.to_path_buf();
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;

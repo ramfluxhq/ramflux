@@ -20,7 +20,7 @@ fn event_count(client: &RamfluxClient) -> Result<usize, SdkError> {
 
 #[test]
 fn same_second_blocks_and_unblocks_have_distinct_decision_event_ids() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-same-second")?;
+    let (_root, client) = unlocked_client("decision-same-second")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let first = client.block_friend_link_at("link", 1000)?;
     let first_id = checkpoint(&client, "friend.control")?;
@@ -36,13 +36,12 @@ fn same_second_blocks_and_unblocks_have_distinct_decision_event_ids() -> Result<
     assert_ne!(lift_id, second_lift);
     assert_eq!(client.event_body(&lift_id)?, client.event_body(&second_lift)?);
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn later_second_reblock_does_not_conflict() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-later-second")?;
+    let (_root, client) = unlocked_client("decision-later-second")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     client.block_friend_link_at("link", 1000)?;
     let old_id = checkpoint(&client, "friend.control")?;
@@ -52,13 +51,12 @@ fn later_second_reblock_does_not_conflict() -> Result<(), SdkError> {
     assert_eq!(blocked.capability_revoked_at, Some(1002));
     assert_ne!(old_id, checkpoint(&client, "friend.control")?);
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn removal_scope_cycles_in_one_consent_epoch_have_distinct_ids() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-remove-cycle")?;
+    let (_root, client) = unlocked_client("decision-remove-cycle")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     client.remove_friend_link_at("link", "me", 1000)?;
     let first = checkpoint(&client, "friend.control")?;
@@ -77,13 +75,12 @@ fn removal_scope_cycles_in_one_consent_epoch_have_distinct_ids() -> Result<(), S
     client.remove_friend_link_at("link", "me", 1002)?;
     assert_ne!(checkpoint(&client, "friend.control")?, last);
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn sibling_reblock_after_local_lift_and_duplicate_tombstone_are_safe() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-sibling")?;
+    let (_root, client) = unlocked_client("decision-sibling")?;
     let own = client.owned_device_identity()?.root_commitment().to_owned();
     let peer = ramflux_protocol::encode_base64url([0x33; 32]);
     client.establish_friend_link("link", &own, &peer)?;
@@ -102,13 +99,12 @@ fn sibling_reblock_after_local_lift_and_duplicate_tombstone_are_safe() -> Result
     assert_eq!(checkpoint(&client, "friend.control")?, fresh);
     assert_eq!(event_count(&client)?, count, "same sibling decision must remain a no-op");
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn legacy_rows_and_new_decision_replays_survive_reopen() -> Result<(), SdkError> {
-    let (root, mut client) = unlocked_client("decision-legacy-reopen")?;
+    let (_root, mut client) = unlocked_client("decision-legacy-reopen")?;
     let legacy = b"{\"type\":\"friend.blocked\",\"link_id\":\"link\",\"legacy\":true}";
     client.append_event("friend.blocked:link", "friend.blocked", legacy)?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
@@ -132,13 +128,12 @@ fn legacy_rows_and_new_decision_replays_survive_reopen() -> Result<(), SdkError>
     assert_eq!(event_count(&client)?, count);
     assert_eq!(client.event_body("friend.blocked:link")?, Some(legacy.to_vec()));
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn a_new_decline_preserves_legacy_rows_and_its_replay_is_idempotent() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-decline")?;
+    let (_root, client) = unlocked_client("decision-decline")?;
     let legacy = b"{\"type\":\"friend.rejected\",\"legacy\":true}";
     client.append_event("friend.rejected:pending", "friend.rejected", legacy)?;
     client.record_pending_friend_link("pending", "peer", "principal_contact")?;
@@ -153,13 +148,12 @@ fn a_new_decline_preserves_legacy_rows_and_its_replay_is_idempotent() -> Result<
     assert_eq!(client.event_body("friend.rejected:pending")?, Some(legacy.to_vec()));
     assert!(client.reject_friend_link("pending").is_err(), "closed decline remains closed");
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn regranted_object_revocations_use_their_own_decision_identity() -> Result<(), SdkError> {
-    let (root, client) = unlocked_client("decision-regrant")?;
+    let (_root, client) = unlocked_client("decision-regrant")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let mut ids = Vec::new();
     for at in [1000, 1000, 1002] {
@@ -180,14 +174,13 @@ fn regranted_object_revocations_use_their_own_decision_identity() -> Result<(), 
     assert_eq!(client.event_body(&ids[0])?, client.event_body(&ids[1])?);
     assert_ne!(client.event_body(&ids[1])?, client.event_body(&ids[2])?);
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn equal_stamps_and_payloads_from_distinct_device_signers_have_distinct_ids() -> Result<(), SdkError>
 {
-    let (root, mut client) = unlocked_client("decision-device-namespace")?;
+    let (_root, mut client) = unlocked_client("decision-device-namespace")?;
     client.establish_friend_link("link", "principal_contact", "peer")?;
     let blocked = client.block_friend_link_at("link", 1000)?;
     let first_id = checkpoint(&client, "friend.control")?;
@@ -203,6 +196,5 @@ fn equal_stamps_and_payloads_from_distinct_device_signers_have_distinct_ids() ->
     assert_eq!(client.event_body(&second_id)?, Some(first_body));
     assert_ne!(first_id, second_id, "distinct device decisions must not collide at equal stamps");
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

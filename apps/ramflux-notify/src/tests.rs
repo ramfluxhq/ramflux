@@ -216,7 +216,6 @@ fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(entry.queued_at, 1_760_000_123);
     drop(ingress);
     drop(store);
-    std::fs::remove_dir_all(&root)?;
     Ok(())
 }
 
@@ -335,7 +334,6 @@ fn notify_ingest_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
         elapsed.as_millis()
     );
     drop(ingress);
-    let _ = std::fs::remove_dir_all(&temp_root);
     Ok(())
 }
 

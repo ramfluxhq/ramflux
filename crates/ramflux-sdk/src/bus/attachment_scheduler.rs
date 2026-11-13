@@ -129,7 +129,6 @@ mod tests {
         assert_eq!(db.pending_received_attachment_ids(10, 64)?.len(), 0);
         assert_eq!(db.pending_received_attachment_ids(20, 64)?, vec!["b"]);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

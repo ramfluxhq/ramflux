@@ -14,10 +14,9 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + 
 fn context(
     custody: Option<crate::custody::Pools>,
 ) -> anyhow::Result<(ramflux_test_support::TestPath, GatewayListenerContext)> {
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let context = fixture_value_0;
+    let (fixture_directory_0, context) = crate::session::tests::test_gateway_context()?;
     Ok((
-        _fixture_directory_0,
+        fixture_directory_0,
         GatewayListenerContext {
             custody,
             node_id: context.node_id,

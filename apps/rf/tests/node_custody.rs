@@ -42,8 +42,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let root = ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
+        let root = ramflux_test_support::TestPath::new()?
             .child(format!("rf-custody-{}", encode_base64url(ramflux_crypto::random_32()?)));
         fs::create_dir(&root)?;
         let seed = root.join("node-signing.key");

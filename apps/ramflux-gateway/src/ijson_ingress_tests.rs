@@ -137,12 +137,10 @@ impl FakeRouter {
 }
 
 fn fake_router() -> anyhow::Result<FakeRouter> {
-    let cert_root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!(
-            "ramflux-gateway-ijson-router-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+    let cert_root = ramflux_test_support::TestPath::new()?.child(format!(
+        "ramflux-gateway-ijson-router-{}",
+        ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+    ));
     std::fs::create_dir(&cert_root)?;
     let certificate = rcgen::generate_simple_self_signed(vec![
         "ramflux-router".into(),
@@ -321,10 +319,9 @@ fn session_frame(timestamp: i64) -> anyhow::Result<Vec<u8>> {
 fn context_with_router(
     router: &crate::RouterMeshClient,
 ) -> anyhow::Result<(ramflux_test_support::TestPath, crate::GatewayQuicContext)> {
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let mut context = fixture_value_0;
+    let (fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
     context.router = router.clone();
-    Ok((_fixture_directory_0, context))
+    Ok((fixture_directory_0, context))
 }
 
 fn open_frame() -> anyhow::Result<ramflux_node_core::GatewayOpenFrame> {
@@ -431,12 +428,10 @@ async fn tcp_session_frames_refuse_i_json(
     router: &crate::RouterMeshClient,
     calls: &AtomicUsize,
 ) -> anyhow::Result<()> {
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!(
-            "ramflux-gateway-ijson-session-{}",
-            ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-        ));
+    let root = ramflux_test_support::TestPath::new()?.child(format!(
+        "ramflux-gateway-ijson-session-{}",
+        ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+    ));
     std::fs::create_dir(&root)?;
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let tls = ramflux_transport::MeshTlsConfig {

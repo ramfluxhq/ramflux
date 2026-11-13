@@ -163,7 +163,6 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
     let fourth_path = pending_path(&root, "acct", &h(40));
     std::fs::write(&fourth_path, encode(&fourth)?)?;
     assert!(matches!(list_pending(&root, "acct"), Err(SdkError::PairingField("pending_cap"))));
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
 
@@ -192,6 +191,5 @@ fn list_pending_binds_filename_account_and_size() -> Result<(), SdkError> {
         super::read_pending(&root, "acct", &h(70)),
         Err(SdkError::PairingField("size"))
     ));
-    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

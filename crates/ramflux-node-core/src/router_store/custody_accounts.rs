@@ -393,7 +393,6 @@ mod tests {
                 }
             }
         }
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -423,7 +422,6 @@ mod tests {
             assert_eq!(v6[1].1, 128);
             assert_eq!(v6[2].1, 512);
         }
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -465,7 +463,6 @@ mod tests {
             assert_eq!(table.get("192.0.2.0/24")?.ok_or("row missing")?.value(), encoded);
             assert_eq!(store.custody_publication_write_count(), 0);
         }
-        std::fs::remove_file(path)?;
         Ok(())
     }
 

@@ -97,7 +97,6 @@ fn removed_and_blocked_contacts_arrive_before_acceptances_and_cannot_be_resurrec
     sibling.receive_own_contact(&delayed)?;
     assert_eq!(sibling.account_db()?.friend_link("z-removed")?.state, "removed");
     drop((own, sibling, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -128,7 +127,6 @@ fn missing_peer_manifest_leaves_cursor_retryable_until_authority_arrives() -> Te
     assert_eq!(own.stage_contact_backfill_batch()?, 0);
     assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
     drop((own, sibling, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -187,7 +185,6 @@ fn heavy_account_history_pages_preserve_every_contact_and_manifest_within_admiss
         )?;
     }
     drop((own, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -227,6 +224,5 @@ fn unreachable_contact_manifest_is_throttled_then_parked_without_blocking_later_
     assert_eq!(parked[0]["attempts"], 5);
     assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
     drop((own, sibling, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

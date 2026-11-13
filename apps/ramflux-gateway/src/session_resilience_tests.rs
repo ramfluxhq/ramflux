@@ -81,8 +81,7 @@ async fn survives_router_failure(timeout: bool) -> anyhow::Result<()> {
     let endpoint = server.local_addr()?.to_string();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let serving = tokio::spawn(serve_router(server, timeout, stopped));
-    let (_fixture_directory_0, fixture_value_0) = super::tests::test_gateway_context()?;
-    let mut context = fixture_value_0;
+    let (_fixture_directory_0, mut context) = super::tests::test_gateway_context()?;
     context.router = crate::RouterMeshClient {
         endpoint: "127.0.0.1:0".into(),
         server_name: "ramflux-router".into(),
@@ -237,8 +236,7 @@ async fn a_missing_auth_root_gets_an_explicit_rejection_before_router_io() -> an
 #[tokio::test]
 async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reconnect_delivers()
 -> anyhow::Result<()> {
-    let (_fixture_directory_3, fixture_value_3) = super::tests::test_gateway_context()?;
-    let context = fixture_value_3;
+    let (_fixture_directory_3, context) = super::tests::test_gateway_context()?;
     let writes = Arc::new(AtomicUsize::new(0));
     context
         .hub
@@ -362,8 +360,7 @@ impl GatewaySessionFrameSource for WaitingSource {
 }
 #[tokio::test]
 async fn resuming_the_same_session_id_survives_the_old_loops_cleanup() -> anyhow::Result<()> {
-    let (_fixture_directory_4, fixture_value_4) = super::tests::test_gateway_context()?;
-    let context = fixture_value_4;
+    let (_fixture_directory_4, context) = super::tests::test_gateway_context()?;
     let mut old_runtime = runtime()?;
     old_runtime.target_delivery_id = "peer".into();
     old_runtime.session_id = "same-session".into();

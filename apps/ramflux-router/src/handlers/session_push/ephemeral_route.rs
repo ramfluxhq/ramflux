@@ -12,7 +12,6 @@ use ramflux_protocol::{
     DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
 };
 use serde_json::{Value, json};
-use std::path::PathBuf;
 
 type TestResult = anyhow::Result<()>;
 
@@ -539,14 +538,13 @@ fn ephemeral_deadline() -> TestResult {
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid }
     );
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
 #[test]
 fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
-    let (live_path, live_router) = fresh("clock-live")?;
-    let (expired_path, expired_router) = fresh("clock-expired")?;
+    let (_live_path, live_router) = fresh("clock-live")?;
+    let (_expired_path, expired_router) = fresh("clock-expired")?;
     establish_capable(&live_router, TARGET)?;
     establish_capable(&expired_router, TARGET)?;
     let live_env = signed_ephemeral("clock-live", TARGET)?;
@@ -566,14 +564,12 @@ fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
     assert_eq!(expired, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired });
     drop(live_router);
     drop(expired_router);
-    std::fs::remove_file(live_path)?;
-    std::fs::remove_file(expired_path)?;
     Ok(())
 }
 
 #[test]
 fn ephemeral_dispatch_observer_calibrates_durable_enqueue() -> TestResult {
-    let (path, router) = fresh("p16-dispatch-control")?;
+    let (_path, router) = fresh("p16-dispatch-control")?;
     let mut envelope = signed_ephemeral("dispatch-control", TARGET)?;
     envelope.ext.ext.remove("delivery_mode");
     envelope.signed.signature =
@@ -587,6 +583,5 @@ fn ephemeral_dispatch_observer_calibrates_durable_enqueue() -> TestResult {
         "the observer must see the actual durable inbox enqueue: {outcome:?}"
     );
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }

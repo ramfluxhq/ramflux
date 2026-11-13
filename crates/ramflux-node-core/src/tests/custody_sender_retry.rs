@@ -28,8 +28,7 @@ fn request(
 fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
     for mode in 0..3 {
         for abort in [false, true] {
-            let _store_directory_0 = temp_store_path(&format!("native-retry-{mode}-{abort}"))?;
-            let root = _store_directory_0.to_path_buf();
+            let root = temp_store_path(&format!("native-retry-{mode}-{abort}"))?;
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;
@@ -51,7 +50,7 @@ fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
             );
             let original = request(&driver, &session, envelope.clone(), 31)?;
             let retry = request(&driver, &session, envelope.clone(), 32)?;
-            let held = hold(root.clone(), abort);
+            let held = hold(root.to_path_buf(), abort);
             std::thread::scope(|scope| -> Result {
                 let first = scope.spawn(|| service.mesh(&router, &store, original, PEER, NOW));
                 held.arrived.recv_timeout(Duration::from_secs(30))?;
@@ -162,8 +161,7 @@ fn hold(root: PathBuf, abort: bool) -> Hold {
 #[test]
 fn sender_signature_requires_ciphertext_hash_on_custody_delivery() -> Result {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let _store_directory_1 = temp_store_path("native-v2-hash-binding")?;
-    let root = _store_directory_1.to_path_buf();
+    let root = temp_store_path("native-v2-hash-binding")?;
     let store = crate::publication::open_durability_fixture(&root, 0)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

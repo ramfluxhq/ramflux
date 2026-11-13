@@ -849,7 +849,6 @@ mod tests {
             return Err(SdkError::LocalBus("low epoch sender key imported".to_owned()));
         };
         assert!(error.to_string().contains("below local joined epoch"));
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

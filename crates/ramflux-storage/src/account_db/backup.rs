@@ -246,7 +246,6 @@ mod tests {
         raw.close().map_err(|(_, error)| error)?;
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }
@@ -284,7 +283,6 @@ mod archived_event_tests {
         ));
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

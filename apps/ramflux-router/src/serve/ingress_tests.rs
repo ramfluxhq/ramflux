@@ -7,7 +7,7 @@ use ramflux_transport::{MeshQuicRawPost, mesh_quic_post_raw_with_peer_ca_pems_as
 use ramflux_transport::{MeshQuicServer, MeshTlsConfig, mesh_quic_exchange_raw_frame};
 use std::{
     collections::BTreeSet,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
     sync::Arc,
     time::{Duration, Instant},
@@ -80,7 +80,7 @@ struct Pki {
     router: MeshTlsConfig,
     federation: MeshTlsConfig,
     gateway: MeshTlsConfig,
-    root: ramflux_test_support::TestPath,
+    _root: ramflux_test_support::TestPath,
 }
 fn pki(name: &str) -> TestResult<Pki> {
     let root = ramflux_test_support::TestPath::new()
@@ -111,7 +111,7 @@ fn pki(name: &str) -> TestResult<Pki> {
         router: service(&root, &ca_key, &ca, "ramflux-router")?,
         federation: service(&root, &ca_key, &ca, "ramflux-federation")?,
         gateway: service(&root, &ca_key, &ca, "ramflux-gateway")?,
-        root,
+        _root: root,
     })
 }
 fn auth() -> RouterAsyncMeshPeerAuth {
@@ -729,7 +729,7 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
     let _serial = IJSON_TEST_LOCK.lock().await;
 
     let pki = pki("ijson-postcard")?;
-    let (db_path, state, store) = crate::router_runtime::tests::test_router("ijson-postcard")?;
+    let (_db_path, state, store) = crate::router_runtime::tests::test_router("ijson-postcard")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
     let roots_pem = pki.ca_pem.clone();
     let server = MeshQuicServer::bind_with_pem_roots_provider(
@@ -1162,7 +1162,6 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
 
     accept.abort();
     drop(router);
-    let _ = std::fs::remove_file(db_path);
     Ok(())
 }
 

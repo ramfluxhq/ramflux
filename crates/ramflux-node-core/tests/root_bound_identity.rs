@@ -238,7 +238,6 @@ fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     );
     drop(restored);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -362,7 +361,6 @@ fn concurrent_publication_and_snapshot_persistence_never_restore_a_lower_epoch()
     );
     drop(restored);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

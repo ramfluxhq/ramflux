@@ -90,8 +90,7 @@ pub(crate) async fn real_router_with_custody(
         }
     });
     tokio::time::timeout(Duration::from_secs(15), ready).await??;
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let mut context = fixture_value_0;
+    let (_fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
     context.node_id = "test-node".into();
     context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(
         child.1.join("gateway.redb"),

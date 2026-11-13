@@ -1055,7 +1055,6 @@ mod root_tests {
             receipt_gateway_message(&account, "unknown", "receipt", "shared", "target", 1).is_err()
         );
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

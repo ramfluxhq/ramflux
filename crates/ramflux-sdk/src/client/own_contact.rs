@@ -513,7 +513,7 @@ mod tests {
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [root_seed; 32]);
         client.create_device_branch(principal, "shared", 1, [root_seed + 1; 32]);
-        client.open_account_index(&path)?;
+        client.open_account_index(path)?;
         client.create_account(principal, principal)?;
         client.unlock_account(principal, b"own-contact-test")?;
         Ok(client)
@@ -560,7 +560,6 @@ mod tests {
         own.receive_own_contact(&packet(manifest, link)?)?;
         assert!(own.account_db()?.friend_link("accepted")?.blocked);
         drop((own, peer, impostor));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
@@ -591,7 +590,6 @@ mod tests {
         assert!(own.receive_own_contact(&packet).is_err());
         assert_eq!(own.account_db()?.friend_link("collision")?, before);
         drop((own, peer, other));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
@@ -630,7 +628,6 @@ mod tests {
         assert_eq!(own.stage_contact_backfill_batch()?, 0);
         assert_eq!(own.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
         drop((own, peer, sibling));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }

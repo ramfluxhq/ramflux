@@ -229,7 +229,7 @@ impl Fixture {
         )?;
         let config = session_config(&client)?;
         bootstrap_pair(&client, &peer, &config)?;
-        Ok(Self { root, peer_root, client, peer })
+        Ok(Self { client, peer, root, peer_root })
     }
 }
 
@@ -250,7 +250,7 @@ fn open_identity(
     let mut client = RamfluxClient::new();
     client.create_identity_root(principal, root_seed);
     client.create_device_branch(principal, device, 1, device_seed);
-    client.open_account_index(&root)?;
+    client.open_account_index(root)?;
     client.create_account(principal, &format!("{principal}-commitment"))?;
     client.unlock_account(principal, b"reply-outbox-secret")?;
     client.initialize_and_publish_prekey_bundle(principal, device, device, device_seed, None)?;

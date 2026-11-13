@@ -8,7 +8,6 @@ use ramflux_node_core::{
     EphemeralRouteGate, SessionDescriptor, SessionLifecycle, SessionPushSessionRequest,
 };
 use serde_json::Value;
-use std::path::PathBuf;
 
 type TestResult = anyhow::Result<()>;
 

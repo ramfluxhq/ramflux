@@ -3,7 +3,6 @@
 
 //! Public direct-listener handshake deadlines protect pre-authentication holders.
 use super::*;
-struct Cleanup(ramflux_test_support::TestPath);
 #[tokio::test]
 async fn direct_custody_slow_tls_peer_loses_its_holder_after_five_seconds() -> anyhow::Result<()> {
     let root = ramflux_test_support::TestPath::new()
@@ -13,7 +12,6 @@ async fn direct_custody_slow_tls_peer_loses_its_holder_after_five_seconds() -> a
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ));
     std::fs::create_dir(&root)?;
-    let _cleanup = Cleanup(root.clone());
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let tls = ramflux_transport::MeshTlsConfig {
         ca_cert: root.join("ca.pem"),

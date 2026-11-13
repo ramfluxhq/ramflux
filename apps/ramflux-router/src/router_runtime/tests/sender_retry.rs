@@ -10,11 +10,19 @@ struct Fixture {
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     handle: RouterHandle,
-    root: ramflux_test_support::TestPath,
+    root: std::path::PathBuf,
+    directory: Option<ramflux_test_support::TestPath>,
 }
 impl Fixture {
     fn new(mode: u8, label: &str) -> anyhow::Result<Self> {
-        let root = temp_store_path(label)?;
+        let directory = temp_store_path(label)?;
+        Self::at(mode, directory.to_path_buf(), Some(directory))
+    }
+    fn at(
+        mode: u8,
+        root: std::path::PathBuf,
+        directory: Option<ramflux_test_support::TestPath>,
+    ) -> anyhow::Result<Self> {
         let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
         let state = Arc::new(ramflux_node_core::RouterCore::new());
         register_test_device(&state, "alice", "alice_phone", "target_alice", 1)?;
@@ -22,13 +30,10 @@ impl Fixture {
         store.initialize_inbox("target_alice")?;
         state.prepare_publication_target(&store, "target_alice")?;
         let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
-        Ok(Self { root, state, store, handle })
+        Ok(Self { state, store, handle, root, directory })
     }
-    fn close(self) -> anyhow::Result<()> {
-        let root = self.root.clone();
+    fn close(self) {
         drop(self);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
     }
 }
 fn submit(
@@ -165,7 +170,8 @@ async fn unresolved_case(mode: u8, index: bool) -> anyhow::Result<()> {
     drop(predecessor);
     drop(held);
     drop(core);
-    fixture.close()
+    fixture.close();
+    Ok(())
 }
 
 #[tokio::test]
@@ -216,22 +222,24 @@ async fn aborted_case(mode: u8, restart: bool) -> anyhow::Result<()> {
         Some(original)
     );
     assert_eq!(fixture.state.resume("target_alice", 0, 10).len(), 1);
-    fixture.close()
+    fixture.close();
+    Ok(())
 }
 fn reopen(fixture: Fixture, mode: u8) -> anyhow::Result<Fixture> {
     let root = fixture.root.clone();
+    let directory = fixture.directory.clone();
     drop(fixture);
     let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
     let state = Arc::new(store.load_router()?.ok_or_else(|| anyhow::anyhow!("restored router"))?);
     let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
-    Ok(Fixture { root, state, store, handle })
+    Ok(Fixture { state, store, handle, root, directory })
 }
 async fn crash_child() -> anyhow::Result<()> {
     let mode: u8 = std::env::var("RAMFLUX_P7_RETRY_MODE")?.parse()?;
-    let fixture = Fixture::new(mode, "retry-crash-child")?;
     let root = std::path::PathBuf::from(
         std::env::var_os("RAMFLUX_P7_RETRY_CHILD").ok_or_else(|| anyhow::anyhow!("root"))?,
     );
+    let fixture = Fixture::at(mode, root.join("store"), None)?;
     let core = fixture.store.publication_core()?;
     let id = fixture.store.inbox_status("target_alice")?.0.ok_or_else(|| anyhow::anyhow!("id"))?;
     let _predecessor = core.reserve("target_alice", &id, &[])?;
@@ -247,25 +255,34 @@ async fn crash_child() -> anyhow::Result<()> {
     std::fs::write(root.join("proof"), serde_json::to_vec(&(fixture.root.clone(), id, envelope))?)?;
     std::process::abort();
 }
+struct Child(std::process::Child);
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 async fn crash_retry(mode: u8) -> anyhow::Result<()> {
     let control = temp_store_path(&format!("retry-crash-proof-{mode}"))?;
-    let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "router_runtime::tests::sender_retry::aborted_and_durable_sender_retry",
-            "--nocapture",
-        ])
-        .env("RAMFLUX_P7_RETRY_CHILD", &control)
-        .env("RAMFLUX_P7_RETRY_MODE", mode.to_string())
-        .spawn()?;
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "router_runtime::tests::sender_retry::aborted_and_durable_sender_retry",
+                "--nocapture",
+            ])
+            .env("RAMFLUX_P7_RETRY_CHILD", &control)
+            .env("RAMFLUX_P7_RETRY_MODE", mode.to_string())
+            .spawn()?,
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.0.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
-            child.kill()?;
-            child.wait()?;
+            child.0.kill()?;
+            child.0.wait()?;
             anyhow::bail!("crash child watchdog");
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -280,12 +297,11 @@ async fn crash_retry(mode: u8) -> anyhow::Result<()> {
     let store = Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
     let state = Arc::new(store.load_router()?.ok_or_else(|| anyhow::anyhow!("recovery"))?);
     let handle = RouterHandle::tokio(Arc::clone(&state), Arc::clone(&store), None);
-    let fixture = Fixture { root, state, store, handle };
+    let fixture = Fixture { state, store, handle, root, directory: None };
     assert_eq!(join(submit(&fixture.handle, &envelope)).await?.inbox_seq, Some(2));
     assert_eq!(fixture.store.inbox_status("target_alice")?, (Some(id), 2));
     assert_eq!(fixture.state.resume("target_alice", 0, 10).len(), 1);
-    fixture.close()?;
-    std::fs::remove_dir_all(control)?;
+    fixture.close();
     Ok(())
 }
 
@@ -312,7 +328,8 @@ async fn capacity_refusal_leaves_no_sender_effect() -> anyhow::Result<()> {
     assert_eq!(fixture.state.resume("target_alice", 0, 10).len(), 1);
     drop(guards);
     drop(core);
-    fixture.close()
+    fixture.close();
+    Ok(())
 }
 
 #[test]
@@ -331,7 +348,8 @@ fn forwarded_conflict_uses_typed_refusal_reply() -> anyhow::Result<()> {
     assert_eq!(reply["reason"], "idempotency_conflict");
     assert_eq!(fixture.store.inbox_status("target_alice")?.1, 0);
     drop(owner);
-    fixture.close()
+    fixture.close();
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -359,7 +377,7 @@ async fn accepted_reply_survives_post_commit_lookup_error() -> anyhow::Result<()
         assert_eq!(retry.inbox_seq, original.inbox_seq);
         assert_eq!(fixture.state.resume(&envelope.target_delivery_id, 0, 10).len(), 1);
         drop(registration);
-        fixture.close()?;
+        fixture.close();
     }
     Ok(())
 }

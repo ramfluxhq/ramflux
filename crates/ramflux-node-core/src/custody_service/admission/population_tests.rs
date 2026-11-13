@@ -26,7 +26,7 @@ impl Scenario {
         fast: bool,
         drivers: &[Driver],
     ) -> Result<Self> {
-        let store = crate::RouterRedbStore::open_without_wal(&path)?;
+        let store = crate::RouterRedbStore::open_without_wal(path)?;
         let router = crate::RouterCore::new();
         store.bootstrap_router(&router)?;
         // Known principals isolate admission from unchanged durable new-principal quotas.

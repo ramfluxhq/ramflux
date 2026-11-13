@@ -5,15 +5,14 @@ use crate::{GatewayQuicContext, gateway_state, session::pre_auth_gate_for_gatewa
 use ramflux_node_core::{GatewayClientFrame, GatewayOpenFrame, GatewayPreAuthPolicy};
 
 fn context() -> anyhow::Result<(ramflux_test_support::TestPath, GatewayQuicContext)> {
-    let (_fixture_directory_0, fixture_value_0) = crate::session::tests::test_gateway_context()?;
-    let context = fixture_value_0;
+    let (fixture_directory_0, context) = crate::session::tests::test_gateway_context()?;
     gateway_state(&context.state)?.set_pre_auth_policy(GatewayPreAuthPolicy {
         enabled: true,
         per_source_ip_handshake_rate: 1,
         window_seconds: 3_600,
         ..GatewayPreAuthPolicy::default()
     })?;
-    Ok((_fixture_directory_0, context))
+    Ok((fixture_directory_0, context))
 }
 
 #[test]
@@ -371,7 +370,6 @@ fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Resul
         serde_json::json!([101])
     );
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -457,6 +455,5 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
             .is_ok()
     );
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }

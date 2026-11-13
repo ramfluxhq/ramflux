@@ -3,7 +3,6 @@
 
 //! Fresh import refuses missing setup before archive verification or job allocation.
 use std::{
-    path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -59,6 +58,5 @@ async fn fresh_import_without_local_passphrase_refuses_before_verifying_archive(
     assert_eq!(jobs["jobs"], serde_json::json!([]));
     drop(bus);
     drop(daemon);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

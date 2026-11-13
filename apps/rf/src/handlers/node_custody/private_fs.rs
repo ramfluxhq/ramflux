@@ -253,7 +253,6 @@ mod tests {
         assert!(directory.write_immutable("kept", b"replacement").is_err());
         assert_eq!(&*directory.read("kept", 100, true)?, b"original");
         assert!(!directory.names()?.iter().any(|name| name.starts_with(".custody-pending-")));
-        fs::remove_dir_all(path)?;
         Ok(())
     }
 
@@ -279,8 +278,6 @@ mod tests {
         fs::rename(&parent, &renamed)?;
         PrivateDir::open(&parent)?;
         assert!(directory.check_path(&parent).is_err());
-        fs::remove_dir_all(parent)?;
-        fs::remove_dir_all(renamed)?;
         Ok(())
     }
 }

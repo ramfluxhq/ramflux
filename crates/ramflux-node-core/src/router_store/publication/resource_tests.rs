@@ -108,7 +108,6 @@ fn published_sibling_survives_last_owner_abort() -> Result {
     drop(aborted);
     drop(core);
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

@@ -54,9 +54,9 @@ fn setup(
 }
 fn finish(
     source: RamfluxClient,
-    sr: PathBuf,
+    sr: ramflux_test_support::TestPath,
     target: RamfluxClient,
-    tr: PathBuf,
+    tr: ramflux_test_support::TestPath,
 ) -> Result<(), SdkError> {
     drop(source);
     drop(target);
@@ -655,8 +655,8 @@ fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip(
 #[test]
 fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_offline_decryption()
 -> Result<(), SdkError> {
-    let (sr, tr, source, target, _) = setup("fresh-sibling-authority")?;
-    let (br, mut bob) = client_with_account("fresh-sibling-bob", "bob", "bob")?;
+    let (_sr, tr, source, target, _) = setup("fresh-sibling-authority")?;
+    let (_br, mut bob) = client_with_account("fresh-sibling-bob", "bob", "bob")?;
     bob.create_identity_root(
         "bob",
         ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &[0x63; 32]),
@@ -725,8 +725,5 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
         b"history from authenticated remote root"
     );
     drop((source, bob, reader));
-    std::fs::remove_dir_all(sr)?;
-    std::fs::remove_dir_all(tr)?;
-    std::fs::remove_dir_all(br)?;
     Ok(())
 }

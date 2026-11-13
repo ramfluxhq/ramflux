@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn conversation_list_returns_inserted_conversations() -> Result<(), SdkError> {
-        let (root, client) = client_with_account("returns-inserted")?;
+        let (_root, client) = client_with_account("returns-inserted")?;
         let metadata = MessageMetadata::default();
         client.account_db()?.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "conv_one",
@@ -418,7 +418,6 @@ mod tests {
             summaries.first().map(|summary| summary.conversation_id.as_str()),
             Some("conv_one")
         );
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

@@ -18,7 +18,7 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
     let mut c = RamfluxClient::new();
     c.create_identity_root(id, [seed; 32]);
     c.create_device_branch(id, &format!("{id}-device"), 1, [seed + 1; 32]);
-    c.open_account_index(&root)?;
+    c.open_account_index(root)?;
     c.create_account(id, id)?;
     c.unlock_account(id, b"task-test-secret")?;
     Ok(c)
@@ -60,7 +60,7 @@ impl Fixture {
                 &json!({"kind":"direct","participants":["human","agent"]}),
             )?;
         }
-        Ok(Self { root, human, agent })
+        Ok(Self { human, agent, root })
     }
 }
 impl Drop for Fixture {

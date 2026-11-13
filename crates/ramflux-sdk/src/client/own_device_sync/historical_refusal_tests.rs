@@ -82,7 +82,7 @@ impl Page {
             ));
         }
         COUNTS.with(|counts| counts.set((0, 0)));
-        Ok(Self { client, root, envelope, bytes })
+        Ok(Self { client, envelope, bytes, root })
     }
     fn assert_uncommitted(&self) -> Result<(), SdkError> {
         assert!(self.client.direct_message_by_id("page-first")?.is_none());

@@ -83,7 +83,6 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     drop(local);
     drop(index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -218,7 +217,6 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     drop(local);
     drop(source_index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -304,7 +302,6 @@ fn r2_merge_never_imports_restore_flags_or_marks_existing_local_sessions_inactiv
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -357,7 +354,6 @@ fn backup_tombstone_classifies_only_devices_under_the_local_account_root() -> Te
     drop(reopened);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -420,6 +416,5 @@ fn backup_reserved_dm_scopes_require_canonical_immutable_root_bindings() -> Test
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

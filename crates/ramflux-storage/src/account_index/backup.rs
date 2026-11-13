@@ -168,7 +168,6 @@ mod tests {
         }
         drop(reopened);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
@@ -210,7 +209,6 @@ mod tests {
         let reopened = AccountIndex::open(&root)?;
         assert_eq!(reopened.account("account")?.db_relative_path, install.db_relative_path);
         drop(reopened);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -121,7 +121,6 @@ mod tests {
         assert!(run(IdentityJournalCommand::Checkpoint, &locked).is_err());
         assert!(run(IdentityJournalCommand::DiscardStale, &locked).is_err());
         drop(store);
-        std::fs::remove_file(locked)?;
         Ok(())
     }
 
@@ -137,7 +136,6 @@ mod tests {
         let store = RouterRedbStore::open_existing(&path)?;
         assert_eq!(store.pending_identity_admission_count()?, 0);
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -181,7 +179,6 @@ mod tests {
         assert!(txn.open_table(SNAPSHOTS)?.get("identity_registry")?.is_some());
         drop(txn);
         drop(db);
-        std::fs::remove_file(shutdown_path)?;
         Ok(())
     }
 }

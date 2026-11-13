@@ -2369,8 +2369,7 @@ pub(crate) mod tests {
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
         let runtime = test_runtime(&branch)?;
-        let (_fixture_directory_0, fixture_value_0) = test_gateway_context()?;
-        let context = fixture_value_0;
+        let (_fixture_directory_0, context) = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
         let request = ramflux_node_core::RelayTokenIssueRequest {
@@ -2388,8 +2387,7 @@ pub(crate) mod tests {
     fn relay_token_issue_accepts_authenticated_owner_put() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let (_fixture_directory_1, fixture_value_1) = test_gateway_context()?;
-        let context = fixture_value_1;
+        let (_fixture_directory_1, context) = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
         let request = ramflux_node_core::RelayTokenIssueRequest {
@@ -2418,8 +2416,7 @@ pub(crate) mod tests {
         let wrong_branch =
             ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x22; 32]);
         let runtime = test_runtime(&branch)?;
-        let (_fixture_directory_2, fixture_value_2) = test_gateway_context()?;
-        let context = fixture_value_2;
+        let (_fixture_directory_2, context) = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 
@@ -2450,8 +2447,7 @@ pub(crate) mod tests {
     fn relay_token_issue_binding_failure_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let (_fixture_directory_3, fixture_value_3) = test_gateway_context()?;
-        let context = fixture_value_3;
+        let (_fixture_directory_3, context) = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 
@@ -2478,8 +2474,7 @@ pub(crate) mod tests {
     fn relay_token_issue_expired_does_not_poison_replay() -> anyhow::Result<()> {
         let branch = ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [0x21; 32]);
         let runtime = test_runtime(&branch)?;
-        let (_fixture_directory_4, fixture_value_4) = test_gateway_context()?;
-        let context = fixture_value_4;
+        let (_fixture_directory_4, context) = test_gateway_context()?;
         let body =
             test_relay_token_issue_body(&branch, ramflux_node_core::ObjectRelayCapability::Put)?;
 

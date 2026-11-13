@@ -103,7 +103,6 @@ mod tests {
         assert_eq!(db.pending_actor_state_sequence("account/networking")?, None);
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

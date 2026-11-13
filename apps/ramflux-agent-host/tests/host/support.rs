@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
 pub type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;

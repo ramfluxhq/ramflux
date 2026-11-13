@@ -164,7 +164,6 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         }
     }
     drop(handle);
-    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 
@@ -869,7 +868,7 @@ fn assert_transport_matrix(
 async fn gateway_registration_is_bound_to_authenticated_instance_on_tcp_and_tokio_quic()
 -> Result<(), Box<dyn std::error::Error>> {
     let pki = MeshPki::new("gw-instance-identity")?;
-    let (path, state, store) = crate::router_runtime::tests::test_router("gw-instance-identity")?;
+    let (_path, state, store) = crate::router_runtime::tests::test_router("gw-instance-identity")?;
     let router = Arc::new(crate::router_runtime::RouterHandle::tokio_with_node_id(
         state, store, None, "node-a",
     ));
@@ -1025,7 +1024,6 @@ async fn gateway_registration_is_bound_to_authenticated_instance_on_tcp_and_toki
     );
     accept_task.abort();
     drop(router);
-    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
@@ -1249,7 +1247,7 @@ struct MeshPki {
     gateway_a: ramflux_transport::MeshTlsConfig,
     gateway_b: ramflux_transport::MeshTlsConfig,
     federation: ramflux_transport::MeshTlsConfig,
-    root: ramflux_test_support::TestPath,
+    _root: ramflux_test_support::TestPath,
 }
 
 impl MeshPki {
@@ -1307,7 +1305,7 @@ impl MeshPki {
                 None,
             )?,
             ca_pem,
-            root,
+            _root: root,
         })
     }
 }

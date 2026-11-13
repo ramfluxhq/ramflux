@@ -255,7 +255,7 @@ pub(super) fn child() -> Result {
     let hook_control = control.clone();
     let once = AtomicBool::new(false);
     let _guard = observe(
-        root.to_path_buf(),
+        root.clone(),
         Arc::new(move |path, op, done| {
             if path == target
                 && op == operation

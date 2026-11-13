@@ -1704,7 +1704,6 @@ mod tests {
         assert!(restored.home_node_migration(&request.proof.principal_id).is_none());
         assert!(restored.resolve_home_node_route(&request.proof.principal_id).is_none());
         drop(store);
-        let _ = std::fs::remove_file(path);
         Ok(())
     }
 
@@ -1754,13 +1753,12 @@ mod tests {
         assert!(value["observed_at"].is_u64());
         assert_eq!(handle.store().custody_publication_write_count(), 0);
         drop(handle);
-        let _ = std::fs::remove_file(path);
         Ok(())
     }
 
     #[test]
     fn forwarded_endpoint_is_not_reachable_from_client_listener() -> anyhow::Result<()> {
-        let (path, state, store) = crate::router_runtime::tests::test_router("forwarded-role")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("forwarded-role")?;
         let mut envelope =
             crate::router_runtime::tests::current_envelope("forwarded-role", "active-target")?;
         state.refresh_registered_envelope_authority(&mut envelope)?;
@@ -1816,13 +1814,12 @@ mod tests {
         assert_eq!(body["accepted"], true);
         assert_eq!(handle.state().resume("active-target", 0, 10).len(), 1);
         drop(handle);
-        let _ = std::fs::remove_file(path);
         Ok(())
     }
 
     #[test]
     fn migration_peer_ingress_requires_the_federation_role_before_decoding() -> anyhow::Result<()> {
-        let (path, state, store) = crate::router_runtime::tests::test_router("migration-role")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("migration-role")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         for peer in ["ramflux-gateway", "ramflux-relay", "ramflux-retention"] {
             let response = handle_mesh_request_value(
@@ -1837,7 +1834,6 @@ mod tests {
             assert_eq!(response.status, "403 Forbidden");
         }
         drop(handle);
-        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 
@@ -1871,7 +1867,7 @@ mod tests {
     fn authority_refresh_requires_federation_mesh_and_replaces_attached_authority()
     -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let (path, state, store) = crate::router_runtime::tests::test_router("authority-refresh")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("authority-refresh")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let mut envelope =
             crate::router_runtime::tests::current_envelope("refresh-authority", "peer")?;
@@ -1914,14 +1910,13 @@ mod tests {
             ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch
         );
         drop(handle);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
     #[test]
     fn mesh_quic_request_submit_uses_async_router_path() -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        let (path, state, store) = crate::router_runtime::tests::test_router("mesh_async_submit")?;
+        let (_path, state, store) = crate::router_runtime::tests::test_router("mesh_async_submit")?;
         let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
         let envelope = crate::router_runtime::tests::current_envelope(
             "env_router_async_ingress",
@@ -1965,8 +1960,6 @@ mod tests {
         assert_eq!(Some(rows[0].inbox_seq), accepted.inbox_seq);
         assert_eq!(rows[0].envelope.envelope_id, "env_router_async_ingress");
 
-        let _removed = std::fs::remove_file(&path);
-        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
         Ok(())
     }
 
@@ -1996,7 +1989,6 @@ mod tests {
             );
         }
         drop(handle);
-        let _ = std::fs::remove_file(path);
         Ok(())
     }
 
@@ -2021,8 +2013,6 @@ mod tests {
         assert_eq!(response.status, 403);
         assert_eq!(response.body["error"], "retention peer is only authorized for gc_sweep");
 
-        let _removed = std::fs::remove_file(&path);
-        let _removed = std::fs::remove_dir_all(path.with_extension("redb.wal"));
         Ok(())
     }
 

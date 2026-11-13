@@ -410,7 +410,6 @@ fn preauth_runtime_policy_and_debt_commit_atomically_across_restart() -> Result 
         assert!(store.load_state_with_pre_auth_config(&runtime)?.is_some());
         assert!(store.load_state()?.is_some());
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -451,7 +450,6 @@ fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
     ));
     assert!(state.check_pre_auth(&source, None, 3731).is_ok());
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -580,7 +578,6 @@ fn empty_rate_zero_sources_are_reclaimed_on_reopen() -> Result {
     assert!(restored.pre_auth_expiry_by_source.is_empty());
     assert!(matches!(restored.check_pre_auth(&source(4097), None, 100)?, Decision::Challenge(_)));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

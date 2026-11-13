@@ -172,7 +172,6 @@ mod tests {
         assert!(index.take_over_supervisor_operation("alice", "key", "fp").is_err());
         assert!(index.take_over_supervisor_operation("alice", "missing", "fp").is_err());
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
@@ -197,7 +196,6 @@ mod tests {
             matches!(index.reserve_supervisor_operation("alice", "key", "fp"), Err(StorageError::OperationReconciliationRequired { key }) if key == "key")
         );
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

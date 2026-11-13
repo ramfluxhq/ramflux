@@ -569,7 +569,7 @@ mod deadline_tests;
 pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::TcpListener;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -653,7 +653,6 @@ pub(crate) mod tests {
             ramflux_protocol::NotificationDeliveryClass::UserContentNotification
         );
         signer.verify_notification_wake(&request.wake)?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -684,7 +683,6 @@ pub(crate) mod tests {
         assert_eq!(request.device_delivery_id, "target_notify_mesh_fallback");
         assert_eq!(request.wake.wake_id, "wake_env_notify_mesh_fallback");
         signer.verify_notification_wake(&request.wake)?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -717,7 +715,6 @@ pub(crate) mod tests {
         assert_eq!(response.target_delivery_id, "target_notify_mesh");
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.envelope_id, "env_router_async_mesh");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -755,7 +752,6 @@ pub(crate) mod tests {
         assert_eq!(response.target_delivery_id, "target_notify_mesh");
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.envelope_id, "env_router_async_mesh_fallback");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -790,7 +786,6 @@ pub(crate) mod tests {
 
         assert_eq!(response["transport"], "quic");
         assert_eq!(received.recv_timeout(Duration::from_secs(5))?, "/mvp0/cursor/target_async_get");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -828,7 +823,6 @@ pub(crate) mod tests {
             received.recv_timeout(Duration::from_secs(5))?,
             "/mvp0/cursor/target_get_opt_out"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -871,7 +865,6 @@ pub(crate) mod tests {
             received.recv_timeout(Duration::from_secs(5))?,
             "/mvp0/cursor/target_get_fallback"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -890,7 +883,6 @@ pub(crate) mod tests {
 
         assert_eq!(router.endpoint, DEFAULT_ROUTER_ASYNC_ENDPOINT);
         assert_eq!(notify.endpoint, DEFAULT_NOTIFY_MESH_ENDPOINT);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -901,7 +893,6 @@ pub(crate) mod tests {
         let config = test_gateway_config(&gateway.tls);
 
         assert!(notify_mesh_client_from_endpoint_value(&config, Some("off"))?.is_none());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1330,8 +1321,6 @@ pub(crate) mod tests {
         let second = temp_cert_root_at("same-tick", 1)?;
         assert_ne!(first, second);
         assert_eq!(std::fs::read(&marker)?, b"first");
-        std::fs::remove_dir_all(first)?;
-        std::fs::remove_dir_all(second)?;
         Ok(())
     }
 

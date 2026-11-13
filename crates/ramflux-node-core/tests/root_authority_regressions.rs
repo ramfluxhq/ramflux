@@ -98,7 +98,6 @@ fn a_thousand_exact_replays_do_not_write_the_registry() -> TestResult {
     assert_eq!(store.identity_registry_write_count(), count);
     drop(router);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -287,7 +286,6 @@ fn deletion_cleanup_cannot_persist_a_snapshot_older_than_a_concurrent_publicatio
     assert!(restored.mvp1_device_auth_key_checked(&lookup(&b)?)?.ok_or("device")?.revoked);
     drop(restored);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -326,7 +324,6 @@ fn copying_an_existing_device_label_cannot_change_qualified_prekey_or_auth_looku
     );
     drop(router);
     drop(store);
-    std::fs::remove_file(file)?;
     Ok(())
 }
 #[test]
@@ -394,7 +391,6 @@ fn durable_finalize_and_concurrent_publication_keep_lifecycle_authority_and_clea
     assert!(restored.mvp1_device_auth_key_checked(&lookup(&other)?)?.ok_or("device")?.revoked);
     drop(restored);
     drop(store);
-    std::fs::remove_file(file)?;
     Ok(())
 }
 
@@ -458,7 +454,6 @@ fn failed_registration_never_consumes_the_proof_or_commits_partial_authority() -
     assert!(router.register_identity_durable(&retry, &reopened).is_err());
     drop(router);
     drop(reopened);
-    std::fs::remove_file(store_path)?;
     Ok(())
 }
 

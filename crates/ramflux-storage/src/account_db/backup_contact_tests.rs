@@ -88,6 +88,5 @@ fn r3_merge_preserves_contact_release_delete_and_denial_fences_and_maximum_autho
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

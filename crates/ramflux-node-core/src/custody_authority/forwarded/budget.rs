@@ -197,7 +197,7 @@ mod tests {
     }
     #[test]
     fn foreign_pin_store_evicts_unreferenced_lru_and_keeps_referenced_pins() -> Result {
-        let (path, db) = database()?;
+        let (_path, db) = database()?;
         let tx = db.begin_write()?;
         for anchor in ["protected", "old", "recent"] {
             insert_bounded(&tx, "peer", anchor, &state(anchor)?, 1, 3, 3, 100_000)?;
@@ -212,12 +212,11 @@ mod tests {
         drop(table);
         tx.commit()?;
         drop(db);
-        std::fs::remove_file(path)?;
         Ok(())
     }
     #[test]
     fn one_peer_cannot_exhaust_foreign_pin_store_for_others() -> Result {
-        let (path, db) = database()?;
+        let (_path, db) = database()?;
         let tx = db.begin_write()?;
         for anchor in ["a1", "a2"] {
             insert_bounded(&tx, "A", anchor, &state(anchor)?, 1, 4, 2, 100_000)?;
@@ -231,12 +230,11 @@ mod tests {
         assert!(tx.open_table(FOREIGN)?.get("b1")?.is_some());
         tx.commit()?;
         drop(db);
-        std::fs::remove_file(path)?;
         Ok(())
     }
     #[test]
     fn full_foreign_pin_store_returns_classified_retryable_refusal() -> Result {
-        let (path, db) = database()?;
+        let (_path, db) = database()?;
         let tx = db.begin_write()?;
         insert_bounded(&tx, "A", "a", &state("a")?, 1, 1, 1, 100_000)?;
         referenced(&tx, "a")?;
@@ -254,7 +252,6 @@ mod tests {
         ));
         drop(tx);
         drop(db);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 }

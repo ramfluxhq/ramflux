@@ -55,7 +55,6 @@ fn r4_twenty_thousand_downloaded_references_are_scanned_with_bounded_work()
     drop(private);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
