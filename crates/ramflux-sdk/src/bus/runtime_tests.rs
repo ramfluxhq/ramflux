@@ -701,7 +701,7 @@ fn evicted_object_cache_entries_reload_from_encrypted_db() -> Result<(), SdkErro
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pipelined_mutations_keep_mailbox_order_and_control_state_survives_restart()
+async fn pipelined_mutations_keep_mailbox_order_and_account_config_survives_restart()
 -> Result<(), SdkError> {
     LocalSet::new()
         .run_until(async {
@@ -728,66 +728,38 @@ async fn pipelined_mutations_keep_mailbox_order_and_control_state_survives_resta
                         crate::client::identity_authority::test_support::manifest(&account.client)?;
                     account.client.persist_identity_directory(&authority)?;
                     account.client.record_owned_proof_published(now_unix_timestamp())?;
-                    if round == 0 {
-                        let event = A2iControlEvent {
-                            event_id: "ordered-control".into(),
-                            event_type: "request".into(),
-                            source_device_id: "device-alice".into(),
-                            source_principal_id: Some("alice".into()),
-                            source_principal_commitment: Some(
-                                account.client.surface_local_root_commitment()?,
-                            ),
-                            target_device_id: "device-alice".into(),
-                            control_domain: "automation".into(),
-                            action: "notify".into(),
-                            subject_base64: ramflux_protocol::encode_base64url(b"control"),
-                            created_at: 1,
-                            acknowledged: false,
-                        };
-                        account.client.account_db()?.persist_actor_state(
-                            &crate::client::routed::control::a2i_key(
-                                &account.client.local_device_identity(&event.source_device_id)?,
-                                &event.event_id,
-                            )?,
-                            &event,
-                        )?;
-                    }
                     Ok(account)
                 });
                 let supervisor =
                     supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
                 let (client, server) = client(Rc::clone(&supervisor), 1).await?;
                 if round == 0 {
-                    // Use durable controls rather than the removed local-only call stub. Both requests
-                    // use the mutation mailbox: the pending list must observe the earlier ACK.
-                    let ack = client.request_frame(request(
-                        "ack",
+                    // Both writes use the mutation mailbox; the later value must persist.
+                    let first = client.request_frame(request(
+                        "first",
                         "alice",
-                        "a2i.acknowledge",
-                        serde_json::json!({"event_id":"ordered-control"}),
+                        "account.config.set",
+                        serde_json::json!({"offline_retention_secs":3600}),
                     ));
-                    let list = client.request_frame(request(
-                        "list",
+                    let second = client.request_frame(request(
+                        "second",
                         "alice",
-                        "a2i.list_pending",
-                        serde_json::json!({}),
+                        "account.config.set",
+                        serde_json::json!({"offline_retention_secs":7200}),
                     ));
-                    let (acknowledged, pending) = tokio::join!(ack, list);
-                    assert_eq!(acknowledged?["acknowledged"], true);
-                    assert_eq!(pending?["events"].as_array().map(Vec::len), Some(0));
-                } else {
-                    let events = client
-                        .request_frame(request(
-                            "restored",
-                            "alice",
-                            "a2i.list",
-                            serde_json::json!({}),
-                        ))
-                        .await?;
-                    assert_eq!(events["events"].as_array().map(Vec::len), Some(1));
-                    assert_eq!(events["events"][0]["event_id"], "ordered-control");
-                    assert_eq!(events["events"][0]["acknowledged"], true);
+                    let (first, second) = tokio::join!(first, second);
+                    assert_eq!(first?["offline_retention_secs"], 3600);
+                    assert_eq!(second?["offline_retention_secs"], 7200);
                 }
+                let restored = client
+                    .request_frame(request(
+                        "current",
+                        "alice",
+                        "account.config.get",
+                        serde_json::json!({}),
+                    ))
+                    .await?;
+                assert_eq!(restored["offline_retention_secs"], 7200);
                 drop(client);
                 let _ = server.await;
                 supervisor.shutdown().await?;

@@ -139,6 +139,47 @@ fn readonly_group_metadata_does_not_need_private_root_material() -> Result<(), S
     Ok(())
 }
 
+fn reject_tampered_bootstrap_without_mutation(
+    peer: &RamfluxClient,
+    state: &ramflux_crypto::VerifiedGroupState,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    bytes: &[u8],
+) -> Result<(), SdkError> {
+    let mut poisoned: Value = serde_json::from_slice(bytes)?;
+    let payload = ramflux_protocol::decode_base64url(
+        poisoned["distribution_base64"].as_str().ok_or(SdkError::IdentityRootMissing)?,
+    )
+    .map_err(|_| invalid("distribution encoding"))?;
+    let mut distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&payload)?;
+    distribution.sender_key_seed = [99; 32];
+    poisoned["distribution_base64"] =
+        json!(ramflux_protocol::encode_base64url(serde_json::to_vec(&distribution)?));
+    let poisoned = serde_json::to_vec(&poisoned)?;
+    let before_poison = serde_json::to_value(peer.load_group_sender_key_state(
+        "group",
+        source,
+        state.view().epoch,
+        "recv",
+    )?)?;
+    assert!(
+        matches!(
+            peer.prepare_shared_group_payload(state.clone(), &poisoned),
+            Err(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed))
+        ),
+        "tampered seed must fail during authenticated preparation"
+    );
+    assert_eq!(
+        serde_json::to_value(peer.load_group_sender_key_state(
+            "group",
+            source,
+            state.view().epoch,
+            "recv",
+        )?)?,
+        before_poison
+    );
+    Ok(())
+}
+
 #[test]
 fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_receiver()
 -> Result<(), SdkError> {
@@ -193,18 +234,7 @@ fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_rece
     let next = owner.encrypt_group_message("group", "owner", b"second after bootstrap replay")?;
     peer.send_direct_message("thread", "second", "owner", &next)?;
     assert_eq!(peer.decrypt_group_message("thread", "second")?, b"second after bootstrap replay");
-    let mut poisoned: Value = serde_json::from_slice(&bytes)?;
-    let payload = ramflux_protocol::decode_base64url(
-        poisoned["distribution_base64"].as_str().ok_or(SdkError::IdentityRootMissing)?,
-    )
-    .map_err(|_| invalid("distribution encoding"))?;
-    let mut distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&payload)?;
-    distribution.sender_key_seed = [99; 32];
-    poisoned["distribution_base64"] =
-        json!(ramflux_protocol::encode_base64url(serde_json::to_vec(&distribution)?));
-    let poisoned = serde_json::to_vec(&poisoned)?;
-    let changed = peer.prepare_shared_group_payload(state.clone(), &poisoned)?;
-    assert!(peer.apply_prepared_shared_group(&changed, "target-peer").is_err());
+    reject_tampered_bootstrap_without_mutation(&peer, &state, &source, &bytes)?;
     let removed = owner.shared_group_change(
         "group",
         "target-owner",

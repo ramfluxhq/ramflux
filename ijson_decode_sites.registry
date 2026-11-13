@@ -400,8 +400,6 @@ crates/ramflux-sdk/src/bus/custody_setup.rs | begin_native | 1 | E | excluded=ta
 crates/ramflux-sdk/src/bus/daemon.rs | dispatch_local_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/daemon.rs | read_local_bus_account_manifest | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/daemon.rs | read_local_bus_account_manifest | 2 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/bus/dispatch/a2i_a2ui.rs | dispatch_a2i_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/a2i_a2ui.rs | dispatch_a2i_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/a2i_a2ui.rs | dispatch_a2ui_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/a2i_a2ui.rs | dispatch_a2ui_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/account.rs | account_request | 1 | D | admitted-before-persist; stored row is not an ingress decoder

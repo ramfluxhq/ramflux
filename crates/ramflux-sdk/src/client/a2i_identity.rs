@@ -8,15 +8,6 @@ use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_sync::A2iControlEvent;
 impl RamfluxClient {
-    pub(crate) fn bind_owned_a2i_event(
-        &self,
-        event: &mut A2iControlEvent,
-    ) -> Result<RootQualifiedDeviceRef, SdkError> {
-        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let source = self.owned_device_identity()?;
-        bind(event, &branch.principal_id, &source)?;
-        Ok(source)
-    }
     pub(crate) fn bind_received_a2i_event(
         &self,
         event: &mut A2iControlEvent,
