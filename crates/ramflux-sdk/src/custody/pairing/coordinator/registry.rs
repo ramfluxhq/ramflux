@@ -185,11 +185,12 @@ fn remove_entry(root: &Path, account_id: &str) -> Result<Option<Arc<Entry>>, Sdk
 pub(crate) fn work_signal(root: &Path, account: &str) -> Option<Arc<tokio::sync::Notify>> {
     find(root, account).ok().map(|entry| entry.work.clone())
 }
-pub(crate) fn service_full_transfer(
+pub(crate) fn service_frontend(
     root: &Path,
     account: &str,
-    db: &ramflux_storage::AccountDb,
+    client: &crate::RamfluxClient,
 ) -> Result<bool, SdkError> {
+    let db = client.account_db()?;
     let entry = match find(root, account) {
         Ok(entry) => entry,
         Err(SdkError::PairingCode("NotFound")) => return Ok(false),
@@ -198,7 +199,7 @@ pub(crate) fn service_full_transfer(
     entry.require_live()?;
     let applied = match entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.as_mut()
     {
-        Some(writer) => writer.try_apply(db)?,
+        Some(writer) => writer.try_apply_client(client)?,
         None => false,
     };
     let Ok(mut actor) = entry.actor.try_lock() else { return Ok(applied) };
@@ -224,13 +225,23 @@ pub(crate) fn take_installed_recipient(
         return Ok(None);
     }
     let participant = actor.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+    let node_id = actor
+        .ceremony
+        .as_ref()
+        .and_then(|c| c.full.as_ref())
+        .and_then(|full| full.node.as_ref())
+        .map(|node| node.envelope().body.node_id.clone())
+        .ok_or(SdkError::PairingCode("WrongContext"))?;
     let mut client = crate::RamfluxClient::new();
     participant.return_client(&mut client)?;
     let bind = (|| {
         if !crate::custody::pairing::ordinary_session_admitted(&client, account)? {
             return Err(SdkError::PairingCode("PublicationPending"));
         }
-        actor.bind_installed_frontend_writer(client.account_db()?, entry.work.clone())
+        let db = client.account_db()?;
+        db.persist_actor_state("account/node-id", &node_id)?;
+        db.persist_actor_state("sync/node-id", &Some(&node_id))?;
+        actor.bind_installed_frontend_writer(db, entry.work.clone())
     })();
     match bind {
         Ok(service) => {

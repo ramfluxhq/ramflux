@@ -344,13 +344,18 @@ impl PairingActor {
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         if let Some(writer) = &self.local_writer {
             let runtime = self.full_runtime.clone();
-            return writer
+            let (work, cancel) = writer
                 .request(move |db| {
-                    participant.prepare_full_source_with_cancel_in(db, |cancel| {
-                        runtime.register_preparation(cancel)
-                    })
+                    participant.full_selected_db(db, None)?;
+                    let source = db.prepare_full_transfer_source()?;
+                    let cancel = source.cancel_handle();
+                    runtime.register_preparation(cancel.clone())?;
+                    Ok((source.into_encoding_work()?, cancel))
                 })
-                .await;
+                .await?;
+            let prepared =
+                self.full_runtime.clone().run_blocking(move || Ok(work.encode()?)).await?;
+            return Ok((prepared, cancel));
         }
         // Complete source census/typed encoding before any Issue/Create allocation.
         let runtime = self.full_runtime.clone();

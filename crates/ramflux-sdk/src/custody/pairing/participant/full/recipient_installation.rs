@@ -15,7 +15,7 @@ use ramflux_protocol::custody::CustodyAuthority;
 impl LocalPairingParticipant {
     pub(crate) fn install_new_full_generation(
         &self,
-        install: Install,
+        install: &Install,
     ) -> Result<CustodyAuthority, SdkError> {
         if install.recipient_mode != "new" || install.account_id != self.account_id {
             return Err(wrong());

@@ -140,7 +140,7 @@ impl LocalPairingParticipant {
                 .to_bytes(),
         ))
     }
-    pub(super) fn full_selected_db(
+    pub(in crate::custody::pairing) fn full_selected_db(
         &self,
         db: &AccountDb,
         anchor: Option<&str>,

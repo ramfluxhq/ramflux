@@ -116,9 +116,26 @@ impl FreshPairingNative {
         vault: Arc<dyn crate::custody::PrimaryVault>,
     ) -> Self {
         Self::with_factory(Arc::new(move || {
-            let config = config.clone();
+            let mut config = config.clone();
             let vault = Arc::clone(&vault);
-            Box::pin(CustodyConnection::connect_for_proof(config, vault))
+            Box::pin(async move {
+                let root = config.account_root.clone();
+                let account_id = config.account_id.clone();
+                // A newly installed recipient has its own reference by its next begin.
+                // Resolve public local authority now, never a remembered gateway cookie
+                // or the unreserved placeholder used for root-free discovery.
+                config.device_id = tokio::task::spawn_blocking(move || {
+                    let account = crate::custody::load_account(
+                        &root,
+                        &account_id,
+                        crate::custody::network_now()?,
+                    )?;
+                    account.local_device_id().map(str::to_owned)
+                })
+                .await
+                .map_err(|_| SdkError::PairingCode("Retired"))??;
+                CustodyConnection::connect_for_proof(config, vault).await
+            })
         }))
     }
 }

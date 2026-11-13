@@ -344,13 +344,11 @@ impl AccountRuntime {
             ),
         }
         let result = self.state.accounts.get(&self.id).map_or(Ok(false), |account| {
-            account.client.account_db().and_then(|db| {
-                crate::custody::pairing::service_full_transfer(
-                    &self.state.config.data_root,
-                    &self.id,
-                    db,
-                )
-            })
+            crate::custody::pairing::service_frontend(
+                &self.state.config.data_root,
+                &self.id,
+                &account.client,
+            )
         });
         match result {
             Ok(true) => {

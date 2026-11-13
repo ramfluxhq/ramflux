@@ -9,7 +9,9 @@ use crate::account_db::full_transfer::{
 };
 use crate::{AccountDb, StorageError};
 use ramflux_crypto::custody::pairing::PairingRole;
+mod work;
 use std::{marker::PhantomData, path::PathBuf};
+pub use work::FullSourcePreparationWork;
 
 /// Opaque local data reference across network waits; holds no account key, database
 /// connection, SAS confirmation, signing permission or lease. Ordinary unlock is required
@@ -55,12 +57,19 @@ fn digest(
     snapshot: &str,
     encoding: &FullBaseSourceEncoding,
 ) -> Result<[u8; 32], StorageError> {
+    digest_identity(&db.local_account_id, &db.principal_commitment, id, snapshot, encoding)
+}
+fn digest_identity(
+    account: &str,
+    principal: &str,
+    id: &str,
+    snapshot: &str,
+    encoding: &FullBaseSourceEncoding,
+) -> Result<[u8; 32], StorageError> {
     let mut hash = blake3::Hasher::new();
-    for bytes in [
-        b"ramflux.full.source.preparation.v2".as_slice(),
-        db.local_account_id.as_bytes(),
-        db.principal_commitment.as_bytes(),
-    ] {
+    for bytes in
+        [b"ramflux.full.source.preparation.v2".as_slice(), account.as_bytes(), principal.as_bytes()]
+    {
         hash.update(&u32::try_from(bytes.len()).map_err(|_| context())?.to_be_bytes());
         hash.update(bytes);
     }

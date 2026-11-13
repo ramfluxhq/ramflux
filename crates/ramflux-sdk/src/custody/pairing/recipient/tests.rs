@@ -715,3 +715,103 @@ fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
     assert_eq!(staged.install.state, "vault_durable");
     Ok(())
 }
+
+struct FrontendOnlyPorts;
+impl super::super::NodeHeadPersist for FrontendOnlyPorts {
+    fn persist_head(
+        &self,
+        _: &ramflux_protocol::custody::Publication,
+        _: u64,
+    ) -> Result<String, SdkError> {
+        Err(SdkError::PairingCode("WrongContext"))
+    }
+}
+impl super::super::PairingAuthorityQuery for FrontendOnlyPorts {
+    fn current_authority(
+        &self,
+        _: &str,
+    ) -> Result<ramflux_protocol::custody::CustodyAuthority, SdkError> {
+        Err(SdkError::PairingCode("WrongContext"))
+    }
+}
+struct FrontendVaultSecret;
+impl ramflux_storage::VaultSecretSource for FrontendVaultSecret {
+    fn vault_secret(&self, _: &str) -> Result<[u8; 32], ramflux_storage::StorageError> {
+        Ok([77; 32])
+    }
+}
+#[test]
+fn pairing_existing_frontend_unlock_preserves_custom_vault_and_actual_writer() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let account = "linked-frontend";
+    let native = crate::custody::tests::create_with_device(
+        root.path(),
+        account,
+        "linked-device",
+        vault.as_ref(),
+        crate::custody::network_now()?,
+    )?;
+    let reference = DeviceRef {
+        account_anchor: native.record().body.account_anchor.clone(),
+        device_id: native.local_device_id()?.into(),
+        device_epoch: 1,
+    };
+    let mut client = crate::RamfluxClient::new();
+    client.set_vault_secret_source(Box::new(FrontendVaultSecret));
+    client.open_account_index(root.path())?;
+    client.seal_new_account_data(account, &reference.account_anchor, PHRASE)?;
+    let path = client.account_db()?.path.clone();
+    let invite = invitation("existing", 25, Some(reference.clone()))?;
+    let provider = Arc::new(Phrase::setup(PHRASE));
+    let participant = Arc::new(super::super::LocalPairingParticipant {
+        root: root.path().into(),
+        account_id: account.into(),
+        vault,
+        provider: provider.clone(),
+        db: std::sync::Mutex::new(None),
+        persist: Arc::new(FrontendOnlyPorts),
+        query: Arc::new(FrontendOnlyPorts),
+    });
+    let stale = super::ExistingFrontendUnlock::acquire(participant.clone(), invite.clone(), 3, 1)?;
+    let unlock = super::ExistingFrontendUnlock::acquire(participant.clone(), invite, 3, 1)?;
+    assert!(
+        matches!(stale.finish(&client), Err(SdkError::PairingCode("Retired"))),
+        "test: a replaced private reservation authorized an old credential reply"
+    );
+    assert!(
+        install_store::list_pending(root.path(), account)?.is_empty(),
+        "test: private prompt created an install before the actual frontend verified it"
+    );
+    assert!(
+        participant.db.lock().map_err(|_| "test: participant mutex")?.is_none(),
+        "test: credential prompt parked the ordinary account writer"
+    );
+    client.account_db()?.persist_actor_state("test/ordinary-during-prompt", &true)?;
+    assert_eq!(
+        unlock.finish(&client)?,
+        reference,
+        "test: linked staging changed its original device identity"
+    );
+    assert_eq!(
+        client.account_db()?.path,
+        path,
+        "test: linked staging replaced the ordinary frontend database"
+    );
+    assert_eq!(
+        provider.setups.load(Ordering::SeqCst),
+        0,
+        "test: linked target was prompted to set a new data password"
+    );
+    assert!(
+        !root.path().join("vault").join(format!("{account}.key")).exists(),
+        "test: linked verification replaced the configured custom vault with a file vault"
+    );
+    let pending = install_store::list_pending(root.path(), account)?;
+    assert_eq!(
+        pending.len(),
+        1,
+        "test: verified linked staging did not persist one pending install"
+    );
+    Ok(())
+}

@@ -46,7 +46,9 @@ impl PairingActor {
         };
         if let Some(writer) = &self.local_writer {
             return writer
-                .request(move |db| participant.record_invitation_in(db, &invitation, generation))
+                .request_client(move |client| {
+                    participant.record_invitation_in(client.account_db()?, &invitation, generation)
+                })
                 .await;
         }
         let runtime = self.full_runtime.clone();

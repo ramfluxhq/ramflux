@@ -27,6 +27,7 @@ pub(super) fn outcome(result: &LocalResult) -> i32 {
 pub(super) fn failure(error: RfError) -> RfError {
     let exit = match error {
         RfError::PairingExit { .. } => return error,
+        RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy) => 3,
         RfError::Sdk(ramflux_sdk::SdkError::PairingCode(code)) => code_category(code),
         RfError::Sdk(ramflux_sdk::SdkError::LocalBusRefused { code, .. }) => code_category(&code),
         _ => 1,
@@ -35,7 +36,7 @@ pub(super) fn failure(error: RfError) -> RfError {
 }
 fn code_category(value: &str) -> i32 {
     match value {
-        "Busy" | "busy" | "PublicationPending" => 3,
+        "Busy" | "busy" | "GatewayWriterBusy" | "PublicationPending" => 3,
         "SasMismatch" => 4,
         "PrimaryRequired" => 5,
         "UpdateRequired" => 6,

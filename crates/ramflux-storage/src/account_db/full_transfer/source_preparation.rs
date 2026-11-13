@@ -152,7 +152,7 @@ impl FullSourcePreparation<'_> {
 }
 
 mod checkpoint;
-pub use checkpoint::PreparedFullSource;
+pub use checkpoint::{FullSourcePreparationWork, PreparedFullSource};
 
 mod bind;
 pub(super) use bind::SourceBindParts;

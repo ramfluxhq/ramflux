@@ -79,6 +79,18 @@ impl PairingActor {
                 FullProgress::observed(manifest, 0)
             })?
         };
+        let publication =
+            &c.full.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?.publication;
+        let result = if publication.tail_pending()
+            && crate::custody::network_now()? >= trust.lease_expires_at()
+        {
+            Some(FullError::LeaseExpired)
+        } else {
+            c.full_error.or_else(|| {
+                (publication.source_acknowledged() && !publication.source_tail_durable)
+                    .then_some(FullError::ResumeRequired)
+            })
+        };
         let value = FullStatus {
             attachment_absent: U64(0),
             bytes_durable: U64(progress.durable),
@@ -87,11 +99,17 @@ impl PairingActor {
             generation: c.generation,
             lease_expires_at: trust.lease_expires_at(),
             operation_id: c.operation_id.clone(),
-            result: c.full_error,
+            result,
             role: c.role.as_str().into(),
             // The completed pre-J3 chain and original-A reverse DV await local preparation; no
             // candidate, publication or installation is implied by completed totals.
-            stage: if c.full.as_ref().is_some_and(|full| {
+            stage: if publication.destination_installed() || publication.source_retired() {
+                FullStatusStage::Installed
+            } else if publication.destination_requested() {
+                FullStatusStage::Installing
+            } else if publication.is_publishing() {
+                FullStatusStage::Publishing
+            } else if c.full.as_ref().is_some_and(|full| {
                 full.candidate.is_some() || full.source_candidate.is_some() || full.affirmation_used
             }) {
                 FullStatusStage::Candidate
@@ -102,7 +120,11 @@ impl PairingActor {
             } else {
                 FullStatusStage::Snapshot
             },
-            tail_status: FullTailStatus::None,
+            tail_status: if publication.tail_pending() {
+                FullTailStatus::Pending
+            } else {
+                FullTailStatus::None
+            },
         };
         value.validate().map_err(|error| wire(&error))?;
         Ok(Some(value))

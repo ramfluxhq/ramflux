@@ -153,8 +153,8 @@ async fn dispatch_device_pair(
                     }
                 } => {
                     if let Some(account) = state.accounts.get(account_id) {
-                        crate::custody::pairing::service_full_transfer(
-                            &state.config.data_root, account_id, account.client.account_db()?,
+                        crate::custody::pairing::service_frontend(
+                            &state.config.data_root, account_id, &account.client,
                         )?;
                     }
                 }

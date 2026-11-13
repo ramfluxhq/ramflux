@@ -943,3 +943,6 @@ fn pairing_full_chunked_or_oversize_refused_before_reservation() -> TestResult {
     assert_eq!(scratch.reservation_attempts()?, 0, "invalid token reserved listener payload bytes");
     Ok(())
 }
+
+#[path = "pairing_activation_tests.rs"]
+mod activation;

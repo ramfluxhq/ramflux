@@ -40,7 +40,7 @@ mod workflow;
 pub(crate) use registry::settle_actor_data_for_test;
 pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
 pub(crate) use registry::{
-    install_actor_with_writer, service_full_transfer, take_installed_recipient, work_signal,
+    install_actor_with_writer, service_frontend, take_installed_recipient, work_signal,
 };
 
 const LIVE_CAP: usize = 3;
@@ -441,7 +441,14 @@ impl PairingActor {
     /// Primary approval after TWO local confirmations and both direction MACs.
     /// # Errors
     /// `PrimaryRequired`, `WrongContext`, or a TH/proposal mismatch.
-    pub async fn approve(&mut self, approve: &Approve) -> Result<LocalResult, SdkError> {
+    pub fn approve<'a>(
+        &'a mut self,
+        approve: &'a Approve,
+    ) -> impl std::future::Future<Output = Result<LocalResult, SdkError>> + std::marker::Send + 'a
+    {
+        Box::pin(self.approve_owned(approve))
+    }
+    async fn approve_owned(&mut self, approve: &Approve) -> Result<LocalResult, SdkError> {
         approve.validate().map_err(|e| wire(&e))?;
         self.require_open()?;
         if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
@@ -968,13 +975,39 @@ impl PairingActor {
         })
     }
 
-    async fn stage_recipient_before_commit(&self) -> Result<Option<DeviceRef>, SdkError> {
+    fn stage_recipient_before_commit(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<DeviceRef>, SdkError>> + std::marker::Send + '_
+    {
+        Box::pin(self.stage_recipient_owned())
+    }
+    async fn stage_recipient_owned(&self) -> Result<Option<DeviceRef>, SdkError> {
         let Some(staging) = self.recipient_stage.as_ref() else {
             return Ok(None);
         };
         let invite = self.with_ceremony(|ceremony| {
             ceremony.verified_invite.clone().ok_or(SdkError::PairingCode("InvalidInput"))
         })?;
+        if invite.body.recipient_mode == "existing"
+            && let (Some(writer), Some(participant)) =
+                (&self.local_writer, self.participant.clone())
+        {
+            let generation = self.frontend_generation;
+            let ceremony_generation = self.actor_generation;
+            let unlock = self
+                .full_runtime
+                .clone()
+                .run_blocking(move || {
+                    super::recipient::ExistingFrontendUnlock::acquire(
+                        participant,
+                        invite,
+                        generation,
+                        ceremony_generation,
+                    )
+                })
+                .await?;
+            return Ok(Some(writer.request_client(move |client| unlock.finish(client)).await?));
+        }
         let staging = Arc::clone(staging);
         let generation = self.frontend_generation;
         let ceremony_generation = self.actor_generation;

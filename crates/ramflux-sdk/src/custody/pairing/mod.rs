@@ -40,7 +40,7 @@ pub use coordinator::{
     pairing_enabled, remove_actor, remove_actor_and_drain, validate_head_advance,
 };
 pub(crate) use coordinator::{
-    install_actor_with_writer, service_full_transfer, take_installed_recipient, work_signal,
+    install_actor_with_writer, service_frontend, take_installed_recipient, work_signal,
 };
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};
