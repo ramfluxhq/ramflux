@@ -107,6 +107,7 @@ fn prompt(
             matches!(metadata.action.as_str(), "setup" | "unlock")
         }
         "device.transfer.prepare" => metadata.action == "phrase",
+        "device.transfer.status" => metadata.action == "unlock",
         "account.unlock" => metadata.action == "unlock" && request.body.get("passphrase").is_none(),
         _ => false,
     };

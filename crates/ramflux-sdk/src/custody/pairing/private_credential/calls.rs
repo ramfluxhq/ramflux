@@ -24,6 +24,7 @@ pub enum PrivateCredentialCallKind {
     Join,
     Unlock,
     Prepare { operation_id: String },
+    Resume { operation_id: String },
 }
 struct Call {
     active: AtomicBool,
@@ -111,7 +112,9 @@ pub fn bind_call(
     if request_id.is_empty() || request_id.len() > 128 {
         return Err(invalid());
     }
-    if let PrivateCredentialCallKind::Prepare { operation_id } = &kind {
+    if let PrivateCredentialCallKind::Prepare { operation_id }
+    | PrivateCredentialCallKind::Resume { operation_id } = &kind
+    {
         super::identifier(operation_id)?;
     }
     let key = (std::fs::canonicalize(root)?, account.into());
@@ -168,6 +171,10 @@ impl Call {
             }
             PrivateCredentialCallKind::Unlock => {
                 scope.request().action == "unlock" && scope.operation_id().is_none()
+            }
+            PrivateCredentialCallKind::Resume { operation_id } => {
+                scope.request().action == "unlock"
+                    && scope.operation_id() == Some(operation_id.as_str())
             }
             PrivateCredentialCallKind::Prepare { operation_id } => {
                 scope.request().action == "phrase"

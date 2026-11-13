@@ -637,7 +637,7 @@ mod tests {
         actor: &mut PairingActor,
         participant: &std::sync::Arc<LocalPairingParticipant>,
         client: &mut crate::RamfluxClient,
-        password: &[u8],
+        password: &'static [u8],
         primary: bool,
     ) -> Result<PairingLocalWriterService, Box<dyn std::error::Error>> {
         let retained = if primary { None } else { Some(resume_request(client)?) };
