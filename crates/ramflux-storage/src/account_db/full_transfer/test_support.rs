@@ -4,6 +4,52 @@
 //! Closed fixture seeding only; end-to-end oracles use the ordinary object identity gate.
 use crate::{AccountDb, StorageError};
 impl AccountDb {
+    /// Populate every currently compiled portable SQL owner for endpoint fixtures.
+    /// # Errors
+    /// Returns errors from the actual local writes and original-root MAC namespace.
+    pub fn seed_full_transfer_supported_state_for_test(&self) -> Result<(), StorageError> {
+        let h = |n: u8| ramflux_protocol::encode_base64url([n; 32]);
+        self.write_transaction(|| {
+            self.connection.execute(
+                "UPDATE account_erasure_generation SET generation=max(generation,7)",
+                [],
+            )?;
+            self.connection
+                .execute("INSERT INTO object_erasure_fence VALUES(?1)", rusqlite::params![h(81)])?;
+            self.connection.execute(
+                "INSERT INTO object_identity_replacement VALUES(?1)",
+                rusqlite::params![h(82)],
+            )?;
+            self.connection.execute(
+                "INSERT INTO object_segment_reference_veto VALUES(?1)",
+                rusqlite::params![[83_u8; 32].as_slice()],
+            )?;
+            self.connection.execute(
+                "INSERT INTO object_erasure_lookup VALUES(?1,?2)",
+                rusqlite::params![h(84), h(81)],
+            )?;
+            self.connection.execute(
+                "INSERT INTO object_payload_dependency VALUES(?1,?2)",
+                rusqlite::params![h(85), h(86)],
+            )?;
+            let source = ramflux_protocol::custody::DeviceRef {
+                account_anchor: self.principal_commitment.clone(),
+                device_id: "historical-pairing-fixture".into(),
+                device_epoch: 1,
+            };
+            self.connection.call(move |db| {
+                let keys = zeroize::Zeroizing::new([87_u8; 192]);
+                let id = super::super::mac_subkeys::bundle_id(keys.as_slice());
+                Ok(super::super::mac_subkeys::full::import_into_private_generation(
+                    db,
+                    &source,
+                    &id,
+                    keys.as_slice(),
+                ))
+            })??;
+            Ok(())
+        })
+    }
     /// Seed one actual append-only fixture veto and its max generation without importing payload.
     /// This exists solely under the preexisting storage instrumentation feature used by SDK tests.
     /// # Errors

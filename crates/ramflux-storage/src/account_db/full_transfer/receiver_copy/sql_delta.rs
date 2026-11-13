@@ -36,7 +36,7 @@ pub(super) fn attach(
     target.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
     target.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, false)?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    target.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    target.progress_handler(1000, Some(move || Instant::now() >= deadline))?;
     Ok(())
 }
 

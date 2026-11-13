@@ -42,18 +42,22 @@ fn is_merged(result: &ramflux_protocol::custody::pairing::local_dto::LocalResult
     matches!(&result.outcome, Outcome::FullStatus { value } if value.tail_status == FullTailStatus::Merged)
 }
 
-async fn setup() -> Result<
-    (
-        Rig,
-        PairingLocalWriterService,
-        crate::RamfluxClient,
-        PairingLocalWriterService,
-        StatusRequest,
-    ),
-    Box<dyn std::error::Error>,
-> {
+type TailFixture = (
+    Rig,
+    PairingLocalWriterService,
+    crate::RamfluxClient,
+    PairingLocalWriterService,
+    StatusRequest,
+);
+async fn setup() -> Result<TailFixture, Box<dyn std::error::Error>> {
+    Box::pin(setup_with_source(|_| Ok(()))).await
+}
+async fn setup_with_source(
+    seed: impl FnOnce(&crate::RamfluxClient) -> TestResult,
+) -> Result<TailFixture, Box<dyn std::error::Error>> {
     let mut rig = Box::pin(Rig::open_profile(true)).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
+    seed(&rig.source.client)?;
     let mut source = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
     Box::pin(bootstrap(&mut rig, &mut source)).await?;
     Box::pin(finish_owned_stream(&mut rig)).await?;
@@ -348,3 +352,5 @@ async fn cold_status(
     actor.lock().await?;
     Ok(())
 }
+
+mod source_data;

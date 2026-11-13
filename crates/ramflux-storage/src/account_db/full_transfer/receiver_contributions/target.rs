@@ -21,7 +21,7 @@ impl Contributions {
         let mut db = open(path, key)?;
         let tx = db.transaction()?;
         tx.execute_batch("CREATE TEMP TABLE current_target(family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL CHECK(length(record)<=16384),PRIMARY KEY(family,key)) WITHOUT ROWID;")?;
-        self.capture_target(&tx, rows.current, rows.schema, stage)?;
+        Self::capture_target(&tx, rows.current, rows.schema, stage)?;
         self.remove_target_absences(&tx, private, stage)?;
         let mut query = tx.prepare("SELECT fresh.record FROM current_target AS fresh LEFT JOIN full_union_record AS old ON old.generation_nonce=?1 AND old.owner=?2 AND old.family=fresh.family AND old.key=fresh.key WHERE old.record IS NOT fresh.record ORDER BY CASE WHEN fresh.family='sql/object_payload_dependency' THEN 1 ELSE 0 END,fresh.family,fresh.key")?;
         let mut rows = query.query(params![self.nonce.as_slice(), self.owners[1]])?;
@@ -48,7 +48,6 @@ impl Contributions {
     }
 
     fn capture_target(
-        &self,
         target: &Connection,
         current: &BackupDatabase,
         schema: &super::super::FullTransferSchema,

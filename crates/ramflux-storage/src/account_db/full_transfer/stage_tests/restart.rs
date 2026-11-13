@@ -53,7 +53,8 @@ fn cold_prefix(retained: usize) -> TestResult {
     let mut preserved = vec![0; prefix.len()];
     super::super::stage::open_regular(&path, false)?.read_exact(&mut preserved)?;
     assert_eq!(
-        preserved, prefix,
+        preserved.as_slice(),
+        prefix.as_slice(),
         "test: cold resume changed previously receipted ciphertext or nonce"
     );
     stage.verify_forward_root(&hash)?;

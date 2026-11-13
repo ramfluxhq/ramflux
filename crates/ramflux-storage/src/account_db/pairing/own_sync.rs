@@ -160,7 +160,7 @@ impl AccountDb {
         )? {
             return Ok(());
         }
-        self.connection.execute("DELETE FROM pairing_own_sync WHERE operation_kind=?1 AND operation_id IN(SELECT operation_id FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END!='queued' ORDER BY operation_id LIMIT max(0,(SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1)-127))",params![KIND])?;
+        self.connection.execute("DELETE FROM pairing_own_sync WHERE operation_kind=?1 AND operation_id IN(SELECT operation_id FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END IN ('done','failed') ORDER BY operation_id LIMIT max(0,(SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1)-127))",params![KIND])?;
         let count: u64 = self.connection.query_row(
             "SELECT count(*) FROM pairing_own_sync WHERE operation_kind=?1",
             params![KIND],

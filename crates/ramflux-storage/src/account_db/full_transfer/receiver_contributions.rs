@@ -27,6 +27,7 @@ pub(super) struct Contributions {
     pub(super) nonce: [u8; 32],
     pub(super) owners: [String; 2],
 }
+#[derive(Clone, Copy)]
 pub(super) struct TargetRows<'a> {
     pub(super) current: &'a BackupDatabase,
     pub(super) schema: &'a super::FullTransferSchema,

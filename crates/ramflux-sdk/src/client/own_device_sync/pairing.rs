@@ -33,6 +33,9 @@ impl RamfluxClient {
             .ok_or(SdkError::PairingCode("UpdateRequired"))?;
         current.authorize(&job.source_ref, "sync", now)?;
         current.authorize(&job.target_ref, "sync", now)?;
+        if ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
         if target.principal_commitment != *root
             || target.device_epoch != job.target_ref.device_epoch
         {
@@ -57,6 +60,9 @@ impl RamfluxClient {
             .ok_or(SdkError::PairingCode("UpdateRequired"))?;
         current.authorize(&job.source_ref, "sync", now)?;
         current.authorize(&job.target_ref, "sync", now)?;
+        if ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
         let bytes =
             zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(&exported.envelope)?);
         let identity = crate::new_surface_message_id()?;
