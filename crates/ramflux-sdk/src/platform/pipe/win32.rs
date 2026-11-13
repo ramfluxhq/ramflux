@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -499,10 +499,13 @@ struct ConnectOperation {
     overlapped: UnsafeCell<OVERLAPPED>,
 }
 
-// SAFETY: the wait thread and the task that drops `ConnectWait` share this value. The kernel is
-// the only writer of the overlapped, the event handle is waited and signalled, and the value is
-// not moved. Both sides hold the `Arc` until after `GetOverlappedResult` returns. `Send` is
-// automatic; `Sync` is not, because of the `UnsafeCell`.
+// SAFETY: `OVERLAPPED` stores a copy of the event pointer, not an owned allocation. `event`
+// owns that handle and is `Send`. Moving this value does not free or duplicate the event.
+unsafe impl Send for ConnectOperation {}
+
+// SAFETY: the wait thread and the task that drops `ConnectWait` share this value through `Arc`.
+// The kernel is the only writer of the overlapped record. Both sides hold the `Arc` until
+// `GetOverlappedResult` returns. `UnsafeCell` is why `Sync` is not automatic.
 unsafe impl Sync for ConnectOperation {}
 
 struct ConnectWait {
@@ -598,7 +601,7 @@ pub(super) fn create_instance(
     first: bool,
 ) -> io::Result<ListeningPipe> {
     let wide = wide(name);
-    let mut attributes = descriptor.attributes()?;
+    let attributes = descriptor.attributes()?;
     let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_OWNER;
     if first {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
