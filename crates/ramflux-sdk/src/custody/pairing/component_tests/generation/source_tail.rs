@@ -344,7 +344,7 @@ mod tests {
             &rig.participant_a.account_id,
             now,
         )?;
-        let branch = account.credentials(
+        let (_, branch) = account.credentials(
             rig.participant_a.vault.as_ref(),
             account.local_device_id()?,
             now,

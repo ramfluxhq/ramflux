@@ -203,8 +203,7 @@ fn pairing_full_schema_inspection_refuses_incomplete_catalog_and_changed_columns
 }
 
 #[test]
-fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_owners()
--> TestResult {
+fn primary_transfer_full_census_every_family() -> TestResult {
     use super::catalog::full_transfer_catalog;
     use crate::StorageError;
     let (_root, db) = crate::tests::test_db("fresh-catalog-coverage")?;
