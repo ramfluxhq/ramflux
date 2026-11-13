@@ -3,9 +3,9 @@
 
 //! Console mode for the account ceremony.
 //!
-//! `CONIN$` is the input buffer and `CONOUT$` is where prompts are written. Line input is
-//! turned off so a newline written by a pseudoconsole arrives immediately. Echo is toggled
-//! on that same input buffer and line input stays off.
+//! `CONIN$` is the input buffer and `CONOUT$` is where prompts are written. Line input stays
+//! on: echo without it is `ERROR_INVALID_PARAMETER`. A hidden prompt is line input with echo
+//! off, which is the console password mode.
 
 #![allow(unsafe_code)]
 
@@ -16,20 +16,8 @@ use std::os::windows::io::AsRawHandle;
 const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
 const ENABLE_LINE_INPUT: u32 = 0x0002;
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
-/// Input flags `SetConsoleMode` accepts. ConPTY also reports `ENABLE_AUTO_POSITION`
-/// (`0x0100`) and then rejects that bit with `ERROR_INVALID_PARAMETER`.
-const INPUT_MODE_MASK: u32 = ENABLE_PROCESSED_INPUT
-    | ENABLE_LINE_INPUT
-    | ENABLE_ECHO_INPUT
-    | 0x0008
-    | 0x0010
-    | 0x0020
-    | 0x0040
-    | 0x0080
-    | 0x0200;
 
 unsafe extern "system" {
-    fn GetConsoleMode(handle: *mut core::ffi::c_void, mode: *mut u32) -> i32;
     fn SetConsoleMode(handle: *mut core::ffi::c_void, mode: u32) -> i32;
 }
 
@@ -43,55 +31,34 @@ pub(crate) fn open_output() -> io::Result<File> {
     File::options().write(true).open(r"\\.\CONOUT$")
 }
 
-fn mode(input: &File) -> io::Result<u32> {
-    let mut mode = 0_u32;
-    // SAFETY: `input` is an open console handle and `mode` is a writable `u32`.
-    let ok = unsafe { GetConsoleMode(input.as_raw_handle(), &raw mut mode) };
-    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(mode) }
-}
-
 fn apply(input: &File, mode: u32) -> io::Result<()> {
-    // SAFETY: `input` is the same console handle. The mode keeps every bit except the ones
-    // the caller cleared or set.
+    // SAFETY: `input` is an open console input handle. `mode` is a cooked input mode:
+    // processed and line input, with echo only when the caller asked for it.
     let ok = unsafe { SetConsoleMode(input.as_raw_handle(), mode) };
-    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-}
-
-/// Set an input mode that keeps line input off.
-///
-/// The reported mode is masked to flags `SetConsoleMode` accepts. If that still fails,
-/// processed input alone is used so each byte arrives without echo unless requested.
-///
-/// # Errors
-/// Returns the OS error when neither mode can be set.
-fn apply_input_mode(input: &File, mode: u32) -> io::Result<()> {
-    let requested = mode & INPUT_MODE_MASK & !ENABLE_LINE_INPUT;
-    if apply(input, requested).is_ok() {
-        return Ok(());
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        Err(io::Error::new(error.kind(), format!("SetConsoleMode {mode:#x}: {error}")))
+    } else {
+        Ok(())
     }
-    let fallback = ENABLE_PROCESSED_INPUT | (requested & ENABLE_ECHO_INPUT);
-    apply(input, fallback).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("SetConsoleMode {requested:#x} then {fallback:#x}: {error}"),
-        )
-    })
 }
 
-/// Clear line input. Every other accepted mode bit stays as it was.
+/// Select cooked input and leave echo on.
+///
+/// Echo without line input is rejected. The ceremony hides a secret by turning echo off
+/// while line input stays on.
 ///
 /// # Errors
-/// Returns the OS error when the console mode cannot be read or set.
-pub(crate) fn disable_line_input(input: &File) -> io::Result<()> {
-    apply_input_mode(input, mode(input)?)
+/// Returns the OS error when the console mode cannot be set.
+pub(crate) fn prepare_input(input: &File) -> io::Result<()> {
+    apply(input, ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)
 }
 
-/// Show or hide typed characters. Line input stays off.
+/// Show or hide typed characters. Line input stays on so echo remains valid.
 ///
 /// # Errors
-/// Returns the OS error when the console mode cannot be read or set.
+/// Returns the OS error when the console mode cannot be set.
 pub(crate) fn set_echo(input: &File, enabled: bool) -> io::Result<()> {
-    let current = mode(input)?;
-    let echoed = if enabled { current | ENABLE_ECHO_INPUT } else { current & !ENABLE_ECHO_INPUT };
-    apply_input_mode(input, echoed)
+    let echo = if enabled { ENABLE_ECHO_INPUT } else { 0 };
+    apply(input, ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | echo)
 }
