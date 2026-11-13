@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! F1: two born-v3 accounts, contact cards, DM A→B, exact text, ACK visible to A.
-#![cfg(all(unix, feature = "itest-memory-vault"))]
+#![cfg(all(any(unix, windows), feature = "itest-memory-vault"))]
 
 #[path = "e2e/mod.rs"]
 mod e2e;
@@ -69,6 +69,16 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     }
     wait_dm_receipt(&alice_d, &alice, &conversation, &message, &bob)
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
+    // Reopen the receiving store and read the same body back. Linux already covers this
+    // through the restart jobs; the Windows acceptance requires it in this test.
+    #[cfg(windows)]
+    {
+        let (socket, data_root) = e2e::shutdown_daemon(bob_d)?;
+        let bob_again = e2e::start_daemon_at(socket, data_root)?;
+        e2e::unlock_account_without_wait(&bob_again, &bob)?;
+        let persisted = wait_dm_texts(&bob_again, &bob, &conversation, &[body])?;
+        assert_texts_once_in_order(&persisted, &[body])?;
+    }
     Ok(())
 }
 

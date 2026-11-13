@@ -140,6 +140,20 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/windows-daemon-smoke.ps1 -Rf target\release\rf.exe
 
+      # Design M2 acceptance: two accounts, one DM, delivery, then the receiver reopens.
+      # The release rf.exe above stays free of itest features. This step builds its own
+      # dev-profile rf with the memory vault and the four local node services.
+      - name: Two-account DM through the gateway
+        shell: pwsh
+        env:
+          RAMFLUX_ITEST_BUILD: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm f1_two_accounts_contact_dm_receive_ack -- --ignored --exact --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Package rf.exe
         shell: pwsh
         run: |

@@ -43,6 +43,26 @@ fn refused<T>(result: Result<T, SdkError>, what: &str) -> Result<(), String> {
     }
 }
 
+/// Bound a worker that cannot be cancelled. The caller releases a stalled worker itself.
+fn join_within<T: Send + 'static>(
+    action: impl FnOnce() -> Result<T, String> + Send + 'static,
+    budget: std::time::Duration,
+) -> Result<T, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(action());
+    });
+    match receiver.recv_timeout(budget) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err("test: worker exceeded its deadline".to_owned())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("test: worker ended without a result".to_owned())
+        }
+    }
+}
+
 #[test]
 fn primary_seed_round_trips_and_records_its_own_class() -> Result<(), String> {
     let (_root, vault) = vault()?;
@@ -210,20 +230,21 @@ fn a_second_user_cannot_read_or_unprotect_an_entry() -> Result<(), String> {
     let entropy = WindowsDpapiVault::entropy(PRIMARY);
 
     let other_vault = vault.clone();
-    let (opened, unprotected, loaded) = std::thread::spawn(move || {
-        let guard = impersonate_user(&user, &password).map_err(text)?;
-        std::fs::read(&control)
-            .map_err(|error| format!("the control file is not readable: {error}"))?;
-        // The access list refuses the file; the blob itself, had it leaked, does not open
-        // under another user's DPAPI keys.
-        let opened = std::fs::File::open(&path).map(|_| ());
-        let unprotected = dpapi::unprotect(&protected, &entropy).map(|_| ());
-        let loaded = other_vault.load_primary(PRIMARY).map(|_| ());
-        drop(guard);
-        Ok::<_, String>((opened, unprotected, loaded))
-    })
-    .join()
-    .map_err(|_| "impersonating thread failed".to_owned())??;
+    let (opened, unprotected, loaded) = join_within(
+        move || {
+            let guard = impersonate_user(&user, &password).map_err(text)?;
+            std::fs::read(&control)
+                .map_err(|error| format!("the control file is not readable: {error}"))?;
+            // The access list refuses the file; the blob itself, had it leaked, does not open
+            // under another user's DPAPI keys.
+            let opened = std::fs::File::open(&path).map(|_| ());
+            let unprotected = dpapi::unprotect(&protected, &entropy).map(|_| ());
+            let loaded = other_vault.load_primary(PRIMARY).map(|_| ());
+            drop(guard);
+            Ok((opened, unprotected, loaded))
+        },
+        std::time::Duration::from_secs(15),
+    )?;
 
     match opened {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
@@ -235,4 +256,66 @@ fn a_second_user_cannot_read_or_unprotect_an_entry() -> Result<(), String> {
     }
     refused(loaded, "second user load")?;
     vault.load_primary(PRIMARY).map(|_| ()).map_err(text)
+}
+
+/// A worker that never finishes is refused inside `budget` and is then released, so the
+/// thread is not still running when the test returns.
+#[test]
+fn a_stalled_worker_fails_inside_its_deadline() -> Result<(), String> {
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    let outcome = join_within(
+        move || {
+            let _ = release_rx.recv();
+            let _ = done_tx.send(());
+            Ok(())
+        },
+        std::time::Duration::from_millis(200),
+    );
+    if outcome.is_ok() {
+        return Err("a stalled worker returned a result".to_owned());
+    }
+    if started.elapsed() >= std::time::Duration::from_secs(2) {
+        return Err("the stalled worker was not refused inside its deadline".to_owned());
+    }
+    release_tx.send(()).map_err(text)?;
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| "test: stalled worker was still running after it was released".to_owned())?;
+    Ok(())
+}
+
+fn directory_names(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(text)? {
+        names.push(entry.map_err(text)?.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The vault directory itself is a junction. Admission refuses before a blob is written
+/// through it, and the shared target is unchanged.
+#[test]
+fn a_junction_vault_directory_is_refused_before_any_blob() -> Result<(), String> {
+    let parent = tempfile::tempdir().map_err(text)?;
+    let target = parent.path().join("shared");
+    std::fs::create_dir(&target).map_err(text)?;
+    let sentinel = target.join("sentinel.bin");
+    std::fs::write(&sentinel, b"shared-bytes").map_err(text)?;
+    let names = directory_names(&target)?;
+    let bytes = std::fs::read(&sentinel).map_err(text)?;
+    let data = parent.path().join("data");
+    std::fs::create_dir(&data).map_err(text)?;
+    files::plant_mount_point(&data.join("vault"), &target).map_err(text)?;
+    let vault = WindowsDpapiVault::for_data_root(&data);
+    refused(vault.store_new(PRIMARY, &key(7)), "junction vault")?;
+    if std::fs::read(&sentinel).map_err(text)? != bytes || directory_names(&target)? != names {
+        return Err(format!(
+            "junction vault admission changed the shared target | {}",
+            super::last_unavailable()
+        ));
+    }
+    Ok(())
 }

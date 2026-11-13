@@ -8,6 +8,7 @@
 //! The second-user tests need a second local account. They are ignored unless the job provides
 //! `RAMFLUX_TEST_SECOND_USER` and `RAMFLUX_TEST_SECOND_USER_PASSWORD`.
 
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -343,4 +344,174 @@ fn the_sqlcipher_file_opens_only_as_the_same_user() -> Result<(), String> {
     let value: String =
         connection.query_row("SELECT value FROM marker", [], |row| row.get(0)).map_err(text)?;
     if value == "kept" { Ok(()) } else { Err(format!("unexpected value {value:?}")) }
+}
+
+fn directory_names(path: &Path) -> Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for entry in std::fs::read_dir(path).map_err(text)? {
+        names.insert(entry.map_err(text)?.file_name().to_string_lossy().into_owned());
+    }
+    Ok(names)
+}
+
+fn permission_denied(error: &SdkError) -> bool {
+    matches!(error, SdkError::Io(inner) if inner.kind() == io::ErrorKind::PermissionDenied)
+        || matches!(error, SdkError::LocalBusPermissionDenied)
+}
+
+/// A junction at the data root, and one used as an ancestor, is refused before any create
+/// or access-list write. The shared target keeps its names, bytes, and security descriptor.
+#[test]
+fn a_junction_root_or_ancestor_is_refused_without_touching_the_target() -> Result<(), String> {
+    let parent = tempfile::tempdir().map_err(text)?;
+    let target = parent.path().join("shared-target");
+    std::fs::create_dir(&target).map_err(text)?;
+    let sentinel = target.join("sentinel.bin");
+    std::fs::write(&sentinel, b"shared-bytes").map_err(text)?;
+    let names = directory_names(&target)?;
+    let bytes = std::fs::read(&sentinel).map_err(text)?;
+    let target_sd = crate::platform::pipe::win32::diag::object_sddl(&target, false);
+
+    let root_link = parent.path().join("root-link");
+    files::plant_mount_point(&root_link, &target).map_err(text)?;
+    let root_sd = crate::platform::pipe::win32::diag::object_sddl(&root_link, false);
+    match ensure_data_root(&root_link) {
+        Err(SdkError::LocalBusPermissionDenied) => {}
+        Ok(()) => return Err(explain_root("a junction root was accepted", &root_link)),
+        Err(error) => return Err(explain_root(error, &root_link)),
+    }
+    if std::fs::read(&sentinel).map_err(text)? != bytes
+        || directory_names(&target)? != names
+        || crate::platform::pipe::win32::diag::object_sddl(&target, false) != target_sd
+        || crate::platform::pipe::win32::diag::object_sddl(&root_link, false) != root_sd
+    {
+        return Err("junction root admission changed the link or the shared target".to_owned());
+    }
+
+    let ancestor = parent.path().join("ancestor-link");
+    files::plant_mount_point(&ancestor, &target).map_err(text)?;
+    let ancestor_sd = crate::platform::pipe::win32::diag::object_sddl(&ancestor, false);
+    let child = ancestor.join("child").join("data");
+    match ensure_data_root(&child) {
+        Err(SdkError::LocalBusPermissionDenied) => {}
+        Ok(()) => return Err("an ancestor junction was accepted".to_owned()),
+        Err(error) => return Err(format!("ancestor junction: {error}")),
+    }
+    if directory_names(&target)? != names
+        || std::fs::read(&sentinel).map_err(text)? != bytes
+        || crate::platform::pipe::win32::diag::object_sddl(&ancestor, false) != ancestor_sd
+        || crate::platform::pipe::win32::diag::object_sddl(&target, false) != target_sd
+    {
+        return Err("ancestor junction admission changed the link or the shared target".to_owned());
+    }
+    Ok(())
+}
+
+/// The second user can still read the shared directory after the junction is refused.
+#[test]
+#[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
+fn a_second_user_can_still_read_a_refused_junction_target() -> Result<(), String> {
+    let (dir, control) = shared_tempdir()?;
+    control_is_readable(&control)?;
+    let target = dir.path().join("shared-target");
+    std::fs::create_dir(&target).map_err(text)?;
+    let sentinel = target.join("sentinel.bin");
+    std::fs::write(&sentinel, b"shared-bytes").map_err(text)?;
+    let link = dir.path().join("root-link");
+    files::plant_mount_point(&link, &target).map_err(text)?;
+    match ensure_data_root(&link) {
+        Err(SdkError::LocalBusPermissionDenied) => {}
+        Ok(()) => return Err("a junction root was accepted".to_owned()),
+        Err(error) => return Err(text(error)),
+    }
+    let sentinel = sentinel.clone();
+    let read = as_second_user(move || std::fs::read(sentinel))??;
+    if read == b"shared-bytes" {
+        Ok(())
+    } else {
+        Err(format!("second user read {read:?} from the shared target"))
+    }
+}
+
+/// Another user's file that grants this user write and `WRITE_DAC` is not truncated, and a
+/// node save through the same helper leaves `nodes.json.tmp` and its descriptor alone.
+#[test]
+#[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
+fn another_users_file_keeps_its_bytes_when_truncate_is_refused() -> Result<(), String> {
+    let (dir, control) = shared_tempdir()?;
+    control_is_readable(&control)?;
+    let me = files::current_user().map_err(text)?.to_sddl_string().map_err(text)?;
+    let sentinel = dir.path().join("sentinel.bin");
+    let temporary = dir.path().join("nodes.json.tmp");
+    let planted = as_second_user({
+        let (sentinel, temporary, me) = (sentinel.clone(), temporary.clone(), me.clone());
+        move || -> Result<[(String, String); 2], String> {
+            let mut snapshots = Vec::new();
+            for path in [&sentinel, &temporary] {
+                std::fs::write(path, b"keep-these-bytes").map_err(text)?;
+                let owner =
+                    files::path_owner(path).map_err(text)?.to_sddl_string().map_err(text)?;
+                let grant = format!("D:P(A;;FA;;;{owner})(A;;FA;;;{me})");
+                files::replace_dacl(path, &grant).map_err(text)?;
+                let sddl = crate::platform::pipe::win32::diag::object_sddl(path, false);
+                snapshots.push((owner, sddl));
+            }
+            snapshots.try_into().map_err(|_| "test: snapshot count".to_owned())
+        }
+    })??;
+    let before =
+        [std::fs::read(&sentinel).map_err(text)?, std::fs::read(&temporary).map_err(text)?];
+    match open_owner_only_truncate(&sentinel) {
+        Err(error) if permission_denied(&error) => {}
+        Ok(_) => return Err("helper truncated another user's file".to_owned()),
+        Err(error) => return Err(format!("helper: {error}")),
+    }
+    match crate::node::NodeStore::default().save(dir.path()) {
+        Err(error) if permission_denied(&error) => {}
+        Ok(()) => return Err("node save truncated another user's nodes.json.tmp".to_owned()),
+        Err(error) => return Err(format!("node save: {error}")),
+    }
+    if dir.path().join("nodes.json").exists() {
+        return Err("node save published nodes.json after a refused truncate".to_owned());
+    }
+    for (path, snapshot, bytes) in
+        [(&sentinel, &planted[0], &before[0]), (&temporary, &planted[1], &before[1])]
+    {
+        if &std::fs::read(path).map_err(text)? != bytes {
+            return Err(format!("{} bytes changed", path.display()));
+        }
+        let owner_after = files::path_owner(path).map_err(text)?.to_sddl_string().map_err(text)?;
+        let sddl_after = crate::platform::pipe::win32::diag::object_sddl(path, false);
+        if owner_after != snapshot.0 || sddl_after != snapshot.1 {
+            return Err(format!(
+                "{} owner or access list changed: owner {} -> {owner_after}, sddl {} -> {sddl_after}",
+                path.display(),
+                snapshot.0,
+                snapshot.1
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Publication renames, then flushes the directory. A successful no-op does not move the counter.
+#[test]
+fn a_publication_rename_flushes_the_directory() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let before = directory_flushes();
+    let temporary = dir.path().join("authority.json.tmp");
+    let published = dir.path().join("authority.json");
+    std::fs::write(&temporary, b"authority").map_err(text)?;
+    sync_path(&temporary).map_err(text)?;
+    std::fs::rename(&temporary, &published).map_err(text)?;
+    sync_path(dir.path()).map_err(text)?;
+    if std::fs::read(&published).map_err(text)? != b"authority" {
+        return Err("publication was not visible after the directory flush".to_owned());
+    }
+    let after = directory_flushes();
+    if after > before {
+        Ok(())
+    } else {
+        Err(format!("directory flush did not run ({before} -> {after})"))
+    }
 }

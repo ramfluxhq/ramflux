@@ -4,13 +4,20 @@
 //! Shared boot for CLI e2e: mesh certs, four node processes, rf daemons, PTY create.
 #![allow(dead_code)]
 
+#[cfg(windows)]
+mod conpty;
+#[cfg(unix)]
+#[path = "proc.rs"]
+mod proc;
+#[cfg(windows)]
+#[path = "proc_win.rs"]
 mod proc;
 
 use serde::Deserialize as _;
 use serde_json::Value;
 use std::{
     fs::File,
-    io::{Read, Write as _},
+    io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -182,6 +189,9 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     write_seed_file(&signing_seed, &seed)?;
     let route_key = root.join("secrets").join("notify-route.key");
     write_seed_file(&route_key, &[0x11; 32])?;
+    // Custody provisioning is descriptor-relative and Unix-only. Pairing and home migration
+    // stay off in this harness, so the gateway and router start without those variables.
+    #[cfg(unix)]
     let custody = init_custody(&root, &signing_seed, node_id, seed)?;
     let router_async = free_udp_addr()?;
     for (service, mesh_addr) in services.iter().zip(mesh.iter()) {
@@ -214,9 +224,6 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env("RAMFLUX_FEDERATION_NODE_ID", node_id)
             .env("RAMFLUX_FEDERATION_ADMIN_TOKEN", "cli-e2e-admin")
             .env("RAMFLUX_CLIENT_PREKEY_HTTP_URL", format!("http://{public_addr}"))
-            .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
-            .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
-            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
             .env("RAMFLUX_ROUTER_ASYNC_INGRESS", "1")
             .env("RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR", &router_async)
             .env("RAMFLUX_ROUTER_ASYNC_ENDPOINT", &router_async)
@@ -224,6 +231,13 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env("RAMFLUX_ROUTER_ASYNC_PEER_CA_PEM_FILE", &ca_pem)
             .env("RUST_LOG", "info")
             .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR");
+        #[cfg(unix)]
+        {
+            command
+                .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
+                .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
+                .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
+        }
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -523,6 +537,7 @@ pub fn unlock_account_without_wait(daemon: &Daemon, account: &Account) -> Result
 }
 
 /// Wait for the production post-commit marker and require an actual abort exit.
+#[cfg(unix)]
 pub fn await_receive_crash(
     mut daemon: Daemon,
     account: &Account,
@@ -1269,6 +1284,14 @@ fn rf_output_env_timeout(
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
+#[cfg(windows)]
+fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Result<Value> {
+    let spawned = conpty::spawn(&rf_bin(), socket, display_name)?;
+    let mut session = PtySession::from_console(spawned)?;
+    session.drive_account_create(passphrase, CEREMONY_TIMEOUT)
+}
+
+#[cfg(not(windows))]
 fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Result<Value> {
     let rf = rf_bin();
     let socket_text = socket.to_str().ok_or("socket path")?;
@@ -1298,9 +1321,11 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
 
 struct PtySession {
     group: proc::ProcessGroup,
-    stdin: Option<std::process::ChildStdin>,
+    stdin: Option<Box<dyn Write + Send>>,
     output: Arc<Mutex<String>>,
     readers: Vec<std::thread::JoinHandle<()>>,
+    #[cfg(windows)]
+    console: Option<conpty::PseudoConsole>,
 }
 
 impl PtySession {
@@ -1315,7 +1340,27 @@ impl PtySession {
             proc::drain_pipe(stdout, Arc::clone(&output)),
             proc::drain_pipe(stderr, Arc::clone(&output)),
         ];
-        Ok(Self { group, stdin: Some(stdin), output, readers })
+        Ok(Self {
+            group,
+            stdin: Some(Box::new(stdin)),
+            output,
+            readers,
+            #[cfg(windows)]
+            console: None,
+        })
+    }
+
+    #[cfg(windows)]
+    fn from_console(spawned: conpty::Spawned) -> Result<Self> {
+        let output = Arc::new(Mutex::new(String::new()));
+        let readers = vec![proc::drain_pipe(spawned.stdout, Arc::clone(&output))];
+        Ok(Self {
+            group: spawned.group,
+            stdin: Some(Box::new(spawned.stdin)),
+            output,
+            readers,
+            console: Some(spawned.console),
+        })
     }
 
     fn drive_account_create(&mut self, passphrase: &str, budget: Duration) -> Result<Value> {
@@ -1371,6 +1416,9 @@ impl PtySession {
     fn write_line(&mut self, line: &str) -> Result<()> {
         let stdin = self.stdin.as_mut().ok_or("pty stdin closed")?;
         stdin.write_all(line.as_bytes())?;
+        #[cfg(windows)]
+        stdin.write_all(b"\r\n")?;
+        #[cfg(not(windows))]
         stdin.write_all(b"\n")?;
         stdin.flush()?;
         Ok(())
@@ -1397,6 +1445,10 @@ impl Drop for PtySession {
         drop(self.stdin.take());
         self.group.kill_group();
         let _ = self.group.wait();
+        #[cfg(windows)]
+        {
+            self.console.take();
+        }
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
@@ -1522,7 +1574,8 @@ fn rf_bin() -> PathBuf {
 }
 
 fn sibling_bin(name: &str) -> Result<PathBuf> {
-    let path = rf_bin().parent().ok_or("rf parent")?.join(name);
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() };
+    let path = rf_bin().parent().ok_or("rf parent")?.join(file);
     if path.is_file() {
         Ok(path)
     } else {
@@ -1724,13 +1777,19 @@ storage_budget_bytes = 536870912
 turn_udp_addr = "127.0.0.1:0"
 turn_tcp_addr = "127.0.0.1:0"
 "#,
-            database.display(),
-            certs.join("ca.pem").display(),
-            certs.join(format!("{service}.pem")).display(),
-            certs.join(format!("{service}.key")).display(),
+            toml_path(&database),
+            toml_path(&certs.join("ca.pem")),
+            toml_path(&certs.join(format!("{service}.pem"))),
+            toml_path(&certs.join(format!("{service}.key"))),
         ),
     )?;
     Ok(())
+}
+
+/// TOML strings treat `\` as an escape. Windows paths are written with `/`, which `Path`
+/// accepts. On Unix the replacement does not change the path.
+fn toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }
 
 fn wait_for_log_markers(path: &Path, markers: &[&str], timeout: Duration) -> Result<()> {
@@ -1750,6 +1809,7 @@ fn wait_for_log_markers(path: &Path, markers: &[&str], timeout: Duration) -> Res
 }
 
 /// Harness proof: a hung CLI child is killed and reaped inside `budget`.
+#[cfg(unix)]
 pub fn prove_hung_command_reaped_within(budget: Duration) -> Result<()> {
     let mut command = Command::new("sleep");
     command.arg("60");
@@ -1767,6 +1827,7 @@ pub fn prove_hung_command_reaped_within(budget: Duration) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn hung_script_command() -> Command {
     let inner = r#"trap "" HUP; sleep 60"#;
     let mut command = Command::new("script");
@@ -1784,6 +1845,7 @@ fn hung_script_command() -> Command {
 /// Linux `script -c` puts the command in a new session. Cleanup must reap that
 /// descendant, including a child that ignores SIGHUP. Descendants are owned by
 /// the production prompt-wait path, not by test-only pretracking.
+#[cfg(unix)]
 pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
     let mut command = hung_script_command();
     let mut session = PtySession::spawn(&mut command)?;
@@ -1812,6 +1874,7 @@ pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
 }
 
 /// Harness proof: Drop still kills remaining group members after the leader exits.
+#[cfg(unix)]
 pub fn prove_orphaned_group_members_reaped_within(budget: Duration) -> Result<()> {
     let mut command = Command::new("sh");
     command.args(["-c", r#"trap "" HUP; sleep 60"#]);
@@ -1835,6 +1898,7 @@ pub fn prove_orphaned_group_members_reaped_within(budget: Duration) -> Result<()
 
 /// Leader exits during a production prompt wait, before Drop. Descendants were
 /// recorded by that wait, so cleanup still reaches the reparented PTY child.
+#[cfg(unix)]
 pub fn prove_pty_leader_exit_before_prompt_reaps_within(budget: Duration) -> Result<()> {
     let mut command = hung_script_command();
     let mut session = PtySession::spawn(&mut command)?;
@@ -1864,6 +1928,7 @@ pub fn prove_pty_leader_exit_before_prompt_reaps_within(budget: Duration) -> Res
     Ok(())
 }
 
+#[cfg(unix)]
 fn wait_tracked_descendants(group: &proc::ProcessGroup, budget: Duration) -> Result<Vec<u32>> {
     let end = Instant::now() + budget;
     loop {
@@ -1878,6 +1943,7 @@ fn wait_tracked_descendants(group: &proc::ProcessGroup, budget: Duration) -> Res
     }
 }
 
+#[cfg(unix)]
 fn wait_leader_reaped(group: &mut proc::ProcessGroup, budget: Duration) -> Result<()> {
     let end = Instant::now() + budget;
     loop {
@@ -1892,6 +1958,7 @@ fn wait_leader_reaped(group: &mut proc::ProcessGroup, budget: Duration) -> Resul
 }
 
 /// Harness proof: Drop of an unresponsive daemon returns inside `budget` with no leftovers.
+#[cfg(unix)]
 pub fn prove_unresponsive_daemon_drop_within(budget: Duration) -> Result<()> {
     let root = std::env::temp_dir().join(format!(
         "rf-cli-e2e-hung-{}-{}",

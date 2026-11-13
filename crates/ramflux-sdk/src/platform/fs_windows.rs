@@ -10,16 +10,22 @@
 //! hygiene against other standard users and sandboxed processes; administrators and SYSTEM can
 //! always reach a user's files.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io;
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS,
+    CREATE_NEW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS,
 };
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_FLUSHES: Cell<u32> = const { Cell::new(0) };
+}
 
 use crate::SdkError;
 use crate::platform::pipe::win32::files::{self, KnownFolder};
@@ -48,7 +54,7 @@ pub(crate) fn create_new_owner_only_io(path: &Path) -> io::Result<File> {
 }
 
 pub(crate) fn open_owner_only_truncate(path: &Path) -> Result<File, SdkError> {
-    Ok(files::open_owner_only(path, GENERIC_WRITE, CREATE_ALWAYS, 0)?)
+    Ok(files::open_owner_only_truncate(path)?)
 }
 
 pub(crate) fn create_owner_only_dir(path: &Path) -> Result<(), SdkError> {
@@ -148,18 +154,40 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     files::move_file(from, to, false)
 }
 
-/// Flush a file. For a directory there is nothing to flush through a handle: NTFS journals
-/// the metadata of a rename, and [`replace_file`] and [`rename_no_replace`] wait for the disk.
-/// A file needs a handle with write access before it can be flushed.
+/// Flush a file, or a directory after a name in it changed.
+///
+/// A directory is opened with `FILE_FLAG_BACKUP_SEMANTICS` and `GENERIC_WRITE`, then
+/// `FlushFileBuffers` runs through `File::sync_all`. NTFS journaling alone is not this
+/// barrier: `FlushFileBuffers` on the directory handle is what pushes the namespace update.
+/// A crash that cuts power before this call returns can still lose the rename. This host
+/// cannot prove that with a VM reset; a failed flush is an error, not success.
 ///
 /// # Errors
-/// Returns the OS error when the path is missing or a file cannot be opened or flushed.
+/// Returns the OS error when the path is missing or cannot be opened or flushed.
 pub(crate) fn sync_path(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     if std::fs::metadata(path)?.is_dir() {
+        flush_directory(path)?;
+        #[cfg(test)]
+        DIRECTORY_FLUSHES.with(|count| count.set(count.get().saturating_add(1)));
         return Ok(());
     }
     std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
+fn flush_directory(path: &Path) -> io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
+}
+
+/// How many directory flushes this thread has completed. Tests use the delta to tell a real
+/// flush from a successful no-op.
+#[cfg(test)]
+pub(crate) fn directory_flushes() -> u32 {
+    DIRECTORY_FLUSHES.with(Cell::get)
 }
 
 fn is_inside(path: &Path, ancestor: &Path) -> bool {
@@ -204,35 +232,22 @@ pub(crate) fn default_data_root(profile: &str) -> Result<PathBuf, SdkError> {
     Ok(local.join(PRODUCT_DIRECTORY).join(profile))
 }
 
-/// Create the data root and every missing ancestor below the first existing one as owner-only
-/// directories, then verify that the root belongs to the current user and is not roaming.
+/// Create the data root and every missing ancestor as owner-only directories, then verify
+/// that the root belongs to the current user, is not a reparse point, and is not roaming.
 ///
 /// # Errors
-/// `LocalBusPermissionDenied` when the root is roaming or belongs to another user.
+/// `LocalBusPermissionDenied` when the root or an ancestor is a junction or other reparse
+/// point, the resolved path is roaming, or the directory belongs to another user.
 pub(crate) fn ensure_data_root(root: &Path) -> Result<(), SdkError> {
     refuse_roaming(root)?;
-    let mut missing = Vec::new();
-    let mut cursor = Some(root);
-    while let Some(path) = cursor {
-        if path.as_os_str().is_empty() || path.exists() {
-            break;
+    let absolute = std::path::absolute(root)?;
+    match files::prepare_owner_only_directory(&absolute) {
+        Ok(resolved) => refuse_roaming(&resolved),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            Err(SdkError::LocalBusPermissionDenied)
         }
-        missing.push(path);
-        cursor = path.parent();
+        Err(error) => Err(error.into()),
     }
-    for path in missing.into_iter().rev() {
-        match files::create_dir_owner_only(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let owner = files::path_owner(root)?;
-    let user = files::current_user()?;
-    if !files::owner_matches_user(&owner, &user)? {
-        return Err(SdkError::LocalBusPermissionDenied);
-    }
-    Ok(files::restrict(root, true)?)
 }
 
 #[cfg(test)]
