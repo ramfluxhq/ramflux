@@ -1,0 +1,50 @@
+{
+  "light": {
+    "root": null,
+    "job": null,
+    "job:people": {
+      "color": "#161616"
+    },
+    "job:progress": {
+      "color": "#222224"
+    },
+    "job:step-compile": {
+      "color": "#161616"
+    },
+    "job:step-test": {
+      "color": "#161616"
+    }
+  },
+  "dark": {
+    "root": null,
+    "job": null,
+    "job:people": {
+      "color": "#EBEBEB"
+    },
+    "job:progress": {
+      "color": "#EBEBEB"
+    },
+    "job:step-compile": {
+      "color": "#EBEBEB"
+    },
+    "job:step-test": {
+      "color": "#EBEBEB"
+    }
+  },
+  "contrast": {
+    "root": null,
+    "job": null,
+    "job:people": {
+      "color": "#000000"
+    },
+    "job:progress": {
+      "color": "#222224"
+    },
+    "job:step-compile": {
+      "color": "#000000"
+    },
+    "job:step-test": {
+      "color": "#000000"
+    }
+  }
+}

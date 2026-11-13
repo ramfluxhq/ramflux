@@ -18,7 +18,9 @@
         "./primitives.ts"
       ]
     },
-    "moduleResolution": "Bundler"
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true
   },
   "files": [
     "form.tsx",

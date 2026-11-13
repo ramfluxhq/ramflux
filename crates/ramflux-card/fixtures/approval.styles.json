@@ -1,0 +1,23 @@
+{
+  "light": {
+    "root": null,
+    "request": null,
+    "request:explanation": {
+      "color": "#161616"
+    }
+  },
+  "dark": {
+    "root": null,
+    "request": null,
+    "request:explanation": {
+      "color": "#EBEBEB"
+    }
+  },
+  "contrast": {
+    "root": null,
+    "request": null,
+    "request:explanation": {
+      "color": "#000000"
+    }
+  }
+}

@@ -117,6 +117,7 @@ impl Tree {
         preflight(bytes, MAX_TREE)?;
         let tree: Self = serde_json::from_slice(bytes)?;
         tree.check_limits()?;
+        palette(&tree.root, &spec.presentation()?)?;
         if tree.without_style() != crate::projection::expected(spec)? {
             return Err(CardError::Invalid("component semantics"));
         }
@@ -269,10 +270,16 @@ mod tests {
             })
             .collect();
         assert!(
-            Tree::parse(&serde_json::to_vec(&tree).expect("test: bounded expanded tree"), &spec)
-                .is_err(),
-            "expanded-node limit must reject before publication"
+            matches!(tree.check_limits(), Err(CardError::Limit("expanded nodes or depth"))),
+            "257 nodes must fail the expansion bound"
         );
+        tree.root.children.pop();
+        tree.check_limits().expect("test: exactly 256 nodes accepted");
+        let mut bytes = fixture.as_bytes().to_vec();
+        bytes.resize(MAX_TREE, b' ');
+        Tree::parse(&bytes, &spec).expect("test: exactly 64 KiB accepted");
+        bytes.push(b' ');
+        assert!(matches!(Tree::parse(&bytes, &spec), Err(CardError::Limit("JSON bytes"))));
     }
     #[test]
     fn keyed_diff_orders_removals_and_skips_unchanged_nodes() {
@@ -361,4 +368,23 @@ mod depth_and_move_tests {
             "reparenting must recreate unchanged descendants destroyed with their ancestor"
         );
     }
+}
+
+fn palette(node: &Node, presentation: &crate::Presentation) -> Result<(), CardError> {
+    if let Some(style) = &node.attrs.style {
+        for value in [&style.color, &style.background, &style.border].into_iter().flatten() {
+            if !presentation.owns_color(value) {
+                return Err(CardError::Invalid("color outside host tokens"));
+            }
+        }
+        for value in [style.gap, style.padding].into_iter().flatten() {
+            if !presentation.tokens.values().any(|token| token.as_u64() == Some(u64::from(value))) {
+                return Err(CardError::Invalid("geometry outside host tokens"));
+            }
+        }
+    }
+    for child in &node.children {
+        palette(child, presentation)?;
+    }
+    Ok(())
 }

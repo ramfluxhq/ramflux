@@ -1,1 +1,1 @@
-{"catalog":"rf-card/v1","components":[{"id":"profile","component":"rf.form","title":"Profile","label":"Name","binding":"/name","submit":"save"}],"model":{"name":"Ada"}}
+{"catalog":"rf-card/v1","components":[{"id":"profile","component":"rf.form","title":"Profile","submit":"save","fields":[{"id":"field","kind":"input","label":"Name","binding":"/name"}]}],"model":{"name":"Ada"}}

@@ -58,11 +58,6 @@ pub struct Form {
     pub id: String,
     pub title: String,
     pub submit: String,
-    /// Legacy one-text-field spelling remains accepted without mixing both shapes.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub label: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub binding: String,
     #[serde(default)]
     pub fields: Vec<Field>,
     #[serde(default)]
@@ -103,26 +98,6 @@ pub struct Field {
     #[serde(default)]
     pub maximum: Option<i64>,
 }
-impl Form {
-    pub(crate) fn normalized_fields(&self) -> Vec<Field> {
-        if self.fields.is_empty() && !self.binding.is_empty() {
-            vec![Field {
-                id: "field".into(),
-                kind: FieldKind::Input,
-                label: self.label.clone(),
-                binding: self.binding.clone(),
-                required: false,
-                disabled: false,
-                error: None,
-                options: Vec::new(),
-                minimum: None,
-                maximum: None,
-            }]
-        } else {
-            self.fields.clone()
-        }
-    }
-}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -135,14 +110,14 @@ pub enum TaskStatus {
 }
 impl TaskStatus {
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub const fn key(self) -> &'static str {
         match self {
-            Self::Pending => "Pending",
-            Self::Delivered => "Delivered",
-            Self::Running => "Running",
-            Self::Completed => "Completed",
-            Self::Refused => "Refused",
-            Self::Cancelled => "Cancelled",
+            Self::Pending => "pending",
+            Self::Delivered => "delivered",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Refused => "refused",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -193,7 +168,7 @@ pub struct Chart {
     pub title: String,
     pub kind: ChartKind,
     pub unit: String,
-    /// Values are integers; display value = value / scale. No floating point data.
+    /// Values are integers; tables display the exact fraction `value / scale unit` (scale 1 omits the divisor).
     pub scale: u32,
     pub series: Vec<Series>,
 }

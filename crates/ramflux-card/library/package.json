@@ -7,16 +7,19 @@
   "scripts": {
     "build": "node build.mjs",
     "check": "node build.mjs --check",
-    "test": "node build.mjs --test",
+    "test": "node build.mjs --test && node ../web/test.mjs && node check-presentation.mjs && node ../web/worker-test.mjs",
     "typecheck": "tsc --noEmit",
-    "typecheck:web": "tsc -p ../web/tsconfig.json"
+    "typecheck:web": "tsc -p ../web/tsconfig.json",
+    "web:build": "node ../web/build-web.mjs",
+    "web:check": "node ../web/build-web.mjs --check"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
     "acorn": "8.15.0",
     "acorn-walk": "8.3.4",
     "typescript": "5.9.3",
-    "eslint-scope": "8.4.0"
+    "eslint-scope": "8.4.0",
+    "happy-dom": "21.0.4"
   },
   "engines": {
     "node": "20.19.2"

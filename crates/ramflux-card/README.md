@@ -80,11 +80,11 @@ The current catalog, host ABI, engine and bytecode digest must also match before
 received package. Applications persist/pin their own rollback policy. Engine or
 host-contract changes regenerate packages and fixtures.
 
-## Optional C bridge (`c-abi`, standalone ABI major 3)
+## Optional C bridge (`c-abi`, standalone ABI major 4)
 
 `include/ramflux_card.h` defines open/update/event/suspend/resume/dispose plus a
 version query. ABI 2 added descriptor and application-pinned policy spans
-to open. ABI 3 introduces typed fields/events, expanded semantic attributes and
+to open. ABI 4 includes host presentation alongside typed fields/events, expanded semantic attributes and
 `host_slots` outside the tree. Hosts must negotiate version 3 before calling. The SDK lane links this rlib into its existing core static/dynamic library;
 do not create a second Rust static runtime or infer SDK ABI numbers from this ABI.
 All calls run synchronously on the creating renderer thread. There is no detached
@@ -112,7 +112,7 @@ uses exact messages from the pinned engine; these diagnostics confer no authorit
 ## Signed component library
 
 The library consumes manifest-owned BSD presentation components and light/dark
-Palettes through project-owned `@rf/card` semantic primitives. Hosts select theme;
+Palettes through project-owned `@rf/card` semantic primitives. Hosts pass independently validated locale catalogs and theme tokens;
 peer input cannot supply styles. The generated token/component files are read-only.
 The final design catalog also contains header/search signatures; these are
 typechecked but explicitly refused by this closed profile and pruned from the
@@ -120,7 +120,7 @@ production bundle. `form.tsx` is the entry point for the four admitted component
 
 - `rf.form`: 1–16 typed fields, each with unique id/binding, optional required/error/
   disabled state; select has 1–16 closed choices; number uses safe integers and
-  optional inclusive bounds. Legacy one-text-field input remains accepted.
+  optional inclusive bounds. Only the explicit fields array is accepted.
 - `rf.task`: reported requester/owner, closed status, optional 0–100 progress and
   up to 16 steps. All labels describe untrusted presentation, never authority.
 - `rf.chart`: line/bar, 1–2 aligned series of 1–16 safe-integer points, integer
@@ -144,7 +144,7 @@ that port. The Worker has public release material and no SDK, private signing ke
 account keys or storage. Trusted glue supplies the pinned C shim's sole clock
 import from worker performance time; that function is not a QuickJS global.
 The application must keep the worker URL app-owned and
-apply its existing CSP; browser hosting trust is unchanged.
+enforce the restrictive CSP and Trusted Types policy in `tests/web-host.html`; only the adjacent app-owned `worker.js` URL is accepted.
 
 `web/adapter.ts` maps fixed semantic controls to DOM elements using `textContent`,
 never HTML. It keeps native input identity/focus, applies keyed mutations in
@@ -179,3 +179,13 @@ recovery, multi-form diffs, replay and C error/lifetime paths. A bounded child
 process integration test runs the shipping packer and loads its output. Mobile,
 Intel macOS, ARM64 Linux and WASM compile checks complement those native tests;
 compilation alone establishes no device, worker, SDK or end-to-end acceptance.
+
+### Host presentation (ABI 4)
+
+Peer JSON contains only catalog, components and model; peer `theme` or `host` properties are rejected. Forms require 1–16 explicit `fields`; the single-field spelling is rejected. Host `Presentation` contains locale, direction, a complete bounded string table and a token set. `ramflux_card_open` accepts a separate presentation span; `ramflux_card_present` switches it atomically. Packages must be regenerated for ABI 4. Locale tables live in `locales/{en,zh-CN}.json`; peer labels remain opaque data. Tables display exact integer fractions for scale > 1; status containers use `role=group`.
+
+`web/settings.ts` registers JSON token sets and locales (including RTL), checks contrast, follows system changes and persists the per-device selection. The external preview offers runtime language/theme settings and query previews (`?locale=zh-CN&theme=dark`, `?locale=pseudo&rtl`). Additional themes use `PresentationRegistry.addTheme(name, tokenFile)` without changing its implementation. Security slots remain host drawn with host presentation.
+
+Native edits retain their shown version. Submit is disabled while edits or invalid numeric drafts remain unresolved. Stale edits restore the latest committed value and report the conflict; host snapshots are never replayed. A typed runtime liveness check distinguishes pre-work refusal from a dead VM; dead VM replies settle all requests, clear security slots, make the view inert and release its worker.
+
+`npm test` includes automated DOM/settings tests and presentation lint; `web:check -- <release-prefix> <policy>` rejects web bundle drift after `web:build`. Release material is public and independently pinned; signing keys never enter the worker.

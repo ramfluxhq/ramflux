@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
+import type { RFTheme } from "../../../src/generated/rf-tokens";
+let tokens:RFTheme;
+export function setTokens(value:RFTheme):void {tokens=value}
 // Fixed semantic primitives consumed by the generated presentation catalog.
 export type CardAction = Readonly<{ action?: string }>;
 export type Attrs = { required?: boolean; disabled?: boolean; error?: string; options?: readonly {id:string;label:string}[];
@@ -17,7 +20,7 @@ export function node(kind:string, id:string, text="", value="", children:CardNod
 function control(kind:string,p:Props):CardNode {
   const n=node(kind,p.id,p.label??p.text??p.title??"",typeof p.value==="number"?p.value.toString():p.value??"");
   n.attrs={required:p.required,disabled:p.disabled,error:p.error,options:p.options,
-    style:{color:p.color,background:p.background,border:p.border,gap:p.gap,padding:p.padding}};
+    style:{color:p.color??tokens.text,background:p.background,border:p.border,gap:p.gap===undefined?undefined:tokens.gap,padding:p.padding===undefined?undefined:tokens.gap}};
   return n;
 }
 export function Text(p:Props):CardNode{return control("text",p)}
@@ -28,7 +31,7 @@ export function Submit(p:Props):CardNode{const n=control("submit",p);n.action=p.
 export function Progress(p:Props):CardNode{const n=control("progress",p);n.value="";n.attrs={...n.attrs,progress:typeof p.value==="number"?p.value:undefined};return n}
 export function Table(p:Props):CardNode{
   const n=control("table",p);const columns=p.columns??[];
-  n.attrs={...n.attrs,columns:columns.map(c=>c.label),rows:(p.rows??[]).map(r=>columns.map(c=>(c.id==="label"?r.cells.label:c.id==="first"?r.cells.first:r.cells.second)??""))};return n;
+  n.attrs={...n.attrs,columns:columns.map(c=>c.label),rows:(p.rows??[]).map(r=>columns.map(c=>readCell(r.cells,c.id)))};return n;
 }
 export function List(p:Props):CardNode{const n=control("column",p);n.children=(p.items??[]).map(i=>Text({id:i.id,text:i.text,color:p.color}));return n}
 export function ChartFrame(p:Props,...children:CardNode[]):CardNode{const n=control("chart",p);n.children=children;return n}
@@ -39,3 +42,8 @@ export function createNode(component:(props:Props,...children:CardNode[])=>CardN
 // Keep their generated signatures typechecked without introducing new controls.
 export function Header(_props:Props,..._children:CardNode[]):CardNode{throw new Error("header is not admitted by the card profile")}
 export function SearchField(_props:Props):CardNode{throw new Error("search is not admitted by the card profile")}
+
+function readCell(record:Readonly<Record<string,string>>,key:string):string {
+ if(key==="constructor"||key==="prototype"||key==="__proto__")return "";
+ return record[key]??"";
+}
