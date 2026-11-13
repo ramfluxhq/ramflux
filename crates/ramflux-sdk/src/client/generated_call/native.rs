@@ -6,6 +6,8 @@ use super::{g, refused};
 use crate::SdkError;
 use ramflux_protocol as n;
 
+const MAX_START_BYTES: usize = 8 * 1024;
+
 fn endpoint(value: &n::CallEndpoint) -> g::CallEndpoint {
     g::CallEndpoint {
         principal_id: value.principal_id.clone(),
@@ -47,8 +49,22 @@ fn native_consent(value: g::VoiceLeaseConsent) -> Result<n::VoiceLeaseConsent, S
     })
 }
 
-pub(crate) fn from_native(value: &n::CallControl) -> g::Call {
-    g::Call {
+pub(crate) fn from_native(value: &n::CallControl) -> Result<g::Call, SdkError> {
+    let call_start = value
+        .call_start
+        .as_ref()
+        .map(|start| {
+            start.body.validate_shape()?;
+            if start.signature.len() > 128 {
+                return Err(refused("call Start signature byte budget"));
+            }
+            Ok::<_, SdkError>(serde_json::to_vec(start)?)
+        })
+        .transpose()?;
+    if call_start.as_ref().is_some_and(|bytes| bytes.len() > MAX_START_BYTES) {
+        return Err(refused("call Start byte budget"));
+    }
+    Ok(g::Call {
         control: Some(g::CallControl {
             schema: value.schema.clone(),
             call_id: value.call_id.clone(),
@@ -60,8 +76,10 @@ pub(crate) fn from_native(value: &n::CallControl) -> g::Call {
             created_at: value.created_at,
             body: Some(g::CallAction { value: Some(action(&value.body)) }),
             signature: value.signature.clone(),
+            call_ref: value.call_ref.clone(),
+            call_start,
         }),
-    }
+    })
 }
 
 pub(crate) fn to_native(value: g::Call) -> Result<n::CallControl, SdkError> {
@@ -80,7 +98,16 @@ pub(crate) fn to_native(value: g::Call) -> Result<n::CallControl, SdkError> {
         created_at: control.created_at,
         body: native_action(action)?,
         signature: control.signature,
+        call_ref: control.call_ref,
+        call_start: control.call_start.as_deref().map(decode_start).transpose()?,
     })
+}
+
+fn decode_start(bytes: &[u8]) -> Result<n::SignedCallIntentV1, SdkError> {
+    if bytes.len() > MAX_START_BYTES {
+        return Err(refused("call Start byte budget"));
+    }
+    Ok(n::parse_signed_call_intent_v1(bytes)?)
 }
 
 fn action(value: &n::CallAction) -> g::call_action::Value {
@@ -151,4 +178,42 @@ fn native_action(value: g::call_action::Value) -> Result<n::CallAction, SdkError
             N::RekeyAck { generation: value.generation, base_key: value.base_key }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_start_refuses_oversize_and_malformed_proof_before_projection() {
+        for proof in [vec![b' '; MAX_START_BYTES + 1], b"{}".to_vec()] {
+            let endpoint = g::CallEndpoint {
+                principal_id: "caller".into(),
+                root_public_key: "root".into(),
+                device_id: "device".into(),
+            };
+            let call = g::Call {
+                control: Some(g::CallControl {
+                    schema: "ramflux.call.control.v1".into(),
+                    call_id: "call".into(),
+                    conversation_id: "direct".into(),
+                    caller: Some(endpoint.clone()),
+                    callee: Some(g::CallEndpoint {
+                        principal_id: "callee".into(),
+                        ..endpoint.clone()
+                    }),
+                    sender: Some(endpoint),
+                    seq: 1,
+                    created_at: 1,
+                    body: Some(g::CallAction {
+                        value: Some(g::call_action::Value::Ringing(g::CallActionRinging {})),
+                    }),
+                    signature: "signature".into(),
+                    call_ref: Some("reference".into()),
+                    call_start: Some(proof),
+                }),
+            };
+            assert!(to_native(call).is_err(), "invalid Start proof reached native projection");
+        }
+    }
 }

@@ -271,4 +271,3 @@ fn admission_is_released_only_after_the_blocking_worker_exits() -> TestResult {
     std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }
-

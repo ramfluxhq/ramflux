@@ -180,6 +180,9 @@ fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatc
     )?;
     let c =
         account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("media keys unavailable"))?;
+    if c.media_held {
+        return Err(invalid("call resolution missing"));
+    }
     if c.row.state != "active" || c.media_taken {
         return Err(invalid(
             "media session unavailable; start a fresh call before restarting the media engine",

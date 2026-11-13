@@ -212,7 +212,7 @@ fn scan_field(
         Kind::Bytes => {
             let cap = match (schema.parent_message().name(), schema.name()) {
                 ("Thumbnail", "encoded_image") => 16 * 1024,
-                (_, "native_authority_proof") => 8 * 1024,
+                (_, "native_authority_proof") | ("CallControl", "call_start") => 8 * 1024,
                 ("NativeGroupSnapshot", "canonical") => crate::group_state::MAX_GROUP_STATE_BYTES,
                 (name, "canonical") if name.starts_with("Native") => 8 * 1024,
                 _ => super::validation::MAX_INNER_BYTES,

@@ -39,7 +39,7 @@ pub(crate) struct LiveCall {
     pub(crate) local_generation: u64,
     pub(crate) gateway_generation: Option<String>,
     pub(crate) gateway_answered: bool,
-    /// Set when an incoming invite carries `call_ref`. Media stays blocked until the
+    /// Calls start held. Media stays blocked until the
     /// gateway accepts a resolve of that reference.
     pub(crate) media_held: bool,
     #[cfg(feature = "test-support")]

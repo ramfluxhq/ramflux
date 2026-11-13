@@ -5,7 +5,7 @@
 use super::*;
 use crate::client::call::{self, state::LiveCall};
 use crate::client::identity_authority::HeadUse;
-use ramflux_protocol::{CallAction, CallControl, VoiceAllocation};
+use ramflux_protocol::{CallAction, CallControl};
 use serde_json::json;
 fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
     for (local, peer) in [(a, b), (b, a)] {
@@ -39,6 +39,43 @@ fn control(a: &Fixture, b: &Fixture, id: u8, thread: &str) -> Result<LiveCall, S
     Ok(call)
 }
 fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError> {
+    if matches!(c.body, CallAction::Invite { .. }) && c.call_start.is_none() {
+        let branch = sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let peer = sender.client.call_device_identity(&c.callee)?;
+        let peer_record = sender.client.trusted_device(HeadUse::NewAuthorization, &peer)?;
+        let created_at = u64::try_from(c.created_at).map_err(|_| invalid("test: call clock"))?;
+        let body = ramflux_protocol::CallIntentV1 {
+            version: 1,
+            signing_key_id: ramflux_protocol::encode_base64url(
+                branch.signing_key.verifying_key().to_bytes(),
+            ),
+            signature_alg: ramflux_protocol::WakeSignatureAlg::Ed25519,
+            audience: ramflux_protocol::GATEWAY_CALL_INTENT_AUDIENCE.into(),
+            sender_device: sender.client.call_device_identity(&c.caller)?.storage_key().into(),
+            sender_epoch: branch.device_epoch,
+            target_device: peer.storage_key().into(),
+            target_epoch: peer_record
+                .get("device_epoch")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| invalid("test: peer epoch"))?,
+            target_delivery_id: c.callee.device_id.clone(),
+            call_ref: c.call_id.clone(),
+            source_event_id: format!("call-start-{}", c.call_id),
+            kind: ramflux_protocol::CallIntentKind::OneToOne,
+            action: ramflux_protocol::CallIntentAction::Start,
+            seq: 0,
+            created_at,
+            issued_at: created_at,
+            expires_at: created_at + 30,
+            start_digest: None,
+        };
+        let signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &ramflux_protocol::call_intent_signing_bytes(&body)?,
+            branch,
+        );
+        c.call_ref = Some(body.call_ref.clone());
+        c.call_start = Some(ramflux_protocol::SignedCallIntentV1 { body, signature });
+    }
     c.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
         &call::signing_bytes(&c)?,
         sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -52,6 +89,7 @@ fn entry(
     id: &str,
     thread: &str,
 ) -> Result<GatewayInboxEntry, SdkError> {
+    let id = c.call_start.as_ref().map_or(id, |start| start.body.source_event_id.as_str());
     seal_as(
         sender,
         receiver,
@@ -98,8 +136,8 @@ async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_d
     apply(&mut bob, &entry).await?;
     assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
     assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
-    let redrive =
-        self::entry(&alice, &bob, &invite, "call-invite-redrive", "private-first-call-thread")?;
+    // A retransmit preserves the original Start-bound envelope identity and bytes.
+    let redrive = entry.clone();
     apply(&mut bob, &redrive).await?;
     assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
     assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
@@ -143,108 +181,37 @@ async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call(
     Ok(())
 }
 #[tokio::test]
-async fn signed_answer_ack_and_hangup_transition_both_peers_and_wipe_ended_media()
--> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 61)?;
-    let mut bob = Fixture::new("bob", 71)?;
-    contacts(&alice, &bob)?;
-    let origin = control(&alice, &bob, 3, "voice-thread")?;
-    let id = origin.row.call_id.clone();
-    let invite = signed(&alice, origin.pending[0].clone())?;
-    alice.client.persist_call_row(&origin.row)?;
-    alice.client.voice_calls.insert(id.clone(), origin);
-    let invite = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
-    apply(&mut bob, &invite).await?;
-    let recipient =
-        bob.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("recipient missing"))?;
-    recipient.answer(now_unix_timestamp())?;
-    let answer = recipient
-        .pending
-        .iter()
-        .find(|c| matches!(c.body, CallAction::Answer { .. }))
-        .cloned()
-        .ok_or_else(|| invalid("answer missing"))?;
-    let answer = signed(&bob, answer)?;
-    let answer = entry(&bob, &alice, &answer, "answer", "voice-thread")?;
-    apply(&mut alice, &answer).await?;
-    assert_eq!(alice.client.voice_calls[&id].row.state, "connecting");
-    let origin = alice.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("origin missing"))?;
-    origin.activate(
-        VoiceAllocation {
-            endpoint: "relay.example:9000".into(),
-            lease_id: ramflux_protocol::encode_base64url([8; 16]),
-            side: 0,
-            token: ramflux_protocol::encode_base64url([9; 32]),
-            rebind_key: ramflux_protocol::encode_base64url([12; 32]),
-            hard_expires_at: now_unix_timestamp().unsigned_abs() + 14400,
-            expires_at: now_unix_timestamp().unsigned_abs().saturating_add(60),
-        },
-        now_unix_timestamp(),
-    )?;
-    let ack = origin
-        .pending
-        .iter()
-        .find(|c| matches!(c.body, CallAction::Ack { .. }))
-        .cloned()
-        .ok_or_else(|| invalid("ack missing"))?;
-    let ack = signed(&alice, ack)?;
-    let ack = entry(&alice, &bob, &ack, "ack", "voice-thread")?;
-    apply(&mut bob, &ack).await?;
-    assert_eq!(bob.client.voice_calls[&id].row.state, "connecting");
-    let lease =
-        bob.client.voice_calls[&id].lease_offer.clone().ok_or_else(|| invalid("lease offer"))?;
-    let mut consent = ramflux_protocol::VoiceLeaseConsent {
-        scope: bob.client.voice_calls[&id].lease_scope(),
-        lease_id: lease.lease_id.clone(),
-        expires_at: lease.hard_expires_at,
-        signature: String::new(),
-    };
-    consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-        &ramflux_protocol::voice_lease_consent_bytes(&consent)?,
-        bob.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-    );
-    bob.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("call"))?.accept_lease(
-        VoiceAllocation {
-            lease_id: lease.lease_id,
-            endpoint: lease.endpoint,
-            side: 1,
-            token: ramflux_protocol::encode_base64url([10; 32]),
-            rebind_key: ramflux_protocol::encode_base64url([11; 32]),
-            expires_at: lease.expires_at,
-            hard_expires_at: lease.hard_expires_at,
-        },
-        consent,
-        now_unix_timestamp(),
-    )?;
-    let ready = bob.client.voice_calls[&id]
-        .pending
-        .iter()
-        .find(|c| matches!(c.body, CallAction::Ready { .. }))
-        .cloned()
-        .ok_or_else(|| invalid("ready"))?;
-    let ready = signed(&bob, ready)?;
-    let ready = entry(&bob, &alice, &ready, "ready", "voice-thread")?;
-    apply(&mut alice, &ready).await?;
-    assert!(alice.client.voice_calls[&id].lease_consent.is_some());
-    assert_eq!(bob.client.voice_calls[&id].row.state, "active");
-    alice
-        .client
-        .voice_calls
-        .get_mut(&id)
-        .ok_or_else(|| invalid("origin missing"))?
-        .end(false, now_unix_timestamp())?;
-    let hangup = alice.client.voice_calls[&id].pending[0].clone();
-    let hangup = signed(&alice, hangup)?;
-    let hangup = entry(&alice, &bob, &hangup, "hangup", "voice-thread")?;
-    apply(&mut bob, &hangup).await?;
-    let ended = &bob.client.voice_calls[&id];
-    assert_eq!(ended.row.state, "ended");
-    assert_eq!(ended.row.end_reason.as_deref(), Some("completed"));
-    assert!(ended.receive_key.is_none());
-    assert_eq!(ended.send_key.as_ref(), &[0; 32]);
-    apply(&mut bob, &hangup).await?;
-    assert_eq!(bob.client.voice_calls[&id].row.end_reason.as_deref(), Some("completed"));
-    Ok(())
+async fn a_signed_invite_stays_held_without_a_correlated_gateway_decision() -> Result<(), SdkError>
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let alice = Fixture::new("alice", 61)?;
+        let mut bob = Fixture::new("bob", 71)?;
+        contacts(&alice, &bob)?;
+        let origin = control(&alice, &bob, 3, "voice-thread")?;
+        let id = origin.row.call_id.clone();
+        let invite = signed(&alice, origin.pending[0].clone())?;
+        let packet = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
+        apply(&mut bob, &packet).await?;
+        let recipient = bob
+            .client
+            .voice_calls
+            .get_mut(&id)
+            .ok_or_else(|| invalid("test: recipient missing"))?;
+        assert!(recipient.media_held, "signed provenance alone granted media");
+        assert!(
+            recipient.answer(now_unix_timestamp()).is_err(),
+            "answer bypassed correlated Ringing authority"
+        );
+        assert_eq!(recipient.row.state, "incoming_ringing", "refusal mutated the incoming state");
+        assert!(recipient.allocation.is_none(), "held call acquired relay credentials");
+        assert!(
+            !recipient.pending.iter().any(|c| matches!(c.body, CallAction::Answer { .. })),
+            "refused answer queued a control"
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|_| invalid("test: routed call admission timed out"))?
 }
 
 #[tokio::test]
@@ -280,7 +247,7 @@ async fn retiring_a_call_removes_control_receipts_without_reviving_keys_on_redel
     bob.client.retire_call_without_keys(&invite.call_id)?;
     bob.client.voice_calls.clear();
     assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 0);
-    let retry = entry(&alice, &bob, &invite, "retry-call", "direct-thread")?;
+    let retry = packet.clone();
     apply(&mut bob, &retry).await?;
     assert!(bob.client.voice_calls.is_empty());
     assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 0);

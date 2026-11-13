@@ -276,17 +276,41 @@ impl Fixture {
             now_unix_timestamp(),
         )?;
         let mut control = caller.pending[0].clone();
+        let bound = crate::client::call::intent::bind_call_intent(
+            &self.peer,
+            &control,
+            &crate::client::call::intent::IntentTarget {
+                device_id: target.device.clone(),
+                qualified_device: target.identity.storage_key().to_owned(),
+                epoch: self
+                    .source
+                    .client
+                    .device_branch
+                    .as_ref()
+                    .ok_or("source device")?
+                    .device_epoch,
+                delivery_id: target.delivery.clone(),
+            },
+            now_unix_timestamp().unsigned_abs(),
+        )?
+        .ok_or("test: inbound Start missing")?;
+        control.call_ref = Some(bound.signed.body.call_ref.clone());
+        control.call_start = Some(bound.signed.clone());
         control.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
             &crate::client::call::signing_bytes(&control)?,
             self.peer.client.device_branch.as_ref().ok_or("peer device")?,
         );
-        let call = seal(
+        let call = crate::bus::dispatch::task_transport::seal_assigned(
             &self.peer,
             &mut engine,
             &target,
-            "healthy",
-            &crate::client::call::bytes(&control)?,
-            crate::client::routed::Route::control(),
+            crate::bus::dispatch::task_transport::AssignedSeal {
+                conversation: "healthy",
+                body: &crate::client::call::bytes(&control)?,
+                kind: crate::client::routed::Route::control(),
+                envelope_id: Some(&bound.envelope_id),
+                created_at: Some(control.created_at),
+            },
         )
         .await?;
         self.peer.install_test_session(engine);

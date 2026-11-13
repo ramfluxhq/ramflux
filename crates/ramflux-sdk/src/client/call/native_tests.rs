@@ -191,12 +191,14 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
         identity,
         &ramflux_protocol::message::Content {
             value: Some(ramflux_protocol::message::content::Value::Call(
-                crate::client::generated_call::native::from_native(&signed),
+                crate::client::generated_call::native::from_native(&signed)?,
             )),
         },
     )?;
+    let converted = decode(&raw)?.ok_or("test: generated call missing")?;
+    assert!(converted == signed, "generated carrier must retain signed Start authority");
     bob.client.account_db()?.write_transaction(|| {
-        bob.client.project_native_call_control(&entry, &conversation, None, &signed, &raw)
+        bob.client.project_native_call_control(&entry, &conversation, None, &converted, &raw)
     })?;
     assert!(bob.client.refresh_generated_control_cache(&raw)?);
     assert!(

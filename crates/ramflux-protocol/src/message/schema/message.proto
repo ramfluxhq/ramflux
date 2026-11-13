@@ -459,6 +459,9 @@ message CallControl {
   int64 created_at = 8;
   CallAction body = 9;
   string signature = 10;
+  optional string call_ref = 11;
+  // Strict I-JSON SignedCallIntentV1; bounded and verified by the native call owner.
+  optional bytes call_start = 12;
 }
 message VoiceAllocationRequest {
   string call_id = 1;
