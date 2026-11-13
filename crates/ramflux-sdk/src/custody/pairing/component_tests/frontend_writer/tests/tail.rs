@@ -3,7 +3,6 @@
 
 //! Full production tail driver with two actual frontend owners and the native relay.
 use super::*;
-use crate::custody::pairing::PairingAuthorityQuery as _;
 use ramflux_protocol::custody::pairing::local_dto::{FullTailStatus, Outcome, StatusRequest};
 #[tokio::test(start_paused = true)]
 async fn primary_transfer_full_catch_up_and_tail_cover_post_cut() -> TestResult {

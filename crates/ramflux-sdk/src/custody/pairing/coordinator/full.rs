@@ -58,6 +58,10 @@ pub(super) struct FullCeremony {
     data_retry_at: Option<tokio::time::Instant>,
 }
 impl FullCeremony {
+    pub(in crate::custody::pairing::coordinator) fn has_installed_tail(&self) -> bool {
+        self.publication.source_acknowledged() || self.publication.destination_installed()
+    }
+
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
         self.bootstrap.as_mut().and_then(|state| state.epoch_job.take())
     }

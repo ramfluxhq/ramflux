@@ -34,7 +34,7 @@ pub(super) struct FullPublication {
     pub(super) destination_retry_at: Option<tokio::time::Instant>,
 }
 impl FullPublication {
-    pub(in crate::custody::pairing::coordinator) fn source_acknowledged(&self) -> bool {
+    pub(super) fn source_acknowledged(&self) -> bool {
         self.source >= SourcePhase::Acknowledged
     }
     pub(super) fn source_retired(&self) -> bool {
@@ -46,7 +46,7 @@ impl FullPublication {
     pub(super) fn destination_requested(&self) -> bool {
         self.destination == DestinationPhase::Requested
     }
-    pub(in crate::custody::pairing::coordinator) fn destination_installed(&self) -> bool {
+    pub(super) fn destination_installed(&self) -> bool {
         self.destination == DestinationPhase::Installed
     }
     pub(super) fn is_publishing(&self) -> bool {

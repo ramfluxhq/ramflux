@@ -117,7 +117,7 @@ async fn handle_attended(socket: PathBuf, command: PairingCommand) -> Result<(),
             status(&mut bus, &command.account, &display, operation, full_status).await
         }
         PairingAction::Cancel(operation) => {
-            cancel(&mut bus, &command.account, &display, operation).await
+            cancel(&mut bus, &command.account, &display, operation, "cancel").await
         }
     }
 }
@@ -147,11 +147,12 @@ async fn cancel(
     account: &str,
     display: &sas::Display<'_>,
     operation: PairingOperation,
+    action: &str,
 ) -> Result<(), RfError> {
     let result = invoke(
         bus,
         account,
-        "cancel",
+        action,
         &Cancel {
             schema: "ramflux.pairing.Cancel.v2".into(),
             version: 2,

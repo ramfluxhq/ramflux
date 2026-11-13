@@ -510,10 +510,7 @@ impl PairingActor {
         self.require_open()?;
         if self.tail_jobs.contains_key(&cancel.operation_id)
             || self.ceremony.as_ref().is_some_and(|c| {
-                c.full.as_ref().is_some_and(|full| {
-                    full.publication.source_acknowledged()
-                        || full.publication.destination_installed()
-                })
+                c.full.as_ref().is_some_and(full::FullCeremony::has_installed_tail)
             })
         {
             return Err(SdkError::PairingCode("InvalidInput"));

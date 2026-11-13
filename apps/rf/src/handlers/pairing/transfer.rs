@@ -108,7 +108,8 @@ async fn dispatch(socket: PathBuf, command: TransferCommand) -> Result<(), RfErr
             super::finish(&display, result)
         }
         TransferAction::Cancel(operation) => {
-            super::cancel(&mut client, &command.account, &display, operation).await
+            super::cancel(&mut client, &command.account, &display, operation, "transfer.cancel")
+                .await
         }
         TransferAction::Affirm { .. } => Err(invalid()),
     }

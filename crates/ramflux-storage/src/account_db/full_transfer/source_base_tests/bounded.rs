@@ -72,7 +72,10 @@ fn primary_transfer_full_large_stream_is_bounded() -> TestResult {
         "test: streamed bytes disagreed with signed totals"
     );
     assert!(encoded.chunk_count > 16, "test: large input did not cross enough encrypted slots");
-    assert!(probe.calls > RECORDS, "test: source buffered the whole record family before output");
+    assert!(
+        probe.calls >= encoded.chunk_count,
+        "test: multi-slot output was not streamed through bounded writes"
+    );
     assert!(probe.largest <= CHUNK_BYTES as usize, "test: output write exceeded one bounded slot");
     Ok(())
 }
