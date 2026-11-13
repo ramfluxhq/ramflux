@@ -423,7 +423,7 @@ fn mutate_branch(branch: &mut p::QualifiedBranch, field: usize) {
             branch.signing_key = SigningKey::from_bytes(&[0xa5; 32]).verifying_key().to_bytes();
         }
         7 => branch.agreement_key[0] ^= 1,
-        _ => unreachable!("qualified branch field index"),
+        _ => panic!("qualified branch field index"),
     }
 }
 

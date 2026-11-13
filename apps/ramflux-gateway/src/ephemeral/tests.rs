@@ -181,10 +181,9 @@ fn pad_to_frame_size(target: usize) -> TestResult<Envelope> {
 
 pub(crate) async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
     let finished = tokio::time::timeout(Duration::from_secs(10), future).await;
-    assert!(finished.is_ok(), "{what} did not finish within 10s");
     match finished {
         Ok(output) => output,
-        Err(_) => unreachable!("guarded by the assert above"),
+        Err(error) => panic!("test: {what} did not finish within 10s: {error}"),
     }
 }
 

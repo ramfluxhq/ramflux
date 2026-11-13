@@ -135,7 +135,7 @@ fn registration_journal_checkpoints_at_count_and_byte_bounds_without_replaying_o
     Ok(())
 }
 #[test]
-fn registration_failure_or_unwind_restores_only_affected_entries_and_all_receipts() -> TestResult {
+fn registration_failure_restores_only_affected_entries_and_all_receipts() -> TestResult {
     let router = RouterCore::new();
     let alice = registration_request(&router, "alice", "phone", 1, None, "192.0.2.1")?;
     let bob = registration_request(&router, "bob", "phone", 2, None, "192.0.2.2")?;
@@ -148,11 +148,11 @@ fn registration_failure_or_unwind_restores_only_affected_entries_and_all_receipt
         assert_ne!(*guard.registry, before);
     }
     assert_eq!(registry, before);
-    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let failure: TestResult = {
         let _guard = prepared.apply_to(&mut registry);
-        std::panic::resume_unwind(Box::new("simulated admission persistence unwind"));
-    }));
-    assert!(unwind.is_err());
+        Err("simulated admission persistence error".into())
+    };
+    assert!(failure.is_err(), "failed persistence must roll back the admission guard");
     assert_eq!(registry, before);
     prepared.apply_to(&mut registry).commit();
     assert!(registry.signed_device_set(&bob.principal_commitment).is_some());

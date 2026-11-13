@@ -43,31 +43,18 @@ pub(crate) use crate::custody::observer;
 #[cfg(test)]
 mod tests {
     use super::observer;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    /// Harness rule: re-entry on the same thread fails loudly, the lock is released on drop and
-    /// by an unwinding panic.
     #[test]
+    #[should_panic(expected = "observer::begin while this thread holds")]
     fn observer_session_reentry_panics_and_releases() {
-        let first = observer::begin(&["x"]);
-        let again = catch_unwind(AssertUnwindSafe(|| drop(observer::begin(&["y"]))));
-        let message = again.err().map(|e| {
-            e.downcast_ref::<String>()
-                .cloned()
-                .or_else(|| e.downcast_ref::<&str>().map(|text| (*text).to_owned()))
-                .unwrap_or_default()
-        });
-        assert!(
-            message.is_some_and(|m| m.contains("observer::begin while this thread holds")),
-            "same-thread re-entry must panic with the scoping message"
-        );
-        drop(first);
-        drop(observer::begin(&["z"]));
-        let unwound = catch_unwind(|| {
-            let _s = observer::begin(&["w"]);
-            assert_eq!(std::hint::black_box(1), 2, "case failed");
-        });
-        assert!(unwound.is_err());
-        drop(observer::begin(&["after"]));
+        struct Reopen;
+        impl Drop for Reopen {
+            fn drop(&mut self) {
+                drop(observer::begin(&["after"]));
+            }
+        }
+        let _reopen = Reopen;
+        let _first = observer::begin(&["x"]);
+        drop(observer::begin(&["y"]));
     }
 }

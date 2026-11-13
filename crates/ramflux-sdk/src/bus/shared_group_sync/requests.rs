@@ -575,7 +575,10 @@ fn was_delivered(
                     (record.request, true)
                 }
                 GroupControlBody::DeviceSet { .. } | GroupControlBody::Transfer { .. } => {
-                    unreachable!()
+                    return Err(ramflux_protocol::ProtocolError::InvalidGroupState(
+                        "unexpected group control body in request delivery lookup",
+                    )
+                    .into());
                 }
             };
             client

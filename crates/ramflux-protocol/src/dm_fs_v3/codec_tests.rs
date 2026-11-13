@@ -177,14 +177,8 @@ fn dm_fs_v3_length_prefix_lies_rejected_without_allocation() -> Result {
     assert_eq!(stats, allocation::Stats::default());
     for (input, error) in [(&huge, DecodeError::TypeCeiling), (&truncated, DecodeError::Truncated)]
     {
-        let (result, stats) = allocation::measure(|| {
-            std::panic::catch_unwind(|| scan(WireType::QualifiedBranch, input).err())
-        });
-        assert_eq!(
-            result.ok(),
-            Some(Some(error)),
-            "remaining-length rejection must return an error"
-        );
+        let (result, stats) = allocation::measure(|| scan(WireType::QualifiedBranch, input).err());
+        assert_eq!(result, Some(error), "remaining-length rejection must return an error");
         // Zero-copy scanning has zero allocator requests, stronger than cap + 0 overhead.
         assert_eq!(stats, allocation::Stats::default(), "untrusted prefix caused allocation");
         assert!(
@@ -215,13 +209,15 @@ fn dm_fs_v3_malformed_input_never_panics() -> Result {
         let raw = bytes(string(&vector["bytes"])?)?;
         // Every prefix of all 27 fixed wire fixtures, plus each single-byte XOR.
         for length in 0..raw.len() {
-            let result = std::panic::catch_unwind(|| scan(kind, &raw[..length]).err());
-            assert!(result.is_ok_and(|error| error.is_some()), "truncated prefix {length}");
+            assert!(
+                scan(kind, &raw[..length]).is_err(),
+                "test: accepted truncated prefix {length}"
+            );
         }
         let mut changed = raw;
         for offset in 0..changed.len() {
             changed[offset] ^= 0xff;
-            assert!(std::panic::catch_unwind(|| scan(kind, &changed).err()).is_ok());
+            let _result = scan(kind, &changed);
             changed[offset] ^= 0xff;
         }
     }

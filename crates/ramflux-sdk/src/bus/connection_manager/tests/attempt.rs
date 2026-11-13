@@ -86,25 +86,27 @@ async fn manager_attempt_timeout_drops_an_uncooperative_connector_and_real_lease
     .await
 }
 
-struct PanicsOnce {
+struct FailsOnce {
     attempts: Arc<AtomicUsize>,
     next: Connector,
 }
-impl SessionConnector for PanicsOnce {
+impl SessionConnector for FailsOnce {
     fn connect(
         &self,
         config: GatewaySessionConfig,
         deadline: Instant,
     ) -> SessionFuture<'_, GatewaySessionEngine> {
         Box::pin(async move {
-            assert_ne!(self.attempts.fetch_add(1, Ordering::AcqRel), 0, "injected connector panic");
+            if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                return Err(SdkError::GatewaySessionRejected("injected connector failure".into()));
+            }
             self.next.connect(config, deadline).await
         })
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn manager_restarts_after_connector_panic_with_the_same_backoff_policy()
+async fn manager_retries_connector_error_with_the_same_backoff_policy()
 -> Result<(), Box<dyn std::error::Error>> {
     super::watchdog(async {
         let limits = limits();
@@ -114,7 +116,7 @@ async fn manager_restarts_after_connector_panic_with_the_same_backoff_policy()
             config()?,
             None,
             limits.clone(),
-            Arc::new(PanicsOnce {
+            Arc::new(FailsOnce {
                 attempts: Arc::clone(&attempts),
                 next: Connector { sessions, frame: limits.frame },
             }),
@@ -122,6 +124,14 @@ async fn manager_restarts_after_connector_panic_with_the_same_backoff_policy()
         );
         tokio::task::yield_now().await;
         assert_eq!(handle.snapshot().phase, ConnectionPhase::Backoff);
+        assert!(
+            handle
+                .snapshot()
+                .last_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected connector failure")),
+            "the real manager must publish the connector's typed failure"
+        );
         let until = handle.snapshot().retry_after_ms.ok_or("missing restart backoff")?;
         let before = handle.generation();
         tokio::time::advance(Duration::from_millis(until - 1)).await;

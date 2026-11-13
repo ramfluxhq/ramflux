@@ -112,14 +112,15 @@ fn guard_drop_tombstone() -> Result {
             "published accepted sibling no longer retains registry metadata"
         );
         drop(later);
-        // Unwind strictly before a store call is safe to resolve off-request.
-        let unwind_guard = core.reserve("target", &id, &[])?;
+        // A typed failure before a store call detaches the reservation for resolution.
+        let guard = core.reserve("target", &id, &[])?;
+        let failed: std::result::Result<(), NodeCoreError> = {
+            let _guard = guard;
+            Err(NodeCoreError::Redb("injected pre-write failure".into()))
+        };
         assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let _guard = unwind_guard;
-                panic!("injected pre-write unwind");
-            }))
-            .is_err()
+            matches!(failed, Err(NodeCoreError::Redb(_))),
+            "pre-write failure must return its typed error"
         );
         await_p(&core, &id, 3);
         // Validation error and the allocated should_persist=false branch.
@@ -278,7 +279,7 @@ fn aborted_slot_capacity() -> Result {
 #[test]
 fn single_worker_reply_and_drop() -> Result {
     super::view_tests::reply_liveness()?;
-    crate::router_wal::fatal_tests::panic_in_write()?;
+    crate::router_wal::fatal_tests::error_in_write()?;
     for mode in 0..=2 {
         let root = fixture(&format!("worker-{mode}"));
         let store = test_store(&root, mode, 1024 * 1024)?;
@@ -304,11 +305,14 @@ fn single_worker_reply_and_drop() -> Result {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         runtime.block_on(async {
             let guard = core.reserve("target", &id, &[]).expect("reserve");
-            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let failed: std::result::Result<(), NodeCoreError> = {
                 let _guard = guard;
-                panic!("pre-write unwind on Tokio worker");
-            }));
-            assert!(unwind.is_err());
+                Err(NodeCoreError::Redb("pre-write failure on Tokio worker".into()))
+            };
+            assert!(
+                matches!(failed, Err(NodeCoreError::Redb(_))),
+                "failed Tokio request must release the real publication guard"
+            );
             tokio::task::yield_now().await;
         });
         await_p(&core, &id, 1);
@@ -472,58 +476,64 @@ fn request_guard_does_not_own_storage_shutdown() -> Result {
     Ok(())
 }
 
-#[test]
-fn resolver_panic_fail_stops() -> Result {
+#[tokio::test]
+async fn resolver_error_fail_stops() -> Result {
     use std::os::unix::process::ExitStatusExt;
-    if let Some(root) = std::env::var_os("RAMFLUX_RESOLVER_PANIC_CHILD") {
+    use tokio::io::AsyncReadExt;
+    const STDERR_BYTES: u64 = 64 * 1024;
+    const DEADLINE: Duration = Duration::from_secs(30);
+    if let Some(root) = std::env::var_os("RAMFLUX_RESOLVER_ERROR_CHILD") {
         let root = PathBuf::from(root);
-        let mode = std::env::var("RAMFLUX_RESOLVER_PANIC_MODE")?.parse()?;
+        let mode = std::env::var("RAMFLUX_RESOLVER_ERROR_MODE")?.parse()?;
         let store = test_store(&root, mode, 1024 * 1024)?;
         let id = store.initialize_inbox("target")?;
         let core = store.publication_core()?;
         let _observer = crate::durability_test_hooks::observe(
             root,
             Arc::new(|_, op, done| {
-                assert!(op != "tombstone_checkpoint" || done, "injected resolver panic");
+                if op == "tombstone_checkpoint" && !done {
+                    return Err(std::io::Error::other("injected resolver failure"));
+                }
                 Ok(())
             }),
         );
         drop(core.reserve("target", &id, &[])?);
-        loop {
-            thread::park();
-        }
+        tokio::time::timeout(DEADLINE, std::future::pending::<()>()).await?;
+        return Err("test: resolver error did not abort the process".into());
     }
     for mode in 0..=2 {
-        let root = fixture(&format!("resolver-panic-{mode}"));
-        let mut child = std::process::Command::new(std::env::current_exe()?)
+        let root = tempfile::tempdir()?;
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "router_store::publication::tests::resolver_panic_fail_stops",
+                "router_store::publication::tests::resolver_error_fail_stops",
                 "--nocapture",
             ])
-            .env("RAMFLUX_RESOLVER_PANIC_CHILD", &root)
-            .env("RAMFLUX_RESOLVER_PANIC_MODE", mode.to_string())
+            .env("RAMFLUX_RESOLVER_ERROR_CHILD", root.path())
+            .env("RAMFLUX_RESOLVER_ERROR_MODE", mode.to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                assert_eq!(status.signal(), Some(6), "resolver failure must SIGABRT");
-                let output = child.wait_with_output()?;
-                assert!(
-                    String::from_utf8_lossy(&output.stderr).contains("fatal_tombstone_persistence")
-                );
-                break;
-            }
-            if Instant::now() >= deadline {
-                child.kill()?;
-                child.wait()?;
-                panic!("resolver abort hang guard");
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        std::fs::remove_dir_all(root)?;
+        let stderr = child.stderr.take().ok_or("test: child stderr missing")?;
+        let (status, bytes) = tokio::time::timeout(DEADLINE, async {
+            let read = async {
+                let mut bytes = Vec::new();
+                stderr.take(STDERR_BYTES + 1).read_to_end(&mut bytes).await?;
+                Ok::<_, std::io::Error>(bytes)
+            };
+            tokio::try_join!(child.wait(), read)
+        })
+        .await??;
+        assert!(
+            u64::try_from(bytes.len())? <= STDERR_BYTES,
+            "test: resolver child exceeded the diagnostic limit"
+        );
+        assert_eq!(status.signal(), Some(6), "test: resolver failure must SIGABRT");
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("fatal_tombstone_persistence"),
+            "test: typed resolver failure must reach the fatal tombstone fence"
+        );
     }
     Ok(())
 }

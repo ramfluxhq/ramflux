@@ -657,7 +657,7 @@ fn metadata_census_covers_all_r8_classes() {
             A::LossScratch => {
                 "p 0.11.18 src/connection/mod.rs:1695-1696,1730-1735,1779-1793; lost_packets capacity plus simultaneous pending transfers"
             }
-            _ => unreachable!("non-metadata class in exhaustive fixture"),
+            _ => panic!("non-metadata class in exhaustive fixture"),
         };
         assert_eq!(e.source, source, "{class:?} pinned citation changed");
         for policy in [

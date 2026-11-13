@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private federation ingress preserves sender bytes and the source retention deadline.
+use crate::sender_retry::RetryAdmission;
 use crate::{
     CustodyPublication, InboxEntry, MigrationNode, NodeCoreError, RouterCore, RouterRedbStore,
     RouterSubmitOutcome,
@@ -214,15 +215,17 @@ impl RouterCore {
         let admission = store.admit_sender_retry(&source, &envelope, now)?;
         drop(pin_admission);
         let retry_owner = match admission {
-            crate::sender_retry::RetryAdmission::Owner(owner) => owner,
+            RetryAdmission::Owner(owner) => owner,
             retry => {
                 drop(lease);
                 let assignment = match retry {
-                    crate::sender_retry::RetryAdmission::Accepted(assignment) => assignment,
-                    crate::sender_retry::RetryAdmission::Waiting(waiter) => {
-                        waiter.resolved_blocking()?
+                    RetryAdmission::Accepted(assignment) => assignment,
+                    RetryAdmission::Waiting(waiter) => waiter.resolved_blocking()?,
+                    RetryAdmission::Owner(_) => {
+                        return Err(NodeCoreError::Redb(
+                            "retry owner reached accepted forwarding branch".into(),
+                        ));
                     }
-                    crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
                 };
                 let assignment =
                     crate::publication::await_sender_retry(&store.publication_core()?, assignment)?;

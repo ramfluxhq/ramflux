@@ -436,6 +436,12 @@ impl BackupDatabase {
             Arc,
             atomic::{AtomicU64, Ordering},
         };
+        struct ResetProgress<'a>(&'a mut rusqlite::Connection);
+        impl Drop for ResetProgress<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
         let steps = Arc::new(AtomicU64::new(0));
         let counter = steps.clone();
         let _ = self.db.progress_handler(
@@ -445,11 +451,9 @@ impl BackupDatabase {
                 false
             }),
         );
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&self.db)));
-        let _ = self.db.progress_handler(0, None::<fn() -> bool>);
-        match result {
-            Ok(value) => (value, steps.load(Ordering::Relaxed)),
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
+        let reset = ResetProgress(&mut self.db);
+        let result = operation(&*reset.0);
+        drop(reset);
+        (result, steps.load(Ordering::Relaxed))
     }
 }

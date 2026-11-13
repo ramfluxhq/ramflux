@@ -55,23 +55,8 @@ tokio = { version = "1.42", features = ["test-util"] }
 tracing = { workspace = true }
 ramflux-node-core = { workspace = true }
 
-[lints.rust]
-warnings = "deny"
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "deny"
-correctness = "deny"
-suspicious = "deny"
-complexity = "deny"
-perf = "deny"
-style = "deny"
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-dbg_macro = "deny"
+[lints]
+workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }

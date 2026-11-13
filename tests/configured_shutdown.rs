@@ -924,7 +924,7 @@ fn assert_committed_request(
                 assert_eq!(body["deleted_count"], 2);
             }
         }
-        _ => unreachable!(),
+        _ => return Err("test: unexpected shutdown fixture variant".into()),
     }
     Ok(())
 }

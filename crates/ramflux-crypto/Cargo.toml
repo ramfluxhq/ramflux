@@ -37,23 +37,8 @@ thiserror = "2.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.8", features = ["derive"] }
 
-[lints.rust]
-warnings = "deny"
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "deny"
-correctness = "deny"
-suspicious = "deny"
-complexity = "deny"
-perf = "deny"
-style = "deny"
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-dbg_macro = "deny"
+[lints]
+workspace = true
 
 [dev-dependencies]
 curve25519-dalek = "5.0.0"

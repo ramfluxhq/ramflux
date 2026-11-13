@@ -83,6 +83,7 @@ impl Drop for PairingEnv {
 
 #[allow(unsafe_code)]
 fn set_plain_http() {
+    // SAFETY: The caller holds PairingEnv and its process-wide environment lock.
     unsafe {
         std::env::set_var("RAMFLUX_FEDERATION_PUBLIC_PLAIN_HTTP", "1");
     }

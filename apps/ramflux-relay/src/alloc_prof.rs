@@ -20,8 +20,9 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 // default-off profiler feature and never in the production relay.
 #[allow(unsafe_code)]
 fn install_signal_handlers() {
-    // SAFETY: registering a trivial async-signal-safe handler (atomic store) at startup.
     let handler = on_signal as *const () as libc::sighandler_t;
+    // SAFETY: on_signal has the C signal-handler ABI and static lifetime. Both valid signal
+    // numbers install that handler at startup; it only stores to a lock-free atomic.
     unsafe {
         libc::signal(libc::SIGTERM, handler);
         libc::signal(libc::SIGINT, handler);

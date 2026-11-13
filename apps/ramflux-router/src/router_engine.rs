@@ -497,8 +497,8 @@ fn submission_refusal(
     }
 }
 
-// Both ingress adapters use this completion path; a client panic releases the
-// reservation and owned permits without turning a retryable forward into HTTP failure.
+// Both ingress adapters complete typed forwarding failures through the same
+// reservation owner, releasing permits before the next retry.
 pub(crate) fn complete_forward_attempt(
     state: &ramflux_node_core::RouterCore,
     reservation: Box<ramflux_node_core::RouterForwardReservation>,
@@ -507,12 +507,7 @@ pub(crate) fn complete_forward_attempt(
         ramflux_node_core::NodeCoreError,
     >,
 ) -> ramflux_node_core::RouterSubmitOutcome {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
-        Ok(response) => state.complete_home_node_forward(reservation, response),
-        Err(_) => ramflux_node_core::RouterSubmitOutcome::ForwardInProgress {
-            target_delivery_id: reservation.target_delivery_id().to_owned(),
-        },
-    }
+    state.complete_home_node_forward(reservation, work())
 }
 
 #[cfg(feature = "itest-http")]

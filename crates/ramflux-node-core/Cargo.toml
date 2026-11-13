@@ -57,6 +57,8 @@ ramflux-core = { workspace = true }
 rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["process"] }
 tracing-subscriber = { workspace = true }
 curve25519-dalek = "5.0.0"
 ed25519-dalek = { workspace = true }

@@ -15,7 +15,7 @@ fn signed(id: &str) -> ramflux_protocol::SignedRequest {
         "device_proof_hash": "already_authed", "body_hash": "h", "nonce": id,
         "created_at": 1, "expires_at": 2
     }))
-    .unwrap_or_else(|_| unreachable!("fixture signed request"))
+    .unwrap_or_else(|_| panic!("fixture signed request"))
 }
 
 fn register(id: &str) -> RouteIntent {

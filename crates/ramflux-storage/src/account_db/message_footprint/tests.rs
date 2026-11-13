@@ -742,7 +742,9 @@ fn envelope_merge_relocates_incoming_archive_rows_and_erases_them() -> Result<()
         index.create_account("account", "root")?;
         dbs.push(AccountDb::open(&index, "account", &AccountDbKey::generate()?)?);
     }
-    let [origin, middle, last] = &dbs[..] else { unreachable!() };
+    let [origin, middle, last] = &dbs[..] else {
+        panic!("test: unexpected fixture variant or missing fixture value")
+    };
     for db in [origin, middle, last] {
         db.send_direct_message("thread", "message", "peer", b"secret")?;
     }
@@ -1053,7 +1055,7 @@ fn envelope_sql_predicate_matches_the_rust_predicate() -> Result<(), StorageErro
             "ext" => json!({"ext":{"envelope":envelope}}),
             "entry_direct" => json!({"entry": envelope}),
             "nested" => json!({"entry":{"envelope":{"envelope":envelope}}}),
-            _ => unreachable!(),
+            _ => panic!("test: unexpected fixture variant or missing fixture value"),
         }
     };
     let mut cases: Vec<(String, Vec<u8>)> = Vec::new();

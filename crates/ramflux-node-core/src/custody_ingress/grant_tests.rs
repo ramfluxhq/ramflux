@@ -68,17 +68,11 @@ fn finite_pool_reservation_prevents_concurrent_oversubscription() -> Result {
 }
 
 #[test]
-fn failed_and_panicked_callbacks_release_reservations_without_renewing_holders() -> Result {
+fn failed_callbacks_release_reservations_without_renewing_holders() -> Result {
     let limiter = CustodyIngressLimiter::with_authenticated_limit(256, 1);
     let tick = Instant::now();
     let permit = limiter.acquire("192.0.2.1".parse()?, None, tick)?;
     assert_eq!(permit.try_grant("one", || Err::<(), _>("callback"))?, Err("callback"));
-    assert!(
-        std::panic::catch_unwind(
-            || permit.grant("one", || std::panic::resume_unwind(Box::new("callback panic")))
-        )
-        .is_err()
-    );
     let state = limiter.state.lock().map_err(|_| "state")?;
     assert_eq!((state.handshakes, state.authenticated), (1, 0));
     assert_eq!(

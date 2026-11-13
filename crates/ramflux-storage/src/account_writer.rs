@@ -210,8 +210,9 @@ impl Drop for AccountWriter {
 
 #[cfg(test)]
 pub(crate) fn poison_registry() {
-    let _ = std::panic::catch_unwind(|| {
+    let thread = std::thread::spawn(|| {
         let _registered = owners().owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::panic::resume_unwind(Box::new("injected account writer registry poison"));
+        panic!("test: injected account writer registry poison");
     });
+    assert!(thread.join().is_err(), "test: registry poison worker must unwind");
 }

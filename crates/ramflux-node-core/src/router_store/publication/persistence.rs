@@ -92,10 +92,8 @@ impl RouterRedbStore {
         let worker = thread::Builder::new()
             .name("ramflux-publication-resolver".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    resolver(&worker_shared);
-                }));
-                if result.is_err() {
+                if let Err(error) = resolver(&worker_shared) {
+                    tracing::error!(%error, "publication resolver failed");
                     crate::fatal_durability::fence(true);
                 }
             })

@@ -4,6 +4,7 @@
 //! Real engine exchanges over the host fixture, with no actor or competing timers.
 
 use super::{ConnectionHandle, GatewayClientFrame, GatewayServerFrame, entry, fixture, send};
+use crate::SdkError;
 use crate::bus::connection_manager::{NetworkingState, subscriptions::SessionEvent};
 use crate::gateway::frame_dispatch::FrameKind;
 use std::time::{Duration, Instant as WallClock};
@@ -296,18 +297,12 @@ async fn priority_call_cannot_await_writer_apply() -> Result<(), Box<dyn std::er
         .priority_call(
             move |_engine| {
                 Box::pin(async move {
-                    let mut checkpoint = Box::pin(writer.apply(|_| Ok(())));
-                    let rejected = std::future::poll_fn(|cx| {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            std::future::Future::poll(checkpoint.as_mut(), cx)
-                        })) {
-                            Err(_) => std::task::Poll::Ready(true),
-                            Ok(std::task::Poll::Ready(_)) => std::task::Poll::Ready(false),
-                            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
-                        }
-                    })
-                    .await;
-                    Ok(rejected)
+                    match writer.apply(|_| Ok(())).await {
+                        Err(SdkError::PriorityWriterAccess) => Ok(true),
+                        other => Err(SdkError::GatewaySessionRejected(format!(
+                            "writer access returned {other:?}"
+                        ))),
+                    }
                 })
             },
             std::time::Duration::from_secs(1),

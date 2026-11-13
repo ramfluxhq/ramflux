@@ -80,19 +80,11 @@ fn handle_itest_connection(
     context: &ItestHttpContext,
     connection: &ramflux_node_core::ConnectionGuard,
 ) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_itest_request(stream, context, connection)
-    }));
-    match result {
-        Ok(Ok(())) => shutdown_itest_stream(stream),
-        Ok(Err(error)) => {
+    match handle_itest_request(stream, context, connection) {
+        Ok(()) => shutdown_itest_stream(stream),
+        Err(error) => {
             tracing::error!(%error, "federation itest request failed");
             write_itest_500_and_close(stream, &error.to_string());
-        }
-        Err(payload) => {
-            let message = panic_payload_to_string(payload.as_ref());
-            tracing::error!(panic = %message, "federation itest request panicked");
-            write_itest_500_and_close(stream, &format!("federation itest panic: {message}"));
         }
     }
 }
@@ -112,17 +104,6 @@ fn write_itest_500_and_close(stream: &mut TcpStream, body: &str) {
         tracing::warn!(%error, "failed to write federation itest error");
     }
     shutdown_itest_stream(stream);
-}
-
-#[cfg(feature = "itest-http")]
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_owned()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_owned()
-    }
 }
 
 #[cfg(feature = "itest-http")]

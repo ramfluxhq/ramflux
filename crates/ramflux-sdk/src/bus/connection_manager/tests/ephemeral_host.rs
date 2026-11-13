@@ -177,7 +177,7 @@ async fn ephemeral_worker_lock_closes_consumer_and_removes_lease() -> Case {
 }
 
 #[tokio::test]
-async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbox() -> Case {
+async fn ephemeral_worker_error_closes_old_consumer_and_replaces_generation_inbox() -> Case {
     watchdog(async {
         let (handle, io) = fixture().await?;
         let inbox = handle
@@ -188,7 +188,7 @@ async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbo
             .clone();
         let mut consumer = inbox.consumer().ok_or("consumer missing")?;
         let raw = frame(
-            envelope(crate::time::now_unix_timestamp(), "pending-at-panic")
+            envelope(crate::time::now_unix_timestamp(), "pending-at-error")
                 .map_err(|e| e.to_string())?,
         )?;
         inbox.push(&raw, u64::MAX);
@@ -198,9 +198,10 @@ async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbo
         let call = tokio::spawn(async move {
             owner
                 .call::<(), _>(
-                    |_| {
-                        Box::pin(async {
-                            std::panic::resume_unwind(Box::new("fixture host panic"))
+                    |engine| {
+                        Box::pin(async move {
+                            engine.terminal_reason = Some(DisconnectReason::Restart);
+                            Err(SdkError::GatewaySessionRejected("fixture host failure".into()))
                         })
                     },
                     tokio::time::Instant::now() + Duration::from_secs(600),
@@ -208,8 +209,8 @@ async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbo
                 .await
         });
         assert!(
-            matches!(call.await?, Err(SdkError::NetworkingPendingContext { .. })),
-            "panicked host call must return the generation-fenced pending error"
+            matches!(call.await?, Err(SdkError::GatewaySessionRejected(_))),
+            "failed host call must return its typed error"
         );
         disconnected(&mut events, DisconnectReason::Restart).await?;
         let mut next = Box::pin(consumer.next(|_| source().ok()));
@@ -217,7 +218,7 @@ async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbo
             std::future::poll_fn(|cx| std::task::Poll::Ready(next.as_mut().poll(cx))).await;
         assert!(
             matches!(completion, std::task::Poll::Ready(None)),
-            "panic must close the displaced generation's consumer before restart publication"
+            "error retirement must close the displaced generation's consumer before restart publication"
         );
         assert_eq!(inbox.observation(), (0, 0, 0, 0));
         assert!(
@@ -228,7 +229,7 @@ async fn ephemeral_worker_panic_closes_old_consumer_and_replaces_generation_inbo
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .consumer()
                 .is_some(),
-            "panic must install a fresh inbox capability"
+            "error retirement must install a fresh inbox capability"
         );
         handle.stop().await;
         drop(io);

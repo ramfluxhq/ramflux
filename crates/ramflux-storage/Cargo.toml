@@ -35,23 +35,8 @@ durability-test-hooks = []
 test-instrumentation = ["rusqlite/hooks"]
 insecure-test-sqlite = ["rusqlite/bundled"]
 
-[lints.rust]
-warnings = "deny"
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "deny"
-correctness = "deny"
-suspicious = "deny"
-complexity = "deny"
-perf = "deny"
-style = "deny"
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-dbg_macro = "deny"
+[lints]
+workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true

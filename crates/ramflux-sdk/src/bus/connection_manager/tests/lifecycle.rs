@@ -235,21 +235,24 @@ async fn connection_events_and_child_slot_lifecycle_follow_each_session_generati
             .call::<(), _>(
                 |engine| {
                     Box::pin(async move {
-                        std::panic::resume_unwind(Box::new(format!(
-                            "injected restart of live session {}",
-                            engine.session().session_id
-                        )));
+                        engine.terminal_reason = Some(DisconnectReason::Restart);
+                        Err(SdkError::GatewaySessionRejected(
+                            "injected live session failure".into(),
+                        ))
                     })
                 },
                 Instant::now() + Duration::from_secs(600),
             )
             .await;
-        assert!(failed.is_err());
+        assert!(
+            matches!(failed, Err(SdkError::GatewaySessionRejected(_))),
+            "the live operation must return its typed error before retirement"
+        );
         assert_eq!(drops.recv().await, Some(next), "restart must join the previous child");
         let mut restarted = next_session(&handle, &mut sessions, next).await?;
         let restarted_generation = handle.generation();
         assert_eq!(
-            starts.recv().await.ok_or("child not restarted after panic")?.0,
+            starts.recv().await.ok_or("child not restarted after error")?.0,
             restarted_generation
         );
         heartbeat(&handle, &mut restarted).await?;

@@ -190,17 +190,17 @@ struct ErrorJson<'a> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_sdk_abi_version_major() -> u32 {
-    catch_unwind(|| ABI_VERSION_MAJOR).unwrap_or_default()
+    ABI_VERSION_MAJOR
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_sdk_abi_version_minor() -> u32 {
-    catch_unwind(|| ABI_VERSION_MINOR).unwrap_or_default()
+    ABI_VERSION_MINOR
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_sdk_protocol_version() -> u32 {
-    catch_unwind(|| PROTOCOL_VERSION).unwrap_or_default()
+    PROTOCOL_VERSION
 }
 
 #[unsafe(no_mangle)]
@@ -243,25 +243,36 @@ pub extern "C" fn ramflux_client_close(
 }
 
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "FFI boundary defence in depth; nothing relies on it under panic=abort"
+)]
 pub extern "C" fn ramflux_client_free(client: *mut RamfluxClient) {
     let _ignored = catch_unwind(AssertUnwindSafe(|| {
         if client.is_null() {
             return;
         }
+        // SAFETY: the C caller transfers the live handle returned by ramflux_client_new exactly once.
         let inner = unsafe { Box::from_raw(client.cast::<CAbiClientInner>()) };
         close_inner(&inner);
     }));
 }
 
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "FFI boundary defence in depth; nothing relies on it under panic=abort"
+)]
 pub extern "C" fn ramflux_buffer_free(buffer: *mut RamfluxBuffer) {
     let _ignored = catch_unwind(AssertUnwindSafe(|| {
         if buffer.is_null() {
             return;
         }
+        // SAFETY: the C caller transfers the live buffer allocated by write_buffer exactly once.
         let buffer = unsafe { Box::from_raw(buffer) };
         if !buffer.ptr.is_null() && buffer.len > 0 {
             let slice = ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
+            // SAFETY: write_buffer allocated this exact boxed slice and retained its length.
             let _bytes = unsafe { Box::from_raw(slice) };
         }
     }));
@@ -308,11 +319,16 @@ pub extern "C" fn ramflux_event_queue_poll(
 }
 
 #[unsafe(no_mangle)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "FFI boundary defence in depth; nothing relies on it under panic=abort"
+)]
 pub extern "C" fn ramflux_event_queue_free(queue: *mut RamfluxEventQueue) {
     let _ignored = catch_unwind(AssertUnwindSafe(|| {
         if queue.is_null() {
             return;
         }
+        // SAFETY: the C caller transfers its live SDK-allocated queue exactly once.
         let _queue = unsafe { Box::from_raw(queue.cast::<CAbiEventQueue>()) };
     }));
 }
@@ -549,6 +565,10 @@ pub extern "C" fn ramflux_client_put_object(
     })
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "FFI boundary defence in depth; nothing relies on it under panic=abort"
+)]
 fn ffi_result(
     out_error_json: *mut *mut RamfluxBuffer,
     function: impl FnOnce() -> CAbiResult<()>,
@@ -585,6 +605,7 @@ fn input_bytes(ptr: *const c_uchar, len: usize) -> CAbiResult<Vec<u8>> {
     if len == 0 {
         Ok(Vec::new())
     } else {
+        // SAFETY: the C API requires len readable initialized bytes for the duration of the call.
         Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
     }
 }
@@ -593,6 +614,7 @@ fn client_inner<'a>(client: *mut RamfluxClient) -> CAbiResult<&'a CAbiClientInne
     if client.is_null() {
         return Err(CAbiError::new(RamfluxErrorCode::InvalidArgument, "client pointer is null"));
     }
+    // SAFETY: the C API requires a live SDK client handle that is not freed during this call.
     Ok(unsafe { &*client.cast::<CAbiClientInner>() })
 }
 
@@ -603,6 +625,7 @@ fn event_queue<'a>(queue: *mut RamfluxEventQueue) -> CAbiResult<&'a CAbiEventQue
             "event queue pointer is null",
         ));
     }
+    // SAFETY: the C API requires a live SDK queue handle that is not freed during this call.
     Ok(unsafe { &*queue.cast::<CAbiEventQueue>() })
 }
 
@@ -772,6 +795,7 @@ fn write_buffer(out: *mut *mut RamfluxBuffer, bytes: Vec<u8>) -> CAbiResult<()> 
     let len = boxed.len();
     std::mem::forget(boxed);
     let buffer = Box::new(RamfluxBuffer { ptr, len });
+    // SAFETY: the C API requires out to point to writable pointer storage; null was rejected.
     unsafe {
         *out = Box::into_raw(buffer);
     }
@@ -782,6 +806,7 @@ fn clear_out_ptr<T>(out: *mut *mut T) -> CAbiResult<()> {
     if out.is_null() {
         return Err(CAbiError::new(RamfluxErrorCode::InvalidArgument, "output pointer is null"));
     }
+    // SAFETY: the C API requires out to point to writable pointer storage; null was rejected.
     unsafe {
         *out = ptr::null_mut();
     }
@@ -792,6 +817,7 @@ fn write_out_ptr<T>(out: *mut *mut T, value: *mut T) -> CAbiResult<()> {
     if out.is_null() {
         return Err(CAbiError::new(RamfluxErrorCode::InvalidArgument, "output pointer is null"));
     }
+    // SAFETY: the C API requires out to point to valid writable output storage; null was rejected.
     unsafe {
         *out = value;
     }
@@ -805,6 +831,7 @@ fn clear_u64_out(out: *mut u64) -> CAbiResult<()> {
             "operation id pointer is null",
         ));
     }
+    // SAFETY: the C API requires out to point to valid writable u64 storage; null was rejected.
     unsafe {
         *out = 0;
     }
@@ -818,6 +845,7 @@ fn write_u64_out(out: *mut u64, value: u64) -> CAbiResult<()> {
             "operation id pointer is null",
         ));
     }
+    // SAFETY: the C API requires out to point to valid writable output storage; null was rejected.
     unsafe {
         *out = value;
     }
@@ -828,6 +856,7 @@ fn clear_optional_out_error(out_error_json: *mut *mut RamfluxBuffer) {
     if out_error_json.is_null() {
         return;
     }
+    // SAFETY: a non-null optional error output must point to writable pointer storage.
     unsafe {
         *out_error_json = ptr::null_mut();
     }
@@ -899,7 +928,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {
             RamfluxErrorCode::InvalidCanonicalJson
         }
-        SdkError::Io(_) => RamfluxErrorCode::Internal,
+        SdkError::PriorityWriterAccess | SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::CustodyVaultUnavailable
         | SdkError::CustodyVault(_)
         | SdkError::AttachmentDeleted

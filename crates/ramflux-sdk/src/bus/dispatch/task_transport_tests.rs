@@ -122,7 +122,7 @@ async fn repeated_stalled_manifest_fetches_never_exceed_the_global_worker_cap()
 }
 
 #[tokio::test]
-async fn manifest_flight_guard_releases_panics_and_groups_by_full_manifest_url()
+async fn manifest_flight_guard_releases_errors_and_groups_by_full_manifest_url()
 -> Result<(), Box<dyn std::error::Error>> {
     let _test_guard = manifest_test_lock().lock().await;
     let before = super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire);
@@ -146,11 +146,14 @@ async fn manifest_flight_guard_releases_panics_and_groups_by_full_manifest_url()
         super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire),
         before + 2
     );
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let failed: Result<(), SdkError> = {
         let _guard = first;
-        std::panic::resume_unwind(Box::new("manifest worker panic"));
-    }));
-    assert!(panicked.is_err());
+        Err(SdkError::GatewaySessionRejected("manifest worker failure".into()))
+    };
+    assert!(
+        matches!(failed, Err(SdkError::GatewaySessionRejected(_))),
+        "test: failed manifest work must return a typed error and release its flight"
+    );
     assert_eq!(
         super::manifest_worker_count().load(std::sync::atomic::Ordering::Acquire),
         before + 1

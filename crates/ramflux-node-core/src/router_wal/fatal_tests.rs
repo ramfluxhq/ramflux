@@ -139,10 +139,13 @@ fn uncertain_write_fail_stop() -> TestResult {
         }
         if case == "index_lock" {
             let wal = store.submission_wal.as_ref().expect("wal");
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _held = wal.state.lock().expect("state");
-                panic!("poison the real index mutex");
-            }));
+            std::thread::scope(|scope| {
+                let poisoned = scope.spawn(|| {
+                    let _held = wal.state.lock().expect("test: index state");
+                    panic!("test: poison the real index mutex");
+                });
+                assert!(poisoned.join().is_err(), "test: index poison worker must unwind");
+            });
             let _response = enqueue(&store, entry(2), mode)?;
             park();
         }
@@ -169,8 +172,7 @@ fn uncertain_write_fail_stop() -> TestResult {
             park();
         }
         let count = AtomicUsize::new(0);
-        let selected = if case == "wal_panic" { "wal_serialize".to_owned() } else { case.clone() };
-        let inject_panic = case == "wal_panic";
+        let selected = if case == "wal_error" { "wal_serialize".to_owned() } else { case.clone() };
         let _observer = observe(
             root.clone(),
             Arc::new(move |path, op, done| {
@@ -183,7 +185,6 @@ fn uncertain_write_fail_stop() -> TestResult {
                             0
                         })
                 {
-                    assert!(!inject_panic, "panic after earlier batch members wrote");
                     if selected.starts_with("record_") {
                         let mut file = OpenOptions::new().append(true).open(path)?;
                         file.write_all(&[0xA5, 0x5A])?;
@@ -207,13 +208,12 @@ fn uncertain_write_fail_stop() -> TestResult {
                 wal.association.clone(),
             )?;
             let batch = [payload(2), payload(3), payload(4)];
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if mode == 2 {
-                    let _ = writer.append_batch_no_sync(&batch);
-                } else {
-                    let _ = writer.append_batch(&batch);
-                }
-            }));
+            let result = if mode == 2 {
+                writer.append_batch_no_sync(&batch).map(|_| ())
+            } else {
+                writer.append_batch(&batch).map(|_| ())
+            };
+            assert!(result.is_err(), "test: faulted WAL batch must return an error");
             // If a mutation classifies the failed conversion as definite non-write,
             // returning normally is observable by the parent instead of a fake abort.
             if crate::fatal_durability::check().is_err() {
@@ -245,7 +245,7 @@ fn wal_fail_stop_cases(mode: u8) -> TestResult {
         "wal_convert",
         "wal_serialize",
         "wal_frame_len",
-        "wal_panic",
+        "wal_error",
         "writer_channel_loss",
         "index_lock",
         "fsync_channel_loss",
@@ -287,7 +287,7 @@ fn redb_fail_stop_cases() -> TestResult {
         "redb_begin",
         "redb_apply",
         "redb_commit",
-        "redb_panic",
+        "redb_error",
         "ack",
         "nack",
         "checkpoint",
@@ -310,25 +310,24 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
     store.record_submission_increment("before", i64::MAX, Some(&entry(1)))?;
     let selected = match case {
         "redb_begin" => "begin_write",
-        "redb_apply" | "redb_panic" => "commit_apply",
+        "redb_apply" | "redb_error" => "commit_apply",
         "redb_commit" => "commit",
         "ack" | "nack" => "direct_commit",
         "checkpoint" => "checkpoint_commit",
         "startup" => "immediate_commit",
         "rotation" => "rotation_commit",
-        _ => unreachable!(),
+        _ => panic!("test: unexpected fixture variant or missing fixture value"),
     };
-    let panic = case == "redb_panic";
-    let panic_reached = Arc::new(AtomicBool::new(false));
-    let observed_panic = Arc::clone(&panic_reached);
+    let track_error = case == "redb_error";
+    let error_reached = Arc::new(AtomicBool::new(false));
+    let observed_error = Arc::clone(&error_reached);
     let _observer = observe(
         root.to_path_buf(),
         Arc::new(move |_, op, done| {
             if op == selected && !done {
-                if panic {
-                    observed_panic.store(true, Ordering::Release);
+                if track_error {
+                    observed_error.store(true, Ordering::Release);
                 }
-                assert!(!panic, "panic inside held redb transaction");
                 return Err(io::Error::other("redb writer injected fault"));
             }
             Ok(())
@@ -346,9 +345,8 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
         let _ = RouterRedbStore::rotate_inbox_incarnations_at(&root.join("db"), None, None);
         park();
     }
-    // The deliberate panic must not let libtest win the process-exit race.
-    // WriteGuard owns the fence; only its real supervisor may terminate this child.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match case {
+    // Typed write errors fence publication before the supervisor terminates the child.
+    match case {
         "ack" => {
             let _ = store.record_ack_increment(&cursor, "fatal-1");
         }
@@ -364,28 +362,29 @@ fn redb_child(root: &Path, case: &str, mode: u8) -> TestResult {
         _ => {
             let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(2)));
         }
-    }));
-    if panic {
-        assert!(panic_reached.load(Ordering::Acquire), "redb panic injection was not reached");
-        assert!(crate::fatal_durability::check().is_err(), "unwind did not fence");
-        fs::write(root.join("panic-returned"), [])?;
-    } else if let Err(payload) = result {
-        std::panic::resume_unwind(payload);
+    }
+    if track_error {
+        assert!(
+            error_reached.load(Ordering::Acquire),
+            "test: redb error injection was not reached"
+        );
+        assert!(crate::fatal_durability::check().is_err(), "test: write error did not fence");
+        fs::write(root.join("error-returned"), [])?;
     }
 
     park();
 }
 
 #[test]
-fn expected_redb_panic_waits_for_held_supervisor() -> TestResult {
-    let root = root("held-redb-panic");
+fn expected_redb_error_waits_for_held_supervisor() -> TestResult {
+    let root = root("held-redb-error");
     fs::create_dir_all(&root)?;
-    let mut child = command("uncertain_write_fail_stop", &root, "redb_panic", 0)
+    let mut child = command("uncertain_write_fail_stop", &root, "redb_error", 0)
         .env("RAMFLUX_FATAL_HOLD", &root)
         .env("RAMFLUX_ROUTER_GROUP_COMMIT", "0")
         .spawn()?;
     wait_file(&root, "fenced", &mut child)?;
-    wait_file(&root, "panic-returned", &mut child)?;
+    wait_file(&root, "error-returned", &mut child)?;
     assert!(child.try_wait()?.is_none(), "libtest exited while supervisor was held");
     fs::write(root.join("abort"), [])?;
     wait_abort(child)?;
@@ -531,9 +530,9 @@ fn writer_fence_blocks_later_batch() -> TestResult {
     Ok(())
 }
 
-pub(crate) fn panic_in_write() -> TestResult {
-    let root = root("panic-closure");
-    wait_abort(command("uncertain_write_fail_stop", &root, "redb_panic", 0).spawn()?)?;
+pub(crate) fn error_in_write() -> TestResult {
+    let root = root("error-closure");
+    wait_abort(command("uncertain_write_fail_stop", &root, "redb_error", 0).spawn()?)?;
     fs::remove_dir_all(root)?;
     Ok(())
 }

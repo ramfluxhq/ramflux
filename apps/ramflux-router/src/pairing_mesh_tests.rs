@@ -56,6 +56,7 @@ fn pairing_env(values: &[(&str, &str)]) -> PairingEnv {
 
 #[allow(unsafe_code)]
 fn set_pairing_enabled(enabled: bool) {
+    // SAFETY: The caller holds PairingEnv and its process-wide environment lock.
     unsafe {
         std::env::set_var("RAMFLUX_DEVICE_PAIRING_ENABLED", if enabled { "1" } else { "0" });
     }

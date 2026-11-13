@@ -503,7 +503,7 @@ mod tests {
                 "bad-bundle" => rejected_bundle = serde_json::json!({"unexpected": true}),
                 "unauthorized-device" => rejected_device.device_id.push_str("-unauthorized"),
                 "bad-declaration" => {}
-                _ => unreachable!(),
+                _ => panic!("test: unexpected fixture variant or missing fixture value"),
             }
 
             assert!(

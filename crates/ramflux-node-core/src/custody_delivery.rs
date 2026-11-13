@@ -66,7 +66,9 @@ pub(crate) fn submit(
                 crate::sender_retry::RetryAdmission::Waiting(waiter) => waiter
                     .resolved_blocking()
                     .map_err(|error| crate::sender_retry::custody_refusal(&error))?,
-                crate::sender_retry::RetryAdmission::Owner(_) => unreachable!(),
+                crate::sender_retry::RetryAdmission::Owner(_) => {
+                    return Err(CustodyRefusal::PersistenceUnavailable);
+                }
             };
             crate::publication::await_sender_retry(
                 &store

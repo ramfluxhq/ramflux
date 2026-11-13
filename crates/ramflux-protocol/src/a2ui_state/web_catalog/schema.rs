@@ -407,7 +407,7 @@ mod tests {
     use serde_json::json;
 
     fn hash(c: &CreateSurfaceCommand) -> String {
-        crate::surface_snapshot_hash(c).unwrap_or_else(|e| unreachable!("hash: {e}"))
+        crate::surface_snapshot_hash(c).unwrap_or_else(|e| panic!("hash: {e}"))
     }
     fn samples() -> Vec<Value> {
         vec![
@@ -443,9 +443,8 @@ mod tests {
     }
     fn negative(component: &Value, pointer: &str, value: Value, path: &str, rule: &str) {
         let mut changed = component.clone();
-        *changed
-            .pointer_mut(pointer)
-            .unwrap_or_else(|| unreachable!("fixture pointer {pointer}")) = value;
+        *changed.pointer_mut(pointer).unwrap_or_else(|| panic!("fixture pointer {pointer}")) =
+            value;
         let c = content(changed);
         assert_eq!(super::super::validate(&c), Err(reject(path, rule)), "{pointer}");
     }
@@ -458,7 +457,7 @@ mod tests {
             let c = content(component.clone());
             assert_eq!(super::super::validate(&c), Ok(()));
             let actual = super::super::super::snapshot::validated_hash(&c)
-                .unwrap_or_else(|e| unreachable!("valid fixture: {e}"));
+                .unwrap_or_else(|e| panic!("valid fixture: {e}"));
             assert_eq!(actual, hash(&c));
             // No projection, stripping, ordering of arrays or normalization enters the hash.
             let mut changed = c.clone();
@@ -470,7 +469,9 @@ mod tests {
                 let mut hostile = c.clone();
                 hostile.components[0]
                     .as_object_mut()
-                    .unwrap_or_else(|| unreachable!())
+                    .unwrap_or_else(|| {
+                        panic!("test: unexpected fixture variant or missing fixture value")
+                    })
                     .insert(key.into(), json!("https://hostile.invalid/code.js"));
                 assert_eq!(
                     super::super::validate(&hostile),
@@ -484,7 +485,7 @@ mod tests {
             closed_fields(
                 &component,
                 component_schema(&component),
-                bundled().unwrap_or_else(|e| unreachable!("{e}")),
+                bundled().unwrap_or_else(|e| panic!("{e}")),
                 "/components/0",
             );
         }
@@ -494,7 +495,10 @@ mod tests {
             super::super::super::snapshot::validated_hash(&c),
             Err(reject("/components/0/scriptUrl", "unknownField"))
         );
-        c.components[0].as_object_mut().unwrap_or_else(|| unreachable!()).remove("scriptUrl");
+        c.components[0]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("test: unexpected fixture variant or missing fixture value"))
+            .remove("scriptUrl");
         c.catalog_version = "2".into();
         assert_eq!(
             super::super::super::snapshot::validated_hash(&c),
@@ -513,18 +517,18 @@ mod tests {
             1,
             &crate::A2uiConversationCommand::CreateSurface(c.clone()),
         )
-        .unwrap_or_else(|e| unreachable!("{e}"));
-        let event = crate::A2uiConversationEvent::from_wire_bytes(&bytes)
-            .unwrap_or_else(|e| unreachable!("{e}"));
+        .unwrap_or_else(|e| panic!("{e}"));
+        let event =
+            crate::A2uiConversationEvent::from_wire_bytes(&bytes).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(event.command(), &crate::A2uiConversationCommand::CreateSurface(c.clone()));
         c.components[0]["text"] = json!("é");
         let crate::A2uiConversationCommand::CreateSurface(original) = event.command() else {
-            unreachable!()
+            panic!("test: unexpected fixture variant or missing fixture value")
         };
         assert_ne!(hash(original), hash(&c));
         for key in ["__proto__", "prototype", "constructor"] {
             c.data_model = serde_json::from_value(json!({"nested":[{key:1}]}))
-                .unwrap_or_else(|e| unreachable!("{e}"));
+                .unwrap_or_else(|e| panic!("{e}"));
             assert_eq!(
                 super::super::validate(&c),
                 Err(reject(&format!("/dataModel/nested/0/{key}"), "prototype"))
@@ -562,7 +566,7 @@ mod tests {
         c.catalog = "basic".into();
         c.components.clear();
         let bytes = br#"{"catalog":"basic","catalogVersion":"1","fallbackText":"Summary","surfaceId":"surface","surfaceType":"message_card"}"#;
-        assert_eq!(crate::canonical_json_bytes(&c).unwrap_or_else(|e| unreachable!("{e}")), bytes);
+        assert_eq!(crate::canonical_json_bytes(&c).unwrap_or_else(|e| panic!("{e}")), bytes);
         // Independent pinned transcript, without the production domain/hash helper.
         let mut h = blake3::Hasher::new();
         h.update(b"ramflux.a2ui.surface_hash.v1");
@@ -574,28 +578,32 @@ mod tests {
     fn component_schema(component: &Value) -> &'static Value {
         let name = component["type"]
             .as_str()
-            .unwrap_or_else(|| unreachable!())
+            .unwrap_or_else(|| panic!("test: unexpected fixture variant or missing fixture value"))
             .strip_prefix("rf.")
-            .unwrap_or_else(|| unreachable!());
-        bundled().unwrap_or_else(|e| unreachable!("{e}"))["$defs"]
+            .unwrap_or_else(|| panic!("test: unexpected fixture variant or missing fixture value"));
+        bundled().unwrap_or_else(|e| panic!("{e}"))["$defs"]
             .get(name)
-            .unwrap_or_else(|| unreachable!())
+            .unwrap_or_else(|| panic!("test: unexpected fixture variant or missing fixture value"))
     }
     fn resolve<'a>(schema: &'a Value, root: &'a Value) -> &'a Value {
         if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
             return root
-                .pointer(r.strip_prefix('#').unwrap_or_else(|| unreachable!()))
-                .unwrap_or_else(|| unreachable!());
+                .pointer(r.strip_prefix('#').unwrap_or_else(|| {
+                    panic!("test: unexpected fixture variant or missing fixture value")
+                }))
+                .unwrap_or_else(|| {
+                    panic!("test: unexpected fixture variant or missing fixture value")
+                });
         }
         schema
     }
     fn closed_fields(value: &Value, schema: &Value, root: &Value, path: &str) {
         let schema = resolve(schema, root);
         if let Some(choices) = schema.get("anyOf").and_then(Value::as_array) {
-            let choice = choices
-                .iter()
-                .find(|s| check(value, s, root, path).is_ok())
-                .unwrap_or_else(|| unreachable!());
+            let choice =
+                choices.iter().find(|s| check(value, s, root, path).is_ok()).unwrap_or_else(|| {
+                    panic!("test: unexpected fixture variant or missing fixture value")
+                });
             closed_fields(value, choice, root, path);
             return;
         }
@@ -609,7 +617,12 @@ mod tests {
             if let Some(required) = schema.get("required").and_then(Value::as_array) {
                 for key in required.iter().filter_map(Value::as_str) {
                     let mut missing = value.clone();
-                    missing.as_object_mut().unwrap_or_else(|| unreachable!()).remove(key);
+                    missing
+                        .as_object_mut()
+                        .unwrap_or_else(|| {
+                            panic!("test: unexpected fixture variant or missing fixture value")
+                        })
+                        .remove(key);
                     assert_eq!(
                         check(&missing, schema, root, path),
                         Err(reject(&pointer(path, key), "required"))
@@ -669,7 +682,9 @@ mod tests {
             (9, "options"),
         ] {
             let mut c = s[index].clone();
-            let a = c["data"][field].as_array_mut().unwrap_or_else(|| unreachable!());
+            let a = c["data"][field].as_array_mut().unwrap_or_else(|| {
+                panic!("test: unexpected fixture variant or missing fixture value")
+            });
             a.push(a[0].clone());
             assert_eq!(
                 super::super::validate(&content(c)),
@@ -728,7 +743,7 @@ mod tests {
     fn webui_source_bytes_and_formats_have_exact_refusals() {
         let mut c = content(samples().remove(0));
         c.components[0]["text"] = json!("");
-        let overhead = encoded(&c.components[0]).unwrap_or_else(|e| unreachable!("{e}"));
+        let overhead = encoded(&c.components[0]).unwrap_or_else(|e| panic!("{e}"));
         c.components[0]["text"] = json!("a".repeat(256 - overhead));
         assert_eq!(super::super::validate(&c), Ok(()));
         c.components[0]["text"] = json!("a".repeat(257 - overhead));
@@ -745,7 +760,7 @@ mod tests {
         assert_eq!(super::super::validate(&c), Err(reject("/dataModel", "x-encodedBytes")));
         c.data_model.clear();
         let mut action = json!({"name":"go","label":"","kind":"request"});
-        let overhead = encoded(&action).unwrap_or_else(|e| unreachable!("{e}"));
+        let overhead = encoded(&action).unwrap_or_else(|e| panic!("{e}"));
         action["label"] = json!("a".repeat(112 - overhead));
         c.allowed_actions = vec![action.clone()];
         assert_eq!(super::super::validate(&c), Ok(()));
@@ -781,14 +796,17 @@ mod tests {
     // including optional fields and nested records, without duplicating a bound table.
     #[test]
     fn webui_every_schema_bound_rejects_with_exact_path_and_rule() {
-        let root = bundled().unwrap_or_else(|e| unreachable!("{e}"));
+        let root = bundled().unwrap_or_else(|e| panic!("{e}"));
         bounds(root, root, "");
-        for (name, schema) in root["$defs"].as_object().unwrap_or_else(|| unreachable!()) {
+        for (name, schema) in root["$defs"]
+            .as_object()
+            .unwrap_or_else(|| panic!("test: unexpected fixture variant or missing fixture value"))
+        {
             bounds(schema, root, &format!("/$defs/{name}"));
         }
     }
     fn size(n: u64) -> usize {
-        usize::try_from(n).unwrap_or_else(|e| unreachable!("schema bound: {e}"))
+        usize::try_from(n).unwrap_or_else(|e| panic!("schema bound: {e}"))
     }
     fn inclusive_bounds(schema: &Value, root: &Value, path: &str) {
         for key in ["minimum", "maximum"] {
@@ -1008,7 +1026,7 @@ mod tests {
     }
     #[test]
     fn webui_inclusive_semantic_bounds_are_closed() {
-        let root = bundled().unwrap_or_else(|e| unreachable!("{e}"));
+        let root = bundled().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(check(&json!("a".repeat(24)), &root["$defs"]["Id"], root, "/id"), Ok(()));
         for value in ["9007199254740991", "-9007199254740991"] {
             let mut input = samples().remove(7);

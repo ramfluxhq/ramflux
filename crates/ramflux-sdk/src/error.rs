@@ -53,6 +53,8 @@ pub enum ReceiveEpochReconcileFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("priority session calls cannot await account writer checkpoints")]
+    PriorityWriterAccess,
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error("receive epoch reconciliation refused: {0}")]

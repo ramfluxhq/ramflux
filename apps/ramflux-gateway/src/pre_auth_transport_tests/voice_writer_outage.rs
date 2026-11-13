@@ -150,7 +150,7 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
             (8, ramflux_protocol::VoiceLeaseRequest::Allocate {scope:scope.clone()}),
             (9, ramflux_protocol::VoiceLeaseRequest::Accept {consent:Box::new(consent.clone())}),
         ] {
-            let mut signed_request = match signed_operation(index, &format!("outage-device-{index}"))? { GatewayClientFrame::RelayTokenV3Issue {request} => request.signed_request, _ => unreachable!() };
+            let mut signed_request = match signed_operation(index, &format!("outage-device-{index}"))? { GatewayClientFrame::RelayTokenV3Issue {request} => request.signed_request, _ => panic!("test: unexpected fixture variant or missing fixture value") };
             signed_request.path = "/voice/v1/lease".into();
             signed_request.request_id = format!("voice-busy-{}",requests.len());
             signed_request.nonce = signed_request.request_id.clone();

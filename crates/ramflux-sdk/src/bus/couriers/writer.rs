@@ -46,10 +46,9 @@ impl Writer {
         &self,
         step: impl FnOnce(&mut LocalBusAccountState) -> Result<T, SdkError> + Send + 'static,
     ) -> Result<T, SdkError> {
-        debug_assert!(
-            !super::super::connection_manager::session_host::priority_exchange_active(),
-            "priority session calls must not await Writer::apply"
-        );
+        if super::super::connection_manager::session_host::priority_exchange_active() {
+            return Err(SdkError::PriorityWriterAccess);
+        }
         let (reply, response) = oneshot::channel();
         #[cfg(test)]
         let source_reads = self.source_reads;

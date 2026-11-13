@@ -104,55 +104,21 @@ pub(super) async fn run(bootstrap: Bootstrap) {
     } = bootstrap;
     let mut retry = AdmissionRetry::default();
     let mut children = Children::default();
-    loop {
-        let attempt = supervise(run_account(
-            &handle,
-            AccountLoop {
-                config: &mut config,
-                engine: &mut engine,
-                connector: &connector,
-                retry: &mut retry,
-                children: &mut children,
-            },
-            &timeouts,
-            &mut calls,
-            &mut registrations,
-            &mut stopping,
-        ))
-        .await;
-        if attempt.is_ok() {
-            break;
-        }
-        // Drop the panicked exchange and join every generation-owned task before retrying.
-        children.stop().await;
-        handle
-            .shared
-            .ephemeral_inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .disconnect(true);
-        *handle.shared.ephemeral_inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            crate::ephemeral::session::SessionInbox::new();
-        handle
-            .shared
-            .hub
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .disconnect(DisconnectReason::Restart);
-        update(&handle, |snapshot| {
-            snapshot.state = NetworkingState::NetworkingPending;
-            snapshot.generation = new_generation();
-            snapshot.session_id = None;
-            snapshot.active_transport_kind = None;
-        });
-        let _ = handle.shared.events.send(ConnectionEvent::Disconnected {
-            reason: DisconnectReason::Restart,
-            generation: handle.generation(),
-        });
-        let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
-        retry.record(&error, Instant::now());
-        failed(&handle, &retry, &error);
-    }
+    run_account(
+        &handle,
+        AccountLoop {
+            config: &mut config,
+            engine: &mut engine,
+            connector: &connector,
+            retry: &mut retry,
+            children: &mut children,
+        },
+        &timeouts,
+        &mut calls,
+        &mut registrations,
+        &mut stopping,
+    )
+    .await;
     children.stop().await;
     handle
         .shared
@@ -173,21 +139,6 @@ pub(super) async fn run(bootstrap: Bootstrap) {
         snapshot.generation = new_generation();
         snapshot.phase = ConnectionPhase::Stopped;
     });
-}
-
-// Catch a poll panic without moving the receivers or retry policy into a disposable task.
-async fn supervise(future: impl std::future::Future<Output = ()>) -> Result<(), ()> {
-    let mut future = std::pin::pin!(future);
-    std::future::poll_fn(move |context| {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            future.as_mut().poll(context)
-        })) {
-            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
-            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
-            Err(_) => std::task::Poll::Ready(Err(())),
-        }
-    })
-    .await
 }
 
 struct AccountLoop<'a> {
@@ -282,15 +233,7 @@ async fn run_account(
                 .unwrap_or(DisconnectReason::Stop),
             super::session_host::HostExit::Retired(reason) => reason,
         };
-        handle
-            .shared
-            .ephemeral_inbox
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .disconnect(matches!(
-                reason,
-                DisconnectReason::Stop | DisconnectReason::Lock | DisconnectReason::Restart
-            ));
+        retire_inbox(handle, reason);
         if let Some(host) = &resident.host {
             host.hub.disconnect(reason);
         }
@@ -302,6 +245,18 @@ async fn run_account(
         let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
         retry.record(&error, Instant::now());
         failed(handle, retry, &error);
+    }
+}
+
+fn retire_inbox(handle: &ConnectionHandle, reason: DisconnectReason) {
+    let mut inbox =
+        handle.shared.ephemeral_inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    inbox.disconnect(matches!(
+        reason,
+        DisconnectReason::Stop | DisconnectReason::Lock | DisconnectReason::Restart
+    ));
+    if reason == DisconnectReason::Restart {
+        *inbox = crate::ephemeral::session::SessionInbox::new();
     }
 }
 

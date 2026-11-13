@@ -78,19 +78,56 @@ fn socket_timeout_uses_production_forward_completion() -> anyhow::Result<()> {
 }
 
 #[test]
-fn forward_panic_uses_production_completion_and_releases_permit() -> anyhow::Result<()> {
+fn forward_error_uses_production_completion_and_releases_permit() -> anyhow::Result<()> {
+    const DEADLINE: Duration = Duration::from_secs(5);
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
-    let attempt = reservation(&handle, "join-failure")?;
+    let (handle, _) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
+    let attempt = reservation(&handle, "forward-error")?;
     let RouterHandle::Tokio(inner) = &handle;
     let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
+    let server = thread::spawn(move || -> std::io::Result<()> {
+        let deadline = Instant::now() + DEADLINE;
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::yield_now();
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        stream.set_write_timeout(Some(DEADLINE))?;
+        std::io::Write::write_all(
+            &mut stream,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot-json",
+        )
+    });
     let result = crate::router_engine::complete_forward_attempt(handle.state(), attempt, || {
         let _permit = permit;
-        std::panic::resume_unwind(Box::new("forward worker stopped"));
+        let result = crate::forward_http::post(&url, &serde_json::json!({}), DEADLINE);
+        assert!(
+            matches!(&result, Err(ramflux_node_core::NodeCoreError::ItestHttp(_))),
+            "test: malformed real HTTP response must produce a typed forwarding error"
+        );
+        result
     });
-    assert!(matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }));
-    assert_eq!(inner.forward_semaphore.available_permits(), 1);
-    drop(reservation(&handle, "join-failure")?);
+    server.join().map_err(|_| anyhow::anyhow!("test: malformed response server panicked"))??;
+    assert!(
+        matches!(result, ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { .. }),
+        "test: forwarding error must retain the retryable submission outcome"
+    );
+    assert_eq!(
+        inner.forward_semaphore.available_permits(),
+        1,
+        "test: failed forwarding must release its owned permit"
+    );
+    drop(reservation(&handle, "forward-error")?);
     Ok(())
 }
 

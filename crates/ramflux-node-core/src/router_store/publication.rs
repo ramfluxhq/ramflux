@@ -856,11 +856,9 @@ fn diagnostics(shared: &Shared, now: Instant) -> PublicationMetrics {
     metrics
 }
 
-fn resolver(shared: &Shared) {
+fn resolver(shared: &Shared) -> Result<(), NodeCoreError> {
     loop {
-        if crate::fatal_durability::check().is_err() {
-            return;
-        }
+        crate::fatal_durability::check()?;
         let (stopping, descriptors): (_, Vec<_>) = {
             let registry = lock(shared);
             let stopping = shared.stopping.load(Ordering::Acquire);
@@ -908,11 +906,7 @@ fn resolver(shared: &Shared) {
             claimed.push(descriptor);
         }
         if !claimed.is_empty() {
-            if let Err(error) = persistence::abort_batch(shared, &claimed) {
-                let _ = error;
-                crate::fatal_durability::fence(true);
-                return;
-            }
+            persistence::abort_batch(shared, &claimed)?;
             for descriptor in claimed {
                 descriptor.state.store(PersistenceState::AbortedDurable as u8, Ordering::Release);
                 finish(shared, &descriptor, true);
@@ -922,9 +916,9 @@ fn resolver(shared: &Shared) {
         if stopping {
             if lock(shared).inboxes.values().any(|inbox| !inbox.in_flight.is_empty()) {
                 crate::fatal_durability::fence(false);
-                return;
+                return Err(error("publication shutdown has unresolved assignments"));
             }
-            return;
+            return Ok(());
         }
         thread::park_timeout(Duration::from_secs(1));
     }

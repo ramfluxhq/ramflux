@@ -12,7 +12,9 @@ fn queue_half_drain_and_inflight() {
             assert_eq!(queue.try_push(vec![0; 32], seq as u64), Admission::Queued);
             assert!(queue.inner.accesses.load(Ordering::Relaxed) - before <= 4);
         }
-        let Next::Frame(inflight) = queue.next() else { unreachable!() };
+        let Next::Frame(inflight) = queue.next() else {
+            panic!("test: unexpected fixture variant or missing fixture value")
+        };
         assert_eq!(queue.try_push(vec![0; 32], 300), Admission::Overflowed);
         let state = queue.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = queue.inner.accesses.load(Ordering::Relaxed);
@@ -23,7 +25,9 @@ fn queue_half_drain_and_inflight() {
         drop(state);
         queue.complete(Some(&inflight));
         for _ in 1..limit / 2 {
-            let Next::Frame(frame) = queue.next() else { unreachable!() };
+            let Next::Frame(frame) = queue.next() else {
+                panic!("test: unexpected fixture variant or missing fixture value")
+            };
             queue.complete(Some(&frame));
         }
         assert!(matches!(queue.next(), Next::Hint(299, _)));
@@ -41,10 +45,14 @@ fn resync_threshold() {
         assert_eq!(queue.try_push(vec![0; 1024 * 1024], seq), Admission::Queued);
     }
     assert_eq!(queue.try_push(vec![0], 20), Admission::Overflowed);
-    let Next::Frame(frame) = queue.next() else { unreachable!() };
+    let Next::Frame(frame) = queue.next() else {
+        panic!("test: unexpected fixture variant or missing fixture value")
+    };
     queue.complete(Some(&frame));
     // Three frames are below the frame threshold but above the byte threshold.
-    let Next::Frame(frame) = queue.next() else { unreachable!() };
+    let Next::Frame(frame) = queue.next() else {
+        panic!("test: unexpected fixture variant or missing fixture value")
+    };
     queue.complete(Some(&frame));
     assert!(matches!(queue.next(), Next::Hint(19, _)));
     assert_eq!(queue.try_push(vec![0], 19), Admission::Overflowed);

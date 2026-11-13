@@ -257,12 +257,14 @@ fn expired_inbound_forward_lease_is_reclaimed_after_lost_holder()
     let (_, source) = DeviceAuthKeyResponse::forwarded_envelope_source(&forward.envelope)?;
     let now = 1_760_000_010;
 
-    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _result = store.deliver_inbound_forward_once(&source, &forward, now, || {
-            std::panic::resume_unwind(Box::new("simulated lost holder"))
+    std::thread::scope(|scope| {
+        let abandoned = scope.spawn(|| {
+            let _result = store.deliver_inbound_forward_once(&source, &forward, now, || {
+                panic!("test: simulated lost forwarding holder");
+            });
         });
-    }));
-    assert!(crashed.is_err());
+        assert!(abandoned.join().is_err(), "test: lost holder fixture must unwind");
+    });
     let pending = store
         .deliver_inbound_forward_once(&source, &forward, now + 1, || {
             Err(NodeCoreError::ItestHttp("live lease reached router".into()))
