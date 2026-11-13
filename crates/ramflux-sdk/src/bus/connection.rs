@@ -6,6 +6,7 @@
 use super::supervisor::Supervisor;
 use crate::platform::listener::{BusListener, BusStream};
 use crate::prelude::*;
+use std::sync::Arc;
 use tokio::task::JoinSet;
 
 pub(super) async fn serve(
@@ -105,21 +106,20 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
-    let (mut reader, writer) = stream.into_halves();
+    let (reader, writer) = stream.into_halves();
+    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let credential_input =
+        super::credentials::connection(supervisor.config.data_root.clone(), id, outbound.clone());
+    let reader_credentials = credential_input.channel();
     let (incoming, mut frames) = mpsc::channel(64);
     let (disconnect, mut disconnected) = watch::channel(false);
-    let reader_task = tokio::task::spawn_local(async move {
-        loop {
-            let frame =
-                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
-            let failed = frame.is_err();
-            if incoming.try_send(frame).is_err() || failed {
-                break;
-            }
-        }
-        let _ = disconnect.send(true);
-    });
-    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let reader_task = tokio::task::spawn_local(read_requests(
+        reader,
+        reader_credentials,
+        id,
+        incoming,
+        disconnect,
+    ));
     let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
     let writer_task = tokio::task::spawn_local(write_responses(
         writer,
@@ -131,6 +131,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     let _cleanup =
         ConnectionTasks { reader: reader_task.abort_handle(), writer: writer_task.abort_handle() };
     let mut connection = LocalBusConnectionState::new(id, outbound.clone());
+    connection.credential_channel = Some(credential_input.channel());
     let mut requests = JoinSet::new();
     let mut inflight = BTreeSet::new();
     let mut ceremony: Option<crate::custody::CreationCeremony> = None;
@@ -181,6 +182,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     continue;
                 }
                 let context = LocalBusConnectionState {
+                    credential_channel: connection.credential_channel.clone(),
                     connection_id: id, outbound: outbound.clone(), topics: connection.topics.clone(),
                     attended_account_id: connection.attended_account_id.clone(), pending_events: Vec::new(),
                 };
@@ -194,6 +196,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
             }
         }
     };
+    credential_input.close();
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     supervisor.disconnect(id);
@@ -202,6 +205,29 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+async fn read_requests<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    reader_credentials: Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    id: u64,
+    incoming: mpsc::Sender<Result<super::custody_setup::Incoming, SdkError>>,
+    disconnect: watch::Sender<bool>,
+) {
+    loop {
+        let frame = match super::credentials::read_frame(&mut reader, &reader_credentials, id).await
+        {
+            Ok(None) => continue,
+            Ok(Some(frame)) => Ok(super::custody_setup::Incoming::new(frame)),
+            Err(error) => Err(error),
+        };
+        let failed = frame.is_err();
+        if incoming.try_send(frame).is_err() || failed {
+            break;
+        }
+    }
+    reader_credentials.close();
+    let _ = disconnect.send(true);
 }
 
 async fn custody_response(

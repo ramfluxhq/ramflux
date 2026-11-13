@@ -555,6 +555,9 @@ impl PairingActor {
     /// # Errors
     /// No live ceremony.
     pub async fn lock(&mut self) -> Result<LocalResult, SdkError> {
+        if let Some(participant) = &self.participant {
+            participant.provider.cancel();
+        }
         self.frontend_generation = self.frontend_generation.saturating_add(1);
         self.actor_generation = self.actor_generation.saturating_add(1);
         // A previous cancel may already have dropped the full owner and returned the
@@ -1162,6 +1165,9 @@ impl PairingActor {
     /// Root removal erases memory and joins owned work without turning an encrypted
     /// data-resume journal into approval or deleting uncertain publication operands.
     async fn retire_owned_runtime(&mut self) {
+        if let Some(participant) = &self.participant {
+            participant.provider.cancel();
+        }
         self.full_runtime.stop();
         if let Some(native) = &self.native {
             native.close();

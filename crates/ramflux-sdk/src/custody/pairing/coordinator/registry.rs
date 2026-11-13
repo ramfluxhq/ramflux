@@ -20,6 +20,7 @@ pub(super) struct Entry {
     pub(super) actor: tokio::sync::Mutex<PairingActor>,
     cancelled: AtomicBool,
     native: Option<Arc<dyn PairingNative>>,
+    credential_provider: Option<Arc<dyn crate::custody::pairing::LocalCredentialProvider>>,
     full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
     work: Arc<tokio::sync::Notify>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -55,10 +56,13 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
         return Err(SdkError::PairingCode("Busy"));
     }
     let native = actor.native.clone();
+    let credential_provider =
+        actor.participant.as_ref().map(|participant| participant.provider.clone());
     let full_runtime = actor.full_runtime.clone();
     let entry = Arc::new(Entry {
         actor: tokio::sync::Mutex::new(actor),
         native,
+        credential_provider,
         full_runtime,
         cancelled: AtomicBool::new(false),
         work: Arc::new(tokio::sync::Notify::new()),
@@ -129,6 +133,9 @@ fn remove_entry(root: &Path, account_id: &str) -> Result<Option<Arc<Entry>>, Sdk
     let entry = actors().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
     if let Some(entry) = &entry {
         crate::custody::pairing::cancel_credential(&key.0, account_id);
+        if let Some(provider) = &entry.credential_provider {
+            provider.cancel();
+        }
         entry.cancelled.store(true, Ordering::Release);
         entry.full_runtime.stop();
         if let Some(pump) =

@@ -23,6 +23,40 @@ pub trait LocalCredentialProvider: Send + Sync {
     /// # Errors
     /// Provider transport or validation failures.
     fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError>;
+    /// Actual SDK-validated operation/role scope for connection-owned private adapters.
+    /// # Errors
+    /// Refuses a changed local scope or unavailable attended input.
+    fn provide_scoped(
+        &self,
+        request: &CredentialRequest,
+        _scope: &super::private_credential::PrivateCredentialScope,
+    ) -> Result<CredentialOutcome, SdkError> {
+        self.provide(request)
+    }
+    /// Interrupt outstanding attended input before the owning lifecycle drains workers.
+    fn cancel(&self) {}
+}
+
+pub(crate) struct ScopedProvider<'a> {
+    provider: &'a dyn LocalCredentialProvider,
+    scope: super::private_credential::PrivateCredentialScope,
+}
+pub(crate) fn scoped(
+    provider: &dyn LocalCredentialProvider,
+    scope: super::private_credential::PrivateCredentialScope,
+) -> ScopedProvider<'_> {
+    ScopedProvider { provider, scope }
+}
+impl LocalCredentialProvider for ScopedProvider<'_> {
+    fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
+        if self.scope.request() != request {
+            return Err(SdkError::PairingField("credential_scope"));
+        }
+        self.provider.provide_scoped(request, &self.scope)
+    }
+    fn cancel(&self) {
+        self.provider.cancel();
+    }
 }
 
 /// Private provider result. Not a pairing DTO.
@@ -44,6 +78,13 @@ impl SecretUtf8 {
             return Err(SdkError::PairingField("credential_length"));
         }
         Ok(Self(Zeroizing::new(bytes.to_vec())))
+    }
+
+    pub(super) fn from_owned(bytes: Zeroizing<Vec<u8>>) -> Result<Self, SdkError> {
+        if bytes.is_empty() || bytes.len() > 1024 || std::str::from_utf8(&bytes).is_err() {
+            return Err(SdkError::PairingField("credential_length"));
+        }
+        Ok(Self(bytes))
     }
 
     #[must_use]

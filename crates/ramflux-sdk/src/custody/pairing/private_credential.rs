@@ -10,6 +10,19 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use zeroize::Zeroizing;
+mod async_reader;
+pub use async_reader::read_reply_after_discriminator;
+mod calls;
+pub use calls::{
+    PrivateCredentialCall, PrivateCredentialCallKind, bind_call, cancel_call, parent_request_id,
+    provider_for_account,
+};
+mod frontend;
+pub use frontend::PairingBusClient;
+mod channel;
+pub use channel::{
+    PrivateCredentialChannel, PrivateCredentialPrompt, PrivateCredentialScopeResolver,
+};
 const TAG: u8 = 0xC1;
 const MAX_BODY: usize = 2064;
 // Distinct connections must not accidentally have equal outstanding request IDs:
@@ -81,6 +94,13 @@ pub fn read_reply(
     reader: &mut impl Read,
     requested: &str,
 ) -> Result<PrivateCredentialReply, SdkError> {
+    read_reply_checked(reader, requested, None)
+}
+fn read_reply_checked(
+    reader: &mut impl Read,
+    requested: &str,
+    expected_generation: Option<u64>,
+) -> Result<PrivateCredentialReply, SdkError> {
     action(requested)?;
     let mut prefix = [0; 4];
     reader.read_exact(&mut prefix)?;
@@ -95,7 +115,7 @@ pub fn read_reply(
     }
     reader.read_exact(&mut header[1..])?;
     let generation = u64::from_be_bytes(header[1..9].try_into().map_err(|_| invalid())?);
-    if generation == 0 {
+    if generation == 0 || expected_generation.is_some_and(|expected| expected != generation) {
         return Err(invalid());
     }
     let arm = header[9];
@@ -117,6 +137,15 @@ pub fn read_reply(
     }
     let mut confirm = Zeroizing::new(vec![0; confirm_len]);
     reader.read_exact(&mut confirm)?;
+    finish_reply(generation, requested, arm, pass, confirm)
+}
+fn finish_reply(
+    generation: u64,
+    requested: &str,
+    arm: u8,
+    pass: Zeroizing<Vec<u8>>,
+    confirm: Zeroizing<Vec<u8>>,
+) -> Result<PrivateCredentialReply, SdkError> {
     let outcome = if arm == 0 {
         CredentialOutcome::Refused
     } else {
@@ -124,9 +153,9 @@ pub fn read_reply(
             return Err(invalid());
         }
         CredentialOutcome::Provided {
-            passphrase: SecretUtf8::from_bytes(&pass)?,
+            passphrase: SecretUtf8::from_owned(pass)?,
             confirmation: if requested == "setup" {
-                Some(SecretUtf8::from_bytes(&confirm)?)
+                Some(SecretUtf8::from_owned(confirm)?)
             } else {
                 None
             },
@@ -142,6 +171,18 @@ pub struct PrivateCredentialScope {
     candidate: Option<String>,
 }
 impl PrivateCredentialScope {
+    #[must_use]
+    pub const fn request(&self) -> &CredentialRequest {
+        &self.request
+    }
+    #[must_use]
+    pub fn operation_id(&self) -> Option<&str> {
+        self.operation.as_deref()
+    }
+    #[must_use]
+    pub fn candidate_hash(&self) -> Option<&str> {
+        self.candidate.as_deref()
+    }
     /// # Errors
     /// Refuses phrase input outside its separately revalidated responder preparation arm.
     pub fn data(request: CredentialRequest, operation: Option<String>) -> Result<Self, SdkError> {
@@ -220,5 +261,7 @@ impl PrivateCredentialSlot {
         Ok(reply.outcome)
     }
 }
+#[cfg(test)]
+mod channel_tests;
 #[cfg(test)]
 mod tests;

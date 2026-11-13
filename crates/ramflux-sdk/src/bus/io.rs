@@ -471,8 +471,15 @@ where
         // This generic reader never allocates or forwards their secret payload to JSON.
         return Err(SdkError::PairingField("credential_channel"));
     }
+    read_json_after_discriminator(reader, len, discriminator[0]).await
+}
+pub(super) async fn read_json_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<LocalBusFrame, SdkError> {
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
-    body[0] = discriminator[0];
+    body[0] = discriminator;
     reader.read_exact(&mut body[1..]).await?;
     Ok(ramflux_protocol::parse_i_json_secret(&body)?)
 }

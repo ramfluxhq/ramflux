@@ -16,6 +16,7 @@ mod control_state;
 pub(crate) mod couriers;
 mod creation_client;
 mod creation_confirm;
+mod credentials;
 #[cfg(test)]
 #[path = "tests/native_actor.rs"]
 pub(crate) mod native_actor;
