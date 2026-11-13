@@ -6,11 +6,7 @@ use super::*;
 
 #[tokio::test]
 async fn subscription_refusals_preserve_replay_bounds_in_the_sdk_error() -> Result<(), SdkError> {
-    let root = PathBuf::from("/tmp").join(format!(
-        "ramflux-stream-error-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
-    ));
+    let root = ramflux_test_support::TestPath::new()?.child("stream");
     std::fs::create_dir_all(&root)?;
     let socket = root.join("bus.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
@@ -45,6 +41,5 @@ async fn subscription_refusals_preserve_replay_bounds_in_the_sdk_error() -> Resu
     }
     server.await.map_err(|e| SdkError::LocalBus(e.to_string()))??;
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

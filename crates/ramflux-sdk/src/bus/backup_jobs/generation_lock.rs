@@ -57,7 +57,6 @@ mod tests {
         super::super::recovery::recover_generations(&root, &index, &locks)?;
         assert!(!generation.exists());
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

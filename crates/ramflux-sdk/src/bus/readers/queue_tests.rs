@@ -48,6 +48,5 @@ async fn reader_queue_full_refuses_without_blocking() -> Result<(), Box<dyn std:
     drop(readers);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -73,6 +73,5 @@ async fn group_surface_reaches_a_peer_sibling_only_after_its_device_joins()
     peer.directory.abort();
     drop(peer.peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -70,7 +70,6 @@ fn account_busy_is_retryable_and_typed_for_restore_check_and_install() -> TestRe
     assert_eq!(serde_json::to_value(failure)?["code"], "account_busy");
 
     drop(holder);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -831,7 +830,6 @@ fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
         account.client.device_branch.as_ref().ok_or("branch")?.signing_key.verifying_key()
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

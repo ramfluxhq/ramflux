@@ -90,6 +90,5 @@ async fn parked_copy_is_indexed_when_due_and_fails_at_the_configured_lifetime() 
     assert_eq!(status["state"], "failed");
     directory.abort();
     drop((source, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -317,7 +317,6 @@ mod terminal_tests {
         let available = account.client.persist_fetch_terminal(state, None)?;
         assert_eq!(available["retryable"], false);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

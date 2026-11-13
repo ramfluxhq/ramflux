@@ -128,7 +128,6 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
     }
     directory.abort();
     drop((source, peers));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -330,7 +329,6 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         Err(SdkError::InboundRejected(reason)) if reason == "group state issuer differs from authenticated transport"));
     directory.abort();
     drop((source, peers));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -430,6 +428,5 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
     }
     directory.abort();
     drop((source, peers));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

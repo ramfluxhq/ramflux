@@ -92,7 +92,6 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -130,7 +129,6 @@ async fn confirmed_context_is_scoped_to_the_prepared_active_target_set() -> Test
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -213,7 +211,6 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -296,7 +293,6 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -346,7 +342,6 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -386,7 +381,6 @@ async fn a_slow_failure_parks_the_target_from_completion_instead_of_attempt_star
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

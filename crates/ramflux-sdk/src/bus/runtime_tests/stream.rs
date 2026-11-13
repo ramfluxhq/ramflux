@@ -429,6 +429,5 @@ fn status_transitions_preserve_changes_but_ignore_poll_timestamps() -> Result<()
         16
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

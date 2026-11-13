@@ -89,7 +89,6 @@ async fn native_group_link_open_leaves_legacy_signed_groups_unchanged() -> TestR
     assert!(reopened.born_v3_account.is_none());
     assert_eq!(reopened.account_db()?.client_record("group", "legacy-group")?, original);
     drop(reopened);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

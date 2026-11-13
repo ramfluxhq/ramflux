@@ -10,10 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 async fn attachment_fetch_prints_deleted_receipt_and_exits_one()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!("rf-fetch-{}-{unique}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()?.child("fetch");
     std::fs::create_dir_all(&root)?;
     let socket = root.join("bus.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;

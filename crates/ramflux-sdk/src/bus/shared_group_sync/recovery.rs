@@ -102,7 +102,6 @@ mod tests {
         }
         assert_eq!(db.list_actor_states::<serde_json::Value>("group-state/send/")?.len(), 1);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

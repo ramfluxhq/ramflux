@@ -79,7 +79,6 @@ fn r4_restart_removes_an_owned_final_archive_after_a_process_dies_mid_copy() -> 
     super::super::recovery::recover_jobs_excluding(&jobs, &BTreeSet::new())?;
     assert!(!output.exists(), "restart must remove the final file owned by an interrupted copy");
     assert!(!source.exists());
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]

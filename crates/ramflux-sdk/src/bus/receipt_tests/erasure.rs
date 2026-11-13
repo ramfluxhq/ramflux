@@ -104,7 +104,6 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     drop(raw);
     drop(recipient);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

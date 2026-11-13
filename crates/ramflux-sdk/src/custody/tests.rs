@@ -17,8 +17,7 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(crate) struct Root(pub(crate) ramflux_test_support::TestPath);
 impl Root {
     pub(crate) fn new() -> Result<Self> {
-        let root = ramflux_test_support::TestPath::new()?
-            .child(format!("rf-custody-{}", ramflux_protocol::encode_base64url(*random()?)));
+        let root = ramflux_test_support::TestPath::new()?.child("custody");
         std::fs::create_dir(&root)?;
         Ok(Self(root))
     }

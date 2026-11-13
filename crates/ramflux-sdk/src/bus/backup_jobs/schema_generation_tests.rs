@@ -67,6 +67,5 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
             generation.is_none_or(|value| value == 0)
         );
     }
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

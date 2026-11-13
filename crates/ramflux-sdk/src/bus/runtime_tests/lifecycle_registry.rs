@@ -38,9 +38,12 @@ async fn concurrent(before_receipt: bool, changed: bool) -> Case {
             bounded(&gate.entered).await?;
             if before_receipt {
                 assert!(supervisor.account_is_open("alice"));
-                let pending =
-                    crate::bus::lifecycle::reserve(supervisor.index.clone(), root.clone(), &unlock)
-                        .await;
+                let pending = crate::bus::lifecycle::reserve(
+                    supervisor.index.clone(),
+                    root.to_path_buf(),
+                    &unlock,
+                )
+                .await;
                 assert!(
                     pending
                         .err()

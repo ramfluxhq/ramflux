@@ -51,7 +51,6 @@ async fn native_cli_conversation_selector_resolves_to_signed_group_thread() -> T
         "legacy-thread"
     );
     drop(legacy);
-    std::fs::remove_dir_all(legacy_root)?;
     Ok(())
 }
 

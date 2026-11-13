@@ -10,13 +10,13 @@ type Capture = Arc<Mutex<Vec<ramflux_protocol::Envelope>>>;
 
 struct Rig {
     captures: [Capture; 3],
-    root: PathBuf,
     phone: LocalBusAccountState,
     laptop: LocalBusAccountState,
     next: LocalBusAccountState,
     config: GatewaySessionConfig,
     directory: tokio::task::JoinHandle<()>,
     removed_root: String,
+    root: ramflux_test_support::TestPath,
 }
 impl Rig {
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -68,13 +68,13 @@ impl Rig {
         config.tcp_gateway_addr = Some(address);
         let mut rig = Self {
             captures: std::array::from_fn(|_| Arc::default()),
-            root,
             phone,
             laptop,
             next,
             config,
             directory,
             removed_root: String::new(),
+            root,
         };
         rig.configure()?;
         rig.create_group()?;
@@ -330,9 +330,7 @@ async fn check_handover(stale: bool) -> TestResult {
         assert!(handover.view().effective_role(&rig.removed_root, "device-mallory").is_none());
     }
     rig.directory.abort();
-    let root = rig.root.clone();
     drop(rig);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -421,9 +419,7 @@ async fn stale_snapshot() -> TestResult {
     );
     Box::pin(assert_stale_refusal(&mut rig, &base, &head, &stale)).await?;
     rig.directory.abort();
-    let root = rig.root.clone();
     drop(rig);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

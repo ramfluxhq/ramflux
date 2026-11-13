@@ -61,12 +61,15 @@ async fn run(advance_deadlines: bool) -> Case {
             );
             assert_eq!(supervisor.index.account("alice")?.account_state, "active");
             // Read the durable cached body before retrying, so the test does not depend on P3.
-            let saved =
-                crate::bus::lifecycle::reserve(supervisor.index.clone(), root.clone(), &unlock)
-                    .await?
-                    .ok_or("missing receipt")?
-                    .cached
-                    .ok_or("receipt still pending")?;
+            let saved = crate::bus::lifecycle::reserve(
+                supervisor.index.clone(),
+                root.to_path_buf(),
+                &unlock,
+            )
+            .await?
+            .ok_or("missing receipt")?
+            .cached
+            .ok_or("receipt still pending")?;
             let (outbound, _replies) = mpsc::channel(8);
             let retry = LocalBusConnectionState::new(2, outbound);
             unlock.deadline_ms = None;
@@ -121,12 +124,15 @@ async fn closed_connection_does_not_cancel_unlock() -> Case {
             assert!(
                 supervisor.account_actor("alice").ok_or("missing actor")?.reader_pool().is_ok()
             );
-            let saved =
-                crate::bus::lifecycle::reserve(supervisor.index.clone(), root.clone(), &unlock)
-                    .await?
-                    .ok_or("missing receipt")?
-                    .cached
-                    .ok_or("pending receipt")?;
+            let saved = crate::bus::lifecycle::reserve(
+                supervisor.index.clone(),
+                root.to_path_buf(),
+                &unlock,
+            )
+            .await?
+            .ok_or("missing receipt")?
+            .cached
+            .ok_or("pending receipt")?;
             let (outbound, _replies) = mpsc::channel(8);
             let replay =
                 supervisor.request(unlock, &LocalBusConnectionState::new(2, outbound)).await?;

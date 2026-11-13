@@ -41,6 +41,5 @@ fn completed_approval_ids_are_not_reused_for_new_single_use_grants() -> Result<(
         mcp_grant_signing_body(&account, &second)?.grant_id
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -295,7 +295,6 @@ async fn daemon_start_and_immediate_socket_unlock_are_race_free() -> Result<(), 
             .map_err(|_| failure("daemon start/unlock must not hang"))?;
     daemon_result?;
     unlocked?;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -346,6 +345,5 @@ async fn a_real_daemon_emits_account_not_open_after_lock_and_for_missing_account
             .map_err(|_| failure("closed-account code test timed out"))?;
     server?;
     flow?;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
