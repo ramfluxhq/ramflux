@@ -174,7 +174,7 @@ impl GatewayState {
     /// Retains live counters, debt and resume-signing bytes; no validation can fail after commit.
     pub fn install_committed_pre_auth_policy_from(&mut self, committed: &Self) {
         let mut policy = committed.pre_auth_policy.clone();
-        policy.cookie_secret = self.pre_auth_policy.cookie_secret.clone();
+        policy.cookie_secret.clone_from(&self.pre_auth_policy.cookie_secret);
         self.pre_auth_policy = policy;
         self.pre_auth_policy_revision = committed.pre_auth_policy_revision;
         self.trim_pre_auth_debt();
