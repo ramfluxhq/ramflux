@@ -51,6 +51,7 @@ pub struct BackupDatabase {
     original_input: BackupInputObservation,
     _generation_reader: Option<crate::account_generation::GenerationReadLease>,
 }
+#[derive(Clone, Copy)]
 enum FullInputMode {
     PrivateCopy,
     SelectedRead,
