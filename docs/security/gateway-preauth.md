@@ -63,8 +63,8 @@ Opens perform no disk write. An Open beyond the committed reservation fails with
 `checkpoint_unavailable` in either mode until another checkpoint succeeds. Failed
 commits leave the previous reservation in force. A stalled writer never owns the
 global state mutex: established sessions can continue heartbeat/read activity.
-Network writes acquire one of eight bounded asynchronous offload permits before
-waiting for the writer gate or fsync. Excess requests receive retryable
+Network writes acquire a bounded root-qualified or unauthenticated offload permit
+before waiting for the writer gate or fsync. Excess requests receive retryable
 `gateway_writer_busy`; cancellation keeps the permit until the actual blocking
 work finishes. No uncommitted signed operation is acknowledged. Recovery is
 automatic after a successful checkpoint. `checkpoint_failures` counts failed

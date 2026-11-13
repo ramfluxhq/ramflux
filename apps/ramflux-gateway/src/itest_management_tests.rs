@@ -111,3 +111,50 @@ fn policy_commit_releases_state_lock_rejects_overlap_and_preserves_live_updates(
     );
     Ok(())
 }
+
+#[test]
+fn failed_policy_commit_preserves_live_and_persisted_policy_and_releases_slot() -> anyhow::Result<()>
+{
+    let directory = tempfile::TempDir::new()?;
+    let store = ramflux_node_core::GatewayRedbStore::open(directory.path().join("gateway.redb"))?;
+    let state = Arc::new(Mutex::new(ramflux_node_core::GatewayState::new()));
+    store.save_state(&gateway_state(&state)?.clone())?;
+    let original = gateway_state(&state)?.pre_auth_policy().per_source_ip_handshake_rate;
+    let config = ramflux_node_core::GatewayPreAuthConfig {
+        per_source_ip_handshake_rate: original + 1,
+        ..Default::default()
+    };
+    let request = ramflux_node_core::NodeHttpRequest {
+        method: "POST".into(),
+        path: "/mvp6/preauth/policy".into(),
+        body: serde_json::to_vec(&config)?,
+        keep_alive: false,
+        source_ip_hash: None,
+        pre_auth_cookie: None,
+        pre_auth_now: None,
+        forwarded_proto: None,
+        forwarded_for: None,
+    };
+    let (_client, mut server) = sockets()?;
+    store.fail_next_pre_auth_commit();
+    assert!(
+        handle_preauth_control_request(&mut server, &request, &state, &store).is_err(),
+        "failed durable commit must refuse the policy update"
+    );
+    assert_eq!(
+        gateway_state(&state)?.pre_auth_policy().per_source_ip_handshake_rate,
+        original,
+        "failed update must preserve live policy"
+    );
+    assert_eq!(
+        store
+            .load_state()?
+            .ok_or_else(|| anyhow::anyhow!("missing baseline policy"))?
+            .pre_auth_policy()
+            .per_source_ip_handshake_rate,
+        original,
+        "failed update must preserve persisted policy"
+    );
+    let _retry = store.try_admit_management_write()?;
+    Ok(())
+}
