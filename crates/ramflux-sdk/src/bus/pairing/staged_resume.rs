@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Private ordinary data unlock for a new recipient; never an account/session admission.
+//! Private ordinary data unlock for retained recipients; never an account/session admission.
 use super::{
     Arc, FreshPairingNative, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
     HttpRelay, LocalPairingParticipant, Mutex, NativePairingPublication, NativePairingQuery,
@@ -24,14 +24,11 @@ pub(super) fn has_pending(
     request: &StatusRequest,
 ) -> Result<bool, SdkError> {
     request.validate().map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-    let authority_exists = crate::custody::authority_exists(root, account)?;
     Ok(crate::custody::pairing::install_store::list_pending(root, account)?.iter().any(|row| {
         row.operation_id == request.operation_id
-            && row.recipient_mode == "new"
+            && matches!(row.recipient_mode.as_str(), "new" | "existing")
             && row.install_purpose == "transfer_destination"
-            && row.prior_record_hash.is_none()
-            && ((!authority_exists
-                && row.state == "vault_durable"
+            && ((row.state == "vault_durable"
                 && (row.record_hash.is_none() || row.primary_vault_ref.is_some()))
                 || (row.full_transfer.is_some()
                     && row.record_hash.is_some()
@@ -119,7 +116,7 @@ fn unlock(
             &request.operation_id,
         )?
         .ok_or(SdkError::PairingCode("NotFound"))?;
-        if pending.recipient_mode != "new"
+        if pending.recipient_mode != identity.recipient_mode
             || pending.recipient_ref != identity.grant.destination_ref
         {
             return Err(SdkError::PairingCode("WrongContext"));
@@ -143,7 +140,10 @@ fn unlock(
     let record = stage.resume_record()?;
     let context = TranscriptV3::from_wire_bytes(&record.transcript)
         .map_err(|_| SdkError::PairingCode("WrongContext"))?;
-    if context.initiator.common.recipient_mode != "new" {
+    let pending =
+        crate::custody::pairing::install_store::read_pending(root, account, &request.operation_id)?
+            .ok_or(SdkError::PairingCode("NotFound"))?;
+    if context.initiator.common.recipient_mode != pending.recipient_mode {
         return Err(SdkError::PairingCode("WrongContext"));
     }
     let base_epoch = context.initiator.common.device_set_epoch;

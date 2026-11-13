@@ -228,33 +228,9 @@ mod tests {
         relay: std::sync::Arc<dyn crate::custody::pairing::PairingTransport>,
         mut frontend: crate::RamfluxClient,
     ) -> TestResult {
-        use crate::custody::pairing::{PairingActor, PairingConfig, PairingIdentity};
         use ramflux_protocol::custody::pairing::local_dto::{FullStatusStage, Outcome};
-        let mut actor = PairingActor::new(
-            PairingIdentity {
-                account_id: rig.participant_b.account_id.clone(),
-                local_ref: install.recipient_ref.clone(),
-                master_public_key: Some(
-                    authority
-                        .publication
-                        .record
-                        .body
-                        .master_certificate
-                        .body
-                        .master_public_key
-                        .clone(),
-                ),
-                base_record_hash: ramflux_protocol::custody::object_hash(
-                    &authority.publication.record,
-                )?,
-                base_epoch: authority.publication.record.body.device_set_epoch,
-                is_primary: true,
-            },
-            None,
-            relay,
-            PairingConfig { enabled: true, extra_root_ca_pem: None },
-        );
-        actor.set_participant(rig.participant_b.clone());
+        let restart_relay = relay.clone();
+        let mut actor = cold_installed_actor(rig, &install, &authority, relay)?;
         let before = rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed);
         let mut wrong = request.clone();
         wrong.generation += 1;
@@ -284,7 +260,54 @@ mod tests {
             "test: repeated status lost recovered installation"
         );
         actor.lock().await?;
+        drop(frontend.active_account_db.take());
+        frontend.unlock_account(&install.account_id, b"component-recipient-passphrase")?;
+        rig.participant_b.take_client(&mut frontend)?;
+        let mut reopened = cold_installed_actor(rig, &install, &authority, restart_relay)?;
+        let status =
+            reopened.recover_full_installation(&request).await?.ok_or("test: cold G3 status")?;
+        assert!(
+            matches!(status.outcome, Outcome::FullStatus { value } if value.stage == FullStatusStage::Installed
+            && value.tail_status == ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Pending),
+            "test: G3 restart lost installed/tail-pending status after Head cleanup"
+        );
+        assert!(reopened.displayed_proposal().is_err(), "test: installed status restored approval");
+        reopened.lock().await?;
         Ok(())
+    }
+    fn cold_installed_actor(
+        rig: &Rig,
+        install: &Install,
+        authority: &CustodyAuthority,
+        relay: std::sync::Arc<dyn crate::custody::pairing::PairingTransport>,
+    ) -> Result<crate::custody::pairing::PairingActor, Box<dyn std::error::Error>> {
+        use crate::custody::pairing::{PairingActor, PairingConfig, PairingIdentity};
+        let mut actor = PairingActor::new(
+            PairingIdentity {
+                account_id: rig.participant_b.account_id.clone(),
+                local_ref: install.recipient_ref.clone(),
+                master_public_key: Some(
+                    authority
+                        .publication
+                        .record
+                        .body
+                        .master_certificate
+                        .body
+                        .master_public_key
+                        .clone(),
+                ),
+                base_record_hash: ramflux_protocol::custody::object_hash(
+                    &authority.publication.record,
+                )?,
+                base_epoch: authority.publication.record.body.device_set_epoch,
+                is_primary: true,
+            },
+            None,
+            relay,
+            PairingConfig { enabled: true, extra_root_ca_pem: None },
+        );
+        actor.set_participant(rig.participant_b.clone());
+        Ok(actor)
     }
     fn install_generation(
         root: &std::path::Path,

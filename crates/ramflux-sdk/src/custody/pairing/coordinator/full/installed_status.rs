@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Cold installed status is backed by G3 owners; it creates no epoch or approval.
+use super::{PairingActor, PairingWire, SdkError, install_recovery::RecoveredInstallation};
+use crate::custody::pairing::{full_generation, install_store};
+use ramflux_protocol::custody::pairing::{
+    full_transfer::{FullError, U64},
+    local_dto::{FullStatus, FullStatusStage, FullTailStatus, LocalResult, StatusRequest},
+};
+impl PairingActor {
+    pub(super) async fn restore_installed_status(
+        &mut self,
+        request: &StatusRequest,
+    ) -> Result<Option<LocalResult>, SdkError> {
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let local = participant.clone();
+        let owned = request.clone();
+        let snapshot = self
+            .installation_loan(move |db| {
+                if db.pairing_head()?.is_some() {
+                    return Ok(None);
+                }
+                let Some(install) = install_store::read_installed(&local.root, &local.account_id)?
+                else {
+                    return Ok(None);
+                };
+                let Some(adoption) = db
+                    .pairing_adoption()?
+                    .filter(|adoption| adoption.full_generation_nonce.is_some())
+                else {
+                    return Ok(None);
+                };
+                let selected = ramflux_storage::AccountIndex::open(&local.root)?
+                    .account_generation_selection(&local.account_id)?;
+                let bytes = zeroize::Zeroizing::new(
+                    selected.manifest_json.ok_or(SdkError::PairingCode("PublicationPending"))?,
+                );
+                let marker = full_generation::FullGenerationManifest::decode(&bytes)?;
+                if marker.operation_id != owned.operation_id {
+                    return Ok(None);
+                }
+                local.full_selected_db(db, Some(&install.account_anchor))?;
+                let now = crate::custody::network_now()?;
+                let native =
+                    crate::custody::load_data_account(&local.root, &local.account_id, now)?;
+                full_generation::require_completed_full_generation(
+                    &local.root,
+                    &native,
+                    &install,
+                    &adoption,
+                )?;
+                let scope = db.full_installed_recipient_tail_scope(
+                    &owned.operation_id,
+                    owned.generation,
+                    now,
+                )?;
+                Ok(Some((install, scope, db.full_local_unlock_guard()?)))
+            })
+            .await?;
+        let Some((install, scope, unlock)) = snapshot else { return Ok(None) };
+        let local = participant;
+        let anchor = install.account_anchor.clone();
+        let current = self
+            .full_runtime
+            .clone()
+            .run_blocking(move || {
+                unlock.require_unlocked()?;
+                let current = local.full_native_head(&anchor)?;
+                unlock.require_unlocked()?;
+                Ok(current)
+            })
+            .await?;
+        let owned = request.clone();
+        let result = self
+            .installation_loan(move |db| {
+                let now = crate::custody::network_now()?;
+                db.observe_full_installed_tail_native_head(
+                    &owned.operation_id,
+                    owned.generation,
+                    &current,
+                    now,
+                )?;
+                Ok(
+                    match ramflux_crypto::custody::pairing::verify_full_tail_authority(
+                        &scope.grant,
+                        &current,
+                        now,
+                    ) {
+                        Ok(()) => {
+                            (now >= scope.lease_expires_at).then_some(FullError::LeaseExpired)
+                        }
+                        Err(ramflux_crypto::CryptoError::Pairing("LeaseExpired")) => {
+                            Some(FullError::LeaseExpired)
+                        }
+                        Err(_) => Some(FullError::HeadChanged),
+                    },
+                )
+            })
+            .await?;
+        // These are public progress totals only. Neither the historic installed marker
+        // nor a live relay lease reconstructs a data session or confirms a candidate.
+        let status = installed_progress(
+            request,
+            scope.lease_expires_at,
+            scope.bytes_total,
+            scope.cut,
+            result,
+        );
+        status.validate().map_err(|error| super::wire(&error))?;
+        self.recovered_installation = Some(RecoveredInstallation { install, status });
+        self.recovered_installation
+            .as_ref()
+            .ok_or(SdkError::PairingCode("WrongContext"))?
+            .result(request)
+            .map(Some)
+    }
+}
+
+pub(super) fn installed_progress(
+    request: &StatusRequest,
+    expires: u64,
+    total: u64,
+    cut: u64,
+    result: Option<FullError>,
+) -> FullStatus {
+    FullStatus {
+        attachment_absent: U64(0),
+        bytes_durable: U64(total),
+        bytes_total: U64(total),
+        cut: U64(cut),
+        generation: request.generation,
+        lease_expires_at: expires,
+        operation_id: request.operation_id.clone(),
+        result,
+        role: "responder".into(),
+        stage: FullStatusStage::Installed,
+        tail_status: FullTailStatus::Pending,
+    }
+}

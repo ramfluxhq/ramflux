@@ -224,7 +224,7 @@ pub(crate) fn take_installed_recipient(
     };
     entry.require_live()?;
     let Ok(mut actor) = entry.actor.try_lock() else { return Ok(None) };
-    if !actor.full_new_recipient_installed() || actor.local_writer.is_some() {
+    if !actor.full_staged_recipient_installed() || actor.local_writer.is_some() {
         return Ok(None);
     }
     let mut services = entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?;

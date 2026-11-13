@@ -48,6 +48,7 @@ async fn run_refresh(reopen: bool) -> TestResult {
     // Native query, not the request or a relay success flag, supplies refresh authority.
     let observed = rig.node.current_authority(&authority.publication.record.body.account_anchor)?;
     assert_eq!(canonical_json_bytes(&observed)?, canonical_json_bytes(&authority)?);
+    require_observed_head_fences_old_install(&rig, &observed)?;
     refresh_participant(&rig.participant_b, &observed, rig.now)
         .map_err(|e| format!("B full refresh: {e}"))?;
     rig.participant_a.take_client(&mut rig.source.client)?;
@@ -74,6 +75,26 @@ async fn run_refresh(reopen: bool) -> TestResult {
             .map_err(|error| format!("test: refresh reopen: {error}"))?;
     }
     hold.finish().await?;
+    Ok(())
+}
+
+fn require_observed_head_fences_old_install(rig: &Rig, authority: &CustodyAuthority) -> TestResult {
+    let mut frontend = crate::RamfluxClient::new();
+    rig.participant_b.return_client(&mut frontend)?;
+    custody::accept_publication(
+        &rig.participant_b.root,
+        &rig.participant_b.account_id,
+        authority,
+        rig.now,
+    )?;
+    assert!(
+        !crate::custody::pairing::ordinary_session_admitted(
+            &frontend,
+            &rig.participant_b.account_id
+        )?,
+        "test: an observed newer native head admitted stale full-generation authority"
+    );
+    rig.participant_b.take_client(&mut frontend)?;
     Ok(())
 }
 

@@ -265,7 +265,7 @@ impl PairingActor {
         signal: Arc<tokio::sync::Notify>,
     ) -> Result<PairingLocalWriterService, SdkError> {
         self.require_open()?;
-        if self.local_writer.is_some() || !self.full_new_recipient_installed() {
+        if self.local_writer.is_some() || !self.full_staged_recipient_installed() {
             return Err(SdkError::PairingCode("WrongContext"));
         }
         self.bind_selected_writer(db, signal)
