@@ -19,6 +19,8 @@ mod snapshot_generated;
 pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
 mod creator_conflicts;
 mod devices;
+// Pure bounded selection for layer planning; this is not an authorization capability.
+pub(crate) use devices::select as select_layer_devices;
 mod federation;
 mod invitations;
 pub(crate) mod maintenance;

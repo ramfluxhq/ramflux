@@ -6,7 +6,7 @@ use crate::prelude::*;
 use ramflux_protocol::group_state::{
     MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT, SharedGroupState,
 };
-pub(super) fn select(
+pub(crate) fn select(
     state: &SharedGroupState,
     manifests: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeMap<String, BTreeSet<String>> {
@@ -93,22 +93,10 @@ impl RamfluxClient {
                 self.current_custody_authority(root, crate::custody::network_now()?)?
             {
                 let now = crate::custody::network_now()?;
-                let names = authority
-                    .envelope()
-                    .body
-                    .devices
-                    .iter()
-                    .filter(|entry| {
-                        let device = ramflux_protocol::custody::DeviceRef {
-                            account_anchor: root.clone(),
-                            device_id: entry.device_id.clone(),
-                            device_epoch: entry.device_epoch,
-                        };
-                        authority.authorize(&device, "group", now).is_ok()
-                            && authority.authorize(&device, "message", now).is_ok()
-                    })
-                    .map(|entry| entry.device_id.clone())
-                    .collect();
+                let names = crate::client::identity_authority::VerifiedLayerRoster::from_verified(
+                    authority,
+                )
+                .group_devices(now);
                 manifests.insert(root.clone(), names);
             } else if self.custody_mode_observed(root)? {
                 return Err(SdkError::InboundPending(

@@ -480,7 +480,7 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     )?;
     let entry = seal(&a, &b, message("upgrade-target", "c"), &raw)?;
     let opened = b.client.open_routed(&entry, &b.id)?;
-    let copy_id = b.client.authenticated_committed_key(HeadUse::HistoricalRead, &entry)?;
+    let copy_id = b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let receipt = crate::client::routed::Committed {
         routing: opened.routing.clone(),
         entry: entry.clone(),
