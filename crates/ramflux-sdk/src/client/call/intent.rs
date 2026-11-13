@@ -42,9 +42,20 @@ pub(crate) fn start_for_control(
     call: &super::state::LiveCall,
     target_device: &str,
 ) -> Result<Option<SignedCallIntentV1>, SdkError> {
+    start_for_client(&account.client, call, target_device)
+}
+
+/// Original Start can authenticate an incoming control before its submit decision arrives.
+pub(super) fn start_for_client(
+    client: &crate::RamfluxClient,
+    call: &super::state::LiveCall,
+    target_device: &str,
+) -> Result<Option<SignedCallIntentV1>, SdkError> {
     if call.local == call.caller {
-        Ok(load(account, &storage_key(&call.row.call_id, target_device, "start"))?
-            .map(|stored| stored.signed))
+        let stored: Option<StoredCallIntent> = client
+            .account_db()?
+            .load_actor_state(&storage_key(&call.row.call_id, target_device, "start"))?;
+        Ok(stored.map(|stored| stored.signed))
     } else {
         Ok(call.call_start.clone())
     }

@@ -279,19 +279,11 @@ impl LiveCall {
         self.refresh_media();
     }
 
-    pub(crate) fn peer_reference_matches(
-        &self,
-        peer: &CallEndpoint,
-        reference: Option<&str>,
-    ) -> bool {
+    pub(super) fn peer_reference(&self, peer: &CallEndpoint) -> Option<&str> {
         if self.local == self.caller {
-            self.peer_media
-                .get(peer)
-                .is_some_and(|permission| Some(permission.call_ref.as_str()) == reference)
+            self.peer_media.get(peer).map(|permission| permission.call_ref.as_str())
         } else {
-            self.call_start
-                .as_ref()
-                .is_some_and(|start| Some(start.body.call_ref.as_str()) == reference)
+            self.call_start.as_ref().map(|start| start.body.call_ref.as_str())
         }
     }
 

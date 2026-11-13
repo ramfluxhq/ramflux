@@ -395,11 +395,11 @@ fn note_control_result(
                 if let Some(start) =
                     call::intent::start_for_control(account, &next, &peer.device_id)?
                 {
-                    let caller = account.client.call_device_identity(&next.caller)?;
-                    let callee = if next.local == next.caller { &peer } else { &next.local };
-                    let callee = account.client.call_device_identity(callee)?;
-                    if start.body.sender_device == caller.storage_key()
-                        && start.body.target_device == callee.storage_key()
+                    let origin_identity = account.client.call_device_identity(&next.caller)?;
+                    let destination = if next.local == next.caller { &peer } else { &next.local };
+                    let target_identity = account.client.call_device_identity(destination)?;
+                    if start.body.sender_device == origin_identity.storage_key()
+                        && start.body.target_device == target_identity.storage_key()
                     {
                         bindings.push((peer, ramflux_protocol::call_intent_digest(&start)?, start));
                     }

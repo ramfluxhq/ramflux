@@ -205,12 +205,19 @@ impl RamfluxClient {
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
         self.verify_invitation_start(c, entry, &record, key)?;
         if !matches!(c.body, ramflux_protocol::CallAction::Invite { .. })
-            && self
-                .voice_calls
-                .get(&c.call_id)
-                .is_some_and(|old| !old.peer_reference_matches(&c.sender, c.call_ref.as_deref()))
+            && let Some(old) = self.voice_calls.get(&c.call_id)
         {
-            return Err(invalid("control Start reference differs from its peer"));
+            let stored = if old.peer_reference(&c.sender).is_none() {
+                super::intent::start_for_client(self, old, &c.sender.device_id)?
+            } else {
+                None
+            };
+            let reference = old
+                .peer_reference(&c.sender)
+                .or_else(|| stored.as_ref().map(|start| start.body.call_ref.as_str()));
+            if reference.is_none() || reference != c.call_ref.as_deref() {
+                return Err(invalid("control Start reference differs from its peer"));
+            }
         }
         if let Some(old) = self.voice_calls.get(&c.call_id)
             && !old.peer_key_matches(&c.sender, key)
