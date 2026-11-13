@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 mod commands;
 mod connection;
 mod pairing_calls;
+mod pairing_data;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -329,49 +330,7 @@ impl AccountRuntime {
             result = self.publish(&restore) => result.map(|()| true),
         }
     }
-    fn service_pairing_data(&mut self) {
-        match super::pairing::adopt_installed(&mut self.state, &self.id) {
-            Ok(true) => {
-                if let Err(error) = self.initialize_readers().and_then(|()| self.start_connection())
-                {
-                    tracing::warn!(
-                        error_code = local_bus_error_code(&error),
-                        "installed pairing frontend startup deferred"
-                    );
-                }
-                self.start_courier();
-            }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                error_code = local_bus_error_code(&error),
-                "pairing frontend handback deferred"
-            ),
-        }
-        let result = self.state.accounts.get_mut(&self.id).map_or(Ok(false), |account| {
-            crate::custody::pairing::service_frontend(
-                &self.state.config.data_root,
-                &self.id,
-                &mut account.client,
-            )
-        });
-        match result {
-            Ok(true) => {
-                if let Some(account) = self.state.accounts.get_mut(&self.id)
-                    && let Err(error) = super::pairing::refresh_source_role(account)
-                {
-                    tracing::debug!(
-                        error_code = local_bus_error_code(&error),
-                        "pairing public role refresh deferred"
-                    );
-                }
-            }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                error_code = local_bus_error_code(&error),
-                "pairing local data step deferred; account remains open"
-            ),
-        }
-    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_serving(ready).await? {
             return Ok(());
@@ -384,6 +343,7 @@ impl AccountRuntime {
         let mut next = tokio::time::Instant::now() + schedule.min;
         let mut checkpoints = 0_u8;
         loop {
+            Box::pin(self.refresh_pairing_reader_generation()).await?;
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -419,7 +379,7 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.service_pairing_data();
+                    Box::pin(self.service_pairing_data()).await;
                     continue;
                 },
                 outcome = async {

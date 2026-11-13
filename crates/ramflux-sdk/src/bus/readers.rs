@@ -42,6 +42,7 @@ pub(crate) async fn test_account_reader_request(
 
 #[derive(Clone)]
 pub(super) struct AccountReaders {
+    generation_path: std::path::PathBuf,
     identity: ReaderIdentity,
     view: Arc<RwLock<Arc<local::AccountView>>>,
     senders: Vec<mpsc::Sender<ReadCommand>>,
@@ -49,6 +50,9 @@ pub(super) struct AccountReaders {
 }
 
 impl AccountReaders {
+    pub(super) fn generation_path(&self) -> &std::path::Path {
+        &self.generation_path
+    }
     #[cfg(test)]
     pub(super) fn connection_for_test(
         &self,
@@ -152,6 +156,7 @@ impl AccountReaders {
             senders.push(sender);
         }
         Ok(Self {
+            generation_path: db.path.clone(),
             identity,
             view,
             senders,

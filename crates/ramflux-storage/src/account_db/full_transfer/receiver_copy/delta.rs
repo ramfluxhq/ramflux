@@ -16,7 +16,14 @@ impl FullReceiverBaseCopy {
         stage: &FullTransferStage<'_>,
         hash: &str,
     ) -> Result<FullScalarInputCounts, StorageError> {
-        self.verify_materialization(stage)?;
+        self.project_delta_input(stage, hash)
+    }
+    pub(super) fn project_delta_input(
+        &mut self,
+        stage: &impl super::super::receiver_read::ReceiverInput,
+        hash: &str,
+    ) -> Result<FullScalarInputCounts, StorageError> {
+        self.verify_input(stage)?;
         let previous = stage.forward_manifest(&self.hash)?;
         let next = stage.forward_manifest(hash)?;
         if next.manifest.kind != ManifestKind::Delta {
@@ -48,7 +55,7 @@ impl FullReceiverBaseCopy {
             stage,
         }
         .run()?;
-        self.observation.require_current(stage.db)?;
+        stage.require_target(&self.observation)?;
         hash.clone_into(&mut self.hash);
         self.projected = Some(counts);
         self.union = Some(encoding);

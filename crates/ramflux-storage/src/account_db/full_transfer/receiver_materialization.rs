@@ -3,7 +3,7 @@
 
 //! Compare every qualified fixed contribution with actual private-generation records.
 use super::{
-    FullTransferStage, FullUnionEncoding, full_transfer_catalog,
+    FullUnionEncoding, full_transfer_catalog,
     source_base::Rooted,
     source_scalar::{SourceGuard, compiled},
 };
@@ -23,22 +23,22 @@ impl Drop for Header {
     }
 }
 
-pub(super) struct Verification<'a, 'db> {
+pub(super) struct Verification<'a, I: super::receiver_read::ReceiverInput> {
     pub(super) directory: &'a Path,
     pub(super) key: &'a AccountDbKey,
     pub(super) encoding: &'a FullUnionEncoding,
     pub(super) owners: &'a [String; 2],
     pub(super) private: &'a BackupDatabase,
     pub(super) private_key: &'a AccountDbKey,
-    pub(super) stage: &'a FullTransferStage<'db>,
+    pub(super) stage: &'a I,
 }
-impl Verification<'_, '_> {
+impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
     pub(super) fn run(&self) -> Result<(), StorageError> {
         self.stage.require_io()?;
         let path = self.directory.join("contributions.db");
         let mut db = super::receiver_contributions::open(&path, self.key)?;
         let tx = db.transaction()?;
-        let guard = SourceGuard::new(self.stage.db, Some(self.stage.source_cancelled.clone()));
+        let guard = self.stage.source_guard();
         self.verify_root(&tx, &guard)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS materialized_record(family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL,seen INTEGER NOT NULL DEFAULT 0 CHECK(seen IN(0,1)),PRIMARY KEY(family,key)) WITHOUT ROWID; DELETE FROM materialized_record;")?;
         self.expected(&tx)?;

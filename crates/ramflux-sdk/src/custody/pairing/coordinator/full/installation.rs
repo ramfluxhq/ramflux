@@ -38,7 +38,16 @@ impl PairingActor {
                 Ok(stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?)
             })
             .await?;
-        let mut copy = self.full_runtime.clone().run_blocking(move || Ok(pinned.copy()?)).await?;
+        let copy = self.full_runtime.clone().run_blocking(move || Ok(pinned.copy()?)).await?;
+        let operation = install.operation_id.clone();
+        let replay = writer
+            .request(move |db| {
+                let now = crate::custody::network_now()?;
+                let stage = db.open_full_transfer_stage(&operation, PairingRole::Responder, now)?;
+                Ok(stage.into_receiver_replay_work(copy, now)?)
+            })
+            .await?;
+        let copy = self.full_runtime.clone().run_blocking(move || Ok(replay.replay()?)).await?;
         let local = participant.clone();
         let native = authority.clone();
         let preparation = writer
@@ -49,7 +58,6 @@ impl PairingActor {
                     PairingRole::Responder,
                     now,
                 )?;
-                copy.project_retained_chain(&stage, now)?;
                 FullGenerationPreparation::pin(
                     &Installation { root: &local.root, db, vault: local.vault.as_ref(), now },
                     &stage,

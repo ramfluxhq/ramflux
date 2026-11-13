@@ -37,13 +37,20 @@ impl LocalPairingParticipant {
             // actual current generation, retaining the frozen independently verified source.
             stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?
         };
-        let mut copy = pinned.copy()?;
+        let copy = pinned.copy()?;
+        let replay = {
+            let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+            let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+            let now = crate::custody::network_now()?;
+            db.open_full_transfer_stage(operation, PairingRole::Responder, now)?
+                .into_receiver_replay_work(copy, now)?
+        };
+        let copy = replay.replay()?;
         let preparation = {
             let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
             let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             let now = crate::custody::network_now()?;
             let stage = db.open_full_transfer_stage(operation, PairingRole::Responder, now)?;
-            copy.project_retained_chain(&stage, now)?;
             FullGenerationPreparation::pin(
                 &Installation { root: &self.root, db, vault: self.vault.as_ref(), now },
                 &stage,

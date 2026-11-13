@@ -119,7 +119,7 @@ async fn run() -> TestResult {
     loop {
         tokio::select! {
             entered=&mut issue=>{entered?;break;},
-            ()=signal.notified()=>runtime.service_pairing_data(),
+            ()=signal.notified()=>Box::pin(runtime.service_pairing_data()).await,
         }
     }
     assert!(

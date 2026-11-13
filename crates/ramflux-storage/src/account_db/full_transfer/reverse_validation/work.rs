@@ -2,14 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Original-A reverse validation with independent stage bytes/key and weak ordinary unlock.
+use super::super::read_work::{self as reader, Reader};
 use super::{StorageError, mismatch};
 use crate::account_db::full_transfer::{
     FullTransferStage, StageDirection, source_scalar::SourceGuard,
 };
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::pairing::full_transfer::{SourceManifest, manifest_hash};
-mod reader;
-use reader::Reader;
 /// Root-drained local validation. Owns no ordinary database, data key or signing permission.
 pub struct FullReverseValidationWork {
     reader: Reader,
@@ -54,9 +53,10 @@ impl FullTransferStage<'_> {
         let reader = Reader::new(
             reader::Inputs {
                 connection: self.connection,
-                lock: self.lock,
+                lock: std::sync::Arc::new(self.lock),
                 directory: self.directory,
-                key,
+                key: std::sync::Arc::new(key),
+                direction: 1,
             },
             manifest.clone(),
             hash.into(),

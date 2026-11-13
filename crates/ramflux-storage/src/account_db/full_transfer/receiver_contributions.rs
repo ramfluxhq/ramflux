@@ -3,9 +3,7 @@
 
 //! Fixed-base contribution provenance and normalized private root. No DV or selection.
 use super::{
-    FullTransferStage, FullUnionEncoding, full_transfer_catalog,
-    source_base::Rooted,
-    source_scalar::{SourceGuard, compiled},
+    FullUnionEncoding, full_transfer_catalog, source_base::Rooted, source_scalar::compiled,
 };
 use crate::{AccountDbKey, BackupDatabase, StorageError};
 use ramflux_protocol::custody::{
@@ -145,7 +143,7 @@ impl Contributions {
         path: &Path,
         key: &AccountDbKey,
         private: &BackupDatabase,
-        stage: &FullTransferStage<'_>,
+        stage: &impl super::receiver_read::ReceiverInput,
         hash: &str,
     ) -> Result<FullUnionEncoding, StorageError> {
         stage.require_io()?;
@@ -176,7 +174,7 @@ impl Contributions {
         &self,
         tx: &Connection,
         private: &BackupDatabase,
-        stage: &FullTransferStage<'_>,
+        stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullUnionEncoding, StorageError> {
         // The only mutable fixed base owner is the declared erasure-generation maximum.
         // Both contribution records must describe the actual normalized prepared value.
@@ -188,7 +186,7 @@ impl Contributions {
             |row| Ok(super::write_full_scalar_sql_row(rule, row, &mut *normalized)),
         )??;
         tx.execute("UPDATE full_union_record SET record=?1 WHERE generation_nonce=?2 AND family='sql/account_erasure_generation'",params![normalized.as_slice(),self.nonce.as_slice()])?;
-        let guard = SourceGuard::new(stage.db, Some(stage.source_cancelled.clone()));
+        let guard = stage.source_guard();
         let (records, total) = super::union_encoding::visit(
             tx,
             &self.nonce,

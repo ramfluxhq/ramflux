@@ -1750,4 +1750,5 @@ async fn settle_stream_work(rig: &Rig) {
 
 mod attended_join;
 mod frontend_writer;
+mod issue_refresh;
 mod linked_reverse;

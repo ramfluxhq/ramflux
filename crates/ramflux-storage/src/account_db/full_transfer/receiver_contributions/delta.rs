@@ -20,7 +20,7 @@ impl Contributions {
         path: &Path,
         key: &AccountDbKey,
         private: &mut BackupDatabase,
-        stage: &FullTransferStage<'_>,
+        stage: &impl super::super::receiver_read::ReceiverInput,
         hash: &str,
     ) -> Result<FullUnionEncoding, StorageError> {
         stage.require_io()?;
@@ -47,7 +47,7 @@ impl Contributions {
         &self,
         tx: &Connection,
         private: &mut BackupDatabase,
-        stage: &FullTransferStage<'_>,
+        stage: &impl super::super::receiver_read::ReceiverInput,
         hash: &str,
         restrictive: bool,
     ) -> Result<(), StorageError> {
@@ -78,7 +78,11 @@ impl Contributions {
                 }
                 continue;
             }
-            private.apply_full_fixed_base_record(&source, &header.0, &mut &bytes[body..])?;
+            private.apply_full_fixed_base_record(
+                &source,
+                &header.0,
+                &mut bytes.get(body..).ok_or_else(invalid)?,
+            )?;
             if rule.id == "sql/account_erasure_generation" {
                 tx.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![self.nonce.as_slice(),self.owners[0],header.0.family,header.0.key,bytes.as_slice()])?;
             } else {

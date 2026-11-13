@@ -338,7 +338,7 @@ impl PairingActor {
 }
 
 impl PairingActor {
-    async fn prepare_live_full_source(
+    pub(super) async fn prepare_live_full_source(
         &self,
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         let participant =
@@ -395,7 +395,7 @@ impl PairingActor {
             return Err(SdkError::PairingCode("Busy"));
         }
         self.refresh_generation().await?;
-        let source = self.prepare_live_full_source().await?;
+        let source = self.prepare_refreshed_full_source().await?;
         let spec = begin
             .create_spec(
                 self.identity.local_ref.clone(),
