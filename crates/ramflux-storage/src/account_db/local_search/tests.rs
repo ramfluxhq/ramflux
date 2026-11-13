@@ -33,6 +33,7 @@ impl Fixture {
             message_id: Some(id.into()),
             revision: 1,
             timestamp: 1,
+            expires_at: None,
             text: text.into(),
             dependencies: vec![SearchDependency {
                 table: "runtime_message_content".into(),
@@ -89,6 +90,33 @@ fn local_search_cjk_and_normalization() -> TestResult {
             "keyed FTS exact-word/Unicode16 contract failed for {query}"
         );
     }
+    let excerpt = "🙂 cafe\u{301} Straße 東京都";
+    let compiled = compile_query(
+        &SearchQuery::new("highlights", "café STRASSE 東京都"),
+        &SearchControl::new(),
+    )?;
+    let ranges = compiled.highlights(excerpt, &SearchControl::new())?;
+    let pieces: Vec<&str> = ranges
+        .iter()
+        .map(|range| {
+            excerpt
+                .get(range.start as usize..range.end as usize)
+                .ok_or("invalid highlight boundary")
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        pieces,
+        vec!["cafe\u{301}", "Straße", "東京都"],
+        "highlight bytes must enclose whole original graphemes after casefold expansion"
+    );
+    let excessive = "中".repeat(100);
+    assert!(
+        matches!(
+            compile_query(&SearchQuery::new("over-terms", excessive), &SearchControl::new()),
+            Err(SearchError::InvalidQuery)
+        ),
+        "derived terms must be bounded before deduplication or SQL"
+    );
     f.insert("separated", "甲乙 乙丙")?;
     let control = SearchControl::new();
     let query = compile_query(&SearchQuery::new("test", "甲乙丙"), &control)?;
@@ -178,6 +206,273 @@ fn export_discards_search_namespace() -> TestResult {
         f.hits("privatecanary")?.len(),
         1,
         "export sanitization must not mutate the live writer"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_search_old_backup_cannot_restore_erased_hit() -> TestResult {
+    for native in [false, true] {
+        restore_erasure_case(native)?;
+    }
+    Ok(())
+}
+fn restore_erasure_case(native: bool) -> TestResult {
+    use super::super::backup_database::BackupDatabase;
+    use crate::{BackupIndexInstall, WrappedAccountDbKey};
+    let f = Fixture::new()?;
+    f.insert("victim", "archivecanary")?;
+    f.insert("survivor", "survivorcanary")?;
+    let archive = f.directory.path().join("old.db");
+    let old = f.db.write_backup_snapshot(&archive)?;
+    let malicious = BackupDatabase::open(&archive, &old.key)?;
+    malicious.db.execute_batch("CREATE TABLE local_search_untrusted_cache(secret TEXT);INSERT INTO local_search_untrusted_cache VALUES('archivecanary');")?;
+    drop(malicious);
+    f.db.delete_direct_message("thread", "victim", "me", "delete-victim")?;
+    let merged_path = f.directory.path().join("merged.db");
+    let snapshot = f.db.write_backup_snapshot(&merged_path)?;
+    let mut merged = BackupDatabase::open(&merged_path, &snapshot.key)?;
+    if native {
+        merged.merge_native_backup(&archive, &old.key, || Ok(()))?;
+    } else {
+        merged.merge_backup_candidate(&archive, &old.key, || Ok(()))?;
+    }
+    let caches: i64 = merged.db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        caches, 0,
+        "neither full nor native merge may import archive-supplied search tables"
+    );
+    let erased: bool = merged.db.query_row(
+        "SELECT deleted FROM direct_message_projection WHERE message_id='victim'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(erased, "local deletion floor must dominate the older authenticated archive");
+    let payloads: i64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_message_content WHERE message_id='victim'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        payloads, 0,
+        "restore must not retain a source from which erased terms could be rebuilt"
+    );
+    drop(merged);
+    let Fixture { directory, db, activation, watch } = f;
+    drop(db);
+    drop(watch);
+    let index = AccountIndex::open(directory.path())?;
+    let (nonce, wrapped_key) = crate::wrap_with_vault_secret(&[9; 32], snapshot.key.bytes())?;
+    index.install_backup_generation(&BackupIndexInstall {
+        account_id: "account",
+        principal_commitment: "principal",
+        db_relative_path: "merged.db",
+        object_relative_path: "objects",
+        manifest_json: b"{}",
+        wrapped_key: &WrappedAccountDbKey {
+            key_wrapping_provider: "test-vault".into(),
+            key_wrapping_ref: "test-key".into(),
+            nonce,
+            wrapped_key,
+        },
+    })?;
+    assert!(
+        !index.search_owner_admitted("account")?,
+        "freshly installed archive generation must not inherit archive-controlled visibility admission"
+    );
+    index.admit_local_search_after_floor_validation(&activation, "account")?;
+    assert!(
+        index.search_owner_admitted("account")?,
+        "only explicit local owner validation can grant this selected generation"
+    );
+    let reopened = AccountDb::open(&index, "account", &snapshot.key)?;
+    let _watch = reopened.search_prepare(&activation)?;
+    let control = SearchControl::new();
+    let query = compile_query(&SearchQuery::new("after-restore", "archivecanary"), &control)?;
+    assert!(
+        reopened
+            .search_candidates(&activation, &query, SearchKind::Message, i64::MAX, &control)?
+            .is_empty(),
+        "reopened restore must start with no resurrected archive tokens"
+    );
+    assert!(
+        reopened.message_is_deleted("victim")?,
+        "source deletion must remain sticky after account reopen"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_search_bounds_and_rebuild_races() -> TestResult {
+    const DOCUMENTS: i64 = 100_000;
+    let f = Fixture::new()?;
+    f.db.connection.call(|db| {
+        let transaction=db.unchecked_transaction()?;
+        let mut docs=transaction.prepare("INSERT INTO local_search_doc(kind,source_ref,source_key,conversation_id,message_id,source_revision,timestamp,source_hash) VALUES(1,?1,?1,'thread',NULL,'1',1,zeroblob(32))")?;
+        let mut tokens=transaction.prepare("INSERT INTO local_search_terms(doc_id,tokens) VALUES(?1,?2)")?;
+        for number in 0..DOCUMENTS {
+            let id=format!("source-{number:06}");docs.execute([id])?;
+            tokens.execute(params![transaction.last_insert_rowid(),format!("k1 w636f6d6d6f6e w766f636162{number:016x}")])?;
+        }
+        drop(tokens);drop(docs);transaction.commit()
+    })?;
+    let control = SearchControl::new();
+    let query = compile_query(&SearchQuery::new("bounded-common", "common"), &control)?;
+    let candidates =
+        f.db.search_candidates(&f.activation, &query, SearchKind::Message, i64::MAX, &control)?;
+    assert_eq!(
+        candidates.len(),
+        MAX_CANDIDATES,
+        "common-term lookup must bound candidates before authoritative hydration"
+    );
+    assert!(
+        control.vm_steps() < MAX_VM_STEPS,
+        "indexed descending rowid traversal must avoid corpus-wide sorting/VM work"
+    );
+    let stale = f.db.search_revision(&f.activation, &SearchControl::new())?;
+    f.db.persist_client_record("conversation", "thread", &serde_json::json!({"title":"changed"}))?;
+    assert!(
+        matches!(
+            f.db.search_replace(
+                &f.activation,
+                Fixture::source("racing", "mustnotpublish"),
+                stale,
+                &SearchControl::new()
+            ),
+            Err(SearchError::CursorStale)
+        ),
+        "canonical mutation must reject tokenization prepared under an older revision"
+    );
+    let cancelled = SearchControl::new();
+    cancelled.cancel();
+    assert!(
+        matches!(
+            f.db.search_candidates(
+                &f.activation,
+                &query,
+                SearchKind::Message,
+                i64::MAX,
+                &cancelled
+            ),
+            Err(SearchError::Cancelled)
+        ),
+        "cancellation must be checked before entering the SQL queue"
+    );
+    f.db.connection.execute_batch("UPDATE local_search_state SET document_count=1000000;")?;
+    let revision = f.db.search_revision(&f.activation, &SearchControl::new())?;
+    assert!(
+        matches!(
+            f.db.search_replace(
+                &f.activation,
+                Fixture::source("over-quota", "mustnotpublish"),
+                revision,
+                &SearchControl::new()
+            ),
+            Err(SearchError::Capacity)
+        ),
+        "quota must stop new insertion without eviction"
+    );
+    let survivors: i64 =
+        f.db.connection.query_row("SELECT count(*) FROM local_search_doc", [], |r| r.get(0))?;
+    assert_eq!(survivors, DOCUMENTS, "quota refusal must preserve existing documents");
+    // Existing dirty IDs overlap the first affected IDs: DISTINCT alone with a
+    // remaining-capacity LIMIT would silently lose the rest of this work.
+    f.db.connection.execute_batch("UPDATE local_search_state SET document_count=100000,rebuild_required=0,checkpoint_kind=2,coverage='complete'; DELETE FROM local_search_dirty; INSERT INTO local_search_dirty SELECT 1,source_key FROM local_search_doc ORDER BY source_key LIMIT 4000; INSERT INTO local_search_dependency SELECT 'object_erasure_fence','shared-fence',doc_id FROM local_search_doc; INSERT INTO object_erasure_fence(commitment) VALUES('shared-fence');")?;
+    let (remaining, dirty, required): (i64, i64, bool) = f.db.connection.query_row("SELECT (SELECT count(*) FROM local_search_doc),(SELECT count(*) FROM local_search_dirty),rebuild_required FROM local_search_state", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    assert_eq!(remaining, 0, "shared erasure dependency must purge every indexed derivative");
+    assert_eq!(dirty, 0, "overflow must collapse the bounded ID queue");
+    assert!(required, "overlapping dirty IDs must never hide omitted rebuild work");
+
+    Ok(())
+}
+
+#[test]
+fn archive_compaction_preserves_erasure_locators() -> TestResult {
+    use super::super::backup_database::BackupDatabase;
+    let f = Fixture::new()?;
+    f.insert("gap", "discardcanary")?;
+    f.insert("victim", "victimcanary")?;
+    f.insert("survivor", "survivorcanary")?;
+    f.db.delete_direct_message("thread", "gap", "me", "delete-gap")?;
+    f.db.connection.execute_batch("CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT INTO backup_archived_actor_state(rowid,source,state_kind,state_json) VALUES(9,'local','opaque-victim',x'7b2270726976617465223a226f70617175652d63616e617279227d'); INSERT INTO message_footprint VALUES('victim','archived_actor','9');")?;
+    let destination = f.directory.path().join("compacted.db");
+    let snapshot = f.db.write_backup_snapshot(&destination)?;
+    let backup = BackupDatabase::open(&destination, &snapshot.key)?;
+    let present: i64 = backup.db.query_row(
+        "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='opaque-victim'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(present, 1, "fixture must preserve the opaque owned copy before erasure");
+    let aligned:bool=backup.db.query_row("SELECT EXISTS(SELECT 1 FROM message_footprint f JOIN backup_archived_actor_state a ON f.locator=CAST(a.rowid AS TEXT) WHERE f.message_id='victim' AND f.kind='archived_actor' AND a.state_kind='opaque-victim')",[],|r|r.get(0))?;
+    assert!(
+        aligned,
+        "compaction must remap implicit-rowid erasure locators by stable source identity"
+    );
+    backup
+        .db
+        .execute("UPDATE direct_message_projection SET deleted=1 WHERE message_id='victim'", [])?;
+    let opaque: i64 = backup.db.query_row(
+        "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='opaque-victim'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(opaque, 0, "erasure after export must remove the remapped opaque derivative");
+    let survivor: i64 = backup.db.query_row(
+        "SELECT count(*) FROM runtime_message_content WHERE message_id='survivor'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(survivor, 1, "rowid relocation must not redirect erasure onto an unrelated message");
+    let namespace: i64 = backup.db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        namespace, 0,
+        "published snapshot must contain neither search nor compaction work tables"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_search_checkpoint_resumes_and_rejects_reset_races() -> TestResult {
+    let f = Fixture::new()?;
+    f.insert("first", "canary")?;
+    f.insert("second", "canary")?;
+    f.db.connection.execute_batch(
+        "UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=1,checkpoint='first';",
+    )?;
+    f.db.search_rebuild_reset(&f.activation, &SearchControl::new())?;
+    let batch =
+        f.db.search_rebuild_batch(&f.activation, &SearchControl::new())?
+            .ok_or("resumable batch")?;
+    assert_eq!(
+        batch.checkpoint, "first",
+        "a new maintenance lease must preserve the durable checkpoint"
+    );
+    assert_eq!(batch.keys, vec!["second"], "resume must use a strict source keyset");
+    f.db.persist_client_record(
+        "conversation",
+        "thread",
+        &serde_json::json!({"title":"racing reset"}),
+    )?;
+    assert!(
+        matches!(
+            f.db.search_rebuild_advance(
+                &f.activation,
+                batch,
+                Some("second".into()),
+                &SearchControl::new()
+            ),
+            Err(SearchError::CursorStale)
+        ),
+        "a canonical reset must reject the old checkpoint acknowledgement"
     );
     Ok(())
 }

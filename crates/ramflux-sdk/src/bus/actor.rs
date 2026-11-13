@@ -17,6 +17,7 @@ pub(super) enum PrivateCommand {
         owner: u64,
         job: String,
         admission: crate::search::admission::Admission,
+        reset: bool,
         reply: oneshot::Sender<Result<bool, SdkError>>,
     },
     #[cfg(test)]
@@ -242,9 +243,10 @@ impl AccountActor {
         owner: u64,
         job: String,
         admission: crate::search::admission::Admission,
+        reset: bool,
     ) -> Result<bool, SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::SearchRebuild { owner, job, admission, reply })?;
+        self.send_private(PrivateCommand::SearchRebuild { owner, job, admission, reset, reply })?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(

@@ -136,7 +136,7 @@ impl AccountDb {
                 return Ok(Err(error));
             }
             if super::local_search::lifecycle::strip(&target)? {
-                target.execute_batch("PRAGMA temp_store=MEMORY; VACUUM;")?;
+                super::local_search::lifecycle::compact(&target)?;
             }
             super::backup_retirement::strip_own_copy_locators(&target)?;
             target.execute("DELETE FROM object_segment_resource", [])?;

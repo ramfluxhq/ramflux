@@ -20,6 +20,9 @@ type Pending = Arc<Mutex<BTreeMap<SearchText, (u64, SearchCompletion, Instant)>>
 pub struct LocalSearch {
     activation: SearchActivation,
     account: String,
+    path: std::path::PathBuf,
+    publication_epoch: i64,
+    closed: std::sync::atomic::AtomicBool,
     unlock: u64,
     watch: Arc<SearchWatch>,
     account_permit: Arc<tokio::sync::Semaphore>,
@@ -27,13 +30,17 @@ pub struct LocalSearch {
     cursors: Arc<Mutex<Cursors>>,
     pending: Pending,
     observer: Option<SearchRegistration>,
-    rebuild: Mutex<Option<(u64, String, Arc<std::sync::atomic::AtomicBool>)>>,
+    rebuild: super::rebuild_job::Jobs,
+    rebuild_progress: super::rebuild_job::Progress,
+    quota_paused: std::sync::atomic::AtomicBool,
 }
 /// Keeps reply plaintext revocable until the binding's final publication boundary.
 pub struct SearchCompletion {
     page: Arc<Mutex<Option<SearchPage>>>,
     watch: Arc<SearchWatch>,
     stamp: u64,
+    clock: ramflux_storage::AccountClock,
+    expires_at: Option<i64>,
     _watch: SearchRegistration,
     _erasure: ramflux_storage::PrivacyResourceRegistration,
     admission: Admission,
@@ -42,7 +49,9 @@ impl SearchCompletion {
     /// # Errors
     /// Refuses a queued reply invalidated during encoding.
     pub fn check_current(&self) -> SearchResult<()> {
-        if self.watch.stamp() != self.stamp {
+        if self.watch.stamp() != self.stamp
+            || self.expires_at.is_some_and(|expiry| self.clock.now_unix() >= expiry)
+        {
             return Err(SearchError::CursorStale);
         }
         self.admission.control.check()
@@ -50,8 +59,11 @@ impl SearchCompletion {
     /// # Errors
     /// Invalidated or already consumed pages are never returned from a pending completion.
     pub fn take(&self) -> SearchResult<SearchPage> {
+        self.admission.control.check()?;
         let mut page = self.page.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.watch.stamp() != self.stamp {
+        if self.watch.stamp() != self.stamp
+            || self.expires_at.is_some_and(|expiry| self.clock.now_unix() >= expiry)
+        {
             page.take();
             return Err(SearchError::CursorStale);
         }
@@ -82,9 +94,13 @@ impl LocalSearch {
                 .try_into()
                 .map_err(|_| SearchError::IndexUnavailable)?,
         );
+        let publication_epoch = db.search_revision(&activation, &SearchControl::new())?.epoch;
         let mut service = Self {
             activation,
             account: db.local_account_id.clone(),
+            path: db.path.clone(),
+            publication_epoch,
+            closed: std::sync::atomic::AtomicBool::new(false),
             unlock,
             watch,
             account_permit: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -92,12 +108,17 @@ impl LocalSearch {
             cursors: Arc::new(Mutex::new(Cursors::default())),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             observer: None,
-            rebuild: Mutex::new(None),
+            rebuild: Arc::new(Mutex::new(None)),
+            rebuild_progress: Arc::new(Mutex::new(None)),
+            quota_paused: std::sync::atomic::AtomicBool::new(false),
         };
         service.install_observer()?;
         Ok(service)
     }
     pub(crate) async fn admit(&self, owner: u64, id: &str) -> Result<Admission, SdkError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(SearchError::AccountLocked.into());
+        }
         Ok(Admission::acquire(Arc::clone(&self.active), &self.account_permit, owner, id).await?)
     }
     /// Runs a typed Rust query using the shared bounded admission and completion contract.
@@ -115,11 +136,16 @@ impl LocalSearch {
     }
     /// Drops every local query/cursor at the account lock/publication boundary.
     pub fn invalidate(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::Release);
+        self.account_permit.close();
+        self.invalidate_views();
+    }
+    pub(crate) fn invalidate_views(&self) {
         if let Some((owner, id, cancel)) =
             self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {
             cancel.store(true, std::sync::atomic::Ordering::Release);
-            self.cancel(owner, &id);
+            self.cancel_request(owner, &id);
         }
         self.watch.invalidate();
         self.clear_pending();
@@ -130,7 +156,23 @@ impl LocalSearch {
             control.cancel();
         }
     }
-    pub fn cancel(&self, client: u64, request_id: &str) {
+    /// # Errors
+    /// Old-unlock cancellation cannot affect a request admitted by a new account instance.
+    pub fn cancel(&self, client: u64, unlock_epoch: u64, request_id: &str) -> SearchResult<()> {
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(SearchError::InvalidQuery);
+        }
+        if unlock_epoch != self.unlock {
+            return Err(SearchError::CursorStale);
+        }
+        self.cancel_request(client, request_id);
+        Ok(())
+    }
+    #[must_use]
+    pub fn unlock_epoch(&self) -> u64 {
+        self.unlock
+    }
+    fn cancel_request(&self, client: u64, request_id: &str) {
         if let Some(control) = self
             .active
             .lock()
@@ -148,11 +190,17 @@ impl LocalSearch {
         client: &RamfluxClient,
         control: &SearchControl,
     ) -> Result<SearchViewEpoch, SdkError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(SearchError::AccountLocked.into());
+        }
         let db = client.account_db()?;
-        if db.local_account_id != self.account {
+        if db.local_account_id != self.account || db.path != self.path {
             return Err(SearchError::AccountLocked.into());
         }
         let revision = db.search_revision(&self.activation, control)?;
+        if revision.epoch != self.publication_epoch {
+            return Err(SearchError::CursorStale.into());
+        }
         Ok(SearchViewEpoch {
             unlock: self.unlock,
             publication: u64::try_from(revision.epoch)
@@ -171,6 +219,7 @@ impl LocalSearch {
         owner: u64,
         job: &str,
         admission: &Admission,
+        reset: bool,
     ) -> Result<bool, SdkError> {
         if job.is_empty() || job.len() > 128 {
             return Err(SearchError::InvalidQuery.into());
@@ -180,6 +229,9 @@ impl LocalSearch {
         }
         let control = &admission.control;
         let db = client.account_db()?;
+        if reset {
+            db.search_rebuild_reset(&self.activation, control)?;
+        }
         let Some(batch) = db.search_rebuild_batch(&self.activation, control)? else {
             return Ok(true);
         };
@@ -190,13 +242,34 @@ impl LocalSearch {
             if start.elapsed() >= Duration::from_millis(20) || bytes >= MAX_REBUILD_BYTES {
                 break;
             }
-            let sources = hydration::sources(client, &self.activation, batch.kind, key, control)?;
+            let sources =
+                match hydration::sources(client, &self.activation, batch.kind, key, control) {
+                    Ok(sources) => sources,
+                    Err(SdkError::Search(SearchError::Capacity)) => {
+                        db.search_mark_partial(&self.activation, false, control)?;
+                        last = Some(key.clone());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let source_bytes = sources
+                .iter()
+                .fold(0usize, |total, source| total.saturating_add(source.text.expose().len()));
+            if source_bytes > MAX_REBUILD_BYTES {
+                db.search_mark_partial(&self.activation, false, control)?;
+                last = Some(key.clone());
+                continue;
+            }
+            if bytes.saturating_add(source_bytes) > MAX_REBUILD_BYTES {
+                break;
+            }
+            bytes = bytes.saturating_add(source_bytes);
             for source in sources {
-                bytes = bytes.saturating_add(source.text.expose().len());
                 match db.search_replace(&self.activation, source, batch.canonical, control) {
                     Err(SearchError::Capacity) => {
                         db.search_mark_partial(&self.activation, true, control)?;
-                        return Ok(false);
+                        self.quota_paused.store(true, std::sync::atomic::Ordering::Release);
+                        return Ok(true);
                     }
                     result => result?,
                 }

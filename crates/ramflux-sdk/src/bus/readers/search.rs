@@ -55,6 +55,6 @@ pub(super) fn execute(
             let completion = runtime.execute_query(client, owner, &request, admission)?;
             runtime.queue_completion(owner, completion)
         }
-        Work::Status => Ok(serde_json::to_value(runtime.status(client)?)?),
+        Work::Status => Ok(serde_json::to_value(runtime.index_status(client)?)?),
     }
 }

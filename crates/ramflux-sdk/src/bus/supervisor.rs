@@ -109,23 +109,18 @@ impl Supervisor {
         runtime: Arc<crate::search::LocalSearch>,
         owner: u64,
         job: String,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        ticket: crate::search::rebuild_job::RebuildTicket,
     ) {
         let mut tasks = self.lifecycle_tasks.borrow_mut();
         while tasks.try_join_next().is_some() {}
         tasks.spawn_local(async move {
-            let lease = async {
-                while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                    let admission = runtime.admit(owner, &job).await?;
-                    if actor.search_rebuild_batch(owner, job.clone(), admission).await? {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-                Ok::<_, SdkError>(())
-            };
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), lease).await;
-            runtime.finish_rebuild(owner, &job, &cancelled);
+            let _ = runtime
+                .run_rebuild_with(ticket, move |admission, reset| {
+                    let actor = actor.clone();
+                    let job = job.clone();
+                    async move { actor.search_rebuild_batch(owner, job, admission, reset).await }
+                })
+                .await;
         });
         self.lifecycle_changed.notify_one();
     }
@@ -273,10 +268,10 @@ impl Supervisor {
             return Ok(reply(body));
         }
         if crate::search::capability::is_method(&request.method) {
-            return self.search_request(request, connection).await;
+            return Box::pin(self.search_request(request, connection)).await;
         }
         if !super::lifecycle::handles(&request.method) {
-            return self.route(request, connection).await;
+            return Box::pin(self.route(request, connection)).await;
         }
         let keyed = request.operation_id.is_some()
             || request.body.get("idempotency_key").and_then(serde_json::Value::as_str).is_some();
@@ -699,7 +694,7 @@ impl Supervisor {
             if let Ok(pool) = actor.reader_pool()
                 && let Ok(runtime) = pool.search_runtime()
             {
-                runtime.invalidate();
+                runtime.invalidate_views();
             }
         }
         let index = self.index.clone();

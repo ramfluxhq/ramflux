@@ -11,6 +11,7 @@ pub struct SearchMessageInput {
     pub conversation_id: String,
     pub sender_id: String,
     pub created_at: i64,
+    pub expires_at: Option<i64>,
     pub body: zeroize::Zeroizing<Vec<u8>>,
     pub identity: zeroize::Zeroizing<Vec<u8>>,
     pub group_projection: Option<zeroize::Zeroizing<Vec<u8>>>,
@@ -18,6 +19,11 @@ pub struct SearchMessageInput {
 }
 
 impl AccountDb {
+    /// Clock used to recheck time-based visibility at the final publication boundary.
+    #[must_use]
+    pub fn search_clock(&self, _activation: &SearchActivation) -> crate::AccountClock {
+        self.clock.clone()
+    }
     /// Returns IDs only, with an indexed keyset and no held cross-batch snapshot.
     /// # Errors
     /// Refuses cancellation, unsupported source kinds or invalid identifiers.
@@ -87,8 +93,8 @@ impl AccountDb {
         let message = message.to_owned();
         let now = self.now_unix();
         self.search_call(control,move |db| {
-            let header:Option<(String,String,i64)>=db.query_row("SELECT CASE WHEN length(CAST(d.conversation_id AS BLOB))<=256 THEN d.conversation_id END,CASE WHEN length(CAST(d.sender_id AS BLOB))<=256 THEN d.sender_id END,d.created_at FROM direct_message_projection d WHERE d.message_id=?1 AND d.deleted=0 AND NOT EXISTS(SELECT 1 FROM conversation_list_state c WHERE c.conversation_id=d.conversation_id AND (c.hidden_at IS NOT NULL OR d.created_at<=c.cleared_at)) AND NOT EXISTS(SELECT 1 FROM conversation_projection c WHERE c.conversation_id=d.conversation_id AND (c.hidden_at IS NOT NULL OR d.created_at<=c.cleared_at)) AND NOT EXISTS(SELECT 1 FROM conversation_disappearing_policy p WHERE p.conversation_id=d.conversation_id AND p.timer_seconds>0 AND p.countdown_mode='on_send' AND d.created_at+p.timer_seconds<=?2)",params![message,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            let Some((conversation_id,sender_id,created_at))=header else {return Ok(None)};
+            let header:Option<(String,String,i64,Option<i64>)>=db.query_row("SELECT CASE WHEN length(CAST(d.conversation_id AS BLOB))<=256 THEN d.conversation_id END,CASE WHEN length(CAST(d.sender_id AS BLOB))<=256 THEN d.sender_id END,d.created_at,(SELECT d.created_at+p.timer_seconds FROM conversation_disappearing_policy p WHERE p.conversation_id=d.conversation_id AND p.timer_seconds>0 AND p.countdown_mode='on_send') FROM direct_message_projection d WHERE d.message_id=?1 AND d.deleted=0 AND NOT EXISTS(SELECT 1 FROM conversation_list_state c WHERE c.conversation_id=d.conversation_id AND (c.hidden_at IS NOT NULL OR d.created_at<=c.cleared_at)) AND NOT EXISTS(SELECT 1 FROM conversation_projection c WHERE c.conversation_id=d.conversation_id AND (c.hidden_at IS NOT NULL OR d.created_at<=c.cleared_at)) AND NOT EXISTS(SELECT 1 FROM conversation_disappearing_policy p WHERE p.conversation_id=d.conversation_id AND p.timer_seconds>0 AND p.countdown_mode='on_send' AND d.created_at+p.timer_seconds<=?2)",params![message,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            let Some((conversation_id,sender_id,created_at,expires_at))=header else {return Ok(None)};
             let actor=|key:String|->SearchResult<Option<Vec<u8>>> {
                 let value:Option<Option<Vec<u8>>>=db.query_row("SELECT CASE WHEN length(CAST(state_json AS BLOB))<=131072 THEN CAST(state_json AS BLOB) END FROM runtime_actor_state WHERE state_kind=?1",[key],|r|r.get(0)).optional()?;
                 match value {None=>Ok(None),Some(Some(value))=>Ok(Some(value)),Some(None)=>Err(SearchError::Capacity)}
@@ -100,7 +106,7 @@ impl AccountDb {
             let body=match body {None=>return Ok(None),Some(Some(body))=>body,Some(None)=>return Err(SearchError::Capacity)};
             let revision=actor(format!("routed/edit-revision/{message}"))?.map(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_|SearchError::IndexUnavailable)).transpose()?.and_then(|value|value.get("revision").and_then(serde_json::Value::as_u64)).unwrap_or(0);
             let group_projection=actor(format!("routed/group-projection/{message}"))?.map(zeroize::Zeroizing::new);
-            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,body:zeroize::Zeroizing::new(body),identity:zeroize::Zeroizing::new(identity),group_projection,revision}))
+            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,expires_at,body:zeroize::Zeroizing::new(body),identity:zeroize::Zeroizing::new(identity),group_projection,revision}))
         })
     }
 }
@@ -138,19 +144,33 @@ impl AccountDb {
         self.search_call(control,move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM shared_group_member_projection m WHERE group_id=?1 AND root_commitment=?2 AND device_id=?3 AND active=1) AND NOT EXISTS(SELECT 1 FROM group_projection WHERE group_id=?1 AND deleted_at IS NOT NULL)",params![group,root,device],|r|r.get(0))?))
     }
     /// # Errors
-    /// Only an admitted message-owned local reference can authorize an attachment basename.
-    pub fn search_attachment_admitted(
+    /// Resolves only bounded, admitted local references for the exact wire/manifest identity.
+    pub fn search_attachment_dependencies(
         &self,
         _activation: &SearchActivation,
         message: &str,
         object: &str,
+        manifest: &str,
         control: &SearchControl,
-    ) -> SearchResult<bool> {
-        if message.len() > 256 || object.len() > 256 {
+    ) -> SearchResult<Option<Vec<SearchDependency>>> {
+        if message.len() > 256 || object.len() > 256 || manifest.len() > 256 {
             return Err(SearchError::InvalidQuery);
         }
         let message = message.to_owned();
         let object = object.to_owned();
-        self.search_call(control,move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload p INDEXED BY object_retention_wire CROSS JOIN object_retention_reference r INDEXED BY object_reference_payload ON r.commitment=p.commitment CROSS JOIN object_message_reference m ON m.reference_hash=r.reference_hash AND m.message_id=?1 WHERE p.wire_id=?2 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment))",params![message,object],|r|r.get(0))?))
+        let manifest = manifest.to_owned();
+        self.search_call(control,move |db| {
+            let mut statement=db.prepare("SELECT CASE WHEN length(CAST(p.commitment AS BLOB))<=256 THEN p.commitment END,CASE WHEN length(CAST(r.reference_hash AS BLOB))<=256 THEN r.reference_hash END FROM object_retention_payload p INDEXED BY object_retention_wire CROSS JOIN object_retention_reference r INDEXED BY object_reference_payload ON r.commitment=p.commitment CROSS JOIN object_message_reference m ON m.reference_hash=r.reference_hash AND m.message_id=?1 WHERE p.wire_id=?2 AND p.manifest_hash=?3 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment) LIMIT 129")?;
+            let mut rows=statement.query(params![message,object,manifest])?;
+            let mut dependencies=Vec::new();let mut references=0;
+            while let Some(row)=rows.next()? {
+                references+=1;if references>128 {return Err(SearchError::Capacity);}
+                let commitment:String=row.get(0)?;let reference:String=row.get(1)?;
+                dependencies.push(SearchDependency{table:"object_retention_payload".into(),key:commitment.clone()});
+                dependencies.push(SearchDependency{table:"object_erasure_fence".into(),key:commitment});
+                dependencies.push(SearchDependency{table:"object_retention_reference".into(),key:reference});
+            }
+            Ok((references>0).then_some(dependencies))
+        })
     }
 }

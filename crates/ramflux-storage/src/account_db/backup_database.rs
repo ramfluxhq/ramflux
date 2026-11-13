@@ -261,7 +261,7 @@ impl BackupDatabase {
         super::receive::ledger_backup::sanitize_backup(&target)?;
         super::pairing::sanitize_backup(&target)?;
         if super::local_search::lifecycle::strip(&target)? {
-            target.execute_batch("PRAGMA temp_store=MEMORY; VACUUM;")?;
+            super::local_search::lifecycle::compact(&target)?;
         }
         drop(target);
         crate::sync_path::sync_path(path)?;

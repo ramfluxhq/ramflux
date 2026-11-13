@@ -68,8 +68,9 @@ impl Admission {
             Ok::<_, SearchError>(())
         };
         tokio::select! {
-            result=tokio::time::timeout(std::time::Duration::from_millis(100),acquire)=>result.map_err(|_|SearchError::Deadline)??,
+            biased;
             ()=request.wake.notified()=>return Err(SearchError::Cancelled),
+            result=tokio::time::timeout(std::time::Duration::from_millis(100),acquire)=>result.map_err(|_|SearchError::Deadline)??,
         }
         admission.control.check()?;
         Ok(admission)
@@ -82,5 +83,69 @@ impl Drop for Admission {
     fn drop(&mut self) {
         self.control.cancel();
         self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{future::Future as _, task::Poll};
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_search_admission_caps_and_out_of_queue_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let active = Arc::new(Mutex::new(BTreeMap::new()));
+            let account = Arc::new(tokio::sync::Semaphore::new(1));
+            let first = Admission::acquire(Arc::clone(&active), &account, 7, "executing").await?;
+            let mut second =
+                Box::pin(Admission::acquire(Arc::clone(&active), &account, 7, "queued-1"));
+            let mut third =
+                Box::pin(Admission::acquire(Arc::clone(&active), &account, 7, "queued-2"));
+            std::future::poll_fn(|cx| {
+                assert!(
+                    second.as_mut().poll(cx).is_pending(),
+                    "one account must not execute two queries"
+                );
+                assert!(
+                    third.as_mut().poll(cx).is_pending(),
+                    "second queued query must remain outside SQL"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            assert!(
+                matches!(
+                    Admission::acquire(Arc::clone(&active), &account, 7, "overflow").await,
+                    Err(SearchError::Capacity)
+                ),
+                "fourth account request must be rejected before enqueue"
+            );
+            {
+                let requests = active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert_eq!(
+                    requests.len(),
+                    3,
+                    "one executing plus two queued requests is the entire account budget"
+                );
+                requests.get(&(7, "queued-1".into())).ok_or("queued-1 registration")?.cancel();
+                requests.get(&(7, "queued-2".into())).ok_or("queued-2 registration")?.cancel();
+            }
+            assert!(
+                matches!(second.await, Err(SearchError::Cancelled)),
+                "cancellation must wake a queued request while the executor remains held"
+            );
+            assert!(
+                matches!(third.await, Err(SearchError::Cancelled)),
+                "cancellation must not wait for the SQL worker queue"
+            );
+            drop(first);
+            assert!(
+                active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+                "completion/cancellation must release every admission record"
+            );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        Ok(())
     }
 }

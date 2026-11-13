@@ -20,6 +20,7 @@ struct Collected {
     kind: SearchKind,
     before: i64,
     finished: bool,
+    expires_at: Option<i64>,
 }
 impl LocalSearch {
     pub(crate) fn execute_query(
@@ -72,7 +73,13 @@ impl LocalSearch {
             coverage: status.coverage,
             incomplete: !collected.finished || status.coverage != SearchCoverage::Complete,
         };
-        self.register_completion(client, (owner, &request.request_id), page, stamp, admission)
+        self.register_completion(
+            client,
+            (owner, &request.request_id),
+            page,
+            (stamp, collected.expires_at),
+            admission,
+        )
     }
     fn collect_page(
         &self,
@@ -84,6 +91,7 @@ impl LocalSearch {
         let mut items = Vec::new();
         let mut used = 0usize;
         let mut examined = 0;
+        let mut expires_at: Option<i64> = None;
         while examined < MAX_CANDIDATES {
             work.control.check()?;
             if !work.request.kinds.contains(&kind) {
@@ -92,7 +100,7 @@ impl LocalSearch {
                     before = i64::MAX;
                     continue;
                 }
-                return Ok(Collected { items, kind, before, finished: true });
+                return Ok(Collected { items, kind, before, expires_at, finished: true });
             }
             let candidates =
                 db.search_candidates(&self.activation, work.compiled, kind, before, work.control)?;
@@ -102,18 +110,22 @@ impl LocalSearch {
                     before = i64::MAX;
                     continue;
                 }
-                return Ok(Collected { items, kind, before, finished: true });
+                return Ok(Collected { items, kind, before, expires_at, finished: true });
             }
             for candidate in candidates {
                 work.control.check()?;
                 if examined >= MAX_CANDIDATES || items.len() >= limit {
-                    return Ok(Collected { items, kind, before, finished: false });
+                    return Ok(Collected { items, kind, before, expires_at, finished: false });
                 }
                 examined += 1;
-                if let Some(item) = self.hydrate_candidate(work, &candidate)? {
+                if let Some((item, expiry)) = self.hydrate_candidate(work, &candidate)? {
+                    if let Some(expiry) = expiry {
+                        expires_at =
+                            Some(expires_at.map_or(expiry, |previous| previous.min(expiry)));
+                    }
                     let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&item)?);
                     if used.saturating_add(encoded.len()) > MAX_PAGE_BYTES - 2048 {
-                        return Ok(Collected { items, kind, before, finished: false });
+                        return Ok(Collected { items, kind, before, expires_at, finished: false });
                     }
                     used = used.saturating_add(encoded.len());
                     items.push(item);
@@ -121,13 +133,13 @@ impl LocalSearch {
                 before = candidate.doc_id;
             }
         }
-        Ok(Collected { items, kind, before, finished: false })
+        Ok(Collected { items, kind, before, expires_at, finished: false })
     }
     fn hydrate_candidate(
         &self,
         work: &PageWork<'_>,
         candidate: &SearchCandidate,
-    ) -> Result<Option<SearchItem>, SdkError> {
+    ) -> Result<Option<(SearchItem, Option<i64>)>, SdkError> {
         if work
             .request
             .conversation_id
@@ -163,18 +175,21 @@ impl LocalSearch {
             .map(|snippet| work.compiled.highlights(snippet.expose(), work.control))
             .transpose()?
             .unwrap_or_default();
-        Ok(Some(SearchItem {
-            kind: source.kind,
-            id: source.source_ref.into(),
-            conversation_id: source.conversation_id.into(),
-            message_id: source.message_id.map(SearchText::from),
-            source_revision: source.revision,
-            timestamp: source.timestamp,
-            title: (source.kind == SearchKind::Conversation)
-                .then(|| search_excerpt(source.text.expose())),
-            snippet,
-            highlights,
-        }))
+        Ok(Some((
+            SearchItem {
+                kind: source.kind,
+                id: source.source_ref.into(),
+                conversation_id: source.conversation_id.into(),
+                message_id: source.message_id.map(SearchText::from),
+                source_revision: source.revision,
+                timestamp: source.timestamp,
+                title: (source.kind == SearchKind::Conversation)
+                    .then(|| search_excerpt(source.text.expose())),
+                snippet,
+                highlights,
+            },
+            source.expires_at,
+        )))
     }
 }
 fn next_kind(kind: SearchKind) -> Option<SearchKind> {

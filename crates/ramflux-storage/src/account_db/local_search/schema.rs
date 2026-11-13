@@ -10,8 +10,14 @@ pub(super) fn exists(db: &Connection) -> rusqlite::Result<bool> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_search_state')",[],|row|row.get(0))
 }
 
-pub(super) fn initialize(db: &Connection, epoch: i64) -> SearchResult<()> {
+pub(super) fn prepare(db: &Connection) -> SearchResult<()> {
     prerequisites(db)?;
+    Ok(())
+}
+pub(super) fn initialize(db: &Connection, epoch: i64) -> SearchResult<()> {
+    if db.is_autocommit() {
+        return Err(SearchError::IndexUnavailable);
+    }
     if exists(db)? {
         let version: (i64, i64) = db.query_row(
             "SELECT format,normalizer FROM local_search_state WHERE singleton=1",
@@ -20,36 +26,28 @@ pub(super) fn initialize(db: &Connection, epoch: i64) -> SearchResult<()> {
         )?;
         if version != (1, 1) {
             super::lifecycle::strip(db)?;
+            db.execute_batch("DROP TABLE IF EXISTS local_search_compaction_pending;")?;
         }
     }
-    db.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| -> SearchResult<()> {
-        db.execute_batch(SCHEMA)?;
-        db.execute("INSERT INTO local_search_state(singleton,format,normalizer,epoch) VALUES(1,1,1,?1) ON CONFLICT(singleton) DO NOTHING",[epoch])?;
-        db.execute(
-            "INSERT INTO local_search_fts(local_search_fts,rank) VALUES('secure-delete',1)",
-            [],
-        )?;
-        let secure: i64 = db.query_row(
-            "SELECT v FROM local_search_fts_config WHERE k='secure-delete'",
-            [],
-            |row| row.get(0),
-        )?;
-        if secure != 1 {
-            return Err(SearchError::IndexUnavailable);
-        }
-        install_sources(db)?;
-        db.execute(
-            "INSERT INTO local_search_fts(local_search_fts,rank) VALUES('integrity-check',1)",
-            [],
-        )?;
-        db.execute_batch("COMMIT")?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = db.execute_batch("ROLLBACK");
+    db.execute_batch(SCHEMA)?;
+    db.execute("INSERT INTO local_search_state(singleton,format,normalizer,epoch) VALUES(1,1,1,?1) ON CONFLICT(singleton) DO NOTHING",[epoch])?;
+    db.execute(
+        "INSERT INTO local_search_fts(local_search_fts,rank) VALUES('secure-delete',1)",
+        [],
+    )?;
+    let secure: i64 =
+        db.query_row("SELECT v FROM local_search_fts_config WHERE k='secure-delete'", [], |row| {
+            row.get(0)
+        })?;
+    if secure != 1 {
+        return Err(SearchError::IndexUnavailable);
     }
-    result
+    install_sources(db)?;
+    db.execute(
+        "INSERT INTO local_search_fts(local_search_fts,rank) VALUES('integrity-check',1)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn prerequisites(db: &Connection) -> SearchResult<()> {
@@ -75,8 +73,19 @@ fn prerequisites(db: &Connection) -> SearchResult<()> {
     db.execute_batch("PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;")?;
     let secure: i64 = db.query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
     let temporary: i64 = db.query_row("PRAGMA temp_store", [], |row| row.get(0))?;
-    let pages:u64=db.query_row("SELECT COALESCE(sum(pgsize),0) FROM dbstat WHERE name IN ('sqlite_schema','sqlite_master')",[],|row|row.get(0)).map_err(|_|SearchError::IndexUnavailable)?;
+    verify_dbstat(db)?;
+    let pages:u64=db.query_row("SELECT COALESCE(sum(pgsize),0) FROM main.dbstat WHERE name IN ('sqlite_schema','sqlite_master')",[],|row|row.get(0)).map_err(|_|SearchError::IndexUnavailable)?;
     if secure != 1 || temporary != 2 || pages == 0 {
+        return Err(SearchError::IndexUnavailable);
+    }
+    Ok(())
+}
+
+pub(super) fn verify_dbstat(db: &Connection) -> SearchResult<()> {
+    let shadow:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='dbstat') OR EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='dbstat')",[],|r|r.get(0))?;
+    let compiled: bool =
+        db.query_row("SELECT sqlite_compileoption_used('ENABLE_DBSTAT_VTAB')", [], |r| r.get(0))?;
+    if shadow || !compiled {
         return Err(SearchError::IndexUnavailable);
     }
     Ok(())
@@ -113,6 +122,7 @@ CREATE TRIGGER IF NOT EXISTS local_search_doc_insert AFTER INSERT ON local_searc
  UPDATE local_search_state SET document_count=document_count+1,revision=revision+1;
  INSERT INTO message_footprint SELECT NEW.message_id,'local_search_doc',CAST(NEW.doc_id AS TEXT) WHERE NEW.message_id IS NOT NULL ON CONFLICT DO NOTHING; END;
 CREATE TRIGGER IF NOT EXISTS local_search_doc_delete BEFORE DELETE ON local_search_doc BEGIN
+ INSERT INTO runtime_privacy_maintenance VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1;
  DELETE FROM local_search_terms WHERE doc_id=OLD.doc_id;
  DELETE FROM local_search_dependency WHERE doc_id=OLD.doc_id;
  DELETE FROM message_footprint WHERE kind='local_search_doc' AND locator=CAST(OLD.doc_id AS TEXT);
@@ -153,22 +163,23 @@ fn install_sources(db: &Connection) -> rusqlite::Result<()> {
                 "SELECT doc_id FROM local_search_dependency WHERE source_table='{table}' AND source_key IN({keys})"
             );
             let mut body = format!(
-                "UPDATE local_search_state SET revision=revision+1,canonical_revision=canonical_revision+1,coverage=CASE WHEN coverage='building' THEN coverage ELSE 'lagging' END; INSERT INTO local_search_dirty SELECT CASE WHEN kind=0 THEN 0 ELSE 1 END,source_key FROM local_search_doc WHERE doc_id IN({selected}) LIMIT max(0,4096-(SELECT count(*) FROM local_search_dirty)) ON CONFLICT DO NOTHING; DELETE FROM local_search_doc WHERE doc_id IN({selected});"
+                "UPDATE local_search_state SET revision=revision+1,canonical_revision=canonical_revision+1,coverage=CASE WHEN coverage='building' THEN coverage ELSE 'lagging' END; INSERT INTO local_search_dirty SELECT DISTINCT CASE WHEN kind=0 THEN 0 ELSE 1 END,source_key FROM local_search_doc WHERE doc_id IN({selected}) LIMIT 4097 ON CONFLICT DO NOTHING; DELETE FROM local_search_doc WHERE doc_id IN({selected});"
             );
             if let Some(kind) = parent {
                 let column = if kind == 0 { "conversation_id" } else { "message_id" };
                 write!(body, "DELETE FROM local_search_doc WHERE {column} IN({keys});")
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                write!(body, "INSERT INTO local_search_dirty SELECT {kind},{current}.{key} WHERE (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
+                write!(body, "INSERT INTO local_search_dirty SELECT {kind},{current}.{key} WHERE length(CAST({current}.{key} AS BLOB))<=256 AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
+                write!(body, "UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=0,checkpoint='',coverage='building',truncated=1 WHERE length(CAST({current}.{key} AS BLOB))>256;").map_err(|_|rusqlite::Error::InvalidQuery)?;
                 if operation == "UPDATE" {
-                    write!(body, "INSERT INTO local_search_dirty SELECT {kind},OLD.{key} WHERE (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
+                    write!(body, "INSERT INTO local_search_dirty SELECT {kind},OLD.{key} WHERE length(CAST(OLD.{key} AS BLOB))<=256 AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
                 }
             }
             if matches!(table, "group_projection" | "shared_group_member_projection") {
                 body.push_str("UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=0,checkpoint='',coverage='building';");
             }
             if table == "runtime_actor_state" {
-                write!(body, "INSERT INTO local_search_dirty SELECT 0,substr({current}.state_kind,24) WHERE {current}.state_kind GLOB 'directory/conversation/*' AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
+                write!(body, "INSERT INTO local_search_dirty SELECT 0,substr({current}.state_kind,24) WHERE {current}.state_kind GLOB 'directory/conversation/*' AND length(CAST(substr({current}.state_kind,24) AS BLOB))<=256 AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
                 body.push_str(
                     "UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=0,checkpoint='',coverage='building';",
                 );

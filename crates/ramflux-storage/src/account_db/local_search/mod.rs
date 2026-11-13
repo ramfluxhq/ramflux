@@ -3,6 +3,7 @@
 
 //! Account-local, derived encrypted search. Activation is a separate owner decision.
 mod cjk;
+mod compact;
 mod control;
 pub(crate) mod lifecycle;
 mod normalizer;

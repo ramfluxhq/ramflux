@@ -121,7 +121,13 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
-            super::super::actor::PrivateCommand::SearchRebuild { owner, job, admission, reply } => {
+            super::super::actor::PrivateCommand::SearchRebuild {
+                owner,
+                job,
+                admission,
+                reset,
+                reply,
+            } => {
                 if !reply.is_closed() {
                     let result = (|| {
                         let pool = self
@@ -132,7 +138,7 @@ impl AccountRuntime {
                             .ok_or_else(stopped)?;
                         let runtime = pool.search_runtime()?;
                         let account = local_bus_account(&self.state, &self.id)?;
-                        runtime.rebuild_batch(&account.client, owner, &job, &admission)
+                        runtime.rebuild_batch(&account.client, owner, &job, &admission, reset)
                     })();
                     let _ = reply.send(result);
                 }

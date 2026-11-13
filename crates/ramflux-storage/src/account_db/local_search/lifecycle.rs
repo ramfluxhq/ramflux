@@ -24,7 +24,7 @@ pub(crate) fn retire_locator(db: &Connection, locator: &str) -> rusqlite::Result
 /// Strips every table/shadow/trigger in the namespace, including unknown cache revisions.
 /// The caller owns a private encrypted candidate and compacts it before publication.
 pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
-    let count:u64=db.query_row("SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger')",[],|row|row.get(0))?;
+    let count:u64=db.query_row("SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view')",[],|row|row.get(0))?;
     if count == 0 {
         return Ok(false);
     }
@@ -32,7 +32,7 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for _ in 0..128 {
-        let mut statement=db.prepare("SELECT CASE WHEN length(name)<=1024 THEN name ELSE NULL END,type FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger') ORDER BY CASE WHEN type='trigger' THEN 0 WHEN sql LIKE 'CREATE VIRTUAL TABLE%' THEN 1 ELSE 2 END,name LIMIT 1")?;
+        let mut statement=db.prepare("SELECT CASE WHEN length(name)<=1024 THEN name ELSE NULL END,type FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view') ORDER BY CASE WHEN type='trigger' THEN 0 WHEN type='view' THEN 1 WHEN type='index' THEN 2 WHEN sql LIKE 'CREATE VIRTUAL TABLE%' THEN 3 ELSE 4 END,name LIMIT 1")?;
         let mut rows = statement.query([])?;
         let Some(row) = rows.next()? else { break };
         let name: Option<String> = row.get(0)?;
@@ -41,10 +41,15 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         drop(rows);
         drop(statement);
         let name = name.replace('"', "\"\"");
-        let command = if kind == "trigger" { "DROP TRIGGER" } else { "DROP TABLE" };
+        let command = match kind.as_str() {
+            "trigger" => "DROP TRIGGER",
+            "index" => "DROP INDEX",
+            "view" => "DROP VIEW",
+            _ => "DROP TABLE",
+        };
         db.execute_batch(&format!("{command} IF EXISTS \"{name}\";"))?;
     }
-    let remaining:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger'))",[],|row|row.get(0))?;
+    let remaining:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view'))",[],|row|row.get(0))?;
     if remaining {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -53,7 +58,12 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         [],
         |row| row.get::<_, bool>(0),
     )? {
-        db.execute("DELETE FROM message_footprint WHERE kind='local_search_doc'", [])?;
+        db.execute("DELETE FROM message_footprint WHERE kind GLOB 'local_search_*'", [])?;
     }
+    // A private archive copy may pass through more than one sanitizer before publication.
+    // Carry compaction responsibility across those copies, never archive search authority.
+    db.execute_batch("CREATE TABLE local_search_compaction_pending(singleton INTEGER PRIMARY KEY CHECK(singleton=1)); INSERT INTO local_search_compaction_pending VALUES(1);")?;
     Ok(true)
 }
+
+pub(crate) use super::compact::compact;

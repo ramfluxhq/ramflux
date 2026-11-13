@@ -27,7 +27,23 @@ impl AccountDb {
                 .try_into()
                 .map_err(|_| SearchError::IndexUnavailable)?,
         ) & i64::MAX;
-        self.connection.call(move |db| Ok(super::schema::initialize(db, epoch.max(1))))??;
+        self.connection.call(|db| Ok(super::schema::prepare(db)))??;
+        let initialize = || {
+            self.write_transaction(|| {
+                self.connection.call(move |db| Ok(super::schema::initialize(db, epoch.max(1))))?
+            })
+        };
+        if initialize().is_err() {
+            // This cache is disposable. Repair only its reserved namespace, atomically;
+            // inability to drop/recreate it remains a typed refusal, never stale fallback.
+            self.write_transaction(|| {
+                self.connection.call(move |db| {
+                    super::lifecycle::strip(db)?;
+                    db.execute_batch("DROP TABLE IF EXISTS local_search_compaction_pending;")?;
+                    Ok(super::schema::initialize(db, epoch.max(1)))
+                })?
+            })?;
+        }
         let watch = self.connection.observe_local_search(Arc::new(SearchWatch::default()));
         let refreshed = Arc::clone(&watch);
         self.connection.call(move |db| {
@@ -42,32 +58,41 @@ impl AccountDb {
         control: &SearchControl,
         read: impl FnOnce(&Connection) -> SearchResult<T> + Send + 'static,
     ) -> SearchResult<T> {
+        self.search_scope(control, || self.connection.call(move |db| Ok(read(db)))?)
+    }
+    pub(crate) fn search_write<T: Send + 'static>(
+        &self,
+        control: &SearchControl,
+        write: impl FnOnce(&Connection) -> SearchResult<T> + Send + 'static,
+    ) -> SearchResult<T> {
+        self.search_scope(control, || {
+            self.write_transaction(|| self.connection.call(move |db| Ok(write(db)))?)
+        })
+    }
+    fn search_scope<T>(
+        &self,
+        control: &SearchControl,
+        execute: impl FnOnce() -> SearchResult<T>,
+    ) -> SearchResult<T> {
         control.check()?;
-        let control = control.clone();
-        self.connection.call(move |db| {
-            let autocommit = db.is_autocommit();
-            let result = (|| {
-                control.check()?;
-                db.busy_timeout(Duration::ZERO)?;
-                let interrupt = control.clone();
-                db.progress_handler(VM_CALLBACK_STEPS, Some(move || interrupt.vm_interrupt()))?;
-                db.execute_batch("PRAGMA cache_size=-8192; PRAGMA temp_store=MEMORY;")?;
-                control.check()?;
-                let result = read(db);
-                control.check()?;
-                result
-            })();
+        let interrupt = control.clone();
+        let setup = self.connection.call(move |db| {
+            db.busy_timeout(Duration::ZERO)?;
+            db.progress_handler(VM_CALLBACK_STEPS, Some(move || interrupt.vm_interrupt()))?;
+            db.execute_batch("PRAGMA cache_size=-6144; PRAGMA temp_store=MEMORY;")
+        });
+        let result = match setup {
+            Ok(()) => execute(),
+            Err(error) => Err(error.into()),
+        };
+        let budget = control.check();
+        let cleanup = self.connection.call(|db| {
             db.progress_handler(0, None::<fn() -> bool>)?;
-            if autocommit && !db.is_autocommit() {
-                db.execute_batch("ROLLBACK")?;
-            }
-            let restored = db.busy_timeout(Duration::from_secs(5));
-            Ok(match (result, restored) {
-                (Ok(value), Ok(())) => Ok(value),
-                (Err(error), _) => Err(error),
-                (_, Err(error)) => Err(error.into()),
-            })
-        })?
+            db.busy_timeout(Duration::from_secs(5))
+        });
+        cleanup?;
+        budget?;
+        result
     }
 
     /// # Errors
@@ -93,27 +118,27 @@ impl AccountDb {
         source.validate()?;
         let normalized = normalize_document(source.text.expose(), control)?;
         let control_inner = control.clone();
-        self.search_call(control,move |db| {
-            let tx=db.unchecked_transaction()?;
-            let current=revision(&tx)?;
+        self.search_write(control,move |db| {
+
+            let current=revision(db)?;
             if current.epoch!=expected.epoch || current.canonical!=expected.canonical {return Err(SearchError::CursorStale);}
-            tx.execute("DELETE FROM local_search_doc WHERE kind=?1 AND source_ref=?2",params![source.kind.ordinal(),source.source_ref])?;
-            let count:u64=tx.query_row("SELECT document_count FROM local_search_state WHERE singleton=1",[],|r|r.get(0))?;
-            if count>=MAX_DOCUMENTS || index_bytes(&tx)?>=MAX_INDEX_BYTES {return Err(SearchError::Capacity);}
+            db.execute("DELETE FROM local_search_doc WHERE kind=?1 AND source_ref=?2",params![source.kind.ordinal(),source.source_ref])?;
+            let count:u64=db.query_row("SELECT document_count FROM local_search_state WHERE singleton=1",[],|r|r.get(0))?;
+            if count>=MAX_DOCUMENTS || index_bytes(db)?>=MAX_INDEX_BYTES {return Err(SearchError::Capacity);}
             control_inner.check()?;
-            tx.execute("INSERT INTO local_search_doc(kind,source_ref,source_key,conversation_id,message_id,source_revision,timestamp,source_hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![source.kind.ordinal(),source.source_ref,source.source_key,source.conversation_id,source.message_id,source.revision.to_string(),source.timestamp,source.fingerprint().as_slice()])?;
-            let id=tx.last_insert_rowid();
+            db.execute("INSERT INTO local_search_doc(kind,source_ref,source_key,conversation_id,message_id,source_revision,timestamp,source_hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![source.kind.ordinal(),source.source_ref,source.source_key,source.conversation_id,source.message_id,source.revision.to_string(),source.timestamp,source.fingerprint().as_slice()])?;
+            let id=db.last_insert_rowid();
             let mut tokens=zeroize::Zeroizing::new(format!("k{} ",source.kind.ordinal()));
             tokens.push_str(normalized.tokens.expose());
-            tx.execute("INSERT INTO local_search_terms(doc_id,tokens) VALUES(?1,?2)",params![id,tokens.as_str()])?;
+            db.execute("INSERT INTO local_search_terms(doc_id,tokens) VALUES(?1,?2)",params![id,tokens.as_str()])?;
             for dependency in source.dependencies {
                 control_inner.check()?;
-                tx.execute("INSERT OR IGNORE INTO local_search_dependency VALUES(?1,?2,?3)",params![dependency.table,dependency.key,id])?;
+                db.execute("INSERT OR IGNORE INTO local_search_dependency VALUES(?1,?2,?3)",params![dependency.table,dependency.key,id])?;
             }
-            if normalized.truncated {tx.execute("UPDATE local_search_state SET truncated=1",[])?;}
-            if index_bytes(&tx)?>MAX_INDEX_BYTES {return Err(SearchError::Capacity);}
+            if normalized.truncated {db.execute("UPDATE local_search_state SET truncated=1",[])?;}
+            if index_bytes(db)?>MAX_INDEX_BYTES {return Err(SearchError::Capacity);}
             control_inner.check()?;
-            tx.commit()?;
+
             Ok(())
         })
     }
@@ -158,7 +183,7 @@ impl AccountDb {
     ) -> SearchResult<SearchIndexStatus> {
         self.search_call(control,|db| {
             let (coverage,count,truncated,quota):(String,u64,bool,bool)=db.query_row("SELECT coverage,document_count,truncated,quota_limited FROM local_search_state WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-            let coverage=match coverage.as_str(){"building"=>SearchCoverage::Building,"lagging"=>SearchCoverage::Lagging,"complete" if quota=>SearchCoverage::QuotaLimited,"complete" if truncated=>SearchCoverage::Truncated,"complete"=>SearchCoverage::Complete,"failed"=>SearchCoverage::Failed,_=>return Err(SearchError::IndexUnavailable)};
+            let coverage=match coverage.as_str(){"failed"=>SearchCoverage::Failed,_ if quota=>SearchCoverage::QuotaLimited,"building"=>SearchCoverage::Building,"lagging"=>SearchCoverage::Lagging,"complete" if truncated=>SearchCoverage::Truncated,"complete"=>SearchCoverage::Complete,_=>return Err(SearchError::IndexUnavailable)};
             Ok(SearchIndexStatus{coverage,indexed_documents:count,..SearchIndexStatus::disabled()})
         })
     }
@@ -174,8 +199,9 @@ pub(super) fn revision(db: &Connection) -> SearchResult<SearchIndexRevision> {
     .ok_or(SearchError::IndexUnavailable)
 }
 fn index_bytes(db: &Connection) -> SearchResult<u64> {
+    super::schema::verify_dbstat(db)?;
     db.query_row(
-        "SELECT COALESCE(sum(pgsize),0) FROM dbstat WHERE name GLOB 'local_search_*'",
+        "SELECT COALESCE(sum(pgsize),0) FROM main.dbstat WHERE name GLOB 'local_search_*'",
         [],
         |r| r.get(0),
     )

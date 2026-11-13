@@ -81,3 +81,63 @@ impl Cursors {
         Ok(token)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_search_cursor_scope_capacity_and_expiry() -> Result<(), Box<dyn std::error::Error>> {
+        let mut cursors = Cursors::default();
+        let epoch = SearchViewEpoch { unlock: 7, publication: 8, erasure: 9, index: 10 };
+        let token = cursors.insert(1, "account", [4; 32], epoch, (SearchKind::Message, 42))?;
+        assert_eq!(token.expose().len(), 43, "cursor must carry 256 unpredictable bits");
+        assert!(
+            matches!(
+                cursors.take(2, "account", [4; 32], epoch, token.expose()),
+                Err(SearchError::CursorStale)
+            ),
+            "cross-client cursor must be refused without consuming its owner's token"
+        );
+        let changed = SearchViewEpoch { index: 11, ..epoch };
+        assert!(
+            matches!(
+                cursors.take(1, "account", [4; 32], changed, token.expose()),
+                Err(SearchError::CursorStale)
+            ),
+            "changed source epoch must refuse cursor continuation"
+        );
+        assert_eq!(
+            cursors.take(1, "account", [4; 32], epoch, token.expose())?,
+            (SearchKind::Message, 42),
+            "owner may resume only the exact query and epoch"
+        );
+        assert!(
+            matches!(
+                cursors.take(1, "account", [4; 32], epoch, token.expose()),
+                Err(SearchError::CursorStale)
+            ),
+            "consumed cursors cannot be replayed"
+        );
+        for _ in 0..MAX_CURSORS {
+            cursors.insert(1, "account", [4; 32], epoch, (SearchKind::Message, 42))?;
+        }
+        assert!(
+            matches!(
+                cursors.insert(1, "account", [4; 32], epoch, (SearchKind::Message, 42)),
+                Err(SearchError::Capacity)
+            ),
+            "cursor capacity must be per client"
+        );
+        cursors.disconnect(1);
+        let token = cursors.insert(1, "account", [4; 32], epoch, (SearchKind::Message, 42))?;
+        cursors.0.get_mut(token.expose()).ok_or("cursor")?.expires = Instant::now();
+        assert!(
+            matches!(
+                cursors.take(1, "account", [4; 32], epoch, token.expose()),
+                Err(SearchError::CursorStale)
+            ),
+            "expired cursor must not retain a usable keyset"
+        );
+        Ok(())
+    }
+}

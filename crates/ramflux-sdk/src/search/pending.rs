@@ -40,44 +40,6 @@ impl LocalSearch {
         );
         drop(retired);
     }
-    pub(crate) fn start_rebuild(
-        &self,
-        owner: u64,
-        id: &str,
-    ) -> Result<Arc<std::sync::atomic::AtomicBool>, SdkError> {
-        if id.is_empty() || id.len() > 128 {
-            return Err(SearchError::InvalidQuery.into());
-        }
-        let mut rebuild = self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if rebuild.is_some() {
-            return Err(SearchError::Capacity.into());
-        }
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        *rebuild = Some((owner, id.to_owned(), Arc::clone(&cancelled)));
-        Ok(cancelled)
-    }
-    pub(crate) fn cancel_rebuild(&self, owner: u64, id: &str) {
-        let mut rebuild = self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if rebuild.as_ref().is_some_and(|(client, job, _)| *client == owner && job == id)
-            && let Some((_, _, cancelled)) = rebuild.take()
-        {
-            cancelled.store(true, std::sync::atomic::Ordering::Release);
-            self.cancel(owner, id);
-        }
-    }
-    pub(crate) fn finish_rebuild(
-        &self,
-        owner: u64,
-        id: &str,
-        token: &Arc<std::sync::atomic::AtomicBool>,
-    ) {
-        let mut rebuild = self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if rebuild.as_ref().is_some_and(|(client, job, current)| {
-            *client == owner && job == id && Arc::ptr_eq(current, token)
-        }) {
-            rebuild.take();
-        }
-    }
     pub(crate) fn queue_completion(
         &self,
         owner: u64,
@@ -120,7 +82,7 @@ impl LocalSearch {
             .filter(|(client, _, _)| *client == owner)
             .map(|(_, id, _)| id.clone());
         if let Some(job) = job {
-            self.cancel_rebuild(owner, &job);
+            let _ = self.cancel_rebuild(owner, self.unlock, &job);
         }
         self.cursors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).disconnect(owner);
         let retired = {
@@ -142,10 +104,13 @@ impl LocalSearch {
             }
         }
     }
-    pub(crate) fn status(&self, client: &RamfluxClient) -> Result<SearchIndexStatus, SdkError> {
+    pub fn index_status(&self, client: &RamfluxClient) -> Result<SearchIndexStatus, SdkError> {
         let control = SearchControl::new();
+        let epoch = self.epoch(client, &control)?;
         let mut status = client.account_db()?.search_index_status(&self.activation, &control)?;
-        status.view_epoch = Some(self.epoch(client, &control)?);
+        status.view_epoch = Some(epoch);
+        status.rebuild =
+            self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         Ok(status)
     }
 }
@@ -156,7 +121,7 @@ impl LocalSearch {
         client: &RamfluxClient,
         (owner, request): (u64, &str),
         page: SearchPage,
-        stamp: u64,
+        (stamp, expires_at): (u64, Option<i64>),
         admission: Admission,
     ) -> Result<SearchCompletion, SdkError> {
         let generation =
@@ -197,6 +162,8 @@ impl LocalSearch {
             page,
             watch: Arc::clone(&self.watch),
             stamp,
+            clock: client.account_db()?.search_clock(&self.activation),
+            expires_at,
             _watch: registration,
             _erasure: erasure,
             admission,

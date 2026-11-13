@@ -22,7 +22,7 @@ impl Drop for PrivateJson {
         crate::bus::secrets::wipe(&mut self.0);
     }
 }
-fn json(bytes: &[u8]) -> Result<PrivateJson, SdkError> {
+fn check_json_budget(bytes: &[u8]) -> Result<(), SdkError> {
     if bytes.len() > MAX_NORMALIZED_BYTES
         || bytes
             .iter()
@@ -33,6 +33,10 @@ fn json(bytes: &[u8]) -> Result<PrivateJson, SdkError> {
     {
         return Err(SearchError::Capacity.into());
     }
+    Ok(())
+}
+fn json(bytes: &[u8]) -> Result<PrivateJson, SdkError> {
+    check_json_budget(bytes)?;
     serde_json::from_slice(bytes).map(PrivateJson).map_err(|_| SearchError::IndexUnavailable.into())
 }
 fn dependency(table: &str, key: impl Into<String>) -> SearchDependency {
@@ -82,7 +86,7 @@ pub(super) fn sources(
         }
     }
     let message = if let Some(projection) = input.group_projection.as_ref() {
-        let _ = json(projection)?;
+        check_json_budget(projection)?;
         serde_json::from_slice::<super::projection::DisplayMessage>(projection)
             .map_err(|_| SearchError::IndexUnavailable)?
     } else {
@@ -121,29 +125,41 @@ pub(super) fn sources(
             message_id: Some(key.into()),
             revision: input.revision,
             timestamp: input.created_at,
+            expires_at: input.expires_at,
             text: message.text.as_str().into(),
             dependencies: dependencies.clone(),
         });
     }
-    for media in message.media.iter().take(32) {
+    for (ordinal, media) in message.media.iter().take(32).enumerate() {
         control.check()?;
         let Some(name) = media.file_name.as_ref() else { continue };
         let basename = name.rsplit(['/', '\\']).next().unwrap_or("");
-        if basename.is_empty()
-            || !db.search_attachment_admitted(activation, key, &media.object_id, control)?
-        {
+        if basename.is_empty() || media.manifest_digest.len() != 32 {
             continue;
         }
+        let manifest = ramflux_protocol::encode_base64url(&media.manifest_digest);
+        let Some(admitted) = db.search_attachment_dependencies(
+            activation,
+            key,
+            &media.object_id,
+            &manifest,
+            control,
+        )?
+        else {
+            continue;
+        };
         let mut dependencies = dependencies.clone();
+        dependencies.extend(admitted);
         dependencies.push(dependency("object_index", &media.object_id));
         output.push(SearchSource {
             kind: SearchKind::Attachment,
-            source_ref: format!("{key}/{}", media.object_id),
+            source_ref: format!("{key}/{}/{ordinal}", media.object_id),
             source_key: key.into(),
             conversation_id: input.conversation_id.clone(),
             message_id: Some(key.into()),
             revision: input.revision,
             timestamp: input.created_at,
+            expires_at: input.expires_at,
             text: basename.into(),
             dependencies,
         });
@@ -180,11 +196,16 @@ fn conversation(
         dependencies.push(dependency("group_projection", group));
     }
     let mut text = zeroize::Zeroizing::new(String::new());
-    if let Some(title) = metadata.get("title").and_then(Value::as_str) {
-        let _ = append(&mut text, title);
+    if let Some(title) = metadata.get("title").and_then(Value::as_str)
+        && !append(&mut text, title)
+    {
+        return Err(SearchError::Capacity.into());
     }
     if let Some(participants) = metadata.get("participants").and_then(Value::as_array) {
-        for participant in participants.iter().take(128).filter_map(Value::as_str) {
+        if participants.len() > 1024 {
+            return Err(SearchError::Capacity.into());
+        }
+        for participant in participants.iter().take(1024).filter_map(Value::as_str) {
             control.check()?;
             if participant.len() > 256 || !append(&mut text, participant) {
                 return Err(SearchError::Capacity.into());
@@ -192,8 +213,10 @@ fn conversation(
             let actor = format!("directory/identity/{participant}");
             if let Some(bytes) = db.search_actor_bytes(activation, &actor, control)? {
                 let metadata = json(&bytes)?;
-                if let Some(name) = metadata.get("display_name").and_then(Value::as_str) {
-                    let _ = append(&mut text, name);
+                if let Some(name) = metadata.get("display_name").and_then(Value::as_str)
+                    && !append(&mut text, name)
+                {
+                    return Err(SearchError::Capacity.into());
                 }
             }
             dependencies.push(dependency("runtime_actor_state", actor));
@@ -210,6 +233,7 @@ fn conversation(
         message_id: None,
         revision: metadata.get("revision").and_then(Value::as_u64).unwrap_or(0),
         timestamp: 0,
+        expires_at: None,
         text: std::mem::take(&mut *text).into(),
         dependencies,
     }])

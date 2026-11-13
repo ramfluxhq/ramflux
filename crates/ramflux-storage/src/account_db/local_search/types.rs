@@ -262,8 +262,26 @@ pub enum SearchCoverage {
     QuotaLimited,
     Failed,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchRebuildState {
+    Queued,
+    Running,
+    Paused,
+    Cancelled,
+    Failed,
+    Complete,
+    QuotaLimited,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchRebuildProgress {
+    pub job_id: SearchText,
+    pub state: SearchRebuildState,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchIndexStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuild: Option<SearchRebuildProgress>,
     pub format: u32,
     pub normalizer: String,
     pub coverage: SearchCoverage,
@@ -275,6 +293,7 @@ impl SearchIndexStatus {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
+            rebuild: None,
             format: SEARCH_FORMAT,
             normalizer: "unicode16-nfkc-casefold-1".to_owned(),
             coverage: SearchCoverage::Disabled,
@@ -340,6 +359,7 @@ pub struct SearchSource {
     pub message_id: Option<String>,
     pub revision: u64,
     pub timestamp: i64,
+    pub expires_at: Option<i64>,
     pub text: SearchText,
     pub dependencies: Vec<SearchDependency>,
 }
@@ -390,6 +410,8 @@ impl SearchSource {
             hash.update(field.as_bytes());
         }
         hash.update(&self.revision.to_le_bytes());
+        hash.update(&[u8::from(self.expires_at.is_some())]);
+        hash.update(&self.expires_at.unwrap_or_default().to_le_bytes());
         *hash.finalize().as_bytes()
     }
 }

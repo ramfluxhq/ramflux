@@ -326,6 +326,18 @@ async fn write_responses<W: AsyncWrite + Unpin>(
             }
             continue;
         }
+        if crate::search::capability::is_method(&frame.method) {
+            let encoded = super::io::encode_local_bus_frame(&frame);
+            super::secrets::wipe(&mut frame.body);
+            let encoded = zeroize::Zeroizing::new(encoded?);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                super::io::write_encoded_local_bus_frame(&mut writer, &encoded),
+            )
+            .await
+            .map_err(|_| closed())??;
+            continue;
+        }
         write_local_bus_frame(&mut writer, &frame).await?;
         if frame.method == "daemon.stop" {
             supervisor.finish_stop_response(id, &frame.request_id);

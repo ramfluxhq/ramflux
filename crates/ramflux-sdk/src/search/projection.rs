@@ -49,6 +49,9 @@ pub(super) struct DisplayMedia {
     #[prost(string, tag = "1")]
     #[serde(alias = "object_id")]
     pub object_id: String,
+    #[serde(default, deserialize_with = "digest_bytes", alias = "manifest_digest")]
+    #[prost(bytes = "vec", tag = "2")]
+    pub manifest_digest: Vec<u8>,
     #[serde(default)]
     #[prost(string, optional, tag = "6")]
     #[serde(alias = "file_name")]
@@ -57,6 +60,7 @@ pub(super) struct DisplayMedia {
 impl Drop for DisplayMedia {
     fn drop(&mut self) {
         self.object_id.zeroize();
+        self.manifest_digest.zeroize();
         self.file_name.zeroize();
     }
 }
@@ -99,4 +103,18 @@ fn entity_kind<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32,
             .ok_or_else(|| serde::de::Error::custom("invalid entity kind")),
         _ => Err(serde::de::Error::custom("invalid entity kind")),
     }
+}
+
+fn digest_bytes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.len() > 44 {
+        return Err(serde::de::Error::custom("invalid media digest"));
+    }
+    let normalized = value.trim_end_matches('=').replace('+', "-").replace('/', "_");
+    let decoded = ramflux_protocol::decode_base64url(&normalized)
+        .map_err(|_| serde::de::Error::custom("invalid media digest"))?;
+    if decoded.len() != 32 {
+        return Err(serde::de::Error::custom("invalid media digest"));
+    }
+    Ok(decoded)
 }
