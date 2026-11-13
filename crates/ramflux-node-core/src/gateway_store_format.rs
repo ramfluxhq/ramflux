@@ -29,7 +29,7 @@ fn open_with(
         .open(directory.join(".gateway-init.lock"))
         .map_err(redb_error)?;
     fs2::FileExt::lock_exclusive(&initialization).map_err(redb_error)?;
-    sweep_abandoned_stages(directory, std::time::SystemTime::now())?;
+    sweep_abandoned_stages(directory, path, std::time::SystemTime::now())?;
     let mut builder = redb::Database::builder();
     builder.set_cache_size(super::GATEWAY_REPLAY_PAGE_CACHE_BYTES);
     if !path.try_exists().map_err(redb_error)? {
@@ -80,11 +80,14 @@ fn open_with(
 }
 fn sweep_abandoned_stages(
     directory: &Path,
+    public_path: &Path,
     before: std::time::SystemTime,
 ) -> Result<(), NodeCoreError> {
     for entry in std::fs::read_dir(directory).map_err(redb_error)? {
         let entry = entry.map_err(redb_error)?;
-        if !entry.file_name().to_string_lossy().starts_with(".gateway-init-") {
+        if Some(entry.file_name().as_os_str()) == public_path.file_name()
+            || !entry.file_name().to_string_lossy().starts_with(".gateway-init-")
+        {
             continue;
         }
         let metadata = entry.metadata().map_err(redb_error)?;
@@ -158,6 +161,32 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn staging_cleanup_preserves_public_database_with_reserved_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join(".gateway-init-public.redb");
+        let store = crate::GatewayRedbStore::open(&path)?;
+        let mut state = crate::GatewayState::new();
+        state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig {
+            per_source_ip_handshake_rate: 7,
+            ..Default::default()
+        })?;
+        store.save_state(&state)?;
+        drop(store);
+        let reopened = crate::GatewayRedbStore::open(&path)?;
+        assert_eq!(
+            reopened
+                .load_state()?
+                .ok_or("test: public snapshot lost")?
+                .pre_auth_policy()
+                .per_source_ip_handshake_rate,
+            7,
+            "staging cleanup must never replace the configured public database"
+        );
+        Ok(())
+    }
+
     #[test]
     fn active_initializer_holds_cleanup_lock_until_publication()
     -> Result<(), Box<dyn std::error::Error>> {
