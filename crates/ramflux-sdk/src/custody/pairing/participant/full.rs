@@ -219,7 +219,6 @@ impl LocalPairingParticipant {
                             && entry.recipient_mode == "new"
                             && entry.install_purpose == "transfer_destination"
                             && entry.state == "vault_durable"
-                            && entry.record_hash.is_none()
                             && entry.prior_record_hash.is_none()
                     })
             } else {

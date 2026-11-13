@@ -42,6 +42,13 @@ impl FullStreamWork {
         manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
         self.fresh().await?;
+        if self.prepared_candidate {
+            // The durable candidate pins the already verified union. Reconnecting
+            // cannot rebuild it from a later B snapshot or mint another candidate.
+            let proof = self.io.prepared_duplex().await?;
+            self.packet.allow_verified_duplex(&proof)?;
+            return Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None });
+        }
         let pinned = self.io.pin_original_receiver_base().await?;
         let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
         let work = self.io.receiver_replay_work(copy, &hash(&manifest)?).await?;

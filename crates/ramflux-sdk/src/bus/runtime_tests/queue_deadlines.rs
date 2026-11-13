@@ -17,9 +17,9 @@ struct Fixture {
     actor: AccountActor,
     connection: ConnectionHandle,
     io: SessionIo,
-    root: PathBuf,
     reader: AccountDb,
     router: tokio::task::JoinHandle<()>,
+    temp: tempfile::TempDir,
 }
 fn command(method: &str, body: serde_json::Value) -> AccountCommand {
     let (outbound, _) = mpsc::channel(1);
@@ -36,7 +36,8 @@ fn command(method: &str, body: serde_json::Value) -> AccountCommand {
     }
 }
 async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Error>> {
-    let root = crate::bus::runtime_tests::root("queue-origin");
+    let temp = tempfile::Builder::new().prefix("ramflux-queue-origin-").tempdir()?;
+    let root = temp.path().to_path_buf();
     let index = AccountIndex::open(&root)?;
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
     let router = tokio::task::spawn_local(async move {
@@ -98,7 +99,7 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
     .await?;
     let (connection, io, reader) = installed.await?;
     connection.require_live(held).await?;
-    Ok(Fixture { actor, connection, io, root, reader, router })
+    Ok(Fixture { actor, connection, io, temp, reader, router })
 }
 
 #[tokio::test(start_paused = true)]
@@ -127,7 +128,7 @@ async fn case(post_claim: Duration) -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { actor, connection, mut io, root, router, reader } = fixture(post_claim).await?;
+    let Fixture { actor, connection, mut io, temp, router, reader } = fixture(post_claim).await?;
     let owner = connection.clone();
     let courier = tokio::spawn(async move {
         owner
@@ -190,7 +191,7 @@ async fn case(post_claim: Duration) -> Case {
     clock.abort();
     let _ = clock.await;
     drop(reader);
-    std::fs::remove_dir_all(root)?;
+    temp.close()?;
     Ok(())
 }
 

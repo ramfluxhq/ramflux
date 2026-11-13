@@ -122,6 +122,7 @@ enum FullLocalAction {
     ReceiverReplay { copy: Box<ramflux_storage::FullReceiverBaseCopy>, hash: String },
     Reverse(reverse::Action),
     VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
+    PreparedDuplex,
     Semantic(application::Action),
     SourceDelta(source_delta::Action),
     ProjectReceiverDelta { copy: Box<ramflux_storage::FullReceiverBaseCopy>, hash: String },
@@ -164,7 +165,15 @@ impl FullLocalIoRequest {
         if matches!(
             &self.action,
             FullLocalAction::PrepareEmptyReverse
-                | FullLocalAction::Reverse(_)
+                | FullLocalAction::Reverse(
+                    reverse::Action::PrepareSource
+                        | reverse::Action::AcceptSource(_)
+                        | reverse::Action::RetainChunk { .. }
+                        | reverse::Action::Prefix(_)
+                        | reverse::Action::Validate(_)
+                        | reverse::Action::AcceptInput(_)
+                        | reverse::Action::Merge(_)
+                )
                 | FullLocalAction::Rebind(_)
                 | FullLocalAction::ReceiverReplay { .. }
                 | FullLocalAction::SourceDelta(_)
@@ -182,6 +191,19 @@ impl FullLocalIoRequest {
         {
             return Err(wrong());
         }
+        if matches!(&self.action, FullLocalAction::PreparedDuplex) {
+            let head = db.pairing_head()?.ok_or_else(wrong)?;
+            if self.scope.role != PairingRole::Responder
+                || row.phase != "prepared"
+                || head.state != "prepared"
+                || head.kind != "transfer"
+                || head.operation_id != self.scope.operation
+                || head.generation != self.scope.generation
+                || row.proposal_hash.as_deref() != Some(head.candidate_hash.as_str())
+            {
+                return Err(wrong());
+            }
+        }
         let mut stage = db.open_full_transfer_stage(
             &self.scope.operation,
             self.scope.role,
@@ -195,6 +217,20 @@ impl FullLocalIoRequest {
         self.scope.require_db(db)?;
         Ok(FullLocalIoReply(result))
     }
+}
+
+fn verified_duplex(
+    scope: &FullLocalIoScope,
+    stage: &FullTransferStage<'_>,
+    copy: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
+) -> Result<FullLocalResult, SdkError> {
+    if (scope.role == PairingRole::Responder) != copy.is_some() {
+        return Err(wrong());
+    }
+    if let Some(copy) = &copy {
+        copy.require_materialized_generation(stage)?;
+    }
+    Ok(FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, copy))
 }
 
 fn apply_action(
@@ -219,15 +255,10 @@ fn apply_action(
         FullLocalAction::Reverse(action) => {
             FullLocalResult::Reverse(reverse::apply(action, scope, stage)?)
         }
-        FullLocalAction::VerifyDuplex(copy) => {
-            if (scope.role == PairingRole::Responder) != copy.is_some() {
-                return Err(wrong());
-            }
-            if let Some(copy) = &copy {
-                copy.require_materialized_generation(&stage)?;
-            }
-            FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, copy)
+        FullLocalAction::PreparedDuplex => {
+            FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, None)
         }
+        FullLocalAction::VerifyDuplex(copy) => verified_duplex(scope, &stage, copy)?,
         FullLocalAction::SourceDelta(action) => {
             FullLocalResult::SourceDelta(source_delta::apply(action, scope, stage)?)
         }

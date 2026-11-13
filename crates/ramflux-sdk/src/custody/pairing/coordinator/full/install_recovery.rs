@@ -59,6 +59,9 @@ impl PairingActor {
             let Some((install, query, selected)) = pending else { return Ok(None) };
             let observation =
                 self.full_runtime.clone().run_blocking(move || query.observe()).await?;
+            if !selected && self.unpublished_prepared_candidate(&install, &observation).await? {
+                return Ok(None);
+            }
             let (install, authority, expires) = if selected {
                 let authority = observation.authority().clone();
                 let expires =
@@ -93,6 +96,42 @@ impl PairingActor {
                 .map(Some)
         })
     }
+    async fn unpublished_prepared_candidate(
+        &self,
+        install: &install_store::Install,
+        observation: &crate::custody::pairing::FullRecipientNativeObservation,
+    ) -> Result<bool, SdkError> {
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let saved = install.clone();
+        let authority = observation.authority().clone();
+        self.installation_loan(move |db| {
+            let Some(head) = db.pairing_head()? else { return Ok(false) };
+            if head.state != "prepared"
+                || ramflux_protocol::custody::object_hash(&authority.publication.record)?
+                    != head.base_record_hash
+            {
+                return Ok(false);
+            }
+            let current = ramflux_crypto::custody::verify_publication(
+                &authority,
+                crate::custody::network_now()?,
+            )?;
+            let live = db
+                .pairing_live_rows()?
+                .into_iter()
+                .find(|row| row.operation_id == saved.operation_id)
+                .ok_or(SdkError::PairingCode("WrongContext"))?;
+            let candidate = participant
+                .retained_full_candidate_in(db, &live, &current, crate::custody::network_now()?)?
+                .ok_or(SdkError::PairingCode("WrongContext"))?;
+            if candidate.install() != &saved {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok(true)
+        })
+        .await
+    }
+
     async fn recover_selected_install(
         &self,
         install: install_store::Install,

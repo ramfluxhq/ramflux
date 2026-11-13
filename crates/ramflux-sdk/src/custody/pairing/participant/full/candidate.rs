@@ -26,6 +26,7 @@ use ramflux_protocol::{
 };
 use ramflux_storage::{AccountDb, FullDuplexReceipt, HeadRow, LiveRow};
 mod frontend;
+mod recovery;
 
 /// Frozen candidate and B-local owners. No source preservation or publication approval.
 pub struct FullPreparedTransferCandidate {

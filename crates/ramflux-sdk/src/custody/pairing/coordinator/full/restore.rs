@@ -152,7 +152,8 @@ impl PairingActor {
             common: Some(legacy),
             verified_invite: Some(snapshot.invitation),
         });
-        ceremony.phase = "mutually_confirmed".into();
+        ceremony.phase =
+            if snapshot.candidate.is_some() { "prepared" } else { "mutually_confirmed" }.into();
         ceremony.expires_at = expires;
         ceremony.displayed_th = Some(th);
         let peer = if role == PairingRole::Initiator {
@@ -163,6 +164,11 @@ impl PairingActor {
         ceremony.peer_ref = Some(peer.device_ref.clone());
         ceremony.peer_name = Some(peer.display_name.clone());
         let mut full = FullCeremony::new(common, None);
+        if let Some(candidate) = &snapshot.candidate {
+            ceremony.displayed_proposal =
+                Some(ramflux_protocol::custody::object_hash(&candidate.publication().record)?);
+        }
+        full.candidate = snapshot.candidate;
         full.node = Some(node.clone());
         full.transcript = Some(snapshot.context);
         full.bootstrap = Some(BootstrapState::restored(

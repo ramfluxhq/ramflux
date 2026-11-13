@@ -23,6 +23,8 @@ use ramflux_storage::{AccountDb, FullStageIoCancel, LiveRow};
 use std::sync::Arc;
 
 pub(crate) struct FullDataResume {
+    pub(in crate::custody::pairing) candidate:
+        Option<super::super::super::FullPreparedTransferCandidate>,
     pub(in crate::custody::pairing) live: LiveRow,
     pub(in crate::custody::pairing) invitation: Envelope<Invitation>,
     pub(in crate::custody::pairing) context: TranscriptV3,
@@ -52,9 +54,13 @@ impl LocalPairingParticipant {
         if live.generation != request.generation {
             return Err(wrong());
         }
-        if live.phase != "mutually_confirmed" || db.pairing_head()?.is_some() {
+        if live.phase != "mutually_confirmed"
+            && !(live.role == "responder" && live.phase == "prepared")
+        {
             return Err(SdkError::PairingCode("PublicationPending"));
         }
+        let candidate =
+            self.retained_full_candidate_in(db, &live, current, custody::network_now()?)?;
         let role = match live.role.as_str() {
             "initiator" => PairingRole::Initiator,
             "responder" => PairingRole::Responder,
@@ -94,6 +100,7 @@ impl LocalPairingParticipant {
         )?
         .map(|entry| entry.frontend_generation);
         Ok(FullDataResume {
+            candidate,
             live,
             invitation,
             context,

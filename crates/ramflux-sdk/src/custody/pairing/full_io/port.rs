@@ -309,6 +309,16 @@ impl FullLocalIoPort {
         Ok(())
     }
 
+    pub(crate) async fn prepared_duplex(
+        &mut self,
+    ) -> Result<ramflux_storage::FullDuplexReceipt, SdkError> {
+        let FullLocalResult::Duplex(proof, None) =
+            self.request(FullLocalAction::PreparedDuplex).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(proof)
+    }
     pub(crate) async fn verify_duplex(
         &mut self,
         copy: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,

@@ -318,7 +318,8 @@ async fn cold_status(
     )?;
     let adoption =
         client.account_db()?.pairing_adoption()?.ok_or("test: terminal adoption missing")?;
-    let reference: DeviceRef = ramflux_protocol::parse_i_json(&adoption.local_ref)?;
+    let reference: ramflux_protocol::custody::DeviceRef =
+        ramflux_protocol::parse_i_json(&adoption.local_ref)?;
     let mut actor = PairingActor::new(
         PairingIdentity {
             account_id: participant.account_id.clone(),
