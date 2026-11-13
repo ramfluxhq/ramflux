@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Idle positions use each endpoint's own persisted DV and still finish the reverse proof.
+use super::{
+    DataPacket, FullStreamFinished, FullStreamWork, SdkError, SourceManifest, hash, mismatch, wire,
+};
+use ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler;
+impl FullStreamWork {
+    pub(super) async fn send_idle(&mut self, manifest: &SourceManifest) -> Result<(), SdkError> {
+        let own = self.idle_manifest.as_ref().ok_or_else(mismatch)?;
+        if hash(own)? != hash(manifest)? {
+            return Err(mismatch());
+        }
+        let encrypted = self.packet.seal_packet(&DataPacket::Idle { last_verified: hash(own)? })?;
+        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+        self.forward_started = true;
+        self.flush_rebind().await
+    }
+    pub(super) async fn receive_position(&mut self) -> Result<(SourceManifest, bool), SdkError> {
+        let packet = self.receive().await?;
+        if let DataPacket::Idle { last_verified } = packet {
+            let own = self.idle_manifest.as_ref().ok_or_else(mismatch)?;
+            if hash(own)? != last_verified {
+                return Err(mismatch());
+            }
+            return Ok((own.clone(), true));
+        }
+        let mut assembler = ManifestAssembler::default();
+        if let Some(manifest) = assembler.push(&packet).map_err(|error| wire(&error))? {
+            return Ok((manifest, false));
+        }
+        loop {
+            let packet = self.receive().await?;
+            if let Some(manifest) = assembler.push(&packet).map_err(|error| wire(&error))? {
+                return Ok((manifest, false));
+            }
+        }
+    }
+    pub(super) async fn finish_idle_destination(
+        mut self,
+        manifest: SourceManifest,
+    ) -> Result<FullStreamFinished, SdkError> {
+        self.fresh().await?;
+        let pinned = self.io.pin_original_receiver_base().await?;
+        let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
+        let work = self.io.receiver_replay_work(copy, &hash(&manifest)?).await?;
+        let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(work.replay()?))).await?;
+        self.fresh().await?;
+        let copy = self.io.retain_replayed_application(copy).await?;
+        let (proof, receiver) = self.io.verify_duplex(Some(copy)).await?;
+        self.packet.allow_verified_duplex(&proof)?;
+        Ok(FullStreamFinished { packet: self.packet, manifest, receiver })
+    }
+}

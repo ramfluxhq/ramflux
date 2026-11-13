@@ -84,6 +84,8 @@ fn wrong() -> SdkError {
 struct FullStreamWork {
     role: PairingRole,
     forward_started: bool,
+    source_idle: bool,
+    idle_manifest: Option<SourceManifest>,
     pending_rebind: Option<ramflux_protocol::custody::pairing::full_transfer::DataPacket>,
     packet: FullPacketEpoch,
     progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
@@ -212,6 +214,8 @@ impl PairingActor {
         let work = FullStreamWork {
             role,
             forward_started: false,
+            source_idle: state.source_idle,
+            idle_manifest: state.idle_manifest.clone(),
             pending_rebind: None,
             progress: progress.clone(),
             packet,

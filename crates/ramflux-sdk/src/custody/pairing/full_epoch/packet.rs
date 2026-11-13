@@ -97,6 +97,16 @@ impl FullEpoch {
     }
 }
 impl FullPacketEpoch {
+    pub(crate) fn expect_idle_position(
+        &mut self,
+        manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+    ) -> Result<(), SdkError> {
+        let hash = ramflux_protocol::custody::pairing::full_transfer::manifest_hash(manifest)
+            .map(encode_base64url)
+            .map_err(|error| wire(&error))?;
+        self.channel()?.expect_idle_position(hash)?;
+        Ok(())
+    }
     pub(crate) fn allow_verified_duplex(
         &mut self,
         proof: &ramflux_storage::FullDuplexReceipt,

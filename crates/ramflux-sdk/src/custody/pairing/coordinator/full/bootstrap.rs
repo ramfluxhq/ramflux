@@ -18,6 +18,8 @@ pub(super) struct BootstrapState {
     owner: Option<FullBootstrap>,
     awaiting_lease: bool,
     pub(super) source_manifest: Option<SourceManifest>,
+    pub(super) idle_manifest: Option<SourceManifest>,
+    pub(super) source_idle: bool,
     pub(super) trust: Option<FullResumeTrust>,
     pub(super) keys: Option<FullResumeKeyOwner>,
     pub(super) signer: Option<Arc<crate::custody::pairing::participant::FullProofSigner>>,
@@ -25,6 +27,39 @@ pub(super) struct BootstrapState {
     pub(super) epoch_job: Option<super::epoch::FullEpochJob>,
     pub(super) epoch_ready: Option<crate::custody::pairing::FullPacketEpoch>,
     pub(super) stream: Option<super::stream::FullStreamState>,
+}
+impl BootstrapState {
+    pub(super) fn restored(
+        trust: FullResumeTrust,
+        keys: FullResumeKeyOwner,
+        signer: Arc<crate::custody::pairing::participant::FullProofSigner>,
+        cancel: FullStageIoCancel,
+        position: ramflux_storage::FullForwardResumePosition,
+    ) -> Self {
+        let (source_manifest, idle_manifest, source_idle) = match position {
+            ramflux_storage::FullForwardResumePosition::Streaming { manifest, last_verified } => {
+                (Some(*manifest), last_verified.map(|manifest| *manifest), false)
+            }
+            ramflux_storage::FullForwardResumePosition::Idle { manifest } => {
+                (Some((*manifest).clone()), Some(*manifest), true)
+            }
+            ramflux_storage::FullForwardResumePosition::AwaitingSource => (None, None, false),
+        };
+        Self {
+            owner: None,
+            awaiting_lease: false,
+            source_manifest,
+            idle_manifest,
+            source_idle,
+            trust: Some(trust),
+            keys: Some(keys),
+            signer: Some(signer),
+            cancel: Some(cancel),
+            epoch_job: None,
+            epoch_ready: None,
+            stream: None,
+        }
+    }
 }
 impl Drop for BootstrapState {
     fn drop(&mut self) {
@@ -116,6 +151,8 @@ impl PairingActor {
                     owner: Some(owner),
                     awaiting_lease: false,
                     source_manifest,
+                    idle_manifest: None,
+                    source_idle: false,
                     trust: None,
                     keys: None,
                     signer: None,

@@ -318,6 +318,22 @@ impl FullTransferStage<'_> {
         )?;
         Ok(())
     }
+    /// Read the latest exact retained signed forward manifest after ordinary unlock.
+    /// This returns metadata only and grants neither semantic DV nor publication authority.
+    /// # Errors
+    /// Refuses a stale stage, malformed retained metadata or a foreign original signature.
+    pub fn current_forward_manifest(&self) -> Result<Option<SourceManifest>, StorageError> {
+        self.require_io()?;
+        let hash: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT manifest_hash FROM manifest WHERE direction=0 ORDER BY cut DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        hash.map(|hash| self.forward_manifest(&hash)).transpose()
+    }
     pub(super) fn forward_manifest(&self, hash: &str) -> Result<SourceManifest, StorageError> {
         raw32(hash)?;
         let bytes = Zeroizing::new(

@@ -73,6 +73,18 @@ impl FullAppliedDataReceipt {
     }
 }
 impl FullReceiverBaseCopy {
+    /// Rebind a fresh actual-B replay to its previously signed identical forward DV.
+    /// This grants no new signature, approval or generation selection.
+    /// # Errors
+    /// Refuses incomplete duplex, stale B, changed input or failed atomic receipt rebinding.
+    pub fn retain_replayed_application(
+        &mut self,
+        stage: &FullTransferStage<'_>,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        stage.verified_duplex(now)?;
+        self.retain_for_installation(stage, now)
+    }
     /// Verify/fsync the exact private generation, then commit its key/root in encrypted
     /// stage SQL before exposing the narrow receipt-signing request. This restores no
     /// approval after lock/restart and selects neither paths nor native authority.

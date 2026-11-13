@@ -12,6 +12,7 @@ use ramflux_protocol::{
 };
 use tokio::time::Duration;
 mod catchup;
+mod idle;
 mod rebind;
 mod reverse;
 
@@ -66,7 +67,11 @@ impl FullStreamWork {
         mut manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
         self.fresh().await?;
-        self.send_manifest(&manifest).await?;
+        if self.source_idle {
+            self.send_idle(&manifest).await?;
+        } else {
+            self.send_manifest(&manifest).await?;
+        }
         // The responder's first data object MUST be its actual restrictive manifest,
         // even for a new empty target. A receipt cannot replace that position.
         let reverse = self.receive_manifest().await?;
@@ -87,6 +92,15 @@ impl FullStreamWork {
         self.io.record_reverse_data_verified(draft, &verified).await?;
         let encrypted = self.packet.seal_packet(&verified)?;
         self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+        if self.source_idle {
+            if manifest.manifest.is_last_prepublication_delta() {
+                let (proof, _) = self.io.verify_duplex(None).await?;
+                self.packet.allow_verified_duplex(&proof)?;
+                return Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None });
+            }
+            manifest = self.next_source_manifest().await?;
+            self.send_manifest(&manifest).await?;
+        }
         loop {
             self.transfer_source_input(&manifest).await?;
             if manifest.manifest.is_last_prepublication_delta() {
@@ -102,29 +116,38 @@ impl FullStreamWork {
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
     pub(super) async fn destination(mut self) -> Result<FullStreamFinished, SdkError> {
-        let mut manifest = self.receive_manifest().await?;
+        let (mut manifest, idle) = self.receive_position().await?;
         self.fresh().await?;
-        let mut prefix = self.io.retain_manifest(&manifest).await?;
+        let mut prefix = if idle { None } else { self.io.retain_manifest(&manifest).await? };
         let reverse = self.prepare_own_reverse().await?;
         self.io.retain_reverse_manifest(&reverse).await?;
         self.fresh().await?;
         self.send_manifest(&reverse).await?;
         self.send_reverse_input(&reverse).await?;
+        if idle {
+            if manifest.manifest.is_last_prepublication_delta() {
+                return self.finish_idle_destination(manifest).await;
+            }
+            manifest = self.receive_manifest().await?;
+            self.fresh().await?;
+            prefix = self.io.retain_manifest(&manifest).await?;
+        }
         let mut receiver = None;
         loop {
             self.receive_forward_input(&manifest, prefix).await?;
             let hash = hash(&manifest)?;
             self.runtime.require_live()?;
             self.fresh().await?;
-            let prepared = if let Some(copy) = receiver.take() {
-                self.io.project_receiver_delta(copy, &hash).await?
+            let copy = if let Some(copy) = receiver.take() {
+                copy
             } else {
-                let pinned = self.io.pin_receiver_base(&hash).await?;
-                let copy =
-                    self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
-                self.fresh().await?;
-                self.io.project_receiver_base(copy).await?
+                let pinned = self.io.pin_original_receiver_base().await?;
+                self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?
             };
+            self.fresh().await?;
+            let work = self.io.receiver_replay_work(copy, &hash).await?;
+            let prepared =
+                self.runtime.clone().run_blocking(move || Ok(Box::new(work.replay()?))).await?;
             let (copy, draft) = self.io.prepare_data_verified(prepared).await?;
             let participant = self.participant.clone();
             let (draft, verified) = self

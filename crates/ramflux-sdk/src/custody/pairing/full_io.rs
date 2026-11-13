@@ -119,6 +119,7 @@ struct FullLocalIoRequest {
 }
 enum FullLocalAction {
     Rebind(rebind::Action),
+    ReceiverReplay { copy: Box<ramflux_storage::FullReceiverBaseCopy>, hash: String },
     Reverse(reverse::Action),
     VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Action),
@@ -137,6 +138,7 @@ enum FullLocalAction {
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
     Rebind(rebind::Applied),
+    ReceiverReplay(Box<ramflux_storage::FullReceiverReplayWork>),
     Reverse(reverse::Applied),
     Duplex(ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Applied),
@@ -164,10 +166,12 @@ impl FullLocalIoRequest {
             FullLocalAction::PrepareEmptyReverse
                 | FullLocalAction::Reverse(_)
                 | FullLocalAction::Rebind(_)
+                | FullLocalAction::ReceiverReplay { .. }
                 | FullLocalAction::SourceDelta(_)
                 | FullLocalAction::ProjectReceiverDelta { .. }
                 | FullLocalAction::Semantic(
-                    application::Action::Prepare(_)
+                    application::Action::RetainReplay(_)
+                        | application::Action::Prepare(_)
                         | application::Action::Record { .. }
                         | application::Action::PrepareReverse
                         | application::Action::RecordReverse { .. }
@@ -199,6 +203,16 @@ fn apply_action(
     mut stage: FullTransferStage<'_>,
 ) -> Result<FullLocalResult, SdkError> {
     Ok(match action {
+        FullLocalAction::ReceiverReplay { copy, hash } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            FullLocalResult::ReceiverReplay(Box::new(stage.into_receiver_replay_through(
+                *copy,
+                &hash,
+                custody::network_now()?,
+            )?))
+        }
         FullLocalAction::Rebind(action) => {
             FullLocalResult::Rebind(rebind::apply(action, scope, &mut stage)?)
         }

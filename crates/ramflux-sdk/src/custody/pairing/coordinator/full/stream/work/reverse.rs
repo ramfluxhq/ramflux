@@ -8,6 +8,9 @@ use super::{
 };
 impl FullStreamWork {
     pub(super) async fn prepare_own_reverse(&mut self) -> Result<SourceManifest, SdkError> {
+        if let Some(manifest) = self.io.retained_reverse_manifest().await? {
+            return Ok(manifest);
+        }
         let draft = if self.linked_target {
             let work = self.io.reverse_source_work().await?;
             let encoded = self.runtime.clone().run_blocking(move || Ok(work.encode()?)).await?;

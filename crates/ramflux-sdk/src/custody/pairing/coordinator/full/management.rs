@@ -250,7 +250,7 @@ impl PairingActor {
                     operation: c.operation_id.clone(),
                     generation: c.generation,
                     th: c.displayed_th.ok_or_else(wrong)?,
-                    previous: full.sas_base.as_ref().ok_or_else(wrong)?.envelope().clone(),
+                    previous: candidate.previous().clone(),
                     candidate: candidate.publication().record.clone(),
                     preservation: *preservation,
                 }));

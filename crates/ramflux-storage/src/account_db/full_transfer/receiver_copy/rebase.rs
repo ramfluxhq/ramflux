@@ -77,15 +77,25 @@ impl FullReceiverBaseCopy {
         stage: &impl super::super::receiver_read::ReceiverInput,
         hashes: &[String],
     ) -> Result<(), StorageError> {
-        let record = stage.resume_record()?;
-        if self.hash != record.base_manifest_hash || self.projected.is_some() {
-            return Err(wrong());
-        }
         let last = hashes.last().ok_or_else(wrong)?;
         if hashes.len() < 2
+            || !stage.forward_manifest(last)?.manifest.is_last_prepublication_delta()
+        {
+            return Err(wrong());
+        }
+        self.project_prefix_input(stage, hashes)
+    }
+    pub(in crate::account_db::full_transfer) fn project_prefix_input(
+        &mut self,
+        stage: &impl super::super::receiver_read::ReceiverInput,
+        hashes: &[String],
+    ) -> Result<(), StorageError> {
+        let record = stage.resume_record()?;
+        if self.hash != record.base_manifest_hash
+            || self.projected.is_some()
+            || hashes.is_empty()
             || hashes.len() > 9
             || hashes.first() != Some(&record.base_manifest_hash)
-            || !stage.forward_manifest(last)?.manifest.is_last_prepublication_delta()
         {
             return Err(wrong());
         }

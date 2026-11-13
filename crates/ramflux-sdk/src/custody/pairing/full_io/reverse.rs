@@ -9,6 +9,7 @@ use ramflux_storage::{
     FullValidatedReverseInput,
 };
 pub(super) enum Action {
+    Current,
     PrepareSource,
     AcceptSource(Box<FullReverseSourceDraft>),
     ReadSource { hash: String, index: u64 },
@@ -19,6 +20,7 @@ pub(super) enum Action {
     Merge(String),
 }
 pub(super) enum Applied {
+    Current(Box<Option<ramflux_protocol::custody::pairing::full_transfer::SourceManifest>>),
     Source(Box<FullReverseSourceWork>),
     Draft(Box<Manifest>),
     Bytes(Zeroizing<Vec<u8>>),
@@ -33,15 +35,17 @@ pub(super) fn apply(
     stage: FullTransferStage<'_>,
 ) -> Result<Applied, SdkError> {
     let expected = match &action {
-        Action::PrepareSource | Action::AcceptSource(_) | Action::ReadSource { .. } => {
-            PairingRole::Responder
-        }
+        Action::Current
+        | Action::PrepareSource
+        | Action::AcceptSource(_)
+        | Action::ReadSource { .. } => PairingRole::Responder,
         _ => PairingRole::Initiator,
     };
     if scope.role != expected {
         return Err(wrong());
     }
     Ok(match action {
+        Action::Current => Applied::Current(Box::new(stage.retained_reverse_manifest()?)),
         Action::PrepareSource => Applied::Source(Box::new(stage.into_reverse_source_work()?)),
         Action::AcceptSource(draft) => {
             Applied::Draft(Box::new(stage.accept_reverse_source_draft(&draft)?))

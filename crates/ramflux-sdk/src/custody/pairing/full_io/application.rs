@@ -8,6 +8,7 @@ use ramflux_protocol::custody::pairing::full_transfer::DataPacket;
 use ramflux_storage::{FullAppliedDataReceipt, FullReceiverBaseCopy, FullTransferStage};
 
 pub(super) enum Action {
+    RetainReplay(Box<FullReceiverBaseCopy>),
     Prepare(Box<FullReceiverBaseCopy>),
     Record {
         copy: Box<FullReceiverBaseCopy>,
@@ -68,6 +69,13 @@ pub(super) fn apply(
 ) -> Result<Applied, SdkError> {
     let now = crate::custody::network_now()?;
     match action {
+        Action::RetainReplay(mut copy) => {
+            if scope.role != ramflux_crypto::custody::pairing::PairingRole::Responder {
+                return Err(wrong());
+            }
+            copy.retain_replayed_application(stage, now)?;
+            Ok(Applied::Receiver(copy))
+        }
         Action::PrepareReverse => {
             if scope.role != ramflux_crypto::custody::pairing::PairingRole::Initiator {
                 return Err(wrong());

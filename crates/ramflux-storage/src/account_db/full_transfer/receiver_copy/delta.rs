@@ -18,7 +18,7 @@ impl FullReceiverBaseCopy {
     ) -> Result<FullScalarInputCounts, StorageError> {
         self.project_delta_input(stage, hash)
     }
-    pub(super) fn project_delta_input(
+    pub(in crate::account_db::full_transfer) fn project_delta_input(
         &mut self,
         stage: &impl super::super::receiver_read::ReceiverInput,
         hash: &str,

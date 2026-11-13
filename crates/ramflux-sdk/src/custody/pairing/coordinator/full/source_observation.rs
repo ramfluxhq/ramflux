@@ -77,7 +77,11 @@ impl PairingActor {
             .clone()
             .run_blocking(move || participant.full_native_head(&anchor))
             .await?;
-        let own_key = self.load_public_keys(self.identity.local_ref.clone()).await?.0;
+        let own_key = self
+            .load_public_keys(self.identity.local_ref.clone())
+            .await?
+            .ok_or(SdkError::PairingCode("HeadChanged"))?
+            .0;
         let body = &current.envelope().body;
         let cert = current.authorize(
             &self.identity.local_ref,
