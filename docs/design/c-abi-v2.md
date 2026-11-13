@@ -293,8 +293,9 @@ ordinary `c-abi` builds omit the renderer. Package one Rust library and both
 headers, and define `RAMFLUX_WITH_CARD_RUNTIME` when consuming the umbrella header.
 Negotiation returns `card_runtime:null` when disabled, otherwise the independent
 card ABI major and catalog SHA-256. Always check `ramflux_card_abi_version()`
-before passing card structures. The accepted runtime currently uses card ABI 2;
-SDK ABI 2 numbering is independent. Unaccepted ABI3 library changes are not linked.
+before passing card structures. The accepted runtime and library use standalone
+card ABI 4; SDK ABI 2 numbering is independent. `RamfluxCardOpen.presentation` is
+mandatory. `ramflux_card_present` switches host locale/theme without a peer update.
 
 `RamfluxCardOpen.descriptor` authenticates application/package identity, catalog,
 engine, ABI, epoch/version and exact bytecode digest. Its separate `policy` and
@@ -352,3 +353,35 @@ that requires a federated generated carrier receives a typed per-target
 It never substitutes the generation-zero carrier. Native generated-carrier tests
 verify the actual envelope, pair crypto, receiver commits, source projection
 updates and erasure, independently of the production generation-zero gate.
+
+
+## Bundled card trust package
+
+`ramflux_v2_card_trust_package(out)` returns owned public JSON even before an account
+or renderer opens. It includes the bytecode, exact canonical signed descriptor,
+Ed25519 signature/public key (binary fields encoded as unpadded base64url), exact
+release policy, and complete `en`/`zh-CN` × light/dark host presentations. Free the
+buffer with `ramflux_v2_buffer_free`. Package sources live next to the SDK header
+in `include/card/`; only public release material is distributed.
+
+This SDK release uses shared library identity `app_id:ramflux.native`,
+`package_id:ramflux.card.library`, security epoch 1 and version 1. These are the
+shared renderer release identities; they confer no account or SDK authority.
+The signed library manifest is `library.descriptor.json`, authenticated by
+`library.sig`. The surrounding `trust.json` is a public release index, not a
+second signature format. Presentation and policy are host-owned configuration,
+separate from signed bytecode and from peer input.
+
+Native application releases independently pin the index BLAKE3 (advertised as
+`card_runtime.trust_manifest_blake3`), trusted key and exact descriptor policy.
+Load these bundled app/SDK assets rather than a peer-supplied package's policy or
+key. Pass the unchanged canonical descriptor bytes, decoded binary material and
+separate policy/presentation spans to standalone ABI 4. Preserve host presentation
+across peer updates and apply presentation mutation batches normally. Approval
+facts, confirmation and Allow/Deny controls remain host-owned outside the tree.
+
+Release tooling runs the existing `card-pack` compiler/signer against the reviewed
+library, with a private seed outside the repository. Then run
+`scripts/generate-c-abi-card-trust.py` to generate the independently configured
+policy and public index; `--check` rejects artifact/catalog/index drift. Never put
+a private seed in the package or derive release policy from runtime peer data.

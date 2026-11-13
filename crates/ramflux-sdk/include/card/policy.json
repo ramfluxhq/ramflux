@@ -1,0 +1,7 @@
+{
+  "app_id": "ramflux.native",
+  "exact_descriptor_sha256": "b9d4ec6cec88516438628fd13d50fc347721b8d128c8141325a2dea2242f2dff",
+  "minimum_epoch": 1,
+  "minimum_version": 1,
+  "package_id": "ramflux.card.library"
+}

@@ -360,6 +360,13 @@ int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
                                    struct RamfluxBuffer **out);
 
 /*
+ Return the SDK-bundled public card trust package, signed descriptor and host presentation assets.
+ Hosts independently pin its manifest digest and policy in their signed application release.
+ The owned JSON output uses `ramflux_v2_buffer_free`; no account or renderer is opened.
+ */
+int32_t ramflux_v2_card_trust_package(struct RamfluxBuffer **out);
+
+/*
  Decode and re-encode a generated message request through the shared adapter core.
  */
 int32_t ramflux_message_request_adapt(const unsigned char *request_json,

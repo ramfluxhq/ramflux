@@ -633,3 +633,17 @@ pub extern "C" fn ramflux_v2_receipt_present(
         result
     })
 }
+
+/// Return the SDK-bundled public card trust package, signed descriptor and host presentation assets.
+/// Hosts independently pin its manifest digest and policy in their signed application release.
+/// The owned JSON output uses `ramflux_v2_buffer_free`; no account or renderer is opened.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_card_trust_package(out: *mut *mut RamfluxBuffer) -> i32 {
+    call(|| {
+        super::super::clear_out_ptr(out)?;
+        let value =
+            super::card::trust_package().map_err(|error| super::super::map_sdk_error(&error))?;
+        super::super::write_json_buffer(out, &value)
+    })
+}

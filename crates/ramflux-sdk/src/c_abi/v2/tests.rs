@@ -672,3 +672,71 @@ fn native_clients_cannot_submit_raw_routing_without_explicit_capability() {
     );
     assert_eq!(operation, 0, "refused raw routing cannot allocate an operation");
 }
+
+#[cfg(feature = "card-runtime")]
+#[test]
+fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut buffer = std::ptr::null_mut();
+    assert_eq!(ramflux_v2_card_trust_package(&raw mut buffer), 0);
+    let index = take_buffer(buffer);
+    assert_eq!(index["card_abi_major"], 4);
+    assert_eq!(index["release"]["app_id"], "ramflux.native");
+    let decode = |name: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(ramflux_protocol::decode_base64url(
+            index.get(name).and_then(Value::as_str).ok_or("binary field")?,
+        )?)
+    };
+    let bytecode = decode("bytecode_base64url")?;
+    let signature: [u8; 64] =
+        decode("signature_base64url")?.try_into().map_err(|_| "signature length")?;
+    let key: [u8; 32] = decode("trusted_key_base64url")?.try_into().map_err(|_| "key length")?;
+    let descriptor = index["descriptor"].as_str().ok_or("descriptor")?.as_bytes();
+    let policy: ramflux_card::AcceptancePolicy = serde_json::from_slice(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/include/card/policy.json"
+    )))?;
+    assert_eq!(policy.app_id, "ramflux.native");
+    assert_eq!(policy.package_id, "ramflux.card.library");
+    let package =
+        ramflux_card::SignedPackage::verify(&bytecode, descriptor, &signature, &key, &policy)?;
+    let fixtures: &[&[u8]] = &[
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ramflux-card/fixtures/complete_form.json"
+        )),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../ramflux-card/fixtures/task.json")),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../ramflux-card/fixtures/chart.json")),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ramflux-card/fixtures/approval.json"
+        )),
+    ];
+    for input in fixtures {
+        assert!(input.len() <= 8192, "bounded card fixture");
+        let spec = ramflux_card::CardSpec::parse(input)?;
+        let (_session, batch) = ramflux_card::CardSession::open(spec, package.clone())?;
+        batch.mutations.first().ok_or("signed SDK library produced no semantic mutations")?;
+    }
+    for presentation in index["presentations"].as_object().ok_or("presentations")?.values() {
+        ramflux_card::Presentation::parse(&serde_json::to_vec(presentation)?)?;
+    }
+    let mut tampered = bytecode;
+    let first = tampered.first_mut().ok_or("bytecode")?;
+    *first ^= 1;
+    assert!(
+        ramflux_card::SignedPackage::verify(&tampered, descriptor, &signature, &key, &policy)
+            .is_err()
+    );
+    assert!(
+        ramflux_card::SignedPackage::verify(
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/include/card/library.qjb")),
+            descriptor,
+            &signature,
+            &[0; 32],
+            &policy
+        )
+        .is_err()
+    );
+    Ok(())
+}
