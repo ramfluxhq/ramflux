@@ -18,13 +18,13 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
-#[cfg(test)]
-pub(crate) use store::sibling_fixture::{SiblingSetup, install_sibling_fixture};
 pub(crate) use store::pairing::{
     matches_generation_install, matches_install, verify_generation_keys,
     verify_local as verify_pairing_local, write_authority as write_pairing_authority,
     write_generation_authority,
 };
+#[cfg(test)]
+pub(crate) use store::sibling_fixture::{SiblingSetup, install_sibling_fixture};
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
     accept_publication, account_exists, custody_vault_reference, export_agent_credentials,
