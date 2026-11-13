@@ -12,6 +12,8 @@ pub(super) const FORMAT: &str = "gateway_state_format";
 const STAGING_DIRECTORY: &str = ".ramflux-gateway-staging-v1";
 const STAGING_PREFIX: &str = ".gateway-init-";
 const STAGING_RANDOM_LENGTH: usize = 16;
+const STAGING_OWNER_FILE: &str = "owner-v1";
+const STAGING_OWNER: &[u8] = b"ramflux-gateway-staging-owner-1\n";
 pub(super) fn open(path: impl AsRef<Path>) -> Result<redb::Database, NodeCoreError> {
     open_with(path.as_ref(), |_| {})
 }
@@ -38,15 +40,7 @@ fn open_with(
         .map_err(redb_error)?;
     fs2::FileExt::lock_exclusive(&initialization).map_err(redb_error)?;
     let staging_directory = directory.join(STAGING_DIRECTORY);
-    match std::fs::create_dir(&staging_directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(redb_error(error)),
-    }
-    let metadata = std::fs::symlink_metadata(&staging_directory).map_err(redb_error)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(NodeCoreError::GatewayStateReservedPath);
-    }
+    prepare_staging_directory(&staging_directory)?;
     // Cleanup precedes creation/publication and never scans the public directory.
     sweep_abandoned_stages(&staging_directory, path, std::time::SystemTime::now())?;
     let mut builder = redb::Database::builder();
@@ -98,6 +92,63 @@ fn open_with(
     }
     Ok(db)
 }
+fn prepare_staging_directory(directory: &Path) -> Result<(), NodeCoreError> {
+    use std::io::{Read, Write};
+    match std::fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(redb_error(error)),
+    }
+    let metadata = std::fs::symlink_metadata(directory).map_err(redb_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(NodeCoreError::GatewayStateReservedPath);
+    }
+    let marker = directory.join(STAGING_OWNER_FILE);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() != STAGING_OWNER.len() as u64
+            {
+                return Err(NodeCoreError::GatewayStateReservedPath);
+            }
+            // Read a fixed bound even if a local operator replaces the marker concurrently.
+            let mut contents = Vec::new();
+            std::fs::File::open(marker)
+                .map_err(redb_error)?
+                .take(64)
+                .read_to_end(&mut contents)
+                .map_err(redb_error)?;
+            if contents != STAGING_OWNER {
+                return Err(NodeCoreError::GatewayStateReservedPath);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // An old arbitrary public path may already occupy this directory. Never adopt
+            // its contents as stages. An empty directory is safe after a pre-marker crash.
+            if std::fs::read_dir(directory).map_err(redb_error)?.next().is_some() {
+                return Err(NodeCoreError::GatewayStateReservedPath);
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(marker)
+                .map_err(redb_error)?;
+            file.write_all(STAGING_OWNER).map_err(redb_error)?;
+            file.sync_all().map_err(redb_error)?;
+        }
+        Err(error) => return Err(redb_error(error)),
+    }
+    #[cfg(unix)]
+    {
+        std::fs::File::open(directory).and_then(|file| file.sync_all()).map_err(redb_error)?;
+        if let Some(parent) = directory.parent() {
+            std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(redb_error)?;
+        }
+    }
+    Ok(())
+}
+
 fn refuse_reserved_path(path: &Path) -> Result<(), NodeCoreError> {
     if path.components().any(|part| part.as_os_str() == STAGING_DIRECTORY) {
         return Err(NodeCoreError::GatewayStateReservedPath);
@@ -250,6 +301,50 @@ mod tests {
                 .per_source_ip_handshake_rate,
             7,
             "staging cleanup must never replace the configured public database"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_cleanup_refuses_preexisting_unowned_namespace()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let reserved = directory.path().join(STAGING_DIRECTORY);
+        std::fs::create_dir(&reserved)?;
+        let old_public = reserved.join(".gateway-init-0123456789abcdef");
+        {
+            let database = redb::Database::create(&old_public)?;
+            let write = database.begin_write()?;
+            {
+                let mut table = write.open_table(GATEWAY_STATE_TABLE)?;
+                table.insert(FORMAT, b"3".as_slice())?;
+                table.insert("published-canary", b"preserve".as_slice())?;
+            }
+            write.commit()?;
+        }
+        let image = std::fs::read(&old_public)?;
+        let other = directory.path().join("other.redb");
+        assert!(
+            matches!(open(&other), Err(NodeCoreError::GatewayStateReservedPath)),
+            "an unowned nonempty namespace must fail closed before cleanup"
+        );
+        assert_eq!(
+            std::fs::read(&old_public)?,
+            image,
+            "namespace reservation must never modify an existing public database"
+        );
+        assert!(!other.try_exists()?, "refusal must precede new database publication");
+        assert!(
+            !reserved.join(STAGING_OWNER_FILE).try_exists()?,
+            "an ambiguous namespace must not acquire an ownership marker"
+        );
+        let database = redb::Database::open(&old_public)?;
+        let read = database.begin_read()?;
+        let table = read.open_table(GATEWAY_STATE_TABLE)?;
+        assert_eq!(
+            table.get("published-canary")?.map(|value| value.value().to_vec()),
+            Some(b"preserve".to_vec()),
+            "committed old public data must reopen unchanged"
         );
         Ok(())
     }

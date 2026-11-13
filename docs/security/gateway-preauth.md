@@ -194,7 +194,9 @@ then published without replacing an existing store. Public database paths inside
 that reserved namespace (including canonical aliases) are refused with
 `GatewayStateReservedPath`. Before publication, serialized cleanup removes only
 exactly named orphan stages there; it never scans public database names and
-retains hard-linked stages or published-inode aliases. Ambiguous old temporary
+retains hard-linked stages or published-inode aliases. A synced ownership marker
+reserves the staging directory; a nonempty directory without the exact marker
+is refused without modifying its contents. Ambiguous old temporary
 names outside the reserved directory are retained for operator inspection.
 A crash before publication leaves no public partial file; existing unmarked or
 older stores still require explicit reset. SIGTERM during a crash-reservation
