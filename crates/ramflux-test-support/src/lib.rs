@@ -140,9 +140,9 @@ mod tests {
         }
         let root = TestPath::new()?;
         let directory = root.to_path_buf();
-        let file = root.child("data");
+        let file = root.join("data");
         std::fs::write(&file, b"fixture")?;
-        let fixture = Fixture::new(CheckFile(file.to_path_buf()), root);
+        let fixture = Fixture::new(CheckFile(file), root);
         drop(fixture);
         assert!(!directory.exists(), "fixture teardown must release its final directory owner");
         Ok(())
