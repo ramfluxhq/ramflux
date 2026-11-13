@@ -86,69 +86,83 @@ impl BackupDatabase {
         header: &RecordHeader,
         input: &mut impl Read,
     ) -> Result<(), StorageError> {
-        if self.db.is_autocommit() {
-            return Err(StorageError::PairingField("WrongContext"));
-        }
-        super::super::mac_subkeys::full::source_key(source)?;
-        let root: String = self.db.query_row(
-            "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        if root != source.account_anchor {
-            return Err(unsupported());
-        }
-        let rule = full_transfer_catalog()
-            .iter()
-            .find(|rule| rule.id == header.family)
-            .ok_or_else(unsupported)?;
-        let cells = Cells::read(rule, header, input)?;
-        match rule.id {
-            "sql/account_erasure_generation" => {
-                let changed=self.db.execute("UPDATE account_erasure_generation SET generation=max(generation,?1) WHERE singleton=1",params![cells.integer(1)?])?;
-                if changed != 1 {
-                    return Err(StorageError::PairingField("SchemaMismatch"));
-                }
-            }
-            "sql/object_erasure_fence" => {
-                self.db.execute("INSERT INTO object_erasure_fence(commitment) VALUES(?1) ON CONFLICT DO NOTHING",params![cells.text(0)?])?;
-            }
-            "sql/object_identity_replacement" => {
-                self.db.execute("INSERT INTO object_identity_replacement(commitment) VALUES(?1) ON CONFLICT DO NOTHING",params![cells.text(0)?])?;
-            }
-            "sql/object_segment_reference_veto" => {
-                self.db.execute("INSERT INTO object_segment_reference_veto(reference_id) VALUES(?1) ON CONFLICT DO NOTHING",params![cells.bytes(0)?])?;
-            }
-            "sql/object_erasure_lookup" => {
-                let changed=self.db.execute("INSERT INTO object_erasure_lookup(lookup,commitment) VALUES(?1,?2) ON CONFLICT(lookup) DO UPDATE SET commitment=excluded.commitment WHERE object_erasure_lookup.commitment=excluded.commitment",params![cells.text(0)?,cells.text(1)?])?;
-                if changed != 1 {
-                    return Err(conflict());
-                }
-            }
-            "sql/object_payload_dependency" => {
-                self.db.execute("INSERT INTO object_payload_dependency(parent_commitment,child_commitment) VALUES(?1,?2) ON CONFLICT DO NOTHING",params![cells.text(0)?,cells.text(1)?])?;
-            }
-            "sql/account_mac_bundle/portable" => {
-                super::super::mac_subkeys::full::import_into_private_generation(
-                    &self.db,
-                    source,
-                    cells.text(0)?,
-                    cells.bytes(1)?,
-                )?;
-            }
-            "sql/full_imported_mac_bundle" => {
-                let original = super::super::mac_subkeys::full::decode_source_ref(cells.bytes(0)?)?;
-                super::super::mac_subkeys::full::import_into_private_generation(
-                    &self.db,
-                    &original,
-                    cells.text(1)?,
-                    cells.bytes(2)?,
-                )?;
-            }
-            _ => return Err(unsupported()),
-        }
-        Ok(())
+        apply_fixed_base_in_transaction(&self.db, source, header, input)
     }
+}
+
+/// The caller owns a complete authenticated input and the encompassing all-or-nothing
+/// transaction. Ordinary A reverse application additionally restricts its input catalog.
+pub(super) fn apply_fixed_base_in_transaction(
+    db: &rusqlite::Connection,
+    source: &DeviceRef,
+    header: &RecordHeader,
+    input: &mut impl Read,
+) -> Result<(), StorageError> {
+    if db.is_autocommit() {
+        return Err(StorageError::PairingField("WrongContext"));
+    }
+    super::super::mac_subkeys::full::source_key(source)?;
+    let root: String = db.query_row(
+        "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    if root != source.account_anchor {
+        return Err(unsupported());
+    }
+    let rule = full_transfer_catalog()
+        .iter()
+        .find(|rule| rule.id == header.family)
+        .ok_or_else(unsupported)?;
+    let cells = Cells::read(rule, header, input)?;
+    match rule.id {
+        "sql/account_erasure_generation" => {
+            let changed=db.execute("UPDATE account_erasure_generation SET generation=max(generation,?1) WHERE singleton=1",params![cells.integer(1)?])?;
+            if changed != 1 {
+                return Err(StorageError::PairingField("SchemaMismatch"));
+            }
+        }
+        "sql/object_erasure_fence" => {
+            db.execute(
+                "INSERT INTO object_erasure_fence(commitment) VALUES(?1) ON CONFLICT DO NOTHING",
+                params![cells.text(0)?],
+            )?;
+        }
+        "sql/object_identity_replacement" => {
+            db.execute("INSERT INTO object_identity_replacement(commitment) VALUES(?1) ON CONFLICT DO NOTHING",params![cells.text(0)?])?;
+        }
+        "sql/object_segment_reference_veto" => {
+            db.execute("INSERT INTO object_segment_reference_veto(reference_id) VALUES(?1) ON CONFLICT DO NOTHING",params![cells.bytes(0)?])?;
+        }
+        "sql/object_erasure_lookup" => {
+            let changed=db.execute("INSERT INTO object_erasure_lookup(lookup,commitment) VALUES(?1,?2) ON CONFLICT(lookup) DO UPDATE SET commitment=excluded.commitment WHERE object_erasure_lookup.commitment=excluded.commitment",params![cells.text(0)?,cells.text(1)?])?;
+            if changed != 1 {
+                return Err(conflict());
+            }
+        }
+        "sql/object_payload_dependency" => {
+            db.execute("INSERT INTO object_payload_dependency(parent_commitment,child_commitment) VALUES(?1,?2) ON CONFLICT DO NOTHING",params![cells.text(0)?,cells.text(1)?])?;
+        }
+        "sql/account_mac_bundle/portable" => {
+            super::super::mac_subkeys::full::import_into_private_generation(
+                db,
+                source,
+                cells.text(0)?,
+                cells.bytes(1)?,
+            )?;
+        }
+        "sql/full_imported_mac_bundle" => {
+            let original = super::super::mac_subkeys::full::decode_source_ref(cells.bytes(0)?)?;
+            super::super::mac_subkeys::full::import_into_private_generation(
+                db,
+                &original,
+                cells.text(1)?,
+                cells.bytes(2)?,
+            )?;
+        }
+        _ => return Err(unsupported()),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

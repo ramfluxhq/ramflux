@@ -253,6 +253,13 @@ fn prepare_candidate(
             head
         } else {
             let account = load_account(root, &write.account_id, write.now)?;
+            if write.kind == HeadKind::Revoke
+                && write.revoked_id.as_deref() == Some(write.local_ref.device_id.as_str())
+            {
+                // Native device management requires moving primary first. Do not
+                // sign/journal an unusable self-revocation candidate.
+                return Err(SdkError::PairingField("revoked_ref"));
+            }
             let primary = require_primary(&account, vault, &write.publisher_ref, &write.local_ref)?;
             let record = match write.kind {
                 HeadKind::Enroll => primary.enroll_device(

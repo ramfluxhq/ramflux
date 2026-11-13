@@ -13,16 +13,22 @@ mod device;
 mod node;
 #[path = "pairing_multi_device/relay.rs"]
 mod relay;
+#[path = "pairing_multi_device/revoke.rs"]
+mod revoke;
 #[path = "pairing_multi_device/vault.rs"]
 mod vault;
 type ResultOf<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::test]
 async fn pairing_three_devices_keep_distinct_keys_and_live_sessions() -> ResultOf<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(120), Box::pin(three_devices()))
-        .await
-        .map_err(|_| "test: three-device native pairing exceeded its deadline")?
+    deadline(Box::pin(three_devices())).await
 }
+async fn deadline(work: impl std::future::Future<Output = ResultOf<()>>) -> ResultOf<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(120), work)
+        .await
+        .map_err(|_| "test: multi-device native operation exceeded its deadline")?
+}
+
 async fn three_devices() -> ResultOf<()> {
     use ramflux_sdk::custody::pairing::PairingAuthorityQuery;
     let node = node::Node::open()?;

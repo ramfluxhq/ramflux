@@ -78,6 +78,18 @@ impl Vault {
         }
         owned.ok_or_else(unavailable)
     }
+    pub fn owned_references(&self) -> Result<(String, Option<String>), SdkError> {
+        let entries = self.0.lock().map_err(|_| unavailable())?;
+        let branches: Vec<_> = entries.iter().filter(|(_, bytes)| bytes.len() == 64).collect();
+        let primary: Vec<_> = entries.iter().filter(|(_, bytes)| bytes.len() == 32).collect();
+        if branches.len() != 1 || primary.len() > 1 {
+            return Err(unavailable());
+        }
+        Ok((
+            branches.first().ok_or_else(unavailable)?.0.clone(),
+            primary.first().map(|(reference, _)| (*reference).clone()),
+        ))
+    }
     pub fn primary_entries(&self) -> Result<usize, SdkError> {
         Ok(self
             .0

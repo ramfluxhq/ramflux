@@ -192,6 +192,7 @@ impl AccountDb {
             return Err(context());
         }
         stage.recover_forward_receipts()?;
+        stage.recover_reverse_receipts()?;
         Ok(stage)
     }
 }

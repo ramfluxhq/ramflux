@@ -344,3 +344,6 @@ fn open_metadata_with_key(
         )?;
     Ok(connection)
 }
+
+mod read;
+pub(super) use read::FullChunkReadKey;
