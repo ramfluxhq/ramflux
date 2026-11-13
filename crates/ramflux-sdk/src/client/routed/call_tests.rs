@@ -186,33 +186,39 @@ async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call(
 #[tokio::test]
 async fn a_signed_invite_stays_held_without_a_correlated_gateway_decision() -> Result<(), SdkError>
 {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let alice = Fixture::new("alice", 61)?;
-        let mut bob = Fixture::new("bob", 71)?;
-        contacts(&alice, &bob)?;
-        let origin = control(&alice, &bob, 3, "voice-thread")?;
-        let id = origin.row.call_id.clone();
-        let invite = signed(&alice, origin.pending[0].clone())?;
-        let packet = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
-        apply(&mut bob, &packet).await?;
-        let recipient = bob
-            .client
-            .voice_calls
-            .get_mut(&id)
-            .ok_or_else(|| invalid("test: recipient missing"))?;
-        assert!(recipient.media_held, "signed provenance alone granted media");
-        assert!(
-            recipient.answer(now_unix_timestamp()).is_err(),
-            "answer bypassed correlated Ringing authority"
-        );
-        assert_eq!(recipient.row.state, "incoming_ringing", "refusal mutated the incoming state");
-        assert!(recipient.allocation.is_none(), "held call acquired relay credentials");
-        assert!(
-            !recipient.pending.iter().any(|c| matches!(c.body, CallAction::Answer { .. })),
-            "refused answer queued a control"
-        );
-        Ok(())
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Box::pin(async {
+            let alice = Fixture::new("alice", 61)?;
+            let mut bob = Fixture::new("bob", 71)?;
+            contacts(&alice, &bob)?;
+            let origin = control(&alice, &bob, 3, "voice-thread")?;
+            let id = origin.row.call_id.clone();
+            let invite = signed(&alice, origin.pending[0].clone())?;
+            let packet = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
+            apply(&mut bob, &packet).await?;
+            let recipient = bob
+                .client
+                .voice_calls
+                .get_mut(&id)
+                .ok_or_else(|| invalid("test: recipient missing"))?;
+            assert!(recipient.media_held, "signed provenance alone granted media");
+            assert!(
+                recipient.answer(now_unix_timestamp()).is_err(),
+                "answer bypassed correlated Ringing authority"
+            );
+            assert_eq!(
+                recipient.row.state, "incoming_ringing",
+                "refusal mutated the incoming state"
+            );
+            assert!(recipient.allocation.is_none(), "held call acquired relay credentials");
+            assert!(
+                !recipient.pending.iter().any(|c| matches!(c.body, CallAction::Answer { .. })),
+                "refused answer queued a control"
+            );
+            Ok(())
+        }),
+    )
     .await
     .map_err(|_| invalid("test: routed call admission timed out"))?
 }
