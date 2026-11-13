@@ -78,6 +78,10 @@ async fn real_policy_routes_share_and_release_management_slot() -> anyhow::Resul
     std::fs::File::open(path)?.take(65537).read_to_string(&mut logs)?;
     anyhow::ensure!(logs.len() <= 65536, "test: route child diagnostics exceeded bound");
     anyhow::ensure!(status.success(), "test: real route child failed: {logs}");
+    anyhow::ensure!(
+        logs.contains("real policy routes completed"),
+        "test: child did not execute real routes: {logs}"
+    );
     Ok(())
 }
 
@@ -112,6 +116,7 @@ fn route_case(root: &Path) -> anyhow::Result<()> {
         1,
         "real HTTP success must expose the committed policy row"
     );
+    println!("real policy routes completed");
     Ok(())
 }
 
