@@ -78,6 +78,7 @@ impl PairingActor {
             Ok((c.role, *channel, context, node, full.prepared.take()))
         })?;
         let now = crate::custody::network_now()?;
+        let writer = self.local_writer.clone();
         let (state, prepared, frames) = local(self.full_runtime.clone(), move || {
             let node_id = node.envelope().body.node_id.clone();
             let mut owner = FullBootstrap::new(role, channel, context.clone(), node, now)?;
@@ -85,9 +86,11 @@ impl PairingActor {
             let mut source_manifest = None;
             if role == PairingRole::Initiator {
                 let prepared = prepared.as_ref().ok_or_else(wrong)?;
-                let (manifest, start) = owner.prepare_source_start(prepared, now, |request| {
-                    participant.sign_full_source_manifest(request)
-                })?;
+                let (manifest, start) =
+                    owner.prepare_source_start(prepared, now, |request| match &writer {
+                        Some(writer) => writer.sign_manifest(&participant, request),
+                        None => participant.sign_full_source_manifest(request),
+                    })?;
                 let grant = DataGrant {
                     schema: "ramflux.pairing.full_transfer.data_grant.v1".into(),
                     version: 1,
@@ -102,8 +105,9 @@ impl PairingActor {
                     opaque_commitment: start.opaque_commitment.clone(),
                     expires_at: now.checked_add(604_800).ok_or_else(wrong)?,
                 };
-                frames.extend(owner.begin_source(start, &grant, now, |request| {
-                    participant.sign_full_grant(request)
+                frames.extend(owner.begin_source(start, &grant, now, |request| match &writer {
+                    Some(writer) => writer.sign_grant(&participant, request),
+                    None => participant.sign_full_grant(request),
                 })?);
                 source_manifest = Some(manifest);
             }
@@ -153,21 +157,34 @@ impl PairingActor {
                 state.source_manifest.clone(),
             ))
         })?;
-        let (trust, cancel, signer) = local(self.full_runtime.clone(), move || {
+        let owner = participant.clone();
+        let work = move |db: &ramflux_storage::AccountDb| {
             let source = match (&prepared, &manifest) {
                 (Some(prepared), Some(manifest)) => Some((prepared, manifest)),
                 (None, None) => None,
                 _ => return Err(wrong()),
             };
-            let cancel = participant
-                .retain_full_data_stage(&operation, generation, &trust, &base, source)?;
-            // Prepare the weak original-writer/vault-reference scope while the ordinary
-            // frontend still lends its actual DB. The later relay pump retains no DB/key.
-            let signer =
-                Arc::new(participant.prepare_full_proof_signer(&operation, generation, &trust)?);
+            let cancel = participant.retain_full_data_stage_in(
+                db,
+                (&operation, generation),
+                &trust,
+                &base,
+                source,
+            )?;
+            let signer = Arc::new(
+                participant.prepare_full_proof_signer_in(db, &operation, generation, &trust)?,
+            );
             Ok((trust, cancel, signer))
-        })
-        .await?;
+        };
+        let (trust, cancel, signer) = if let Some(writer) = &self.local_writer {
+            writer.request(work).await?
+        } else {
+            local(self.full_runtime.clone(), move || {
+                let slot = owner.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+                work(slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?)
+            })
+            .await?
+        };
         self.full_runtime.register_stage(cancel.clone())?;
         self.with_ceremony_mut(|c| {
             c.expires_at = trust.lease_expires_at();
@@ -215,9 +232,12 @@ impl PairingActor {
                 continue;
             }
             let signer = participant.clone();
+            let writer = self.local_writer.clone();
             let (mut owner, reply) = local(self.full_runtime.clone(), move || {
-                let reply =
-                    owner.receive(&frame, now, |request| signer.sign_full_grant(request))?;
+                let reply = owner.receive(&frame, now, |request| match &writer {
+                    Some(writer) => writer.sign_grant(&signer, request),
+                    None => signer.sign_full_grant(request),
+                })?;
                 Ok((owner, reply))
             })
             .await?;

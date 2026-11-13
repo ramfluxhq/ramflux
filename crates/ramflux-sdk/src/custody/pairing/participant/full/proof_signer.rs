@@ -62,8 +62,9 @@ impl FullProofSigner {
     }
 }
 impl LocalPairingParticipant {
-    pub(crate) fn prepare_full_proof_signer(
+    pub(crate) fn prepare_full_proof_signer_in(
         &self,
+        db: &ramflux_storage::AccountDb,
         operation: &str,
         generation: u64,
         trust: &FullResumeTrust,
@@ -79,8 +80,6 @@ impl LocalPairingParticipant {
             }
         };
         let unlock = {
-            let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-            let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
             self.full_selected_db(db, Some(&reference.account_anchor))?;
             let row = db
                 .pairing_live_rows()?
@@ -97,7 +96,7 @@ impl LocalPairingParticipant {
             }
             db.full_local_unlock_guard()?
         };
-        self.with_full_branch(reference, branch_key, |_| Ok(()))?;
+        self.with_full_branch_in(db, reference, branch_key, |_| Ok(()))?;
         let vault_ref = self.full_branch_vault_ref(reference)?;
         unlock.require_unlocked()?;
         Ok(FullProofSigner {

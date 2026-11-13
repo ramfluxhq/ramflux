@@ -15,6 +15,12 @@ impl PairingActor {
     pub(super) async fn refresh_generation(&mut self) -> Result<(), SdkError> {
         if let Some(participant) = self.participant.clone() {
             let runtime = self.full_runtime.clone();
+            if let Some(writer) = &self.local_writer {
+                let generation =
+                    writer.request(move |db| participant.next_generation_in(db)).await?;
+                self.actor_generation = self.actor_generation.max(generation);
+                return Ok(());
+            }
             self.actor_generation = self.actor_generation.max(
                 block(self.full_runtime.clone(), move || {
                     let _local = runtime.local_work()?;
@@ -28,6 +34,28 @@ impl PairingActor {
         Ok(())
     }
 
+    pub(super) async fn record_local_invitation(
+        &self,
+        invitation: ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::native::Invitation,
+        >,
+        generation: u64,
+    ) -> Result<(), SdkError> {
+        let Some(participant) = self.participant.clone() else {
+            return Ok(());
+        };
+        if let Some(writer) = &self.local_writer {
+            return writer
+                .request(move |db| participant.record_invitation_in(db, &invitation, generation))
+                .await;
+        }
+        let runtime = self.full_runtime.clone();
+        block(self.full_runtime.clone(), move || {
+            let _local = runtime.local_work()?;
+            participant.record_invitation(&invitation, generation)
+        })
+        .await
+    }
     pub(super) async fn load_public_keys(
         &self,
         reference: DeviceRef,

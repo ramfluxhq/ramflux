@@ -283,6 +283,13 @@ impl LocalPairingParticipant {
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.prepare_full_source_with_cancel_in(db, register)
+    }
+    pub(crate) fn prepare_full_source_with_cancel_in(
+        &self,
+        db: &AccountDb,
+        register: impl FnOnce(FullSourcePreparationCancel) -> Result<(), SdkError>,
+    ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         self.full_selected_db(db, None)?;
         let mut source = db.prepare_full_transfer_source()?;
         let cancel = source.cancel_handle();
@@ -318,7 +325,24 @@ impl LocalPairingParticipant {
     ) -> Result<R, SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.with_full_branch_in(db, reference, expected_key, use_branch)
+    }
+    pub(super) fn with_full_branch_in<R>(
+        &self,
+        db: &AccountDb,
+        reference: &DeviceRef,
+        expected_key: &str,
+        use_branch: impl FnOnce(&custody::BranchCredentials) -> Result<R, SdkError>,
+    ) -> Result<R, SdkError> {
         self.full_selected_db(db, Some(&reference.account_anchor))?;
+        self.with_full_branch_vault(reference, expected_key, use_branch)
+    }
+    pub(in crate::custody::pairing) fn with_full_branch_vault<R>(
+        &self,
+        reference: &DeviceRef,
+        expected_key: &str,
+        use_branch: impl FnOnce(&custody::BranchCredentials) -> Result<R, SdkError>,
+    ) -> Result<R, SdkError> {
         let vault_ref = self.full_branch_vault_ref(reference)?;
         let branch = self.vault.load_branch(&vault_ref, &reference.account_anchor, reference)?;
         if encode_base64url(branch.signing.signing_key.verifying_key().to_bytes()) != expected_key {
@@ -332,6 +356,23 @@ impl LocalPairingParticipant {
     pub fn sign_full_source_manifest(
         &self,
         request: &FullSourceManifestSigningRequest<'_>,
+    ) -> Result<String, SdkError> {
+        self.sign_full_source_manifest_owned(request, None)
+    }
+    pub(in crate::custody::pairing) fn sign_full_source_manifest_off_loan(
+        &self,
+        request: &FullSourceManifestSigningRequest<'_>,
+        unlocked: &ramflux_storage::FullLocalUnlockGuard,
+    ) -> Result<String, SdkError> {
+        unlocked.require_unlocked()?;
+        let signature = self.sign_full_source_manifest_owned(request, Some(unlocked))?;
+        unlocked.require_unlocked()?;
+        Ok(signature)
+    }
+    fn sign_full_source_manifest_owned(
+        &self,
+        request: &FullSourceManifestSigningRequest<'_>,
+        unlocked: Option<&ramflux_storage::FullLocalUnlockGuard>,
     ) -> Result<String, SdkError> {
         let context = request.context();
         let source = &context.initiator;
@@ -347,9 +388,15 @@ impl LocalPairingParticipant {
         }
         let bytes =
             manifest.signing_bytes().map_err(|error| super::super::transport::wire(&error))?;
-        self.with_full_branch(&source.device_ref, &source.branch_key, |branch| {
+        let sign = |branch: &custody::BranchCredentials| {
             Ok(encode_base64url(branch.signing.signing_key.sign(&bytes).to_bytes()))
-        })
+        };
+        if let Some(unlocked) = unlocked {
+            unlocked.require_unlocked()?;
+            self.with_full_branch_vault(&source.device_ref, &source.branch_key, sign)
+        } else {
+            self.with_full_branch(&source.device_ref, &source.branch_key, sign)
+        }
     }
     /// Sign only an A3 template matched to this endpoint's own frozen epoch and keys.
     /// The typed request cannot be constructed from a generic bus/relay proof body.

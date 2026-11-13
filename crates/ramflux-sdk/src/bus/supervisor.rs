@@ -45,7 +45,10 @@ pub(super) struct Supervisor {
 }
 
 impl Supervisor {
-    pub(super) fn new(config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
+    pub(super) fn new(mut config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
+        if config.pairing.is_none() {
+            config.pairing = Some(crate::custody::pairing::PairingConfig::from_env()?);
+        }
         let nodes = crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?;
         let (stop_requested, _) = watch::channel(false);
         let (stop_response, _) = watch::channel(false);
@@ -457,10 +460,11 @@ impl Supervisor {
             return Ok(status);
         }
         let creating = opens_account(&request.method);
+        let creating_pairing = super::pairing::creates_recipient(&self.config, &request)?;
         self.require_restore_ready(&id, creating)?;
         let actor = if let Some(actor) = actor {
             actor
-        } else if creating {
+        } else if creating || creating_pairing {
             #[cfg(test)]
             super::lifecycle::hold_before_creation(&self.config).await;
             let actor = AccountActor::start(

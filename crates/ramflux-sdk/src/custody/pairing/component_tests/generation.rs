@@ -232,7 +232,11 @@ fn retain_destination_approval(
             rig.now,
         )?;
         stage
-            .retained_source_full_preservation(source.record(), &publication.record, rig.now)?
+            .retained_source_full_preservation(
+                source.record(),
+                &publication.record,
+                custody::network_now()?,
+            )?
             .ok_or("test: missing source approval")?
     };
     let slot = rig.participant_b.db.lock().map_err(|_| "test: destination preservation writer")?;
@@ -242,12 +246,14 @@ fn retain_destination_approval(
         ramflux_crypto::custody::pairing::PairingRole::Responder,
         rig.now,
     )?;
-    stage.retain_destination_full_preservation(
-        source.record(),
-        &publication.record,
-        &signed,
-        rig.now,
-    )?;
+    stage
+        .retain_destination_full_preservation(
+            source.record(),
+            &publication.record,
+            &signed,
+            custody::network_now()?,
+        )
+        .map_err(|error| format!("test: destination source approval retention: {error}"))?;
     Ok(())
 }
 

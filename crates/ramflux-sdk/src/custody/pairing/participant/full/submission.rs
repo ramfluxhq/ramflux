@@ -218,10 +218,54 @@ impl LocalPairingParticipant {
         } else {
             self.preserve_full_candidate(&observation)?
         };
-        let publication = observation.candidate;
-        runtime.require_live()?;
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.prepare_source_submission_in(
+            db,
+            ((operation.into(), generation, th), observation),
+            runtime,
+            cancelled,
+            approval,
+        )
+    }
+
+    pub(crate) fn prepare_affirmed_source_submission_in(
+        &self,
+        db: &AccountDb,
+        observed: ((String, u64, [u8; 32]), super::FullSourceCandidateObservation),
+        runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
+        cancelled: FullStageIoCancel,
+        affirmed: ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+        >,
+    ) -> Result<FullSourceSubmission, SdkError> {
+        let (scope, observation) = observed;
+        self.require_source_observation(&observation, &scope)?;
+        let retained = self.retained_full_candidate_in(db, &observation)?;
+        if canonical_json_bytes(&retained)? != canonical_json_bytes(&affirmed)? {
+            return Err(wrong());
+        }
+        self.prepare_source_submission_in(db, (scope, observation), runtime, cancelled, retained)
+    }
+
+    fn prepare_source_submission_in(
+        &self,
+        db: &AccountDb,
+        observed: ((String, u64, [u8; 32]), super::FullSourceCandidateObservation),
+        runtime: Arc<crate::custody::pairing::coordinator::FullRuntimeCancel>,
+        cancelled: FullStageIoCancel,
+        approval: ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+        >,
+    ) -> Result<FullSourceSubmission, SdkError> {
+        let (scope, observation) = observed;
+        let (operation, generation, th) = scope;
+        let operation = operation.as_str();
+        let publication = observation.candidate;
+        runtime.require_live()?;
+        if cancelled.is_cancelled() {
+            return Err(SdkError::PairingCode("Retired"));
+        }
         self.full_selected_db(db, Some(&publication.record.body.account_anchor))?;
         let stage = db.open_full_transfer_stage(
             operation,

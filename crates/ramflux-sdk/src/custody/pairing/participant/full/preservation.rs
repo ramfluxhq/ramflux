@@ -28,6 +28,13 @@ impl LocalPairingParticipant {
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.preserve_candidate(db, observation, false)
     }
+    pub(super) fn retained_full_candidate_in(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        observation: &super::FullSourceCandidateObservation,
+    ) -> Result<Envelope<PreservationFull>, SdkError> {
+        self.preserve_candidate(db, observation, false)
+    }
     pub(in crate::custody::pairing) fn preserve_full_candidate_in(
         &self,
         db: &ramflux_storage::AccountDb,

@@ -32,12 +32,14 @@ use zeroize::{Zeroize, Zeroizing};
 
 mod full;
 pub(super) use full::cancel::FullRuntimeCancel;
+mod local_writer;
 mod registry;
+pub use local_writer::PairingLocalWriterService;
 mod workflow;
 #[cfg(test)]
 pub(crate) use registry::settle_actor_data_for_test;
 pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
-pub(crate) use registry::{service_full_transfer, work_signal};
+pub(crate) use registry::{install_actor_with_writer, service_full_transfer, work_signal};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
@@ -103,6 +105,7 @@ pub struct PairingActor {
     ceremony: Option<Ceremony>,
     unsolicited: u32,
     recipient_stage: Option<Arc<dyn super::recipient::RecipientKeyStaging>>,
+    local_writer: Option<local_writer::LocalWriterPort>,
 }
 
 struct Ceremony {
@@ -213,6 +216,7 @@ impl PairingActor {
             ceremony: None,
             unsolicited: 0,
             recipient_stage: None,
+            local_writer: None,
         }
     }
 
@@ -293,13 +297,7 @@ impl PairingActor {
         let invite_envelope = created.invitation.clone();
         let expires_at = invitation.expires_at;
         let keys = self.load_public_keys(self.identity.local_ref.clone()).await?;
-        if let Some(participant) = self.participant.clone() {
-            let invitation = invite_envelope.clone();
-            self.full_runtime
-                .clone()
-                .run_blocking(move || participant.record_invitation(&invitation, generation))
-                .await?;
-        }
+        self.record_local_invitation(invite_envelope.clone(), generation).await?;
         let mut ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: request_id.clone(),
             generation,

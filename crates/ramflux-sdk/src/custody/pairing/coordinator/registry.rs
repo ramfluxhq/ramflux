@@ -23,6 +23,7 @@ pub(super) struct Entry {
     credential_provider: Option<Arc<dyn crate::custody::pairing::LocalCredentialProvider>>,
     full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
     work: Arc<tokio::sync::Notify>,
+    writer: Option<Mutex<super::PairingLocalWriterService>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl Entry {
@@ -42,7 +43,20 @@ fn actors() -> &'static Mutex<HashMap<Key, Arc<Entry>>> {
 /// # Errors
 /// Refuses a foreign account/root, an existing owner or an unavailable root.
 pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Result<(), SdkError> {
+    install_actor_with_writer(root, account_id, actor, None)
+}
+
+/// Install a short local service without transferring the actual account writer.
+pub(crate) fn install_actor_with_writer(
+    root: &Path,
+    account_id: String,
+    actor: PairingActor,
+    writer: Option<super::PairingLocalWriterService>,
+) -> Result<(), SdkError> {
     actor.require_open()?;
+    if let Some(writer) = &writer {
+        writer.require_actor(root, &actor)?;
+    }
     let key = (std::fs::canonicalize(root)?, account_id);
     if actor.identity.account_id != key.1
         || actor.participant.as_ref().is_some_and(|participant| {
@@ -65,7 +79,11 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
         credential_provider,
         full_runtime,
         cancelled: AtomicBool::new(false),
-        work: Arc::new(tokio::sync::Notify::new()),
+        work: writer
+            .as_ref()
+            .map(super::PairingLocalWriterService::work_signal)
+            .unwrap_or_else(|| Arc::new(tokio::sync::Notify::new())),
+        writer: writer.map(Mutex::new),
         pump: Mutex::new(None),
     });
     owners.insert(key, entry.clone());
@@ -169,8 +187,14 @@ pub(crate) fn service_full_transfer(
         Err(error) => return Err(error),
     };
     entry.require_live()?;
-    let Ok(mut actor) = entry.actor.try_lock() else { return Ok(false) };
-    actor.service_full_transfer(db)
+    let applied = match &entry.writer {
+        Some(writer) => {
+            writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.try_apply(db)?
+        }
+        None => false,
+    };
+    let Ok(mut actor) = entry.actor.try_lock() else { return Ok(applied) };
+    actor.service_full_transfer(db).map(|progress| progress || applied)
 }
 #[cfg(test)]
 pub(crate) async fn settle_actor_data_for_test(
