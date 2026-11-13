@@ -1234,9 +1234,14 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
       - name: Verify patches and unique resolution
         run: python3 -B scripts/check-quic-patches.py --verify-upstream
       - name: Run dependency libraries explicitly
         run: python3 -B scripts/test-quic-dependencies.py
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
