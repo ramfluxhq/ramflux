@@ -16,16 +16,8 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
         DmAction::Send(send) => {
             let federation = rf_federation_route(&send)?;
             let attachments = rf_dm_attachments(&send)?;
-            let generated = bindings::cli::send_text(
-                &send.envelope,
-                &send.account,
-                &send.conversation,
-                &send.body,
-                send.message.as_bytes(),
-            )?;
-            let (conversation_id, text) = bindings::cli::send_payload(&generated)?;
             let request = LocalBusMessageSubmitRequest {
-                conversation_id,
+                conversation_id: send.conversation,
                 message_id: send.message,
                 envelope_id: send.envelope,
                 source_principal_id: send.source_principal,
@@ -34,7 +26,9 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 recipient_principal_commitment: send.recipient_principal_commitment,
                 target_delivery_id: send.target,
                 encrypted_body_base64: String::new(),
-                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(text.as_bytes())),
+                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
+                    send.body.as_bytes(),
+                )),
                 created_at: rf_now_unix_timestamp(),
                 ttl: send
                     .ttl

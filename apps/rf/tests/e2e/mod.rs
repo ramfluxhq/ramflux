@@ -201,6 +201,8 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env_remove("RAMFLUX_ROUTER_WAL_DIR")
             .env("RAMFLUX_NODE_STATE_DIR", root.join("state"))
             .env("RAMFLUX_NOTIFY_ROUTE_KEY_FILE", &route_key)
+            // Also supports the gateway binary built by the local-mint feature matrix.
+            .env("RAMFLUX_RELAY_SERVICE_KEY_REF", "literal:rf-cli-e2e-relay-test-key")
             .env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE", &signing_seed)
             .env("RAMFLUX_FEDERATION_PUBLIC_ADDR", &public_addr)
             .env("RAMFLUX_FEDERATION_ADMIN_ADDR", &admin_addr)

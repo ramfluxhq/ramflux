@@ -116,22 +116,15 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         GroupAction::Rename(rename) => handle_group_rename(&mut bus, rename).await,
         GroupAction::Send(send) => {
             let federation = rf_group_send_federation_route(&send)?;
-            let request_id = send.envelope.as_deref().unwrap_or(&send.message);
-            let generated = bindings::cli::send_text(
-                request_id,
-                &send.account,
-                &send.conversation,
-                &send.body,
-                send.message.as_bytes(),
-            )?;
-            let (conversation_id, text) = bindings::cli::send_payload(&generated)?;
             let request = LocalBusGroupSendRequest {
                 group_id: send.group,
-                conversation_id,
+                conversation_id: send.conversation,
                 message_id: send.message,
                 sender_id: send.sender,
                 encrypted_body_base64: String::new(),
-                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(text.as_bytes())),
+                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
+                    send.body.as_bytes(),
+                )),
                 envelope_id: send.envelope,
                 source_principal_id: send.source_principal,
                 target_delivery_id: send.target,
