@@ -23,6 +23,7 @@ impl<'a> MutationIntent<'a> {
             return Err(SdkError::LocalBus("operation_id must contain 1 to 256 bytes".into()));
         }
         let key = key
+            .filter(|_| !crate::search::capability::is_method(&request.method))
             .filter(|_| !matches!(request.method.as_str(), "object.fetch" | "call.media.session"));
         let fingerprint = key
             .map(|_| {

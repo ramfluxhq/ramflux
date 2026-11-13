@@ -51,3 +51,9 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Unicode 16 search tables are isolated from the newer protocol dependencies.
+# Both manifests and Cargo.lock pin immutable upstream commits.
+allow-git = [
+    "https://github.com/unicode-rs/unicode-normalization",
+    "https://github.com/unicode-rs/unicode-segmentation",
+]

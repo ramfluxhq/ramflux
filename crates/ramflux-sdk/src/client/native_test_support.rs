@@ -117,3 +117,6 @@ mod history_item_tests;
 mod reaction_restore_tests;
 
 pub(crate) mod watchdog;
+
+#[cfg(ramflux_itest)]
+mod local_search;

@@ -54,7 +54,7 @@ pub mod protocol;
 pub(crate) mod read_model;
 mod readers;
 mod requests;
-mod secrets;
+pub(crate) mod secrets;
 mod shared_group_sync;
 pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
@@ -106,3 +106,8 @@ mod custody_daemon_tests;
 
 #[cfg(test)]
 mod generated_typing_tests;
+
+#[cfg(test)]
+mod search_tests;
+
+mod search_dispatch;

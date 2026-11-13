@@ -82,6 +82,7 @@ mod itest_crash_seam;
 mod itest_rfd_fault;
 mod node;
 mod object;
+pub mod search;
 pub use node::{
     GatewayProbe, NodeGateway, NodePinSource, NodeProfile, NodeRelay, probe_gateway_pre_account,
 };

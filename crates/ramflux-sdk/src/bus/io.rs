@@ -214,6 +214,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     }
     match error {
         SdkError::GeneratedApi(error) => error.name,
+        SdkError::Search(error) => error.code(),
         SdkError::EditConflict { .. } => "EditConflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
         SdkError::DataRootInUse => "DataRootInUse",

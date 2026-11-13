@@ -297,9 +297,35 @@ async fn write_responses<W: AsyncWrite + Unpin>(
             }
             frame = receiver.recv() => frame,
         };
-        let Some(frame) = frame else {
+        let Some(mut frame) = frame else {
             break;
         };
+        if frame.method == "search.query" && frame.ok == Some(true) {
+            let encoded = (|| -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+                let completion = supervisor.resolve_search_completion(&frame, id)?;
+                frame.body = serde_json::to_value(completion.take()?)?;
+                let encoded = super::io::encode_local_bus_frame(&frame);
+                super::secrets::wipe(&mut frame.body);
+                let encoded = zeroize::Zeroizing::new(encoded?);
+                completion.check_current()?;
+                Ok(encoded)
+            })();
+            match encoded {
+                Ok(bytes) => {
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        super::io::write_encoded_local_bus_frame(&mut writer, &bytes),
+                    )
+                    .await
+                    .map_err(|_| closed())??;
+                }
+                Err(error) => {
+                    frame = super::io::local_bus_error(&frame, &error);
+                    write_local_bus_frame(&mut writer, &frame).await?;
+                }
+            }
+            continue;
+        }
         write_local_bus_frame(&mut writer, &frame).await?;
         if frame.method == "daemon.stop" {
             supervisor.finish_stop_response(id, &frame.request_id);

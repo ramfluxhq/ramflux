@@ -15,12 +15,16 @@ ramflux-crypto = { workspace = true }
 ramflux-protocol = { workspace = true }
 fs2 = "0.4"
 zeroize = "1.8"
+# Search pins Unicode 16 separately; existing protocol normalization stays unchanged.
+search-normalization = { package = "unicode-normalization", git = "https://github.com/unicode-rs/unicode-normalization", rev = "c9921309f09ebd05108920fda92efbf5f8124a7d" }
+search-segmentation = { package = "unicode-segmentation", git = "https://github.com/unicode-rs/unicode-segmentation", rev = "9e3f88c06ca275294ef4cb1daf0789f06a28611d" }
+caseless = "=0.2.2"
 blake3 = "1.8.5"
 hkdf = { workspace = true }
 hmac = { workspace = true, features = ["zeroize"] }
 sha2 = { workspace = true, features = ["zeroize"] }
 chacha20poly1305 = "0.10.1"
-rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint"] }
+rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint", "hooks"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

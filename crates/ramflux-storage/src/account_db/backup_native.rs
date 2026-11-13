@@ -33,6 +33,7 @@ impl BackupDatabase {
     /// # Errors
     /// Returns SQLite errors. Callers must discard the private snapshot on any failure.
     pub fn sanitize_native_backup(&self) -> Result<(), StorageError> {
+        super::local_search::lifecycle::strip(&self.db)?;
         self.db.execute_batch("PRAGMA secure_delete=ON; BEGIN IMMEDIATE;
             DELETE FROM runtime_actor_state WHERE state_kind LIKE 'account/%' OR state_kind LIKE 'identity/owned_%' OR state_kind LIKE 'sync/%' OR state_kind LIKE 'gateway/%';
             DELETE FROM runtime_operation; DELETE FROM message_footprint WHERE kind='journal'; DELETE FROM runtime_journal; DELETE FROM runtime_message_sequence; DELETE FROM runtime_outbox;

@@ -121,6 +121,22 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
+            super::super::actor::PrivateCommand::SearchRebuild { owner, job, admission, reply } => {
+                if !reply.is_closed() {
+                    let result = (|| {
+                        let pool = self
+                            .readers
+                            .lock()
+                            .map_err(|_| stopped())?
+                            .clone()
+                            .ok_or_else(stopped)?;
+                        let runtime = pool.search_runtime()?;
+                        let account = local_bus_account(&self.state, &self.id)?;
+                        runtime.rebuild_batch(&account.client, owner, &job, &admission)
+                    })();
+                    let _ = reply.send(result);
+                }
+            }
             super::super::actor::PrivateCommand::AuthorizeBackup { generation, reply } => {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);

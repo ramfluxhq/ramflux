@@ -39,7 +39,8 @@ struct RowSelection<'a> {
     filter: &'a str,
 }
 fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
-    if table.starts_with("runtime_attachment_")
+    if table.starts_with("local_search_")
+        || table.starts_with("runtime_attachment_")
         || table == "object_segment_reference_veto"
         || (native_data_only && table.starts_with("raw_inner_"))
         || super::backup_selector_admission::is_scratch(table)
@@ -446,6 +447,7 @@ impl BackupDatabase {
         candidate: bool,
         after_capture: impl FnOnce(&rusqlite::Connection) -> Result<(), StorageError>,
     ) -> Result<Vec<String>, StorageError> {
+        super::local_search::lifecycle::strip(&self.db)?;
         super::message_footprint::migration::begin_merge(&self.db)?;
         let tables = self.incoming_tables()?;
         self.begin_message_merge()?;
