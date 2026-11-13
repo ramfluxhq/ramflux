@@ -108,6 +108,11 @@ impl AccountDb {
             .into_iter()
             .find(|live| live.operation_id == head.operation_id)
         {
+            // Full-transfer J3 has no separate enrollment proposal. Bind the
+            // frozen candidate hash and phase in this same actual-writer commit.
+            if head.kind == "transfer" && live.proposal_hash.is_none() {
+                live.proposal_hash = Some(head.candidate_hash.clone());
+            }
             live.phase.clone_from(&head.state);
             live.candidate_id = Some(head.operation_id.clone());
             self.put_pairing_live(&live)?;

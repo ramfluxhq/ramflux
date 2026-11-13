@@ -454,7 +454,7 @@ impl PairingWire for CredentialRequest {
         b32(&self.reservation_id, "reservation_id")?;
         integer(self.frontend_generation, "frontend_generation")?;
         require(self.frontend_generation >= 1, "frontend_generation")?;
-        require(matches!(self.action.as_str(), "setup" | "unlock"), "action")?;
+        require(matches!(self.action.as_str(), "setup" | "unlock" | "phrase"), "action")?;
         budget(self, Self::LIMIT)
     }
 }

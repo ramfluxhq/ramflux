@@ -1526,11 +1526,17 @@ pub async fn handle_bus(
     entry.require_live()?;
     let result = match method {
         "device.pair.begin" => Box::pin(actor.begin(bus_body(body)?)).await,
-        "device.pair.join" => Box::pin(actor.join(bus_body(body)?)).await,
-        "device.pair.confirm" => Box::pin(actor.confirm(&bus_body(body)?)).await,
+        "device.pair.join" | "device.transfer.join" => Box::pin(actor.join(bus_body(body)?)).await,
+        "device.pair.confirm" | "device.transfer.confirm" => {
+            Box::pin(actor.confirm(&bus_body(body)?)).await
+        }
         "device.pair.approve" => Box::pin(actor.approve(&bus_body(body)?)).await,
-        "device.pair.cancel" => Box::pin(actor.cancel(&bus_body(body)?)).await,
+        "device.pair.cancel" | "device.transfer.cancel" => {
+            Box::pin(actor.cancel(&bus_body(body)?)).await
+        }
         "device.pair.status" => Box::pin(actor.status(&bus_body(body)?)).await,
+        "device.transfer.begin" => Box::pin(actor.begin_full(bus_body(body)?)).await,
+        "device.transfer.prepare" => Box::pin(actor.prepare_full_transfer(&bus_body(body)?)).await,
         "device.transfer.status" => Box::pin(actor.transfer_status(&bus_body(body)?)).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
     };

@@ -208,9 +208,7 @@ impl Rig {
             vault: Arc::new(super::recipient::tests::DiskVault::open(
                 recipient_root.path().join("branch-vault"),
             )?),
-            provider: Arc::new(super::recipient::tests::Phrase::setup(
-                b"component-recipient-passphrase",
-            )),
+            provider: generation::phrase_provider(source.phrase.as_deref().map(String::as_str)),
             db: Mutex::new(None),
             persist: node.clone(),
             query: node.clone(),

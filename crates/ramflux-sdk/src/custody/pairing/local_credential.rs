@@ -180,6 +180,17 @@ pub fn acquire_unlock(
     take_bound(root, expected, provider, stored, "unlock")
 }
 
+// Only the full-transfer participant may call this after checking its actual
+// responder stage, final durable duplex and explicit attended Prepare binding.
+pub(super) fn acquire_phrase(
+    root: &Path,
+    expected: &CredentialRequest,
+    provider: &dyn LocalCredentialProvider,
+    stored: &PersistedReservation,
+) -> Result<SecretUtf8, SdkError> {
+    take_bound(root, expected, provider, stored, "phrase")
+}
+
 fn take_bound(
     root: &Path,
     expected: &CredentialRequest,

@@ -158,6 +158,7 @@ impl AccountDb {
         connection.execute_batch(super::union_encoding::SCHEMA)?;
         connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
+        connection.execute_batch(super::preservation::SCHEMA)?;
         let stage = FullTransferStage {
             connection,
             lock,
@@ -357,6 +358,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::union_encoding::SCHEMA)?;
         tx.execute_batch(super::source_scalar::SCHEMA)?;
         tx.execute_batch(super::native_floor::SCHEMA)?;
+        tx.execute_batch(super::preservation::SCHEMA)?;
         tx.execute(
             "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
             params![local, role, expires_at, digest.as_slice()],

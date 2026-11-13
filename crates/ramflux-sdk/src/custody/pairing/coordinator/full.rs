@@ -33,6 +33,7 @@ pub(super) struct FullCeremony {
     pub(super) prepared: Option<PreparedFullSource>,
     cancelled: Option<FullSourcePreparationCancel>,
     bootstrap: Option<bootstrap::BootstrapState>,
+    candidate: Option<crate::custody::pairing::FullPreparedTransferCandidate>,
 }
 impl FullCeremony {
     pub(super) fn take_epoch_job(&mut self) -> Option<epoch::FullEpochJob> {
@@ -58,6 +59,7 @@ impl FullCeremony {
             prepared,
             cancelled,
             bootstrap: None,
+            candidate: None,
         }
     }
 }
@@ -466,5 +468,154 @@ impl super::PairingActor {
             cancelled,
             self.full_runtime.clone(),
         )
+    }
+}
+
+impl PairingActor {
+    /// Sign and fsync exact source preservation only while this actor still owns
+    /// the original two confirmations and final durable data exchange. Reopened
+    /// stage metadata alone can never call the primary signer through this gate.
+    /// # Errors
+    /// Refuses B, a lost confirmation, incomplete data, changed native state or candidate.
+    pub async fn preserve_full_candidate(
+        &self,
+        candidate: ramflux_protocol::custody::Publication,
+    ) -> Result<
+        ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+        >,
+        SdkError,
+    > {
+        self.require_open()?;
+        self.full_runtime.require_live()?;
+        let (operation, generation, th) = self.with_ceremony(|c| {
+            if c.role != PairingRole::Initiator
+                || !c.local_confirmed
+                || !c.peer_mac_ok
+                || c.full
+                    .as_ref()
+                    .and_then(|full| full.bootstrap.as_ref())
+                    .and_then(|state| state.stream.as_ref())
+                    .is_none_or(|stream| stream.complete.is_none())
+            {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok((
+                c.operation_id.clone(),
+                c.generation,
+                c.displayed_th.ok_or(SdkError::PairingCode("WrongContext"))?,
+            ))
+        })?;
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let runtime = self.full_runtime.clone();
+        self.full_runtime
+            .clone()
+            .run_blocking(move || {
+                let _local = runtime.local_work()?;
+                let signed =
+                    participant.preserve_full_candidate(&operation, generation, th, &candidate)?;
+                runtime.require_live()?;
+                Ok(signed)
+            })
+            .await
+    }
+}
+
+impl PairingActor {
+    /// B's explicit attended phrase ceremony after its complete durable data exchange.
+    /// # Errors
+    /// Refuses another role/TH/generation, duplicate preparation or an incomplete data stage.
+    pub async fn prepare_full_transfer(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::local_dto::Prepare,
+    ) -> Result<LocalResult, SdkError> {
+        request.validate().map_err(|error| wire(&error))?;
+        self.require_open()?;
+        self.full_runtime.require_live()?;
+        self.with_ceremony(|c| {
+            super::check_generation(c, &request.operation_id, request.generation)?;
+            let full = c.full.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?;
+            // B's fresh attended phrase supplies its management approval even
+            // after DATA-only resume. Only A's preservation signer requires the
+            // original live confirmations or a separately attended reaffirmation.
+            if c.role != PairingRole::Responder
+                || full.candidate.is_some()
+                || c.displayed_th.map(encode_base64url).as_deref()
+                    != Some(request.transcript_hash.as_str())
+                || full
+                    .bootstrap
+                    .as_ref()
+                    .and_then(|state| state.stream.as_ref())
+                    .is_none_or(|stream| stream.complete.is_none())
+            {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok(())
+        })?;
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let runtime = self.full_runtime.clone();
+        let request_owned = request.clone();
+        let frontend_generation = self.frontend_generation;
+        let prepared = self
+            .full_runtime
+            .clone()
+            .run_blocking(move || {
+                let _local = runtime.local_work()?;
+                let prepared = participant
+                    .prepare_full_transfer_candidate(&request_owned, frontend_generation)?;
+                runtime.require_live()?;
+                Ok(prepared)
+            })
+            .await?;
+        let hash = ramflux_protocol::custody::object_hash(&prepared.publication().record)?;
+        self.with_ceremony_mut(|c| {
+            super::check_generation(c, &request.operation_id, request.generation)?;
+            let full = c.full.as_mut().ok_or(SdkError::PairingCode("WrongContext"))?;
+            if full.candidate.is_some() {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            full.candidate = Some(prepared);
+            c.displayed_proposal = Some(hash);
+            c.phase = "prepared".into();
+            c.emoji = None;
+            Ok(())
+        })?;
+        self.transfer_status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: request.operation_id.clone(),
+            generation: request.generation,
+        })
+        .await
+    }
+    #[cfg(test)]
+    pub(crate) fn full_prepared_candidate_for_test(
+        &self,
+    ) -> Result<(ramflux_protocol::custody::Publication, crate::custody::pairing::Install), SdkError>
+    {
+        let candidate = self
+            .ceremony
+            .as_ref()
+            .and_then(|c| c.full.as_ref())
+            .and_then(|full| full.candidate.as_ref())
+            .ok_or(SdkError::PairingCode("WrongContext"))?;
+        Ok((candidate.publication().clone(), candidate.install().clone()))
+    }
+}
+
+#[cfg(test)]
+impl PairingActor {
+    pub(crate) fn replace_full_confirmations_for_test(
+        &mut self,
+        flags: (bool, bool),
+    ) -> Result<(bool, bool), SdkError> {
+        self.with_ceremony_mut(|c| {
+            if c.full.is_none() {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            let previous = (c.local_confirmed, c.peer_mac_ok);
+            (c.local_confirmed, c.peer_mac_ok) = flags;
+            Ok(previous)
+        })
     }
 }
