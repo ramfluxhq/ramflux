@@ -189,7 +189,13 @@ exhaustion returns typed retryable `GatewayWriterBusy` before spawning work.
 A busy root cannot take other roots' slots; disk failure can still prevent commits.
 
 Fresh databases are initialized, committed and synced under a temporary name in
-the destination directory, then published without replacing an existing store.
+the destination directory's reserved `.ramflux-gateway-staging-v1` subdirectory,
+then published without replacing an existing store. Public database paths inside
+that reserved namespace (including canonical aliases) are refused with
+`GatewayStateReservedPath`. Before publication, serialized cleanup removes only
+exactly named orphan stages there; it never scans public database names and
+retains hard-linked stages or published-inode aliases. Ambiguous old temporary
+names outside the reserved directory are retained for operator inspection.
 A crash before publication leaves no public partial file; existing unmarked or
 older stores still require explicit reset. SIGTERM during a crash-reservation
 wait drains startup without opening listeners or releasing the crash barrier.

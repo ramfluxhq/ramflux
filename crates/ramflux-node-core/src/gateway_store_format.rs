@@ -130,10 +130,13 @@ fn sweep_abandoned_stages(
         let metadata = std::fs::symlink_metadata(entry.path()).map_err(redb_error)?;
         // A leftover hard-link to the published inode is committed state, not an orphan.
         #[cfg(unix)]
-        if published.as_ref().is_some_and(|published| {
+        if {
             use std::os::unix::fs::MetadataExt;
-            published.dev() == metadata.dev() && published.ino() == metadata.ino()
-        }) {
+            metadata.nlink() > 1
+                || published.as_ref().is_some_and(|published| {
+                    published.dev() == metadata.dev() && published.ino() == metadata.ino()
+                })
+        } {
             continue;
         }
         // Without a portable file-identity check, retain stages when a public DB exists.
@@ -313,6 +316,11 @@ mod tests {
         assert!(
             matches!(open(&orphan), Err(NodeCoreError::GatewayStateReservedPath)),
             "public stores must never use the cleanup namespace"
+        );
+        drop(crate::GatewayRedbStore::open(directory.path().join("other.redb"))?);
+        assert!(
+            alias.try_exists()?,
+            "opening another public store must preserve committed aliases"
         );
         let store = crate::GatewayRedbStore::open(&path)?;
         assert_eq!(
