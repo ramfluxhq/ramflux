@@ -69,9 +69,11 @@ impl AccountDb {
             [],
         )?;
         super::stage::sync_stage(&stage.directory)?;
-        self.connection.call(|raw| {
+        let account = self.local_account_id.clone();
+        let operation = operation.to_owned();
+        self.connection.call(move |raw| {
             let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            tx.execute("UPDATE pairing_full_tail SET tail_status='abandoned' WHERE account_id=?1 AND operation_id=?2 AND tail_status='pending'", params![self.local_account_id, operation])?;
+            tx.execute("UPDATE pairing_full_tail SET tail_status='abandoned' WHERE account_id=?1 AND operation_id=?2 AND tail_status='pending'", params![account, operation])?;
             tx.execute("UPDATE pairing_full_tail_apply SET tail_status='abandoned' WHERE operation_id=?1 AND tail_status='pending'", params![operation])?;
             tx.commit()
         })?;
