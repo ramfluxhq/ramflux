@@ -35,7 +35,8 @@ services:
       RAMFLUX_ITEST_HTTP: "1"
       RAMFLUX_ITEST_PERF: "${RF_COMPOSE_ITEST_PERF:-0}"
       RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL: "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL:-AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA}"
-      RAMFLUX_ITEST_GATEWAY_HTTP_ADDR: "0.0.0.0:18081"
+      # Management HTTP is local to the gateway network namespace.
+      RAMFLUX_ITEST_GATEWAY_HTTP_ADDR: "127.0.0.1:18081"
       RAMFLUX_ITEST_GATEWAY_QUIC_ADDR: "0.0.0.0:18443"
       RAMFLUX_ITEST_GATEWAY_TCP_ADDR: "0.0.0.0:18443"
       RAMFLUX_ITEST_GATEWAY_FRAME_DELAY_MS: "${RF_COMPOSE_ITEST_GATEWAY_FRAME_DELAY_MS:-0}"
@@ -51,7 +52,6 @@ services:
       - gateway-b-redb:/var/lib/ramflux/gateway
     depends_on: [ramflux-router, ramflux-retention]
     ports:
-      - "${RAMFLUX_ITEST_GATEWAY_B_HTTP_PORT:-18088}:18081"
       - "${RAMFLUX_ITEST_GATEWAY_B_QUIC_PORT:-18444}:18443/udp"
       - "${RAMFLUX_ITEST_GATEWAY_B_TCP_PORT:-18444}:18443/tcp"
     networks:

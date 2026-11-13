@@ -168,7 +168,8 @@ format 3 never imports those rows and does not charge ownerless rows to roots.
 Test HTTP policy routes exist only with the non-default `itest-http` feature.
 The listener binds only to a literal loopback address (default `127.0.0.1:18081`);
 non-loopback addresses fail startup with `ItestListenerNonLoopback`. Loopback is
-the test authority boundary; local processes can use these test routes. Release
+the test authority boundary; local processes can use these test routes. Container
+examples keep HTTP inside the gateway network namespace without a published port. Release
 and production builds refuse the feature, and CI checks release/deploy build
 commands and the normal production feature graph.
 
