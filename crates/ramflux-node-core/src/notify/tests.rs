@@ -49,12 +49,24 @@ fn n1_persisted_predecessor_and_zero_retention_require_reset() -> TestResult {
 fn n1_cancel_horizon_survives_restart_and_bounded_cleanup() -> TestResult {
     let temp = tempfile::TempDir::new()?;
     let path = temp.path().join("notify.redb");
-    let until = {
+    const CANCEL_COUNT: usize = 129;
+    let (until, earliest, latest) = {
         let store = NotifyRedbStore::open_without_wal(&path)?;
-        for id in 0..129 {
-            store.tombstone_wake_id(&format!("cancel-{id}"), None)?;
+        let mut earliest = u64::MAX;
+        let mut latest = 0;
+        for id in 0..CANCEL_COUNT {
+            let key = format!("cancel-{id}");
+            store.tombstone_wake_id(&key, None)?;
+            let horizon =
+                store.load_wake_ledger_row(&key)?.ok_or("test: cancel missing")?.retain_until;
+            earliest = earliest.min(horizon);
+            latest = latest.max(horizon);
         }
-        store.load_wake_ledger_row("cancel-0")?.ok_or("test: first cancel missing")?.retain_until
+        let until = store
+            .load_wake_ledger_row("cancel-0")?
+            .ok_or("test: first cancel missing")?
+            .retain_until;
+        (until, earliest, latest)
     };
     let store = NotifyRedbStore::open_without_wal(&path)?;
     store.tombstone_wake_id("cancel-0", None)?;
@@ -63,9 +75,16 @@ fn n1_cancel_horizon_survives_restart_and_bounded_cleanup() -> TestResult {
         until,
         "repeated cancellation refreshed the fixed original horizon"
     );
-    assert_eq!(store.prune_wake_ledger(until - 1)?, 0, "denial retired before its horizon");
-    assert_eq!(store.prune_wake_ledger(until)?, 128, "cleanup exceeded its indexed batch limit");
-    assert_eq!(store.prune_wake_ledger(until + 1)?, 1, "remaining denial never retired");
+    assert_eq!(
+        store.prune_wake_ledger(earliest.saturating_sub(1))?,
+        0,
+        "denial retired before its horizon"
+    );
+    // Creating durable rows may cross clock seconds; all 129 rows are due only
+    // at the latest horizon assigned by the actual store.
+    assert_eq!(store.prune_wake_ledger(latest)?, 128, "cleanup exceeded its indexed batch limit");
+    let after = latest.checked_add(1).ok_or("test: cancel horizon overflow")?;
+    assert_eq!(store.prune_wake_ledger(after)?, 1, "remaining denial never retired");
     let tx = store.db.begin_read()?;
     assert_eq!(tx.open_table(NOTIFY_WAKE_DUE)?.len()?, 0, "cleanup left an uncharged due index");
     assert_eq!(
