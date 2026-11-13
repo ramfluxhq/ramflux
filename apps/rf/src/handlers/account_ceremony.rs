@@ -19,6 +19,9 @@ struct Terminal {
     input: File,
     output: File,
     echo_disabled: bool,
+    /// A carriage return ended the previous line. A following line feed belongs to that Enter.
+    #[cfg(windows)]
+    skip_lf: bool,
 }
 impl Terminal {
     fn open() -> Result<Self, RfError> {
@@ -38,7 +41,7 @@ impl Terminal {
             super::windows_console::disable_line_input(&input).map_err(|error| {
                 RfError::Message(format!("Could not protect terminal input: {error}"))
             })?;
-            return Ok(Self { input, output, echo_disabled: false });
+            return Ok(Self { input, output, echo_disabled: false, skip_lf: false });
         }
         #[cfg(not(windows))]
         {
@@ -87,7 +90,19 @@ impl Terminal {
         let mut overflow = false;
         loop {
             self.input.read_exact(&mut *byte)?;
+            #[cfg(windows)]
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte[0] == b'\n' {
+                    continue;
+                }
+            }
             if byte[0] == b'\n' {
+                break;
+            }
+            #[cfg(windows)]
+            if byte[0] == b'\r' {
+                self.skip_lf = true;
                 break;
             }
             if bytes.len() < 4096 {
