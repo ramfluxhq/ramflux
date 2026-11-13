@@ -69,3 +69,17 @@ byte totals, missing-attachment count, tail status and an exact typed error. Its
 After the receiver commits and signs an applied-input receipt, both peers show
 `awaiting_reverse`; reverse proof, catch-up and installation are separate steps.
 `pairing status` keeps the legacy ceremony view.
+
+Local display clients can use `subscription.open` with their account ID and the
+single topic `device.pairing.event`. Each event body is a closed
+`ramflux.pairing.LocalEvent.v2`; invitation tokens and private input never appear
+in it. The bounded display stream includes a sequence cursor and reports lag
+when a reader must subscribe again. It is available for a staged recipient
+without admitting ordinary account networking.
+
+The narrow ABI's `ramflux_pairing_event_poll` also receives these background
+snapshots after a successful pairing call. Its reader is separate from attended
+credential calls and accepts only the handle's current operation and generation.
+Closing the handle drains that reader; locking the account ends its daemon
+subscription. Polling display events never requests a recovery phrase or a data
+passphrase.

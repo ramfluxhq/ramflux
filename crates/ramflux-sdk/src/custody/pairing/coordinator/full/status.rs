@@ -88,7 +88,9 @@ impl PairingActor {
             c.full_terminal_status = Some(Box::new(value));
         }
     }
-    pub(super) fn current_full_status(&self) -> Result<Option<FullStatus>, SdkError> {
+    pub(in crate::custody::pairing::coordinator) fn current_full_status(
+        &self,
+    ) -> Result<Option<FullStatus>, SdkError> {
         let c = self.ceremony.as_ref().ok_or(SdkError::PairingCode("NotFound"))?;
         if let Some(saved) = &c.full_terminal_status {
             return Ok(Some((**saved).clone()));

@@ -25,16 +25,20 @@ use std::{
     },
 };
 
+mod events;
+
 pub(in crate::c_abi) struct State {
     pub(super) root: PathBuf,
     pub(super) socket: Option<PathBuf>,
     pub(super) account: Option<String>,
     provider: Mutex<Option<Arc<CallbackProvider>>>,
-    events: Mutex<VecDeque<LocalEvent>>,
-    last: Mutex<Option<(String, u64)>>,
+    events: Arc<Mutex<VecDeque<LocalEvent>>>,
+    event_reader: Mutex<Option<events::EventReader>>,
+    event_account: Mutex<Option<String>>,
+    last: Arc<Mutex<Option<(String, u64)>>>,
     busy: AtomicBool,
-    closed: AtomicBool,
-    stopped: tokio::sync::Notify,
+    closed: Arc<AtomicBool>,
+    stopped: Arc<tokio::sync::Notify>,
 }
 pub(super) struct Permit<'a>(&'a AtomicBool);
 impl Drop for Permit<'_> {
@@ -61,11 +65,13 @@ impl State {
             socket: socket.map(PathBuf::from),
             account,
             provider: Mutex::new(None),
-            events: Mutex::new(VecDeque::new()),
-            last: Mutex::new(None),
+            events: Arc::new(Mutex::new(VecDeque::new())),
+            event_reader: Mutex::new(None),
+            event_account: Mutex::new(None),
+            last: Arc::new(Mutex::new(None)),
             busy: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-            stopped: tokio::sync::Notify::new(),
+            closed: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(tokio::sync::Notify::new()),
         })
     }
     pub(super) fn enter(&self) -> CAbiResult<Permit<'_>> {
@@ -100,6 +106,11 @@ impl State {
     pub(in crate::c_abi) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.stopped.notify_waiters();
+        let reader =
+            self.event_reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(reader) = reader {
+            reader.stop_and_join();
+        }
         let provider =
             self.provider.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(provider) = provider {
@@ -137,6 +148,7 @@ impl State {
         if self.closed.load(Ordering::Acquire) {
             return Err(internal());
         }
+        let event_account = account.clone();
         let remote = async {
             let mut client = PairingBusClient::connect(socket, provider).await?;
             client.request(Some(account), "device", method, body).await
@@ -153,6 +165,7 @@ impl State {
         result
             .validate_method(method.strip_prefix("device.").ok_or_else(internal)?)
             .map_err(|_| internal())?;
+        *self.event_account.lock().map_err(|_| internal())? = Some(event_account);
         Ok(result)
     }
     pub(super) fn remember(&self, result: &LocalResult) -> CAbiResult<()> {
@@ -182,7 +195,11 @@ impl State {
             Outcome::Error { .. } => (None, None),
         };
         if let Some(identity) = identity {
-            *self.last.lock().map_err(|_| internal())? = Some(identity);
+            let mut last = self.last.lock().map_err(|_| internal())?;
+            if last.as_ref() != Some(&identity) {
+                self.events.lock().map_err(|_| internal())?.clear();
+            }
+            *last = Some(identity);
         }
         if let Some(event) = event {
             event.validate().map_err(|_| internal())?;
@@ -196,6 +213,9 @@ impl State {
                 events.pop_front();
             }
             events.push_back(event);
+        }
+        if let Some(account) = self.event_account.lock().map_err(|_| internal())?.clone() {
+            self.start_events(account);
         }
         Ok(())
     }

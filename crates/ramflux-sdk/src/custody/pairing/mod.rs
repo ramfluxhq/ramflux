@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant pairing install-store and SDK coordinator. Default-off.
+/// Same-user local subscription topic carrying only closed public pairing display events.
+pub const PAIRING_EVENT_TOPIC: &str = "device.pairing.event";
 mod activate;
 pub(crate) mod admission;
 mod coordinator;
@@ -40,7 +42,8 @@ pub use coordinator::{
     pairing_enabled, remove_actor, remove_actor_and_drain, validate_head_advance,
 };
 pub(crate) use coordinator::{
-    install_actor_with_writer, service_frontend, take_installed_recipient, work_signal,
+    PairingEventSubscription, install_actor_with_writer, pairing_event_stream, service_frontend,
+    take_installed_recipient, work_signal,
 };
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};

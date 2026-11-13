@@ -18,6 +18,7 @@ use ramflux_protocol::custody::pairing::{
 use ramflux_protocol::custody::{DeviceRef, object_hash};
 use std::sync::{Arc, Mutex};
 
+pub(in crate::bus) mod events;
 mod staged_resume;
 #[cfg(test)]
 pub(crate) use staged_resume::unlock_for_test;

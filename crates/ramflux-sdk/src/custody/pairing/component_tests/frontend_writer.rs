@@ -173,6 +173,41 @@ mod tests {
         hold.finish().await?;
         result
     }
+    fn assert_public_events(
+        events: &crate::custody::pairing::PairingEventSubscription,
+        begin: &ramflux_protocol::custody::pairing::local_dto::BeginResult,
+    ) -> TestResult {
+        use ramflux_protocol::custody::pairing::PairingWire as _;
+        let (floor, _) = events.bounds()?;
+        let rows = events.page(floor)?;
+        assert!(!rows.is_empty(), "test: actual bus begin published no public display snapshot");
+        for (_, event) in rows {
+            let bytes = event.to_wire_bytes()?;
+            assert!(
+                !bytes
+                    .windows(begin.invite_token.recipient_token.len())
+                    .any(|part| part == begin.invite_token.recipient_token.as_bytes()),
+                "test: initiating secret token entered asynchronous display stream"
+            );
+            let event =
+                ramflux_protocol::custody::pairing::local_dto::LocalEvent::from_wire_bytes(&bytes)?;
+            let ramflux_protocol::custody::pairing::local_dto::LocalEvent::Update {
+                update, ..
+            } = event
+            else {
+                continue;
+            };
+            assert_eq!(
+                update.operation_id, begin.operation_id,
+                "test: event crossed invitation owners"
+            );
+            assert_eq!(
+                update.generation, begin.generation,
+                "test: event crossed local generations"
+            );
+        }
+        Ok(())
+    }
     #[tokio::test(start_paused = true)]
     async fn pairing_registered_frontend_services_local_work_while_bus_call_owns_actor()
     -> TestResult {
@@ -191,6 +226,10 @@ mod tests {
                 Some(service),
             )?;
             let _registered = Registered(participant.root.clone(), participant.account_id.clone());
+            let events = crate::custody::pairing::pairing_event_stream(
+                &participant.root,
+                &participant.account_id,
+            )?;
             let signal =
                 crate::custody::pairing::work_signal(&participant.root, &participant.account_id)
                     .ok_or("test: missing registered writer signal")?;
@@ -215,6 +254,7 @@ mod tests {
             let Outcome::Begin { value } = issued.outcome else {
                 return Err("test: registered frontend did not issue invitation".into());
             };
+            assert_public_events(&events, &value)?;
             let live = source.client.account_db()?.pairing_live_rows()?;
             assert!(
                 live.iter().any(|row| row.operation_id == value.operation_id),
@@ -229,6 +269,10 @@ mod tests {
                 &participant.account_id,
             )
             .await?;
+            assert!(
+                events.bounds().is_err(),
+                "test: display subscription retained a locked root owner"
+            );
             Ok(())
         }))
         .await;

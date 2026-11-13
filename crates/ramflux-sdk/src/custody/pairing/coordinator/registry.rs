@@ -12,6 +12,9 @@ use std::{
     },
 };
 
+mod events;
+pub(crate) use events::{PairingEventSubscription, pairing_event_stream};
+
 type Key = (PathBuf, String);
 fn key(root: &Path, account: &str) -> Result<Key, SdkError> {
     Ok((std::fs::canonicalize(root)?, account.into()))
@@ -23,6 +26,8 @@ pub(super) struct Entry {
     credential_provider: Option<Arc<dyn crate::custody::pairing::LocalCredentialProvider>>,
     full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
     work: Arc<tokio::sync::Notify>,
+    events: Mutex<events::Events>,
+    event_signal: Arc<tokio::sync::Notify>,
     writer: Mutex<Option<super::PairingLocalWriterService>>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -83,15 +88,22 @@ pub(crate) fn install_actor_with_writer(
             || Arc::new(tokio::sync::Notify::new()),
             super::PairingLocalWriterService::work_signal,
         ),
+        events: Mutex::new(events::Events::default()),
+        event_signal: Arc::new(tokio::sync::Notify::new()),
         writer: Mutex::new(writer),
         pump: Mutex::new(None),
     });
     owners.insert(key, entry.clone());
     drop(owners);
+    start_pump(&entry);
+    Ok(())
+}
+
+fn start_pump(entry: &Arc<Entry>) {
     // Pure synchronous SDK callers may drive their actor explicitly. The bus installs
     // within its account runtime and always owns this separate relay-only pump.
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let owner = Arc::downgrade(&entry);
+        let owner = Arc::downgrade(entry);
         let task = runtime.spawn(async move {
             while let Some(entry) = owner.upgrade() {
                 if entry.require_live().is_err() {
@@ -121,6 +133,9 @@ pub(crate) fn install_actor_with_writer(
                             actor.note_background_error(&error);
                         }
                     }
+                    if let Err(error) = entry.remember_display(&actor) {
+                        actor.note_background_error(&error);
+                    }
                 }
                 entry.work.notify_one();
                 drop(entry);
@@ -129,7 +144,6 @@ pub(crate) fn install_actor_with_writer(
         });
         *entry.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
-    Ok(())
 }
 /// Fence callbacks and close the proof connection immediately on owner lock/disconnect.
 /// An already submitted head remains journaled for reconciliation.
@@ -169,6 +183,7 @@ fn remove_entry(root: &Path, account_id: &str) -> Result<Option<Arc<Entry>>, Sdk
             provider.cancel();
         }
         entry.cancelled.store(true, Ordering::Release);
+        entry.event_signal.notify_waiters();
         entry.full_runtime.stop();
         if let Some(pump) =
             entry.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()

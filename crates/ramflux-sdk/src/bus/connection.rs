@@ -259,6 +259,9 @@ async fn configure_subscription(
     if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         connection.attended_account_id.clone_from(&request.account_id);
     }
+    if super::pairing::events::requested(request) {
+        return supervisor.subscribe_pairing_stream(request.clone(), connection).await;
+    }
     if request.account_id.is_none() {
         return supervisor.subscribe_backup_stream(request.clone(), connection).await;
     }

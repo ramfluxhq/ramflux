@@ -39,10 +39,11 @@ mod attended_join;
 mod workflow;
 #[cfg(test)]
 pub(crate) use registry::settle_actor_data_for_test;
-pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
 pub(crate) use registry::{
-    install_actor_with_writer, service_frontend, take_installed_recipient, work_signal,
+    PairingEventSubscription, install_actor_with_writer, pairing_event_stream, service_frontend,
+    take_installed_recipient, work_signal,
 };
+pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
@@ -1695,6 +1696,14 @@ pub async fn handle_bus(
         }
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
     };
+    if result.is_ok()
+        && let Err(error) = entry.remember_display(&actor)
+    {
+        tracing::warn!(
+            error_code = crate::bus::io::local_bus_error_code(&error),
+            "pairing display publication deferred"
+        );
+    }
     if entry.require_live().is_err() {
         actor.retire_owned_runtime().await;
         return Err(SdkError::PairingCode("Retired"));
