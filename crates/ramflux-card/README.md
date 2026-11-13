@@ -114,7 +114,9 @@ uses exact messages from the pinned engine; these diagnostics confer no authorit
 The library consumes manifest-owned BSD presentation components and light/dark
 Palettes through project-owned `@rf/card` semantic primitives. Hosts select theme;
 peer input cannot supply styles. The generated token/component files are read-only.
-`form.tsx` is the package entry point for all four components:
+The final design catalog also contains header/search signatures; these are
+typechecked but explicitly refused by this closed profile and pruned from the
+production bundle. `form.tsx` is the entry point for the four admitted components:
 
 - `rf.form`: 1–16 typed fields, each with unique id/binding, optional required/error/
   disabled state; select has 1–16 closed choices; number uses safe integers and
