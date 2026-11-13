@@ -20,4 +20,23 @@ CREATE TABLE IF NOT EXISTS pairing_source_cleanup(
  primary_ref TEXT NOT NULL CHECK(length(primary_ref)=43),
  old_self_key TEXT NOT NULL CHECK(length(old_self_key)=43),
  PRIMARY KEY(account_id,operation_id)
-) WITHOUT ROWID;";
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pairing_full_tail_apply(
+ operation_id TEXT NOT NULL PRIMARY KEY CHECK(length(operation_id)=43),
+ generation_nonce TEXT NOT NULL UNIQUE CHECK(length(generation_nonce)=43),
+ stage_digest BLOB NOT NULL CHECK(length(stage_digest)=32),
+ source_owner TEXT NOT NULL CHECK(length(source_owner) BETWEEN 1 AND 1024),
+ tail_hash TEXT CHECK(tail_hash IS NULL OR length(tail_hash)=43),
+ phase INTEGER NOT NULL DEFAULT 0 CHECK(phase BETWEEN 0 AND 2),
+ next_record INTEGER NOT NULL DEFAULT 0 CHECK(next_record>=0),
+ tail_status TEXT NOT NULL DEFAULT 'pending' CHECK(tail_status IN ('pending','merged','abandoned'))
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pairing_full_tail_dependency(
+ operation_id TEXT NOT NULL CHECK(length(operation_id)=43),
+ owner INTEGER NOT NULL CHECK(owner IN(0,1)),
+ parent_commitment TEXT NOT NULL CHECK(length(parent_commitment)=43),
+ child_commitment TEXT NOT NULL CHECK(length(child_commitment)=43),
+ PRIMARY KEY(operation_id,owner,parent_commitment,child_commitment),
+ FOREIGN KEY(operation_id) REFERENCES pairing_full_tail_apply(operation_id) ON DELETE CASCADE
+) WITHOUT ROWID;
+";

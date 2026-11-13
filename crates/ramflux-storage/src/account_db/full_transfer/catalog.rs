@@ -575,7 +575,9 @@ mod tables_0;
 mod tables_1;
 mod tables_2;
 mod tables_3;
+mod tail_application_local;
 mod tail_local;
+use tail_application_local::{APPLY as TAIL_APPLICATION, DEPENDENCY as TAIL_DEPENDENCIES};
 /// Fresh migrated baseline schema declarations. No row with `RequiresOwner` can be
 /// exported. Optional/history schemas and actor projections must be added explicitly.
 #[must_use]
@@ -695,6 +697,8 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     tables_2::RULE_106,  // sql/pairing_adoption
     tables_2::RULE_107,  // sql/pairing_floor
     tail_local::RULE,    // sql/pairing_full_tail
+    TAIL_APPLICATION,    // sql/pairing_full_tail_apply
+    TAIL_DEPENDENCIES,   // sql/pairing_full_tail_dependency
     tables_2::RULE_108,  // sql/pairing_head
     tables_2::RULE_109,  // sql/pairing_live
     cleanup_local::RULE, // sql/pairing_source_cleanup
