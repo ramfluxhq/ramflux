@@ -28,7 +28,7 @@ fn open_with(
         .write(true)
         .open(directory.join(".gateway-init.lock"))
         .map_err(redb_error)?;
-    fs2::FileExt::try_lock_exclusive(&initialization).map_err(redb_error)?;
+    fs2::FileExt::lock_exclusive(&initialization).map_err(redb_error)?;
     sweep_abandoned_stages(directory, std::time::SystemTime::now())?;
     let mut builder = redb::Database::builder();
     builder.set_cache_size(super::GATEWAY_REPLAY_PAGE_CACHE_BYTES);
@@ -158,6 +158,33 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn active_initializer_holds_cleanup_lock_until_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("gateway.redb");
+        let database = open_with(&path, |_| {
+            let lock = std::fs::OpenOptions::new()
+                .write(true)
+                .open(directory.path().join(".gateway-init.lock"))
+                .expect("test: initializer lock exists");
+            let error = fs2::FileExt::try_lock_exclusive(&lock)
+                .expect_err("test: active initializer owns cleanup lock");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock,
+                "cleanup must not enter an active initializer"
+            );
+        })?;
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.path().join(".gateway-init.lock"))?;
+        fs2::FileExt::try_lock_exclusive(&lock)?;
+        assert!(path.try_exists()?, "publication must complete before cleanup lock is released");
+        drop(database);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn initial_creation_crash_never_publishes_unmarked_database()
     -> Result<(), Box<dyn std::error::Error>> {
