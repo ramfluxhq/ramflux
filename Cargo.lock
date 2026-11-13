@@ -3542,7 +3542,6 @@ dependencies = [
  "sha2 0.11.1",
  "signal-hook",
  "subtle",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
