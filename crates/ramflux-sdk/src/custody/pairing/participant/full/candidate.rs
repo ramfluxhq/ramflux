@@ -85,6 +85,7 @@ impl LocalPairingParticipant {
             return Err(wrong());
         }
         let duplex = stage.verified_duplex(now)?;
+        super::require_candidate_lease(duplex.expires_at(), now)?;
         let install =
             install_store::read_pending(&self.root, &self.account_id, &request.operation_id)?
                 .ok_or_else(wrong)?;

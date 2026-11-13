@@ -6,6 +6,7 @@
 use super::AccountDb;
 use crate::{AccountDbKey, StorageError};
 use std::path::Path;
+mod tail;
 
 /// Per-category counts read from the exact snapshot, with no row-count limit.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

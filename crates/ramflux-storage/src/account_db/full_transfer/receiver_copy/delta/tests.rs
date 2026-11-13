@@ -300,6 +300,16 @@ fn retain_rebased_atomically(
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
+    assert_ne!(
+        old.0.as_slice(),
+        copy.union_encoding().ok_or("new union")?.generation_nonce.as_slice(),
+        "rollback probe reused the already durable generation"
+    );
+    assert_ne!(
+        old.1,
+        copy.scratch.path.file_name().and_then(|name| name.to_str()).ok_or("new workspace")?,
+        "rollback probe reused the already durable workspace"
+    );
     let receipt: Vec<u8> = stage.connection.query_row(
         "SELECT bytes FROM receiver_receipt WHERE manifest_hash=?1",
         params![copy.hash],
@@ -398,9 +408,8 @@ fn rebase_current_b(
         assert_eq!(private.db.query_row("SELECT count(*) FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",params![h(n),h(n+1)],|row|row.get::<_,u64>(0))?,1,"rebase lost an independent intervening B write");
     }
     drop(private);
-    let (_, packet) = receipt(&mut copy, stage)?;
     assert_eq!(
-        encode_base64url(packet.data_verified_hash()?),
+        stage.verified_duplex(1000)?.data_verified_hash(),
         before.data_verified_hash(),
         "B rebase changed the frozen source receipt"
     );

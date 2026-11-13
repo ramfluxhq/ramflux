@@ -14,6 +14,11 @@ use ramflux_protocol::{
 };
 use rusqlite::{OptionalExtension as _, params};
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS full_preservation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),base_record BLOB NOT NULL,candidate BLOB NOT NULL,bytes BLOB NOT NULL);";
+#[derive(Clone, Copy)]
+enum ApprovalTime {
+    BeforePublish,
+    AfterNativeAck,
+}
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
 }
@@ -27,11 +32,30 @@ impl FullTransferStage<'_> {
         candidate: &Envelope<DeviceSet>,
         now: u64,
     ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
+        self.read_source_preservation(previous, candidate, now, ApprovalTime::BeforePublish)
+    }
+    // An expired local approval cannot undo an independently confirmed native
+    // publication. This is exact submitted-candidate reconciliation, never signing.
+    pub(super) fn retained_source_after_native_ack(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        now: u64,
+    ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
+        self.read_source_preservation(previous, candidate, now, ApprovalTime::AfterNativeAck)
+    }
+    fn read_source_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        now: u64,
+        validity: ApprovalTime,
+    ) -> Result<Option<Envelope<PreservationFull>>, StorageError> {
         self.require_io()?;
         let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self
             .connection
             .query_row(
-                "SELECT base_record,candidate,bytes FROM full_preservation WHERE singleton=1",
+                "SELECT base_record,candidate,bytes FROM full_preservation WHERE singleton=1 AND length(base_record)<=524288 AND length(candidate)<=524288 AND length(bytes)<=11700",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -47,7 +71,7 @@ impl FullTransferStage<'_> {
         if canonical_json_bytes(&signed)? != bytes {
             return Err(wrong());
         }
-        self.retain_source_full_preservation(previous, candidate, &signed, now)?;
+        self.check_source_preservation(previous, candidate, &signed, now, validity)?;
         Ok(Some(signed))
     }
     /// Fsync A's exact signed preservation before releasing `TransferReadyFull`.
@@ -62,6 +86,35 @@ impl FullTransferStage<'_> {
         candidate: &Envelope<DeviceSet>,
         signed: &Envelope<PreservationFull>,
         now: u64,
+    ) -> Result<(), StorageError> {
+        self.check_source_preservation(
+            previous,
+            candidate,
+            signed,
+            now,
+            ApprovalTime::BeforePublish,
+        )?;
+        let old = canonical_json_bytes(previous)?;
+        let candidate = canonical_json_bytes(candidate)?;
+        let bytes = canonical_json_bytes(signed)?;
+        if old.len() > 524_288 || candidate.len() > 524_288 || bytes.len() > PreservationFull::LIMIT
+        {
+            return Err(wrong());
+        }
+        let changed=self.connection.execute("INSERT INTO full_preservation VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes WHERE full_preservation.base_record=excluded.base_record AND full_preservation.candidate=excluded.candidate AND full_preservation.bytes=excluded.bytes",params![old,candidate,bytes])?;
+        if changed != 1 {
+            return Err(wrong());
+        }
+        super::stage::sync_stage(&self.directory)?;
+        self.require_io()
+    }
+    fn check_source_preservation(
+        &self,
+        previous: &Envelope<DeviceSet>,
+        candidate: &Envelope<DeviceSet>,
+        signed: &Envelope<PreservationFull>,
+        now: u64,
+        validity: ApprovalTime,
     ) -> Result<(), StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
@@ -85,7 +138,7 @@ impl FullTransferStage<'_> {
             || body.manifest_chain_hash != proof.manifest_chain_hash()
             || body.data_verified_hash != proof.data_verified_hash()
             || body.target_restrictions_root != proof.target_restrictions_root()
-            || body.expires_at <= now
+            || (matches!(validity, ApprovalTime::BeforePublish) && body.expires_at <= now)
             || body.expires_at > proof.expires_at()
             || body.expires_at > now.saturating_add(300)
         {
@@ -97,18 +150,6 @@ impl FullTransferStage<'_> {
             &previous.body.master_certificate.body.self_signing_public_key,
         )
         .map_err(|_| wrong())?;
-        let old = canonical_json_bytes(previous)?;
-        let candidate = canonical_json_bytes(candidate)?;
-        let bytes = canonical_json_bytes(signed)?;
-        if old.len() > 524_288 || candidate.len() > 524_288 || bytes.len() > PreservationFull::LIMIT
-        {
-            return Err(wrong());
-        }
-        let changed=self.connection.execute("INSERT INTO full_preservation VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes WHERE full_preservation.base_record=excluded.base_record AND full_preservation.candidate=excluded.candidate AND full_preservation.bytes=excluded.bytes",params![old,candidate,bytes])?;
-        if changed != 1 {
-            return Err(wrong());
-        }
-        super::stage::sync_stage(&self.directory)?;
-        self.require_io()
+        Ok(())
     }
 }

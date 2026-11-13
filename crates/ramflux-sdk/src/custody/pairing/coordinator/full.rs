@@ -488,24 +488,7 @@ impl PairingActor {
     > {
         self.require_open()?;
         self.full_runtime.require_live()?;
-        let (operation, generation, th) = self.with_ceremony(|c| {
-            if c.role != PairingRole::Initiator
-                || !c.local_confirmed
-                || !c.peer_mac_ok
-                || c.full
-                    .as_ref()
-                    .and_then(|full| full.bootstrap.as_ref())
-                    .and_then(|state| state.stream.as_ref())
-                    .is_none_or(|stream| stream.complete.is_none())
-            {
-                return Err(SdkError::PairingCode("WrongContext"));
-            }
-            Ok((
-                c.operation_id.clone(),
-                c.generation,
-                c.displayed_th.ok_or(SdkError::PairingCode("WrongContext"))?,
-            ))
-        })?;
+        let (operation, generation, th) = self.full_source_approval_scope()?;
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let runtime = self.full_runtime.clone();
         self.full_runtime
@@ -522,6 +505,59 @@ impl PairingActor {
 }
 
 impl PairingActor {
+    fn full_source_approval_scope(&self) -> Result<(String, u64, [u8; 32]), SdkError> {
+        self.with_ceremony(|c| {
+            if c.role != PairingRole::Initiator
+                || !c.local_confirmed
+                || !c.peer_mac_ok
+                || c.full
+                    .as_ref()
+                    .and_then(|full| full.bootstrap.as_ref())
+                    .and_then(|state| state.stream.as_ref())
+                    .is_none_or(|stream| stream.complete.is_none())
+            {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok((
+                c.operation_id.clone(),
+                c.generation,
+                c.displayed_th.ok_or(SdkError::PairingCode("WrongContext"))?,
+            ))
+        })
+    }
+    /// Journal the original A's exact approved candidate before releasing native work.
+    /// Return the frontend database loan before calling the returned submission owner.
+    /// # Errors
+    /// Refuses restored approval, unfinished duplex, a foreign candidate or pending intent.
+    pub async fn prepare_full_source_submission(
+        &self,
+        candidate: ramflux_protocol::custody::Publication,
+    ) -> Result<crate::custody::pairing::FullSourceSubmission, SdkError> {
+        self.require_open()?;
+        self.full_runtime.require_live()?;
+        let scope = self.full_source_approval_scope()?;
+        let cancelled = self.with_ceremony(|c| {
+            c.full
+                .as_ref()
+                .and_then(|f| f.bootstrap.as_ref())
+                .and_then(|s| s.cancel.clone())
+                .ok_or(SdkError::PairingCode("WrongContext"))
+        })?;
+        let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
+        let runtime = self.full_runtime.clone();
+        self.full_runtime
+            .clone()
+            .run_blocking(move || {
+                let _local = runtime.local_work()?;
+                participant.prepare_full_source_submission(
+                    scope,
+                    candidate,
+                    runtime.clone(),
+                    cancelled,
+                )
+            })
+            .await
+    }
     /// B's explicit attended phrase ceremony after its complete durable data exchange.
     /// # Errors
     /// Refuses another role/TH/generation, duplicate preparation or an incomplete data stage.

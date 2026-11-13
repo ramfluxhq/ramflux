@@ -1,5 +1,5 @@
 {
-  "census_hash": "ts8q8yCXGHqbxUOwW5yFrXC7wk6HUTZqkB0QcIIF3ss",
+  "census_hash": "Rzw7t6dUoX8bkNvwIoSJEpj-sFjJxACpoKpLixPBYBw",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -445,6 +445,10 @@
     {
       "hash": "t7YyDxEh-oOAjV2e2olRRJSf7fEXmIn_bwGS3qQvse4",
       "id": "sql/pairing_floor"
+    },
+    {
+      "hash": "5qS63-9_6V6q6IG7NLpRruZqIkti-6tcD45Kd07szxI",
+      "id": "sql/pairing_full_tail"
     },
     {
       "hash": "DWTii5HN0EclU4ymQnjUXnoWNU4bkvAj2qNL1rDXUJk",
