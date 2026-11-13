@@ -90,9 +90,9 @@ pub(crate) fn extended(path: &Path) -> io::Result<Vec<u16>> {
 
 /// Open or create `path` with the owner-only descriptor.
 ///
-/// A file that already existed keeps its old descriptor (`CreateFileW` ignores the descriptor
-/// when it opens an existing file), so its owner is checked and its access list is reset on the
-/// open handle before the handle is returned.
+/// A new file keeps the descriptor passed to `CreateFileW`. A file that already existed keeps
+/// its old descriptor (`CreateFileW` ignores the descriptor on an existing file), so its owner
+/// is checked and its access list is reset before the handle is returned.
 ///
 /// # Errors
 /// Returns the OS error; `PermissionDenied` when an existing file belongs to another user.
@@ -124,21 +124,10 @@ pub(crate) fn open_owner_only(
             return Err(io::Error::last_os_error());
         }
         let existed = GetLastError() == ERROR_ALREADY_EXISTS;
-        let owned = File::from_raw_handle(handle);
-        // The create grants this handle its access directly. A later open checks the list
-        // stored on the file, so write that list again after the owner change.
-        if !existed
-            && let Err(error) =
-                super::assign_user(owned.as_raw_handle(), SE_FILE_OBJECT, &user, &descriptor)
-        {
-            drop(owned);
-            let _ = std::fs::remove_file(path);
-            return Err(error);
-        }
-        Ok((owned, existed))
+        Ok((File::from_raw_handle(handle), existed))
     })?;
     if existed {
-        if owner_of(file.as_raw_handle(), SE_FILE_OBJECT)? != user {
+        if !super::owner_matches_user(&owner_of(file.as_raw_handle(), SE_FILE_OBJECT)?, &user)? {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         reset_access_list(&file, &descriptor)?;
@@ -176,7 +165,7 @@ pub(crate) fn restrict(path: &Path, directory: bool) -> io::Result<()> {
         }
         File::from_raw_handle(handle)
     };
-    if owner_of(file.as_raw_handle(), SE_FILE_OBJECT)? != user {
+    if !super::owner_matches_user(&owner_of(file.as_raw_handle(), SE_FILE_OBJECT)?, &user)? {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     reset_access_list(&file, &descriptor)
@@ -188,26 +177,30 @@ pub(crate) fn restrict(path: &Path, directory: bool) -> io::Result<()> {
 /// Returns the OS error; `AlreadyExists` when the path exists.
 pub(crate) fn create_dir_owner_only(path: &Path) -> io::Result<()> {
     let wide = extended(path)?;
-    let (descriptor, user) = owner_descriptor(true)?;
+    let descriptor = SecurityDescriptor::from_sddl(&owner_only_sddl(true)?)?;
     let attributes = descriptor.attributes()?;
-    // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call.
+    // The descriptor is applied by `CreateDirectoryW`. A follow-up owner write returns access
+    // denied on an elevated token and used to delete the directory.
     super::assigning_owner(|| {
         super::note_call("CreateDirectoryW");
+        // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call.
         if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
-            return Err(io::Error::last_os_error());
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
         }
-        // `READ_CONTROL | WRITE_DAC` is what the owner can open even when the stored list
-        // does not yet grant `WRITE_OWNER`. The owner and the list are both written below.
-        let directory = open_for_facts(path, READ_CONTROL | WRITE_DAC)?;
-        if let Err(error) =
-            super::assign_user(directory.as_raw_handle(), SE_FILE_OBJECT, &user, &descriptor)
-        {
-            drop(directory);
-            let _ = std::fs::remove_dir(path);
-            return Err(error);
-        }
-        Ok(())
     })
+}
+
+/// Whether `owner` is acceptable for an object that must belong to `user`.
+///
+/// An elevated token may leave BUILTIN\Administrators as the owner. The access list still
+/// names only the user. See `owner_matches_user` on the parent module.
+///
+/// # Errors
+/// Returns the OS error when the process token cannot be read.
+pub(crate) fn owner_matches_user(owner: &Sid, user: &Sid) -> io::Result<bool> {
+    super::owner_matches_user(owner, user)
 }
 
 /// Owner SID of an existing file or directory, without following a final reparse point.

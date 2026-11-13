@@ -94,7 +94,9 @@ pub(super) fn write_name_file(
 /// when it cannot be read or is malformed.
 pub(super) fn read_name_file(path: &Path, expected: &Sid) -> Result<String, SdkError> {
     let file = std::fs::File::open(path)?;
-    if win32::file_owner(&file)? != *expected {
+    // An elevated creator may leave BUILTIN\Administrators as the owner. That SID is accepted
+    // only when this token is elevated and its TokenOwner is Administrators.
+    if !win32::owner_matches_user(&win32::file_owner(&file)?, expected)? {
         return Err(SdkError::LocalBusPermissionDenied);
     }
     read_nonce(file)

@@ -25,17 +25,18 @@ use windows_sys::Win32::Security::Authorization::{
     SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
-    ACL, AdjustTokenPrivileges, CopySid, DACL_SECURITY_INFORMATION, GetLengthSid,
-    GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    IsValidSid, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SECURITY_ATTRIBUTES, TOKEN_ADJUST_PRIVILEGES,
-    TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
-    TokenIntegrityLevel, TokenIsAppContainer, TokenUser,
+    ACL, AdjustTokenPrivileges, CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+    GetLengthSid, GetSecurityDescriptorDacl, GetSidSubAuthority, GetSidSubAuthorityCount,
+    GetTokenInformation, IsValidSid, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    RevertToSelf, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SECURITY_ATTRIBUTES,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenIntegrityLevel,
+    TokenIsAppContainer, TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
-    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION, WRITE_DAC,
+    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
@@ -160,17 +161,23 @@ pub(crate) struct TokenFacts {
 }
 
 /// Buffer for fixed-size token information classes; aligned for the pointer the structures hold.
+///
+/// `GetTokenInformation` stores absolute pointers into this buffer. The buffer must stay at the
+/// address passed to that call until those pointers have been copied out. Returning it by value
+/// moves it and leaves the pointers dangling, so every read goes through [`with_token_information`].
 #[repr(C, align(8))]
 struct TokenBuffer([u8; 128]);
 
-fn token_information(
+fn with_token_information<T>(
     token: &OwnedHandle,
     class: TOKEN_INFORMATION_CLASS,
-) -> io::Result<TokenBuffer> {
+    read: impl FnOnce(&[u8]) -> io::Result<T>,
+) -> io::Result<T> {
     let mut buffer = TokenBuffer([0; 128]);
     let mut returned = 0_u32;
     let capacity = u32::try_from(buffer.0.len()).map_err(io::Error::other)?;
-    // SAFETY: `token` is an open token handle with TOKEN_QUERY; the buffer and its length match.
+    // SAFETY: `token` is an open token handle with TOKEN_QUERY. The buffer stays at this address
+    // until `read` returns, so a SID pointer written into it is valid for the copy `read` makes.
     let ok = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
@@ -180,34 +187,62 @@ fn token_information(
             &raw mut returned,
         )
     };
-    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(buffer) }
+    if ok == 0 { Err(io::Error::last_os_error()) } else { read(&buffer.0) }
+}
+
+/// Read a token class whose result is one `u32`.
+///
+/// `TokenElevation` returns `ERROR_BAD_LENGTH` (24) when the buffer is larger than the value.
+/// `TokenElevationType` and `TokenIsAppContainer` are the same size.
+fn token_dword(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32> {
+    let mut value = 0_u32;
+    let mut returned = 0_u32;
+    let length = u32::try_from(size_of::<u32>()).map_err(io::Error::other)?;
+    // SAFETY: `token` is open with TOKEN_QUERY. `value` is a writable `u32`, the documented
+    // size of these classes, and it stays in place for the call.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            (&raw mut value).cast(),
+            length,
+            &raw mut returned,
+        )
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(value) }
 }
 
 fn token_facts(token: &OwnedHandle) -> io::Result<TokenFacts> {
-    let user_buffer = token_information(token, TokenUser)?;
-    // SAFETY: a successful TokenUser query fills a TOKEN_USER whose SID pointer points into the
-    // same buffer, which is alive and suitably aligned.
-    let user = unsafe { Sid::copy_from((*user_buffer.0.as_ptr().cast::<TOKEN_USER>()).User.Sid)? };
+    let user = with_token_information(token, TokenUser, |bytes| {
+        // SAFETY: a successful TokenUser query fills a TOKEN_USER at the start of `bytes`. Its
+        // SID pointer addresses this slice. `copy_from` copies the SID before the slice is dropped.
+        unsafe { Sid::copy_from((*bytes.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
+    })?;
 
-    let label_buffer = token_information(token, TokenIntegrityLevel)?;
-    // SAFETY: a successful TokenIntegrityLevel query fills a TOKEN_MANDATORY_LABEL whose SID
-    // points into the buffer; the SID is validated before its last sub-authority is read.
-    let integrity_rid = unsafe {
-        let label = (*label_buffer.0.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
-        if label.is_null() || IsValidSid(label) == 0 {
-            return Err(io::Error::other("token has no integrity label"));
+    let integrity_rid = with_token_information(token, TokenIntegrityLevel, |bytes| {
+        // SAFETY: a successful TokenIntegrityLevel query fills a TOKEN_MANDATORY_LABEL whose SID
+        // pointer addresses this slice. The RID is a `u32` copied out before the slice is dropped.
+        unsafe {
+            let label = (*bytes.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            if label.is_null() || IsValidSid(label) == 0 {
+                return Err(io::Error::other("token has no integrity label"));
+            }
+            let count = *GetSidSubAuthorityCount(label);
+            if count == 0 {
+                return Err(io::Error::other("integrity label has no RID"));
+            }
+            Ok(*GetSidSubAuthority(label, u32::from(count) - 1))
         }
-        let count = *GetSidSubAuthorityCount(label);
-        if count == 0 {
-            return Err(io::Error::other("integrity label has no RID"));
-        }
-        *GetSidSubAuthority(label, u32::from(count) - 1)
-    };
+    })?;
 
-    let container_buffer = token_information(token, TokenIsAppContainer)?;
-    let mut flag = [0_u8; 4];
-    flag.copy_from_slice(container_buffer.0.get(..4).unwrap_or(&[0; 4]));
-    Ok(TokenFacts { user, integrity_rid, app_container: u32::from_ne_bytes(flag) != 0 })
+    let app_container = with_token_information(token, TokenIsAppContainer, |bytes| {
+        let flag: [u8; 4] = bytes
+            .get(..4)
+            .and_then(|flag| flag.try_into().ok())
+            .ok_or_else(|| io::Error::other("token field shorter than 4 bytes"))?;
+        Ok(u32::from_ne_bytes(flag) != 0)
+    })?;
+    Ok(TokenFacts { user, integrity_rid, app_container })
 }
 
 /// Facts about this process's own token.
@@ -225,6 +260,63 @@ pub(crate) fn process_facts() -> io::Result<TokenFacts> {
         OwnedHandle::from_raw_handle(token)
     };
     token_facts(&token)
+}
+
+/// Whether `owner` is acceptable for an object that must belong to `user`.
+///
+/// `user` is that account's user SID. An elevated token whose `TokenOwner` is
+/// BUILTIN\Administrators (`S-1-5-32-544`) cannot always replace the default owner, so
+/// `CreateFile`, `CreateDirectory`, and `CreateNamedPipe` may leave that group as the owner.
+/// That SID is accepted only when this process is elevated and its `TokenOwner` is
+/// Administrators. The object's access list still names only `user`. Administrators can reach
+/// the object anyway; the list is hygiene against other users, not a boundary against them.
+///
+/// # Errors
+/// Returns the OS error when the process token or the Administrators SID cannot be read.
+pub(crate) fn owner_matches_user(owner: &Sid, user: &Sid) -> io::Result<bool> {
+    if owner == user {
+        return Ok(true);
+    }
+    let mut raw: HANDLE = std::ptr::null_mut();
+    // SAFETY: the process pseudo-handle is always valid. On success `raw` is an open process
+    // token this function owns.
+    let token = unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(raw)
+    };
+    if token_dword(&token, TokenElevation)? == 0 {
+        return Ok(false);
+    }
+    let token_owner = with_token_information(&token, TokenOwner, |bytes| {
+        // SAFETY: a successful TokenOwner query fills a TOKEN_OWNER at the start of `bytes`.
+        // Its SID pointer addresses this slice. `copy_from` copies the SID before the slice
+        // is dropped.
+        unsafe { Sid::copy_from((*bytes.as_ptr().cast::<TOKEN_OWNER>()).Owner) }
+    })?;
+    let administrators = builtin_administrators()?;
+    Ok(token_owner == administrators && owner == &administrators)
+}
+
+fn builtin_administrators() -> io::Result<Sid> {
+    let mut bytes = SidBytes([0; MAX_SID_BYTES]);
+    let mut size = u32::try_from(MAX_SID_BYTES).map_err(io::Error::other)?;
+    // SAFETY: `bytes` is aligned for a SID and has `size` bytes of room. A null domain is
+    // correct for `WinBuiltinAdministratorsSid`. On success the buffer starts with that SID.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            bytes.0.as_mut_ptr().cast(),
+            &raw mut size,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `CreateWellKnownSid` succeeded, so `bytes` starts with a valid SID.
+    unsafe { Sid::copy_from(bytes.0.as_mut_ptr().cast()) }
 }
 
 /// Facts about the token of the client connected to `pipe`.
@@ -450,53 +542,9 @@ impl ListeningPipe {
     }
 }
 
-/// Make `owner` the owner of `handle`. An elevated token's default owner is Administrators, and
-/// a descriptor's `O:` entry is not always stored; this call is what the owner check reads back.
-///
-/// # Errors
-/// Returns the OS error when the owner cannot be set.
-pub(super) fn set_handle_owner(
-    handle: RawHandle,
-    kind: SE_OBJECT_TYPE,
-    owner: &Sid,
-) -> io::Result<()> {
-    note_call("SetSecurityInfo(owner)");
-    // SAFETY: `handle` is open with WRITE_OWNER (or the restore privilege stands in for it).
-    // `owner` is a SID that outlives the call.
-    let status = unsafe {
-        SetSecurityInfo(
-            handle,
-            kind,
-            OWNER_SECURITY_INFORMATION,
-            owner.as_psid(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
-    if status == 0 { Ok(()) } else { Err(os_error(status)) }
-}
-
-/// Make `owner` the owner and replace the access list with `descriptor`'s list.
-///
-/// The list must already use specific rights (`FA`), not `GA`. A later `CreateFile` asks for
-/// `SYNCHRONIZE`, which the generic bit does not grant. Both writes happen together while the
-/// restore privilege is held.
-///
-/// # Errors
-/// Returns the OS error when either write fails.
-pub(super) fn assign_user(
-    handle: RawHandle,
-    kind: SE_OBJECT_TYPE,
-    owner: &Sid,
-    descriptor: &SecurityDescriptor,
-) -> io::Result<()> {
-    set_handle_owner(handle, kind, owner)?;
-    set_handle_dacl(handle, kind, descriptor)
-}
-
 /// Replace the protected access list. The handle must be open with `WRITE_DAC`, or the restore
-/// privilege must stand in for it.
+/// privilege must stand in for it. The owner is not changed here: `Create*` applies the
+/// descriptor, and an elevated token may keep BUILTIN\Administrators.
 ///
 /// # Errors
 /// Returns the OS error when the descriptor has no list or the list cannot be written.
@@ -693,16 +741,13 @@ fn os_error(code: u32) -> io::Error {
 pub(super) fn create_instance(
     name: &OsStr,
     descriptor: &SecurityDescriptor,
-    owner: &Sid,
     first: bool,
 ) -> io::Result<ListeningPipe> {
     let wide = wide(name);
     let attributes = descriptor.attributes()?;
-    // `WRITE_OWNER` is the same bit as `FILE_FLAG_FIRST_PIPE_INSTANCE`. Requesting it on every
-    // instance would make the second instance look like a first instance and fail once the name
-    // exists. `WRITE_DAC` is a different bit and is what the access-list write below needs.
-    // The owner is set with the restore privilege, which does not need `WRITE_OWNER` on the handle.
-    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_DAC;
+    // `WRITE_OWNER` is the same bit as `FILE_FLAG_FIRST_PIPE_INSTANCE`. It is not an open-mode
+    // flag. The descriptor, including its owner entry, is applied by `CreateNamedPipeW`.
+    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
     if first {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
@@ -724,9 +769,7 @@ pub(super) fn create_instance(
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let owned = OwnedHandle::from_raw_handle(handle);
-        assign_user(owned.as_raw_handle(), SE_KERNEL_OBJECT, owner, descriptor)?;
-        Ok(ListeningPipe { handle: owned })
+        Ok(ListeningPipe { handle: OwnedHandle::from_raw_handle(handle) })
     })
 }
 
@@ -816,14 +859,15 @@ pub(super) fn server_process_user(pipe: &NamedPipeClient) -> io::Result<Sid> {
 pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> io::Result<File> {
     let wide = wide(path.as_os_str());
     let attributes = descriptor.attributes()?;
-    let owner = process_facts()?.user;
     // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
-    // returned handle is owned by the `File`.
+    // returned handle is owned by the `File`. The descriptor is applied here. A later owner
+    // write is not used: on an elevated token it returns access denied and the file would be
+    // deleted.
     assigning_owner(|| unsafe {
         note_call("CreateFileW(create_new_file)");
         let handle = CreateFileW(
             wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
             0,
             &raw const attributes,
             CREATE_NEW,
@@ -833,13 +877,7 @@ pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> i
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let owned = OwnedHandle::from_raw_handle(handle);
-        if let Err(error) = assign_user(owned.as_raw_handle(), SE_FILE_OBJECT, &owner, descriptor) {
-            drop(owned);
-            let _ = std::fs::remove_file(path);
-            return Err(error);
-        }
-        Ok(File::from_raw_handle(owned.into_raw_handle()))
+        Ok(File::from_raw_handle(handle))
     })
 }
 

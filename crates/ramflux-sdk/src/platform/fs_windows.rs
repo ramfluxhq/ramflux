@@ -3,10 +3,12 @@
 
 //! Owner-only files, the exclusive data-root lock, and the per-user data root on Windows.
 //!
-//! A Unix mode of 0o600 or 0o700 becomes a security descriptor whose owner is the current user
-//! and whose protected access list holds only that user. Directories pass that entry on to
-//! what is created inside them. The access list is hygiene against other standard users and
-//! sandboxed processes; administrators and SYSTEM can always reach a user's files.
+//! A Unix mode of 0o600 or 0o700 becomes a security descriptor whose protected access list
+//! holds only the current user. Directories pass that entry on to what is created inside them.
+//! An elevated token may leave BUILTIN\Administrators as the owner; that owner is accepted only
+//! when the token is elevated and its `TokenOwner` is Administrators. The access list is
+//! hygiene against other standard users and sandboxed processes; administrators and SYSTEM can
+//! always reach a user's files.
 
 use std::fs::File;
 use std::io;
@@ -225,7 +227,9 @@ pub(crate) fn ensure_data_root(root: &Path) -> Result<(), SdkError> {
             Err(error) => return Err(error.into()),
         }
     }
-    if files::path_owner(root)? != files::current_user()? {
+    let owner = files::path_owner(root)?;
+    let user = files::current_user()?;
+    if !files::owner_matches_user(&owner, &user)? {
         return Err(SdkError::LocalBusPermissionDenied);
     }
     Ok(files::restrict(root, true)?)

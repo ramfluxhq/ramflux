@@ -188,7 +188,7 @@ impl PipeBusListener {
     /// Returns [`SdkError::DataRootInUse`] when the name already exists.
     pub(super) fn create(name: OsString, user_sid: &str, owner: Sid) -> Result<Self, SdkError> {
         let descriptor = SecurityDescriptor::from_sddl(&name::pipe_sddl(user_sid))?;
-        let first = win32::create_instance(&name, &descriptor, &owner, true).map_err(|error| {
+        let first = win32::create_instance(&name, &descriptor, true).map_err(|error| {
             if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
                 SdkError::DataRootInUse
             } else {
@@ -235,7 +235,7 @@ impl BusListener for PipeBusListener {
         // already closed, completes this wait. The next instance is created only afterwards,
         // so the client cannot attach to an instance this call is not connecting.
         win32::connect_server(&pending).await?;
-        let next = win32::create_instance(&self.name, &self.descriptor, &self.owner, false)?;
+        let next = win32::create_instance(&self.name, &self.descriptor, false)?;
         let current = std::mem::replace(&mut *pending, next);
         Ok(PipeServerStream { inner: current.into_server()? })
     }
@@ -251,7 +251,10 @@ impl BusListener for PipeBusListener {
 /// Refuse a pipe that this user's daemon did not create. Runs before the first frame is sent.
 fn verify_server(pipe: &NamedPipeClient, expected: &Sid) -> Result<(), SdkError> {
     let owner = win32::pipe_owner(pipe).map_err(|_| SdkError::LocalBusPermissionDenied)?;
-    if owner != *expected {
+    // An elevated creator may leave BUILTIN\Administrators as the owner. That SID is accepted
+    // only when this token is elevated and its TokenOwner is Administrators. The DACL still
+    // names only the user.
+    if !win32::owner_matches_user(&owner, expected)? {
         return Err(SdkError::LocalBusPermissionDenied);
     }
     // The owner SID is required. Compare the server process token only when it
