@@ -119,6 +119,31 @@ impl FullTailEndpoint<'_> {
         }
         Ok(())
     }
+    /// Snapshot only a pending tail's locally authenticated data-resume operands.
+    /// A new network epoch must never be constructed from a merged or abandoned tail.
+    /// # Errors
+    /// Refuses terminal/foreign state, changed generation, expired authority or lost unlock.
+    pub fn pending_resume_record(
+        &self,
+        now: u64,
+    ) -> Result<ramflux_crypto::custody::pairing::FullResumeRecord, StorageError> {
+        self.require_live(now)?;
+        let record = self.stage.resume_record()?;
+        let pending: bool = match record.role {
+            PairingRole::Initiator => self.stage.db.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pairing_full_tail WHERE account_id=?1 AND operation_id=?2 AND stage_id=?3 AND tail_status='pending' AND cut_state='durable')",
+                rusqlite::params![self.stage.db.local_account_id, self.operation, self.stage.reference().stage_id], |row| row.get(0),
+            )?,
+            PairingRole::Responder => self.stage.db.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.operation_id=?1 AND t.stage_digest=?2 AND t.tail_status='pending')",
+                rusqlite::params![self.operation, record.stage_digest()?.as_slice()], |row| row.get(0),
+            )?,
+        };
+        if !pending {
+            return Err(wrong());
+        }
+        Ok(record)
+    }
     /// A cancellation fence for this one tail job; contains no data or key.
     #[must_use]
     pub fn io_cancel_handle(&self) -> crate::FullStageIoCancel {

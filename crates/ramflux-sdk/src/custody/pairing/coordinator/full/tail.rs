@@ -10,6 +10,7 @@ use ramflux_protocol::custody::pairing::full_transfer::{
 use std::sync::Arc;
 mod io;
 mod receive;
+mod resume;
 mod send;
 use io::TailIo;
 fn wrong() -> SdkError {
@@ -34,12 +35,14 @@ enum Phase {
 }
 pub(in crate::custody::pairing::coordinator) struct TailJob {
     packet: Option<FullPacketEpoch>,
+    pub(super) epoch: Option<super::epoch::FullEpochJob>,
     io: TailIo,
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
     phase: Phase,
     manifest: Option<SourceManifest>,
     assembler: ManifestAssembler,
+    status: ramflux_protocol::custody::pairing::local_dto::FullStatus,
     next: u64,
     abandoned: bool,
     pub(super) error: Option<ramflux_protocol::custody::pairing::full_transfer::FullError>,
@@ -50,6 +53,9 @@ impl Drop for TailJob {
     }
 }
 impl TailJob {
+    pub(in crate::custody::pairing::coordinator) fn generation(&self) -> u64 {
+        self.io.generation
+    }
     pub(super) fn merged(&self) -> bool {
         self.phase == Phase::Finished
     }
@@ -64,6 +70,13 @@ impl TailJob {
         super::status::FullProgress::observed(manifest, manifest.manifest.chunk_count.0).ok()
     }
     async fn advance(&mut self) -> Result<(), SdkError> {
+        if self.epoch.as_ref().is_some_and(|epoch| !epoch.finished()) {
+            return Ok(());
+        }
+        if let Some(epoch) = self.epoch.take() {
+            self.packet = Some(epoch.packet().await?);
+            self.io.fresh().await?;
+        }
         match self.phase {
             Phase::Prepare => {
                 self.manifest = Some(self.io.source_manifest().await?);
@@ -126,6 +139,9 @@ impl PairingActor {
         }
         job.io.cancelled.cancel();
         job.packet = None;
+        if let Some(epoch) = job.epoch.take() {
+            epoch.abort_and_drain().await;
+        }
         self.full_runtime.drain_local_jobs().await;
         self.full_runtime.drain_local_work();
         let op = operation.to_owned();
@@ -181,6 +197,8 @@ impl PairingActor {
                 return Err(SdkError::PairingCode("TransferCapacity"));
             }
         }
+        let status = self.current_full_status()?.ok_or_else(wrong)?;
+        let c = self.ceremony.as_ref().ok_or_else(wrong)?;
         let operation = c.operation_id.clone();
         let generation = c.generation;
         let role = c.role;
@@ -214,6 +232,7 @@ impl PairingActor {
             operation.clone(),
             TailJob {
                 packet: Some(packet),
+                epoch: None,
                 io: TailIo {
                     participant,
                     writer,
@@ -232,6 +251,7 @@ impl PairingActor {
                 },
                 manifest: None,
                 assembler: ManifestAssembler::default(),
+                status,
                 next: 0,
                 error: None,
                 abandoned: false,

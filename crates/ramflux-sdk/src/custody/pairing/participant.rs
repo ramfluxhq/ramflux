@@ -543,6 +543,7 @@ mod full;
 pub(crate) use full::FullDataResume;
 pub(in crate::custody::pairing) use full::FullDestinationReady;
 pub(crate) use full::FullProofSigner;
+pub(in crate::custody::pairing) use full::FullTailResume;
 pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
     FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,

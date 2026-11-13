@@ -21,6 +21,7 @@ pub struct FullInstalledTailScope {
     pub bytes_total: u64,
     pub cut: u64,
     pub merged: bool,
+    pub abandoned: bool,
 }
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
@@ -87,6 +88,10 @@ impl AccountDb {
             "SELECT EXISTS(SELECT 1 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.operation_id=?1 AND t.tail_status='merged' AND t.phase=2)",
             rusqlite::params![operation], |row| row.get(0),
         )?;
+        let abandoned: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.operation_id=?1 AND t.tail_status='abandoned')",
+            rusqlite::params![operation], |row| row.get(0),
+        )?;
         // A durably received tail remains pending until its separate semantic application.
         // Display the installed prepublication cut rather than imply that input is merged.
         let bytes: Vec<u8> = stage.connection.query_row(
@@ -100,6 +105,7 @@ impl AccountDb {
             bytes_total: manifest.manifest.total_bytes.0,
             cut: manifest.manifest.snapshot_cut.0,
             merged,
+            abandoned,
         })
     }
     /// Persist this installed endpoint's own verified native tail floor before checking roles.

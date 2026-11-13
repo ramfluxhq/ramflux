@@ -77,7 +77,12 @@ impl PairingActor {
             );
             self.recovered_installation = Some(RecoveredInstallation {
                 status: super::installed_status::installed_progress(
-                    request, expires, 0, 0, None, false,
+                    request,
+                    expires,
+                    0,
+                    0,
+                    None,
+                    ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Pending,
                 ),
                 install,
             });

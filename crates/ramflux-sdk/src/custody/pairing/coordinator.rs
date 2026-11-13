@@ -108,6 +108,7 @@ pub struct PairingActor {
     ceremony: Option<Ceremony>,
     recovered_installation: Option<full::install_recovery::RecoveredInstallation>,
     tail_jobs: BTreeMap<String, full::tail::TailJob>,
+    recovered_tail_status: Option<ramflux_protocol::custody::pairing::local_dto::FullStatus>,
     unsolicited: u32,
     recipient_stage: Option<Arc<dyn super::recipient::RecipientKeyStaging>>,
     local_writer: Option<local_writer::LocalWriterPort>,
@@ -222,6 +223,7 @@ impl PairingActor {
             ceremony: None,
             recovered_installation: None,
             tail_jobs: BTreeMap::new(),
+            recovered_tail_status: None,
             unsolicited: 0,
             recipient_stage: None,
             local_writer: None,
@@ -536,11 +538,44 @@ impl PairingActor {
     /// Transport, `Busy`, or protocol failure.
     pub async fn sync_relay(&mut self) -> Result<LocalResult, SdkError> {
         self.require_open()?;
+        if self.ceremony.is_none()
+            && self.tail_jobs.is_empty()
+            && self.local_writer.is_some()
+            && let Some(recovered) = &self.recovered_installation
+        {
+            let request = StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: recovered.status.operation_id.clone(),
+                generation: recovered.status.generation,
+            };
+            Box::pin(self.resume_full_tail(&request)).await?;
+        }
+        self.advance_full_tails().await?;
+        if self.ceremony.is_none() {
+            if let Some((operation, job)) = self.tail_jobs.iter().next_back() {
+                return job.result(&StatusRequest {
+                    schema: "ramflux.pairing.StatusRequest.v2".into(),
+                    version: 2,
+                    operation_id: operation.clone(),
+                    generation: job.generation(),
+                });
+            }
+            if let Some(status) = &self.recovered_tail_status {
+                return self
+                    .recovered_tail_result(&StatusRequest {
+                        schema: "ramflux.pairing.StatusRequest.v2".into(),
+                        version: 2,
+                        operation_id: status.operation_id.clone(),
+                        generation: status.generation,
+                    })?
+                    .ok_or(SdkError::PairingCode("WrongContext"));
+            }
+        }
         if let Some(recovered) = &self.recovered_installation {
             return recovered.local_result();
         }
         self.expire_live().await;
-        self.advance_full_tails().await?;
         if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
             self.flush_send().await?;
             self.close_completed_relay().await;
@@ -1242,7 +1277,11 @@ impl PairingActor {
             participant.provider.cancel();
         }
         self.full_runtime.stop();
-        self.tail_jobs.clear();
+        for (_, mut job) in std::mem::take(&mut self.tail_jobs) {
+            if let Some(epoch) = job.epoch.take() {
+                epoch.abort_and_drain().await;
+            }
+        }
         if let Some(native) = &self.native {
             native.close();
         }
@@ -1625,7 +1664,11 @@ pub async fn handle_bus(
         "device.transfer.status" => {
             let request = bus_body(body)?;
             if actor.ceremony.is_none() {
-                if let Some(result) = Box::pin(actor.recover_full_installation(&request)).await? {
+                if let Some(result) = Box::pin(actor.resume_full_tail(&request)).await? {
+                    Ok(result)
+                } else if let Some(result) =
+                    Box::pin(actor.recover_full_installation(&request)).await?
+                {
                     Ok(result)
                 } else {
                     Box::pin(actor.resume_full_data(&request)).await

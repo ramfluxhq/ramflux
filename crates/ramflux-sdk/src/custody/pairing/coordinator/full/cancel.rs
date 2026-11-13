@@ -20,6 +20,7 @@ pub(crate) struct FullRuntimeCancel {
     idle: Condvar,
     stage: Mutex<Option<FullStageIoCancel>>,
     tail_stages: Mutex<Vec<FullStageIoCancel>>,
+    tail_epochs: Mutex<Vec<tokio::task::AbortHandle>>,
     preparation: Mutex<Option<ramflux_storage::FullSourcePreparationCancel>>,
     job: Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -103,6 +104,23 @@ impl FullRuntimeCancel {
         }
         Ok(())
     }
+    pub(crate) fn register_tail_epoch(
+        &self,
+        job: tokio::task::AbortHandle,
+    ) -> Result<(), SdkError> {
+        let mut jobs = self.tail_epochs.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        jobs.retain(|job| !job.is_finished());
+        if let Err(error) = self.require_live() {
+            job.abort();
+            return Err(error);
+        }
+        if jobs.len() >= 3 {
+            job.abort();
+            return Err(SdkError::PairingCode("TransferCapacity"));
+        }
+        jobs.push(job);
+        Ok(())
+    }
     pub(crate) fn register_tail_stage(&self, stage: FullStageIoCancel) -> Result<(), SdkError> {
         let mut stages = self.tail_stages.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         if let Err(error) = self.require_live() {
@@ -139,6 +157,11 @@ impl FullRuntimeCancel {
             self.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {
             stage.cancel();
+        }
+        for job in
+            self.tail_epochs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..)
+        {
+            job.abort();
         }
         for stage in
             self.tail_stages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..)

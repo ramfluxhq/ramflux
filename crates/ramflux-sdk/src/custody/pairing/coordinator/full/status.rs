@@ -38,6 +38,17 @@ impl PairingActor {
         request: &StatusRequest,
     ) -> Result<LocalResult, SdkError> {
         self.require_open()?;
+        if let Some(job) = self.tail_jobs.get(&request.operation_id) {
+            return job.result(request);
+        }
+        if self.ceremony.is_none() {
+            if let Some(result) = Box::pin(self.resume_full_tail(request)).await? {
+                return Ok(result);
+            }
+            if let Some(result) = self.recovered_tail_result(request)? {
+                return Ok(result);
+            }
+        }
         if self.recovered_installation.is_some() {
             return self
                 .recover_full_installation(request)
@@ -69,7 +80,7 @@ impl PairingActor {
             c.full_terminal_status = Some(Box::new(value));
         }
     }
-    fn current_full_status(&self) -> Result<Option<FullStatus>, SdkError> {
+    pub(super) fn current_full_status(&self) -> Result<Option<FullStatus>, SdkError> {
         let c = self.ceremony.as_ref().ok_or(SdkError::PairingCode("NotFound"))?;
         if let Some(saved) = &c.full_terminal_status {
             return Ok(Some((**saved).clone()));

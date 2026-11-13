@@ -31,8 +31,11 @@ impl Drop for FullEpochJob {
     }
 }
 impl FullEpochJob {
-    fn finished(&self) -> bool {
+    pub(super) fn finished(&self) -> bool {
         self.0.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+    pub(super) async fn packet(self) -> Result<FullPacketEpoch, SdkError> {
+        self.finish().await?.packet
     }
     pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(mut self) {
         if let Some(task) = self.0.take() {
@@ -54,11 +57,16 @@ struct FullEpochWork {
     trust: FullResumeTrust,
     keys: FullResumeKeyOwner,
 }
+enum EpochScope {
+    Ceremony,
+    Tail,
+}
 fn start(
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
     stop: Arc<FullRuntimeCancel>,
     work: FullEpochWork,
+    scope: EpochScope,
 ) -> Result<FullEpochJob, SdkError> {
     let FullEpochWork { signer, cancelled, trust, mut keys } = work;
     stop.require_live()?;
@@ -139,8 +147,35 @@ fn start(
     });
     // Retain even an already-aborted join owner: dropping its handle here could leave
     // private epoch output alive after the root has been fenced.
-    let _ = owner.register_job(task.abort_handle());
+    match scope {
+        EpochScope::Ceremony => {
+            let _ = owner.register_job(task.abort_handle());
+        }
+        EpochScope::Tail => {
+            let _ = owner.register_tail_epoch(task.abort_handle());
+        }
+    }
     Ok(FullEpochJob(Some(task)))
+}
+pub(super) fn start_tail(
+    relay: Arc<dyn FullPairingTransport>,
+    origin: String,
+    stop: Arc<FullRuntimeCancel>,
+    resume: crate::custody::pairing::participant::FullTailResume,
+) -> Result<FullEpochJob, SdkError> {
+    let keys = resume.trust.key_owner(None)?;
+    start(
+        relay,
+        origin,
+        stop,
+        FullEpochWork {
+            signer: resume.signer,
+            cancelled: resume.cancelled,
+            trust: resume.trust,
+            keys,
+        },
+        EpochScope::Tail,
+    )
 }
 impl crate::custody::pairing::PairingActor {
     #[cfg(test)]
@@ -254,6 +289,7 @@ impl crate::custody::pairing::PairingActor {
             c.origin.clone(),
             self.full_runtime.clone(),
             FullEpochWork { signer, cancelled, trust, keys },
+            EpochScope::Ceremony,
         )?);
         Ok(true)
     }

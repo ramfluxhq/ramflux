@@ -81,7 +81,7 @@ impl PairingActor {
                     &current,
                     now,
                 )?;
-                if scope.merged {
+                if scope.merged || scope.abandoned {
                     return Ok(None);
                 }
                 Ok(installed_authority_result(&scope.grant, &current, now, scope.lease_expires_at))
@@ -95,7 +95,7 @@ impl PairingActor {
             scope.bytes_total,
             scope.cut,
             result,
-            scope.merged,
+            tail_disposition(&scope),
         );
         status.validate().map_err(|error| super::wire(&error))?;
         self.recovered_installation = Some(RecoveredInstallation { install, status });
@@ -113,7 +113,7 @@ pub(super) fn installed_progress(
     total: u64,
     cut: u64,
     result: Option<FullError>,
-    merged: bool,
+    tail_status: FullTailStatus,
 ) -> FullStatus {
     FullStatus {
         attachment_absent: U64(0),
@@ -126,11 +126,11 @@ pub(super) fn installed_progress(
         result,
         role: "responder".into(),
         stage: FullStatusStage::Installed,
-        tail_status: if merged { FullTailStatus::Merged } else { FullTailStatus::Pending },
+        tail_status,
     }
 }
 
-fn installed_authority_result(
+pub(super) fn installed_authority_result(
     grant: &ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
     current: &ramflux_crypto::custody::VerifiedRecord,
     now: u64,
@@ -140,5 +140,15 @@ fn installed_authority_result(
         Ok(()) => (now >= expires).then_some(FullError::LeaseExpired),
         Err(ramflux_crypto::CryptoError::Pairing("LeaseExpired")) => Some(FullError::LeaseExpired),
         Err(_) => Some(FullError::HeadChanged),
+    }
+}
+
+pub(super) fn tail_disposition(scope: &ramflux_storage::FullInstalledTailScope) -> FullTailStatus {
+    if scope.abandoned {
+        FullTailStatus::Abandoned
+    } else if scope.merged {
+        FullTailStatus::Merged
+    } else {
+        FullTailStatus::Pending
     }
 }

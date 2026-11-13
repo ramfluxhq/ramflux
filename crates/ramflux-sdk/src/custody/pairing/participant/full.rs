@@ -33,6 +33,7 @@ mod stage;
 mod tail;
 pub(crate) use proof_signer::FullProofSigner;
 pub use tail::FullTailContext;
+pub(in crate::custody::pairing) use tail::FullTailResume;
 
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")

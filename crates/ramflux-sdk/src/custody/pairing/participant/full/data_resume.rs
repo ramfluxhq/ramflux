@@ -106,7 +106,7 @@ impl LocalPairingParticipant {
         })
     }
 }
-fn resume_invitation(
+pub(super) fn resume_invitation(
     live: &LiveRow,
     context: &TranscriptV3,
     node: &VerifiedNodeRecord,

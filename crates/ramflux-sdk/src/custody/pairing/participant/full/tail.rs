@@ -88,3 +88,69 @@ impl LocalPairingParticipant {
         Ok(packet)
     }
 }
+
+/// Only authenticated local pending state can create a fresh tail epoch.
+pub(in crate::custody::pairing) struct FullTailResume {
+    pub(in crate::custody::pairing) trust: ramflux_crypto::custody::pairing::FullResumeTrust,
+    pub(in crate::custody::pairing) signer: std::sync::Arc<super::proof_signer::FullProofSigner>,
+    pub(in crate::custody::pairing) cancelled: ramflux_storage::FullStageIoCancel,
+    pub(in crate::custody::pairing) origin: String,
+}
+impl LocalPairingParticipant {
+    pub(in crate::custody::pairing) fn restore_full_tail_in(
+        &self,
+        db: &AccountDb,
+        request: &ramflux_protocol::custody::pairing::local_dto::StatusRequest,
+        node: &ramflux_crypto::custody::VerifiedNodeRecord,
+        current: &VerifiedRecord,
+    ) -> Result<FullTailResume, SdkError> {
+        use ramflux_crypto::custody::pairing::{FullResumeTrust, PairingRole};
+        use ramflux_protocol::custody::pairing::{PairingWire as _, context_v3::TranscriptV3};
+        let now = crate::custody::network_now()?;
+        self.full_selected_db(db, None)?;
+        let endpoint =
+            db.open_full_tail_endpoint(&request.operation_id, request.generation, current, now)?;
+        let record = endpoint.pending_resume_record(now)?;
+        if record.role == PairingRole::Responder {
+            let install = crate::custody::pairing::install_store::read_installed(
+                &self.root,
+                &self.account_id,
+            )?
+            .ok_or(SdkError::PairingCode("PublicationPending"))?;
+            let native = crate::custody::load_data_account(&self.root, &self.account_id, now)?;
+            let adoption = db.pairing_adoption()?.ok_or(SdkError::PairingCode("WrongContext"))?;
+            crate::custody::pairing::full_generation::require_completed_full_generation(
+                &self.root, &native, &install, &adoption,
+            )?;
+        }
+        let context = TranscriptV3::from_wire_bytes(&record.transcript)
+            .map_err(|_| SdkError::PairingCode("WrongContext"))?;
+        let live = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == request.operation_id)
+            .ok_or(SdkError::PairingCode("WrongContext"))?;
+        let invitation = super::data_resume::resume_invitation(&live, &context, node)?;
+        let reference = match record.role {
+            PairingRole::Initiator => &record.grant.source_ref,
+            PairingRole::Responder => &record.grant.destination_ref,
+        };
+        let reference = reference.clone();
+        let own_key = self.public_keys(&reference)?.0;
+        let trust = FullResumeTrust::restore_local_stage(record, node, &reference, &own_key, now)?;
+        let cancelled = endpoint.io_cancel_handle();
+        drop(endpoint);
+        let signer = self.prepare_full_proof_signer_in(
+            db,
+            &request.operation_id,
+            request.generation,
+            &trust,
+        )?;
+        Ok(FullTailResume {
+            trust,
+            signer: std::sync::Arc::new(signer),
+            cancelled,
+            origin: invitation.body.public_origin,
+        })
+    }
+}

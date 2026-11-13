@@ -3,6 +3,7 @@
 
 //! Original A's one saved tail, bounded credit and original B's semantic acknowledgement.
 use super::{DataPacket, Phase, SdkError, TailJob, hash, wrong};
+use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::{
     custody::pairing::full_transfer::{SecretBase64, U64, chunk_digest},
     encode_base64url,
