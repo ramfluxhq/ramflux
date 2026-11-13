@@ -211,7 +211,7 @@ async fn client_refuses_a_pipe_of_another_owner_before_sending_a_frame() -> Resu
             Ok(_) => return Err("the client trusted a pipe of another owner".to_owned()),
             Err(error) => return Err(text(error)),
         }
-        let (mut reader, _writer) = accepted.map_err(text)?.into_halves();
+        let (reader, _writer) = accepted.map_err(text)?.into_halves();
         let mut received = Vec::new();
         // The refused client closed its end. The server sees end of stream and not one byte.
         let _ = reader.take(MAX_TEST_FRAME).read_to_end(&mut received).await;
@@ -318,7 +318,8 @@ async fn daemon_and_client_refuse_a_name_pre_created_by_a_second_user() -> Resul
             Ok(pipe)
         })
     }))
-    .await???;
+    .await?
+    .map_err(text)???;
     match PipeBusListener::create(pipe_name.clone(), &user_sid, me) {
         Err(SdkError::DataRootInUse) => {}
         Ok(_) => return Err("the daemon bound a name another user created".to_owned()),
