@@ -201,14 +201,14 @@ impl NativeCallAccount {
     ) -> Result<AccountSessionHarness, SdkError> {
         let index = self.client.account_index()?.clone();
         self.client.first_activate_receive_ledger(&self.config.target_delivery_id, None)?;
-        AccountSessionHarness::attach_initialized(
+        Box::pin(AccountSessionHarness::attach_initialized(
             index,
             self.client,
             self.config,
             session,
             stream,
             FixtureCapabilities { incarnation: None, ephemeral: false },
-        )
+        ))
         .await
     }
 }

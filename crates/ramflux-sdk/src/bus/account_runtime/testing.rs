@@ -92,14 +92,14 @@ impl AccountSessionHarness {
             ephemeral,
         } = fixture;
         let client = Self::fixture_client(&index, db, identity, &config, incarnation.as_deref())?;
-        Self::attach_initialized(
+        Box::pin(Self::attach_initialized(
             index,
             client,
             config,
             session,
             stream,
             FixtureCapabilities { incarnation, ephemeral },
-        )
+        ))
         .await
     }
 

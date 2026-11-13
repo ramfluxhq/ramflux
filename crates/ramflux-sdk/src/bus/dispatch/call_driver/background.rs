@@ -384,38 +384,56 @@ fn note_control_result(
         next.pending.clear();
         next.retry_attempts = 0;
         next.retry_at = 0;
-        if outcome.sent
-            && let Some(call_ref) = outcome.acknowledged
-        {
-            if next.call_ref.is_none() {
-                next.call_ref = Some(call_ref);
-            }
-            for resolved in outcome.resolutions {
-                let peer = if next.local == next.caller { &next.callee } else { &next.caller };
+        if outcome.sent && outcome.acknowledged.is_some() {
+            let peers = if next.local == next.caller {
+                next.invited.clone()
+            } else {
+                vec![next.caller.clone()]
+            };
+            let mut bindings = Vec::new();
+            for peer in peers {
                 if let Some(start) =
                     call::intent::start_for_control(account, &next, &peer.device_id)?
-                    && resolved.context.start_digest
-                        == ramflux_protocol::call_intent_digest(&start)?
-                    && resolved.context.call_ref == start.body.call_ref
-                    && account.connection.as_ref().is_some_and(|handle| {
-                        let snapshot = handle.snapshot();
-                        handle.metadata().is_some_and(|metadata| {
-                            snapshot.state == crate::bus::connection_manager::NetworkingState::Live
-                                && metadata.generation == snapshot.generation
-                                && metadata.session.session_id == resolved.context.session_id
-                                && metadata.session.call_session_generation.as_ref()
-                                    == Some(&resolved.context.session_generation)
-                        })
+                {
+                    let caller = account.client.call_device_identity(&next.caller)?;
+                    let callee = if next.local == next.caller { &peer } else { &next.local };
+                    let callee = account.client.call_device_identity(callee)?;
+                    if start.body.sender_device == caller.storage_key()
+                        && start.body.target_device == callee.storage_key()
+                    {
+                        bindings.push((peer, ramflux_protocol::call_intent_digest(&start)?, start));
+                    }
+                }
+            }
+            for resolved in outcome.resolutions {
+                let Some((peer, _, start)) = bindings.iter().find(|(_, digest, start)| {
+                    resolved.context.start_digest == *digest
+                        && resolved.context.call_ref == start.body.call_ref
+                }) else {
+                    continue;
+                };
+                if account.connection.as_ref().is_some_and(|handle| {
+                    let snapshot = handle.snapshot();
+                    handle.metadata().is_some_and(|metadata| {
+                        snapshot.state == crate::bus::connection_manager::NetworkingState::Live
+                            && metadata.generation == snapshot.generation
+                            && metadata.session.session_id == resolved.context.session_id
+                            && metadata.session.call_session_generation.as_ref()
+                                == Some(&resolved.context.session_generation)
                     })
-                    && resolved.permits_media()
-                    && expected_actions.contains(&resolved.action)
+                }) && expected_actions.contains(&resolved.action)
                     && !next.expired(now)
                     && next.row.state != "ended"
                 {
-                    if resolved.decision.state == ramflux_protocol::CallResolutionState::Answered {
-                        next.gateway_answered = true;
-                    }
-                    next.allow_media();
+                    let allowed = resolved.permits_media();
+                    next.apply_media_for(
+                        peer.clone(),
+                        start,
+                        allowed,
+                        allowed
+                            && resolved.decision.state
+                                == ramflux_protocol::CallResolutionState::Answered,
+                    )?;
                 }
             }
         }
@@ -499,9 +517,8 @@ fn prepare_controls(
             );
         }
 
-        if control.call_ref.is_none() {
-            control.call_ref = bound_start.map(|start| start.body.call_ref.clone());
-        }
+        // Fan-out controls bind their actual recipient, including a losing sibling.
+        control.call_ref = bound_start.map(|start| start.body.call_ref.clone());
         let signed = sign_control(account, &mut control, prepared, start_digest)?;
         let message = GatewayDirectMessage {
             conversation_id: plan.original.row.conversation_id.clone(),

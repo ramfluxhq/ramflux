@@ -204,6 +204,14 @@ impl RamfluxClient {
             record["signing_public_key"].as_str().ok_or_else(|| invalid("sender key missing"))?;
         ramflux_crypto::verify_canonical_signature(&signing_bytes(c)?, &c.signature, key)?;
         self.verify_invitation_start(c, entry, &record, key)?;
+        if !matches!(c.body, ramflux_protocol::CallAction::Invite { .. })
+            && self
+                .voice_calls
+                .get(&c.call_id)
+                .is_some_and(|old| !old.peer_reference_matches(&c.sender, c.call_ref.as_deref()))
+        {
+            return Err(invalid("control Start reference differs from its peer"));
+        }
         if let Some(old) = self.voice_calls.get(&c.call_id)
             && !old.peer_key_matches(&c.sender, key)
         {

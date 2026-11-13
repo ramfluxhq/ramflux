@@ -10,6 +10,14 @@ use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 #[derive(Clone, PartialEq)]
+struct PeerMedia {
+    call_ref: String,
+    start_digest: String,
+    allowed: bool,
+    answered: bool,
+}
+
+#[derive(Clone, PartialEq)]
 pub(crate) struct LiveCall {
     pub row: CallRow,
     pub caller: CallEndpoint,
@@ -30,6 +38,7 @@ pub(crate) struct LiveCall {
     media_loss: Option<(VoiceCallFailureReason, u64)>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
     peer_keys: BTreeMap<CallEndpoint, String>,
+    peer_media: BTreeMap<CallEndpoint, PeerMedia>,
     next_seq: u64,
     ring_deadline: i64,
     seen: BTreeMap<CallEndpoint, u64>,
@@ -126,6 +135,10 @@ impl LiveCall {
         call.seen.insert(control.sender.clone(), control.seq);
         call.call_ref.clone_from(&control.call_ref);
         call.call_start.clone_from(&control.call_start);
+        if let Some(start) = &call.call_start {
+            call.ring_deadline =
+                call.ring_deadline.min(i64::try_from(start.body.expires_at).unwrap_or(i64::MAX));
+        }
         let ringing = call.control(CallAction::Ringing, now)?;
         call.pending.push(ringing);
         Ok(call)
@@ -178,6 +191,7 @@ impl LiveCall {
             media_loss: None,
             offer_keys: BTreeMap::new(),
             peer_keys: BTreeMap::new(),
+            peer_media: BTreeMap::new(),
             next_seq: 1,
             ring_deadline: now.saturating_add(45),
             seen: BTreeMap::new(),
@@ -201,23 +215,122 @@ impl LiveCall {
                 .checked_add(1)
                 .ok_or_else(|| invalid("local call generation exhausted"))?;
             self.gateway_generation = generation.map(str::to_owned);
+            self.peer_media.clear();
+            self.gateway_answered = false;
             self.media_held = true;
         }
         Ok(())
     }
 
-    /// Release media after the gateway accepts the owner's resolve.
-    pub(crate) fn allow_media(&mut self) {
-        self.apply_gateway_resolution(true);
+    fn media_peer(&self) -> &CallEndpoint {
+        if self.local == self.caller { &self.callee } else { &self.caller }
     }
 
-    /// Apply an authenticated decision after the caller has checked its complete context.
+    fn refresh_media(&mut self) {
+        let permission = self.peer_media.get(self.media_peer());
+        self.media_held = permission.is_none_or(|permission| !permission.allowed);
+        self.gateway_answered = permission.is_some_and(|permission| permission.answered);
+        if let Some(permission) = permission
+            && !permission.call_ref.is_empty()
+        {
+            self.call_ref = Some(permission.call_ref.clone());
+        }
+    }
+
+    /// Retain only a verified operation's exact peer and immutable Start binding.
+    pub(crate) fn apply_media_for(
+        &mut self,
+        peer: CallEndpoint,
+        start: &ramflux_protocol::SignedCallIntentV1,
+        allowed: bool,
+        answered: bool,
+    ) -> Result<(), SdkError> {
+        if (self.local == self.caller && !self.invited.contains(&peer))
+            || (self.local != self.caller && peer != self.caller)
+        {
+            return Err(invalid("media decision peer is not invited"));
+        }
+        let digest = ramflux_protocol::call_intent_digest(start)?;
+        if self.peer_media.get(&peer).is_some_and(|prior| {
+            prior.call_ref != start.body.call_ref || prior.start_digest != digest
+        }) {
+            return Err(invalid("media Start binding changed"));
+        }
+        let answered = answered || self.peer_media.get(&peer).is_some_and(|prior| prior.answered);
+        self.ring_deadline =
+            self.ring_deadline.min(i64::try_from(start.body.expires_at).unwrap_or(i64::MAX));
+        self.peer_media.insert(
+            peer,
+            PeerMedia {
+                call_ref: start.body.call_ref.clone(),
+                start_digest: digest,
+                allowed,
+                answered,
+            },
+        );
+        self.refresh_media();
+        Ok(())
+    }
+
+    pub(crate) fn hold_media_for(&mut self, peer: &CallEndpoint) {
+        if let Some(permission) = self.peer_media.get_mut(peer) {
+            permission.allowed = false;
+        }
+        self.refresh_media();
+    }
+
+    pub(crate) fn peer_reference_matches(
+        &self,
+        peer: &CallEndpoint,
+        reference: Option<&str>,
+    ) -> bool {
+        if self.local == self.caller {
+            self.peer_media
+                .get(peer)
+                .is_some_and(|permission| Some(permission.call_ref.as_str()) == reference)
+        } else {
+            self.call_start
+                .as_ref()
+                .is_some_and(|start| Some(start.body.call_ref.as_str()) == reference)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allow_media(&mut self) {
+        let peers = if self.local == self.caller {
+            self.invited.clone()
+        } else {
+            vec![self.caller.clone()]
+        };
+        for peer in peers {
+            self.peer_media.insert(
+                peer,
+                PeerMedia {
+                    call_ref: self.call_ref.clone().unwrap_or_default(),
+                    start_digest: String::new(),
+                    allowed: true,
+                    answered: self.gateway_answered,
+                },
+            );
+        }
+        self.refresh_media();
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_gateway_resolution(&mut self, media_allowed: bool) {
-        self.media_held = !media_allowed;
+        if media_allowed {
+            self.allow_media();
+        } else {
+            self.peer_media.clear();
+            self.refresh_media();
+        }
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
-        if self.call_ref.is_some() {
-            self.media_held = true;
+        if self.call_ref.is_some()
+            && !matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
+        {
+            let peer = self.media_peer().clone();
+            self.hold_media_for(&peer);
         }
         let seq = self.next_seq;
         self.next_seq = seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
@@ -296,6 +409,7 @@ impl LiveCall {
                     .ok_or_else(|| invalid("answer has no fresh offer key"))?;
                 self.offer_keys.clear();
                 self.callee = c.callee.clone();
+                self.refresh_media();
                 self.set_state("connecting", now)?;
                 for loser in self
                     .invited
@@ -486,6 +600,7 @@ impl LiveCall {
             .local_generation
             .checked_add(1)
             .ok_or_else(|| invalid("local call generation exhausted"))?;
+        self.peer_media.clear();
         self.media_held = true;
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
