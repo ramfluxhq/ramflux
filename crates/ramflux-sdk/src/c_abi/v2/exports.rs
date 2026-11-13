@@ -177,9 +177,20 @@ pub extern "C" fn ramflux_v2_client_open(
         if config.data_root.as_os_str().is_empty() || !config.data_root.is_absolute() {
             return Err(invalid("data_root must be absolute"));
         }
-        // Reserve capacity before opening a writer; no bridge registry lock spans filesystem I/O.
+        let candidate_root = std::fs::canonicalize(&config.data_root).ok();
+        // A registered root remains reserved until shutdown is acknowledged, even if
+        // its OS lease is released just before the worker publishes completion.
+        // No bridge registry lock spans filesystem I/O.
         let id = {
             let mut registry = REGISTRY.lock().map_err(|_| internal())?;
+            if candidate_root.as_ref().is_some_and(|root| {
+                registry.clients.values().any(|client| &client.data_root == root)
+            }) {
+                return Err(CAbiError::new(
+                    RamfluxErrorCode::AccountBusy,
+                    "data root has a registered client",
+                ));
+            }
             if registry.clients.len().saturating_add(registry.opening) >= 16 {
                 return Err(busy());
             }

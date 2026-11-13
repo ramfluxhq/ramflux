@@ -66,11 +66,10 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        assert_eq!(
-            ramflux_v2_client_close(self.handle),
-            0,
-            "supervisor must drain and release its writer"
-        );
+        let outcome = ramflux_v2_client_close(self.handle);
+        if !std::thread::panicking() {
+            assert_eq!(outcome, 0, "supervisor must drain and release its writer");
+        }
     }
 }
 fn deadline() -> u64 {
@@ -476,6 +475,13 @@ fn close_timeout_retains_handle_until_real_supervisor_releases_writer() {
         ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut replacement),
         18,
         "the actual data-root lock must refuse replacement while shutdown is pending"
+    );
+    assert!(
+        matches!(
+            crate::bus::data_root_lock::DataRootLock::acquire(root.path()),
+            Err(crate::SdkError::DataRootInUse)
+        ),
+        "the real supervisor must still own its OS data-root lease at the shutdown barrier"
     );
     release.0.notify_one();
     let until = Instant::now() + Duration::from_secs(5);

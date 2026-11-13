@@ -77,8 +77,9 @@ pub(crate) async fn serve(
             () = supervisor.reap_lifecycle_tasks() => {},
         }
     }
+    let explicit_stop = *stopping.borrow();
     supervisor.close_lifecycle_admission();
-    let stop_result = if *stopping.borrow() {
+    let stop_result = if explicit_stop {
         let mut response = supervisor.stop_response();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !*response.borrow() {

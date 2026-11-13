@@ -26,6 +26,7 @@ pub(super) struct Client {
     done: Mutex<CloseCompletion>,
     close_wait: Duration,
     pub closing: AtomicBool,
+    pub data_root: std::path::PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +79,17 @@ impl CloseCompletion {
 #[cfg(test)]
 pub(super) use crate::bus::inprocess::ShutdownGate;
 
+struct Worker {
+    config: LocalBusConfig,
+    commands: mpsc::Receiver<Command>,
+    shutdown: watch::Receiver<bool>,
+    stop: watch::Sender<bool>,
+    ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
+    shared: Arc<Shared>,
+    #[cfg(test)]
+    gate: Option<ShutdownGate>,
+}
+
 impl Client {
     pub fn start(config: LocalBusConfig) -> Result<Arc<Self>, SdkError> {
         Self::start_inner(
@@ -101,6 +113,7 @@ impl Client {
         close_wait: Duration,
         #[cfg(test)] gate: Option<ShutdownGate>,
     ) -> Result<Arc<Self>, SdkError> {
+        let data_root = config.data_root.clone();
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (ready, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -112,16 +125,16 @@ impl Client {
             let result = (|| {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 tokio::task::LocalSet::new().block_on(&runtime, async {
-                    run(
+                    run(Worker {
                         config,
-                        receiver,
-                        shutdown_rx,
-                        worker_shutdown,
+                        commands: receiver,
+                        shutdown: shutdown_rx,
+                        stop: worker_shutdown,
                         ready,
-                        Arc::clone(&worker_shared),
+                        shared: Arc::clone(&worker_shared),
                         #[cfg(test)]
                         gate,
-                    )
+                    })
                     .await
                 })
             })();
@@ -134,7 +147,15 @@ impl Client {
             let _ = shutdown.send(true);
             return Err(SdkError::LocalBus("supervisor startup timed out".into()));
         }
+        let data_root = match std::fs::canonicalize(data_root) {
+            Ok(root) => root,
+            Err(error) => {
+                let _ = shutdown.send(true);
+                return Err(error.into());
+            }
+        };
         Ok(Arc::new(Self {
+            data_root,
             commands,
             shared,
             shutdown,
@@ -167,15 +188,17 @@ impl Drop for Client {
     }
 }
 
-async fn run(
-    config: LocalBusConfig,
-    commands: mpsc::Receiver<Command>,
-    shutdown: watch::Receiver<bool>,
-    stop: watch::Sender<bool>,
-    ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
-    shared: Arc<Shared>,
-    #[cfg(test)] gate: Option<ShutdownGate>,
-) -> Result<(), SdkError> {
+async fn run(worker: Worker) -> Result<(), SdkError> {
+    let Worker {
+        config,
+        commands,
+        shutdown,
+        stop,
+        ready,
+        shared,
+        #[cfg(test)]
+        gate,
+    } = worker;
     // Bounded byte carrier; framing, custody ceremonies and response ordering are shared.
     let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
     let (server_ready, initialized) = oneshot::channel();
