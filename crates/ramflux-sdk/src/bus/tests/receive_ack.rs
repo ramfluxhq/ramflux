@@ -368,8 +368,6 @@ async fn cursor_error_case() -> Case {
         before,
         "C unchanged on cursor error"
     );
-    let root = fixture.root.clone();
-    drop(fixture);
     Ok(())
 }
 
@@ -568,7 +566,6 @@ pub(super) async fn ack_fence() -> Case {
     let snap = db_of(&runtime)?.receive_ledger_snap_for_test(&target)?;
     assert_eq!(snap.cursor, 2, "AckResults never writes C");
     ack_outcomes(&mut runtime, generation, &target).await?;
-    let root = fixture.root.clone();
     drop(runtime);
     Ok(())
 }

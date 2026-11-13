@@ -26,7 +26,6 @@ use crate::bus::task_courier::{Item, TaskCourier};
 use crate::bus::task_courier_apply::conflict_terminal;
 use crate::bus::task_courier_queue as queue;
 use ramflux_storage::durability_test_hooks::{Registration, observe};
-use std::path::PathBuf;
 use tokio::sync::watch;
 
 #[path = "task_courier_refusal_decision.rs"]
