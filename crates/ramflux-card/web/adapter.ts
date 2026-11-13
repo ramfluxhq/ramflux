@@ -43,15 +43,16 @@ export class CardView {
   resume():Promise<Reply|null>{return this.request("resume")}
   dispose():void {
     if(this.disposed)return;this.disposed=true;
-    this.abort(Error("Card disposed"));this.port.close();this.worker.terminate();
+    this.abort(Error("Card disposed"),false);this.port.close();this.worker.terminate();
     this.nodes.clear();this.displayed.clear();this.root.replaceChildren();this.hostSlots([]);
   }
-  private abort(error:Error):void {
+  private abort(error:Error,notify=true):void {
     for(const pending of this.pending.values())pending.reject(error);this.pending.clear();
-    this.failure(error.message);
+    if(notify){this.root.inert=true;this.failure(error.message)}
   }
   private async request(op:string,json?:string):Promise<Reply|null> {
     if(this.disposed)throw Error("Card disposed");
+    if(json!==undefined && (typeof json!=="string" || json.length>16384))throw Error("Card transport bound");
     if(this.pending.size>=32)throw Error("Card busy");
     // Reserve before awaiting readiness so the pre-init queue is bounded too.
     const seq=++this.sequence;
