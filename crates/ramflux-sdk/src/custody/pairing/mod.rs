@@ -22,8 +22,8 @@ mod participant;
 pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};
 pub use native_ports::{NativePairingPublication, NativePairingQuery};
 pub use participant::{
-    FullPreparedTransferCandidate, FullSourcePublished, FullSourceSubmission,
-    LocalPairingParticipant, ParticipantContext,
+    FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
+    FullSourcePublished, FullSourceSubmission, LocalPairingParticipant, ParticipantContext,
 };
 pub mod install_gate;
 pub mod install_store;

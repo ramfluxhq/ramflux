@@ -13,6 +13,8 @@ use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, Prep
 mod candidate;
 pub use candidate::FullPreparedTransferCandidate;
 mod preservation;
+mod recipient_reconciliation;
+pub use recipient_reconciliation::{FullRecipientNativeObservation, FullRecipientPublicationQuery};
 mod submission;
 pub use submission::{FullSourcePublished, FullSourceSubmission};
 mod proof_signer;
@@ -129,7 +131,11 @@ impl LocalPairingParticipant {
                 .to_bytes(),
         ))
     }
-    fn full_selected_db(&self, db: &AccountDb, anchor: Option<&str>) -> Result<(), SdkError> {
+    pub(super) fn full_selected_db(
+        &self,
+        db: &AccountDb,
+        anchor: Option<&str>,
+    ) -> Result<(), SdkError> {
         if db.local_account_id != self.account_id {
             return Err(wrong());
         }

@@ -125,9 +125,18 @@ impl AccountDb {
         role: PairingRole,
         now: u64,
     ) -> Result<FullTransferStage<'_>, StorageError> {
+        self.open_full_stage_reference_inner(reference, role, now, false)
+    }
+    pub(super) fn open_full_stage_reference_inner(
+        &self,
+        reference: FullStageReference,
+        role: PairingRole,
+        now: u64,
+        reconciliation: bool,
+    ) -> Result<FullTransferStage<'_>, StorageError> {
         self.require_full_stage_unlock()?;
         reference.validate().map_err(|_| context())?;
-        if reference.lease_expires_at.0 <= now {
+        if !reconciliation && reference.lease_expires_at.0 <= now {
             return Err(StorageError::PairingField("LeaseExpired"));
         }
         let directory = stage_directory(self, &reference.stage_id, false)?;
@@ -159,6 +168,14 @@ impl AccountDb {
         connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
         connection.execute_batch(super::preservation::SCHEMA)?;
+        connection.execute_batch(super::data_terminal::SCHEMA)?;
+        if !reconciliation
+            && connection.query_row("SELECT EXISTS(SELECT 1 FROM data_terminal)", [], |row| {
+                row.get::<_, bool>(0)
+            })?
+        {
+            return Err(context());
+        }
         let stage = FullTransferStage {
             connection,
             lock,
@@ -359,6 +376,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::source_scalar::SCHEMA)?;
         tx.execute_batch(super::native_floor::SCHEMA)?;
         tx.execute_batch(super::preservation::SCHEMA)?;
+        tx.execute_batch(super::data_terminal::SCHEMA)?;
         tx.execute(
             "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
             params![local, role, expires_at, digest.as_slice()],

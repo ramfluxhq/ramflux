@@ -13,6 +13,7 @@ use crate::custody::{
 use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
+mod recipient_cancel;
 mod source_cancel;
 mod source_tail;
 
@@ -384,6 +385,15 @@ fn finish_installed(
     .len();
     assert_eq!(pending_count, 0, "G3 retained its pending install file");
     let adoption = selected.pairing_adoption()?.ok_or("selected adoption")?;
+    assert!(selected.pairing_head()?.is_none(), "G3 retained the primary head-writer fence");
+    assert!(
+        selected
+            .pairing_live_rows()?
+            .into_iter()
+            .any(|row| row.operation_id == installed.operation_id
+                && row.full_stage_reference().is_ok_and(|reference| reference.is_some())),
+        "G3 discarded the tail/reconciliation reference"
+    );
     super::super::full_generation::require_selected_full_generation(
         &rig.participant_b.root,
         &installed,

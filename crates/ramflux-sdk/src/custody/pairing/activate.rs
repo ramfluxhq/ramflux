@@ -84,6 +84,7 @@ pub(crate) fn install_exact(
         return Err(SdkError::PairingCode("PublicationPending"));
     }
     row.record_hash = Some(acknowledged_hash.into());
+    let adoption = super::full_generation::preserved_refresh_adoption(root, db, &row)?;
     custody::verify_pairing_local(&row, authority, vault, now)?;
     row.state = "adopt_prepared".into();
     install_store::write_pending(root, &row)?;
@@ -95,7 +96,7 @@ pub(crate) fn install_exact(
     custody::verify_pairing_local(&row, authority, vault, now)?;
     row.state = "authority_durable".into();
     install_store::write_pending(root, &row)?;
-    db.commit_pairing_install(&adoption(&row)?)?;
+    db.commit_pairing_install(&adoption)?;
     row.state = "installed".into();
     install_store::write_installed(root, &row)?;
     install_store::remove_pending(root, &row.account_id, &row.operation_id)?;

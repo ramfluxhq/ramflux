@@ -557,7 +557,9 @@ impl PairingActor {
     pub async fn lock(&mut self) -> Result<LocalResult, SdkError> {
         self.frontend_generation = self.frontend_generation.saturating_add(1);
         self.actor_generation = self.actor_generation.saturating_add(1);
-        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+        // A previous cancel may already have dropped the full owner and returned the
+        // frontend database. Lock still retires memory; it must not repeat that DB loan.
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some() || c.cleanup == "pending") {
             self.retire_owned_runtime().await;
             self.with_ceremony_mut(|c| {
                 c.phase = "cancelled".into();

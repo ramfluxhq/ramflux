@@ -11,6 +11,9 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 pub mod owner;
+mod refresh;
+pub(crate) use refresh::has_selected as has_selected_full_generation;
+pub(crate) use refresh::preserve as preserved_refresh_adoption;
 const LIMIT: usize = 4096;
 fn pending() -> SdkError {
     SdkError::PairingCode("PublicationPending")
@@ -108,7 +111,12 @@ pub(crate) fn require_installed_native_generation(
     account: &crate::custody::BornAccount,
     install: &Install,
 ) -> Result<(), SdkError> {
-    require_completed_full_generation(root, account, install, &super::activate::adoption(install)?)
+    let adoption = if install.full_transfer.is_some() {
+        super::activate::adoption(install)?
+    } else {
+        refresh::expected(root, install)?
+    };
+    require_completed_full_generation(root, account, install, &adoption)
 }
 
 /// Completed G3 admission requires every durable local owner to agree. A decoded
@@ -121,12 +129,22 @@ pub(crate) fn require_completed_full_generation(
 ) -> Result<(), SdkError> {
     if install.state != "installed"
         || !super::install_store::list_pending(root, &install.account_id)?.is_empty()
-        || super::activate::adoption(install)? != *adoption
-        || !crate::custody::matches_generation_install(account, install)?
     {
         return Err(pending());
     }
-    require_selected_full_generation(root, install, adoption)
+    if install.full_transfer.is_some() {
+        if super::activate::adoption(install)? != *adoption
+            || !crate::custody::matches_generation_install(account, install)?
+        {
+            return Err(pending());
+        }
+        require_selected_full_generation(root, install, adoption)
+    } else {
+        if !crate::custody::matches_install(account, install)? {
+            return Err(pending());
+        }
+        refresh::require(root, install, adoption)
+    }
 }
 
 fn compare_selected_full_generation(

@@ -179,7 +179,9 @@ pub fn ordinary_session_admitted(
     let adoption = client.account_db()?.pairing_adoption()?;
     let installed = install_store::read_installed(root, account_id)?;
     if let (Some(install), Some(adoption)) = (&installed, &adoption)
-        && install.full_transfer.is_some()
+        && (install.full_transfer.is_some()
+            || adoption.full_generation_nonce.is_some()
+            || adoption.full_initial_union_root.is_some())
     {
         let account =
             crate::custody::load_data_account(root, account_id, crate::custody::network_now()?)?;

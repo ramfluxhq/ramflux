@@ -224,7 +224,12 @@ pub(super) fn require_installed_marker(root: &Path, account: &BornAccount) -> Re
         return Err(SdkError::PairingCode("PublicationPending"));
     }
     match install_store::read_installed(root, id)? {
-        Some(row) if row.full_transfer.is_some() => {
+        Some(row)
+            if row.full_transfer.is_some()
+                || crate::custody::pairing::full_generation::has_selected_full_generation(
+                    root, id,
+                )? =>
+        {
             crate::custody::pairing::full_generation::require_installed_native_generation(
                 root, account, &row,
             )?;

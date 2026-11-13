@@ -24,14 +24,22 @@ pub(crate) fn require_network_admission(
     let adoption = reader
         .read_for(&config.account_root, &config.account_id)?
         .ok_or(SdkError::PairingCode("PublicationPending"))?;
-    if installed.full_transfer.is_some() {
+    if installed.full_transfer.is_some()
+        || adoption.full_generation_nonce.is_some()
+        || adoption.full_initial_union_root.is_some()
+    {
         super::full_generation::require_completed_full_generation(
             &config.account_root,
             account,
             &installed,
             &adoption,
         )?;
-        return crate::custody::verify_generation_keys(
+        let verify = if installed.full_transfer.is_some() {
+            crate::custody::verify_generation_keys
+        } else {
+            crate::custody::verify_pairing_local
+        };
+        return verify(
             &installed,
             &ramflux_protocol::custody::CustodyAuthority {
                 publication: account.publication(),
