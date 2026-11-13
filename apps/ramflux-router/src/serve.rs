@@ -814,18 +814,26 @@ fn bind_router_async_reuse_port_socket(addr: SocketAddr) -> anyhow::Result<std::
     Ok(socket.into())
 }
 
+// `socket2` exposes `SO_REUSEPORT` on Unix only. A single ingress socket never calls this.
 #[cfg(not(any(
     target_os = "solaris",
     target_os = "illumos",
     target_os = "cygwin",
-    target_os = "wasi"
+    target_os = "wasi",
+    target_os = "windows"
 )))]
 fn set_router_async_reuse_port(socket: &Socket) -> anyhow::Result<()> {
     socket.set_reuse_port(true)?;
     Ok(())
 }
 
-#[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin", target_os = "wasi"))]
+#[cfg(any(
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "cygwin",
+    target_os = "wasi",
+    target_os = "windows"
+))]
 fn set_router_async_reuse_port(_socket: &Socket) -> anyhow::Result<()> {
     anyhow::bail!("SO_REUSEPORT is unavailable on this target")
 }
