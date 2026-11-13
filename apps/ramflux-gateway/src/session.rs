@@ -313,7 +313,7 @@ async fn handle_gateway_session_transport_inner(
     let auth_open = open.clone();
     let auth_payload = auth_frame.clone();
     let auth_key = registered_auth_key.clone();
-    let auth_result = crate::durable_work::run(&context, move |context| {
+    let auth_result = crate::durable_work::run(&context, None, move |context| {
         authenticate_gateway_request(context, &auth_open, &auth_payload, &auth_key)
             .map_err(Into::into)
     })
@@ -683,7 +683,7 @@ pub(crate) async fn establish_gateway_session(
     let persisted_open = open.clone();
     let persisted_session = session_id.clone();
     let epoch = auth_frame.device_proof.device_epoch;
-    let resume_token = crate::durable_work::run(context, move |context| {
+    let resume_token = crate::durable_work::run(context, Some(&source_identity), move |context| {
         persist_established_session(
             context,
             &persisted_open,
@@ -1100,9 +1100,10 @@ async fn handle_gateway_relay_token_issue(
     runtime: &GatewaySessionRuntime,
     request: &ramflux_node_core::RelayTokenIssueRequest,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let runtime = runtime.clone();
     let request = request.clone();
-    let result = crate::durable_work::run(context, move |context| {
+    let result = crate::durable_work::run(context, Some(&source), move |context| {
         issue_relay_token_for_authenticated_session(context, &runtime, &request)
     })
     .await;
@@ -1135,9 +1136,10 @@ async fn handle_gateway_relay_token_v3_issue(
     runtime: &GatewaySessionRuntime,
     request: &ramflux_node_core::GatewayRelayTokenV3IssueRequest,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let runtime = runtime.clone();
     let request = request.clone();
-    let result = crate::durable_work::run(context, move |context| {
+    let result = crate::durable_work::run(context, Some(&source), move |context| {
         issue_relay_token_v3_for_authenticated_session(context, &runtime, &request)
     })
     .await;
@@ -1318,6 +1320,7 @@ pub(crate) async fn validate_gateway_session_signed_request_async<T: serde::Seri
     path: &str,
     body: &T,
 ) -> anyhow::Result<()> {
+    let source = runtime.source_identity.clone();
     let (runtime, request, method, path, body) = (
         runtime.clone(),
         signed_request.clone(),
@@ -1325,7 +1328,7 @@ pub(crate) async fn validate_gateway_session_signed_request_async<T: serde::Seri
         path.to_owned(),
         serde_json::to_value(body)?,
     );
-    crate::durable_work::run(context, move |context| {
+    crate::durable_work::run(context, Some(&source), move |context| {
         validate_gateway_session_signed_request(context, &runtime, &request, &method, &path, &body)
     })
     .await
@@ -1412,18 +1415,14 @@ async fn route_non_durable_submit(
     Ok(())
 }
 
-pub(crate) async fn handle_gateway_submit(
-    send: &GatewaySendHandle,
+async fn validate_durable_submit(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
-) -> anyhow::Result<()> {
-    if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
-        return route_non_durable_submit(send, context, runtime, submit).await;
-    }
+) -> anyhow::Result<ramflux_protocol::Envelope> {
     let owned_runtime = runtime.clone();
     let owned_submit = submit.clone();
-    let validated = crate::durable_work::run(context, move |context| {
+    crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
         let envelope = crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
         validate_gateway_session_signed_request(
             context,
@@ -1435,7 +1434,19 @@ pub(crate) async fn handle_gateway_submit(
         )?;
         Ok(envelope)
     })
-    .await;
+    .await
+}
+
+pub(crate) async fn handle_gateway_submit(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> anyhow::Result<()> {
+    if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
+        return route_non_durable_submit(send, context, runtime, submit).await;
+    }
+    let validated = validate_durable_submit(context, runtime, submit).await;
     let mut envelope = match validated {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -1643,10 +1654,11 @@ pub(crate) async fn handle_gateway_own_device_fanout(
     }
     let owned_runtime = runtime.clone();
     let owned_fanout = fanout.clone();
-    let replay_rejection = crate::durable_work::run(context, move |context| {
-        fanout_replay_rejection(context, &owned_runtime, &owned_fanout)
-    })
-    .await?;
+    let replay_rejection =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            fanout_replay_rejection(context, &owned_runtime, &owned_fanout)
+        })
+        .await?;
     if let Some(reason) = replay_rejection {
         write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::Nack { reason }).await?;
         return Ok(());
@@ -2061,7 +2073,7 @@ pub(crate) async fn handle_gateway_close(
     reason: String,
 ) -> anyhow::Result<()> {
     let session_id = runtime.session_id.clone();
-    crate::durable_work::run(context, move |context| {
+    crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
         let writer = context.store.write_guard()?;
         let checkpoint = {
             let mut state = gateway_state(&context.state)?;
@@ -2674,7 +2686,14 @@ pub(crate) mod tests {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
                 NEXT_DB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
-        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(&store_path)?);
+        let context = test_gateway_context_at(&store_path)?;
+        Ok((store_path, context))
+    }
+
+    pub(crate) fn test_gateway_context_at(
+        store_path: &std::path::Path,
+    ) -> anyhow::Result<crate::GatewayQuicContext> {
+        let store = Arc::new(ramflux_node_core::GatewayRedbStore::open(store_path)?);
         store.configure_replay(
             ramflux_node_core::test_support::federation_fixtures::gateway_replay_fixture_config(),
             0,
@@ -2705,38 +2724,35 @@ pub(crate) mod tests {
             signaling: None,
             relay: None,
         };
-        Ok((
-            store_path,
-            crate::GatewayQuicContext {
-                custody: None,
-                node_id: "node-gateway-test".to_owned(),
-                gateway_id: "ramflux-gateway".to_owned(),
-                peers: crate::GatewayPeerDirectory::empty(&config),
-                router: crate::RouterMeshClient {
-                    endpoint: "127.0.0.1:7443".to_owned(),
-                    server_name: "ramflux-router".to_owned(),
-                    tls: ramflux_transport::MeshTlsConfig {
-                        ca_cert: "ca.pem".into(),
-                        service_cert: "gateway.pem".into(),
-                        service_key: "gateway-key.pem".into(),
-                    },
-                    client: ramflux_transport::MeshHttpClient::new(),
-                    async_mesh: None,
+        Ok(crate::GatewayQuicContext {
+            custody: None,
+            node_id: "node-gateway-test".to_owned(),
+            gateway_id: "ramflux-gateway".to_owned(),
+            peers: crate::GatewayPeerDirectory::empty(&config),
+            router: crate::RouterMeshClient {
+                endpoint: "127.0.0.1:7443".to_owned(),
+                server_name: "ramflux-router".to_owned(),
+                tls: ramflux_transport::MeshTlsConfig {
+                    ca_cert: "ca.pem".into(),
+                    service_cert: "gateway.pem".into(),
+                    service_key: "gateway-key.pem".into(),
                 },
-                notify: crate::NotifyHttpClient {
-                    endpoint: "http://127.0.0.1:18085".to_owned(),
-                    signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
-                    mesh: None,
-                    wake_calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                },
-                #[cfg(feature = "itest-local-mint")]
-                relay_service_key: b"relay-service-key-test".to_vec(),
-                state: Arc::new(Mutex::new(state)),
-                store,
-                hub: Arc::new(crate::GatewaySessionHub::default()),
-                remote_addr: "127.0.0.1:50000".parse()?,
+                client: ramflux_transport::MeshHttpClient::new(),
+                async_mesh: None,
             },
-        ))
+            notify: crate::NotifyHttpClient {
+                endpoint: "http://127.0.0.1:18085".to_owned(),
+                signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
+                mesh: None,
+                wake_calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+            #[cfg(feature = "itest-local-mint")]
+            relay_service_key: b"relay-service-key-test".to_vec(),
+            state: Arc::new(Mutex::new(state)),
+            store,
+            hub: Arc::new(crate::GatewaySessionHub::default()),
+            remote_addr: "127.0.0.1:50000".parse()?,
+        })
     }
 }
 

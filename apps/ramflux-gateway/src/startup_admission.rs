@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-pub(crate) fn wait(state: &mut GatewayState) -> anyhow::Result<u64> {
+pub(crate) fn wait(state: &mut GatewayState) -> anyhow::Result<Option<u64>> {
     let started = Instant::now();
     let maximum = Duration::from_secs(ramflux_node_core::PRE_AUTH_CHECKPOINT_SECONDS);
     wait_with(state, SystemTime::now, |delay| {
@@ -16,21 +16,20 @@ pub(crate) fn wait(state: &mut GatewayState) -> anyhow::Result<u64> {
         if remaining.is_zero() {
             return Err(NodeCoreError::PreAuthClockRollback);
         }
-        std::thread::sleep(delay.min(remaining));
-        Ok(())
+        Ok(ramflux_node_core::service_shutdown_sleep(delay.min(remaining)))
     })
 }
 fn wait_with(
     state: &mut GatewayState,
     mut clock: impl FnMut() -> SystemTime,
-    mut wait: impl FnMut(Duration) -> Result<(), NodeCoreError>,
-) -> anyhow::Result<u64> {
+    mut wait: impl FnMut(Duration) -> Result<bool, NodeCoreError>,
+) -> anyhow::Result<Option<u64>> {
     let mut logged = false;
     loop {
         let time = clock();
         let delay = state.admission_startup_delay(time)?;
         if delay.is_zero() {
-            return Ok(state.observe_pre_auth_time(time)?);
+            return Ok(Some(state.observe_pre_auth_time(time)?));
         }
         if !logged {
             tracing::info!(
@@ -39,7 +38,9 @@ fn wait_with(
             );
             logged = true;
         }
-        wait(delay)?;
+        if !wait(delay)? {
+            return Ok(None);
+        }
     }
 }
 
@@ -66,12 +67,8 @@ mod tests {
     #[test]
     fn clean_restart_is_immediate_crash_waits_and_true_rollback_is_typed() -> anyhow::Result<()> {
         for enabled in [false, true] {
-            let path = ramflux_test_support::TestPath::new()
-                .expect("test: allocate fixture directory")
-                .child(format!(
-                    "gateway-startup-{}.redb",
-                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-                ));
+            let directory = tempfile::TempDir::new()?;
+            let path = directory.path().join("gateway.redb");
             let store = GatewayRedbStore::open(&path)?;
             let mut state = GatewayState::new();
             state.set_pre_auth_policy(ramflux_node_core::GatewayPreAuthPolicy {
@@ -91,11 +88,11 @@ mod tests {
                 |duration| {
                     waits.set(waits.get() + 1);
                     clock.set(clock.get() + duration.as_secs());
-                    Ok(())
+                    Ok(true)
                 },
             )?;
-            assert_eq!(now, 130, "crash must wait through committed endpoint");
-            assert_eq!(waits.get(), 1);
+            assert_eq!(now, Some(130), "crash must wait through committed endpoint");
+            assert_eq!(waits.get(), 1, "reservation should require one virtual wait");
             let mut rolled = store
                 .load_state()?
                 .ok_or_else(|| anyhow::anyhow!("missing rollback checkpoint"))?;
@@ -117,11 +114,37 @@ mod tests {
                     || UNIX_EPOCH + Duration::from_secs(100),
                     |_| Err(NodeCoreError::PreAuthSnapshotInvalid)
                 )?,
-                100
+                Some(100),
+                "clean startup must observe the exact floor"
             );
             drop(store);
             std::fs::remove_file(path)?;
         }
+        Ok(())
+    }
+    #[test]
+    fn cancelled_startup_retains_the_committed_reservation() -> anyhow::Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let path = directory.path().join("gateway.redb");
+        let store = GatewayRedbStore::open(&path)?;
+        let mut state = GatewayState::new();
+        state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(100))?;
+        store.save_admission_checkpoint(&state.admission_checkpoint(100))?;
+        let mut reopened =
+            store.load_state()?.ok_or_else(|| anyhow::anyhow!("missing reservation"))?;
+        assert_eq!(
+            wait_with(&mut reopened, || UNIX_EPOCH + Duration::from_secs(100), |_| Ok(false))?,
+            None,
+            "cancellation must stop startup before serving"
+        );
+        let reopened = store
+            .load_state()?
+            .ok_or_else(|| anyhow::anyhow!("missing reservation after cancellation"))?;
+        assert_eq!(
+            reopened.admission_startup_delay(UNIX_EPOCH + Duration::from_secs(100))?,
+            Duration::from_secs(30),
+            "cancellation must never release an unexpired crash barrier"
+        );
         Ok(())
     }
 }

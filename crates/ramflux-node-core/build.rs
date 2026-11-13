@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ramflux_release_profile)");
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        println!("cargo:rustc-cfg=ramflux_release_profile");
+    }
     println!("cargo:rustc-check-cfg=cfg(ramflux_production)");
     println!("cargo:rerun-if-env-changed=RAMFLUX_PRODUCTION_BUILD");
     if std::env::var("RAMFLUX_PRODUCTION_BUILD").as_deref() == Ok("1") {

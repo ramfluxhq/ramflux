@@ -3,6 +3,7 @@
 # Copyright (c) 2026 Span Brain
 """Refuse integration-only memory custody in the resolved production feature graph."""
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -32,7 +33,8 @@ def check_tree(graph):
         features = set(fields[-1].split(","))
         forbidden = {
             "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts", "test-support"),
-            "ramflux-node-core": ("durability-test-hooks",),
+            "ramflux-node-core": ("durability-test-hooks", "itest-http"),
+            "ramflux-gateway": ("itest-http",),
             "ramflux-storage": ("durability-test-hooks",),
         }.get(name, ())
         for feature in forbidden:
@@ -40,7 +42,36 @@ def check_tree(graph):
                 raise ValueError(f"production graph enables forbidden {name} {feature}")
 
 
+def check_release_commands(text, file):
+    # Fold shell continuations so feature flags on a following line are checked too.
+    for command in text.replace("\\\n", " ").splitlines():
+        if re.search(r"\b(?:cargo|cross)(?:\s+[^\s;]+)*?\s+(?:build|install|run)\b", command):
+            if "itest-http" in command or "--all-features" in command:
+                raise ValueError(f"test HTTP feature in release/deploy build command: {file}")
+
+
+def self_test_release_commands():
+    for command in (
+        "cargo build --release --features itest-http",
+        "cargo install --path apps/ramflux-gateway --features itest-http",
+        "cargo run --release --features ramflux-gateway/itest-http",
+        "cross build --release --all-features",
+        "cargo +stable build --release --all-features",
+        "cargo $TC build --release " + "\\" + "\n --features ramflux-gateway/itest-http",
+    ):
+        try:
+            check_release_commands(command, "fixture")
+        except ValueError:
+            continue
+        raise ValueError("release command guard accepted a forbidden feature fixture")
+    check_release_commands("cargo build --locked --release --workspace", "fixture")
+
+
 def main():
+    self_test_release_commands()
+    if sys.argv[1:] == ["--self-test"]:
+        print("release/deploy feature command guards: OK")
+        return
     root = Path(__file__).resolve().parent.parent
     # Each production binary gets its own normal/build graph. Dev feature
     # unification from cargo metadata is deliberately excluded here.
@@ -54,8 +85,13 @@ def main():
         check_tree(result.stdout)
     for file in (root / ".github/workflows/release.yml", root / "deploy/Dockerfile"):
         text = file.read_text()
+        check_release_commands(text, file)
         if "RAMFLUX_PRODUCTION_BUILD=1 cargo build" not in text:
             raise ValueError(f"production build guard absent: {file}")
+    check_release_commands((root / "deploy/scripts/build-prod-images.sh").read_text(), "production host build")
+    core = (root / "crates/ramflux-node-core/src/lib.rs").read_text()
+    if 'all(feature = "itest-http", any(ramflux_production, ramflux_release_profile))' not in core:
+        raise ValueError("test HTTP release/production compile guard absent")
     sdk_root = (root / "crates/ramflux-sdk/src/lib.rs").read_text()
     for guard in (
         'all(feature = "itest-memory-vault", ramflux_production)',

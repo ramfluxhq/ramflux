@@ -63,8 +63,8 @@ Opens perform no disk write. An Open beyond the committed reservation fails with
 `checkpoint_unavailable` in either mode until another checkpoint succeeds. Failed
 commits leave the previous reservation in force. A stalled writer never owns the
 global state mutex: established sessions can continue heartbeat/read activity.
-Network writes acquire one of eight bounded asynchronous offload permits before
-waiting for the writer gate or fsync. Excess requests receive retryable
+Network writes acquire a bounded root-qualified or unauthenticated offload permit
+before waiting for the writer gate or fsync. Excess requests receive retryable
 `gateway_writer_busy`; cancellation keeps the permit until the actual blocking
 work finishes. No uncommitted signed operation is acknowledged. Recovery is
 automatic after a successful checkpoint. `checkpoint_failures` counts failed
@@ -161,11 +161,43 @@ fixture, not a physical upper bound for arbitrary workloads.
 Authentication and each signed operation commit one root-owned identity and its
 indexes outside the global state mutex. Establishment commits a session/token pair.
 
-The shared router replay guard retains its pre-existing v2 key isolation/lookup
-until the separate legacy-removal work removes the router store upgrader. Gateway
-format 3 never imports those rows and does not charge ownerless rows to roots.
+Gateway format 3 never imports router replay rows or charges ownerless rows to roots.
 
-The test-feature HTTP policy POST remains a CARRY: its existing unauthenticated
-administrative full-state save can hold the global lock during commit. It acquires
-the writer gate before that lock to preserve ordering. Production Open/Auth and
-timer paths do not use that administrative save path.
+Root fairness bounds admission, not commit latency. Admitted writes, retention and
+checkpoint work share a mutex without FIFO ordering; disk stalls or repeated lock
+competition can delay a root. No successful-commit latency bound is promised.
+
+Test HTTP policy routes exist only with the non-default `itest-http` feature.
+The listener binds only to a literal loopback address (default `127.0.0.1:18081`);
+non-loopback addresses fail startup with `ItestListenerNonLoopback`. Loopback is
+the test authority boundary; local processes can use these test routes. Container
+examples keep HTTP inside the gateway network namespace without a published port. Release
+and production builds refuse the feature, and CI checks release/deploy build
+commands and the normal production feature graph.
+
+The pre-auth and forwarded registration policy routes share one management-write
+slot. Overlap receives HTTP 503 with retryable `gateway_writer_busy`. A policy
+snapshot is captured under the state mutex, then serialized and committed after
+releasing it while retaining the writer gate. Only the committed policy is merged
+back into live state, preserving concurrent admission, metrics and session work.
+A failed commit leaves live policy unchanged.
+
+Network writes admit at most eight authenticated roots concurrently, with one
+queued/running write per root across all devices and sessions. Unverified AUTH
+uses a separate two-operation budget. No waiting request queue is allocated;
+exhaustion returns typed retryable `GatewayWriterBusy` before spawning work.
+A busy root cannot take other roots' slots; disk failure can still prevent commits.
+
+Fresh databases are initialized, committed and synced under a temporary name in
+the destination directory's reserved `.ramflux-gateway-staging-v1` subdirectory,
+then published without replacing an existing store. Public database paths inside
+that reserved namespace (including directory-identity and canonical aliases) are refused with
+`GatewayStateReservedPath`. Before publication, serialized cleanup removes only
+exactly named orphan stages there; it never scans public database names and
+retains hard-linked stages or published-inode aliases. A synced empty ownership marker
+reserves the staging directory; a nonempty directory without the exact marker
+is refused without modifying its contents. Ambiguous old temporary
+names outside the reserved directory are retained for operator inspection.
+A crash before publication leaves no public partial file; existing unmarked or
+older stores still require explicit reset. SIGTERM during a crash-reservation
+wait drains startup without opening listeners or releasing the crash barrier.

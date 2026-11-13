@@ -44,8 +44,9 @@ workspace = true
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
+tempfile.workspace = true
 ramflux-storage = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "process"] }
 ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "test-support"] }
 ramflux-sdk = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }

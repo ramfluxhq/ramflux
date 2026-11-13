@@ -84,7 +84,15 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
         let mut state = pre_auth::restore(&store, config.gateway.as_ref())?;
         pre_auth::configure(&mut state, config.gateway.as_ref())?;
-        let now = startup_admission::wait(&mut state)?;
+        let Some(now) = startup_admission::wait(&mut state)? else {
+            // No listener or worker has started; retain the crash reservation on cancellation.
+            return shutdown
+                .wait_and_finalize(move || {
+                    drop((state, store));
+                    Ok(())
+                })
+                .map_err(Into::into);
+        };
         store.configure_replay(
             config
                 .gateway
@@ -108,6 +116,16 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let notify = notify_http_client(&config)?;
         let state = Arc::new(Mutex::new(state));
         let store = Arc::new(store);
+        #[cfg(feature = "itest-http")]
+        let itest_listener = if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref()
+            == Ok("1")
+        {
+            let address = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:18081".to_owned());
+            Some(itest_http::bind_itest_listener(&address)?)
+        } else {
+            None
+        };
         serve_gateway_quic(
             &config,
             router.clone(),
@@ -116,12 +134,13 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             Arc::clone(&store),
         )?;
         #[cfg(feature = "itest-http")]
-        if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
+        if let Some(itest_listener) = itest_listener {
             let itest_router = router.clone();
             let itest_store = Arc::clone(&store);
             let itest_state = Arc::clone(&state);
             ramflux_node_core::spawn_service_worker("ramflux-gateway-itest-http", move |_| {
                 if let Err(error) = serve_itest_http(
+                    &itest_listener,
                     &itest_router,
                     &itest_store,
                     &itest_state,

@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
+tempfile.workspace = true
 redb = { workspace = true }
 
 [lints]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 type RegistrationSeed = fn(&Path) -> Result<(), Box<dyn std::error::Error>>;
 type ShutdownProbe = std::thread::JoinHandle<Result<(), std::io::Error>>;
@@ -120,13 +120,14 @@ pub fn configured_notify_runtime_shutdown_is_clean(
     Ok(())
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
+    _directory: tempfile::TempDir,
     registration_seed: Option<RegistrationSeed>,
     gateway_tls_probe: Option<GatewayTlsProbe>,
     root: PathBuf,
     config: PathBuf,
-    database: PathBuf,
-    probe_addr: String,
+    pub(crate) database: PathBuf,
+    pub(crate) probe_addr: String,
     probe_udp: bool,
     route_key: PathBuf,
     signing_seed: PathBuf,
@@ -139,12 +140,25 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(service: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-{service}-shutdown-{}-{nonce}", std::process::id()));
+    pub(crate) fn new(service: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::in_directory(tempfile::TempDir::new()?, service)
+    }
+
+    pub(crate) fn in_directory(
+        directory: tempfile::TempDir,
+        service: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::in_directory_with_tls(directory, service, create_tls_material)
+    }
+
+    pub(crate) fn in_directory_with_tls(
+        directory: tempfile::TempDir,
+        service: &str,
+        setup: impl FnOnce(&Path, &str) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let root = directory.path().to_path_buf();
         std::fs::create_dir_all(root.join("state"))?;
-        create_tls_material(&root, service)?;
+        setup(&root, service)?;
         let key = root.join("service.key");
         let cert = root.join("service.pem");
         let mesh_addr = free_tcp_addr()?;
@@ -215,6 +229,7 @@ turn_tcp_addr = "127.0.0.1:0"
             std::fs::set_permissions(&signing_seed, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(Self {
+            _directory: directory,
             notify_runtime: None,
             registration_seed: None,
             gateway_tls_probe: None,
@@ -231,12 +246,6 @@ turn_tcp_addr = "127.0.0.1:0"
             public_addr: free_tcp_addr()?,
             admin_addr: free_tcp_addr()?,
         })
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -778,11 +787,32 @@ fn free_udp_addr() -> Result<String, std::io::Error> {
 }
 
 fn openssl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("openssl").args(args).output()?;
-    if !output.status.success() {
-        return Err(format!("openssl failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+    let mut command = Command::new("openssl");
+    command.args(args);
+    run_tls_command(command, Duration::from_secs(5))
+}
+
+pub(crate) fn run_tls_command(
+    mut command: Command,
+    bound: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut child = ChildGuard(command.stdout(Stdio::null()).stderr(Stdio::null()).spawn()?);
+    let deadline = Instant::now() + bound;
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("TLS child exited: {status}").into())
+            };
+        }
+        if Instant::now() >= deadline {
+            child.0.kill()?;
+            child.0.wait()?;
+            return Err("TLS generation deadline exceeded; child killed and reaped".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
-    Ok(())
 }
 
 fn issue_certificate(
@@ -1007,7 +1037,7 @@ fn create_tls_material(root: &Path, service: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn configured_command(
+pub(crate) fn configured_command(
     binary: &str,
     service: &str,
     fixture: &Fixture,
@@ -1042,7 +1072,7 @@ fn configured_command(
             .env("RAMFLUX_NOTIFY_COMPIO_FANOUT_WORKERS", "2")
             .env("RAMFLUX_NOTIFY_COMPIO_PROVIDER_WORKERS", "2");
     }
-    if service == "ramflux-gateway" {
+    if matches!(service, "ramflux-gateway" | "ramflux-relay") {
         child.env(
             "RAMFLUX_RELAY_SERVICE_KEY_REF",
             "literal:shutdown-test-relay-service-key-material",

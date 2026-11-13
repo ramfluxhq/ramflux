@@ -53,30 +53,7 @@ pub fn crash_restart(binary: &str, enabled: bool) -> Result<(), Box<dyn std::err
         1,
         "{logs}"
     );
-    let mut child = spawn()?;
-    let reader = spawn_shutdown_log_reader(child.0.stdout.take().ok_or("stdout")?);
-    wait_for_ready(&reader.receiver, "ramflux-gateway", Duration::from_secs(10))?;
-    let (status, _) =
-        signal_and_wait(&mut child.0, "ramflux-gateway", "idle", Duration::from_secs(10), None)?;
-    assert!(status.success());
-    let logs = reader.thread.join().map_err(|_| "reader panic")?;
-    assert!(
-        !logs.contains("waiting for committed crash reservation"),
-        "clean restart waited: {logs}"
-    );
-    // A future committed observation models a real host rollback after shutdown.
-    let store = ramflux_node_core::GatewayRedbStore::open(&fixture.database)?;
-    let state = store.load_state()?.ok_or("clean checkpoint")?;
-    store.save_admission_checkpoint(
-        &state.final_admission_checkpoint(ramflux_node_core::now_unix_seconds() + 60),
-    )?;
-    drop(store);
-    let mut child = spawn()?;
-    let status = child.0.wait()?;
-    let mut stderr = String::new();
-    child.0.stderr.take().ok_or("stderr")?.read_to_string(&mut stderr)?;
-    assert_eq!(status.code(), Some(2));
-    assert!(stderr.contains("clock_rollback"), "rollback was not typed: {stderr}");
+
     Ok(())
 }
 

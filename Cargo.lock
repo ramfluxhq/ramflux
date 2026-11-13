@@ -3469,6 +3469,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3481,6 +3482,7 @@ dependencies = [
 name = "ramflux-gateway"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "anyhow",
  "compio",
  "ed25519-dalek",
@@ -3522,6 +3524,7 @@ dependencies = [
 name = "ramflux-node-core"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "aes-gcm 0.10.3",
  "arc-swap",
  "blake3",
@@ -3544,7 +3547,6 @@ dependencies = [
  "sha2 0.11.1",
  "signal-hook",
  "subtle",
- "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -3580,6 +3582,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3632,6 +3635,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3646,6 +3650,7 @@ dependencies = [
  "ramflux-transport",
  "redb",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3694,6 +3699,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3755,6 +3761,7 @@ dependencies = [
  "redb",
  "serde_json",
  "stun",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "turn",

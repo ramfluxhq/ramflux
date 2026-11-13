@@ -45,6 +45,7 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
+tempfile.workspace = true
 rcgen = { workspace = true }
 redb = { workspace = true }
 

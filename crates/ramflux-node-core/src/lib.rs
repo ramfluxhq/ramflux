@@ -6,6 +6,9 @@
 #[cfg(all(feature = "durability-test-hooks", ramflux_production))]
 compile_error!("durability-test-hooks must not be enabled in a production build");
 
+#[cfg(all(feature = "itest-http", any(ramflux_production, ramflux_release_profile)))]
+compile_error!("itest-http must not be enabled in release or production builds");
+
 mod authority_refusal;
 mod config;
 mod durability_io;

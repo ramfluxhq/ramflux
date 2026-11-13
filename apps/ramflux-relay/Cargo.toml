@@ -64,6 +64,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
+tempfile.workspace = true
 ramflux-node-core = { workspace = true, features = ["test-support"] }
 ramflux-crypto = { workspace = true }
 redb = { workspace = true }
