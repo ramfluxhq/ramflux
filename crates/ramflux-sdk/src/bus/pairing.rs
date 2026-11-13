@@ -13,7 +13,7 @@ use crate::{
 };
 use ramflux_protocol::custody::pairing::{
     PairingWire,
-    local_dto::{Begin, FullTransferBegin, Join},
+    local_dto::{Begin, FullTransferBegin, Join, StatusRequest},
 };
 use ramflux_protocol::custody::{DeviceRef, object_hash};
 use std::sync::{Arc, Mutex};
@@ -38,20 +38,26 @@ pub(super) async fn ensure_actor(
         "device.pair.join" | "device.transfer.join" => {
             let join = validated_join(request)?;
             return if join.token.invitation.body.recipient_mode == "existing" {
-                install_source(state, account_id, Some(&join)).await
+                install_source(state, account_id, Some(&join), None).await
             } else {
                 install_new_recipient(state, account_id, join).await
             };
         }
+        "device.transfer.status" => {
+            let status: StatusRequest = serde_json::from_value(request.body.clone())?;
+            status.validate().map_err(|_| SdkError::PairingCode("InvalidInput"))?;
+            return install_source(state, account_id, None, Some(&status)).await;
+        }
         _ => return Ok(()),
     }
-    install_source(state, account_id, None).await
+    install_source(state, account_id, None, None).await
 }
 
 async fn install_source(
     state: &LocalBusDaemonState,
     account_id: &str,
     recipient: Option<&Join>,
+    resume: Option<&StatusRequest>,
 ) -> Result<(), SdkError> {
     let config = state.config.pairing.clone().ok_or(SdkError::PairingCode("NotFound"))?;
     if !config.enabled {
@@ -76,7 +82,11 @@ async fn install_source(
         device_id: device_id.into(),
         device_epoch: device.device_epoch,
     };
-    let primary = source_or_linked_role(recipient, &reference, record)?;
+    let primary = if let Some(request) = resume {
+        retained_data_role(account.client.account_db()?, request, &reference, record)?
+    } else {
+        source_or_linked_role(recipient, &reference, record)?
+    };
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let profile =
         state.nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NoNodeSelected)?;
@@ -159,6 +169,30 @@ async fn verified_recipient_node(
         return Err(SdkError::PairingCode("WrongContext"));
     }
     Ok(Some(node))
+}
+
+fn retained_data_role(
+    db: &ramflux_storage::AccountDb,
+    request: &StatusRequest,
+    reference: &DeviceRef,
+    record: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+) -> Result<bool, SdkError> {
+    let row = db
+        .pairing_live_rows()?
+        .into_iter()
+        .find(|row| row.operation_id == request.operation_id)
+        .ok_or(SdkError::PairingCode("NotFound"))?;
+    if row.generation != request.generation || row.full_stage_reference()?.is_none() {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    if row.phase != "mutually_confirmed" || db.pairing_head()?.is_some() {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
+    let primary = reference == &record.body.master_certificate.body.primary_device_ref;
+    if !matches!((row.role.as_str(), primary), ("initiator", true) | ("responder", false)) {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    Ok(primary)
 }
 
 fn source_or_linked_role(

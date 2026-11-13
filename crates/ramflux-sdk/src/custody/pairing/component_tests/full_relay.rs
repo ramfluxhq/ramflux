@@ -47,7 +47,9 @@ impl FullNativeFixture {
     fn full_claim(&self, claim: &FullClaim) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         if let FullClaim::Hello(hello) = claim {
             let mut seen = self.full_hellos.lock().map_err(|_| wrong())?;
-            if seen.len() < 2 && !seen.iter().any(|value| value.role == hello.role) {
+            if seen.len() < 4
+                && !seen.iter().any(|value| value.role == hello.role && value.epoch == hello.epoch)
+            {
                 seen.push(hello.as_ref().clone());
             }
         }

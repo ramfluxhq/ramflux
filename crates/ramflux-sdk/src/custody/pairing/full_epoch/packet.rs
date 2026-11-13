@@ -22,9 +22,16 @@ use ramflux_protocol::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FirstForwardPosition {
+    Manifest { hash: String, counter: u64 },
+    Idle { last_verified: String, counter: u64 },
+}
+
 /// Memory-only authenticated data epoch. Drop on lock/cancel; no serialized channel state.
-/// The first position must be a manifest. Idle/durable-duplex controls remain unavailable
-/// until the coordinator supplies its own committed application ledger.
+/// The initial position is the frozen base manifest. A reconnect may use CURRENT or
+/// own-ledger-backed Idle; duplex controls require the committed application ledger.
 pub struct FullPacketEpoch {
     channel: Option<FullConfirmedChannel>,
     token: Option<SecretBase64>,
@@ -33,6 +40,8 @@ pub struct FullPacketEpoch {
     role: PairingRole,
     expires_at: u64,
     last_received: Option<u64>,
+    #[cfg(test)]
+    first_position: Option<FirstForwardPosition>,
 }
 impl FullEpoch {
     /// A uses only its own frozen binding, after both original-branch proofs passed.
@@ -55,8 +64,11 @@ impl FullEpoch {
             role: "initiator".into(),
         };
         control.validate().map_err(|error| wire(&error))?;
-        let channel =
-            FullConfirmedChannel::resume(self.role, setup.keys, self.binding.manifest_hash)?;
+        let channel = if self.initial_epoch {
+            FullConfirmedChannel::new(self.role, setup.keys, self.binding.manifest_hash)?
+        } else {
+            FullConfirmedChannel::resume(self.role, setup.keys, self.binding.manifest_hash)?
+        };
         Ok((
             FullPacketEpoch {
                 channel: Some(channel),
@@ -66,6 +78,8 @@ impl FullEpoch {
                 role: self.role,
                 expires_at: self.expires_at,
                 last_received: None,
+                #[cfg(test)]
+                first_position: None,
             },
             control,
         ))
@@ -84,7 +98,11 @@ impl FullEpoch {
             return Err(wrong());
         }
         let keys = self.verified.open_control(control, &self.binding)?;
-        let channel = FullConfirmedChannel::resume(self.role, keys, self.binding.manifest_hash)?;
+        let channel = if self.initial_epoch {
+            FullConfirmedChannel::new(self.role, keys, self.binding.manifest_hash)?
+        } else {
+            FullConfirmedChannel::resume(self.role, keys, self.binding.manifest_hash)?
+        };
         Ok(FullPacketEpoch {
             channel: Some(channel),
             token: Some(self.token),
@@ -93,10 +111,31 @@ impl FullEpoch {
             role: self.role,
             expires_at: self.expires_at,
             last_received: None,
+            #[cfg(test)]
+            first_position: None,
         })
     }
 }
 impl FullPacketEpoch {
+    #[cfg(test)]
+    pub(crate) fn first_position_for_test(&self) -> Option<FirstForwardPosition> {
+        self.first_position.clone()
+    }
+    #[cfg(test)]
+    fn record_first_position(&mut self, packet: Option<&DataPacket>, counter: u64) {
+        if self.role != PairingRole::Responder || self.first_position.is_some() {
+            return;
+        }
+        self.first_position = match packet {
+            Some(DataPacket::Manifest { manifest_hash, offset, .. }) if offset.0 == 0 => {
+                Some(FirstForwardPosition::Manifest { hash: manifest_hash.clone(), counter })
+            }
+            Some(DataPacket::Idle { last_verified }) => {
+                Some(FirstForwardPosition::Idle { last_verified: last_verified.clone(), counter })
+            }
+            _ => None,
+        };
+    }
     pub(crate) fn expect_idle_position(
         &mut self,
         manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
@@ -203,6 +242,8 @@ impl FullPacketEpoch {
         let result = (|| {
             let ciphertext = self.peer(packet)?;
             let opened = self.channel()?.open_packet(packet.counter.0, &ciphertext)?;
+            #[cfg(test)]
+            self.record_first_position(opened.as_ref(), packet.counter.0);
             self.last_received =
                 Some(self.last_received.map_or(packet.counter.0, |old| old.max(packet.counter.0)));
             Ok(opened)

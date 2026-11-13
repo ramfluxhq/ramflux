@@ -54,6 +54,7 @@ pub struct FullEpoch {
     role: PairingRole,
     binding: ramflux_protocol::custody::pairing::full_transfer::DataBinding,
     expires_at: u64,
+    initial_epoch: bool,
 }
 impl FullEpoch {
     /// Poll B's control using only this original-proof-verified role token and local scope.
@@ -108,6 +109,7 @@ struct Negotiation<'a> {
     proof: Option<ProveFull>,
     deadline: Instant,
     discovered_source: Option<String>,
+    initial_epoch: bool,
 }
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
@@ -124,6 +126,7 @@ impl<'a> Negotiation<'a> {
                 (saved.grant.destination_ref, saved.grant.branch_keys.destination)
             }
         };
+        let initial_epoch = keys.next_uses_sas_key();
         let key = keys.next_key()?;
         let hello = if role == PairingRole::Initiator {
             Some(HelloFull {
@@ -148,6 +151,7 @@ impl<'a> Negotiation<'a> {
             attempt: None,
             proof: None,
             discovered_source: None,
+            initial_epoch,
             deadline: Instant::now() + Duration::from_secs(10),
         })
     }
@@ -276,6 +280,7 @@ impl<'a> Negotiation<'a> {
                     role: self.role,
                     binding,
                     expires_at: self.trust.lease_expires_at(),
+                    initial_epoch: self.initial_epoch,
                 }))
             }
         }
@@ -353,6 +358,8 @@ impl HttpRelay {
 }
 
 mod packet;
+#[cfg(test)]
+pub(crate) use packet::FirstForwardPosition;
 pub use packet::FullPacketEpoch;
 
 #[cfg(test)]

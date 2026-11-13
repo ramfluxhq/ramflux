@@ -202,6 +202,7 @@ impl AccountRuntime {
         if matches!(
             command.request.method.as_str(),
             "device.transfer.begin"
+                | "device.transfer.status"
                 | "device.pair.join"
                 | "device.transfer.join"
                 | "object.fetch"
@@ -302,7 +303,10 @@ impl AccountRuntime {
         reply: tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
     ) -> Result<(), SdkError> {
         match command.request.method.as_str() {
-            "device.transfer.begin" | "device.pair.join" | "device.transfer.join" => {
+            "device.transfer.begin"
+            | "device.transfer.status"
+            | "device.pair.join"
+            | "device.transfer.join" => {
                 Box::pin(self.start_pairing_begin(command, reply)).await;
             }
             "object.fetch" => self.start_fetch(command, reply),

@@ -131,6 +131,16 @@ impl FullManagement {
     }
 }
 impl PairingActor {
+    #[cfg(test)]
+    pub(crate) fn first_forward_position_for_test(
+        &self,
+    ) -> Option<crate::custody::pairing::full_epoch::FirstForwardPosition> {
+        let full = self.ceremony.as_ref()?.full.as_ref()?;
+        if let Some(management) = &full.management {
+            return management.packet.first_position_for_test();
+        }
+        full.bootstrap.as_ref()?.epoch_ready.as_ref()?.first_position_for_test()
+    }
     pub(in crate::custody::pairing::coordinator) fn candidate_control_ready(&self) -> bool {
         self.ceremony.as_ref().is_some_and(|c| {
             c.full.as_ref().is_some_and(|full| {
