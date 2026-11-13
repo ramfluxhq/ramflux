@@ -81,6 +81,7 @@ impl SourceGuard {
         Ok(schema)
     }
     pub(super) fn require(&self) -> Result<(), StorageError> {
+        crate::database::require_generation_rebase_deadline()?;
         if self
             .cancelled
             .as_ref()

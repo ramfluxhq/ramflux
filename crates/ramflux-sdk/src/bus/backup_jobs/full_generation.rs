@@ -62,6 +62,38 @@ impl FullGenerationDirectory {
     pub(crate) fn remember_prior(&self, prior: &LocalAccountRecord) -> Result<(), SdkError> {
         super::reclamation::remember(&self.guard.path, Some(prior))
     }
+    pub(crate) fn discard_unselected(
+        &self,
+        install: &crate::custody::pairing::install_store::Install,
+    ) -> Result<(), SdkError> {
+        let full =
+            install.full_transfer.as_ref().ok_or(SdkError::PairingCode("PublicationPending"))?;
+        let selected = self.index.account(&self.account)?;
+        if selected.db_relative_path != full.expected_prior_generation.db_relative_path
+            || selected.object_dir_relative_path
+                != full.expected_prior_generation.object_relative_path
+            || self.root.join(&selected.db_relative_path).parent()
+                == Some(self.guard.path.as_path())
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        let pending = crate::custody::pairing::install_store::read_pending(
+            &self.root,
+            &self.account,
+            &install.operation_id,
+        )?;
+        if pending.as_ref() != Some(install) {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        // Keep the possible-publication fence and original vault owners. Only the
+        // positively unselected G1 directory is abandoned, never the pairing intent.
+        let mut retained = install.clone();
+        retained.schema = "ramflux.pairing.Install.v2".into();
+        retained.version = 2;
+        retained.full_transfer = None;
+        retained.state = "vault_durable".into();
+        crate::custody::pairing::install_store::write_pending(&self.root, &retained)
+    }
     pub(crate) fn finish_g3(&mut self) -> Result<(), SdkError> {
         self.guard.transferred = true;
         if super::reclamation::complete(&self.guard.path, &self.root, &self.index, &self.account)? {

@@ -440,11 +440,26 @@ mod tests {
         hold.finish().await?;
         result
     }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_linked_installation_rebases_three_target_writes_under_final_fence()
+    -> TestResult {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
+            run_install_scenario(false, 3),
+        ))
+        .await;
+        hold.finish().await?;
+        result
+    }
     async fn run_install() -> TestResult {
         Box::pin(run_install_case(false)).await
     }
     async fn run_install_case(rebind: bool) -> TestResult {
+        Box::pin(run_install_scenario(rebind, 0)).await
+    }
+    async fn run_install_scenario(rebind: bool, races: u8) -> TestResult {
         let mut fixture = Box::pin(run_data_with_change(rebind)).await?;
+        fixture.rig.secondary.set_install_races_for_test(races)?;
         let original = fixture.target.account_db()?.path.clone();
         let native = crate::custody::load_account(
             &fixture.rig.participant_b.root,
@@ -469,6 +484,25 @@ mod tests {
             original,
             "test: linked frontend retained retired G2 writer"
         );
+        if races > 0 {
+            assert_eq!(
+                fixture.target.account_db()?.privacy_erasure_generation()?,
+                13,
+                "test: final rebase lost the maximum concurrent B floor"
+            );
+            for id in 1..=races {
+                assert!(
+                    matches!(
+                        fixture.target.account_db()?.check_object_identity(
+                            &format!("install-race-{id}"),
+                            "install-race-manifest"
+                        ),
+                        Err(ramflux_storage::StorageError::ObjectErased)
+                    ),
+                    "test: G2 discarded an intervening B veto"
+                );
+            }
+        }
         assert!(
             crate::custody::pairing::ordinary_session_admitted(
                 &fixture.target,

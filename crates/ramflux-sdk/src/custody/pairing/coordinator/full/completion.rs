@@ -102,6 +102,10 @@ impl PairingActor {
                 && c.full.as_ref().is_some_and(|full| {
                     full.publication.destination_requested()
                         && !full.publication.destination_installed()
+                        && full
+                            .publication
+                            .destination_retry_at
+                            .is_none_or(|deadline| tokio::time::Instant::now() >= deadline)
                 }))
         })?;
         if !pending {
@@ -112,13 +116,26 @@ impl PairingActor {
             let full = c.full.as_ref().ok_or_else(wrong)?;
             Ok(full.candidate.as_ref().ok_or_else(wrong)?.install().clone())
         })?;
-        let authority = if install.recipient_mode == "existing" {
-            Box::pin(self.install_linked_full_generation(install)).await?
+        let outcome = if install.recipient_mode == "existing" {
+            Box::pin(self.install_linked_full_generation(install)).await
         } else {
             self.full_runtime
                 .clone()
                 .run_blocking(move || participant.install_new_full_generation(&install))
-                .await?
+                .await
+        };
+        let authority = match outcome {
+            Ok(authority) => authority,
+            Err(error) => {
+                if super::installation::install_busy(&error) {
+                    self.with_ceremony_mut(|c| {
+                        c.full.as_mut().ok_or_else(wrong)?.publication.destination_retry_at =
+                            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+                        Ok(())
+                    })?;
+                }
+                return Err(error);
+            }
         };
         self.with_ceremony_mut(|c| {
             let full = c.full.as_mut().ok_or_else(wrong)?;
@@ -128,6 +145,7 @@ impl PairingActor {
                 return Err(wrong());
             }
             full.publication.destination = DestinationPhase::Installed;
+            full.publication.destination_retry_at = None;
             if let Some(stream) = full.bootstrap.as_mut().and_then(|state| state.stream.as_mut()) {
                 stream.receiver.take();
             }

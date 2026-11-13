@@ -22,9 +22,23 @@ impl LocalWriterPort {
         authority: CustodyAuthority,
     ) -> Result<FullGenerationCommitted, SdkError> {
         self.require_participant(&participant)?;
+        #[cfg(test)]
+        let scope = self.scope.clone();
         self.request_with(false, move |reply| {
             Box::new(Work {
                 action: move |db: &ramflux_storage::AccountDb| {
+                    #[cfg(test)]
+                    if let Ok(remaining) = scope.install_races.fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |value| value.checked_sub(1),
+                    ) {
+                        db.seed_full_transfer_object_veto_for_test(
+                            &format!("install-race-{remaining}"),
+                            "install-race-manifest",
+                            10 + u64::from(remaining),
+                        )?;
+                    }
                     let now = crate::custody::network_now()?;
                     let operation = prepared.install().operation_id.clone();
                     let stage =
@@ -45,6 +59,38 @@ impl LocalWriterPort {
         })
         .await
     }
+    pub(in crate::custody::pairing::coordinator) async fn rebase_full_generation(
+        &self,
+        participant: Arc<LocalPairingParticipant>,
+        install: crate::custody::pairing::install_store::Install,
+        authority: CustodyAuthority,
+    ) -> Result<FullGenerationCommitted, SdkError> {
+        self.require_participant(&participant)?;
+        let runtime = self.scope.runtime.clone();
+        self.request_with(false, move |reply| Box::new(Work {
+            action: move |db: &ramflux_storage::AccountDb| {
+                db.with_full_transfer_install_fence(|| {
+                    runtime.require_live()?;
+                    let now = crate::custody::network_now()?;
+                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let pinned = stage.pin_receiver_base(&stage.resume_record()?.base_manifest_hash)?;
+                    drop(stage);
+                    let copy = pinned.copy()?;
+                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let copy = stage.into_receiver_replay_work(copy, now)?.replay()?;
+                    let stage = db.open_full_transfer_stage(&install.operation_id, PairingRole::Responder, now)?;
+                    runtime.register_stage(stage.io_cancel_handle())?;
+                    let local = Installation { root: &participant.root, db, vault: participant.vault.as_ref(), now };
+                    let preparation = crate::custody::pairing::full_generation::owner::FullGenerationPreparation::pin(&local, &stage, copy, install, &authority)?;
+                    let prepared = preparation.prepare()?;
+                    runtime.require_live()?;
+                    prepared.select(&local, &stage, &authority)
+                })
+            }, reply,
+        })).await
+    }
     pub(in crate::custody::pairing::coordinator) fn require_prior_frontend(
         &self,
         client: &crate::RamfluxClient,
@@ -61,6 +107,22 @@ impl LocalWriterPort {
         {
             return Err(SdkError::PairingCode("WrongContext"));
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl super::PairingActor {
+    pub(crate) fn set_install_races_for_test(&self, count: u8) -> Result<(), SdkError> {
+        if count > 3 {
+            return Err(SdkError::PairingCode("InvalidInput"));
+        }
+        self.local_writer
+            .as_ref()
+            .ok_or(SdkError::PairingCode("WrongContext"))?
+            .scope
+            .install_races
+            .store(count, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 }

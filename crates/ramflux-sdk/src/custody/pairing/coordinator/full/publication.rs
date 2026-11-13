@@ -31,6 +31,7 @@ pub(super) struct FullPublication {
     pub(super) source: SourcePhase,
     pub(super) destination: DestinationPhase,
     pub(super) source_tail_durable: bool,
+    pub(super) destination_retry_at: Option<tokio::time::Instant>,
 }
 impl FullPublication {
     pub(super) fn source_acknowledged(&self) -> bool {
