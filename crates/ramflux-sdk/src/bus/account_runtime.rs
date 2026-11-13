@@ -347,11 +347,11 @@ impl AccountRuntime {
                 "pairing frontend handback deferred"
             ),
         }
-        let result = self.state.accounts.get(&self.id).map_or(Ok(false), |account| {
+        let result = self.state.accounts.get_mut(&self.id).map_or(Ok(false), |account| {
             crate::custody::pairing::service_frontend(
                 &self.state.config.data_root,
                 &self.id,
-                &account.client,
+                &mut account.client,
             )
         });
         match result {

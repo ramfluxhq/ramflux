@@ -5,6 +5,8 @@
 use super::{PairingActor, SdkError, full::cancel::FullRuntimeCancel};
 use ramflux_storage::{AccountDb, AccountIndex, FullLocalUnlockGuard};
 use std::{path::PathBuf, sync::Arc};
+mod generation;
+
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 fn retired() -> SdkError {
     SdkError::PairingCode("Retired")
@@ -200,16 +202,17 @@ impl LocalWriterPort {
         &self,
         action: impl FnOnce(&AccountDb) -> Result<R, SdkError> + Send + 'static,
     ) -> Result<R, SdkError> {
-        self.request_with(move |reply| Box::new(Work { action, reply })).await
+        self.request_with(true, move |reply| Box::new(Work { action, reply })).await
     }
     pub(super) async fn request_client<R: Send + 'static>(
         &self,
         action: impl FnOnce(&crate::RamfluxClient) -> Result<R, SdkError> + Send + 'static,
     ) -> Result<R, SdkError> {
-        self.request_with(move |reply| Box::new(ClientWork { action, reply })).await
+        self.request_with(true, move |reply| Box::new(ClientWork { action, reply })).await
     }
     async fn request_with<R: Send + 'static>(
         &self,
+        require_original_after: bool,
         build: impl FnOnce(oneshot::Sender<Result<R, SdkError>>) -> Box<dyn Request>,
     ) -> Result<R, SdkError> {
         self.scope.live()?;
@@ -229,7 +232,10 @@ impl LocalWriterPort {
                 result.map_err(|_|SdkError::PairingCode("Busy"))?.map_err(|_|retired())?
             }
         };
-        self.scope.live()?;
+        self.scope.runtime.require_live()?;
+        if require_original_after {
+            self.scope.live()?;
+        }
         result
     }
 }
@@ -260,7 +266,7 @@ impl PairingActor {
         }
         self.bind_selected_writer(db, signal)
     }
-    fn bind_selected_writer(
+    pub(super) fn bind_selected_writer(
         &mut self,
         db: &AccountDb,
         signal: Arc<tokio::sync::Notify>,

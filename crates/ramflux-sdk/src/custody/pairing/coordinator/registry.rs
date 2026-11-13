@@ -188,15 +188,22 @@ pub(crate) fn work_signal(root: &Path, account: &str) -> Option<Arc<tokio::sync:
 pub(crate) fn service_frontend(
     root: &Path,
     account: &str,
-    client: &crate::RamfluxClient,
+    client: &mut crate::RamfluxClient,
 ) -> Result<bool, SdkError> {
-    let db = client.account_db()?;
     let entry = match find(root, account) {
         Ok(entry) => entry,
         Err(SdkError::PairingCode("NotFound")) => return Ok(false),
         Err(error) => return Err(error),
     };
     entry.require_live()?;
+    if let Ok(mut actor) = entry.actor.try_lock()
+        && let Some(writer) =
+            entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.as_mut()
+        && actor.service_linked_installation(client, writer)?
+    {
+        return Ok(true);
+    }
+    let db = client.account_db()?;
     let applied = match entry.writer.lock().map_err(|_| SdkError::PairingCode("Retired"))?.as_mut()
     {
         Some(writer) => writer.try_apply_client(client)?,

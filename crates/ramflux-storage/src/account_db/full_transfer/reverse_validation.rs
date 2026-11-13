@@ -5,6 +5,7 @@
 use super::{FullTransferStage, copy_full_scalar_record, full_census_hash, full_transfer_catalog};
 use crate::StorageError;
 use ramflux_protocol::custody::pairing::full_transfer::{RecordOp, read_record_header};
+use rusqlite::OptionalExtension as _;
 use zeroize::{Zeroize as _, Zeroizing};
 fn mismatch() -> StorageError {
     StorageError::PairingField("ManifestMismatch")
@@ -16,6 +17,27 @@ impl Drop for Header {
     }
 }
 impl FullTransferStage<'_> {
+    pub(super) fn require_validated_reverse_input(&self, hash: &str) -> Result<(), StorageError> {
+        self.require_io()?;
+        let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='reverse_input_validated')", [], |row| row.get(0))?;
+        if !exists {
+            return Err(mismatch());
+        }
+        let digest: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT stage_digest FROM reverse_input_validated WHERE manifest_hash=?1",
+                rusqlite::params![hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if digest.as_deref() != Some(self.resume_record()?.stage_digest()?.as_slice()) {
+            return Err(mismatch());
+        }
+        self.reverse_manifest(hash)?;
+        Ok(())
+    }
+
     /// Verify the whole B-signed reverse input against locally compiled restrictive owners.
     /// Root, sorted unique keys, exact put-only cells and complete family counts/lengths
     /// are rechecked. No row is applied and no DV/application marker is written here.
@@ -95,4 +117,4 @@ mod work;
 pub use work::{FullReverseValidationWork, FullValidatedReverseInput};
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

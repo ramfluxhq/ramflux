@@ -110,16 +110,16 @@ impl PairingActor {
         let participant = self.participant.clone().ok_or_else(wrong)?;
         let install = self.with_ceremony(|c| {
             let full = c.full.as_ref().ok_or_else(wrong)?;
-            if full.common.recipient_mode != "new" {
-                return Err(SdkError::PairingCode("UnsupportedRecord"));
-            }
             Ok(full.candidate.as_ref().ok_or_else(wrong)?.install().clone())
         })?;
-        let authority = self
-            .full_runtime
-            .clone()
-            .run_blocking(move || participant.install_new_full_generation(&install))
-            .await?;
+        let authority = if install.recipient_mode == "existing" {
+            Box::pin(self.install_linked_full_generation(install)).await?
+        } else {
+            self.full_runtime
+                .clone()
+                .run_blocking(move || participant.install_new_full_generation(&install))
+                .await?
+        };
         self.with_ceremony_mut(|c| {
             let full = c.full.as_mut().ok_or_else(wrong)?;
             let candidate = full.candidate.as_ref().ok_or_else(wrong)?.publication();

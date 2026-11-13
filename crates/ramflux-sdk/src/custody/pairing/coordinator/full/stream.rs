@@ -90,6 +90,7 @@ struct FullStreamWork {
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
     anchor: String,
+    linked_target: bool,
     new_target: Option<(String, ramflux_protocol::custody::DeviceRef)>,
 }
 impl PairingActor {
@@ -160,9 +161,6 @@ impl PairingActor {
         };
         let Some(state) = &full.bootstrap else { return Ok(false) };
         if state.stream.is_none() && state.epoch_ready.is_some() {
-            if full.common.recipient_mode != "new" {
-                return Err(SdkError::PairingCode("UnsupportedRecord"));
-            }
             let io = self.full_transfer_local_io(db)?;
             self.start_full_base_stream(io)?;
         }
@@ -187,13 +185,14 @@ impl PairingActor {
         let c = self.ceremony.as_mut().ok_or_else(wrong)?;
         let full = c.full.as_mut().ok_or_else(wrong)?;
         let anchor = full.common.account_anchor.clone();
+        let linked_target = full.common.recipient_mode == "existing";
         let state = full.bootstrap.as_mut().ok_or_else(wrong)?;
         let role = c.role;
         let manifest = state.source_manifest.clone();
         if role == PairingRole::Initiator && manifest.is_none() {
             return Err(wrong());
         }
-        let new_target = if role == PairingRole::Responder {
+        let new_target = if role == PairingRole::Responder && !linked_target {
             let record = state.trust.as_ref().ok_or_else(wrong)?.local_stage_record()?;
             Some((c.operation_id.clone(), record.grant.destination_ref))
         } else {
@@ -217,6 +216,7 @@ impl PairingActor {
             origin: c.origin.clone(),
             anchor,
             new_target,
+            linked_target,
         };
         let job = tokio::spawn(async move {
             match role {

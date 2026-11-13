@@ -15,6 +15,19 @@ pub(super) struct SourceContext<'a> {
     pub(super) directory: &'a Path,
 }
 impl FullTransferStage<'_> {
+    pub(super) fn reverse_source_context(&self) -> Result<SourceContext<'_>, StorageError> {
+        self.require_io()?;
+        if self.resume_record()?.role != PairingRole::Responder {
+            return Err(context());
+        }
+        Ok(SourceContext {
+            key: &self.key,
+            connection: &self.connection,
+            guard: SourceGuard::new(self.db, Some(self.source_cancelled.clone())),
+            directory: &self.directory,
+        })
+    }
+
     pub(super) fn source_context(&self) -> Result<SourceContext<'_>, StorageError> {
         self.db.require_full_stage_unlock()?;
         if self.resume_record()?.role != PairingRole::Initiator {

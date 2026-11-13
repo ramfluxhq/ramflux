@@ -152,9 +152,9 @@ async fn dispatch_device_pair(
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(account) = state.accounts.get(account_id) {
+                    if let Some(account) = state.accounts.get_mut(account_id) {
                         crate::custody::pairing::service_frontend(
-                            &state.config.data_root, account_id, &account.client,
+                            &state.config.data_root, account_id, &mut account.client,
                         )?;
                     }
                 }

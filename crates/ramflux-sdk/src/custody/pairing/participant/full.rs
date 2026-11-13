@@ -77,7 +77,7 @@ impl LocalPairingParticipant {
     /// No database loan is retained by the draft or borrowed during vault signing.
     /// # Errors
     /// Refuses locked/retired/foreign local scope or a changed original B branch key.
-    pub fn sign_empty_reverse_manifest(
+    pub fn sign_reverse_manifest(
         &self,
         draft: &crate::custody::pairing::FullReverseManifestDraft,
     ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {
@@ -105,6 +105,15 @@ impl LocalPairingParticipant {
                     .to_bytes(),
             ))
         })
+    }
+    /// Compatibility entry for the already scoped locally prepared reverse manifest.
+    /// # Errors
+    /// Refuses a foreign draft, changed original branch or stopped local root.
+    pub fn sign_empty_reverse_manifest(
+        &self,
+        draft: &crate::custody::pairing::FullReverseManifestDraft,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {
+        self.sign_reverse_manifest(draft)
     }
     /// Sign only the same source ceremony's locally encoded immutable successor.
     /// # Errors
