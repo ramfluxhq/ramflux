@@ -5,7 +5,7 @@
 //! See docs/design/c-abi-v2.md for ownership, cancellation and wire contracts.
 
 use super::super::{CAbiError, RamfluxBuffer, RamfluxErrorCode};
-use super::runtime::{Client, Command};
+use super::runtime::{Client, CloseResult, Command};
 use super::state::{self, MAX_FRAME_BYTES, MAX_OPERATIONS, Operation, OperationKind};
 use crate::{LocalBusConfig, LocalBusFrame};
 use serde::Deserialize;
@@ -198,20 +198,56 @@ pub extern "C" fn ramflux_v2_client_open(
     })
 }
 
-/// Stop the supervisor and release its writer lease. Idempotent for an already closed handle.
-/// Call off the UI thread. A timeout returns 10; shutdown continues in the owner thread.
+/// Stop the supervisor and release its writer lease. Call off the UI thread.
+/// The first wait expires with Timeout=10; retries return Pending=24 until completion.
+/// Pending/failed shutdown retains the handle and completion state; only Done=0 removes it.
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_client_close(handle: u64) -> i32 {
-    call(|| {
-        let client = REGISTRY.lock().map_err(|_| internal())?.clients.remove(&handle);
+    let mut status = 0;
+    let code = call(|| {
+        let client = REGISTRY.lock().map_err(|_| internal())?.clients.get(&handle).cloned();
         if let Some(client) = client {
-            client
-                .close()
-                .map_err(|error| CAbiError::new(RamfluxErrorCode::Timeout, error.to_string()))?;
+            match client.close().map_err(|error| super::super::map_sdk_error(&error))? {
+                CloseResult::Done => {
+                    REGISTRY.lock().map_err(|_| internal())?.clients.remove(&handle);
+                }
+                CloseResult::TimedOut => status = RamfluxErrorCode::Timeout as i32,
+                CloseResult::Pending => status = RamfluxV2Status::Pending as i32,
+            }
         }
         Ok(())
-    })
+    });
+    if code == 0 { status } else { code }
+}
+
+/// Release a retained failed shutdown after the host has inspected its error.
+/// Returns Pending=24 until the owner thread has reported a terminal outcome.
+/// Ordinary successful close already releases its handle; repeated release is harmless.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_client_release(handle: u64) -> i32 {
+    let mut status = 0;
+    let code = call(|| {
+        let client = REGISTRY.lock().map_err(|_| internal())?.clients.get(&handle).cloned();
+        if let Some(client) = client {
+            if client.shutdown_confirmed().map_err(|error| super::super::map_sdk_error(&error))? {
+                REGISTRY.lock().map_err(|_| internal())?.clients.remove(&handle);
+            } else {
+                status = RamfluxV2Status::Pending as i32;
+            }
+        }
+        Ok(())
+    });
+    if code == 0 { status } else { code }
+}
+
+#[cfg(test)]
+pub(super) fn register_test_client(client: Arc<Client>) -> u64 {
+    let mut registry = REGISTRY.lock().expect("test: registry");
+    let id = next_id(&mut registry).expect("test: client id");
+    registry.clients.insert(id, client);
+    id
 }
 
 /// Submit one request, copying input before return. Returns an explicit operation/cancel handle.
@@ -236,7 +272,9 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(invalid("invalid method"));
         }
         let client = client(handle)?;
-        if client.shared.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if client.closing.load(std::sync::atomic::Ordering::Acquire)
+            || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
         }
         let subscription = matches!(request.method.as_str(), "subscription.open" | "bus.subscribe");

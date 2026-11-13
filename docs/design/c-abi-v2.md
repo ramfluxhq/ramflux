@@ -123,12 +123,22 @@ secret ceremony responses. It erases the allocation. Do not use the v1 free
 function for v2 output. Input remains caller-owned and valid until the FFI call
 returns. Temporary encoded requests and retained completions are erased on drop.
 
-`client_close` stops admission, disconnects the carrier, drains the supervisor,
-closes stores and releases the writer lease. It is idempotent. A native caller
-must stop pumps before closing; concurrent lookups retain their state safely.
-Closing can wait up to ten seconds for the existing supervisor shutdown. Failure
-returns a code while the owner thread continues shutdown; it does not authorize
-a replacement writer. Closed/lost replies have unknown effects.
+`client_close` stops admission and asks the owner thread to disconnect, drain
+its supervisor, close stores and release the writer lease. Call it off the UI
+thread. The first call waits up to ten seconds and returns Timeout (10) if the
+owner has not confirmed completion. The handle and operation completions remain
+valid. Further calls poll the retained shutdown state: Pending (24), confirmed
+Done (0), or the same cached terminal SDK error. New execution is refused once
+close begins, and the real data-root lease refuses a replacement writer while
+shutdown is pending. Only confirmed success removes the handle automatically.
+Repeated close after confirmed success is harmless.
+
+A terminal shutdown failure remains available on the same handle; after the
+host has inspected/reported it, `client_release` explicitly discards the retained
+handle and completion state. It returns Pending (24) and retains the handle if
+shutdown is unfinished. It never interrupts the supervisor or grants ownership
+to a replacement. Stop submissions and event pumps before closing; a lost reply
+still has unknown business effects.
 
 ## Events and errors
 

@@ -186,10 +186,18 @@ int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxB
 int32_t ramflux_v2_client_open(const uint8_t *config, size_t len, uint64_t *out_client);
 
 /*
- Stop the supervisor and release its writer lease. Idempotent for an already closed handle.
- Call off the UI thread. A timeout returns 10; shutdown continues in the owner thread.
+ Stop the supervisor and release its writer lease. Call off the UI thread.
+ The first wait expires with Timeout=10; retries return Pending=24 until completion.
+ Pending/failed shutdown retains the handle and completion state; only Done=0 removes it.
  */
 int32_t ramflux_v2_client_close(uint64_t handle);
+
+/*
+ Release a retained failed shutdown after the host has inspected its error.
+ Returns Pending=24 until the owner thread has reported a terminal outcome.
+ Ordinary successful close already releases its handle; repeated release is harmless.
+ */
+int32_t ramflux_v2_client_release(uint64_t handle);
 
 /*
  Submit one request, copying input before return. Returns an explicit operation/cancel handle.

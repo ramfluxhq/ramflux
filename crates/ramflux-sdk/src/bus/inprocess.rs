@@ -9,6 +9,12 @@ use crate::{LocalBusConfig, SdkError};
 use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 use tokio::sync::{oneshot, watch};
 
+#[cfg(test)]
+pub(crate) struct ShutdownGate {
+    pub entered: std::sync::mpsc::SyncSender<()>,
+    pub release: std::sync::Arc<tokio::sync::Notify>,
+}
+
 struct MemoryStream(DuplexStream);
 impl BusStream for MemoryStream {
     type ReadHalf = ReadHalf<DuplexStream>;
@@ -29,6 +35,7 @@ pub(crate) async fn serve(
     stream: DuplexStream,
     mut shutdown: watch::Receiver<bool>,
     ready: oneshot::Sender<Result<(), SdkError>>,
+    #[cfg(test)] gate: Option<ShutdownGate>,
 ) -> Result<(), SdkError> {
     let initialized = (|| {
         std::fs::create_dir_all(&config.data_root)?;
@@ -71,6 +78,12 @@ pub(crate) async fn serve(
         }
     }
     supervisor.close_lifecycle_admission();
+    #[cfg(test)]
+    if let Some(gate) = gate {
+        let _ = gate.entered.try_send(());
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.release.notified()).await;
+    }
     if !connection_finished {
         connection.abort();
         let _ = connection.await;

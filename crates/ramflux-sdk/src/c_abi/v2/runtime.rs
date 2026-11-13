@@ -6,7 +6,9 @@
 use super::state::{MAX_OPERATIONS, Operation, Shared};
 use super::{RamfluxV2Status, failure};
 use crate::{LocalBusConfig, SdkError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
 
@@ -21,11 +23,84 @@ pub(super) struct Client {
     pub commands: mpsc::Sender<Command>,
     pub shared: Arc<Shared>,
     shutdown: watch::Sender<bool>,
-    done: Mutex<std::sync::mpsc::Receiver<Result<(), SdkError>>>,
+    done: Mutex<CloseCompletion>,
+    close_wait: Duration,
+    pub closing: AtomicBool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CloseResult {
+    Done,
+    TimedOut,
+    Pending,
+}
+
+struct CloseCompletion {
+    receiver: std::sync::mpsc::Receiver<Result<(), SdkError>>,
+    terminal: Option<Result<(), Arc<SdkError>>>,
+}
+
+impl CloseCompletion {
+    fn wait(&mut self, first: bool, deadline: Duration) -> Result<CloseResult, Arc<SdkError>> {
+        if let Some(terminal) = &self.terminal {
+            return terminal.as_ref().map(|()| CloseResult::Done).map_err(Arc::clone);
+        }
+        let received = if first {
+            self.receiver.recv_timeout(deadline)
+        } else {
+            self.receiver.try_recv().map_err(|error| match error {
+                std::sync::mpsc::TryRecvError::Empty => std::sync::mpsc::RecvTimeoutError::Timeout,
+                std::sync::mpsc::TryRecvError::Disconnected => {
+                    std::sync::mpsc::RecvTimeoutError::Disconnected
+                }
+            })
+        };
+        match received {
+            Ok(result) => self.terminal = Some(result.map_err(Arc::new)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Ok(if first { CloseResult::TimedOut } else { CloseResult::Pending });
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.terminal = Some(Err(Arc::new(SdkError::LocalBus(
+                    "supervisor exited without shutdown completion".into(),
+                ))));
+            }
+        }
+        self.terminal
+            .as_ref()
+            .ok_or_else(|| Arc::new(SdkError::LocalBus("shutdown completion missing".into())))?
+            .as_ref()
+            .map(|()| CloseResult::Done)
+            .map_err(Arc::clone)
+    }
+}
+
+#[cfg(test)]
+pub(super) use crate::bus::inprocess::ShutdownGate;
 
 impl Client {
     pub fn start(config: LocalBusConfig) -> Result<Arc<Self>, SdkError> {
+        Self::start_inner(
+            config,
+            Duration::from_secs(10),
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn start_delayed(
+        config: LocalBusConfig,
+        gate: ShutdownGate,
+    ) -> Result<Arc<Self>, SdkError> {
+        Self::start_inner(config, Duration::ZERO, Some(gate))
+    }
+
+    fn start_inner(
+        config: LocalBusConfig,
+        close_wait: Duration,
+        #[cfg(test)] gate: Option<ShutdownGate>,
+    ) -> Result<Arc<Self>, SdkError> {
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (ready, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -44,6 +119,8 @@ impl Client {
                         worker_shutdown,
                         ready,
                         Arc::clone(&worker_shared),
+                        #[cfg(test)]
+                        gate,
                     )
                     .await
                 })
@@ -57,16 +134,30 @@ impl Client {
             let _ = shutdown.send(true);
             return Err(SdkError::LocalBus("supervisor startup timed out".into()));
         }
-        Ok(Arc::new(Self { commands, shared, shutdown, done: Mutex::new(done) }))
+        Ok(Arc::new(Self {
+            commands,
+            shared,
+            shutdown,
+            done: Mutex::new(CloseCompletion { receiver: done, terminal: None }),
+            close_wait,
+            closing: AtomicBool::new(false),
+        }))
     }
 
-    pub fn close(&self) -> Result<(), SdkError> {
+    pub fn close(&self) -> Result<CloseResult, Arc<SdkError>> {
+        let first = !self.closing.swap(true, Ordering::AcqRel);
         let _ = self.shutdown.send(true);
         self.done
             .lock()
-            .map_err(|_| SdkError::LocalBus("close lock poisoned".into()))?
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| SdkError::LocalBus("supervisor close timed out".into()))?
+            .map_err(|_| Arc::new(SdkError::LocalBus("close lock poisoned".into())))?
+            .wait(first, self.close_wait)
+    }
+
+    pub fn shutdown_confirmed(&self) -> Result<bool, SdkError> {
+        self.done
+            .lock()
+            .map(|state| state.terminal.is_some())
+            .map_err(|_| SdkError::LocalBus("close lock poisoned".into()))
     }
 }
 
@@ -83,15 +174,19 @@ async fn run(
     stop: watch::Sender<bool>,
     ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
     shared: Arc<Shared>,
+    #[cfg(test)] gate: Option<ShutdownGate>,
 ) -> Result<(), SdkError> {
     // Bounded byte carrier; framing, custody ceremonies and response ordering are shared.
     let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
     let (server_ready, initialized) = oneshot::channel();
+    let server_shutdown = shutdown.clone();
     let server = tokio::task::spawn_local(crate::bus::inprocess::serve(
         config,
         server_stream,
-        shutdown.clone(),
+        server_shutdown,
         server_ready,
+        #[cfg(test)]
+        gate,
     ));
     let result = initialized.await.map_err(|_| SdkError::LocalBus("startup failed".into()))?;
     let started = result.is_ok();
@@ -179,7 +274,9 @@ async fn read_responses(
         let bytes = tokio::select! {
             _ = shutdown.changed() => break Ok(()),
             result = crate::bus::io::read_encoded_local_bus_frame(&mut reader) => match result {
-                Ok(bytes) => bytes, Err(error) => break Err(error),
+                Ok(bytes) => bytes,
+                Err(_) if *shutdown.borrow() => break Ok(()),
+                Err(error) => break Err(error),
             },
         };
         // The authenticated in-process server emits both ordinary bus and compatibility
@@ -218,5 +315,21 @@ async fn read_responses(
             shared.push_event(bytes.to_vec());
         }
         crate::bus::inprocess::erase_value(&mut frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_failure_is_cached_for_every_retry() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender.send(Err(SdkError::DataRootInUse)).expect("test: terminal failure");
+        let mut completion = CloseCompletion { receiver, terminal: None };
+        let first = completion.wait(true, Duration::ZERO).expect_err("test: real failure expected");
+        let retry =
+            completion.wait(false, Duration::ZERO).expect_err("test: failure must remain failed");
+        assert!(Arc::ptr_eq(&first, &retry), "retries must reuse the retained terminal error");
     }
 }

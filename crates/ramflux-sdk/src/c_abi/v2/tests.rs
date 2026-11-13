@@ -59,17 +59,7 @@ impl Fixture {
         operation
     }
     fn result(&self, operation: u64) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let mut buffer = std::ptr::null_mut();
-            let code = ramflux_v2_operation_poll(self.handle, operation, &raw mut buffer);
-            if code == 0 {
-                return take_buffer(buffer);
-            }
-            assert_eq!(code, RamfluxV2Status::Pending as i32, "poll must preserve its operation");
-            assert!(Instant::now() < deadline, "real supervisor request exceeded test deadline");
-            std::thread::yield_now();
-        }
+        wait_result(self.handle, operation)
     }
 }
 impl Drop for Fixture {
@@ -231,7 +221,11 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
         assert!(Instant::now() < until, "cancel terminal exceeded deadline");
         std::thread::yield_now();
     }
-    client.close().expect("test: close supervisor");
+    assert_eq!(
+        client.close().expect("test: close supervisor"),
+        super::runtime::CloseResult::Done,
+        "successful close must confirm real writer release"
+    );
     assert!(
         crate::node::NodeStore::load(root.path(), &[])
             .expect("test: durable nodes")
@@ -426,5 +420,92 @@ fn every_operation_has_explicit_policy_and_generated_manifest_matches() {
             policy.show_once && policy.secret_output,
             "{name} must remain a one-time secret disclosure"
         );
+    }
+}
+
+#[test]
+fn close_timeout_retains_handle_until_real_supervisor_releases_writer() {
+    struct ReleaseOnDrop(Arc<tokio::sync::Notify>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    let root = tempfile::tempdir().expect("test: isolated root");
+    let (entered, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let release = ReleaseOnDrop(Arc::new(tokio::sync::Notify::new()));
+    let client = Client::start_delayed(
+        LocalBusConfig::new("", root.path()),
+        super::runtime::ShutdownGate { entered, release: Arc::clone(&release.0) },
+    )
+    .expect("test: real supervisor with shutdown barrier");
+    let handle = super::exports::register_test_client(Arc::clone(&client));
+    let request = serde_json::to_vec(&json!({"sdk_api":"account","method":"account.list",
+        "body":{},"deadline_ms":deadline()}))
+    .expect("test: real indexed read");
+    let mut operation = 0;
+    assert_eq!(
+        ramflux_v2_execute(handle, request.as_ptr(), request.len(), &raw mut operation),
+        0,
+        "real supervisor operation must be admitted before shutdown"
+    );
+    let completed = wait_result(handle, operation);
+    assert_eq!(
+        ramflux_v2_client_close(handle),
+        10,
+        "bounded initial wait must time out while the real supervisor holds its lease"
+    );
+    entered_rx.recv_timeout(Duration::from_secs(5)).expect("test: real shutdown reached barrier");
+    assert_eq!(
+        ramflux_v2_client_close(handle),
+        24,
+        "retry must remain pending rather than inventing successful close"
+    );
+    assert_eq!(
+        wait_result(handle, operation),
+        completed,
+        "pending close must retain the operation's completed response"
+    );
+    assert_eq!(ramflux_v2_client_release(handle), 24, "a pending shutdown cannot be discarded");
+    let config =
+        serde_json::to_vec(&json!({"data_root":root.path()})).expect("test: replacement config");
+    let mut replacement = 0;
+    assert_eq!(
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut replacement),
+        18,
+        "the actual data-root lock must refuse replacement while shutdown is pending"
+    );
+    release.0.notify_one();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match ramflux_v2_client_close(handle) {
+            0 => break,
+            24 => assert!(
+                Instant::now() < until,
+                "supervisor failed to confirm release before test deadline"
+            ),
+            code => panic!("unexpected shutdown outcome {code}"),
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut replacement),
+        0,
+        "only confirmed shutdown permits replacement writer ownership"
+    );
+    assert_eq!(ramflux_v2_client_close(replacement), 0, "replacement must close normally");
+}
+
+fn wait_result(handle: u64, operation: u64) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut buffer = std::ptr::null_mut();
+        let code = ramflux_v2_operation_poll(handle, operation, &raw mut buffer);
+        if code == 0 {
+            return take_buffer(buffer);
+        }
+        assert_eq!(code, RamfluxV2Status::Pending as i32, "poll must preserve its operation");
+        assert!(Instant::now() < deadline, "real supervisor request exceeded test deadline");
+        std::thread::yield_now();
     }
 }
