@@ -258,14 +258,16 @@ impl FullTransferStage<'_> {
         now: u64,
     ) -> Result<(), StorageError> {
         let old = canonical_json_bytes(previous)?;
-        let candidate = canonical_json_bytes(candidate)?;
+        let candidate_bytes = canonical_json_bytes(candidate)?;
         let bytes = canonical_json_bytes(signed)?;
-        if old.len() > 524_288 || candidate.len() > 524_288 || bytes.len() > PreservationFull::LIMIT
+        if old.len() > 524_288
+            || candidate_bytes.len() > 524_288
+            || bytes.len() > PreservationFull::LIMIT
         {
             return Err(wrong());
         }
         self.replace_expired_preservation(previous, candidate, signed, now)?;
-        let changed=self.connection.execute("INSERT INTO full_preservation VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes WHERE full_preservation.base_record=excluded.base_record AND full_preservation.candidate=excluded.candidate AND full_preservation.bytes=excluded.bytes",params![old,candidate,bytes])?;
+        let changed=self.connection.execute("INSERT INTO full_preservation VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET bytes=excluded.bytes WHERE full_preservation.base_record=excluded.base_record AND full_preservation.candidate=excluded.candidate AND full_preservation.bytes=excluded.bytes",params![old,candidate_bytes,bytes])?;
         if changed != 1 {
             return Err(wrong());
         }
