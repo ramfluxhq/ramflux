@@ -24,8 +24,10 @@ impl Terminal {
     fn open() -> Result<Self, RfError> {
         #[cfg(windows)]
         {
-            let input = super::windows_console::open_input().map_err(|_| {
-                RfError::Message("This ceremony requires a local interactive terminal.".into())
+            let input = super::windows_console::open_input().map_err(|error| {
+                RfError::Message(format!(
+                    "This ceremony requires a local interactive terminal: {error}"
+                ))
             })?;
             let output = super::windows_console::open_output().map_err(|_| {
                 RfError::Message("This ceremony requires a local interactive terminal.".into())
@@ -33,8 +35,9 @@ impl Terminal {
             if !input.is_terminal() {
                 return Err(RfError::Message("A local interactive terminal is required.".into()));
             }
-            super::windows_console::disable_line_input(&input)
-                .map_err(|_| RfError::Message("Could not protect terminal input.".into()))?;
+            super::windows_console::disable_line_input(&input).map_err(|error| {
+                RfError::Message(format!("Could not protect terminal input: {error}"))
+            })?;
             return Ok(Self { input, output, echo_disabled: false });
         }
         #[cfg(not(windows))]
@@ -52,8 +55,9 @@ impl Terminal {
     fn echo(&mut self, enabled: bool) -> Result<(), RfError> {
         #[cfg(windows)]
         {
-            super::windows_console::set_echo(&self.input, enabled)
-                .map_err(|_| RfError::Message("Could not protect terminal input.".into()))?;
+            super::windows_console::set_echo(&self.input, enabled).map_err(|error| {
+                RfError::Message(format!("Could not protect terminal input: {error}"))
+            })?;
             self.echo_disabled = !enabled;
             return Ok(());
         }
