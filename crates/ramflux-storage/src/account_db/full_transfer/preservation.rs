@@ -225,14 +225,15 @@ impl FullTransferStage<'_> {
             )
             .map_err(|_| wrong())?;
         let body = &signed.body;
+        let bound_hash = self.full_prepublication_record_hash()?;
         body.validate().map_err(|_| wrong())?;
         if record.role != role
             || previous.body.master_certificate.body.primary_device_ref != record.grant.source_ref
-            || object_hash(previous)? != record.base_record_hash
+            || object_hash(previous)? != bound_hash
             || body.recipient_mode != context.initiator.common.recipient_mode
             || body.transfer_id != record.transfer_id
             || body.transcript_hash != encode_base64url(record.th)
-            || body.old_record_hash != record.base_record_hash
+            || body.old_record_hash != bound_hash
             || body.new_record_hash != object_hash(candidate)?
             || body.destination_ref != record.grant.destination_ref
             || body.manifest_chain_hash != proof.manifest_chain_hash()

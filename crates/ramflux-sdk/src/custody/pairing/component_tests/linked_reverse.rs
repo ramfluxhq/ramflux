@@ -203,8 +203,8 @@ mod tests {
             &rig.participant_b.account_id,
             rig.now,
         )?;
-        let mut begin = full_begin(rig.now);
-        begin.recipient_mode = "existing".into();
+        let mut request = full_begin(rig.now);
+        request.recipient_mode = "existing".into();
         let id = native.local_device_id()?;
         let device = native
             .record()
@@ -213,13 +213,13 @@ mod tests {
             .iter()
             .find(|device| device.device_id == id)
             .ok_or("test: B branch")?;
-        begin.destination_ref = Some(DeviceRef {
+        request.destination_ref = Some(DeviceRef {
             account_anchor: native.record().body.account_anchor.clone(),
             device_id: id.into(),
             device_epoch: device.device_epoch,
         });
         let begun = drive(
-            Box::pin(rig.primary.begin_full(begin)),
+            Box::pin(rig.primary.begin_full(request)),
             source_service,
             &rig.source.client,
             target_service,
@@ -293,6 +293,9 @@ mod tests {
         Ok(())
     }
     async fn run_data() -> Result<Linked, Box<dyn std::error::Error>> {
+        Box::pin(run_data_with_change(false)).await
+    }
+    async fn run_data_with_change(rebind: bool) -> Result<Linked, Box<dyn std::error::Error>> {
         let mut fixture = Box::pin(open()).await?;
         fixture.rig.source.client.account_db()?.seed_full_transfer_object_veto_for_test(
             "source-veto",
@@ -316,8 +319,18 @@ mod tests {
         );
         Box::pin(bootstrap(&mut fixture)).await?;
         let mut complete = false;
+        let mut revised = None;
         for _ in 0..256 {
             step(&mut fixture).await?;
+            if rebind
+                && revised.is_none()
+                && fixture.rig.primary.full_base_stream_started_for_test()
+                && fixture.rig.secondary.full_base_stream_started_for_test()
+                && !(fixture.rig.primary.full_base_disk_complete_for_test()
+                    && fixture.rig.secondary.full_base_disk_complete_for_test())
+            {
+                revised = Some(advance_profile(&fixture)?);
+            }
             if fixture.rig.primary.full_base_disk_complete_for_test()
                 && fixture.rig.secondary.full_base_disk_complete_for_test()
             {
@@ -352,7 +365,70 @@ mod tests {
                 "test: linked data work parked an ordinary frontend DB"
             );
         }
+        if rebind {
+            let expected =
+                revised.ok_or("test: profile did not change during the actual stream")?;
+            verify_rebound_stages(&fixture, &expected)?;
+        }
         Ok(fixture)
+    }
+    fn advance_profile(fixture: &Linked) -> Result<String, Box<dyn std::error::Error>> {
+        let rig = &fixture.rig;
+        let account = crate::custody::load_data_account(
+            &rig.participant_a.root,
+            &rig.participant_a.account_id,
+            crate::custody::network_now()?,
+        )?;
+        let primary = account.group_primary(rig.participant_a.vault.as_ref())?;
+        let mut body = account.record().body.clone();
+        let (range, revision) = ramflux_protocol::custody::decode_epoch(body.device_set_epoch)?;
+        body.device_set_epoch = ramflux_protocol::custody::encode_epoch(range, revision + 1)?;
+        body.previous_record_hash = Some(object_hash(account.record())?);
+        body.profile.display_name = "Profile changed during original-branch duplex".into();
+        let publication = Publication { record: primary.sign_record(body)?, compacted_ids: None };
+        drop(primary);
+        rig.node.persist_head(&publication, crate::custody::network_now()?)?;
+        Ok(object_hash(&publication.record)?)
+    }
+    fn verify_rebound_stages(fixture: &Linked, expected: &str) -> TestResult {
+        for (client, role) in [
+            (&fixture.rig.source.client, ramflux_crypto::custody::pairing::PairingRole::Initiator),
+            (&fixture.target, ramflux_crypto::custody::pairing::PairingRole::Responder),
+        ] {
+            let db = client.account_db()?;
+            let row = db.pairing_live_rows()?.into_iter().next().ok_or("test: rebound live row")?;
+            let stage = db.open_full_transfer_stage(
+                &row.operation_id,
+                role,
+                crate::custody::network_now()?,
+            )?;
+            assert_eq!(
+                stage.full_prepublication_record_hash()?,
+                expected,
+                "test: endpoint did not retain exact own-native Rebind"
+            );
+            let record = stage.resume_record()?;
+            let manifest = stage.forward_manifest(&record.base_manifest_hash)?;
+            assert_eq!(
+                manifest.manifest.base_record_hash, record.base_record_hash,
+                "test: Rebind rewrote historical provenance"
+            );
+            assert_ne!(
+                manifest.manifest.base_record_hash, expected,
+                "test: profile did not advance the native head"
+            );
+        }
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_rebind_preserves_historical_manifest_and_installs_current_native_candidate()
+    -> TestResult {
+        let hold = ClockHold::new();
+        let result =
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_install_case(true)))
+                .await;
+        hold.finish().await?;
+        result
     }
     #[tokio::test(start_paused = true)]
     async fn pairing_full_linked_frontend_installs_own_generation_and_keeps_original_credentials()
@@ -364,7 +440,10 @@ mod tests {
         result
     }
     async fn run_install() -> TestResult {
-        let mut fixture = Box::pin(run_data()).await?;
+        Box::pin(run_install_case(false)).await
+    }
+    async fn run_install_case(rebind: bool) -> TestResult {
+        let mut fixture = Box::pin(run_data_with_change(rebind)).await?;
         let original = fixture.target.account_db()?.path.clone();
         let native = crate::custody::load_account(
             &fixture.rig.participant_b.root,

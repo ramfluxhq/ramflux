@@ -87,8 +87,10 @@ impl LocalPairingParticipant {
         )?;
         stage.observe_full_native_head(&current)?;
         let record = stage.resume_record()?;
+        let bound_hash = stage.full_prepublication_record_hash()?;
+        stage.require_full_prepublication_record(&current)?;
         if record.th != *th
-            || record.base_record_hash != object_hash(current.envelope())?
+            || bound_hash != object_hash(current.envelope())?
             || record.grant.source_ref
                 != current.envelope().body.master_certificate.body.primary_device_ref
         {
@@ -99,7 +101,7 @@ impl LocalPairingParticipant {
         require_destination(&context, &proposed, &record.grant.destination_ref, now)?;
         let proof = stage.verified_duplex(now)?;
         let account = custody::load_account(&self.root, &self.account_id, now)?;
-        if object_hash(account.record())? != record.base_record_hash {
+        if object_hash(account.record())? != bound_hash {
             return Err(wrong());
         }
         if let Some(saved) =
@@ -123,7 +125,7 @@ impl LocalPairingParticipant {
             version: 1,
             transfer_id: record.transfer_id,
             transcript_hash: encode_base64url(th),
-            old_record_hash: record.base_record_hash,
+            old_record_hash: bound_hash,
             new_record_hash: object_hash(&candidate.record)?,
             destination_ref: record.grant.destination_ref,
             recipient_mode: context.initiator.common.recipient_mode,

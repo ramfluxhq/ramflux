@@ -16,6 +16,7 @@ pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
 mod preservation;
 mod read_work;
+mod rebind;
 mod receiver_contributions;
 mod receiver_copy;
 mod receiver_read;
