@@ -347,3 +347,219 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_conversation_mutations_use_generated_carrier_and_update_source_and_receiver()
+-> TestResult {
+    use crate::client::routed::ConversationEvent;
+    use ramflux_protocol::message as g;
+    let source = Fixture::new("conversation-event-source").await?;
+    let mut peer = Fixture::new("conversation-event-peer").await?;
+    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    let source_root = source.client.own_account_anchor()?;
+    let peer_root = peer.client.own_account_anchor()?;
+    source.client.establish_friend_link("conversation-peer-link", &source_root, &peer_root)?;
+    peer.client.establish_friend_link("conversation-source-link", &source_root, &peer_root)?;
+    let conversation = g::dm_scope::derive(&source_root, &peer_root)?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let identity = source.client.allocate_generated_identity(&conversation, 1000, false)?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let exact = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "original".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let recipients = vec![peer.client.owned_device_identity()?.storage_key().to_owned()];
+    let mut transport = engine(&source, &peer, false)?;
+    let accepted = source
+        .client
+        .submit_conversation_event(
+            &mut transport,
+            ConversationEvent {
+                message: message(&source, &peer)?,
+                exact: &exact,
+                wire: &exact,
+                recipients: &recipients,
+            },
+        )
+        .await?;
+    assert_eq!(accepted.envelope.schema, g::outer::CANDIDATE_ENVELOPE_SCHEMA);
+    assert_eq!(accepted.envelope.version, 2);
+    peer.receive(accepted.envelope, 1).await?;
+    for (sequence, method, fields) in [
+        (2, "conversation.edit", serde_json::json!({"text":"replacement"})),
+        (3, "conversation.react", serde_json::json!({"token":"👍"})),
+        (4, "conversation.delete", serde_json::json!({"scope":"everyone"})),
+    ] {
+        let mut body = serde_json::json!({"conversation_id":conversation,"message_id":id});
+        body.as_object_mut().ok_or("body")?.extend(fields.as_object().ok_or("fields")?.clone());
+        let mut request = crate::LocalBusFrame::request(
+            method,
+            Some("source".into()),
+            "conversation",
+            method,
+            body,
+        );
+        request.operation_id = Some(method.into());
+        let prepared =
+            crate::bus::dispatch::conversation_mutation::prepare(&source.client, &request)?;
+        let accepted = source
+            .client
+            .submit_conversation_event(
+                &mut transport,
+                ConversationEvent {
+                    message: message(&source, &peer)?,
+                    exact: &prepared.exact,
+                    wire: &prepared.wire,
+                    recipients: &recipients,
+                },
+            )
+            .await?;
+        peer.receive(accepted.envelope, sequence).await?;
+        assert_eq!(
+            source.client.direct_messages(&conversation)?.len(),
+            1,
+            "mutations must not add synthetic message rows"
+        );
+        assert_eq!(peer.client.direct_messages(&conversation)?.len(), 1);
+        if method == "conversation.edit" {
+            let source_bytes =
+                source.client.account_db()?.message_content(&id)?.ok_or("source content")?;
+            let peer_bytes =
+                peer.client.account_db()?.message_content(&id)?.ok_or("peer content")?;
+            assert_eq!(source_bytes, peer_bytes, "accepted edit must update both projections");
+            assert!(
+                source
+                    .client
+                    .account_db()?
+                    .actor_state_exists(&format!("own-history/capture/{id}"))?,
+                "edit retirement must precede capturing the accepted revision"
+            );
+        }
+    }
+    assert!(source.client.account_db()?.message_is_deleted(&id)?);
+    assert!(peer.client.account_db()?.message_is_deleted(&id)?);
+    assert!(source.client.account_db()?.message_content(&id)?.is_none());
+    assert!(peer.client.account_db()?.message_content(&id)?.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapper() -> TestResult {
+    use crate::client::routed::ConversationEvent;
+    use ramflux_protocol::message as g;
+    let source = Fixture::new("conversation-group-source").await?;
+    let mut peer = Fixture::with_device("conversation-group-peer", "peer").await?;
+    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    prepare_conversation_group(&source, &peer)?;
+    let state =
+        source.client.account_db()?.shared_group_state("conversation-group")?.ok_or("group")?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let snapshot = source
+        .client
+        .shared_group_packet_for_recipient(&state, &peer.client.owned_device_identity()?)?;
+    peer.receive(source.seal_inner_to(&peer, &snapshot)?, 1).await?;
+    let mut identity = source.client.allocate_generated_identity("thread", 1000, false)?;
+    identity.group_id = Some("conversation-group".into());
+    identity.group_epoch = Some(state.view().epoch);
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let exact = RamfluxClient::encode_generated_inner(
+        identity.clone(),
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "group original".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let wire = source.client.wrap_conversation_group_reply(&identity, &exact)?;
+    let recipients = vec![peer.client.owned_device_identity()?.storage_key().to_owned()];
+    let mut transport = engine(&source, &peer, false)?;
+    let mut outbound = message(&source, &peer)?;
+    outbound.conversation_id = "thread".into();
+    let accepted = source
+        .client
+        .submit_conversation_event(
+            &mut transport,
+            ConversationEvent {
+                message: outbound,
+                exact: &exact,
+                wire: &wire,
+                recipients: &recipients,
+            },
+        )
+        .await?;
+    peer.receive(accepted.envelope, 2).await?;
+    let mut request = crate::LocalBusFrame::request(
+        "group-reply",
+        Some("source".into()),
+        "conversation",
+        "conversation.reply",
+        serde_json::json!({"conversation_id":"thread","message_id":id,"text":"group reply"}),
+    );
+    request.operation_id = Some("group-reply".into());
+    let prepared = crate::bus::dispatch::conversation_mutation::prepare(&source.client, &request)?;
+    let retry = crate::bus::dispatch::conversation_mutation::prepare(&source.client, &request)?;
+    assert_eq!(
+        prepared.wire, retry.wire,
+        "retry cannot advance a sender-key counter or rewrap content"
+    );
+    let mut outbound = message(&source, &peer)?;
+    outbound.conversation_id = "thread".into();
+    let accepted = source
+        .client
+        .submit_conversation_event(
+            &mut transport,
+            ConversationEvent {
+                message: outbound,
+                exact: &prepared.exact,
+                wire: &prepared.wire,
+                recipients: &recipients,
+            },
+        )
+        .await?;
+    peer.receive(accepted.envelope, 3).await?;
+    let reply_id = ramflux_protocol::encode_base64url(&prepared.identity.id);
+    let projection = peer
+        .client
+        .account_db()?
+        .load_actor_state::<g::Message>(&format!("routed/group-projection/{reply_id}"))?
+        .ok_or("group projection")?;
+    assert_eq!(projection.text, "group reply");
+    assert_eq!(projection.reply_to.ok_or("reply reference")?.id, identity.id);
+    Ok(())
+}
+
+fn prepare_conversation_group(source: &Fixture, peer: &Fixture) -> TestResult {
+    let primary = source
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("account")?
+        .group_primary(source.vault.as_ref())?;
+    source.client.shared_group_create_with_primary(
+        "conversation-group",
+        "thread",
+        None,
+        &source.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let actor = peer.client.owned_group_actor(&peer.config.target_delivery_id)?;
+    let state = source.client.shared_group_change_with_primary(
+        "conversation-group",
+        &source.config.target_delivery_id,
+        ramflux_protocol::group_state::GroupStateChange::Add {
+            member: actor.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    peer.client.accept_shared_group_state(&state, &peer.config.target_delivery_id)?;
+    Ok(())
+}

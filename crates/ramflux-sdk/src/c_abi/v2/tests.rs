@@ -92,6 +92,10 @@ fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
     );
     #[cfg(not(feature = "card-runtime"))]
     assert!(metadata["card_runtime"].is_null(), "ordinary C ABI builds must omit the renderer");
+    assert_eq!(
+        metadata["message_schema_generation"],
+        ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION
+    );
     let methods = metadata["methods"].as_array().expect("test: method inventory");
     for method in [
         "account.create.begin",
@@ -103,6 +107,10 @@ fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
         "group.role.set",
         "surface.action",
         "account.config.set",
+        "conversation.edit",
+        "conversation.react",
+        "conversation.reply",
+        "conversation.delete",
     ] {
         assert!(methods.contains(&json!(method)), "missing shared supervisor method {method}");
     }

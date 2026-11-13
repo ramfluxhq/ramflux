@@ -134,6 +134,13 @@ impl LocalBusOutbound {
         }
     }
 
+    pub fn is_closed(&self) -> bool {
+        match &self.channel {
+            Channel::Plain(sender) => sender.is_closed(),
+            Channel::Tagged(sender) => sender.is_closed(),
+        }
+    }
+
     pub async fn closed(&self) {
         match &self.channel {
             Channel::Plain(sender) => sender.closed().await,

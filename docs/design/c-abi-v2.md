@@ -302,3 +302,53 @@ trusted key come from the embedding application's pinned release configuration,
 never peer/package input. All card calls remain on their creating renderer thread;
 callback bytes are borrowed only during the synchronous callback. Card statuses
 remain their own 0..8 namespace. Declarative intents confer no SDK authority.
+
+## High-level message mutations
+
+Use `sdk_api:"conversation"` and `ramflux_v2_execute` for these operations. Each
+requires the account id, a nonempty `operation_id` (at most 256 bytes), and a body
+with `conversation_id` and the existing `message_id`:
+
+| Operation | Additional body fields |
+| --- | --- |
+| `conversation.edit` | `text` (1..65536 UTF-8 bytes), a complete text replacement |
+| `conversation.react` | `token` (SDK-validated reaction), optional `remove` boolean |
+| `conversation.reply` | `text` (1..65536 UTF-8 bytes) |
+| `conversation.delete` | `scope`: `local` or `everyone` |
+
+The SDK reads the authenticated stored target identity and derives its author,
+reference, edit revision and exact previous-content digest. It applies the shared
+author/moderator rules, allocates one durable source-qualified event identity and
+private revision entropy, and uses SDK routing/sealing and ordinary group or
+verified peer-device fanout. Hosts cannot supply a sender, device, envelope,
+revision, digest or tombstone. Unknown fields are refused. An edit replaces the
+whole Message content; old reply, media and forward fields are omitted.
+
+Retries with the same operation id retain the exact prepared Inner and identity;
+changing the intent under that id is refused. Private prepared content is owned
+by the target's erasure lifecycle. Network operations return `event_id`,
+`target_message_id`, the SDK local `message_id`, per-target outcomes and
+`delivery_state`. Submitted outcomes do not mean delivered/read; authoritative
+message changes still arrive through the existing SDK projection/event path.
+A local delete applies the shared local-account deletion and returns
+`delivery_state:"local"` with an empty deliveries list; it never fans out to peers.
+
+These structural operations obey the existing message-schema activation gate.
+Negotiation reports `message_schema_generation`. Main currently has storage generation **0**: they return the typed
+`peer_upgrade_required` refusal before allocating a counter, payload, ratchet or
+outbox. This bridge does not activate generation 1 or substitute legacy text for
+a structural operation. Existing generation-zero send and local `message.delete`
+behavior remains available. Generation-enabled tests exercise real native
+identity, reference derivation, authorization, exact retries and payload encoding.
+
+Generated API errors remain in the owned completion JSON body as
+`{code,name,message,details}` (including target-not-found/deleted, edit-conflict,
+not-authorized and schema-reset-required). Their numeric namespace is independent
+of C ABI return statuses; the latter map to the existing broad failure categories.
+
+The generated mutation carrier currently uses local gateway routes. A group member
+that requires a federated generated carrier receives a typed per-target
+`not_connected` failure; the SDK has no generated federation producer today.
+It never substitutes the generation-zero carrier. Native generated-carrier tests
+verify the actual envelope, pair crypto, receiver commits, source projection
+updates and erasure, independently of the production generation-zero gate.

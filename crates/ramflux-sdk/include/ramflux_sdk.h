@@ -35,6 +35,35 @@ enum RamfluxV2CustodyOperation
 typedef uint32_t RamfluxV2CustodyOperation;
 #endif // __cplusplus
 
+/*
+ Permanent numeric codes shared by every generated product adapter.
+ */
+enum GeneratedErrorCode
+#ifdef __cplusplus
+  : int32_t
+#endif // __cplusplus
+ {
+  GENERATED_ERROR_CODE_INVALID_ARGUMENT = 1,
+  GENERATED_ERROR_CODE_INVALID_JSON = 2,
+  GENERATED_ERROR_CODE_PEER_UPGRADE_REQUIRED = 3,
+  GENERATED_ERROR_CODE_STORAGE_CAPACITY = 4,
+  GENERATED_ERROR_CODE_SCHEMA_RESET_REQUIRED = 5,
+  GENERATED_ERROR_CODE_RESYNC_REQUIRED = 6,
+  GENERATED_ERROR_CODE_EDIT_CONFLICT = 7,
+  GENERATED_ERROR_CODE_NOT_AUTHORIZED = 8,
+  GENERATED_ERROR_CODE_TARGET_NOT_FOUND = 9,
+  GENERATED_ERROR_CODE_TARGET_DELETED = 10,
+  GENERATED_ERROR_CODE_PAYLOAD_TOO_LARGE = 11,
+  GENERATED_ERROR_CODE_RATE_LIMITED = 12,
+  GENERATED_ERROR_CODE_EPHEMERAL_UNAVAILABLE = 13,
+  GENERATED_ERROR_CODE_CRYPTO_FAILURE = 14,
+  GENERATED_ERROR_CODE_NOT_CONNECTED = 15,
+  GENERATED_ERROR_CODE_INTERNAL = 16,
+};
+#ifndef __cplusplus
+typedef int32_t GeneratedErrorCode;
+#endif // __cplusplus
+
 enum RamfluxErrorCode
 #ifdef __cplusplus
   : int32_t
@@ -329,6 +358,22 @@ int32_t ramflux_v2_conversation_project(const uint8_t *input_json,
 int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
                                    size_t len,
                                    struct RamfluxBuffer **out);
+
+/*
+ Decode and re-encode a generated message request through the shared adapter core.
+ */
+int32_t ramflux_message_request_adapt(const unsigned char *request_json,
+                                      size_t request_json_len,
+                                      struct RamfluxBuffer **out_request_json,
+                                      struct RamfluxBuffer **out_error_json);
+
+/*
+ Decode and re-encode a generated message update through the shared adapter core.
+ */
+int32_t ramflux_message_update_adapt(const unsigned char *update_json,
+                                     size_t update_json_len,
+                                     struct RamfluxBuffer **out_update_json,
+                                     struct RamfluxBuffer **out_error_json);
 
 #ifdef __cplusplus
 }  // extern "C"

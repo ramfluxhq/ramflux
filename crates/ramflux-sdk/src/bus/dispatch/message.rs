@@ -16,6 +16,12 @@ pub(crate) async fn dispatch_message_bus_request(
     connection: &LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
+        "conversation.edit"
+        | "conversation.react"
+        | "conversation.reply"
+        | "conversation.delete" => {
+            Box::pin(super::conversation_mutation::dispatch(request, state)).await
+        }
         "conversation.send" => super::conversation_send::send(request, state).await,
         "message.submit" => Box::pin(dispatch_message_submit_request(request, state)).await,
         "message.receive" => dispatch_message_receive_request(request, state, connection).await,

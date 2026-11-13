@@ -927,6 +927,13 @@
     },
     {
       "capability": "message",
+      "name": "message.focus",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "message",
       "name": "message.delete",
       "secret_input": true,
       "secret_output": true,
@@ -984,6 +991,34 @@
     {
       "capability": "conversation",
       "name": "conversation.send",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.edit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.react",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.reply",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "capability": "conversation",
+      "name": "conversation.delete",
       "secret_input": true,
       "secret_output": true,
       "show_once": false

@@ -154,6 +154,7 @@ pub extern "C" fn ramflux_v2_negotiate(
             out,
             &json!({
                 "abi_major":2,"abi_minor":0,"bus_protocol":"ramflux.local_bus.v1",
+                "message_schema_generation":ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
                 "message_descriptor_blake3":blake3::hash(crate::message::FILE_DESCRIPTOR_SET).to_hex().to_string(),
                 "max_frame_bytes":MAX_FRAME_BYTES,"max_operations":MAX_OPERATIONS,
                 "max_events":state::MAX_EVENTS,"max_event_bytes":state::MAX_EVENT_BYTES,
@@ -513,11 +514,20 @@ pub(super) fn failure(status: RamfluxV2Status, message: &str, effects: &str) -> 
 pub(super) fn error_code(name: &str) -> i32 {
     use RamfluxErrorCode as E;
     match name {
-        "InvalidArgument" | "InvalidRequest" | "ValidationFailed" | "CustodySetupInvalid" => {
-            E::InvalidArgument as i32
-        }
+        "InvalidArgument"
+        | "InvalidRequest"
+        | "ValidationFailed"
+        | "CustodySetupInvalid"
+        | "invalid_argument"
+        | "invalid_json"
+        | "payload_too_large"
+        | "target_not_found"
+        | "target_deleted"
+        | "edit_conflict" => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
-        "UnsupportedVersion" | "AccountSchemaTooNew" => E::UnsupportedVersion as i32,
+        "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
+            E::UnsupportedVersion as i32
+        }
         "AuthFailed" | "AccountLocked" | "Unauthenticated" | "TransportSecurity" => {
             E::AuthFailed as i32
         }
@@ -526,20 +536,25 @@ pub(super) fn error_code(name: &str) -> i32 {
         "McpGrantRejected" => E::McpGrantRejected as i32,
         "ObjectTransferFailed" => E::ObjectTransferFailed as i32,
         "DeviceRevoked" => E::DeviceRevoked as i32,
-        "CryptoFailed" => E::CryptoFailed as i32,
-        "StorageFailed" | "storage_unavailable" => E::StorageFailed as i32,
-        "TransportUnavailable" | "NetworkingPending" | "Unavailable" | "NoNodeSelected" => {
-            E::TransportUnavailable as i32
-        }
+        "CryptoFailed" | "crypto_failure" => E::CryptoFailed as i32,
+        "StorageFailed" | "storage_unavailable" | "storage_capacity" => E::StorageFailed as i32,
+        "TransportUnavailable"
+        | "NetworkingPending"
+        | "Unavailable"
+        | "NoNodeSelected"
+        | "not_connected"
+        | "ephemeral_unavailable" => E::TransportUnavailable as i32,
         "Timeout" | "DeadlineExceeded" => E::Timeout as i32,
-        "PermissionDenied" | "authorization_rejected" => E::PermissionDenied as i32,
-        "RateLimited" => E::RateLimited as i32,
+        "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
+            E::PermissionDenied as i32
+        }
+        "RateLimited" | "rate_limited" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
         "ObjectErased" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,
         "ObjectOwnershipUnverified" => E::ObjectOwnershipUnverified as i32,
         "CustodyForkFenced" => E::CustodyForkFenced as i32,
-        "SchemaResetRequired" => E::SchemaResetRequired as i32,
+        "SchemaResetRequired" | "schema_reset_required" => E::SchemaResetRequired as i32,
         "resync_required" => RamfluxV2Status::ResyncRequired as i32,
         _ => E::Internal as i32,
     }

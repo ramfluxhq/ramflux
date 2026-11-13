@@ -190,8 +190,8 @@ impl RamfluxClient {
                 .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
         let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
-        let franking = mode.franking
-            .then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
+        let franking =
+            mode.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
         message.encrypted_body = serde_json::to_vec(&packet)?;
         let mut own_copy = None;
         // History replication controls must not become history messages themselves.

@@ -97,7 +97,7 @@ async fn send_group(
     Ok(vec![delivery(group, outcome)])
 }
 
-fn peer_root(
+pub(super) fn peer_root(
     account: &LocalBusAccountState,
     thread: &Value,
     principal: &str,
