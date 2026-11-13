@@ -140,7 +140,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             let itest_state = Arc::clone(&state);
             ramflux_node_core::spawn_service_worker("ramflux-gateway-itest-http", move |_| {
                 if let Err(error) = serve_itest_http(
-                    itest_listener,
+                    &itest_listener,
                     &itest_router,
                     &itest_store,
                     &itest_state,

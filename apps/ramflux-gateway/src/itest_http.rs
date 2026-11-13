@@ -21,7 +21,7 @@ pub(crate) fn bind_itest_listener(addr: &str) -> anyhow::Result<TcpListener> {
 
 #[cfg(feature = "itest-http")]
 pub(crate) fn serve_itest_http(
-    listener: TcpListener,
+    listener: &TcpListener,
     router: &RouterMeshClient,
     store: &Arc<ramflux_node_core::GatewayRedbStore>,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
