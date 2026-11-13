@@ -355,6 +355,12 @@ impl From<SyncError> for SdkError {
     }
 }
 
+impl From<crate::bindings::AdapterError> for SdkError {
+    fn from(error: crate::bindings::AdapterError) -> Self {
+        Self::GeneratedApi(Box::new(error))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SdkError;
@@ -374,12 +380,5 @@ mod tests {
                 SdkError::GatewaySessionRejected(_)
             ));
         }
-    }
-}
-
-impl From<crate::bindings::AdapterError> for SdkError {
-    fn from(error: crate::bindings::AdapterError) -> Self {
-        Self::GeneratedApi(Box::new(error))
-
     }
 }

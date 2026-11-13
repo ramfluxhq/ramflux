@@ -198,6 +198,7 @@ impl AdapterError {
                     ..Self::new(GeneratedErrorCode::StorageCapacity, error.to_string())
                 };
             }
+            SdkError::GatewayWriterBusy => GeneratedErrorCode::RateLimited,
             SdkError::Json(_) => GeneratedErrorCode::InvalidJson,
             SdkError::Storage(ramflux_storage::StorageError::SchemaResetRequired { .. }) => {
                 GeneratedErrorCode::SchemaResetRequired

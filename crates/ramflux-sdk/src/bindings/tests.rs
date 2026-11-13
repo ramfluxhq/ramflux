@@ -467,3 +467,20 @@ fn public_bindings_strip_private_revision_nonce_and_refuse_selected_input()
     assert!(encode_send_message(&send).is_ok());
     Ok(())
 }
+
+#[test]
+fn gateway_writer_busy_preserves_typed_backpressure_across_adapters() {
+    let error = SdkError::GatewayWriterBusy;
+    for mapped in [
+        AdapterError::from_sdk(&error),
+        cli::AdapterError::from_sdk(&error),
+        uniffi::AdapterError::from_sdk(&error),
+        wasm::AdapterError::from_sdk(&error),
+    ] {
+        assert_eq!(mapped.code, GeneratedErrorCode::RateLimited as i32);
+        assert_eq!(mapped.name, "rate_limited");
+        assert_eq!(mapped.message, "gateway_writer_busy: retryable");
+    }
+    assert!(error.gateway_writer_busy());
+    assert!(crate::error_policy::approval_retryable(&error));
+}
