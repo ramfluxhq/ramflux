@@ -191,7 +191,7 @@ A busy root cannot take other roots' slots; disk failure can still prevent commi
 Fresh databases are initialized, committed and synced under a temporary name in
 the destination directory's reserved `.ramflux-gateway-staging-v1` subdirectory,
 then published without replacing an existing store. Public database paths inside
-that reserved namespace (including canonical aliases) are refused with
+that reserved namespace (including directory-identity and canonical aliases) are refused with
 `GatewayStateReservedPath`. Before publication, serialized cleanup removes only
 exactly named orphan stages there; it never scans public database names and
 retains hard-linked stages or published-inode aliases. A synced empty ownership marker

@@ -135,10 +135,40 @@ fn prepare_staging_directory(directory: &Path) -> Result<(), NodeCoreError> {
 }
 
 fn refuse_reserved_path(path: &Path) -> Result<(), NodeCoreError> {
-    if path.components().any(|part| part.as_os_str() == STAGING_DIRECTORY) {
+    if path.components().any(|part| {
+        part.as_os_str().as_encoded_bytes().eq_ignore_ascii_case(STAGING_DIRECTORY.as_bytes())
+    }) {
         return Err(NodeCoreError::GatewayStateReservedPath);
     }
+    // Canonicalization can preserve case/Unicode aliases on case-insensitive filesystems.
+    // Compare actual directory identities too, before admitting any public path.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for directory in path.ancestors() {
+            let Some(parent) = directory.parent() else { continue };
+            let Some(actual) = existing_metadata(directory)? else { continue };
+            if !actual.is_dir() {
+                continue;
+            }
+            if let Some(reserved) = existing_metadata(&parent.join(STAGING_DIRECTORY))?
+                && actual.dev() == reserved.dev()
+                && actual.ino() == reserved.ino()
+            {
+                return Err(NodeCoreError::GatewayStateReservedPath);
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn existing_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, NodeCoreError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(redb_error(error)),
+    }
 }
 
 fn is_stage_name(name: &std::ffi::OsStr) -> bool {
@@ -308,6 +338,33 @@ mod tests {
             write.commit()?;
         }
         let image = std::fs::read(&old_public)?;
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("stage-directory-alias");
+            std::os::unix::fs::symlink(&reserved, &alias)?;
+            assert!(
+                matches!(
+                    refuse_reserved_path(&alias.join("public.redb")),
+                    Err(NodeCoreError::GatewayStateReservedPath)
+                ),
+                "directory identity must reject aliases independently of lexical canonicalization"
+            );
+            for name in [
+                STAGING_DIRECTORY.to_ascii_uppercase(),
+                STAGING_DIRECTORY.replace("staging", "ſtaging"),
+            ] {
+                let alias = directory.path().join(name);
+                if alias.try_exists()? {
+                    assert!(
+                        matches!(
+                            open(alias.join("public.redb")),
+                            Err(NodeCoreError::GatewayStateReservedPath)
+                        ),
+                        "case-folding filesystem aliases must not enter the staging namespace"
+                    );
+                }
+            }
+        }
         let other = directory.path().join("other.redb");
         assert!(
             matches!(open(&other), Err(NodeCoreError::GatewayStateReservedPath)),
