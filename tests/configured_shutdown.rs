@@ -43,7 +43,6 @@ pub fn configured_gateway_shutdown_is_clean(
 fn configured_shutdown_with_probes(
     binary: &str,
     service: &str,
-    _directory: tempfile::TempDir,
     registration_seed: Option<RegistrationSeed>,
     gateway_tls_probe: Option<GatewayTlsProbe>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -122,6 +121,7 @@ pub fn configured_notify_runtime_shutdown_is_clean(
 }
 
 pub(crate) struct Fixture {
+    _directory: tempfile::TempDir,
     registration_seed: Option<RegistrationSeed>,
     gateway_tls_probe: Option<GatewayTlsProbe>,
     root: PathBuf,
