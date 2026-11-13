@@ -196,6 +196,35 @@ impl LocalPairingParticipant {
         Ok(())
     }
 
+    /// Return the actual full-transfer data owner without creating native/session authority.
+    /// Use this before native/relay I/O while an install remains pending, including
+    /// a new recipient that has no authority file yet. No key is copied or reopened.
+    /// # Errors
+    /// Refuses another frontend/account/generation or an absent own full-stage reference.
+    pub fn return_data_client(&self, client: &mut RamfluxClient) -> Result<(), SdkError> {
+        if client.active_account_db.is_some() {
+            return Err(SdkError::PairingCode("Busy"));
+        }
+        let mut slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.full_selected_db(db, None)?;
+        if !db
+            .pairing_live_rows()?
+            .into_iter()
+            .any(|row| row.full_stage_reference().is_ok_and(|reference| reference.is_some()))
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        client.open_account_index(&self.root)?;
+        client.born_v3_account = None;
+        client.identity_root = None;
+        client.device_branch = None;
+        client.reader_device_identity = None;
+        client.reader_account_root = None;
+        client.active_account_db = slot.take();
+        Ok(())
+    }
+
     /// Load the public keys from the exact staged or installed branch vault entry.
     /// # Errors
     /// Missing or foreign local entries refuse before commitment.
@@ -506,4 +535,7 @@ impl LocalPairingParticipant {
 
 mod full;
 pub(crate) use full::FullProofSigner;
-pub use full::{FullPreparedTransferCandidate, FullSourcePublished, FullSourceSubmission};
+pub use full::{
+    FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
+    FullSourcePublished, FullSourceSubmission,
+};

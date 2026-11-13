@@ -113,7 +113,17 @@ impl AccountDb {
             if head.kind == "transfer" && live.proposal_hash.is_none() {
                 live.proposal_hash = Some(head.candidate_hash.clone());
             }
-            live.phase.clone_from(&head.state);
+            if live.full_stage_reference()?.is_some()
+                && matches!(live.phase.as_str(), "cancelled" | "expired" | "rejected" | "completed")
+            {
+                // Exact native reconciliation may acknowledge the candidate, but
+                // cannot revive the old data opportunity after terminal cleanup.
+                if head.state != "acknowledged" {
+                    return Err(StorageError::PairingField("state"));
+                }
+            } else {
+                live.phase.clone_from(&head.state);
+            }
             live.candidate_id = Some(head.operation_id.clone());
             self.put_pairing_live(&live)?;
         }

@@ -14,6 +14,9 @@ use ramflux_storage::{
     FullSelectedReceiverGeneration, FullTransferStage,
 };
 
+mod stage;
+use stage::InstallStage;
+
 /// Root-drained local G1 work. No original writer or network/signing capability.
 pub struct FullGenerationPreparation {
     database: FullReceiverDatabaseWork,
@@ -62,14 +65,35 @@ impl FullGenerationPreparation {
         local: &Installation<'_>,
         stage: &FullTransferStage<'_>,
         copy: FullReceiverBaseCopy,
+        install: Install,
+        authority: &CustodyAuthority,
+    ) -> Result<Self, SdkError> {
+        Self::pin_stage(local, stage, copy, install, authority)
+    }
+    /// Finish an already-published candidate after data cancellation/expiry without restoring an epoch.
+    /// # Errors
+    /// Refuses wrong own native candidate/keys, missing retained data or changed current B.
+    pub fn pin_reconciliation(
+        local: &Installation<'_>,
+        stage: &ramflux_storage::FullRecipientInstallStage<'_>,
+        copy: FullReceiverBaseCopy,
+        install: Install,
+        authority: &CustodyAuthority,
+    ) -> Result<Self, SdkError> {
+        Self::pin_stage(local, stage, copy, install, authority)
+    }
+    fn pin_stage(
+        local: &Installation<'_>,
+        stage: &impl InstallStage,
+        copy: FullReceiverBaseCopy,
         mut install: Install,
         authority: &CustodyAuthority,
     ) -> Result<Self, SdkError> {
-        let original = stage.resume_record()?;
+        let destination = stage.destination()?;
         if install.install_purpose != "transfer_destination"
             || install.account_id != local.db.local_account_id
-            || install.account_anchor != original.grant.destination_ref.account_anchor
-            || install.recipient_ref != original.grant.destination_ref
+            || install.account_anchor != destination.account_anchor
+            || install.recipient_ref != destination
             || std::fs::canonicalize(local.root)? != local.db.account_index_root()
         {
             return Err(pending());
@@ -82,7 +106,7 @@ impl FullGenerationPreparation {
         install.schema = "ramflux.pairing.Install.v3".into();
         install.version = 3;
         install.full_transfer = Some(FullInstall {
-            chain_hash: stage.verified_duplex(local.now)?.manifest_chain_hash().into(),
+            chain_hash: stage.duplex(local.now)?.manifest_chain_hash().into(),
             db_relative_path: directory.relative(&directory.path().join("account.db"))?,
             object_relative_path: directory.relative(&directory.path().join("objects"))?,
             stage_id: stage.reference().stage_id.clone(),
@@ -98,8 +122,8 @@ impl FullGenerationPreparation {
         });
         install.validate()?;
         acknowledged(local, &install, authority)?;
-        let database = copy.into_generation_database_work(
-            stage,
+        let database = stage.prepare(
+            copy,
             directory.path().join("account.db"),
             super::super::activate::adoption(&install)?,
             local.now,
@@ -131,6 +155,25 @@ impl FullGenerationPrepared {
         stage: &FullTransferStage<'_>,
         authority: &CustodyAuthority,
     ) -> Result<FullGenerationCommitted, SdkError> {
+        self.select_stage(local, stage, authority)
+    }
+    /// Select the exact reconciled G1 using the same actual writer fence and own native keys.
+    /// # Errors
+    /// Refuses changed B, pending-install disagreement or any uncertain G2 outcome.
+    pub fn select_reconciliation(
+        self,
+        local: &Installation<'_>,
+        stage: &ramflux_storage::FullRecipientInstallStage<'_>,
+        authority: &CustodyAuthority,
+    ) -> Result<FullGenerationCommitted, SdkError> {
+        self.select_stage(local, stage, authority)
+    }
+    fn select_stage(
+        self,
+        local: &Installation<'_>,
+        stage: &impl InstallStage,
+        authority: &CustodyAuthority,
+    ) -> Result<FullGenerationCommitted, SdkError> {
         acknowledged(local, &self.install, authority)?;
         if install_store::read_pending(
             local.root,
@@ -146,8 +189,8 @@ impl FullGenerationPrepared {
         let full = self.install.full_transfer.as_ref().ok_or_else(pending)?;
         let index = ramflux_storage::AccountIndex::open(local.root)?;
         let wrapped = index.load_wrapped_db_key(&self.install.account_id)?.ok_or_else(pending)?;
-        let data = self.database.select(
-            stage,
+        let data = stage.select(
+            self.database,
             &ramflux_storage::BackupIndexInstall {
                 account_id: &self.install.account_id,
                 principal_commitment: &self.install.account_anchor,
@@ -201,6 +244,8 @@ impl FullGenerationCommitted {
             &self.install.operation_id,
         )?;
         require_selected_full_generation(local.root, &self.install, &adoption)?;
-        self.directory.finish_g3()
+        self.directory.finish_g3()?;
+        local.db.retire_full_recipient_install_head(&adoption)?;
+        Ok(())
     }
 }

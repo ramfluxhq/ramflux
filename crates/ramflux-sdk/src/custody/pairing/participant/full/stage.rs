@@ -9,7 +9,7 @@ use super::{
 impl LocalPairingParticipant {
     /// Persist a terminal data fence while preserving every stage and uncertain candidate.
     /// Before a lease is linked there is no data stage to reopen; legacy early rows stay fenced
-    /// by their absence of a stage reference. No key unwrap or cleanup authority is exercised.
+    /// by their absence of a stage reference. Only the own encrypted terminal marker is written.
     pub(crate) fn mark_full_data_terminal(
         &self,
         operation: &str,
@@ -36,6 +36,14 @@ impl LocalPairingParticipant {
         if row.full_stage_reference()?.is_none() {
             return Ok(());
         }
+        // Close data durably before changing the account projection. A later exact
+        // installation may change that projection without reviving the data epoch.
+        let role = if row.role == "initiator" {
+            ramflux_crypto::custody::pairing::PairingRole::Initiator
+        } else {
+            ramflux_crypto::custody::pairing::PairingRole::Responder
+        };
+        db.mark_full_transfer_data_terminal(operation, role, phase, custody::network_now()?)?;
         // An uncertain publication is retained verbatim for a separate reconciliation owner.
         row.phase = phase.into();
         db.put_pairing_live(&row)?;
