@@ -13,6 +13,10 @@ use ramflux_storage::{AccountDb, AccountIndex, FullSourcePreparationCancel, Prep
 mod candidate;
 pub use candidate::FullPreparedTransferCandidate;
 mod preservation;
+mod source_observation;
+mod source_reconciliation;
+pub use source_observation::FullSourceCandidateObservation;
+pub use source_reconciliation::{FullSourceNativeObservation, FullSourcePublicationQuery};
 mod recipient_reconciliation;
 pub use recipient_reconciliation::{FullRecipientNativeObservation, FullRecipientPublicationQuery};
 mod retirement;

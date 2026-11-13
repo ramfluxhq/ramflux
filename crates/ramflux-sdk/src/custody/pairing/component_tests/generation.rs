@@ -163,15 +163,23 @@ async fn prepare_candidate(
     assert_eq!(head.candidate, canonical_json_bytes(&publication)?);
     assert_eq!(head.state, "prepared");
     prove_source_preservation(rig, &publication, &install).await?;
+    let observation = rig.primary.observe_full_source_candidate(publication.clone()).await?;
     rig.participant_a.take_client(&mut rig.source.client)?;
-    let source_submission = rig.primary.prepare_full_source_submission(publication.clone()).await?;
+    assert!(
+        matches!(
+            rig.primary.observe_full_source_candidate(publication.clone()).await,
+            Err(crate::SdkError::PairingCode("Busy"))
+        ),
+        "source native observation accepted an ordinary database loan"
+    );
+    let source_submission = rig.primary.prepare_full_source_submission(observation).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     let source =
         custody::load_account(&rig.participant_a.root, &rig.participant_a.account_id, rig.now)?;
     assert!(
         matches!(
             source.group_primary(&custody::NativePrimaryVault),
-            Err(crate::SdkError::PairingCode("Busy"))
+            Err(crate::SdkError::PairingCode("PublicationPending"))
         ),
         "Submitted source reached the old primary vault"
     );
@@ -221,13 +229,12 @@ async fn prove_source_preservation(
     publication: &ramflux_protocol::custody::Publication,
     install: &Install,
 ) -> TestResult {
-    rig.participant_a.take_client(&mut rig.source.client)?;
     let original = rig.primary.replace_full_confirmations_for_test((false, false))?;
-    let refused = rig.primary.preserve_full_candidate(publication.clone()).await.is_err();
+    let refused = preserve_observed_candidate(rig, publication.clone()).await.is_err();
     rig.primary.replace_full_confirmations_for_test(original)?;
     assert!(refused, "data metadata restored A preservation approval without local confirmation");
     assert!(
-        rig.secondary.preserve_full_candidate(publication.clone()).await.is_err(),
+        rig.secondary.observe_full_source_candidate(publication.clone()).await.is_err(),
         "B accessed original A preservation signer"
     );
     let primary = rig
@@ -241,15 +248,15 @@ async fn prove_source_preservation(
     body.devices.retain(|device| device.device_id != old_primary.device_id);
     removed.record = primary.sign_record(body)?;
     assert!(
-        rig.primary.preserve_full_candidate(removed).await.is_err(),
+        preserve_observed_candidate(rig, removed).await.is_err(),
         "A approved a validly signed candidate that removed its branch"
     );
     let foreign = foreign_destination_branch(publication, &primary)?;
     assert!(
-        rig.primary.preserve_full_candidate(foreign).await.is_err(),
+        preserve_observed_candidate(rig, foreign).await.is_err(),
         "A approved a candidate with a substituted SAS-bound B key"
     );
-    let signed = rig.primary.preserve_full_candidate(publication.clone()).await?;
+    let signed = preserve_observed_candidate(rig, publication.clone()).await?;
     ramflux_crypto::verify_canonical_signature(
         &ramflux_protocol::custody::signing_bytes(&signed.body.schema, &signed.body)?,
         &signed.signature,
@@ -260,10 +267,9 @@ async fn prove_source_preservation(
         ramflux_protocol::custody::object_hash(&publication.record)?
     );
     assert!(
-        rig.primary.preserve_full_candidate(publication.clone()).await? == signed,
+        preserve_observed_candidate(rig, publication.clone()).await? == signed,
         "identical preservation was not durably idempotent"
     );
-    rig.participant_a.return_client(&mut rig.source.client)?;
     Ok(())
 }
 
@@ -514,4 +520,20 @@ impl super::super::LocalCredentialProvider for FullPhraseFixture {
             confirmation: None,
         })
     }
+}
+
+async fn preserve_observed_candidate(
+    rig: &mut Rig,
+    candidate: ramflux_protocol::custody::Publication,
+) -> Result<
+    ramflux_protocol::custody::Envelope<
+        ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+    >,
+    Box<dyn std::error::Error>,
+> {
+    let observed = rig.primary.observe_full_source_candidate(candidate).await?;
+    rig.participant_a.take_client(&mut rig.source.client)?;
+    let signed = rig.primary.preserve_full_candidate(observed).await;
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    Ok(signed?)
 }

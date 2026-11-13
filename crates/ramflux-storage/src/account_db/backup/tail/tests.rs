@@ -30,12 +30,12 @@ fn pairing_full_j6_ack_and_tail_cut_bind_the_exact_pre_ack_view() -> TestResult 
     // If tail reservation fails, neither the head ACK nor a tail marker may commit.
     db.connection.execute_batch("CREATE TRIGGER reject_tail_cut BEFORE INSERT ON pairing_full_tail BEGIN SELECT RAISE(ABORT,'forced tail reservation failure'); END;")?;
     assert!(
-        db.commit_full_ack_tail(&head, &stage, &snapshot).is_err(),
+        db.commit_full_ack_tail(&head, &stage, &snapshot, false).is_err(),
         "failed tail reservation accepted ACK"
     );
     assert_eq!(db.pairing_head()?.ok_or("submitted head")?.state, "submitted");
     db.connection.execute_batch("DROP TRIGGER reject_tail_cut;")?;
-    let cut = db.commit_full_ack_tail(&head, &stage, &snapshot)?;
+    let cut = db.commit_full_ack_tail(&head, &stage, &snapshot, false)?;
     assert_eq!(db.pairing_head()?.ok_or("J6 head")?.state, "acknowledged");
     let marker: (String, String, String) = db.connection.query_row(
         "SELECT snapshot_id,tail_status,cut_state FROM pairing_full_tail",
@@ -57,7 +57,7 @@ fn pairing_full_j6_ack_and_tail_cut_bind_the_exact_pre_ack_view() -> TestResult 
     )?;
     assert_eq!(value, "before-j6", "post-J6 write entered the immutable tail cut");
     assert!(
-        db.commit_full_ack_tail(&head, &stage, &encode_base64url([23; 32])).is_err(),
+        db.commit_full_ack_tail(&head, &stage, &encode_base64url([23; 32]), false).is_err(),
         "lost tail cut was silently recaptured"
     );
     drop(private);

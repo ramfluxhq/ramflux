@@ -68,7 +68,7 @@ fn validate(fence: &SubmittedPrimaryFence) -> Result<(), SdkError> {
     Ok(())
 }
 fn read(dir: &Path) -> Result<Option<SubmittedPrimaryFence>, SdkError> {
-    let file = match crate::platform::fs::open_owner_only_no_follow(&path(dir)) {
+    let file = match crate::platform::fs::open_read_only_no_follow(&path(dir)) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -86,7 +86,7 @@ fn read(dir: &Path) -> Result<Option<SubmittedPrimaryFence>, SdkError> {
     Ok(Some(fence))
 }
 pub(crate) fn lock(dir: &Path) -> Result<File, SdkError> {
-    let lock = crate::platform::fs::open_owner_only_read_write(&dir.join(".primary-signing.lock"))?;
+    let lock = crate::platform::fs::open_owner_only_no_follow(&dir.join(".primary-signing.lock"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match crate::platform::fs::try_lock_exclusive(&lock) {
@@ -114,7 +114,7 @@ pub(crate) fn require_available(
     // A positively verified later primary key does not inherit the old key's fence.
     // Ordinary role/current-head checks still run before this predicate and vault use.
     if fence.old_self_key == current.body.master_certificate.body.self_signing_public_key {
-        return Err(SdkError::PairingCode("Busy"));
+        return Err(SdkError::PairingCode("PublicationPending"));
     }
     Ok(())
 }

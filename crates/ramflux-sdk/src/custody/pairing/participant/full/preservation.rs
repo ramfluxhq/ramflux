@@ -6,7 +6,7 @@ use super::{LocalPairingParticipant, custody, wrong};
 use crate::SdkError;
 use ramflux_protocol::{
     custody::{
-        Envelope, Publication, object_hash,
+        Envelope, object_hash,
         pairing::{PairingWire, context_v3::TranscriptV3, full_transfer::PreservationFull},
     },
     encode_base64url,
@@ -14,26 +14,22 @@ use ramflux_protocol::{
 impl LocalPairingParticipant {
     pub(in crate::custody::pairing) fn preserve_full_candidate(
         &self,
-        operation: &str,
-        generation: u64,
-        th: [u8; 32],
-        candidate: &Publication,
+        observation: &super::FullSourceCandidateObservation,
     ) -> Result<Envelope<PreservationFull>, SdkError> {
-        // Independent native freshness completes before borrowing the actual A writer.
+        let (operation, generation, th) = &observation.scope;
+        self.require_source_observation(observation, &observation.scope)?;
+        let candidate = &observation.candidate;
+        let authority = &observation.authority;
         let anchor = &candidate.record.body.account_anchor;
-        let current = self.full_native_head(anchor)?;
-        let authority = self.query.current_authority(anchor)?;
         let now = custody::network_now()?;
-        let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
-        if object_hash(verified.envelope())? != object_hash(current.envelope())?
-            || candidate.compacted_ids != authority.publication.compacted_ids
-        {
+        let current = ramflux_crypto::custody::verify_publication(authority, now)?;
+        if candidate.compacted_ids != authority.publication.compacted_ids {
             return Err(wrong());
         }
         let proposed = ramflux_crypto::custody::verify_publication(
             &ramflux_protocol::custody::CustodyAuthority {
                 publication: candidate.clone(),
-                custodian_publication: None,
+                custodian_publication: authority.custodian_publication.clone(),
             },
             now,
         )?;
@@ -43,21 +39,22 @@ impl LocalPairingParticipant {
         let live = db
             .pairing_live_rows()?
             .into_iter()
-            .find(|row| row.operation_id == operation)
+            .find(|row| row.operation_id == *operation)
             .ok_or_else(wrong)?;
-        if live.generation != generation
+        if live.generation != *generation
             || live.role != "initiator"
             || !matches!(live.phase.as_str(), "mutually_confirmed" | "prepared" | "submitted")
         {
             return Err(wrong());
         }
-        let stage = db.open_full_transfer_stage(
+        let mut stage = db.open_full_transfer_stage(
             operation,
             ramflux_crypto::custody::pairing::PairingRole::Initiator,
             now,
         )?;
+        stage.observe_full_native_head(&current)?;
         let record = stage.resume_record()?;
-        if record.th != th
+        if record.th != *th
             || record.base_record_hash != object_hash(current.envelope())?
             || record.grant.source_ref
                 != current.envelope().body.master_certificate.body.primary_device_ref

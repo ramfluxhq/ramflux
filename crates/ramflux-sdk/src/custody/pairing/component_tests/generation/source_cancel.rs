@@ -68,7 +68,91 @@ async fn pairing_full_source_cancel_fences_off_loan_submission_and_retains_uncer
     );
     drop(key);
     rig.primary.lock().await?;
+    cold_source_retirement(&mut rig, &operation)?;
     rig.secondary.lock().await?;
     hold.finish().await?;
     Ok(())
+}
+
+fn cold_source_retirement(rig: &mut super::Rig, operation: &str) -> TestResult {
+    use crate::custody::pairing::{
+        FullSourceRetirementOutcome, Installation, LocalPairingParticipant,
+    };
+    use std::sync::{Arc, Mutex};
+    assert!(rig.participant_a.db.lock().map_err(|_| "closed source")?.is_none());
+    let mut frontend = crate::RamfluxClient::new();
+    frontend.open_account_index(&rig.participant_a.root)?;
+    frontend.unlock_account(&rig.participant_a.account_id, b"fresh-source-data")?;
+    let previous = &rig.participant_a;
+    let reopened = Arc::new(LocalPairingParticipant {
+        root: previous.root.clone(),
+        account_id: previous.account_id.clone(),
+        vault: Arc::new(super::super::super::recipient::tests::DiskVault::open(
+            previous.root.join("source-vault"),
+        )?),
+        provider: Arc::new(NoApproval),
+        db: Mutex::new(None),
+        persist: previous.persist.clone(),
+        query: previous.query.clone(),
+    });
+    reopened.take_client(&mut frontend)?;
+    let query = reopened.full_source_publication_query(operation)?;
+    reopened.return_data_client(&mut frontend)?;
+    let observed = query.observe()?; // No original actor, approval or database loan.
+    reopened.take_client(&mut frontend)?;
+    {
+        let slot = reopened.db.lock().map_err(|_| "source exact reconciliation")?;
+        let db = slot.as_ref().ok_or("source reconciled writer")?;
+        observed.acknowledge(db)?;
+        observed.acknowledge(db)?; // Idempotent J6 cannot recut a declined tail.
+        assert!(
+            db.open_full_transfer_stage(
+                operation,
+                ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                rig.now
+            )
+            .is_err(),
+            "source reconciliation revived cancelled DATA"
+        );
+        assert_eq!(
+            observed.retire_source(&Installation {
+                root: &reopened.root,
+                db,
+                vault: reopened.vault.as_ref(),
+                now: rig.now
+            })?,
+            FullSourceRetirementOutcome::Complete
+        );
+        assert!(db.pairing_head()?.is_none());
+        assert!(
+            db.open_full_transfer_stage(
+                operation,
+                ramflux_crypto::custody::pairing::PairingRole::Initiator,
+                rig.now
+            )
+            .is_err(),
+            "source G3 erased its data-terminal barrier"
+        );
+    }
+    reopened.return_client(&mut frontend)?;
+    let account = crate::custody::load_account(&reopened.root, &reopened.account_id, rig.now)?;
+    assert_eq!(account.primary_vault_ref(), "");
+    assert!(matches!(
+        account.group_primary(reopened.vault.as_ref()),
+        Err(crate::SdkError::PairingCode("PrimaryRequired"))
+    ));
+    drop(account.credentials(reopened.vault.as_ref(), account.local_device_id()?, rig.now)?);
+    assert!(crate::custody::pairing::ordinary_session_admitted(&frontend, &reopened.account_id)?);
+    rig.participant_a = reopened;
+    rig.source.client = frontend;
+    Ok(())
+}
+struct NoApproval;
+impl crate::custody::pairing::LocalCredentialProvider for NoApproval {
+    fn provide(
+        &self,
+        _: &ramflux_protocol::custody::pairing::local_dto::CredentialRequest,
+    ) -> Result<crate::custody::pairing::CredentialOutcome, crate::SdkError> {
+        Err(crate::SdkError::CustodyVaultUnavailable)
+    }
 }

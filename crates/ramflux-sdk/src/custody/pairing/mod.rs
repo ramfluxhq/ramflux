@@ -23,6 +23,7 @@ pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refr
 pub use native_ports::{NativePairingPublication, NativePairingQuery};
 pub use participant::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
+    FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
     FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
     LocalPairingParticipant, ParticipantContext,
 };

@@ -426,6 +426,7 @@ impl LocalPairingParticipant {
             expires_at: p.lease_expires_at,
             cert_id: ramflux_protocol::encode_base64url(*super::super::random()?),
         })?;
+        drop(primary); // The public certificate goes to a separate head signing owner.
         let mut slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.take().ok_or(SdkError::AccountDbNotUnlocked)?;
         let db = Mutex::new(db);
@@ -537,5 +538,6 @@ mod full;
 pub(crate) use full::FullProofSigner;
 pub use full::{
     FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
+    FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
     FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission,
 };

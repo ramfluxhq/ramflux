@@ -82,7 +82,7 @@ impl FullTransferStage<'_> {
         if self.retained_source_after_native_ack(&previous, &candidate.record, now)?.is_none() {
             return Err(wrong());
         }
-        let cut = self.db.commit_full_ack_tail(head, &reference.stage_id, snapshot_id)?;
+        let cut = self.db.commit_full_ack_tail(head, &reference.stage_id, snapshot_id, false)?;
         Ok(FullSourceTailCut {
             cut,
             operation: head.operation_id.clone(),

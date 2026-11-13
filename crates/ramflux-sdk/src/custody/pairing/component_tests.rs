@@ -94,7 +94,7 @@ struct Rig {
 // for undeclared local events/actors. No rows are deleted or skipped to admit either source.
 struct ComponentSource {
     client: crate::RamfluxClient,
-    vault: Arc<crate::custody::tests::TestVault>,
+    vault: Arc<dyn crate::custody::PrimaryVault>,
     root: crate::custody::tests::Root,
     phrase: Option<zeroize::Zeroizing<String>>,
 }
@@ -111,7 +111,8 @@ impl ComponentSource {
             });
         }
         let root = crate::custody::tests::Root::new()?;
-        let vault = Arc::new(crate::custody::tests::TestVault::default());
+        let vault =
+            Arc::new(super::recipient::tests::DiskVault::open(root.0.join("source-vault"))?);
         let (account, phrase) = crate::custody::tests::create_with_device_and_phrase(
             &root.0,
             "component-source",
@@ -1092,9 +1093,12 @@ async fn pairing_full_sas_base_retains_new_native_floor_before_refusal_and_reope
     };
     let old = rig.node.current_authority(&anchor)?;
     let mut next = old.clone();
-    let primary = rig.source.vault.primary_for_public_key(
-        &old.publication.record.body.master_certificate.body.self_signing_public_key,
+    let local = crate::custody::load_data_account(
+        &rig.participant_a.root,
+        &rig.participant_a.account_id,
+        rig.now,
     )?;
+    let primary = rig.source.vault.load_primary(local.primary_vault_ref())?;
     let mut body = old.publication.record.body.clone();
     body.previous_record_hash = Some(object_hash(&old.publication.record)?);
     body.device_set_epoch += 1;

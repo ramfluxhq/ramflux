@@ -25,6 +25,7 @@ impl AccountDb {
         head: &HeadRow,
         stage_id: &str,
         snapshot_id: &str,
+        abandon: bool,
     ) -> Result<FullTransferCut, StorageError> {
         crate::account_db::pairing::journal::decode_head(head)?;
         if head.account_id != self.local_account_id
@@ -54,7 +55,7 @@ impl AccountDb {
                 let exact:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pairing_head WHERE account_id=?1 AND operation_id=?2 AND kind='transfer' AND state='submitted' AND candidate_hash=?3 AND candidate=?4 AND publisher_ref=?5 AND recipient_ref=?6 AND generation=?7 AND base_record_hash=?8 AND base_epoch=?9)",params![head.account_id,head.operation_id,head.candidate_hash,head.candidate,head.publisher_ref,head.recipient_ref,head.generation,head.base_record_hash,head.base_epoch],|row|row.get(0))?;
                 if !exact {return Err(wrong());}
                 let terminal:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pairing_live WHERE account_id=?1 AND operation_id=?2 AND phase IN ('cancelled','expired','rejected','completed'))",params![head.account_id,head.operation_id],|row|row.get(0))?;
-                if terminal {return Err(wrong());}
+                if terminal && !abandon {return Err(wrong());}
                 let existing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM pairing_full_tail WHERE account_id=?1 AND (operation_id=?2 OR tail_status='pending'))",params![head.account_id,head.operation_id],|row|row.get(0))?;
                 if existing {return Err(StorageError::PairingField("ResumeRequired"));}
                 let snapshot=reader.connection.deferred_transaction()?;
@@ -64,8 +65,8 @@ impl AccountDb {
                 // SQLite writers are excluded by IMMEDIATE; all local workers queue.
                 if Instant::now()>=deadline {return Err(busy());}
                 if tx.execute("UPDATE pairing_head SET state='acknowledged',ack=?1 WHERE account_id=?2 AND operation_id=?3 AND candidate_hash=?4 AND state='submitted'",params![head.ack,head.account_id,head.operation_id,head.candidate_hash])?!=1 {return Err(wrong());}
-                tx.execute("UPDATE pairing_live SET phase='acknowledged',candidate_id=?1,proposal_hash=COALESCE(proposal_hash,?2) WHERE account_id=?3 AND operation_id=?1",params![head.operation_id,head.candidate_hash,head.account_id])?;
-                if tx.execute("INSERT INTO pairing_full_tail VALUES(?1,?2,?3,?4,?5,'pending','pinned') ON CONFLICT(account_id) DO UPDATE SET operation_id=excluded.operation_id,stage_id=excluded.stage_id,snapshot_id=excluded.snapshot_id,record_hash=excluded.record_hash,tail_status='pending',cut_state='pinned' WHERE pairing_full_tail.tail_status!='pending'",params![head.account_id,head.operation_id,stage_id,snapshot_id,head.candidate_hash])? != 1 { return Err(wrong()); }
+                tx.execute("UPDATE pairing_live SET phase=CASE WHEN ?4 THEN CASE WHEN phase IN ('cancelled','expired','rejected','completed') THEN phase ELSE 'cancelled' END ELSE 'acknowledged' END,candidate_id=?1,proposal_hash=COALESCE(proposal_hash,?2) WHERE account_id=?3 AND operation_id=?1",params![head.operation_id,head.candidate_hash,head.account_id,abandon])?;
+                if tx.execute("INSERT INTO pairing_full_tail VALUES(?1,?2,?3,?4,?5,?6,'pinned') ON CONFLICT(account_id) DO UPDATE SET operation_id=excluded.operation_id,stage_id=excluded.stage_id,snapshot_id=excluded.snapshot_id,record_hash=excluded.record_hash,tail_status=excluded.tail_status,cut_state='pinned' WHERE pairing_full_tail.tail_status!='pending'",params![head.account_id,head.operation_id,stage_id,snapshot_id,head.candidate_hash,if abandon {"abandoned"} else {"pending"}])? != 1 { return Err(wrong()); }
                 if Instant::now()>=deadline {return Err(busy());}
                 tx.commit()?;
                 Ok(FullTransferCut {reader,unlocked_owner})
