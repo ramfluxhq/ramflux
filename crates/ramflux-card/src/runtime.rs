@@ -110,7 +110,10 @@ impl CardRuntime {
         self.count.set(0);
         let result = self.context.with(|ctx| -> Result<(), CardError> {
             let render: Function<'_> = ctx.globals().get("__rf_render")?;
-            render.call::<_, ()>((input,))?;
+            let result: rquickjs::Value<'_> = render.call((input,))?;
+            if !result.is_undefined() {
+                return Err(CardError::Invalid("non-synchronous render"));
+            }
             Ok(())
         });
         let elapsed = self.budget.borrow_mut().finish();
@@ -187,6 +190,19 @@ pub(crate) mod tests {
             assert!(vm.render(&spec).is_err(), "hostile evaluation must fail: {source}");
             assert!(vm.render(&spec).is_err(), "failed VM must remain disabled");
         }
+    }
+    #[test]
+    fn rejects_async_commit_even_with_a_valid_tree() {
+        let _guard = TEST_LOCK.lock().expect("test: serial VM capacity");
+        let source = include_str!("../library/form.js")
+            .replace("function render(", "async function render(");
+        let spec = fixture();
+        let mut vm =
+            CardRuntime::new(&package(&source), spec.clone()).expect("test: async module setup");
+        assert!(
+            vm.render(&spec).is_err(),
+            "a synchronous commit must not admit an asynchronous renderer"
+        );
     }
     #[test]
     fn signature_tampering_is_rejected_before_load() {
