@@ -50,14 +50,14 @@ type TailFixture = (
     StatusRequest,
 );
 async fn setup() -> Result<TailFixture, Box<dyn std::error::Error>> {
-    Box::pin(setup_with_source(|_| Ok(()))).await
+    Box::pin(setup_with_source(|_, _| Ok(()))).await
 }
 async fn setup_with_source(
-    seed: impl FnOnce(&crate::RamfluxClient) -> TestResult,
+    seed: impl FnOnce(&crate::RamfluxClient, &Arc<full_relay::NodeEvidence>) -> TestResult,
 ) -> Result<TailFixture, Box<dyn std::error::Error>> {
     let mut rig = Box::pin(Rig::open_profile(true)).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
-    seed(&rig.source.client)?;
+    seed(&rig.source.client, &rig.wire_evidence)?;
     let mut source = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
     Box::pin(bootstrap(&mut rig, &mut source)).await?;
     Box::pin(finish_owned_stream(&mut rig)).await?;
@@ -353,4 +353,5 @@ async fn cold_status(
     Ok(())
 }
 
+mod privacy;
 mod source_data;

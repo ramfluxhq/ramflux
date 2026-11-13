@@ -20,9 +20,9 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
         let mut wire = Continuity::open()?;
         let node = Arc::new(node::Access::new(&wire._node));
         let (primary, mut a) =
-            device::Device::create(node.clone(), "sdk-phone-a", true, &wire.config).await?;
+            device::Device::create(node.clone(), "sdk-phone-a", true, &wire.config)?;
         let (recipient, mut b) =
-            device::Device::create(node.clone(), "sdk-phone-b", false, &wire.config).await?;
+            device::Device::create(node.clone(), "sdk-phone-b", false, &wire.config)?;
         wire.primary = primary;
         wire.recipient = recipient;
         assert_ne!(a.root.path(), b.root.path(), "test: TLS SDK clients share a data root");

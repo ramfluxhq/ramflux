@@ -3,10 +3,12 @@
 
 //! In-process typed transport through the actual native/permit owners; no TLS/Fedwire claim.
 use super::FullNativeFixture;
+mod privacy;
 use crate::{
     SdkError,
     custody::pairing::{FullPairingTransport, FullPortFuture, FullRelayRequest},
 };
+pub(super) use privacy::NodeEvidence;
 use ramflux_node_core::{
     MeshPeerIdentity,
     pairing_relay::{
@@ -62,7 +64,16 @@ impl FullNativeFixture {
         request: &impl FullRelayRequest,
         arm: FullArm,
     ) -> Result<FullAdmittedReply, SdkError> {
+        self.wire_evidence.node(|| self.full_request_observed(request, arm))
+    }
+    fn full_request_observed(
+        &self,
+        request: &impl FullRelayRequest,
+        arm: FullArm,
+    ) -> Result<FullAdmittedReply, SdkError> {
         let body = request.encode_full()?;
+        self.wire_evidence.observe(body.as_slice());
+        tracing::debug!(target:"ramflux_node_core::pairing_relay::test_boundary",bytes=body.len(),"opaque relay request");
         let (lease, epoch, role, token) = request.scope();
         let token = token.decode(32).map_err(|error| wire(&error))?;
         let token = Zeroizing::new(ramflux_protocol::encode_base64url(token.as_slice()));
@@ -120,6 +131,13 @@ impl FullPairingTransport for FullNativeFixture {
     claim!(prove_full, ProveFull, FullProofReply, Proof, FullProofReply::from_wire_bytes);
     fn send_full<'a>(&'a self, _: &'a str, request: &'a SendFull) -> FullPortFuture<'a, SentFull> {
         Box::pin(async move {
+            let encrypted = request
+                .packet
+                .ciphertext
+                .decode(ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES)
+                .map_err(|error| wire(&error))?;
+            self.wire_evidence.observe(&encrypted);
+            self.wire_evidence.sent(encrypted.len());
             match self.full_request(request, FullArm::Send)? {
                 FullAdmittedReply::Sent(counter) => Ok(SentFull {
                     kind: "sent_full".into(),
@@ -218,7 +236,24 @@ impl PairingTransport for FullNativeFixture {
         Some(Arc::new(self.clone()))
     }
     legacy!(claim, Claim, Claimed);
-    legacy!(send, LegacySend, Sent);
+    fn send(&self, _origin: String, request: LegacySend) -> LegacyFuture<Sent> {
+        let store = self.store.clone();
+        let evidence = self.wire_evidence.clone();
+        Box::pin(async move {
+            let bytes = request.to_wire_bytes().map_err(|error| wire(&error))?;
+            evidence.observe(&bytes);
+            if let ramflux_protocol::custody::pairing::relay::RelayFrame::Channel {
+                ciphertext,
+                ..
+            } = &request.frame
+            {
+                let decoded = Zeroizing::new(ramflux_protocol::decode_base64url(ciphertext)?);
+                evidence.observe(&decoded);
+                evidence.sent(decoded.len());
+            }
+            evidence.node(|| store.lock().map_err(|_| wrong())?.send(&request).map_err(error))
+        })
+    }
     legacy!(poll, Poll, Polled);
     legacy!(close, Close, Closed);
 }

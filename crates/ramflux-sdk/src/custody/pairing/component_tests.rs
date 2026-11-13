@@ -83,6 +83,7 @@ struct Rig {
     node: Arc<Node>,
     full_hellos:
         Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
+    wire_evidence: Arc<full_relay::NodeEvidence>,
     recipient_root: tempfile::TempDir,
     original_devices: Vec<ramflux_protocol::custody::Device>,
     now: u64,
@@ -139,6 +140,7 @@ type FixtureTransports = (
     Arc<dyn PairingTransport>,
     Option<ramflux_crypto::custody::VerifiedNodeRecord>,
     Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
+    Arc<full_relay::NodeEvidence>,
 );
 fn fixture_transports(
     full: bool,
@@ -161,6 +163,7 @@ fn fixture_transports(
         None
     };
     let full_hellos = Arc::new(Mutex::new(Vec::new()));
+    let wire_evidence = Arc::new(full_relay::NodeEvidence::default());
     let (native, relay): (Arc<dyn PairingNative>, Arc<dyn PairingTransport>) = match &verified_node
     {
         Some(identity) => {
@@ -169,12 +172,13 @@ fn fixture_transports(
                 node,
                 identity: identity.clone(),
                 full_hellos: full_hellos.clone(),
+                wire_evidence: wire_evidence.clone(),
             });
             (full.clone(), full)
         }
         None => (Arc::new(super::tests::StoreNative { store: relay_store }), relay),
     };
-    Ok((native, relay, verified_node, full_hellos))
+    Ok((native, relay, verified_node, full_hellos, wire_evidence))
 }
 
 impl Rig {
@@ -200,7 +204,7 @@ impl Rig {
         let account_ref =
             source_account.record().body.master_certificate.body.primary_device_ref.clone();
         let clock = TestPairingClock::new(now);
-        let (native, relay, verified_node, full_hellos) =
+        let (native, relay, verified_node, full_hellos, wire_evidence) =
             fixture_transports(full, now, clock.clone(), node.clone())?;
         let participant_a = Arc::new(LocalPairingParticipant {
             root: source.root.0.clone(),
@@ -273,6 +277,7 @@ impl Rig {
             participant_a,
             node,
             full_hellos,
+            wire_evidence,
             recipient_root,
             original_devices,
             now,
@@ -294,14 +299,13 @@ async fn enrollment_admission() -> TestResult {
         clock,
         participant_b,
         participant_a,
-        node: _,
-        full_hellos: _,
         recipient_root,
         original_devices,
         now,
         source: _source,
         _node_root,
         _clock,
+        ..
     } = Rig::open().await?;
     let begun = primary
         .begin(Begin {
@@ -513,6 +517,7 @@ struct FullNativeFixture {
     identity: ramflux_crypto::custody::VerifiedNodeRecord,
     full_hellos:
         Arc<Mutex<Vec<ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull>>>,
+    wire_evidence: Arc<full_relay::NodeEvidence>,
 }
 impl PairingNative for FullNativeFixture {
     fn issue(

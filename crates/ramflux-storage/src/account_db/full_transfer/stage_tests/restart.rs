@@ -33,7 +33,7 @@ fn cold_prefix(retained: usize) -> TestResult {
     drop(stage);
     drop(db);
     let db = AccountDb::open(&index, "acct", &key)?;
-    let mut stage = db.open_full_stage_reference(reference, PairingRole::Responder, 604_801)?;
+    let stage = db.open_full_stage_reference(reference, PairingRole::Responder, 604_801)?;
     assert_eq!(
         stage.revalidate_forward_prefix(&hash)?,
         Some(retained as u64 - 1),
@@ -115,7 +115,7 @@ fn primary_transfer_full_tamper_root_and_resume_binding() -> TestResult {
             0 => wrong.record_digest = h(98),
             1 => wrong.lease_expires_at = U64(604_901),
             _ => wrong.stage_id = h(97),
-        };
+        }
         assert!(
             db.open_full_stage_reference(wrong, PairingRole::Responder, 604_801).is_err(),
             "test: foreign resume metadata was accepted: {variant}"

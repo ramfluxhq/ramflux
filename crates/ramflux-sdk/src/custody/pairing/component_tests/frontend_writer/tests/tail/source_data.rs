@@ -28,7 +28,7 @@ async fn primary_transfer_full_source_remains_secondary_with_all_data() -> TestR
 async fn run() -> TestResult {
     let mut saved = None;
     let (mut rig, mut source, mut target_client, mut target, request) =
-        Box::pin(setup_with_source(|client| {
+        Box::pin(setup_with_source(|client, _| {
             saved = Some(capture(client)?);
             Ok(())
         }))
@@ -60,7 +60,7 @@ async fn run() -> TestResult {
         .iter()
         .find(|device| device.device_id == local)
         .ok_or("test: source device removed")?;
-    assert_eq!(current, &saved.device, "test: handoff replaced A's branch keys, epoch or lease");
+    assert_branch_retained(&saved.device, current)?;
     Box::pin(primary_operations(&rig, &mut target_client)).await?;
     assert_eq!(&rig.source.client.account_db()?.path, path, "test: A selected B's data generation");
     assert_rows(before, &rig.source.client.account_db()?.test_table_fingerprints(&[])?)?;
@@ -94,6 +94,28 @@ async fn run() -> TestResult {
         "test: primary transfer revoked A's installed secondary admission"
     );
     traffic::both_branches(&rig)?;
+    Ok(())
+}
+
+fn assert_branch_retained(
+    before: &ramflux_protocol::custody::Device,
+    after: &ramflux_protocol::custody::Device,
+) -> TestResult {
+    let old =
+        before.branch_certificate.as_ref().ok_or("test: original source certificate missing")?;
+    let new =
+        after.branch_certificate.as_ref().ok_or("test: surviving source certificate missing")?;
+    let mut body = new.body.clone();
+    // A new primary reissues the certificate under its new master binding, preserving policy.
+    body.master_certificate_hash.clone_from(&old.body.master_certificate_hash);
+    body.cert_id.clone_from(&old.body.cert_id);
+    assert_eq!(body, old.body, "test: handoff changed A's branch keys, capabilities or lease");
+    let mut normalized = after.clone();
+    normalized.branch_certificate.clone_from(&before.branch_certificate);
+    assert_eq!(
+        normalized, *before,
+        "test: handoff changed source identity, epoch or revocation status"
+    );
     Ok(())
 }
 

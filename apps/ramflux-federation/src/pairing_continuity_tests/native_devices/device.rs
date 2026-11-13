@@ -3,7 +3,6 @@
 
 //! Each endpoint owns its account directory, private provider and credential vault.
 use super::*;
-use ramflux_sdk::custody::pairing::PairingAuthorityQuery as _;
 const PASSWORD: &[u8] = b"independent TLS pairing data password";
 pub(super) struct Local {
     pub(super) root: tempfile::TempDir,
@@ -37,7 +36,7 @@ impl LocalCredentialProvider for Credential {
     }
 }
 impl Device {
-    pub(super) async fn create(
+    pub(super) fn create(
         node: Arc<node::Access>,
         id: &str,
         primary: bool,

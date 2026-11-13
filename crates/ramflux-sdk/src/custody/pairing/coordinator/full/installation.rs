@@ -49,7 +49,7 @@ impl PairingActor {
                     break;
                 }
                 FullGenerationAttempt::Changed(prepared) if attempt == 2 => {
-                    retained = Some(*prepared)
+                    retained = Some(*prepared);
                 }
                 FullGenerationAttempt::Changed(prepared) => prepared.discard_changed()?,
             }
