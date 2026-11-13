@@ -82,6 +82,13 @@ pub(super) fn call(
                 .ok_or(SdkError::PairingField("operation_id"))?
                 .into(),
         },
+        "device.transfer.status" => {
+            use ramflux_protocol::custody::pairing::PairingWire as _;
+            let status: ramflux_protocol::custody::pairing::local_dto::StatusRequest =
+                serde_json::from_value(request.body.clone())?;
+            status.validate().map_err(|_| SdkError::PairingField("resume_scope"))?;
+            PrivateCredentialCallKind::Resume { operation_id: status.operation_id }
+        }
         "account.unlock" if request.body.get("passphrase").is_none() => {
             PrivateCredentialCallKind::Unlock
         }
@@ -167,3 +174,6 @@ mod tests;
 #[cfg(test)]
 #[path = "credentials/contract_tests.rs"]
 pub(crate) mod contract_tests;
+
+#[cfg(test)]
+mod resume_tests;
