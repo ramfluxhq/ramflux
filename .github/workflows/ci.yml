@@ -1080,6 +1080,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Rust diff
         id: diff
@@ -1154,6 +1156,9 @@ jobs:
           name: mutants-out
           path: mutants.out
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
