@@ -323,7 +323,8 @@ fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() 
 
 #[test]
 fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
-    let (mut client, root) = client_with_account("self-sync-publication", "principal_sync", "local")?;
+    let (mut client, root) =
+        client_with_account("self-sync-publication", "principal_sync", "local")?;
     let update = client.change_self_sync("c", value(7, 0))?;
     for restart in [false, true] {
         if restart {
@@ -331,10 +332,17 @@ fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> 
             client.unlock_account("acct", b"own-device-sync-test")?;
         }
         for _ in 0..2 {
-            assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)), Err(SdkError::InboundPending(_))));
+            assert!(matches!(
+                client
+                    .account_db()?
+                    .write_transaction(|| client.self_sync_publication_inner("c", &update)),
+                Err(SdkError::InboundPending(_))
+            ));
         }
         assert_eq!(client.account_db()?.actor_state_keys("message-identity/counter/")?.len(), 0);
-        assert!(client.self_sync_state("c", &update)?.ok_or("state")?.publication_identity.is_none());
+        assert!(
+            client.self_sync_state("c", &update)?.ok_or("state")?.publication_identity.is_none()
+        );
     }
     drop(client);
     std::fs::remove_dir_all(root)?;
@@ -342,14 +350,21 @@ fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> 
 }
 
 #[test]
-fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publication_defers() -> TestResult {
-    let (client, root) = client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
+fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publication_defers()
+-> TestResult {
+    let (client, root) =
+        client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
     let source = client.owned_device_identity()?;
     let update = value(7, 9);
     let exact = update.encode_to_vec();
-    client.account_db()?.write_transaction(|| client.apply_self_sync_exact(&source, "c", &update, &exact))?;
+    client
+        .account_db()?
+        .write_transaction(|| client.apply_self_sync_exact(&source, "c", &update, &exact))?;
     assert_eq!(client.self_sync_state("c", &update)?.ok_or("exact state")?.exact_body, exact);
-    assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)),
+        Err(SdkError::InboundPending(_))
+    ));
     install_read_messages(&client)?;
     apply(&client, &read("m1", 20))?;
     let greater_read = read("m2", 5);
@@ -357,7 +372,12 @@ fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publica
     let state = client.self_sync_state("c", &greater_read)?.ok_or("read state")?;
     assert_eq!(state.read_marker_body.ok_or("read body")?.exact_body, greater_read.encode_to_vec());
     assert_eq!(state.value.revision, 20);
-    assert!(matches!(client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &greater_read)), Err(SdkError::InboundPending(_))));
+    assert!(matches!(
+        client
+            .account_db()?
+            .write_transaction(|| client.self_sync_publication_inner("c", &greater_read)),
+        Err(SdkError::InboundPending(_))
+    ));
     drop(client);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -486,6 +506,10 @@ fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> 
 fn queue_local_repair(client: &RamfluxClient, value: &g::SelfSync) -> Result<(), SdkError> {
     let source = client.owned_device_identity()?;
     let scope = key(source.root_commitment(), "c", value)?;
-    let state = client.self_sync_state("c", value)?.ok_or_else(|| refused("local test register missing"))?;
-    client.account_db()?.write_transaction(|| client.queue_self_sync_repair(&source, &scope, &state))
+    let state = client
+        .self_sync_state("c", value)?
+        .ok_or_else(|| refused("local test register missing"))?;
+    client
+        .account_db()?
+        .write_transaction(|| client.queue_self_sync_repair(&source, &scope, &state))
 }

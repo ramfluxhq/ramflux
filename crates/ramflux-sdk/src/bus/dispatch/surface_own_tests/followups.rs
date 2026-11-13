@@ -405,7 +405,10 @@ fn assert_durable_acknowledged_proof(db: &ramflux_storage::AccountDb) -> TestRes
     Ok(())
 }
 
-fn conflicting_own_packet(source: &RamfluxClient, mut forged: ramflux_protocol::Envelope) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+fn conflicting_own_packet(
+    source: &RamfluxClient,
+    mut forged: ramflux_protocol::Envelope,
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
     let bytes = ramflux_protocol::decode_base64url(&forged.encrypted_payload)?;
     let raw = bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet prefix")?;
     let mut packet: Value = serde_json::from_slice(raw)?;
@@ -421,13 +424,23 @@ fn conflicting_own_packet(source: &RamfluxClient, mut forged: ramflux_protocol::
     *first = if *first == b'A' { b'B' } else { b'A' };
     packet["ciphertext"] = json!(String::from_utf8(ciphertext)?);
     let branch = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    packet.as_object_mut().ok_or_else(|| SdkError::LocalBus("packet object".into()))?.remove("signature");
-    let signature = ramflux_crypto::sign_with_device_branch(branch, &json!({"domain":crate::client::own_device_copy::DOMAIN,"body":packet}))?;
+    packet
+        .as_object_mut()
+        .ok_or_else(|| SdkError::LocalBus("packet object".into()))?
+        .remove("signature");
+    let signature = ramflux_crypto::sign_with_device_branch(
+        branch,
+        &json!({"domain":crate::client::own_device_copy::DOMAIN,"body":packet}),
+    )?;
     packet["signature"] = json!(signature);
     let mut signed = crate::client::own_device_copy::PREFIX.to_vec();
     signed.extend(serde_json::to_vec(&packet)?);
     forged.encrypted_payload = ramflux_protocol::encode_base64url(signed);
-    forged.payload_hash = ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, forged.encrypted_payload.as_bytes());
-    forged.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(branch, &forged)?;
+    forged.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        forged.encrypted_payload.as_bytes(),
+    );
+    forged.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &forged)?;
     Ok(forged)
 }
