@@ -37,6 +37,12 @@ def check():
     if root.parent.resolve() != Path(os.environ["RF_TEST_TMPBASE"]).resolve() or not root.name.startswith("rf-tests-"):
         raise ValueError("refusing cleanup outside the private CI test directory")
     shutil.rmtree(root)
+    # Post-job cache/actions also create temporary files; do not leave them a deleted TMPDIR.
+    if env_file := os.environ.get("GITHUB_ENV"):
+        with Path(env_file).open("a", encoding="utf-8") as output:
+            for key in ("TMPDIR", "TMP", "TEMP"):
+                output.write(f"{key}={os.environ['RUNNER_TEMP']}\n")
+            output.write("RF_TEST_TMPDIR=\n")
     return int(bool(leaked))
 
 
@@ -60,7 +66,7 @@ class Tests(unittest.TestCase):
                 root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=parent))
                 if leaked:
                     (root / "ramflux-leaked").mkdir()
-                with patch.dict(os.environ, {"RF_TEST_TMPBASE": str(parent), "RF_TEST_TMPDIR": str(root)}):
+                with patch.dict(os.environ, {"RF_TEST_TMPBASE": str(parent), "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": ""}):
                     with contextlib.redirect_stdout(io.StringIO()) as output:
                         self.assertEqual(check(), int(leaked))
                     self.assertIn(f"TEST_TMP_LEAKS={int(leaked)}", output.getvalue())
@@ -78,9 +84,14 @@ class Tests(unittest.TestCase):
             self.assertEqual(root.parent, parent)
             for key in ("TMPDIR", "TMP", "TEMP"):
                 self.assertEqual(assigned[key], str(root))
+            assigned.update(RUNNER_TEMP=str(parent), GITHUB_ENV=str(env_file))
             with patch.dict(os.environ, assigned), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(check(), 0)
             self.assertFalse(root.exists())
+            restored = dict(line.split("=", 1) for line in env_file.read_text(encoding="utf-8").splitlines())
+            for key in ("TMPDIR", "TMP", "TEMP"):
+                self.assertEqual(restored[key], str(parent), "post-job actions need an existing temp directory")
+            self.assertEqual(restored["RF_TEST_TMPDIR"], "")
 
 
 def main():
