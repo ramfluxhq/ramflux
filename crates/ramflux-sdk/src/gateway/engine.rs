@@ -27,10 +27,12 @@ pub struct GatewaySessionEngine {
     pub(crate) terminal_why: Option<String>,
     pub(crate) host: Option<super::host_frames::HostFrames>,
     pub(crate) push_route_expires_at: Option<u64>,
-    pub(crate) pending_push_route: Option<super::push_route::PendingPushRoute>,
+    pub(crate) push_route_expiries: BTreeMap<super::GatewayPushProvider, u64>,
+    pub(crate) pending_push_routes: Vec<super::push_route::PendingPushRoute>,
     /// Negotiated at establishment; read by the capable operations of later parts.
     #[allow(dead_code)]
     pub(crate) mode: super::session_push::SessionMode,
+    pub(crate) pending_calls: super::call_resolution::PendingCalls,
 }
 
 /// One buffered delivery. `push` is set only for a negotiated-session deliver.
@@ -185,6 +187,38 @@ pub(crate) fn decode_voice_reply(
     }
 }
 
+/// Fields the call driver attaches to one submit. Absent fields stay off the wire.
+#[derive(Clone)]
+pub(crate) struct CallSubmitExtras {
+    pub(crate) action: Option<super::call_resolution::CallOperationAction>,
+    pub(crate) start_digest: Option<String>,
+    pub(crate) call_intent: Option<ramflux_protocol::SignedCallIntentV1>,
+    pub(crate) wake_id: Option<String>,
+    pub(crate) call_ref: Option<String>,
+    pub(crate) call_terminal: Option<String>,
+}
+
+impl CallSubmitExtras {
+    pub(crate) fn from_intent(call_intent: Option<ramflux_protocol::SignedCallIntentV1>) -> Self {
+        let action = call_intent.as_ref().map(|intent| match intent.body.action {
+            ramflux_protocol::CallIntentAction::Start => {
+                super::call_resolution::CallOperationAction::Invite
+            }
+            ramflux_protocol::CallIntentAction::Cancel => {
+                super::call_resolution::CallOperationAction::End
+            }
+        });
+        Self {
+            action,
+            start_digest: None,
+            call_intent,
+            wake_id: None,
+            call_ref: None,
+            call_terminal: None,
+        }
+    }
+}
+
 impl GatewaySessionEngine {
     /// # Errors
     /// Returns an error when the QUIC session cannot connect, authenticate, or receive
@@ -314,8 +348,10 @@ impl GatewaySessionEngine {
             terminal_why: None,
             host: None,
             push_route_expires_at: None,
-            pending_push_route: None,
+            push_route_expiries: BTreeMap::new(),
+            pending_push_routes: Vec::new(),
             mode,
+            pending_calls: super::call_resolution::PendingCalls::default(),
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -332,6 +368,7 @@ impl GatewaySessionEngine {
             stream,
             _transport: GatewaySessionClientTransport::Injected,
             session: GatewaySessionState {
+                call_session_generation: None,
                 session_id: "test-session".to_owned(),
                 gateway_id: "test-gateway".to_owned(),
                 resume_token: "test-resume".to_owned(),
@@ -354,8 +391,10 @@ impl GatewaySessionEngine {
             terminal_why: None,
             host: None,
             push_route_expires_at: None,
-            pending_push_route: None,
+            push_route_expiries: BTreeMap::new(),
+            pending_push_routes: Vec::new(),
             mode: super::session_push::SessionMode::Legacy,
+            pending_calls: super::call_resolution::PendingCalls::default(),
         }
     }
 
@@ -439,15 +478,141 @@ impl GatewaySessionEngine {
         &mut self,
         envelope: ramflux_protocol::Envelope,
     ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
-        let submit = GatewaySubmitFrame {
-            signed_request: self.signed_request(
-                "POST",
-                "/gateway/session/submit",
-                "already_authed",
-                &envelope,
-            )?,
-            envelope,
+        self.submit_envelope_classified_with_intent(envelope, CallSubmitExtras::from_intent(None))
+            .await
+    }
+
+    /// Like [`Self::submit_envelope_classified`], with a caller-signed call intent beside the envelope.
+    ///
+    /// # Errors
+    /// Returns an error when the envelope cannot be written or the reply is not a submit reply.
+    pub(crate) async fn submit_envelope_classified_with_intent(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        extras: CallSubmitExtras,
+    ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
+        let submit = self.make_submit(envelope, extras)?;
+        self.submit_frame(submit).await
+    }
+
+    fn make_submit(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        extras: CallSubmitExtras,
+    ) -> Result<GatewaySubmitFrame, SdkError> {
+        let mut request =
+            self.signed_request("POST", "/gateway/session/submit", "already_authed", &envelope)?;
+        let call = extras.call_intent.is_some()
+            || extras.call_ref.is_some()
+            || extras.wake_id.is_some()
+            || extras.call_terminal.is_some();
+        let context = if call {
+            let generation = self.session.call_session_generation.clone().ok_or_else(|| {
+                SdkError::GatewaySessionRejected("call_resolution_not_negotiated".into())
+            })?;
+            let start_digest = match extras.call_intent.as_ref() {
+                Some(intent) if intent.body.action == ramflux_protocol::CallIntentAction::Start => {
+                    ramflux_protocol::call_intent_digest(intent)?
+                }
+                Some(intent) => {
+                    intent.body.start_digest.clone().ok_or_else(|| {
+                        SdkError::GatewaySessionRejected("call_start_missing".into())
+                    })?
+                }
+                None => extras
+                    .start_digest
+                    .clone()
+                    .ok_or_else(|| SdkError::GatewaySessionRejected("call_start_missing".into()))?,
+            };
+            let context = ramflux_protocol::CallSubmitContext {
+                version: 1,
+                call_ref: extras
+                    .call_ref
+                    .clone()
+                    .or_else(|| extras.call_intent.as_ref().map(|i| i.body.call_ref.clone()))
+                    .ok_or_else(|| SdkError::GatewaySessionRejected("call_ref_missing".into()))?,
+                start_digest,
+                request_id: request.request_id.clone(),
+                envelope_id: envelope.envelope_id.clone(),
+                session_id: self.session.session_id.clone(),
+                session_generation: generation,
+            };
+            context.validate()?;
+            let body = ramflux_protocol::CallSubmitBody {
+                envelope: &envelope,
+                call_intent: extras.call_intent.as_ref(),
+                wake_id: extras.wake_id.as_deref(),
+                call_ref: &context.call_ref,
+                call_terminal: extras.call_terminal.as_deref(),
+                call_context: &context,
+            };
+            request.body_hash = ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                &ramflux_protocol::canonical_json_bytes(&body)?,
+            );
+            let branch = self.config.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            request.signed.signature =
+                ramflux_crypto::sign_protocol_object_with_device_branch(branch.as_ref(), &request)?;
+            Some(context)
+        } else {
+            None
         };
+        Ok(GatewaySubmitFrame {
+            signed_request: request,
+            envelope,
+            call_intent: extras.call_intent.map(Box::new),
+            wake_id: extras.wake_id,
+            call_ref: context.as_ref().map(|c| c.call_ref.clone()),
+            call_terminal: extras.call_terminal,
+            call_context: context,
+        })
+    }
+
+    pub(crate) async fn submit_correlated_call(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        extras: CallSubmitExtras,
+        deadline: tokio::time::Instant,
+    ) -> Result<super::call_resolution::CallSubmitOutcome, SdkError> {
+        let action = extras
+            .action
+            .ok_or_else(|| SdkError::GatewaySessionRejected("call_action_missing".into()))?;
+        let submit = self.make_submit(envelope, extras)?;
+        let context = submit
+            .call_context
+            .clone()
+            .ok_or_else(|| SdkError::GatewaySessionRejected("call_context_missing".into()))?;
+        let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(10));
+        self.pending_calls.install(context.clone(), deadline)?;
+        let result = tokio::time::timeout_at(deadline, async {
+            match self.submit_frame(submit).await? {
+                Ok(_) => {}
+                Err(refusal) => return Err(SdkError::gateway_nack(refusal.reason().to_owned())),
+            }
+            loop {
+                if let Some(decision) = self.pending_calls.decision(&context)? {
+                    return Ok(super::call_resolution::CallSubmitOutcome {
+                        context: context.clone(),
+                        decision,
+                        action,
+                        deadline,
+                    });
+                }
+                let frame = self.read_raw_gateway_frame("call resolution").await?;
+                self.dispatch_frame(&frame, None)?;
+            }
+        })
+        .await
+        .map_err(|_| SdkError::GatewaySessionRejected("call_resolution_timeout".into()))
+        .and_then(|result| result);
+        self.pending_calls.retire(&context);
+        result
+    }
+
+    async fn submit_frame(
+        &mut self,
+        submit: GatewaySubmitFrame,
+    ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
         let expected_envelope_id = submit.envelope.envelope_id.clone();
         let expected_target_delivery_id = submit.envelope.target_delivery_id.clone();
         let submitted_envelope = submit.envelope.clone();
@@ -858,7 +1023,15 @@ impl GatewaySessionEngine {
         let signed_request =
             self.signed_request("POST", "/gateway/session/submit", "already_authed", &envelope)?;
         self.write_frame(&GatewayClientFrame::Submit {
-            submit: GatewaySubmitFrame { signed_request, envelope },
+            submit: GatewaySubmitFrame {
+                call_context: None,
+                signed_request,
+                envelope,
+                call_intent: None,
+                wake_id: None,
+                call_ref: None,
+                call_terminal: None,
+            },
         })
         .await?;
         loop {
@@ -1020,6 +1193,7 @@ async fn read_gateway_server_frame_bytes(
     let body = ramflux_transport::GatewaySessionFrameSource::recv_frame(stream)
         .await
         .map_err(SdkError::from)?;
+    ramflux_protocol::validate_call_resolution_frame(&body)?;
     let frame = ramflux_protocol::parse_i_json(&body)
         .map_err(ramflux_transport::TransportError::from)
         .map_err(SdkError::from)?;

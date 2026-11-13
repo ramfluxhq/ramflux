@@ -21,6 +21,7 @@ allowed_service_ids = [
 gateway = "ramflux-gateway:7443"
 router = "ramflux-router:7443"
 notify = "ramflux-notify:7443"
+notify-authority = "ramflux-notify:18085"
 federation = "ramflux-federation:7443"
 relay = "ramflux-relay:7443"
 signaling = "ramflux-signaling:7443"

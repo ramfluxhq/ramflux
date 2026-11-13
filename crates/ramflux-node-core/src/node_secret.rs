@@ -134,6 +134,27 @@ impl NodeSecret {
         mac.update(value);
         ramflux_protocol::encode_base64url(mac.finalize().into_bytes())
     }
+
+    /// Per-device message collapse key: `HMAC-SHA256` truncated to 24 bytes, unpadded base64url.
+    ///
+    /// The domain is `ramflux.notification.device_collapse.v1` and the input is the
+    /// canonical target-delivery-id bytes. Callers omit this key for calls.
+    ///
+    /// # Errors
+    /// Returns [`NodeCoreError::InvalidConfiguration`] when the MAC key cannot be initialized.
+    pub fn device_collapse_key(&self, target_delivery_id: &str) -> Result<String, NodeCoreError> {
+        use hmac::{Hmac, Mac};
+        let mut mac = <Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(self.0.as_ref())
+            .map_err(|_| NodeCoreError::InvalidConfiguration("collapse mac".to_owned()))?;
+        mac.update(ramflux_protocol::domain::NOTIFICATION_DEVICE_COLLAPSE_V1.as_bytes());
+        mac.update(&[0]);
+        mac.update(target_delivery_id.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let prefix = digest
+            .get(..24)
+            .ok_or_else(|| NodeCoreError::InvalidConfiguration("collapse mac length".to_owned()))?;
+        Ok(ramflux_protocol::encode_base64url(prefix))
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +179,22 @@ mod tests {
         assert!(a.open(b"device-b", &sealed).is_err());
         assert!(b.open(b"device-a", &sealed).is_err());
         assert_ne!(a.pseudonym("ip", b"192.0.2.1"), b.pseudonym("ip", b"192.0.2.1"));
+        Ok(())
+    }
+    #[test]
+    fn device_collapse_key_is_stable_truncated_and_device_scoped() -> Result<(), NodeCoreError> {
+        let secret = NodeSecret(Zeroizing::new([0x42; 32]));
+        let first = secret.device_collapse_key("delivery-a")?;
+        assert_eq!(first, secret.device_collapse_key("delivery-a")?);
+        assert_ne!(first, secret.device_collapse_key("delivery-b")?);
+        assert_eq!(first.len(), 32);
+        assert!(!first.contains("delivery"));
+        let decoded = ramflux_protocol::decode_base64url(&first)
+            .map_err(|_| NodeCoreError::InvalidConfiguration("collapse key".to_owned()))?;
+        assert_eq!(decoded.len(), 24);
+        let full = secret
+            .pseudonym(ramflux_protocol::domain::NOTIFICATION_DEVICE_COLLAPSE_V1, b"delivery-a");
+        assert_ne!(first, full);
         Ok(())
     }
 

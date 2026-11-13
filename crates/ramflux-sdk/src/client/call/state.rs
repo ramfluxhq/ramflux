@@ -33,6 +33,17 @@ pub(crate) struct LiveCall {
     next_seq: u64,
     ring_deadline: i64,
     seen: BTreeMap<CallEndpoint, u64>,
+    /// Bound before the encrypted control is signed. Copied onto later controls.
+    pub(crate) call_ref: Option<String>,
+    pub(crate) call_start: Option<ramflux_protocol::SignedCallIntentV1>,
+    pub(crate) local_generation: u64,
+    pub(crate) gateway_generation: Option<String>,
+    pub(crate) gateway_answered: bool,
+    /// Set when an incoming invite carries `call_ref`. Media stays blocked until the
+    /// gateway accepts a resolve of that reference.
+    pub(crate) media_held: bool,
+    #[cfg(feature = "test-support")]
+    pub(crate) last_control_error: Option<String>,
 }
 
 pub(super) fn invalid(message: &str) -> SdkError {
@@ -113,6 +124,9 @@ impl LiveCall {
         call.ring_deadline = now.min(control.created_at).saturating_add(45);
         call.receive_key = Some(decode_key(base_key)?);
         call.seen.insert(control.sender.clone(), control.seq);
+        call.call_ref.clone_from(&control.call_ref);
+        call.call_start.clone_from(&control.call_start);
+        call.media_held = control.call_ref.is_some();
         let ringing = call.control(CallAction::Ringing, now)?;
         call.pending.push(ringing);
         Ok(call)
@@ -168,12 +182,52 @@ impl LiveCall {
             next_seq: 1,
             ring_deadline: now.saturating_add(45),
             seen: BTreeMap::new(),
+            call_ref: None,
+            call_start: None,
+            local_generation: 1,
+            gateway_generation: None,
+            gateway_answered: false,
+            media_held: false,
+            #[cfg(feature = "test-support")]
+            last_control_error: None,
+        }
+    }
+    pub(crate) fn bind_gateway_generation(
+        &mut self,
+        generation: Option<&str>,
+    ) -> Result<(), SdkError> {
+        if self.gateway_generation.as_deref() != generation {
+            self.local_generation = self
+                .local_generation
+                .checked_add(1)
+                .ok_or_else(|| invalid("local call generation exhausted"))?;
+            self.gateway_generation = generation.map(str::to_owned);
+            if self.call_ref.is_some() {
+                self.media_held = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release media after the gateway accepts the owner's resolve.
+    pub(crate) fn allow_media(&mut self) {
+        self.apply_gateway_resolution(true);
+    }
+
+    /// Apply an authenticated `call_resolved` decision. `false` leaves media held.
+    pub(crate) fn apply_gateway_resolution(&mut self, media_allowed: bool) {
+        if media_allowed {
+            self.media_held = false;
         }
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
+        if self.call_ref.is_some() {
+            self.media_held = true;
+        }
         let seq = self.next_seq;
         self.next_seq = seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
         Ok(CallControl {
+            call_start: None,
             schema: "ramflux.call.control.v1".into(),
             call_id: self.row.call_id.clone(),
             conversation_id: self.row.conversation_id.clone(),
@@ -183,10 +237,14 @@ impl LiveCall {
             seq,
             created_at: now,
             body,
+            call_ref: self.call_ref.clone(),
             signature: String::new(),
         })
     }
     pub fn answer(&mut self, now: i64) -> Result<(), SdkError> {
+        if self.media_held {
+            return Err(invalid("call resolution missing"));
+        }
         if self.local != self.callee || self.row.state != "incoming_ringing" || self.expired(now) {
             return Err(invalid("call cannot be answered"));
         }
@@ -413,9 +471,10 @@ impl LiveCall {
     pub(crate) fn media_lost(&self) -> bool {
         self.media_loss.is_some()
     }
-    fn expired(&self, now: i64) -> bool {
+    pub(crate) fn expired(&self, now: i64) -> bool {
         matches!(self.row.state.as_str(), "outgoing_ringing" | "incoming_ringing" | "connecting")
             && self.row.answered_at.is_none()
+            && !self.gateway_answered
             && now >= self.ring_deadline
     }
     pub(super) fn set_state(&mut self, state: &str, now: i64) -> Result<(), SdkError> {
@@ -428,6 +487,11 @@ impl LiveCall {
         Ok(())
     }
     pub fn finish(&mut self, reason: &str, now: i64) -> Result<(), SdkError> {
+        self.local_generation = self
+            .local_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("local call generation exhausted"))?;
+        self.media_held = true;
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
         self.row.failure_reason = None;
@@ -462,6 +526,66 @@ impl LiveCall {
     ) -> Result<(), SdkError> {
         self.finish("failed", now)?;
         self.row.peer_reason = Some(reason);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod resolution_gate {
+    use super::LiveCall;
+
+    fn endpoint(id: &str) -> ramflux_protocol::CallEndpoint {
+        ramflux_protocol::CallEndpoint {
+            principal_id: id.to_owned(),
+            root_public_key: "key".to_owned(),
+            device_id: id.to_owned(),
+        }
+    }
+
+    fn invite(call_ref: Option<String>, now: i64) -> ramflux_protocol::CallControl {
+        let caller = endpoint("caller");
+        ramflux_protocol::CallControl {
+            call_start: None,
+            schema: "ramflux.call.control.v1".into(),
+            call_id: "call-1".into(),
+            conversation_id: "conv-1".into(),
+            caller: caller.clone(),
+            callee: endpoint("callee"),
+            sender: caller,
+            seq: 1,
+            created_at: now,
+            body: ramflux_protocol::CallAction::Invite {
+                base_key: ramflux_protocol::encode_base64url([7_u8; 32]),
+            },
+            call_ref,
+            signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn incoming_call_ref_holds_media_until_the_gateway_accepts() -> Result<(), crate::SdkError> {
+        let now = 1_700_000_000;
+        let plain = LiveCall::incoming(&invite(None, now), endpoint("callee"), now)?;
+        assert!(!plain.media_held);
+        let mut held =
+            LiveCall::incoming(&invite(Some("ref".to_owned()), now), endpoint("callee"), now)?;
+        assert!(held.media_held);
+        assert_eq!(
+            held.pending.first().and_then(|control| control.call_ref.as_deref()),
+            Some("ref")
+        );
+        assert!(held.answer(now).is_err());
+        held.apply_gateway_resolution(false);
+        assert!(held.answer(now).is_err());
+        held.allow_media();
+        held.answer(now)?;
+        let answer = held.pending.last().ok_or_else(|| super::invalid("answer missing"))?;
+        assert_eq!(super::super::resolution_terminal(answer).as_deref(), Some("answer"));
+        let mut covered = invite(Some("ref".to_owned()), now);
+        let with_ref = super::super::signing_bytes(&covered)?;
+        covered.call_ref = None;
+        let without_ref = super::super::signing_bytes(&covered)?;
+        assert_ne!(with_ref.as_slice(), without_ref.as_slice());
         Ok(())
     }
 }

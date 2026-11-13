@@ -211,6 +211,11 @@ impl RouterCore {
             &body.principal_id,
             &body.master_certificate.body.master_public_key,
         )?;
+        let expected =
+            registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
+                publication: publication.clone(),
+                pins: registry.custody.pins_for(anchor),
+            });
         let mut pins = registry.custody.pins_for(anchor);
         let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
         let pruned_before = pins.pruned_evidence(anchor);
@@ -245,8 +250,25 @@ impl RouterCore {
         if verified.capacity_pressure().any() {
             tracing::warn!(account_anchor=%anchor,"custody authority reached eighty percent capacity; prioritize revocations");
         }
-        store.record_custody_account(anchor, &state, is_new, source, now)?;
-        registry.apply_custody_account(anchor.clone(), state)?;
+        drop(control);
+        store.record_custody_account(crate::router_store::CustodyAccountWrite {
+            anchor,
+            state: &state,
+            expected: expected.as_ref(),
+            is_new,
+            source,
+            now,
+        })?;
+        let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &mut control.mvp1_identities;
+        // Another already-committed publication may have advanced the in-memory view.
+        let current = registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
+            publication: publication.clone(),
+            pins: registry.custody.pins_for(anchor),
+        });
+        if current == expected || current.as_ref() == Some(&state) {
+            registry.apply_custody_account(anchor.clone(), state)?;
+        }
         // Native custody does not change the legacy delivery-key migration read snapshot.
         if let PinOutcome::Fenced(alert) = outcome {
             log_conflict(&alert);
@@ -402,6 +424,11 @@ impl RouterCore {
             &body.principal_id,
             &body.master_certificate.body.master_public_key,
         )?;
+        let expected =
+            registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
+                publication: publication.clone(),
+                pins: registry.custody.pins_for(anchor),
+            });
         let mut pins = registry.custody.pins_for(anchor);
         let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
         let pruned_before = pins.pruned_evidence(anchor);
@@ -415,8 +442,18 @@ impl RouterCore {
                 .cloned()
                 .ok_or_else(|| reject("fenced head unavailable"))?;
             let state = CustodyAccountState { publication: accepted, pins };
-            store.record_custody_account(anchor, &state, false, source, now)?;
-            registry.apply_custody_account(anchor.clone(), state)?;
+            drop(control);
+            store.record_custody_account(crate::router_store::CustodyAccountWrite {
+                anchor,
+                state: &state,
+                expected: expected.as_ref(),
+                is_new: false,
+                source,
+                now,
+            })?;
+            let mut control =
+                self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            control.mvp1_identities.apply_custody_account(anchor.clone(), state)?;
             log_conflict(&alert);
             return Err(NodeCoreError::CustodyConflict { alert: Box::new(alert) });
         }
@@ -428,6 +465,12 @@ impl RouterCore {
         if outcome != PinOutcome::Unchanged {
             store.prune_custody_history(now)?;
         }
+        drop(control);
+        let prepared = if outcome == PinOutcome::Unchanged {
+            Vec::new()
+        } else {
+            store.prepare_notify_owner(&state, now)?
+        };
         let tx = store.begin_write().map_err(|e| reject(&e.to_string()))?;
         let offer = crate::home_migration_store::destination::prepare_in_transaction(
             &tx, node, input, &verified, now,
@@ -438,19 +481,39 @@ impl RouterCore {
                 crate::router_store::CustodyAccountWrite {
                     anchor,
                     state: &state,
+                    expected: expected.as_ref(),
                     is_new,
                     source,
                     now,
                 },
             )?;
         }
+        let committed = RouterRedbStore::commit_notify_owner(&tx, &prepared)?;
         crate::home_migration_store::commit_transition(store, tx)?;
+        store.publish_notify_owner(&prepared, &committed)?;
         store.refresh_migration_root(anchor)?;
         if outcome != PinOutcome::Unchanged {
             store.observe_custody_publication_commit();
-            registry.apply_custody_account(anchor.clone(), state)?;
+            self.install_committed_custody(anchor, state, expected.as_ref())?;
         }
         Ok(offer)
+    }
+    fn install_committed_custody(
+        &self,
+        anchor: &str,
+        state: CustodyAccountState,
+        expected: Option<&CustodyAccountState>,
+    ) -> Result<(), NodeCoreError> {
+        let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &mut control.mvp1_identities;
+        let current = registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
+            publication: publication.clone(),
+            pins: registry.custody.pins_for(anchor),
+        });
+        if current.as_ref() == expected || current.as_ref() == Some(&state) {
+            registry.apply_custody_account(anchor.to_owned(), state)?;
+        }
+        Ok(())
     }
 }
 

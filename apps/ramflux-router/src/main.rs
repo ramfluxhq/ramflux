@@ -23,6 +23,7 @@ mod pairing_mesh;
 mod retention;
 mod router_engine;
 mod router_runtime;
+mod send_authority;
 mod serve;
 mod startup;
 
@@ -86,6 +87,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         }
         let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
         let (router, store) = startup::load(redb_path)?;
+        send_authority::configure(&config, &store)?;
         router.set_local_home_node_id(Some(config.node_id.clone()));
         if let Some(signer) = ramflux_node_core::node_service_signing_key_from_config(&config)? {
             router.set_node_franking_public_key(Some(signer.public_key_base64url().to_owned()));

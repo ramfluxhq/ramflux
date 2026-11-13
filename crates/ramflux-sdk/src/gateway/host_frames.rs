@@ -271,6 +271,23 @@ impl GatewaySessionEngine {
                 if let GatewayServerFrame::Deliver { entry } = frame {
                     self.buffer_delivery(entry.clone());
                 }
+                if let GatewayServerFrame::CallResolved {
+                    context,
+                    state,
+                    media_allowed,
+                    wake_resolved,
+                } = frame
+                    && context.session_id == self.session.session_id
+                    && self.session.call_session_generation.as_ref()
+                        == Some(&context.session_generation)
+                {
+                    self.pending_calls.observe(ramflux_protocol::CallResolution {
+                        context: context.clone(),
+                        state: *state,
+                        media_allowed: *media_allowed,
+                        wake_resolved: *wake_resolved,
+                    });
+                }
                 if let Some(host) = &self.host {
                     #[cfg(test)]
                     host.record_dispatch();

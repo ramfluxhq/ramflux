@@ -136,6 +136,7 @@ async fn invite(
         invited,
         now,
     )?;
+    call.media_held = true;
     for target in call.invited.clone() {
         let key = manifest
             .devices

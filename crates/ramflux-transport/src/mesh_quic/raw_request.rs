@@ -20,6 +20,8 @@ pub struct MeshQuicRawPost<'a, T> {
     pub value: &'a T,
     pub deadline: tokio::time::Instant,
     pub admission: tokio::sync::OwnedSemaphorePermit,
+    pub expected_peer_spiffe: Option<&'a str>,
+    pub max_response_frame_bytes: usize,
 }
 
 pub(super) struct RawRequestControl {
@@ -30,6 +32,49 @@ pub(super) struct RawRequestControl {
 
 fn deadline_error() -> TransportError {
     TransportError::Quic("mesh request deadline exceeded".into())
+}
+
+pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
+    post: MeshQuicRawPost<'_, T>,
+) -> Result<Vec<u8>, TransportError> {
+    let remaining = post.deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(deadline_error());
+    }
+    let (response, receiver) = std::sync::mpsc::sync_channel(1);
+    let (completion, _finished) = tokio::sync::oneshot::channel();
+    mesh_quic_client_runtime()
+        .jobs
+        .send(MeshQuicClientJob {
+            request: MeshQuicClientRequestJob {
+                endpoint: post.endpoint.into(),
+                server_name: post.server_name.into(),
+                tls: post.tls.clone(),
+                peer_ca_pems: post.peer_ca_pems.to_vec(),
+                request: MeshQuicClientRequestPayload::RawJson(
+                    GatewayQuicRequest {
+                        method: "POST".into(),
+                        path: post.path.into(),
+                        body: serde_json::to_value(post.value)?,
+                    },
+                    post.max_response_frame_bytes,
+                ),
+                expected_gateway_instance: None,
+                expected_peer_spiffe: post.expected_peer_spiffe.map(str::to_owned),
+                enqueued_at: Instant::now(),
+            },
+            response: MeshQuicClientResponse::BoundedSync(response),
+            raw: Some(RawRequestControl {
+                deadline: post.deadline,
+                admission: post.admission,
+                completion,
+            }),
+        })
+        .map_err(|_| TransportError::Quic("mesh QUIC runtime stopped".into()))?;
+    match receiver.recv_timeout(remaining).map_err(|_| deadline_error())?? {
+        MeshQuicClientResponsePayload::RawJson(bytes) => Ok(bytes),
+        _ => Err(crate::quic_errors::wire("unexpected raw mesh response kind")),
+    }
 }
 
 /// Return the original mesh response frame, without decoding its JSON body.
@@ -55,12 +100,16 @@ pub async fn mesh_quic_post_raw_with_peer_ca_pems_async<T: serde::Serialize>(
                 server_name: post.server_name.into(),
                 tls: post.tls.clone(),
                 peer_ca_pems: post.peer_ca_pems.to_vec(),
-                request: MeshQuicClientRequestPayload::RawJson(GatewayQuicRequest {
-                    method: "POST".into(),
-                    path: post.path.into(),
-                    body: serde_json::to_value(post.value)?,
-                }),
+                request: MeshQuicClientRequestPayload::RawJson(
+                    GatewayQuicRequest {
+                        method: "POST".into(),
+                        path: post.path.into(),
+                        body: serde_json::to_value(post.value)?,
+                    },
+                    post.max_response_frame_bytes,
+                ),
                 expected_gateway_instance: None,
+                expected_peer_spiffe: post.expected_peer_spiffe.map(str::to_owned),
                 enqueued_at: Instant::now(),
             },
             response: MeshQuicClientResponse::Async(response),

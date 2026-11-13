@@ -126,6 +126,7 @@ fn case(kind: &str) -> (n::SessionPushServerFrame, S) {
             F::SessionEstablished {
                 session: n::SessionPushEstablishedFrame {
                     session: n::GatewaySessionEstablishedFrame {
+                        call_session_generation: None,
                         session_id: "sess-1".into(),
                         gateway_id: "gw-1".into(),
                         accepted_cursor: Some(node_cursor(41)),

@@ -304,6 +304,16 @@ fn own_payloads(
     }
     Ok((vec![body.to_vec()], original))
 }
+/// Optional envelope id for a call-intent retry. Other callers leave it empty.
+pub(in crate::bus) struct AssignedSeal<'a> {
+    pub conversation: &'a str,
+    pub body: &'a [u8],
+    pub kind: crate::client::routed::Route,
+    pub envelope_id: Option<&'a str>,
+    /// Original start time. `None` stamps the envelope with the current clock.
+    pub created_at: Option<i64>,
+}
+
 pub(in crate::bus) async fn seal(
     account: &LocalBusAccountState,
     engine: &mut impl GatewaySessionAccess,
@@ -312,7 +322,28 @@ pub(in crate::bus) async fn seal(
     body: &[u8],
     kind: crate::client::routed::Route,
 ) -> Result<SealedDelivery, SdkError> {
-    let id = crate::new_surface_message_id()?;
+    seal_assigned(
+        account,
+        engine,
+        target,
+        AssignedSeal { conversation, body, kind, envelope_id: None, created_at: None },
+    )
+    .await
+}
+
+pub(in crate::bus) async fn seal_assigned(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    target: &Target,
+    assigned: AssignedSeal<'_>,
+) -> Result<SealedDelivery, SdkError> {
+    let id = match assigned.envelope_id {
+        Some(id) => id.to_owned(),
+        None => crate::new_surface_message_id()?,
+    };
+    let conversation = assigned.conversation;
+    let body = assigned.body;
+    let kind = assigned.kind;
     let mut message = GatewayDirectMessage {
         conversation_id: conversation.into(),
         message_id: id.clone(),
@@ -335,7 +366,7 @@ pub(in crate::bus) async fn seal(
         recipient_principal_commitment: Some(target.identity.root_commitment().into()),
         target_delivery_id: target.delivery.clone(),
         encrypted_body: Vec::new(),
-        created_at: now_unix_timestamp(),
+        created_at: assigned.created_at.unwrap_or_else(now_unix_timestamp),
         ttl: account.client.content_ttl()?,
     };
     let sealed = if let Some(federation) = &target.federation {

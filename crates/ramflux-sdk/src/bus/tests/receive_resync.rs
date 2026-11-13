@@ -21,6 +21,7 @@ mod work;
 // Isolated recovery of 266 entries is ~24 s; two of them in parallel is ~36 s.
 // A loaded `cargo test --lib bus` pool stretched one past 240 s with no 10 s
 // silence panic. Durable cases take turns so they do not double-load SQL.
+// A loaded miss is reported. This cap is not raised to hide it.
 const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(360);
 const DURABLE_RECOVERY_WATCHDOG: Duration = Duration::from_secs(420);
 static DURABLE_TURN: AtomicU64 = AtomicU64::new(0);

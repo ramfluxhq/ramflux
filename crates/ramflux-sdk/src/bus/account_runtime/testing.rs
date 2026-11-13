@@ -32,6 +32,11 @@ pub struct AccountSessionFixture {
     pub ephemeral: bool,
 }
 
+pub(super) struct FixtureCapabilities {
+    pub incarnation: Option<String>,
+    pub ephemeral: bool,
+}
+
 impl AccountSessionHarness {
     fn fixture_client(
         index: &AccountIndex,
@@ -59,7 +64,12 @@ impl AccountSessionHarness {
             None,
         )?;
         let mut manifest = super::testing_authority::manifest(&client)?;
-        manifest.devices[0].target_delivery_id.clone_from(&config.target_delivery_id);
+        manifest
+            .devices
+            .first_mut()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .target_delivery_id
+            .clone_from(&config.target_delivery_id);
         client.persist_identity_directory(&manifest)?;
         // The transport begins after authentication; initialize the account-side receive
         // epoch with the same operation used by production install_connection.
@@ -81,9 +91,29 @@ impl AccountSessionHarness {
             incarnation,
             ephemeral,
         } = fixture;
-        let id = db.local_account_id.clone();
-        let root = index.root().to_path_buf();
         let client = Self::fixture_client(&index, db, identity, &config, incarnation.as_deref())?;
+        Self::attach_initialized(
+            index,
+            client,
+            config,
+            session,
+            stream,
+            FixtureCapabilities { incarnation, ephemeral },
+        )
+        .await
+    }
+
+    pub(super) async fn attach_initialized(
+        index: AccountIndex,
+        client: RamfluxClient,
+        config: GatewaySessionConfig,
+        session: GatewaySessionState,
+        stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
+        capabilities: FixtureCapabilities,
+    ) -> Result<Self, SdkError> {
+        let FixtureCapabilities { incarnation, ephemeral } = capabilities;
+        let id = client.account_db()?.local_account_id.clone();
+        let root = index.root().to_path_buf();
         let principal = client.surface_local_root_commitment()?;
         let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), stream);
         engine.session = session;
@@ -153,13 +183,20 @@ impl AccountSessionHarness {
         runtime.start_connection()?;
         let mut harness = Self { runtime, event_router };
         let handle = harness.handle()?;
-        harness.drive(handle.require_live(Duration::from_secs(60))).await?;
+        harness.drive(handle.require_live(Duration::from_secs(10))).await.map_err(|error| {
+            SdkError::GatewaySessionRejected(format!("fixture live admission: {error:?}"))
+        })?;
         harness
             .drive(async {
-                while handle.catch_ups_total() == 0 {
-                    tokio::task::yield_now().await;
-                }
-                Ok(())
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while handle.catch_ups_total() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    SdkError::GatewaySessionRejected("fixture initial catch-up deadline".into())
+                })
             })
             .await?;
         Ok(harness)
@@ -208,6 +245,164 @@ impl AccountSessionHarness {
         self.drive(client.submit_ephemeral(envelope)).await
     }
 
+    /// Stage two independently owned calls; delivery uses the ordinary background courier.
+    /// # Errors
+    /// Refuses invalid native peer authority or account state.
+    pub fn stage_calls(&mut self, manifest: serde_json::Value) -> Result<Vec<String>, SdkError> {
+        let manifest: crate::SdkDeviceManifestResponse = serde_json::from_value(manifest)?;
+        let account = self
+            .runtime
+            .state
+            .accounts
+            .get_mut(&self.runtime.id)
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        account.client.persist_fetched_identity_directory(&manifest)?;
+        account.client.establish_friend_link(
+            "calls-fixture",
+            &account.principal_commitment,
+            &manifest.principal_commitment,
+        )?;
+        let device = manifest.devices.first().ok_or(SdkError::IdentityRootMissing)?;
+        let peer = ramflux_protocol::CallEndpoint {
+            principal_id: manifest.principal_id.clone(),
+            device_id: device.device_id.clone(),
+            root_public_key: manifest.root_public_key.clone(),
+        };
+        let mut ids = Vec::new();
+        for seed in [91u8, 92] {
+            let id = ramflux_protocol::encode_base64url([seed; 16]);
+            let thread = format!("call-thread-{seed}");
+            account.client.account_db()?.persist_client_record("conversation",&thread,&serde_json::json!({"kind":"direct","group_id":null,"participants":[account.gateway_config.principal_id,manifest.principal_id]}))?;
+            let mut call = crate::client::call::state::LiveCall::outgoing(
+                id.clone(),
+                thread,
+                account.client.call_local_endpoint()?,
+                vec![peer.clone()],
+                crate::time::now_unix_timestamp(),
+            )?;
+            call.pin_peer(peer.clone(), device.branch_public_key.clone())?;
+            call.media_held = true;
+            account.client.persist_call_row(&call.row)?;
+            account.client.voice_calls.insert(id.clone(), call);
+            ids.push(id);
+        }
+        self.handle()?.wake_couriers();
+        Ok(ids)
+    }
+
+    /// Request an owner action on the actual `LiveCall`, delivered by its production courier.
+    /// # Errors
+    /// Refuses absent calls or state-machine-invalid owner actions.
+    pub fn call_action(&mut self, id: &str, action: &str) -> Result<(), SdkError> {
+        let account = self
+            .runtime
+            .state
+            .accounts
+            .get_mut(&self.runtime.id)
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        let call = account.client.voice_calls.get_mut(id).ok_or(SdkError::NetworkingPending)?;
+        let now = crate::time::now_unix_timestamp();
+        match action {
+            "answer" => call.answer(now)?,
+            "reject" => call.end(true, now)?,
+            "end" => call.end(false, now)?,
+            _ => return Err(SdkError::NetworkingPending),
+        }
+        let row = call.row.clone();
+        account.client.persist_call_row(&row)?;
+        self.handle()?.wake_couriers();
+        Ok(())
+    }
+
+    /// Observe an incoming call installed by the actual receive writer.
+    /// # Errors
+    /// Refuses a disconnected writer or the bounded receive deadline.
+    pub async fn wait_call_present(&mut self, id: &str) -> Result<(), SdkError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if self
+                .runtime
+                .state
+                .accounts
+                .get(&self.runtime.id)
+                .is_some_and(|account| account.client.voice_calls.contains_key(id))
+            {
+                return Ok(());
+            }
+            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+                .await
+                .map_err(|_| SdkError::NetworkingPending)?
+                .ok_or(SdkError::GatewaySessionNotEstablished)?;
+            Box::pin(self.runtime.apply_connection_work(work)).await?;
+        }
+    }
+
+    /// Snapshot media permission on the actual writer-owned calls.
+    /// # Errors
+    /// Refuses missing account or call state.
+    pub fn call_media(&self, id: &str) -> Result<bool, SdkError> {
+        let call = self
+            .runtime
+            .state
+            .accounts
+            .get(&self.runtime.id)
+            .and_then(|account| account.client.voice_calls.get(id))
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        Ok(!call.media_held && call.row.state != "ended")
+    }
+
+    /// Last production courier error; this observer never changes call permission.
+    #[must_use]
+    pub fn call_error(&self, id: &str) -> Option<&str> {
+        self.runtime
+            .state
+            .accounts
+            .get(&self.runtime.id)
+            .and_then(|account| account.client.voice_calls.get(id))
+            .and_then(|call| call.last_control_error.as_deref())
+    }
+
+    /// Pump the real writer until a bounded test observer sees the expected call permission.
+    /// # Errors
+    /// Refuses a disconnected writer or a ten-second observation deadline.
+    pub async fn wait_call_media(&mut self, id: &str, expected: bool) -> Result<(), SdkError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.call_media(id)? == expected {
+                return Ok(());
+            }
+            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+                .await
+                .map_err(|_| SdkError::NetworkingPending)?
+                .ok_or(SdkError::GatewaySessionNotEstablished)?;
+            Box::pin(self.runtime.apply_connection_work(work)).await?;
+        }
+    }
+
+    /// Await a completed production courier attempt, including a held/refused decision.
+    /// # Errors
+    /// Missing calls, writer failures and the fifteen-second observation deadline refuse.
+    pub async fn wait_call_attempt(&mut self, id: &str) -> Result<(), SdkError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let call = self
+                .runtime
+                .state
+                .accounts
+                .get(&self.runtime.id)
+                .and_then(|account| account.client.voice_calls.get(id))
+                .ok_or(SdkError::AccountDbNotUnlocked)?;
+            if call.pending.is_empty() || call.retry_attempts > 0 {
+                return Ok(());
+            }
+            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+                .await
+                .map_err(|_| SdkError::NetworkingPending)?
+                .ok_or(SdkError::GatewaySessionNotEstablished)?;
+            Box::pin(self.runtime.apply_connection_work(work)).await?;
+        }
+    }
+
     /// Export the authenticated fixture account's public directory.
     /// # Errors
     /// Returns directory construction or serialization errors.
@@ -219,7 +414,12 @@ impl AccountSessionHarness {
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
         let mut manifest = super::testing_authority::manifest(&account.client)?;
-        manifest.devices[0].target_delivery_id.clone_from(&account.target_delivery_id);
+        manifest
+            .devices
+            .first_mut()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .target_delivery_id
+            .clone_from(&account.target_delivery_id);
         Ok(serde_json::to_value(manifest)?)
     }
 

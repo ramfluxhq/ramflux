@@ -143,6 +143,7 @@ mod tests {
         let root = ramflux_crypto::create_identity_root("principal", [51; 32]);
         let branch = ramflux_crypto::create_device_branch("principal", "device", 1, [52; 32]);
         let runtime = crate::GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,

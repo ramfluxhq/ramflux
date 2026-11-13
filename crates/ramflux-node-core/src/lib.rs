@@ -92,6 +92,7 @@ mod relay;
 mod replay_guard;
 mod retention;
 mod router;
+pub mod send_authority;
 pub use forwarded_delivery::*;
 mod router_abuse;
 mod router_lifecycle;

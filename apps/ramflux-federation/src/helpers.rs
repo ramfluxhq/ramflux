@@ -351,6 +351,7 @@ mod router_quic_tests {
         let mut endpoints = BTreeMap::new();
         endpoints.insert("router".to_owned(), router_endpoint.to_owned());
         ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: "node-router-a".to_owned(),
             service_id: "ramflux-federation".to_owned(),
             redb_path: ":memory:".to_owned(),

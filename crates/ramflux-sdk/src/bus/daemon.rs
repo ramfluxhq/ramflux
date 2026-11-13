@@ -208,7 +208,8 @@ async fn restore_local_bus_account_impl(
         gateway = gateway.with_tcp_gateway_addr(addr);
     }
     let stored_push = crate::bus::dispatch::device::stored_push_route(&client)?;
-    gateway.push_route = stored_push.registration;
+    gateway.push_routes = stored_push.routes;
+    gateway.push_route_clears = stored_push.clears;
     gateway.push_route_clear_pending = stored_push.clear_pending;
     // Next sequence = max(saved + 1, now in ms): a reset clock never reuses one.
     gateway.push_route_last_seq = crate::bus::dispatch::device::stored_push_route_seq(&client)?;

@@ -4,9 +4,9 @@
 //! Retire terminal wakes and provider diagnostics while preserving undelivered live work.
 use super::{
     NOTIFY_PROVIDER_ATTEMPT_TABLE, NOTIFY_QUEUE_ENTRY_TABLE, NOTIFY_QUEUE_KEY, NOTIFY_QUEUE_TABLE,
-    NOTIFY_ROUTE_TABLE, NodeCoreError, NotifyQueueState, NotifyQueueStatus, NotifyRedbStore,
-    ProviderPushAttempt, deserialize_notify_provider_attempt, deserialize_notify_queue_entry,
-    routes, serialize_notify_value,
+    NodeCoreError, NotifyQueueState, NotifyQueueStatus, NotifyRedbStore, ProviderPushAttempt,
+    deserialize_notify_bounded_snapshot, deserialize_notify_provider_attempt,
+    deserialize_notify_queue_entry, serialize_notify_value,
 };
 use redb::ReadableTable;
 use std::collections::BTreeMap;
@@ -97,37 +97,11 @@ impl NotifyRedbStore {
             }
         }
         {
-            let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
-            let mut updates = Vec::new();
-            for row in table.iter().map_err(error)? {
-                let (key, value) = row.map_err(error)?;
-                let mut values = routes::open(&self.route_key, key.value(), value.value())?;
-                let before = values.len();
-                values.retain(|route| route.expires_at > now);
-                if values.len() != before {
-                    removed += before - values.len();
-                    updates.push((key.value().to_owned(), values));
-                }
-            }
-            for (key, values) in updates {
-                if values.is_empty() {
-                    table.remove(key.as_str()).map_err(error)?;
-                } else {
-                    table
-                        .insert(
-                            key.as_str(),
-                            routes::seal(&self.route_key, &key, &values)?.as_slice(),
-                        )
-                        .map_err(error)?;
-                }
-            }
-        }
-        {
             let mut table = txn.open_table(NOTIFY_QUEUE_TABLE).map_err(error)?;
             let bytes =
                 table.get(NOTIFY_QUEUE_KEY).map_err(error)?.map(|value| value.value().to_vec());
             if let Some(bytes) = bytes {
-                let mut state: NotifyQueueState = serde_json::from_slice(&bytes).map_err(error)?;
+                let mut state = deserialize_notify_bounded_snapshot(&bytes)?;
                 removed += state.prune_retention(now);
                 table
                     .insert(NOTIFY_QUEUE_KEY, serialize_notify_value(&state)?.as_slice())
@@ -135,6 +109,7 @@ impl NotifyRedbStore {
             }
         }
         txn.commit().map_err(error)?;
+        removed += self.prune_expired_routes(now)?;
         self.prune_route_owners()?;
         removed += self.prune_route_fences(now)?;
         if let Some(shards) = &self.wal_shards {
@@ -142,6 +117,7 @@ impl NotifyRedbStore {
                 shard.store.prune_expired(now)?;
             }
         }
+        removed += self.prune_notification_authority(now)?;
         Ok(removed)
     }
 }

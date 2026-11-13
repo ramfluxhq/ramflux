@@ -71,6 +71,23 @@ impl SessionClient {
             self.generation,
         ))
     }
+    #[cfg(test)]
+    pub(crate) fn submit_correlated_call(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        extras: crate::gateway::engine::CallSubmitExtras,
+    ) -> GatewayCallFuture<'_, crate::gateway::call_resolution::CallSubmitOutcome> {
+        let deadline = self.deadline;
+        Box::pin(self.handle.call_generation(
+            move |engine| {
+                Box::pin(
+                    async move { engine.submit_correlated_call(envelope, extras, deadline).await },
+                )
+            },
+            self.deadline,
+            self.generation,
+        ))
+    }
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }

@@ -473,6 +473,10 @@ pub struct NotificationWake {
     pub delivery_class: NotificationDeliveryClass,
     pub priority: PushPriority,
     pub ttl: u32,
+    /// Effective absolute expiry in Unix seconds, fixed when the signed wake is admitted.
+    /// Provider deadlines use this value. It is never reconstructed from queue time.
+    #[serde(default)]
+    pub absolute_expires_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

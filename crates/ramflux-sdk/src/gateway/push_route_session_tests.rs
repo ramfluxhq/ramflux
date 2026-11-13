@@ -138,13 +138,16 @@ fn engine_with_stray(
     })
     .with_owned_device(&root, branch)
     .expect("owned device");
-    config.push_route = Some(GatewayPushRouteRegistration {
-        provider: GatewayPushProvider::WebPush,
-        token: "slow-token".into(),
-        endpoint: Some("https://push.example/sub".into()),
-        webpush_p256dh: Some("p256dh".into()),
-        webpush_auth: Some("auth".into()),
-    });
+    config.push_routes.insert(
+        GatewayPushProvider::WebPush,
+        GatewayPushRouteRegistration {
+            provider: GatewayPushProvider::WebPush,
+            token: "slow-token".into(),
+            endpoint: Some("https://push.example/sub".into()),
+            webpush_p256dh: Some("p256dh".into()),
+            webpush_auth: Some("auth".into()),
+        },
+    );
     let registrations = Arc::new(Mutex::new(0));
     let gateway = SlowPushGateway {
         outbox: VecDeque::new(),
@@ -202,7 +205,7 @@ async fn refused_registration_is_not_resent_on_every_liveness_check() {
 #[tokio::test]
 async fn a_drain_during_push_route_set_is_kept_for_the_next_reader() {
     let (mut engine, _registrations) = engine_with(false, None, true);
-    let registration = engine.config.push_route.clone();
+    let registration = engine.config.push_routes.get(&GatewayPushProvider::WebPush).cloned();
     assert!(engine.set_push_route(registration).await.is_err(), "the drain must end the wait");
     let error = engine.heartbeat().await.expect_err("the drain is delivered, not dropped");
     assert!(format!("{error:?}").contains("Drain"), "{error:?}");
@@ -211,7 +214,7 @@ async fn a_drain_during_push_route_set_is_kept_for_the_next_reader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stray_frame_during_push_route_set_does_not_spin_and_is_kept() {
     let (mut engine, _registrations) = engine_with_stray(false, None, false, true);
-    let registration = engine.config.push_route.clone();
+    let registration = engine.config.push_routes.get(&GatewayPushProvider::WebPush).cloned();
     // Run the wait on its own task: a busy loop would pin that worker, but this timer
     // still fires on the other one.
     let task = tokio::spawn(async move {

@@ -28,13 +28,13 @@ fn notification_policy_uses_six_canonical_delivery_classes() {
         ),
         (
             ramflux_protocol::NotificationDeliveryClass::CallWakeNotification,
-            60,
+            30,
             ramflux_protocol::PushPriority::High,
         ),
         (
             ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification,
-            60,
-            ramflux_protocol::PushPriority::High,
+            86_400,
+            ramflux_protocol::PushPriority::Normal,
         ),
     ];
 
@@ -110,6 +110,7 @@ fn provider_attempts_are_redacted() -> Result<(), Box<dyn std::error::Error>> {
             webpush_auth: None,
             registered_at: 1_760_000_000,
             expires_at: 1_760_010_000,
+            route_generation: 0,
         },
         credential: ProviderCredential::WebPush(WebPushProviderCredential {
             credential_id: "credential_1".to_owned(),
@@ -130,6 +131,10 @@ fn provider_attempts_are_redacted() -> Result<(), Box<dyn std::error::Error>> {
         push_alias_hash: "push_alias_hash".to_owned(),
         collapse_key_hash: "collapse_key_hash".to_owned(),
         action: NotifyDeliveryAction::Accept,
+        expires_at: 1_760_000_300,
+        admitted_unix: 1_760_000_000,
+        boot_id: 0,
+        owner_epoch: 0,
     };
 
     let attempt = redacted_provider_attempt(&entry, &prepared, true, None);

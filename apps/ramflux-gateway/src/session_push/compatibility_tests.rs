@@ -22,6 +22,7 @@ impl GatewaySessionFrameSink for RawSink {
 }
 fn session() -> ramflux_node_core::GatewaySessionEstablishedFrame {
     ramflux_node_core::GatewaySessionEstablishedFrame {
+        call_session_generation: None,
         session_id: "session".into(),
         gateway_id: "gateway".into(),
         accepted_cursor: None,

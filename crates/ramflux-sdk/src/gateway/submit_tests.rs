@@ -123,6 +123,64 @@ fn envelope() -> Result<ramflux_protocol::Envelope, SdkError> {
     }))?)
 }
 
+#[tokio::test(start_paused = true)]
+async fn call_resolution_is_bound_to_the_pending_operation() -> Result<(), SdkError> {
+    let (mut engine, _submissions) = engine(Reply::ForwardAck)?;
+    let context = ramflux_protocol::CallSubmitContext {
+        version: 1,
+        call_ref: ramflux_protocol::encode_base64url([1_u8; 16]),
+        start_digest: ramflux_protocol::encode_base64url([2_u8; 32]),
+        request_id: "request-A".into(),
+        envelope_id: "envelope-A".into(),
+        session_id: engine.session.session_id.clone(),
+        session_generation: ramflux_protocol::encode_base64url([3_u8; 32]),
+    };
+    engine.session.call_session_generation = Some(context.session_generation.clone());
+    engine.pending_calls.install(
+        context.clone(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+    )?;
+    let mut wrong = context.clone();
+    wrong.request_id = "request-B".into();
+    for correlated in [wrong, context.clone()] {
+        let expected = correlated == context;
+        engine.dispatch_frame(
+            &GatewayServerFrame::CallResolved {
+                context: correlated,
+                state: ramflux_protocol::CallResolutionState::Answered,
+                media_allowed: true,
+                wake_resolved: true,
+            },
+            None,
+        )?;
+        assert_eq!(
+            engine.pending_calls.decision(&context)?.is_some(),
+            expected,
+            "a foreign decision released call A, or its matching decision was lost"
+        );
+    }
+    assert!(engine.pending_calls.decision(&context)?.is_some(), "matching decision was lost");
+    engine.dispatch_frame(
+        &GatewayServerFrame::CallResolved {
+            context: context.clone(),
+            state: ramflux_protocol::CallResolutionState::Cancelled,
+            media_allowed: false,
+            wake_resolved: true,
+        },
+        None,
+    )?;
+    assert!(
+        engine.pending_calls.decision(&context).is_err(),
+        "contradictory decision must stay held"
+    );
+    engine.pending_calls.retire(&context);
+    assert!(
+        engine.pending_calls.decision(&context).is_err(),
+        "completed operation was not retired"
+    );
+    Ok(())
+}
+
 #[test]
 fn stored_inbox_entries_without_forwarded_marker_read_unchanged()
 -> Result<(), Box<dyn std::error::Error>> {

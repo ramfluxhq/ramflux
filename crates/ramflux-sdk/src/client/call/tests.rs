@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! State, replay and device-selection regressions independent of transport timing.
-use super::state::LiveCall;
 use super::*;
+use crate::client::call::state::LiveCall;
 use ramflux_protocol::{CallAction, VoiceAllocation, VoiceCallFailureReason};
 fn endpoint(principal: &str, device: &str) -> CallEndpoint {
     CallEndpoint {
@@ -401,3 +401,6 @@ fn refused_caller_without_hangup_fails_at_original_lease_expiry() -> Result<(), 
     assert!(!origin.expire_media(201)?);
     Ok(())
 }
+
+#[path = "native_tests.rs"]
+mod native;

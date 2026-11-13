@@ -7,6 +7,10 @@ pub enum NodeCoreError {
     GatewayStateReservedPath,
     #[error("itest_listener_non_loopback: test HTTP listeners require a loopback address")]
     ItestListenerNonLoopback,
+    #[error("notify_wake_state_reset_required")]
+    NotifyWakeStateResetRequired,
+    #[error(transparent)]
+    SendAuthority(crate::send_authority::SendAuthorityError),
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(

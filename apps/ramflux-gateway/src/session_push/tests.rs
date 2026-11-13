@@ -303,6 +303,7 @@ async fn unnegotiated_dispatch_and_legacy_establishment() -> anyhow::Result<()> 
     established(
         &mut wire,
         ramflux_node_core::GatewaySessionEstablishedFrame {
+            call_session_generation: None,
             session_id: "session".into(),
             gateway_id: "gateway".into(),
             accepted_cursor: None,

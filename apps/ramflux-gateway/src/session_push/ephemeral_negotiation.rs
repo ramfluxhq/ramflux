@@ -147,6 +147,7 @@ fn capabilities_of(frame: &Value) -> Option<&Value> {
 
 fn established_frame() -> ramflux_node_core::GatewaySessionEstablishedFrame {
     ramflux_node_core::GatewaySessionEstablishedFrame {
+        call_session_generation: None,
         session_id: "session".into(),
         gateway_id: GATEWAY.into(),
         accepted_cursor: None,

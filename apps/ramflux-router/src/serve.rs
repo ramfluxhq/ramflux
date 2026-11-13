@@ -882,14 +882,19 @@ pub(crate) async fn router_async_mesh_quic_connection_loop(
         let request_router = Arc::clone(&router);
         let peer = Arc::clone(&peer);
         tokio::spawn(async move {
-            let accepted =
-                match ramflux_transport::MeshQuicServer::read_wire_request_from_bi(stream).await {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        tracing::warn!(%error, "router async QUIC request frame read failed");
-                        return;
-                    }
-                };
+            let accepted = match if peer.service_id == "ramflux-notify" {
+                ramflux_transport::MeshQuicServer::read_control_request_from_bi(stream)
+                    .await
+                    .map(ramflux_transport::MeshQuicAcceptedWireRequest::Json)
+            } else {
+                ramflux_transport::MeshQuicServer::read_wire_request_from_bi(stream).await
+            } {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(%error, "router async QUIC request frame read failed");
+                    return;
+                }
+            };
             if let Err(error) =
                 handle_router_async_mesh_quic_request(accepted, request_router, peer.as_ref()).await
             {
@@ -1369,6 +1374,7 @@ mod tests {
         let mut allowed_service_ids = BTreeSet::new();
         allowed_service_ids.insert("ramflux-router".to_owned());
         ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: "test-node".to_owned(),
             service_id: "ramflux-router".to_owned(),
             redb_path: "test.redb".to_owned(),

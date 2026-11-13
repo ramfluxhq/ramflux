@@ -32,7 +32,9 @@ fn a_fence_ahead_of_the_client_clock_expires_by_notify_time()
     // Ten minutes later by notify's clock the fence no longer applies, whatever its sequence.
     store.set_route_fence_for_test("skewed-delivery", ahead, now - PUSH_ROUTE_FENCE_SECONDS)?;
     assert!(store.register_authenticated_push_route_at(&owner, &route, Some(now * 1_000))?);
-    assert!(store.register_authenticated_push_route_at(&owner, &route, None)?);
+    // The expired fence no longer applies, but a missing sequence cannot pass the
+    // persistent high-water that registration just stored.
+    assert!(!store.register_authenticated_push_route_at(&owner, &route, None)?);
     Ok(())
 }
 

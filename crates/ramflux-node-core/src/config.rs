@@ -22,6 +22,8 @@ pub struct NodeServiceConfig {
     pub node_service_signing_seed_b64url: Option<RedactedString>,
     pub mesh: MeshConfig,
     #[serde(default)]
+    pub send_authority: Option<crate::send_authority::AuthorityConfiguration>,
+    #[serde(default)]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub signaling: Option<SignalingConfig>,

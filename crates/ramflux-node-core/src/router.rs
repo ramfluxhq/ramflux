@@ -587,7 +587,24 @@ impl RouterCore {
                 .map(str::to_owned),
         })
     }
+    /// Owner epoch for one delivery id. `None` when the device is missing or ambiguous.
+    #[must_use]
+    pub fn mvp1_owner_epoch_for_delivery(&self, target_delivery_id: &str) -> Option<u64> {
+        self.mvp1_owner_for_delivery(target_delivery_id).map(|owner| owner.device_epoch)
+    }
+
+    /// Owner epoch and storage key for one delivery id.
+    #[must_use]
+    pub fn mvp1_owner_for_delivery(
+        &self,
+        target_delivery_id: &str,
+    ) -> Option<crate::DeliveryOwnerEpoch> {
+        let control = lock_unpoisoned(&self.control);
+        control.mvp1_identities.authenticated_owner(target_delivery_id)
+    }
+
     /// Authenticate a root-qualified device selected at the wire boundary.
+    ///
     /// # Errors
     /// Rejects missing, ambiguous or unqualified root-bound device lookups.
     pub fn mvp1_device_auth_key_checked(
