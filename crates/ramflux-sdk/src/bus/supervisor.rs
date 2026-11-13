@@ -228,7 +228,7 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        let _credential_call =
+        let credential_call =
             super::credentials::call(&self.config.data_root, &request, connection)?;
         if request.method == "account.lock" {
             crate::custody::pairing::private_credential::cancel_call(
@@ -237,7 +237,7 @@ impl Supervisor {
             )?;
         }
         if request.method == "account.unlock"
-            && let Some(call) = &_credential_call
+            && let Some(call) = &credential_call
         {
             return self.private_unlock(&request, call).await;
         }

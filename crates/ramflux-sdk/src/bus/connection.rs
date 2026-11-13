@@ -174,11 +174,8 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     inflight.remove(&request.request_id);
                     continue;
                 }
-                let context = LocalBusConnectionState {
-                    credential_channel: connection.credential_channel.clone(),
-                    connection_id: id, outbound: outbound.clone(), topics: connection.topics.clone(),
-                    attended_account_id: connection.attended_account_id.clone(), pending_events: Vec::new(),
-                };
+                let mut context = connection.clone();
+                context.pending_events.clear();
                 requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
             }
             Some(result) = requests.join_next(), if !requests.is_empty() => {

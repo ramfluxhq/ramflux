@@ -9,6 +9,9 @@ use std::path::PathBuf;
 pub(crate) struct PairingCommand {
     #[arg(long)]
     pub(crate) account: String,
+    /// Write the seven SAS names to a new private file when no terminal is available.
+    #[arg(long, global = true)]
+    pub(crate) sas_out: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) action: PairingAction,
 }
@@ -48,6 +51,12 @@ pub(crate) enum PairingAction {
         transcript_hash: String,
         #[arg(long, action = clap::ArgAction::Set, required = true)]
         matches: bool,
+        /// Private SAS file produced by the other device, never a cached local affirmation.
+        #[arg(long)]
+        peer_sas_file: Option<PathBuf>,
+        /// Attest this file came from the physically held peer over a trusted out-of-band path.
+        #[arg(long, requires = "peer_sas_file")]
+        peer_sas_attended: bool,
     },
     Approve {
         #[command(flatten)]

@@ -617,7 +617,7 @@ impl PairingActor {
             c.emoji = None;
             Ok(())
         })?;
-        self.transfer_status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        self.status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
             schema: "ramflux.pairing.StatusRequest.v2".into(),
             version: 2,
             operation_id: request.operation_id.clone(),

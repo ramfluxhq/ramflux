@@ -35,7 +35,7 @@ impl OwnedPath {
             Ok(metadata)
                 if metadata.is_file()
                     && metadata.uid() == rustix::process::geteuid().as_raw()
-                    && metadata.permissions().mode() & 0o077 == 0
+                    && metadata.permissions().mode().trailing_zeros() >= 6
                     && metadata.dev() == self.device
                     && metadata.ino() == self.inode =>
             {
@@ -51,14 +51,17 @@ impl OwnedPath {
 #[serde(deny_unknown_fields)]
 struct Entry {
     operation: String,
-    invitation: OwnedPath,
-    sidecar: OwnedPath,
+    account: String,
+    role: String,
+    invitation: Option<OwnedPath>,
+    sidecar: Option<OwnedPath>,
+    sas: Vec<OwnedPath>,
 }
 pub(super) struct Registry {
     directory: PathBuf,
     _lock: File,
 }
-fn private_file(path: &Path) -> Result<File, RfError> {
+pub(super) fn private_file(path: &Path) -> Result<File, RfError> {
     let fd = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
@@ -122,7 +125,11 @@ impl Registry {
         &self,
         operation: &str,
         output: &InvitationOutput,
+        account: &str,
     ) -> Result<(), RfError> {
+        if account.is_empty() || account.len() > 128 {
+            return Err(invalid());
+        }
         let path = self.path(operation)?;
         if std::fs::read_dir(&self.directory)?.take(LIMIT + 2).count() > LIMIT {
             return Err(invalid());
@@ -133,8 +140,11 @@ impl Registry {
         let mut entry = InvitationOutput::create(path)?;
         let value = Entry {
             operation: operation.into(),
-            invitation: OwnedPath::new(&output.path, &output.file)?,
-            sidecar: OwnedPath::new(&sidecar.path, &sidecar.file)?,
+            account: account.into(),
+            role: "initiator".into(),
+            invitation: Some(OwnedPath::new(&output.path, &output.file)?),
+            sidecar: Some(OwnedPath::new(&sidecar.path, &sidecar.file)?),
+            sas: Vec::new(),
         };
         let bytes = serde_json::to_vec(&value)?;
         if u64::try_from(bytes.len()).map_err(|_| invalid())? > MAX_ENTRY {
@@ -149,12 +159,11 @@ impl Registry {
         File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
-    pub(super) fn cleanup(&self, operation: &str) -> Result<(), RfError> {
-        let path = self.path(operation)?;
-        let file = match private_file(&path) {
+    fn load(&self, operation: &str) -> Result<Option<Entry>, RfError> {
+        let file = match private_file(&self.path(operation)?) {
             Ok(file) => file,
             Err(RfError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
@@ -164,28 +173,105 @@ impl Registry {
             return Err(invalid());
         }
         let entry: Entry = serde_json::from_slice(&bytes)?;
-        if entry.operation != operation {
+        if entry.operation != operation
+            || entry.sas.len() > 8
+            || entry.invitation.is_some() != entry.sidecar.is_some()
+        {
             return Err(invalid());
         }
-        // Check both identities before deleting either path, including a replaced sidecar.
-        let invitation_exists = entry.invitation.exists()?;
-        let sidecar_exists = entry.sidecar.exists()?;
-        if sidecar_exists {
-            let mut sidecar = String::new();
-            private_file(&entry.sidecar.path)?.take(128).read_to_string(&mut sidecar)?;
-            if sidecar != operation {
+        Ok(Some(entry))
+    }
+    pub(super) fn record_role(
+        &self,
+        operation: &str,
+        account: &str,
+        role: &str,
+    ) -> Result<(), RfError> {
+        if account.is_empty() || account.len() > 128 || !matches!(role, "initiator" | "responder") {
+            return Err(invalid());
+        }
+        if let Some(entry) = self.load(operation)? {
+            if entry.account != account || entry.role != role {
+                return Err(invalid());
+            }
+            return Ok(());
+        }
+        if std::fs::read_dir(&self.directory)?.take(LIMIT + 2).count() > LIMIT {
+            return Err(invalid());
+        }
+        self.save(&Entry {
+            operation: operation.into(),
+            account: account.into(),
+            role: role.into(),
+            invitation: None,
+            sidecar: None,
+            sas: Vec::new(),
+        })
+    }
+    pub(super) fn role(&self, operation: &str, account: &str) -> Result<String, RfError> {
+        let entry = self.load(operation)?.ok_or_else(invalid)?;
+        if entry.account != account || !matches!(entry.role.as_str(), "initiator" | "responder") {
+            return Err(invalid());
+        }
+        Ok(entry.role)
+    }
+    pub(super) fn register_sas(
+        &self,
+        operation: &str,
+        output: &InvitationOutput,
+    ) -> Result<(), RfError> {
+        let mut entry = self.load(operation)?.ok_or_else(invalid)?;
+        if entry.sas.len() >= 8 {
+            return Err(invalid());
+        }
+        entry.sas.push(OwnedPath::new(&output.path, &output.file)?);
+        self.save(&entry)
+    }
+    fn save(&self, entry: &Entry) -> Result<(), RfError> {
+        let operation = &entry.operation;
+        let bytes = serde_json::to_vec(&entry)?;
+        if u64::try_from(bytes.len()).map_err(|_| invalid())? > MAX_ENTRY {
+            return Err(invalid());
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid())?
+            .as_nanos();
+        let mut temporary = InvitationOutput::create(
+            self.directory.join(format!(".{operation}-{}-{nonce}.tmp", std::process::id())),
+        )?;
+        temporary.commit(&bytes)?;
+        temporary.keep = false;
+        std::fs::rename(&temporary.path, self.path(operation)?)?;
+        File::open(&self.directory)?.sync_all()?;
+        Ok(())
+    }
+    pub(super) fn cleanup(&self, operation: &str) -> Result<(), RfError> {
+        let Some(entry) = self.load(operation)? else {
+            return Ok(());
+        };
+        let paths = entry.invitation.iter().chain(entry.sidecar.iter()).chain(entry.sas.iter());
+        // Validate every original identity before deleting any registered path.
+        let mut owned = Vec::new();
+        for path in paths {
+            if path.exists()? {
+                owned.push(path);
+            }
+        }
+        if let Some(sidecar) = &entry.sidecar
+            && sidecar.exists()?
+        {
+            let mut value = String::new();
+            private_file(&sidecar.path)?.take(128).read_to_string(&mut value)?;
+            if value != operation {
                 return Err(invalid());
             }
         }
-        for (owned, exists) in
-            [(&entry.invitation, invitation_exists), (&entry.sidecar, sidecar_exists)]
-        {
-            if exists {
-                std::fs::remove_file(&owned.path)?;
-                File::open(owned.path.parent().ok_or_else(invalid)?)?.sync_all()?;
-            }
+        for path in owned {
+            std::fs::remove_file(&path.path)?;
+            File::open(path.path.parent().ok_or_else(invalid)?)?.sync_all()?;
         }
-        std::fs::remove_file(path)?;
+        std::fs::remove_file(self.path(operation)?)?;
         File::open(&self.directory)?.sync_all()?;
         Ok(())
     }

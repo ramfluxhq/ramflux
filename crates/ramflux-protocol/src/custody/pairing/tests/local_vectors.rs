@@ -216,6 +216,7 @@ fn local_result_vectors(all: &Value) -> TestResult {
             "pair.begin",
             "transfer.begin",
             "pair.join",
+            "transfer.join",
             "pair.confirm",
             "pair.approve",
             "pair.cancel",

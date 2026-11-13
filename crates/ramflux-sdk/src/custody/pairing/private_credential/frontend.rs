@@ -68,10 +68,12 @@ impl PairingBusClient {
         Ok(response.body)
     }
 }
-struct Input(Arc<dyn LocalCredentialProvider>);
+struct Input(Option<Arc<dyn LocalCredentialProvider>>);
 impl Drop for Input {
     fn drop(&mut self) {
-        self.0.cancel();
+        if let Some(provider) = &self.0 {
+            provider.cancel();
+        }
     }
 }
 fn prompt(
@@ -130,7 +132,7 @@ pub(super) async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             let (generation, metadata) = prompt(request, &frame)?;
             prompted = true;
             let action = metadata.action.clone();
-            let _input = Input(provider.clone());
+            let mut pending_input = Input(Some(provider.clone()));
             let callback = provider.clone();
             let mut input = tokio::task::spawn_blocking(move || callback.provide(&metadata));
             let outcome = tokio::select! {
@@ -141,6 +143,9 @@ pub(super) async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(invalid());
                 }
             };
+            // The callback has completed; keep its reusable UI provider available for
+            // a later attended call. Only an interrupted callback receives cancel().
+            pending_input.0 = None;
             let reply = encode_reply(generation, &action, &outcome)?;
             drop(outcome);
             stream.write_all(&reply).await?;

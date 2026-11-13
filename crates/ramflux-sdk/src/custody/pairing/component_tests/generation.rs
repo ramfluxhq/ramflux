@@ -13,6 +13,7 @@ use crate::custody::{
 use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::{canonical_json_bytes, custody::CustodyAuthority, encode_base64url};
 use ramflux_storage::{FullPinnedReceiverBase, HeadRow};
+mod private_input;
 mod recipient_cancel;
 mod refresh;
 mod source_cancel;
@@ -148,8 +149,12 @@ async fn prepare_candidate(
     // the original local confirmation flags. This is not a process-restart fixture.
     rig.secondary.replace_full_confirmations_for_test((false, false))?;
     let prepared = rig.secondary.prepare_full_transfer(&request).await?;
+    prepared
+        .validate_method("transfer.prepare")
+        .map_err(|_| "test: prepare emitted an invalid local response arm")?;
     assert!(
-        matches!(prepared.outcome,ramflux_protocol::custody::pairing::local_dto::Outcome::FullStatus {value} if value.stage==ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Candidate)
+        matches!(prepared.outcome, ramflux_protocol::custody::pairing::local_dto::Outcome::Update {value} if value.phase=="prepared"),
+        "test: attended prepare did not return its prepared Update receipt"
     );
     let (publication, install) = rig.secondary.full_prepared_candidate_for_test()?;
     let head = rig

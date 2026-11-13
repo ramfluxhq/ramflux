@@ -19,21 +19,21 @@ use tokio::{
     sync::mpsc,
 };
 
-pub(super) struct ConnectionInput(Arc<PrivateCredentialChannel>);
+pub(crate) struct ConnectionInput(Arc<PrivateCredentialChannel>);
 impl Drop for ConnectionInput {
     fn drop(&mut self) {
         self.0.close();
     }
 }
 impl ConnectionInput {
-    pub(super) fn channel(&self) -> Arc<PrivateCredentialChannel> {
+    pub(crate) fn channel(&self) -> Arc<PrivateCredentialChannel> {
         self.0.clone()
     }
     pub(super) fn close(&self) {
         self.0.close();
     }
 }
-pub(super) fn connection(
+pub(crate) fn connection(
     root: PathBuf,
     id: u64,
     outbound: mpsc::Sender<LocalBusFrame>,
@@ -133,7 +133,7 @@ pub(super) async fn unlock_secret(
 }
 /// `None` denotes a private reply delivered straight to its same-connection callback.
 /// There is no generic decoded frame, trace/event or retry record for those bytes.
-pub(super) async fn read_frame<R: AsyncRead + Unpin>(
+pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     channel: &PrivateCredentialChannel,
     id: u64,
@@ -163,3 +163,7 @@ pub(super) async fn read_frame<R: AsyncRead + Unpin>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "credentials/contract_tests.rs"]
+pub(crate) mod contract_tests;
