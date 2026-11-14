@@ -1437,6 +1437,10 @@ impl PtySession {
         cursor = self.wait_until("Repeat local data passphrase (hidden):", cursor, deadline)?;
         self.write_line(passphrase)?;
         let _ = self.wait_until("\"account_id\"", cursor, deadline)?;
+        // Closing the ConPTY input while the child is still attached makes conhost
+        // deliver Ctrl+C, so Windows reports 0xC000013A after a successful print.
+        // The process exits on its own once the account JSON is written.
+        #[cfg(not(windows))]
         drop(self.stdin.take());
         let status = self.wait_exit(deadline)?;
         let buffer = lock_buf(&self.output).clone();
