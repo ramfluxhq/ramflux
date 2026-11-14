@@ -70,7 +70,7 @@ impl FullStreamWork {
         self.runtime.require_live()
     }
     pub(super) async fn flush_rebind(&mut self) -> Result<(), SdkError> {
-        if self.forward_started
+        if self.reverse_position_received
             && let Some(packet) = self.pending_rebind.take()
         {
             let encrypted = self.packet.seal_packet(&packet)?;
@@ -105,10 +105,6 @@ impl FullStreamWork {
                 bytes: SecretBase64::from_bytes(part),
             })?;
             self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
-            if self.role == PairingRole::Initiator {
-                self.forward_started = true;
-                self.flush_rebind().await?;
-            }
         }
         Ok(())
     }

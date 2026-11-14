@@ -366,7 +366,9 @@ mod tests {
             &rig.participant_a.account_id,
             crate::custody::network_now()?,
         )?;
-        let primary = account.group_primary(rig.participant_a.vault.as_ref())?;
+        let primary = account
+            .group_primary(rig.participant_a.vault.as_ref())
+            .map_err(|error| format!("test: actual source profile signer: {error}"))?;
         let mut body = account.record().body.clone();
         let (range, revision) = ramflux_protocol::custody::decode_epoch(body.device_set_epoch)?;
         body.device_set_epoch = ramflux_protocol::custody::encode_epoch(range, revision + 1)?;
@@ -947,6 +949,9 @@ mod tests {
         let mut current = None;
         for _ in 0..256 {
             step(&mut fixture).await?;
+            if !fixture.rig.primary.full_base_stream_started_for_test() {
+                continue;
+            }
             current = retained_current(&fixture)
                 .map_err(|error| format!("test: inspect retained CURRENT: {error}"))?;
             if current.is_some() {

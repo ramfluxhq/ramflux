@@ -15,6 +15,11 @@ pub(super) async fn enroll_during_stream(
     rig.participant_a.return_client(&mut rig.source.client)?;
     fixture.third = Some(result?);
     management.lock().await?;
+    // The separate attended enrollment held A's ordinary writer and advanced the
+    // relay clock beyond its ten-second idle window. Reconnect the retained DATA
+    // owners through fresh original-branch A3 instead of reusing expired tokens.
+    Box::pin(cold_resume(fixture)).await?;
+    let rig = &fixture.rig;
     let native = crate::custody::load_account(
         &rig.participant_a.root,
         &rig.participant_a.account_id,

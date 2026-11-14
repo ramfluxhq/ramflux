@@ -14,8 +14,7 @@ impl FullStreamWork {
         }
         let encrypted = self.packet.seal_packet(&DataPacket::Idle { last_verified: hash(own)? })?;
         self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
-        self.forward_started = true;
-        self.flush_rebind().await
+        Ok(())
     }
     pub(super) async fn finish_prepared_source(
         mut self,

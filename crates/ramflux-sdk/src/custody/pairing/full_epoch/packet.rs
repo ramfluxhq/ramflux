@@ -478,20 +478,18 @@ impl FullPacketEpoch {
                 role: self.role.as_str().into(),
                 token: self.token.as_ref().ok_or_else(wrong)?.clone(),
             };
-            let reply: PolledFull =
-                tokio::time::timeout(super::super::transport::REQUEST_DEADLINE, async {
-                    loop {
-                        self.channel()?;
-                        match relay.poll_full(origin, &request).await {
-                            Err(SdkError::PairingCode("Busy")) => {
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            }
-                            result => break result,
-                        }
-                    }
-                })
-                .await
-                .map_err(|_| SdkError::PairingCode("ResumeRequired"))??;
+            let reply = tokio::time::timeout(
+                super::super::transport::REQUEST_DEADLINE,
+                relay.poll_full(origin, &request),
+            )
+            .await
+            .map_err(|_| SdkError::PairingCode("ResumeRequired"))?;
+            let reply: PolledFull = match reply {
+                // The peer must be allowed to drain retained frames before another
+                // pre-body reservation fits. Busy changes no cipher or receipt state.
+                Err(SdkError::PairingCode("Busy")) => return Ok(None),
+                result => result?,
+            };
             self.channel()?;
             if let Some(packet) = &reply.packet {
                 self.peer(packet)?;

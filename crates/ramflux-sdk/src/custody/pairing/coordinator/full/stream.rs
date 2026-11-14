@@ -80,7 +80,7 @@ enum StreamResume {
 }
 struct FullStreamWork {
     role: PairingRole,
-    forward_started: bool,
+    reverse_position_received: bool,
     source_idle: bool,
     resume: StreamResume,
     idle_manifest: Option<SourceManifest>,
@@ -226,7 +226,7 @@ impl PairingActor {
         ));
         let work = FullStreamWork {
             role,
-            forward_started: false,
+            reverse_position_received: false,
             source_idle: state.source_idle,
             resume: if full.prepared_resume { StreamResume::Prepared } else { StreamResume::Data },
             idle_manifest: state.idle_manifest.clone(),

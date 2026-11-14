@@ -124,7 +124,8 @@ async fn prepared_retry() -> TestResult {
         &mut fixture.target_service,
         &fixture.target,
     )
-    .await?;
+    .await
+    .map_err(|error| format!("test: actual B prepare before identical retry: {error}"))?;
     let before =
         fixture.target.account_db()?.pairing_head()?.ok_or("test: real J3 head missing")?;
     fixture

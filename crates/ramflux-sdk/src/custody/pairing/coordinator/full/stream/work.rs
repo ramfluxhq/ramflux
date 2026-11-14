@@ -102,6 +102,9 @@ impl FullStreamWork {
         // The responder's first data object MUST be its actual restrictive manifest,
         // even for a new empty target. A receipt cannot replace that position.
         let reverse = self.receive_manifest().await?;
+        // The poll that obtained B's first manifest also acknowledges Ready. Keep
+        // A's second reserved body free until then so both endpoints can make progress.
+        self.reverse_position_received = true;
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
         self.io
             .retain_reverse_manifest(&reverse)
