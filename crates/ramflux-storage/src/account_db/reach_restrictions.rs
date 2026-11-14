@@ -65,9 +65,6 @@ pub(super) fn merge(connection: &Connection) -> Result<(), StorageError> {
     let mut records = BTreeMap::new();
     let mut bytes = 128_usize;
     for database in ["main", "incoming"] {
-        if database == "incoming" && !connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='runtime_actor_state')", [], |row| row.get::<_, bool>(0),
-        )? { continue; }
         if let Some(raw) = read(connection, database, KEY)? {
             let staged: Restrictions =
                 ramflux_protocol::contact_reach::decode(&raw, MAX_STATE_BYTES)?;

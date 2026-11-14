@@ -17,14 +17,6 @@ fn capacity() -> StorageError {
 
 /// Called inside the existing encrypted generation transaction; each body is bounded separately.
 pub(super) fn merge(connection: &Connection) -> Result<(), StorageError> {
-    let incoming_exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE name='runtime_actor_state')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !incoming_exists {
-        return Ok(());
-    }
     validate(connection, None)?;
     let legacy: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM incoming.runtime_actor_state WHERE state_kind='reach/provenance')", [], |row| row.get(0))?;
     if legacy {

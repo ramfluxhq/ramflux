@@ -57,6 +57,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+mod reach_clock;
 mod reach_proof_records;
 mod reach_provenance;
 mod reach_restrictions;
@@ -107,6 +108,7 @@ pub struct AccountDb {
     current_key: AccountDbKey,
     device_signer: Option<ramflux_crypto::DeviceBranch>,
     clock: AccountClock,
+    reach_clock: RefCell<Option<(std::time::Instant, u64)>>,
     object_retirement: object_retention::RetirementObserver,
     pub(crate) connection: Connection,
     erasure_authority: Option<Connection>,
@@ -155,6 +157,7 @@ impl AccountDb {
             current_key: key.clone(),
             device_signer: None,
             clock: AccountClock::real(),
+            reach_clock: RefCell::new(None),
             object_retirement: object_retention::RetirementObserver::default(),
             connection,
             erasure_authority: None,

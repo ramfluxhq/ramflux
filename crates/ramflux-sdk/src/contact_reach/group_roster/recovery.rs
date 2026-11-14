@@ -118,14 +118,8 @@ impl RamfluxClient {
         now: u64,
     ) -> Result<u64, SdkError> {
         let db = self.account_db()?;
+        let now = db.reach_fenced_now(now).map_err(super::super::provenance::store_error)?;
         db.write_transaction(|| {
-            let floor = db.client_record("reach", "roster-clock")?
-                .map(serde_json::from_value::<u64>).transpose()?.unwrap_or(0);
-            let now = now.max(floor);
-            if now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
-                return Err(pending());
-            }
-            db.persist_client_record("reach", "roster-clock", &serde_json::json!(now))?;
             let mut queue: Queue = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
             let expired = queue.active.as_ref().and_then(|intent| intent.operation.as_ref())
                 .is_some_and(|operation| matches!(operation, Operation::GroupRoster { roster, .. }

@@ -90,6 +90,7 @@ impl AccountDb {
             current_key: self.current_key.clone(),
             device_signer: self.device_signer.clone(),
             clock: self.clock.clone(),
+            reach_clock: RefCell::new(None),
             object_retirement: super::super::object_retention::RetirementObserver {
                 generations: std::sync::Arc::clone(&self.object_retirement.generations),
                 ..Default::default()

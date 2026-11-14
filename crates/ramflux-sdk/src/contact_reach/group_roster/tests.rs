@@ -25,6 +25,55 @@ fn cr_roster_queue_requires_explicit_current_context_fields() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cr_roster_refusal_cannot_roll_back_an_observed_command_expiry() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let (_, peer, _) = group_fixture().await?;
+        let now = crate::custody::network_now()?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let operation =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        peer.client.pause_reach_group_roster("roster-group")?;
+        let db = peer.client.account_db()?;
+        let before: Queue = db.load_actor_state(&key("roster-group"))?.ok_or("forked intent")?;
+        let observed = now.checked_add(301).ok_or("command expiry")?;
+        assert!(
+            matches!(
+                peer.client.prepare_reach_group_roster(
+                    peer.vault.as_ref(),
+                    "roster-group",
+                    observed
+                ),
+                Err(SdkError::InboundPending(_))
+            ),
+            "the fork must refuse expiry replacement inside its operation transaction"
+        );
+        assert!(
+            db.reach_fenced_now(now)? >= observed,
+            "the standalone UTC observation survives that operation's rollback"
+        );
+        assert!(
+            matches!(
+                peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now),
+                Err(SdkError::InboundPending(_))
+            ),
+            "rolling wall time back cannot return an expired signed roster for retry"
+        );
+        let after: Queue = db.load_actor_state(&key("roster-group"))?.ok_or("preserved intent")?;
+        assert_eq!(
+            ramflux_protocol::canonical_json_bytes(&after)?,
+            ramflux_protocol::canonical_json_bytes(&before)?,
+            "a refused repair preserves the exact signed intent and fork warning"
+        );
+        assert!(
+            after.active.as_ref().and_then(|intent| intent.operation.as_ref()) == Some(&operation),
+            "the failed repair neither replaces nor acknowledges the original signed operation"
+        );
+        Ok(())
+    })
+    .await?
+}
+
 fn advance(owner: &Fixture, change: GroupStateChange) -> TestResult<VerifiedGroupState> {
     let primary = owner
         .client
