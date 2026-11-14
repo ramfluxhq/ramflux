@@ -151,22 +151,22 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
                     continue;
                 }
-                let request = incoming.take()?;
+                let mut request = incoming.take()?;
                 if let Err(error) = super::requests::deadline(&request) {
-                    outbound.send(local_bus_error(&request,&error)).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
                     continue;
                 }
                 if request.kind != LocalBusFrameKind::Request {
-                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if !inflight.insert(request.request_id.clone()) {
-                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if subscription_method(&request.method) {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
-                        outbound.send(local_bus_error(&request,&error)).await.map_err(|_|closed())?;
+                        outbound.send(rejected_request(&mut request, &error)).await.map_err(|_|closed())?;
                     }
                     inflight.remove(&request.request_id);
                     continue;
@@ -282,6 +282,12 @@ pub(super) async fn configure_subscription(
     Ok(())
 }
 
+fn rejected_request(request: &mut LocalBusFrame, error: &SdkError) -> LocalBusFrame {
+    let response = local_bus_error(request, error);
+    super::secrets::wipe(&mut request.body);
+    response
+}
+
 fn closed() -> SdkError {
     SdkError::LocalBus("local bus connection closed".to_owned())
 }
@@ -324,9 +330,47 @@ async fn write_responses<W: AsyncWrite + Unpin>(
             }
             frame = receiver.recv() => frame,
         };
-        let Some(frame) = frame else {
+        let Some(mut frame) = frame else {
             break;
         };
+        if frame.frame.method == "search.query" && frame.frame.ok == Some(true) {
+            let encoded = (|| -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+                let completion = supervisor.resolve_search_completion(&frame.frame, id)?;
+                frame.frame.body = serde_json::to_value(completion.take()?)?;
+                let encoded = super::io::encode_local_bus_frame(&frame.frame);
+                super::secrets::wipe(&mut frame.frame.body);
+                let encoded = zeroize::Zeroizing::new(encoded?);
+                completion.check_current()?;
+                Ok(encoded)
+            })();
+            match encoded {
+                Ok(bytes) => {
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        super::io::write_encoded_local_bus_frame(&mut writer, &bytes),
+                    )
+                    .await
+                    .map_err(|_| closed())??;
+                }
+                Err(error) => {
+                    frame.frame = super::io::local_bus_error(&frame.frame, &error);
+                    write_local_bus_frame(&mut writer, &frame.frame).await?;
+                }
+            }
+            continue;
+        }
+        if crate::search::capability::is_method(&frame.frame.method) {
+            let encoded = super::io::encode_local_bus_frame(&frame.frame);
+            super::secrets::wipe(&mut frame.frame.body);
+            let encoded = zeroize::Zeroizing::new(encoded?);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                super::io::write_encoded_local_bus_frame(&mut writer, &encoded),
+            )
+            .await
+            .map_err(|_| closed())??;
+            continue;
+        }
         super::outbound::write(&mut writer, &frame).await?;
         if frame.frame.method == "daemon.stop" {
             supervisor.finish_stop_response(id, &frame.frame.request_id);

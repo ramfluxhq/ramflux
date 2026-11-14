@@ -13,6 +13,13 @@ pub(super) type AccountInitializer =
     Box<dyn FnOnce(AccountIndex) -> Result<LocalBusAccountState, SdkError> + Send>;
 
 pub(super) enum PrivateCommand {
+    SearchRebuild {
+        owner: u64,
+        job: String,
+        admission: crate::search::admission::Admission,
+        reset: bool,
+        reply: oneshot::Sender<Result<bool, SdkError>>,
+    },
     #[cfg(test)]
     HoldLocalMutation {
         entered: oneshot::Sender<tokio::time::Instant>,
@@ -231,6 +238,17 @@ impl AccountActor {
         response.await.map_err(|_| stopped())?
     }
 
+    pub(super) async fn search_rebuild_batch(
+        &self,
+        owner: u64,
+        job: String,
+        admission: crate::search::admission::Admission,
+        reset: bool,
+    ) -> Result<bool, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::SearchRebuild { owner, job, admission, reset, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
     pub(super) async fn capture_backup(
         &self,
     ) -> Result<super::backup_jobs::CapturedAccount, SdkError> {

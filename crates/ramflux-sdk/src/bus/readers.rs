@@ -8,6 +8,7 @@ use ramflux_crypto::RootQualifiedDeviceRef;
 use std::sync::{Arc, RwLock};
 use tokio::sync::oneshot;
 mod local;
+mod search;
 type ReaderIdentity = Arc<RwLock<Option<RootQualifiedDeviceRef>>>;
 #[cfg(test)]
 #[path = "readers_backup_tests.rs"]
@@ -19,6 +20,7 @@ mod deleted_tests;
 mod queue_tests;
 
 pub(super) enum ReadCommand {
+    Search(search::Work, oneshot::Sender<Result<serde_json::Value, SdkError>>),
     Request(Box<LocalBusFrame>, oneshot::Sender<Result<serde_json::Value, SdkError>>),
     MissingAttachments(oneshot::Sender<Result<super::backup_jobs::MissingAttachments, SdkError>>),
     Stop(oneshot::Sender<()>),
@@ -42,6 +44,7 @@ pub(crate) async fn test_account_reader_request(
 
 #[derive(Clone)]
 pub(super) struct AccountReaders {
+    search: Option<Arc<crate::search::LocalSearch>>,
     identity: ReaderIdentity,
     view: Arc<RwLock<Arc<local::AccountView>>>,
     senders: Vec<mpsc::Sender<ReadCommand>>,
@@ -80,9 +83,13 @@ impl AccountReaders {
         crate::client::contact_verification::migrate_legacy_contact_verifications(db)?;
         let identity = Arc::new(RwLock::new(device));
         let view = Arc::new(RwLock::new(Arc::new(local::AccountView::default())));
+        let search = ramflux_storage::local_search::SearchActivation::configured()
+            .ok()
+            .and_then(|activation| crate::search::LocalSearch::for_db(db, activation).ok());
         let mut senders = Vec::new();
         for _ in 0..2 {
             let reader = db.open_reader()?;
+            let search = search.clone();
             let identity = Arc::clone(&identity);
             let view = Arc::clone(&view);
             let (sender, mut receiver) = mpsc::channel::<ReadCommand>(64);
@@ -92,6 +99,18 @@ impl AccountReaders {
                     client.active_account_db = Some(reader);
                     while let Some(command) = receiver.blocking_recv() {
                         match command {
+                            ReadCommand::Search(work, reply) => {
+                                if !reply.is_closed() {
+                                    let result = search::execute(
+                                        &mut client,
+                                        &identity,
+                                        &view,
+                                        search.as_ref(),
+                                        work,
+                                    );
+                                    let _ = reply.send(result);
+                                }
+                            }
                             ReadCommand::Request(request, reply) => {
                                 if !reply.is_closed() {
                                     let result = identity
@@ -152,6 +171,7 @@ impl AccountReaders {
             senders.push(sender);
         }
         Ok(Self {
+            search,
             identity,
             view,
             senders,
@@ -223,6 +243,9 @@ impl AccountReaders {
     }
 
     pub(super) async fn stop(&self) {
+        if let Some(search) = self.search.as_ref() {
+            search.invalidate();
+        }
         for sender in &self.senders {
             let (reply, done) = oneshot::channel();
             if sender.send(ReadCommand::Stop(reply)).await.is_ok() {

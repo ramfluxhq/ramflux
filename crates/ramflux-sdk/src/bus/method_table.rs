@@ -48,6 +48,9 @@ macro_rules! methods {
 }
 
 methods! {
+    LocalRead(Always) => Reader: ["search.query", "search.index.status"];
+    LocalRead(Always) => Supervisor: ["search.cancel", "search.cursor.close", "search.index.rebuild.cancel"];
+    LocalMutation(Always) => Actor: ["search.index.rebuild"];
     LocalRead(Always) => Actor: ["account.config.get"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];

@@ -80,6 +80,7 @@ impl AccountDb {
         self.connection.call(move |db| {
             let write = || {
                 if db.is_autocommit() { return Err(StorageError::AuthorizationRejected); }
+                super::local_search::lifecycle::purge_message(db,&message)?;
                 let mut query = db.prepare("SELECT kind,locator FROM message_footprint WHERE message_id=?1")?;
                 let copies = query.query_map([&message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(query);
@@ -101,6 +102,7 @@ pub(super) fn retire_for_restore(
     message: &str,
     keep: &[String],
 ) -> rusqlite::Result<()> {
+    super::local_search::lifecycle::purge_message(db, message)?;
     if !super::message_footprint::table_exists(db, "message_footprint")? {
         return Ok(());
     }
@@ -147,6 +149,7 @@ fn retire_copy(
     keep: &[String],
 ) -> rusqlite::Result<()> {
     match kind {
+        "local_search_doc" => super::local_search::lifecycle::retire_locator(db, locator)?,
         "actor" | "prepared" | "history_container" if !keep.iter().any(|key| key == locator) => {
             retire_actor(db, locator)?;
         }

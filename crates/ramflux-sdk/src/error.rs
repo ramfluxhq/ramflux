@@ -82,6 +82,8 @@ impl std::fmt::Display for GeneratedRefusalCode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error(transparent)]
+    Search(#[from] ramflux_storage::local_search::SearchError),
     #[error("priority session calls cannot await account writer checkpoints")]
     PriorityWriterAccess,
     #[error("gateway_writer_busy: retryable")]

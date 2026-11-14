@@ -16,6 +16,7 @@ from pathlib import Path
 
 BASE = 'crates/ramflux-storage/src/'
 ALLOW = {
+    ('account_db/local_search/compact.rs', 'compact'): 'private unpublished encrypted snapshot compaction; VACUUM is outside transactions, locator remapping commits only in the private candidate',
     ('database.rs', 'deferred_transaction'): 'managed deferred entrypoint',
     ('database.rs', 'immediate_transaction'): 'managed immediate entrypoint',
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',

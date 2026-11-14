@@ -796,3 +796,33 @@ fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dy
     );
     Ok(())
 }
+
+#[test]
+fn local_search_is_refused_before_native_supervisor_admission() {
+    let fixture = Fixture::open();
+    for method in [
+        "search.query",
+        "search.cancel",
+        "search.cursor.close",
+        "search.index.status",
+        "search.index.rebuild",
+        "search.index.rebuild.cancel",
+    ] {
+        let request = serde_json::to_vec(&json!({
+            "sdk_api":"account", "method":method, "body":{}, "deadline_ms":deadline()
+        }))
+        .expect("test: bounded search request");
+        let mut operation = 9;
+        assert_eq!(
+            ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation),
+            12,
+            "{method} must remain unavailable until the search ABI follow-on"
+        );
+        assert_eq!(operation, 0, "{method} must allocate no native operation");
+    }
+    assert_eq!(
+        fixture.result(fixture.submit("account.list", deadline()))["code"],
+        0,
+        "refused search must leave the real supervisor usable"
+    );
+}
