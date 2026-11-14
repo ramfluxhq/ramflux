@@ -9,10 +9,11 @@ use ramflux_protocol::contact_reach::{
 };
 
 pub(crate) fn recognizes(bytes: &[u8]) -> bool {
-    bytes.len() <= MAX_FRAME_BYTES
-        && ramflux_protocol::parse_i_json::<serde_json::Value>(bytes).is_ok_and(|v| {
-            v.get("frame_type").and_then(serde_json::Value::as_str) == Some("contact_foreign")
-        })
+    ramflux_protocol::contact_reach::ephemeral_frame(bytes)
+        || bytes.len() <= MAX_FRAME_BYTES
+            && ramflux_protocol::parse_i_json::<serde_json::Value>(bytes).is_ok_and(|v| {
+                v.get("frame_type").and_then(serde_json::Value::as_str) == Some("contact_foreign")
+            })
 }
 
 pub(crate) async fn handle(
@@ -22,6 +23,15 @@ pub(crate) async fn handle(
     runtime: &GatewaySessionRuntime,
     native: Option<&crate::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
+    if ramflux_protocol::contact_reach::ephemeral_frame(bytes) {
+        let mut sink = send.lock().await;
+        ramflux_transport::write_gateway_session_json(
+            &mut **sink,
+            &ramflux_protocol::contact_reach::unavailable(),
+        )
+        .await?;
+        return Ok(());
+    }
     let started = std::time::Instant::now();
     let frame: GatewayReachRequest = decode(bytes, MAX_FRAME_BYTES)?;
     let request = frame.request;

@@ -18,6 +18,22 @@ impl RamfluxClient {
             return Ok(());
         }
         let reach = entry.reach.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
+        if entry.envelope.report_commitment.is_some() != reach.node_report_receipt.is_some() {
+            return Err(refused(Reason::ReachRouteInvalid));
+        }
+        if let Some(receipt) = &reach.node_report_receipt {
+            let mirror = self.group_reach_mirror()?.ok_or_else(|| {
+                SdkError::InboundPending("receiving home receipt authority unavailable".into())
+            })?;
+            let home_key = mirror.home_node_key.as_deref().ok_or_else(|| {
+                SdkError::InboundPending("receiving home receipt key unavailable".into())
+            })?;
+            ramflux_crypto::contact_reach::verify_bound_node_report_receipt(
+                &entry.envelope,
+                receipt,
+                home_key,
+            )?;
+        }
         let route = &reach.route.body;
         route.validate()?;
         let own = self.owned_device_identity()?;

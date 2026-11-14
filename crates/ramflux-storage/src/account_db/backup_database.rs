@@ -260,6 +260,7 @@ impl BackupDatabase {
         )?;
         super::receive::ledger_backup::sanitize_backup(&target)?;
         super::pairing::sanitize_backup(&target)?;
+        super::reach_incarnation::strip(&target)?;
         drop(target);
         crate::sync_path::sync_path(path)?;
         Ok(())
@@ -269,6 +270,7 @@ impl BackupDatabase {
     /// Returns SQL errors in the private generation before it is selected.
     pub fn enqueue_restore_events(&self, account: &str, job: &str) -> Result<(), StorageError> {
         let tx = self.db.unchecked_transaction()?;
+        super::reach_incarnation::strip(&self.db)?;
         self.db.execute_batch("INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) SELECT 'runtime_actor_state','update',rowid,json_object('state_kind',state_kind) FROM runtime_actor_state WHERE state_kind LIKE 'directory/%'; INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) SELECT 'direct_message_projection','update',rowid,json_object('conversation_id',conversation_id,'message_id',message_id) FROM direct_message_projection;")?;
         self.db.execute("INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json) VALUES('backup_restore','install',0,?1)",params![serde_json::to_string(&serde_json::json!({"local_account_id":account,"job_id":job}))?])?;
         tx.commit()?;

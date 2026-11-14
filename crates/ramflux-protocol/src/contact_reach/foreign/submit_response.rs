@@ -44,25 +44,7 @@ impl SourceSubmitResponse {
     /// Refuses other result arms, invalid nulls/hints, malformed ids and oversized replies.
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
         digest(&self.request_id)?;
-        match &self.result {
-            OperationResult::Submit { envelope_id, outcome, reason } => {
-                super::super::text(envelope_id)?;
-                if (*outcome == SubmitOutcome::Refused) != reason.is_some()
-                    || reason.is_some_and(|reason| !refusal_reason(reason))
-                {
-                    return Err(invalid("source submit result reason"));
-                }
-            }
-            OperationResult::Error { reason, retry_after_ms, current_revision } => {
-                if !error_reason(*reason)
-                    || current_revision.is_some()
-                    || *retry_after_ms != (*reason == Reason::ForeignRateLimited).then_some(1000)
-                {
-                    return Err(invalid("source submit error metadata"));
-                }
-            }
-            _ => return Err(invalid("source submit result arm")),
-        }
+        validate_submit_result(&self.result)?;
         if crate::canonical_json_bytes(self)?.len() > MAX_SUBMIT_RESPONSE_BYTES {
             return Err(invalid("source submit response byte budget"));
         }
@@ -108,6 +90,29 @@ impl SourceSubmitRequest {
             response.result
         }
     }
+}
+
+pub(super) fn validate_submit_result(result: &OperationResult) -> Result<(), crate::ProtocolError> {
+    match result {
+        OperationResult::Submit { envelope_id, outcome, reason } => {
+            super::super::text(envelope_id)?;
+            if (*outcome == SubmitOutcome::Refused) != reason.is_some()
+                || reason.is_some_and(|reason| !refusal_reason(reason))
+            {
+                return Err(invalid("source submit result reason"));
+            }
+        }
+        OperationResult::Error { reason, retry_after_ms, current_revision } => {
+            if !error_reason(*reason)
+                || current_revision.is_some()
+                || *retry_after_ms != (*reason == Reason::ForeignRateLimited).then_some(1000)
+            {
+                return Err(invalid("source submit error metadata"));
+            }
+        }
+        _ => return Err(invalid("source submit result arm")),
+    }
+    Ok(())
 }
 
 const fn refusal_reason(reason: Reason) -> bool {

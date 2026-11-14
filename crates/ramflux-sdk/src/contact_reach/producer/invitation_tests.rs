@@ -52,6 +52,7 @@ async fn previous_consent() -> TestResult {
         target_delivery_id: target.config.target_delivery_id.clone(),
         envelope: submission.envelope,
         reach: Some(Box::new(wire::DeliveryReach {
+            node_report_receipt: None,
             route: submission.route,
             cost: submission.cost,
         })),

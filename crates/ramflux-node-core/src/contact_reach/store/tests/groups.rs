@@ -547,3 +547,191 @@ fn cr_volatile_recipient_home_check_refuses_a_moved_home() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_group_roster_op_and_expired_retry_use_exact_command_identity() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("roster-command.redb"))?;
+    install_live_group(&store, &f)?;
+    let tx = store.begin_write()?;
+    let original =
+        load(&tx, &f.root)?.rosters.get(&subject(100).key()?).ok_or("retained roster")?.clone();
+    drop(tx);
+    let applied = OperationResult::GroupRoster { group_epoch: 100, outcome: Applied::Applied };
+    assert_eq!(
+        store.reach_group_roster(owner(&f), &digest(51), &original, NOW + 301)?,
+        applied,
+        "a lost committed response remains recoverable after the submission window"
+    );
+    let mut fresh = original.clone();
+    fresh.header.body.issued_at = NOW + 301;
+    fresh.header = f.key.sign_group_roster_header(fresh.header.body, &f.authority, NOW + 301)?;
+    assert!(
+        matches!(
+            store.reach_group_roster(owner(&f), &digest(51), &fresh, NOW + 301),
+            Err(crate::contact_reach::ReachError::Refused(Reason::IdempotencyConflict))
+        ),
+        "changing any complete operation bytes while the dedup row lives must conflict"
+    );
+    assert!(
+        matches!(
+            store.reach_group_roster(owner(&f), &digest(51), &original, NOW + 361),
+            Err(crate::contact_reach::ReachError::Refused(Reason::ReachCommandExpired))
+        ),
+        "an expired command cannot be reapplied after dedup retention"
+    );
+    assert_eq!(
+        store.reach_group_roster(owner(&f), &digest(52), &fresh, NOW + 361)?,
+        OperationResult::GroupRoster { group_epoch: 100, outcome: Applied::Duplicate },
+        "a fresh command with equal grant and membership hashes keeps the old roster"
+    );
+    let tx = store.begin_write()?;
+    let state = load(&tx, &f.root)?;
+    assert_eq!(
+        state.rosters.get(&subject(100).key()?),
+        Some(&original),
+        "fresh duplicate bookkeeping cannot replace the original signed roster"
+    );
+    assert_eq!(state.admission_revision, 1, "roster commands never sign or advance consent");
+    drop(tx);
+    store.reach_owner_commit(
+        owner(&f),
+        &decision(&f, 53, subject(101), 1, Decision::Revoke, NOW + 361)?,
+        NOW + 361,
+    )?;
+    assert!(
+        matches!(
+            store.reach_group_roster(owner(&f), &digest(54), &fresh, NOW + 361),
+            Err(crate::contact_reach::ReachError::Refused(Reason::ForeignReadRefused))
+        ),
+        "bookkeeping cannot recreate a retired group grant"
+    );
+    Ok(())
+}
+
+#[test]
+fn cr_reach_error_lifting_preserves_uncertainty_at_roster_commit() -> TestResult {
+    use crate::contact_reach::store::rosters::fault;
+    use crate::contact_reach::{ReachService, ReachSession};
+    for point in [fault::Point::BeforeCommit, fault::Point::AfterCommit] {
+        let dir = tempfile::TempDir::new()?;
+        let (store, f) = initialize(&dir.path().join("roster-fault.redb"))?;
+        install_live_group(&store, &f)?;
+        let tx = store.begin_write()?;
+        let home = home(&tx, &f.root)?;
+        let mut state = load(&tx, &f.root)?;
+        let roster = state.rosters.get(&subject(100).key()?).ok_or("roster")?.clone();
+        state.rosters.clear();
+        save(&tx, &f.root, &state)?;
+        tx.commit()?;
+        let node_id = home.record.home().0.to_owned();
+        let node = crate::MigrationNode::new(
+            home.node_record,
+            [8; 32],
+            crate::MigrationEndpoints {
+                gateway_tcp_addr: format!("{node_id}:443"),
+                federation_endpoint: format!("https://{node_id}"),
+                discovery_hash: digest(85),
+                server_record_hash: digest(86),
+            },
+            NOW,
+        )?;
+        let service = ReachService::new(node)?;
+        let request = ramflux_protocol::contact_reach::Request {
+            request_id: digest(90),
+            session_id: "phone-session".into(),
+            session_generation: 1,
+            remaining_ms: 1000,
+            operation: Operation::GroupRoster {
+                operation_id: digest(91),
+                roster: Box::new(roster),
+            },
+        };
+        let session = ReachSession { actor: &f.actor, id: "phone-session", generation: 1 };
+        {
+            let _fault = fault::arm(point);
+            let response = service.owner(&store, session, &request, NOW);
+            assert_eq!(
+                response.result,
+                OperationResult::Error {
+                    reason: Reason::ForeignStorageUnavailable,
+                    retry_after_ms: None,
+                    current_revision: None,
+                },
+                "both sides of commit must produce the same uncertain storage answer"
+            );
+            request.validate_response(&response)?;
+        }
+        let tx = store.begin_write()?;
+        assert_eq!(
+            load(&tx, &f.root)?.rosters.len(),
+            usize::from(point == fault::Point::AfterCommit),
+            "the injected failure must straddle the actual durable commit point"
+        );
+        drop(tx);
+        let retry = service.owner(&store, session, &request, NOW);
+        assert_eq!(
+            retry.result,
+            OperationResult::GroupRoster { group_epoch: 100, outcome: Applied::Applied },
+            "a pre-commit fault retries the write; an after-commit fault returns its original result"
+        );
+        let tx = store.begin_write()?;
+        assert_eq!(
+            load(&tx, &f.root)?.rosters.len(),
+            1,
+            "the retry must leave exactly one derived roster"
+        );
+        drop(tx);
+        let Operation::GroupRoster { roster, .. } = &request.operation else {
+            return Err("roster request".into());
+        };
+        assert_eq!(
+            store.reach_group_roster(owner(&f), &digest(92), roster, NOW)?,
+            OperationResult::GroupRoster { group_epoch: 100, outcome: Applied::Duplicate },
+            "a second operation proves the roster was really persisted"
+        );
+        let mut unauthenticated = f.actor.clone();
+        unauthenticated.device_id = "unregistered-web".into();
+        let refused = service.owner(
+            &store,
+            ReachSession { actor: &unauthenticated, id: "phone-session", generation: 1 },
+            &request,
+            NOW,
+        );
+        assert_eq!(
+            refused.result,
+            OperationResult::Error {
+                reason: Reason::CustodyRefused,
+                retry_after_ms: None,
+                current_revision: None,
+            },
+            "management authority failure is a definite custody refusal, even for a known operation"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cr_nonempty_reach_state_refuses_home_activation() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("migration-reach.redb"))?;
+    {
+        let tx = store.begin_write()?;
+        crate::contact_reach::require_empty_reach_activation(&tx, &f.root)?;
+    }
+    install_live_group(&store, &f)?;
+    let tx = store.begin_write()?;
+    assert!(
+        matches!(
+            crate::contact_reach::require_empty_reach_activation(&tx, &f.root),
+            Err(crate::NodeCoreError::ContactReachRefused(Reason::HomeEvidenceRequired))
+        ),
+        "a destination cannot activate an existing reach account without its state-transfer module"
+    );
+    assert_eq!(
+        load(&tx, &f.root)?.grants.len(),
+        1,
+        "the refusal leaves existing signed permission state unchanged"
+    );
+    Ok(())
+}

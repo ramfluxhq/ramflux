@@ -92,6 +92,7 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
         || table.starts_with("runtime_own_copy_")
         || table.starts_with("backup_archived_")
         || table == "account_key_check"
+        || table == "reach_local_incarnation"
         || table.starts_with("schema_")
         || matches!(
             table,
@@ -476,6 +477,7 @@ impl BackupDatabase {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
     fn finish_merge(&self) -> Result<(), StorageError> {
+        super::reach_incarnation::strip(&self.db)?;
         let candidate = super::backup_selector_admission::placeholders::active(&self.db)?;
         #[cfg(test)]
         if candidate {
@@ -758,6 +760,7 @@ impl BackupDatabase {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
         super::message_footprint::install(&self.db)?;
         super::home_migration::strip_from_backup(&self.db)?;
+        super::reach_incarnation::strip(&self.db)?;
         super::receive::ledger_backup::sanitize_backup(&self.db)?;
         super::pairing::sanitize_backup(&self.db)?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;

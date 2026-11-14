@@ -71,6 +71,16 @@ pub(crate) fn route(
     bytes: &[u8],
     context: Context<'_>,
 ) -> Result<Option<Response>, NodeCoreError> {
+    if wire::ephemeral_frame(bytes) {
+        return Ok(Some(Response {
+            frame: GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(wire::unavailable())
+                    .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?,
+            },
+            _reservation: None,
+        }));
+    }
     if !recognizes(path) {
         return Ok(None);
     }

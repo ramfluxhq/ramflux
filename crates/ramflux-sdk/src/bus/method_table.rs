@@ -52,7 +52,7 @@ methods! {
     NeedsNetwork(RelaySelected) => Actor: [
 "object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
-    LocalRead(Always) => Actor: ["a2i.list_pending"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "strangers.report"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",

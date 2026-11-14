@@ -284,7 +284,9 @@ pub(crate) async fn dispatch_local_bus_request(
             crate::bus::dispatch::itest_migration::approve_once(request, state)
         }
         "reach.set" | "reach.state" | "strangers.list" | "strangers.decide" | "strangers.reply"
-        | "conversation.start" => crate::bus::dispatch::reach::dispatch(request, state).await,
+        | "strangers.report" | "conversation.start" => {
+            crate::bus::dispatch::reach::dispatch(request, state).await
+        }
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }

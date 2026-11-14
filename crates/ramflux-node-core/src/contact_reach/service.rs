@@ -108,10 +108,12 @@ impl ReachService {
         match &request.operation {
             Operation::Query { .. } => self.resolve_owner_query(store, owner, request, now),
             Operation::Submit { .. } => self.submit_owner(store, owner, request, now),
-            Operation::GroupRoster { .. } => {
-                // TODO(r4h): the signed roster is pinned; its owner request/result is not.
-                Err(refuse(Reason::ForeignCapabilityMissing))
+            Operation::GroupRoster { operation_id, roster } => {
+                store.reach_group_roster(owner, operation_id, roster, now)
             }
+            Operation::UsernameMutate { .. }
+            | Operation::UsernameStatus { .. }
+            | Operation::UsernameResolve { .. } => Err(refuse(Reason::FeatureDisabled)),
             Operation::ProfilePublish { operation_id, expected_epoch, update } => {
                 store.reach_publish_profile(owner, operation_id, *expected_epoch, update, now)
             }
@@ -149,7 +151,7 @@ impl ReachService {
                     )?,
                 })
             }
-            _ => Err(refuse(Reason::ForeignCapabilityMissing)),
+            Operation::Cost { .. } => Err(refuse(Reason::ForeignCapabilityMissing)),
         }
     }
 }

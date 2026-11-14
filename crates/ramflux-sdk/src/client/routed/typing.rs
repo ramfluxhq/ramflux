@@ -40,6 +40,9 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         active: bool,
     ) -> Result<(ramflux_protocol::Envelope, g::MessageUpdate), SdkError> {
+        if ramflux_protocol::contact_reach::enabled() {
+            return Err(typing_unavailable("reach typing requires federation ephemeral support"));
+        }
         let (source, remote) = self.typing_sender_target(engine, message, active)?;
         let expires = message
             .created_at

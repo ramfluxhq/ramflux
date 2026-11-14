@@ -72,7 +72,10 @@ async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() ->
         first,
         "a newer adopted head cannot replace the signed operation while its outcome is uncertain"
     );
-    let result = OperationResult::Admission { revision: 2, outcome: Applied::Applied };
+    let result = OperationResult::GroupRoster {
+        group_epoch: roster(&first)?.header.body.group_epoch,
+        outcome: Applied::Applied,
+    };
     peer.client.apply_reach_group_roster_result("roster-group", &first, &result)?;
     let second =
         peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
@@ -86,7 +89,11 @@ async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() ->
         joined.view().epoch,
         "continuous membership remains clamped to the recipient's JOIN epoch"
     );
-    peer.client.apply_reach_group_roster_result("roster-group", &second, &result)?;
+    let second_result = OperationResult::GroupRoster {
+        group_epoch: roster(&second)?.header.body.group_epoch,
+        outcome: Applied::Applied,
+    };
+    peer.client.apply_reach_group_roster_result("roster-group", &second, &second_result)?;
     peer.client.account_db()?.remove_actor_state(&key("roster-group"))?;
     assert!(
         !peer.client.stage_reach_group_repairs()?,
@@ -168,7 +175,10 @@ async fn cr_group_roster_readded_root_gets_new_continuous_floor() -> TestResult 
         "a removed then re-added root cannot retain its earlier admission floor"
     );
     assert!(root.since_epoch > added.view().epoch, "the old interval ended at removal");
-    let result = OperationResult::Admission { revision: 2, outcome: Applied::Applied };
+    let result = OperationResult::GroupRoster {
+        group_epoch: bookkeeping.header.body.group_epoch,
+        outcome: Applied::Applied,
+    };
     peer.client.apply_reach_group_roster_result("roster-group", &operation, &result)?;
     let db = peer.client.account_db()?;
     let mut queue: Queue = db.load_actor_state(&key("roster-group"))?.ok_or("settled roster")?;
@@ -334,4 +344,140 @@ async fn cr_reach_read_rechecks_current_authority_and_refreshes_same_content_bin
         "transport and current authority refresh never manufacture a new signed admission"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn cr_group_roster_recovery_rebinds_home_and_replaces_expired_intent() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let (_, peer, _) = group_fixture().await?;
+        let now = crate::custody::network_now()?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let first =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        let first_epoch = roster(&first)?.header.body.group_epoch;
+        let before = peer.client.group_reach_mirror()?.ok_or("mirror before repair")?;
+        peer.client.apply_reach_group_roster_result(
+            "roster-group",
+            &first,
+            &OperationResult::GroupRoster { group_epoch: first_epoch, outcome: Applied::Applied },
+        )?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let db = peer.client.account_db()?;
+        let settled: Queue = db.load_actor_state(&key("roster-group"))?.ok_or("settled queue")?;
+        assert!(settled.active.is_none(), "valid local success suppresses redundant repair");
+        let home = ramflux_protocol::encode_base64url([31; 32]);
+        peer.client.install_reach_state(verified_records(
+            &peer,
+            &home,
+            before.records.clone(),
+            now,
+        )?)?;
+        let second =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        assert_ne!(second, first, "a verified home change invalidates the saved success");
+        assert_eq!(
+            roster(&second)?.header.body.grant_hash,
+            roster(&first)?.header.body.grant_hash,
+            "home repair must never replace or resign the live allow"
+        );
+        let expired = peer.client.prepare_reach_group_roster(
+            peer.vault.as_ref(),
+            "roster-group",
+            now + 300,
+        )?;
+        let Operation::GroupRoster { operation_id: old_id, .. } = &second else {
+            return Err("old roster".into());
+        };
+        let Operation::GroupRoster { operation_id: new_id, roster: renewed } = &expired else {
+            return Err("new roster".into());
+        };
+        assert_ne!(
+            new_id, old_id,
+            "an expired uncertain command needs a fresh durable operation id"
+        );
+        assert_eq!(
+            renewed.header.body.issued_at,
+            now + 300,
+            "the replacement is signed with fresh time"
+        );
+        assert_eq!(
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?,
+            expired,
+            "clock rollback cannot resurrect the discarded signed command"
+        );
+        let after = peer.client.group_reach_mirror()?.ok_or("mirror after repair")?;
+        assert_eq!(after.records, before.records, "repair cannot alter grants or retained floors");
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn cr_group_roster_remote_errors_preserve_uncertainty_and_stop_definite_refusals()
+-> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let (_, peer, _) = group_fixture().await?;
+        let now = crate::custody::network_now()?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let first =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        let remote = |reason| {
+            super::super::remote_result(OperationResult::Error {
+                reason,
+                retry_after_ms: None,
+                current_revision: None,
+            })
+            .expect_err("test: native connection must lift the pinned Error arm")
+        };
+        peer.client.settle_reach_group_roster_remote_error(
+            "roster-group",
+            &first,
+            &remote(Reason::ForeignStorageUnavailable),
+        )?;
+        assert_eq!(
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?,
+            first,
+            "uncertain storage must retain exact signed operation bytes for dedup retry"
+        );
+        peer.client.settle_reach_group_roster_remote_error(
+            "roster-group",
+            &first,
+            &remote(Reason::ReachCommandExpired),
+        )?;
+        let fresh =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        assert_ne!(fresh, first, "remote expiry must stage a fresh committed operation identity");
+        peer.client.settle_reach_group_roster_remote_error(
+            "roster-group",
+            &fresh,
+            &remote(Reason::GroupEpochStale),
+        )?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let db = peer.client.account_db()?;
+        let queue: Queue = db.load_actor_state(&key("roster-group"))?.ok_or("stale note")?;
+        assert!(
+            queue.active.is_none() && queue.success.is_none(),
+            "a stale answer stops same-head repair without fabricating an applied success"
+        );
+        let mut queue = queue;
+        queue.refusal = None;
+        db.persist_actor_state(&key("roster-group"), &queue)?;
+        peer.client.stage_reach_group_roster_repair("roster-group")?;
+        let retry =
+            peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+        peer.client.settle_reach_group_roster_remote_error(
+            "roster-group",
+            &retry,
+            &remote(Reason::CustodyRefused),
+        )?;
+        assert!(
+            matches!(
+                peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now),
+                Err(SdkError::InboundPending(_))
+            ),
+            "a definite custody refusal stays pending without automatic retries"
+        );
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await?
 }

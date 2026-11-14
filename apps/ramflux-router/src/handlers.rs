@@ -553,6 +553,12 @@ fn handle_mesh_request_inner(
     received: Instant,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if ramflux_protocol::contact_reach::ephemeral_frame(&body) {
+        return Ok(MeshResponse::json(
+            "200 OK",
+            ramflux_protocol::canonical_json_bytes(&ramflux_protocol::contact_reach::unavailable())?,
+        ));
+    }
     if let Some(response) =
         crate::pairing_mesh::route(peer_service_id, &method, &path, &body, router)?
     {

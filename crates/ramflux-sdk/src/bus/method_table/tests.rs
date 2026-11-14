@@ -141,3 +141,18 @@ fn collect(source: &str, methods: &mut BTreeSet<String>) {
         }
     }
 }
+
+#[test]
+fn cr_deferred_report_refuses_locally_without_a_network_requirement() {
+    let method =
+        classify("strangers.report").expect("test: deferred report stays a known bus method");
+    assert_eq!(
+        method.route,
+        MethodRoute::Actor,
+        "the account actor owns the typed unavailable result"
+    );
+    assert!(
+        !requires_network("strangers.report", &serde_json::json!({}), false, None),
+        "reporting must remain unavailable without starting a network session or uploading evidence"
+    );
+}

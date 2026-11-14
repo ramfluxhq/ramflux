@@ -46,6 +46,9 @@ impl ReachService {
         if !wire::enabled() {
             return Err(refuse(Reason::FeatureDisabled));
         }
+        if submission.envelope.delivery_class == ramflux_protocol::DeliveryClass::CallWake {
+            return Err(refuse(Reason::ForeignCapabilityMissing));
+        }
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(request.remaining_ms))
             .ok_or_else(|| refuse(Reason::ForeignUnavailable))?;

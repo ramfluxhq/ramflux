@@ -15,7 +15,7 @@ pub(super) fn route(request: &SourceSubmitRequest) -> Result<Response, NodeCoreE
             Err(NodeCoreError::PayloadTooLarge) => Reason::ForeignPayloadTooLarge,
             Err(_) => Reason::ReachRouteInvalid,
             Ok(()) => {
-                // The peer/router forward result needs an audited lossless mapping.
+                // Forward result codecs are pinned; full delivery publication is not wired yet.
                 // No admission, source spool or outbound attempt has occurred here.
                 Reason::ForeignUnavailable
             }

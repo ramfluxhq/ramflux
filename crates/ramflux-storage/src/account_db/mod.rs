@@ -74,6 +74,7 @@ mod object_payload;
 pub mod object_retention;
 pub(crate) mod pairing;
 pub mod raw_inner;
+mod reach_incarnation;
 pub mod read_model;
 pub(crate) mod receive;
 pub mod recovery;
@@ -160,6 +161,7 @@ impl AccountDb {
         crate::schema_contact_requests::upgrade(&db.connection)?;
         crate::schema_shared_group::upgrade(&db.connection)?;
         db.enable_runtime()?;
+        reach_incarnation::initialize(&db.connection)?;
         db.complete_footprint_migration()?;
         mac_subkeys::initialize_managed(&db.connection, key, fresh)?;
         db.connection.call(|raw| message_footprint::erased_input_store(raw))?;

@@ -312,6 +312,7 @@ pub enum OperationResult {
     Submit { envelope_id: String, outcome: SubmitOutcome, reason: Option<Reason> },
     Policy { revision: u64, outcome: Applied },
     Admission { revision: u64, outcome: Applied },
+    GroupRoster { group_epoch: u64, outcome: Applied },
     Start { revision: u64, outcome: Applied, submission: Box<OperationResult> },
     Reply { revision: u64, outcome: Applied, submission: Box<OperationResult> },
     Strangers { entries: Vec<StrangerEntry>, next_seq: u64 },
@@ -392,6 +393,7 @@ pub enum Reason {
     UsernameHomeMismatch,
     UsernameSignerRevoked,
     GroupEpochStale,
+    ReachCommandExpired,
 }
 
 mod validation;
@@ -405,3 +407,9 @@ mod submit_response;
 pub use submit_response::{
     MAX_SUBMIT_RESPONSE_BYTES, SourceSubmitResponse, SourceSubmitResponseKind,
 };
+
+mod forward_result;
+pub use forward_result::{ForwardResult, ForwardResultKind, validate_receiving_result};
+
+mod cost;
+pub use cost::*;

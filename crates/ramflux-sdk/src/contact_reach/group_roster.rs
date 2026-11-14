@@ -3,6 +3,7 @@
 
 //! Adopted-head roster intents retain an in-flight operation while coalescing its successor.
 mod membership;
+mod recovery;
 mod repair;
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,8 @@ struct Intent {
     epoch: u64,
     hash: String,
     operation: Option<Operation>,
+    #[serde(default)]
+    context: Option<recovery::RepairContext>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +38,10 @@ struct Queue {
     active: Option<Intent>,
     next: Option<Intent>,
     pending_fork: bool,
+    #[serde(default)]
+    success: Option<recovery::RosterSuccess>,
+    #[serde(default)]
+    refusal: Option<recovery::RosterRefusal>,
 }
 fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
@@ -131,9 +138,21 @@ impl RamfluxClient {
             queue =
                 Queue { grant_hash: hash, pending_fork: queue.pending_fork, ..Queue::default() };
         }
-        if queue.checkpoint.as_ref().is_some_and(|roster| {
-            roster.header.body.group_epoch == state.view().epoch
-                && roster.header.body.membership_hash == state.snapshot().state_hash
+        let incarnation = db.reach_local_incarnation()?;
+        if queue.success.as_ref().is_some_and(|success| {
+            success.valid(
+                &queue.grant_hash,
+                state.view().epoch,
+                &mirror.home_head_hash,
+                &incarnation,
+            )
+        }) || queue.refusal.as_ref().is_some_and(|refusal| {
+            refusal.stale_for(
+                &queue.grant_hash,
+                state.view().epoch,
+                &mirror.home_head_hash,
+                &incarnation,
+            )
         }) || queue.active.iter().chain(queue.next.iter()).any(|intent| {
             intent.epoch == state.view().epoch && intent.hash == state.snapshot().state_hash
         }) {
@@ -147,6 +166,7 @@ impl RamfluxClient {
             epoch: state.view().epoch,
             hash: state.snapshot().state_hash.clone(),
             operation: None,
+            context: None,
         };
         if queue.active.as_ref().is_none_or(|active| active.operation.is_none()) {
             queue.active = Some(intent);
@@ -179,6 +199,7 @@ impl RamfluxClient {
         group: &str,
         now: u64,
     ) -> Result<Operation, SdkError> {
+        let now = self.refresh_reach_roster_intent(group, now)?;
         let db = self.account_db()?;
         let mut queue: Queue = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
         if queue.pending_fork {
@@ -187,6 +208,12 @@ impl RamfluxClient {
         let intent = queue.active.as_ref().ok_or_else(pending)?;
         let mirror = self.group_reach_mirror()?.ok_or_else(pending)?;
         let current = db.shared_group_state(group)?.ok_or_else(pending)?;
+        if queue.refusal.as_ref().is_some_and(|refusal| {
+            refusal.reason == Reason::CustodyRefused
+                && refusal.authority_hash == mirror.authority_head_hash
+        }) {
+            return Err(pending());
+        }
         if mirror.conflict
             || !current
                 .view()
@@ -240,7 +267,12 @@ impl RamfluxClient {
             roster: Box::new(roster),
         };
         let old = ramflux_protocol::canonical_json_bytes(&queue)?;
-        queue.active.as_mut().ok_or_else(pending)?.operation = Some(operation.clone());
+        let active = queue.active.as_mut().ok_or_else(pending)?;
+        active.operation = Some(operation.clone());
+        active.context = Some(recovery::RepairContext {
+            home_head_hash: mirror.home_head_hash.clone(),
+            local_incarnation: db.reach_local_incarnation()?,
+        });
         db.write_transaction(|| {
             let current: Queue = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
             let latest = self.group_reach_mirror()?.ok_or_else(pending)?;
@@ -271,7 +303,7 @@ impl RamfluxClient {
         db.write_transaction(|| {
             let mut queue: Queue = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
             if queue.active.as_ref().and_then(|intent| intent.operation.as_ref()) != Some(operation)
-                || !matches!(result, OperationResult::Admission { .. })
+                || !matches!(result, OperationResult::GroupRoster { .. })
             {
                 return Err(pending());
             }
@@ -279,6 +311,19 @@ impl RamfluxClient {
             let Operation::GroupRoster { roster, .. } = operation else {
                 return Err(pending());
             };
+            let OperationResult::GroupRoster { group_epoch, outcome } = result else {
+                return Err(pending());
+            };
+            queue.success =
+                queue.active.as_ref().and_then(|intent| intent.context.clone()).map(|context| {
+                    recovery::RosterSuccess {
+                        grant_hash: queue.grant_hash.clone(),
+                        group_epoch: *group_epoch,
+                        context,
+                        outcome: *outcome,
+                    }
+                });
+            queue.refusal = None;
             queue.checkpoint = Some(roster.as_ref().clone());
             queue.active = queue.next.take();
             db.persist_actor_state(&key(group), &queue)?;
@@ -300,7 +345,13 @@ impl RamfluxClient {
         S: ramflux_transport::GatewaySessionTransport + Send,
     {
         let operation = self.prepare_reach_group_roster(vault, group, now)?;
-        let result = connection.reach_operation(operation.clone()).await?;
+        let result = match connection.reach_operation(operation.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.settle_reach_group_roster_remote_error(group, &operation, &error)?;
+                return Err(error);
+            }
+        };
         self.apply_reach_group_roster_result(group, &operation, &result)?;
         Ok(result)
     }

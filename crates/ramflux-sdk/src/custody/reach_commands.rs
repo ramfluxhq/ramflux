@@ -53,6 +53,19 @@ fn expiry(now: u64, lifetime: u64) -> Result<u64, SdkError> {
         .ok_or_else(refused)
 }
 impl BornAccount {
+    fn require_reach_primary(&self, context: ReachCommandContext<'_>) -> Result<(), SdkError> {
+        let primary = &self.record().body.master_certificate.body.primary_device_ref;
+        if context.actor != primary || self.local_device_id()? != primary.device_id {
+            return Err(SdkError::PairingCode("PrimaryRequired"));
+        }
+        self.verified().authorize_primary_management(
+            context.actor,
+            "contact_consent",
+            context.now,
+        )?;
+        Ok(())
+    }
+
     /// Prepare an explicit Settings action. Setup uses revision zero and `ContactsOnly`.
     /// Retain this operation unchanged until its original outcome is known.
     /// # Errors
@@ -63,6 +76,7 @@ impl BornAccount {
         context: ReachCommandContext<'_>,
         mode: ReachMode,
     ) -> Result<Operation, SdkError> {
+        self.require_reach_primary(context)?;
         if context.expected_revision == 0 && mode != ReachMode::ContactsOnly {
             return Err(SdkError::ReachRefused(Reason::ReachPolicyRequired));
         }
@@ -99,6 +113,7 @@ impl BornAccount {
         context: ReachCommandContext<'_>,
         action: ReachAllow<'_>,
     ) -> Result<Operation, SdkError> {
+        self.require_reach_primary(context)?;
         let root = &self.record().body.account_anchor;
         verify_notice(action.notice, root, action.peer)?;
         if action.subject.root() != Some(action.peer.root())
@@ -143,6 +158,7 @@ impl BornAccount {
         action: ReachConversationAction,
         submission: Submission,
     ) -> Result<Operation, SdkError> {
+        self.require_reach_primary(context)?;
         let Subject::Conversation { root, conversation_id } = &approval.subject else {
             return Err(refused());
         };
@@ -196,6 +212,7 @@ impl BornAccount {
         subject: Subject,
         decision: Decision,
     ) -> Result<Operation, SdkError> {
+        self.require_reach_primary(context)?;
         if decision == Decision::Allow {
             return Err(refused());
         }
@@ -237,3 +254,6 @@ impl BornAccount {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

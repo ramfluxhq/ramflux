@@ -51,6 +51,7 @@ pub(crate) fn remote_result(
 pub struct VerifiedReachState {
     pub(crate) manifest: StateManifest,
     pub(crate) records: Vec<StateRecord>,
+    home_node_key: String,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
 #[derive(Clone, Copy)]
@@ -100,7 +101,7 @@ impl VerifiedReachState {
         let records = verify_pages(b, pages)?;
         let bases = verification::verify_records(&records, b, &context)?;
         verification::verify_placements(&records, b, &bases)?;
-        Ok(Self { manifest: b.clone(), records })
+        Ok(Self { manifest: b.clone(), records, home_node_key: context.home_node_key.to_owned() })
     }
     #[must_use]
     pub fn revision(&self) -> u64 {
@@ -119,6 +120,8 @@ pub(crate) struct SavedReachState {
     revision: u64,
     admission_revision: u64,
     home_head_hash: String,
+    #[serde(default)]
+    home_node_key: Option<String>,
     authority_head_hash: String,
     state_hash: String,
     records: Vec<StateRecord>,
@@ -173,6 +176,7 @@ impl crate::RamfluxClient {
                     if verified.manifest.state_hash == saved.state_hash {
                         let mut refreshed = saved.clone();
                         refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
+                        refreshed.home_node_key = Some(verified.home_node_key.clone());
                         refreshed
                             .authority_head_hash
                             .clone_from(&verified.manifest.authority_head_hash);
@@ -208,6 +212,7 @@ impl crate::RamfluxClient {
                 revision: verified.manifest.revision,
                 admission_revision: verified.manifest.admission_revision,
                 home_head_hash: verified.manifest.home_head_hash,
+                home_node_key: Some(verified.home_node_key),
                 authority_head_hash: verified.manifest.authority_head_hash,
                 state_hash: verified.manifest.state_hash,
                 records: verified.records,

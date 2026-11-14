@@ -72,7 +72,7 @@ impl RamfluxClient {
         let own = self.owned_device_identity()?;
         let primary = &account.record().body.master_certificate.body.primary_device_ref;
         if own.root_commitment() != primary.account_anchor || own.device_id() != primary.device_id {
-            return Err(invalid());
+            return Err(SdkError::PairingCode("PrimaryRequired"));
         }
         Ok(())
     }
@@ -216,7 +216,9 @@ impl RamfluxClient {
             let mut intent: JoinIntent = db.load_actor_state(&key(group))?.ok_or_else(invalid)?;
             let is_grant = intent.grant.as_ref() == Some(operation);
             let is_roster = intent.roster.as_ref() == Some(operation);
-            if (!is_grant && !is_roster) || !matches!(result, OperationResult::Admission { .. }) {
+            if !(is_grant && matches!(result, OperationResult::Admission { .. })
+                || is_roster && matches!(result, OperationResult::GroupRoster { .. }))
+            {
                 return Err(invalid());
             }
             operation.validate_result(result)?;

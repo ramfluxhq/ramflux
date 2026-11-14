@@ -203,6 +203,7 @@ async fn router_postcard(
                     inbox_seq: entry.inbox_seq,
                     target_delivery_id: entry.target_delivery_id,
                     envelope: entry.envelope,
+                    reach: entry.reach,
                 },
             ),
             ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => {

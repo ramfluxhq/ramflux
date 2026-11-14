@@ -4,22 +4,10 @@
 //! Candidate node report receipts (S10a P08). Unwired on live ingress until P24.
 
 use ramflux_protocol::message::outer::CandidateOuterEnvelope;
-use serde::{Deserialize, Serialize};
 
 use crate::{NodeCoreError, NodeServiceSigningKey};
 
-/// Independently signed acceptance evidence. Not part of the sender AEAD.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct NodeReportReceipt {
-    pub node_id: String,
-    pub envelope_id: String,
-    pub source_ref: String,
-    pub target_delivery_id: String,
-    pub report_commitment: String,
-    pub payload_hash: String,
-    pub accepted_at: u64,
-    pub signature: String,
-}
+pub use ramflux_protocol::NodeReportReceipt;
 
 /// Per-message group opening plus native author proof required for group reports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

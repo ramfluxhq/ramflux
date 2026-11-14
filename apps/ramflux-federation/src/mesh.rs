@@ -643,7 +643,10 @@ async fn handle_mesh_quic_request(
     let Some(_request) = ramflux_node_core::begin_service_request() else {
         return Ok(());
     };
-    if crate::contact_foreign::recognizes(&accepted.request.path) {
+    if crate::contact_foreign::recognizes(&accepted.request.path)
+        || accepted.request.body.get("frame_type").and_then(serde_json::Value::as_str)
+            == Some("contact_reach_ephemeral")
+    {
         let response = match crate::contact_foreign::quic::Job::prepare(
             &accepted.request,
             &context.discovery.node_id,
@@ -740,7 +743,10 @@ async fn handle_mesh_compio_quic_request(
     peer_uri: Option<&str>,
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    if crate::contact_foreign::recognizes(&accepted.request.path) {
+    if crate::contact_foreign::recognizes(&accepted.request.path)
+        || accepted.request.body.get("frame_type").and_then(serde_json::Value::as_str)
+            == Some("contact_reach_ephemeral")
+    {
         let response = match crate::contact_foreign::quic::Job::prepare(
             &accepted.request,
             &context.discovery.node_id,

@@ -310,13 +310,19 @@ impl AccountReach {
         let Some(StateRecord::Grant { update: grant, .. }) = self.grants.get(&key) else {
             return Err(refuse(Reason::ReachRouteInvalid));
         };
+        if self.group_floor(&key)?.is_some_and(|floor| {
+            floor.blocked() || roster.header.body.group_epoch <= floor.floor_epoch
+        }) {
+            return Err(refuse(Reason::ForeignReadRefused));
+        }
         roster.validate(grant)?;
         if let Some(old) = self.rosters.get(&key) {
             if roster.header.body.group_epoch < old.header.body.group_epoch {
                 return Err(refuse(Reason::GroupEpochStale));
             }
             if roster.header.body.group_epoch == old.header.body.group_epoch {
-                if roster.header.body.membership_hash == old.header.body.membership_hash
+                if roster.header.body.grant_hash == old.header.body.grant_hash
+                    && roster.header.body.membership_hash == old.header.body.membership_hash
                     && roster.header.body.members_hash == old.header.body.members_hash
                 {
                     return Ok(false);

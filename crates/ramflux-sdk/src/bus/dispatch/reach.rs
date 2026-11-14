@@ -35,8 +35,8 @@ pub(crate) async fn dispatch(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    if !wire::enabled() {
-        return Err(SdkError::ReachRefused(Reason::ForeignCapabilityMissing));
+    if request.method == "strangers.report" || !wire::enabled() {
+        return Ok(local_bus_ok(serde_json::to_value(wire::unavailable())?));
     }
     let operation = operation(&request.method, &request.body)?;
     let account_id = request_account_id(request)?;

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Unified recipient-owned reach policy, independent of friendship and discovery.
+mod deferred;
+pub use deferred::{ephemeral_frame, unavailable};
 mod groups;
 pub use groups::*;
 mod admission;

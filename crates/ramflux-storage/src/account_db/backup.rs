@@ -129,6 +129,7 @@ impl AccountDb {
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
+            super::reach_incarnation::strip(&target)?;
             if let Err(error) = super::receive::ledger_backup::sanitize_backup(&target) {
                 return Ok(Err(error));
             }

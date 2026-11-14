@@ -44,6 +44,7 @@ fn entry() -> Result<InboxEntry, Box<dyn std::error::Error>> {
         reach: Some(Box::new(DeliveryReach {
             route: Signed { body: route, signature: ramflux_protocol::encode_base64url([4; 64]) },
             cost: None,
+            node_report_receipt: None,
         })),
     })
 }

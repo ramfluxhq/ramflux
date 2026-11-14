@@ -45,11 +45,32 @@ impl Request {
 }
 
 impl Operation {
+    fn validate_error_reason(&self, reason: Reason) -> Result<(), crate::ProtocolError> {
+        if matches!(self, Self::GroupRoster { .. })
+            && !matches!(
+                reason,
+                Reason::ReachRouteInvalid
+                    | Reason::GroupEpochStale
+                    | Reason::ForeignCapacity
+                    | Reason::FeatureDisabled
+                    | Reason::IdempotencyConflict
+                    | Reason::ForeignReadRefused
+                    | Reason::CustodyRefused
+                    | Reason::ForeignStorageUnavailable
+                    | Reason::ReachCommandExpired
+            )
+            || matches!(self, Self::Cost { .. }) && !super::cost_error_reason(reason)
+        {
+            return Err(invalid("reach operation error reason"));
+        }
+        Ok(())
+    }
     /// Match the exact result arm and immutable request identity before exposing an owner result.
     /// # Errors
     /// Refuses substituted envelope/profile ids, mismatched revisions and recursive composite results.
     pub fn validate_result(&self, result: &OperationResult) -> Result<(), crate::ProtocolError> {
         if let OperationResult::Error { reason, retry_after_ms, current_revision } = result {
+            self.validate_error_reason(*reason)?;
             return validate_error(*reason, *retry_after_ms, *current_revision);
         }
         let valid = match (self, result) {
@@ -87,9 +108,10 @@ impl Operation {
                     update.body.expected_revision.checked_add(1) == Some(*revision)
                 }
             }
-            (Self::GroupRoster { .. }, OperationResult::Admission { revision, .. }) => {
-                *revision <= crate::MAX_SAFE_JSON_INTEGER
-            }
+            (
+                Self::GroupRoster { roster, .. },
+                OperationResult::GroupRoster { group_epoch, .. },
+            ) => *group_epoch == roster.header.body.group_epoch,
             (
                 Self::Start { update, submission, .. },
                 OperationResult::Start { revision, submission: result, .. },

@@ -8,6 +8,8 @@ use super::{
     retain_operation, row, storage,
 };
 use redb::{ReadableTable, TableDefinition};
+#[cfg(test)]
+pub(super) mod fault;
 const ROSTERS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("contact_reach_group_rosters_v1");
 pub(super) fn load(
@@ -83,18 +85,12 @@ impl RouterRedbStore {
         let now = clock(&tx, now)?;
         let authority = authority(&tx, owner.recipient_root, now)?;
         authority.authorize_primary_management(owner.actor, "contact_consent", now)?;
-        let mut state = super::load(&tx, owner.recipient_root)?;
-        let subject_key =
-            serde_json::to_string(&serde_json::json!(["group", roster.header.body.group_id]))
-                .map_err(storage)?;
-        let Some(ramflux_protocol::contact_reach::StateRecord::Grant { update: grant, .. }) =
-            state.grants.get(&subject_key)
-        else {
-            return Err(refuse(Reason::ReachRouteInvalid));
-        };
-        ramflux_crypto::contact_reach::verify_group_roster(roster, grant, &authority, now)?;
         let operation_key = key(owner.recipient_root, operation_id)?;
-        let hash = custody::framed_hash(OPERATION_HASH_DOMAIN, roster)?;
+        let operation = ramflux_protocol::contact_reach::Operation::GroupRoster {
+            operation_id: operation_id.to_owned(),
+            roster: Box::new(roster.clone()),
+        };
+        let hash = custody::framed_hash(OPERATION_HASH_DOMAIN, &operation)?;
         if let Some(old) = tx
             .open_table(OPERATIONS)
             .map_err(storage)?
@@ -102,28 +98,45 @@ impl RouterRedbStore {
             .map_err(storage)?
             .map(|v| row::<OperationRow>(v.value()))
             .transpose()?
+            && old.expires_at > now
         {
             if old.hash != hash {
                 return Err(refuse(Reason::IdempotencyConflict));
             }
             return Ok(old.result);
         }
+        let expires = roster
+            .header
+            .body
+            .issued_at
+            .checked_add(300)
+            .ok_or_else(|| refuse(Reason::ReachRouteInvalid))?;
+        if now >= expires {
+            return Err(refuse(Reason::ReachCommandExpired));
+        }
+        let mut state = super::load(&tx, owner.recipient_root)?;
+        let subject_key =
+            serde_json::to_string(&serde_json::json!(["group", roster.header.body.group_id]))
+                .map_err(storage)?;
+        let Some(ramflux_protocol::contact_reach::StateRecord::Grant { update: grant, .. }) =
+            state.grants.get(&subject_key)
+        else {
+            return Err(refuse(Reason::ForeignReadRefused));
+        };
+        ramflux_crypto::contact_reach::verify_group_roster(roster, grant, &authority, now)?;
         let changed = state.group_roster(roster.clone())?;
-        let result = OperationResult::Admission {
-            revision: state.admission_revision,
+        let result = OperationResult::GroupRoster {
+            group_epoch: roster.header.body.group_epoch,
             outcome: if changed { Applied::Applied } else { Applied::Duplicate },
         };
         // Roster intent retry identity is kept separately from consent and survives reconnect.
-        retain_operation(
-            &tx,
-            &operation_key,
-            now.checked_add(300).ok_or_else(|| refuse(Reason::ForeignCapacity))?,
-            &hash,
-            &result,
-            now,
-        )?;
+        retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
         super::save(&tx, owner.recipient_root, &state)?;
+        #[cfg(test)]
+        fault::checkpoint(fault::Point::BeforeCommit)?;
         tx.commit()?;
+        #[cfg(test)]
+        fault::checkpoint(fault::Point::AfterCommit)?;
         Ok(result)
     }
 }

@@ -813,7 +813,9 @@ mod tests;
 
 mod denials;
 
+mod migration;
 mod rosters;
+pub(crate) use migration::require_empty_reach_activation;
 
 mod ephemeral;
 pub(super) use ephemeral::{require_adopted_source_home, require_ephemeral_local_home};

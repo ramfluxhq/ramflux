@@ -15,6 +15,7 @@ fn state() -> SavedReachState {
         revision: 1,
         admission_revision: 1,
         home_head_hash: "home".into(),
+        home_node_key: None,
         authority_head_hash: "authority".into(),
         state_hash: "content".into(),
         records: vec![],

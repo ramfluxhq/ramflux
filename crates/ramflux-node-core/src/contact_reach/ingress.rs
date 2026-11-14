@@ -217,6 +217,7 @@ struct PendingContext<'a> {
 }
 fn make_pending(
     tx: &redb::WriteTransaction,
+    node: &MigrationNode,
     submission: &Submission,
     context: PendingContext<'_>,
 ) -> Result<ReachPending> {
@@ -258,7 +259,16 @@ fn make_pending(
             received_at: now,
             retain_until,
             envelope: envelope.clone(),
-            reach: DeliveryReach { route: submission.route.clone(), cost: submission.cost.clone() },
+            reach: DeliveryReach {
+                route: submission.route.clone(),
+                cost: submission.cost.clone(),
+                node_report_receipt: super::report_receipt::issue(
+                    envelope,
+                    node.node_id(),
+                    &node.key,
+                    now,
+                )?,
+            },
             conversation_id: route.conversation_id.clone(),
             placement,
             policy_revision,
@@ -389,6 +399,7 @@ impl RouterRedbStore {
         }
         let pending = make_pending(
             &tx,
+            node,
             submission,
             PendingContext {
                 source_home,

@@ -133,7 +133,11 @@ async fn cr_group_join_persists_retry_ids_before_signing_and_orders_roster() -> 
         roster,
         "uncertain roster outcomes reuse the saved signed header and operation id"
     );
-    owner.client.apply_reach_group_join_result("reach-group", &roster, &applied)?;
+    let roster_applied = OperationResult::GroupRoster {
+        group_epoch: bookkeeping.header.body.group_epoch,
+        outcome: Applied::Applied,
+    };
+    owner.client.apply_reach_group_join_result("reach-group", &roster, &roster_applied)?;
     assert!(
         owner
             .client

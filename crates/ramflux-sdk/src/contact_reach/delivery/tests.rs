@@ -110,7 +110,11 @@ async fn receive_preview() -> TestResult {
         forwarded: false,
         target_delivery_id: prepared.envelope.target_delivery_id.clone(),
         envelope: prepared.envelope,
-        reach: Some(Box::new(wire::DeliveryReach { route: prepared.route, cost: prepared.cost })),
+        reach: Some(Box::new(wire::DeliveryReach {
+            route: prepared.route,
+            cost: prepared.cost,
+            node_report_receipt: None,
+        })),
     };
     let before = crate::contact_reach::group_test_support::sealing_state(&outgoing.target.client)?;
     for _ in 0..2 {

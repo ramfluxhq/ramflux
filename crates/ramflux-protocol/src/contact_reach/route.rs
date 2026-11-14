@@ -185,6 +185,7 @@ pub struct Submission {
 pub struct DeliveryReach {
     pub route: Signed<Route>,
     pub cost: Option<Cost>,
+    pub node_report_receipt: Option<crate::NodeReportReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

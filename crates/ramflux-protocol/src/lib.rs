@@ -167,3 +167,6 @@ pub mod username_directory;
 
 mod call_submission;
 pub use call_submission::{CallSubmitCarrier, CallSubmitCarrierRef};
+
+mod node_report_receipt;
+pub use node_report_receipt::NodeReportReceipt;
