@@ -107,6 +107,7 @@ pub(super) fn sources(
         dependency("conversation_projection", &input.conversation_id),
         dependency("conversation_disappearing_policy", &input.conversation_id),
         dependency("runtime_actor_state", format!("routed/generated-identity/{key}")),
+        dependency("runtime_actor_state", format!("routed/unsupported/{key}")),
         dependency("runtime_actor_state", format!("routed/group-projection/{key}")),
         dependency("runtime_actor_state", format!("routed/edit-revision/{key}")),
         dependency("object_message_reference", key),

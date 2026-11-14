@@ -186,8 +186,14 @@ fn install_sources(db: &Connection) -> rusqlite::Result<()> {
             }
             body.push_str("UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=0,checkpoint='',coverage='building' WHERE (SELECT count(*) FROM local_search_dirty)>=4096; DELETE FROM local_search_dirty WHERE (SELECT count(*) FROM local_search_dirty)>=4096;");
             let guard = if table == "runtime_actor_state" {
+                let current_guard = actor_source_guard(current);
+                let previous_guard = if operation == "UPDATE" {
+                    format!(" OR ({})", actor_source_guard("OLD"))
+                } else {
+                    String::new()
+                };
                 format!(
-                    " WHEN {current}.state_kind GLOB 'directory/*' OR {current}.state_kind GLOB 'routed/generated-identity/*' OR {current}.state_kind GLOB 'routed/group-projection/*' OR {current}.state_kind GLOB 'routed/edit-revision/*' OR {current}.state_kind GLOB 'shared-group/*' OR {current}.state_kind GLOB 'group/*' OR {current}.state_kind GLOB 'attachment/*' OR {current}.state_kind GLOB 'identity/*' OR {current}.state_kind GLOB 'profile/*' OR EXISTS(SELECT 1 FROM local_search_dependency WHERE source_table='runtime_actor_state' AND source_key IN({keys}))"
+                    " WHEN ({current_guard}){previous_guard} OR EXISTS(SELECT 1 FROM local_search_dependency WHERE source_table='runtime_actor_state' AND source_key IN({keys}))"
                 )
             } else {
                 String::new()
@@ -196,4 +202,23 @@ fn install_sources(db: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+fn actor_source_guard(alias: &str) -> String {
+    [
+        "directory/*",
+        "routed/generated-identity/*",
+        "routed/group-projection/*",
+        "routed/edit-revision/*",
+        "routed/unsupported/*",
+        "shared-group/*",
+        "group/*",
+        "attachment/*",
+        "identity/*",
+        "profile/*",
+    ]
+    .iter()
+    .map(|prefix| format!("{alias}.state_kind GLOB '{prefix}'"))
+    .collect::<Vec<_>>()
+    .join(" OR ")
 }

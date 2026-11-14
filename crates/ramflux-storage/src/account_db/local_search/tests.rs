@@ -35,10 +35,13 @@ impl Fixture {
             timestamp: 1,
             expires_at: None,
             text: text.into(),
-            dependencies: vec![SearchDependency {
-                table: "runtime_message_content".into(),
-                key: id.into(),
-            }],
+            dependencies: vec![
+                SearchDependency { table: "runtime_message_content".into(), key: id.into() },
+                SearchDependency {
+                    table: "runtime_actor_state".into(),
+                    key: format!("routed/unsupported/{id}"),
+                },
+            ],
         }
     }
     fn insert(&self, id: &str, text: &str) -> TestResult {
@@ -196,6 +199,30 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
         1,
         "failed canonical mutation must roll back its purge too"
     );
+    f.insert("unsupported", "classificationcanary")?;
+    f.db.persist_actor_state("routed/unsupported/unsupported", &serde_json::json!({"layer":999}))?;
+    assert!(
+        f.hits("classificationcanary")?.is_empty(),
+        "a newly unsupported source must synchronously purge terms before replacement work"
+    );
+    let prepared = f.db.search_revision(&f.activation, &SearchControl::new())?;
+    f.db.persist_actor_state(
+        "routed/unsupported/not-indexed-yet",
+        &serde_json::json!({"layer":999}),
+    )?;
+    assert!(
+        matches!(
+            f.db.search_replace(
+                &f.activation,
+                Fixture::source("not-indexed-yet", "mustnotpublish"),
+                prepared,
+                &SearchControl::new()
+            ),
+            Err(SearchError::CursorStale)
+        ),
+        "unsupported admission must fence tokenization even before a dependency row exists"
+    );
+
     Ok(())
 }
 
