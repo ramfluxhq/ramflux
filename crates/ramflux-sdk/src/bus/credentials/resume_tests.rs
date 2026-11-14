@@ -8,7 +8,7 @@ use crate::custody::pairing::{
     persist_reservation,
     private_credential::{PairingBusClient, PrivateCredentialScope, provider_for_account},
 };
-use crate::platform::listener::BusListener as _;
+use crate::platform::listener::{BusListener as _, BusStream as _};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -61,8 +61,8 @@ async fn run() -> TestResult {
         TestResult::Ok(())
     };
     let daemon = async {
-        let mut stream = listener.accept().await?;
-        let parent = crate::bus::io::read_local_bus_frame(&mut stream).await?;
+        let (mut reader, mut writer) = listener.accept().await?.into_halves();
+        let parent = crate::bus::io::read_local_bus_frame(&mut reader).await?;
         let public = ramflux_protocol::canonical_json_bytes(&parent)?;
         assert!(
             !public
@@ -70,7 +70,15 @@ async fn run() -> TestResult {
                 .any(|bytes| bytes == b"cold-resume-private-canary"),
             "test: resume public JSON contained the private credential"
         );
-        serve(root.path(), &mut stream, parent, metadata, serde_json::json!({"resumed":true})).await
+        serve(
+            root.path(),
+            &mut reader,
+            &mut writer,
+            parent,
+            metadata,
+            serde_json::json!({"resumed":true}),
+        )
+        .await
     };
     let (frontend, daemon) = tokio::join!(frontend, daemon);
     frontend?;
@@ -82,9 +90,10 @@ async fn run() -> TestResult {
     );
     Ok(())
 }
-pub(crate) async fn serve(
+pub(crate) async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
     root: &Path,
-    stream: &mut crate::platform::fs::LocalSocketStream,
+    reader: &mut R,
+    writer: &mut W,
     parent: LocalBusFrame,
     metadata: ramflux_protocol::custody::pairing::local_dto::CredentialRequest,
     response: serde_json::Value,
@@ -111,9 +120,9 @@ pub(crate) async fn serve(
     )?;
     let worker = tokio::task::spawn_blocking(move || provider.provide_scoped(&metadata, &scope));
     let prompt = prompts.recv().await.ok_or("test: missing exact resume prompt")?;
-    crate::bus::io::write_local_bus_frame(stream, &prompt).await?;
+    crate::bus::io::write_local_bus_frame(writer, &prompt).await?;
     assert!(
-        read_frame(stream, &channel, 91).await?.is_none(),
+        read_frame(reader, &channel, 91).await?.is_none(),
         "test: resume secret became a public bus frame"
     );
     let CredentialOutcome::Provided { passphrase, confirmation } = worker.await?? else {
@@ -127,7 +136,7 @@ pub(crate) async fn serve(
     assert!(confirmation.is_none(), "test: unlock received setup confirmation");
     drop(passphrase);
     crate::bus::io::write_local_bus_frame(
-        stream,
+        writer,
         &LocalBusFrame { kind: crate::LocalBusFrameKind::Response, body: response, ..parent },
     )
     .await?;

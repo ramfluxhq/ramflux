@@ -103,15 +103,14 @@ async fn observe(
 }
 async fn serve(
     participant: &LocalPairingParticipant,
-    listener: &impl crate::platform::listener::BusListener<
-        Stream = crate::platform::fs::LocalSocketStream,
-    >,
+    listener: &impl crate::platform::listener::BusListener,
 ) -> TestResult {
     use crate::platform::listener::BusStream as _;
     for _ in 0..2 {
-        let mut stream = listener.accept().await?;
+        let stream = listener.accept().await?;
         stream.matches_peer(listener.owner()?)?;
-        let frame = crate::bus::io::read_local_bus_frame(&mut stream).await?;
+        let (mut reader, mut writer) = stream.into_halves();
+        let frame = crate::bus::io::read_local_bus_frame(&mut reader).await?;
         assert_eq!(
             frame.method, "device.transfer.status",
             "test: binding used a different state-machine method"
@@ -129,7 +128,7 @@ async fn serve(
         )
         .await?;
         let response = crate::bus::io::local_bus_response(&frame, serde_json::to_value(result)?);
-        crate::bus::io::write_local_bus_frame(&mut stream, &response).await?;
+        crate::bus::io::write_local_bus_frame(&mut writer, &response).await?;
     }
     Ok::<_, Box<dyn std::error::Error>>(())
 }

@@ -3,7 +3,7 @@
 
 //! Public daemon progress reaches the ABI queue without another pairing call or private callback.
 use super::*;
-use crate::platform::listener::BusListener as _;
+use crate::platform::listener::{BusListener as _, BusStream as _};
 use ramflux_protocol::custody::pairing::{
     full_transfer::U64,
     local_dto::{FullStatus, FullStatusStage, FullTailStatus, LocalResult, Outcome},
@@ -49,8 +49,8 @@ async fn run() -> TestResult {
     .map_err(|error| error.message)?;
     *state.event_account.lock().map_err(|_| "test: account lock")? = Some("account".into());
     state.remember(&result(1, 0)).map_err(|error| error.message)?;
-    let mut stream = listener.accept().await?;
-    let request = crate::bus::io::read_local_bus_frame(&mut stream).await?;
+    let (mut reader, mut writer) = listener.accept().await?.into_halves();
+    let request = crate::bus::io::read_local_bus_frame(&mut reader).await?;
     assert_eq!(
         request.method, "subscription.open",
         "test: event reader issued a pairing operation"
@@ -61,7 +61,7 @@ async fn run() -> TestResult {
         "test: event reader crossed accounts"
     );
     crate::bus::io::write_local_bus_frame(
-        &mut stream,
+        &mut writer,
         &crate::bus::io::local_bus_response(&request, serde_json::json!({"subscribed":true})),
     )
     .await?;
@@ -82,9 +82,10 @@ async fn run() -> TestResult {
             serde_json::to_value(event)?,
         );
         frame.seq = Some(sequence);
-        crate::bus::io::write_local_bus_frame(&mut stream, &frame).await?;
+        crate::bus::io::write_local_bus_frame(&mut writer, &frame).await?;
     }
-    drop(stream);
+    drop(reader);
+    drop(writer);
     loop {
         let finished = state
             .event_reader

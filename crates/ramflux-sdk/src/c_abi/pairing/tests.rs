@@ -7,7 +7,7 @@ use crate::c_abi::{
     ramflux_buffer_free, ramflux_client_close, ramflux_client_free, ramflux_client_new,
 };
 use crate::custody::pairing::{PersistedReservation, persist_reservation};
-use crate::platform::listener::BusListener as _;
+use crate::platform::listener::{BusListener as _, BusStream as _};
 use ramflux_protocol::custody::pairing::full_transfer::U64;
 use ramflux_protocol::custody::pairing::local_dto::{
     CredentialRequest, FullStatus, FullStatusStage, FullTailStatus, LocalEvent, StatusRequest,
@@ -83,8 +83,8 @@ async fn round_trip() -> TestResult {
         ffi_case(&config)
     });
     let daemon = async {
-        let mut stream = listener.accept().await?;
-        let parent = crate::bus::io::read_local_bus_frame(&mut stream).await?;
+        let (mut reader, mut writer) = listener.accept().await?.into_halves();
+        let parent = crate::bus::io::read_local_bus_frame(&mut reader).await?;
         let result = LocalResult {
             schema: "ramflux.pairing.LocalResult.v2".into(),
             version: 2,
@@ -107,7 +107,8 @@ async fn round_trip() -> TestResult {
         result.validate()?;
         crate::bus::credentials::resume_tests::serve(
             root.path(),
-            &mut stream,
+            &mut reader,
+            &mut writer,
             parent,
             metadata,
             serde_json::to_value(result)?,
