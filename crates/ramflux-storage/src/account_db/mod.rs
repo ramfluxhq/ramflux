@@ -58,6 +58,8 @@ mod group_snapshot;
 pub mod groups;
 pub mod history;
 mod reach_provenance;
+mod reach_restrictions;
+pub use reach_restrictions::ReachRestoreRestrictions;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};

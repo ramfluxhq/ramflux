@@ -75,10 +75,7 @@ impl RamfluxClient {
         conversation: &str,
         now: u64,
     ) -> Result<SavedReachState, SdkError> {
-        let state: SavedReachState = serde_json::from_value(
-            self.account_db()?.client_record("reach", "state")?.ok_or_else(pending)?,
-        )
-        .map_err(|_| pending())?;
+        let state = self.saved_reach_state()?.ok_or_else(pending)?;
         state.peer_denials(owner, peer, conversation, now)?;
         state.require_positive_ready()?;
         self.require_reach_authority_head(

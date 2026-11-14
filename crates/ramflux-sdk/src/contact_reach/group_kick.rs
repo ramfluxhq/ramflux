@@ -39,11 +39,7 @@ fn pending() -> SdkError {
 }
 impl RamfluxClient {
     pub(super) fn group_reach_mirror(&self) -> Result<Option<SavedReachState>, SdkError> {
-        let state: Option<SavedReachState> = self
-            .account_db()?
-            .client_record("reach", "state")?
-            .map(serde_json::from_value)
-            .transpose()?;
+        let state = self.saved_reach_state()?;
         if let Some(state) = &state {
             self.require_reach_authority_head(
                 &state.root,

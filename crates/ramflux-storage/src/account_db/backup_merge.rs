@@ -412,7 +412,8 @@ impl BackupDatabase {
     }
     fn merge_contact_restore_metadata(&self) -> Result<(), StorageError> {
         self.merge_contact_fences()?;
-        super::reach_provenance::merge(&self.db)
+        super::reach_provenance::merge(&self.db)?;
+        super::reach_restrictions::merge(&self.db)
     }
     fn finish_pair_import(
         &self,
@@ -791,7 +792,7 @@ fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
     if table == "runtime_actor_state" && native_data_only {
         super::backup_native::DATA_STATE_FILTER
     } else if table == "runtime_actor_state" {
-        "r.state_kind<>'reach/provenance' AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
+        "r.state_kind NOT IN ('reach/provenance','reach/restore-restrictions') AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
     } else if table == "friend_link_projection" {
         "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
     } else if table == "contact_request_projection" {

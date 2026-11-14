@@ -67,6 +67,15 @@ async fn group_producer() -> TestResult {
         invitation.route.body.conversation_id, "producer-signed-thread",
         "the adopted conversation is distinct from group ID"
     );
+    let missing_mirror = target.client.require_reach_group_invite_binding(
+        &invitation.route.body,
+        &g::Inner::decode(inner.as_slice())?,
+        &inner,
+    );
+    assert!(
+        matches!(missing_mirror, Err(SdkError::InboundPending(_))),
+        "a real valid keyless invitation waits for the recipient mirror rather than becoming a terminal refusal"
+    );
     let mut ordinary_message = message.clone();
     ordinary_message.envelope_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
     let ordinary = source.client.prepare_reach_submission(

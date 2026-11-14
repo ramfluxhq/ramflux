@@ -83,6 +83,7 @@ impl RamfluxClient {
             (_, Some(group)) => crate::client::routed::Route::group_message(group),
             _ => crate::client::routed::Route::direct(),
         };
+        super::restore::require_ready(self.account_db()?)?;
         self.account_db()?.write_transaction(|| {
             let now = crate::custody::network_now()?;
             if matches!(traffic, Traffic::ReceiptDelivered | Traffic::ReceiptRead) {

@@ -134,11 +134,8 @@ impl crate::RamfluxClient {
         now: u64,
     ) -> Result<ConversationReach, SdkError> {
         let own = self.owned_device_identity()?;
-        let db = self.account_db()?;
-        let state: SavedReachState = serde_json::from_value(
-            db.client_record("reach", "state")?
-                .ok_or_else(|| refused(Reason::ReachPolicyRequired))?,
-        )?;
+        let state =
+            self.saved_reach_state()?.ok_or_else(|| refused(Reason::ReachPolicyRequired))?;
         if state.root != own.root_commitment() {
             return Err(refused(Reason::AnchorMismatch));
         }

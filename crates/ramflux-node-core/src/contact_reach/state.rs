@@ -279,7 +279,8 @@ impl AccountReach {
                 update: update.clone(),
             },
         );
-        self.retirements.remove(&key);
+        // A later allow does not erase the original signed clearance/revocation witness.
+        // Restored siblings need that witness independently of the new live grant.
         if let Some(id) = conversation {
             let accepted = matches!(b.subject, Subject::Friendship { .. });
             let friendship = b

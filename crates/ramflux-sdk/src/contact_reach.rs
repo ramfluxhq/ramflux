@@ -18,6 +18,7 @@ mod producer;
 mod projection;
 mod provenance;
 mod receive_policy;
+mod restore;
 mod restrictions;
 mod signal_settings;
 use restrictions::merge_restrictions;
@@ -60,6 +61,7 @@ pub struct VerifiedReachState {
     provenance: ramflux_crypto::contact_reach::EncryptedProvenanceStage,
     positives_ready: bool,
     custodian_head_hash: Option<String>,
+    home: Option<ramflux_crypto::home_migration::VerifiedHome>,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
 #[derive(Clone, Copy)]
@@ -123,6 +125,7 @@ impl VerifiedReachState {
         Ok(Self {
             positives_ready,
             custodian_head_hash: current_authority::custodian_head(context.authority)?,
+            home: context.home.cloned(),
             manifest: b.clone(),
             records,
             home_node_key: context.home_node_key.to_owned(),
@@ -195,6 +198,8 @@ impl crate::RamfluxClient {
             let previous: Option<SavedReachState> =
                 db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
             provenance::retain_snapshot(db, &verified.provenance)?;
+            let restored =
+                restore::verify(db, &verified.manifest.account_anchor, verified.home.as_ref())?;
             if let Some(saved) = &previous {
                 if saved.root != verified.manifest.account_anchor
                     || saved.conflict
@@ -207,32 +212,31 @@ impl crate::RamfluxClient {
                         && saved.provenance_hash.as_deref()
                             == Some(verified.manifest.provenance_hash.as_str())
                     {
-                        let mut refreshed = saved.clone();
-                        refreshed.positive_pending = !verified.positives_ready;
-                        refreshed.custodian_head_hash.clone_from(&verified.custodian_head_hash);
-                        refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
-                        refreshed.home_node_key = Some(verified.home_node_key.clone());
-                        refreshed
-                            .authority_head_hash
-                            .clone_from(&verified.manifest.authority_head_hash);
-                        db.persist_client_record(
-                            "reach",
-                            "state",
-                            &serde_json::to_value(refreshed)?,
-                        )?;
+                        if restored.is_none() {
+                            let mut refreshed = saved.clone();
+                            refreshed.refresh_current(&verified);
+                            db.persist_client_record(
+                                "reach",
+                                "state",
+                                &serde_json::to_value(refreshed)?,
+                            )?;
+                            return Ok(());
+                        }
+                    } else {
+                        let mut fenced = saved.clone();
+                        fenced.conflict = true;
+                        db.persist_client_record("reach", "state", &serde_json::to_value(fenced)?)?;
+                        // Return after commit below; a callback error would roll the restrictive fence back.
                         return Ok(());
                     }
-                    let mut fenced = saved.clone();
-                    fenced.conflict = true;
-                    db.persist_client_record("reach", "state", &serde_json::to_value(fenced)?)?;
-                    // Return after commit below; a callback error would roll the restrictive fence back.
-                    return Ok(());
                 }
             }
-            let restrictions = match merge_restrictions(
-                previous.as_ref().map_or_else(BTreeMap::new, |p| p.restrictions.clone()),
-                &verified.records,
-            ) {
+            let retained = previous.as_ref().map_or_else(BTreeMap::new, |p| p.restrictions.clone());
+            let retained = match restored.as_deref() {
+                Some(records) => restrictions::merge_restored(retained, records)?,
+                None => retained,
+            };
+            let restrictions = match merge_restrictions(retained, &verified.records) {
                 Ok(restrictions) => restrictions,
                 Err(SdkError::ReachRefused(Reason::HomeFork)) => {
                     let mut fenced = previous.ok_or_else(|| refused(Reason::HomeFork))?;
@@ -258,6 +262,9 @@ impl crate::RamfluxClient {
                 positive_pending: !verified.positives_ready,
             };
             db.persist_client_record("reach", "state", &serde_json::to_value(saved)?)?;
+            if restored.is_some() {
+                db.remove_actor_state(restore::KEY)?;
+            }
             Ok::<_, SdkError>(())
         })?;
         let saved: SavedReachState = serde_json::from_value(
@@ -276,6 +283,13 @@ fn positive_pending_default() -> bool {
     true
 }
 impl SavedReachState {
+    fn refresh_current(&mut self, verified: &VerifiedReachState) {
+        self.positive_pending = !verified.positives_ready;
+        self.custodian_head_hash.clone_from(&verified.custodian_head_hash);
+        self.home_head_hash.clone_from(&verified.manifest.home_head_hash);
+        self.home_node_key = Some(verified.home_node_key.clone());
+        self.authority_head_hash.clone_from(&verified.manifest.authority_head_hash);
+    }
     fn require_positive_ready(&self) -> Result<(), SdkError> {
         if self.positive_pending {
             return Err(SdkError::InboundPending(

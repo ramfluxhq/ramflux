@@ -44,7 +44,7 @@ pub(super) fn merge_restrictions(
                 | StateRecord::Decline { .. }
                 | StateRecord::Floor { .. }
                 | StateRecord::Conflict { .. }
-                | StateRecord::Retirement { group_floor: Some(_), .. }
+                | StateRecord::Retirement { .. }
         ) {
             continue;
         }
@@ -55,6 +55,22 @@ pub(super) fn merge_restrictions(
             continue;
         }
         let merged = match (retained.get(&key), record) {
+            (
+                Some(StateRecord::Retirement { revision: old, update: old_update, .. }),
+                StateRecord::Retirement { revision: next, update: next_update, .. },
+            ) => {
+                if old == next && old_update != next_update {
+                    return Err(refused(Reason::HomeFork));
+                }
+                if old > next {
+                    retained
+                        .get(&key)
+                        .ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?
+                        .clone()
+                } else {
+                    record.clone()
+                }
+            }
             (
                 Some(StateRecord::Floor { subject, revision, denied, erase_generation, erased }),
                 StateRecord::Floor {
@@ -103,6 +119,44 @@ pub(super) fn merge_restrictions(
             .chain(retained.values()),
     )?;
     Ok(retained)
+}
+
+/// Old backup witnesses may precede local floors; keep the strongest F and newest signed control.
+pub(super) fn merge_restored(
+    retained: BTreeMap<String, StateRecord>,
+    records: &[StateRecord],
+) -> Result<BTreeMap<String, StateRecord>, SdkError> {
+    let mut groups = BTreeMap::new();
+    for record in retained.values().chain(records.iter()) {
+        let StateRecord::Retirement { group_floor: Some(next), revision: next_revision, .. } =
+            record
+        else {
+            continue;
+        };
+        let key = record.order_key()?;
+        let merged = match groups.get(&key) {
+            Some(
+                previous @ StateRecord::Retirement {
+                    group_floor: Some(old),
+                    revision: old_revision,
+                    ..
+                },
+            ) if old.floor_epoch > next.floor_epoch
+                || old.floor_epoch == next.floor_epoch && old_revision > next_revision =>
+            {
+                group_restrictions::merge(Some(record), previous)?
+            }
+            previous => group_restrictions::merge(previous, record)?,
+        };
+        groups.insert(key, merged);
+    }
+    let normalized: Vec<_> = records
+        .iter()
+        .filter(|record| !matches!(record, StateRecord::Retirement { group_floor: Some(_), .. }))
+        .cloned()
+        .chain(groups.into_values())
+        .collect();
+    merge_restrictions(retained, &normalized)
 }
 
 fn retain_clearance(

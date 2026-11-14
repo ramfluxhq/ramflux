@@ -45,7 +45,9 @@ impl SavedReachState {
             return false;
         };
         self.records.iter().chain(self.restrictions.values()).all(|record| {
-            let StateRecord::Floor { subject, revision, .. } = record else {
+            let (StateRecord::Floor { subject, revision, .. }
+            | StateRecord::Retirement { subject, revision, .. }) = record
+            else {
                 return true;
             };
             let applies = match subject {

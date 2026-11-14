@@ -63,6 +63,7 @@ fn notice(state: &VerifiedGroupState, root: &str) -> Result<GroupJoinNotice, Sdk
 }
 impl RamfluxClient {
     fn require_group_join_primary(&self) -> Result<(), SdkError> {
+        super::restore::require_ready(self.account_db()?)?;
         let account = self.born_v3_account.as_ref().ok_or_else(invalid)?;
         self.require_reach_authority_head(
             &account.record().body.account_anchor,

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bind every group subtype to an adopted head, or a purely verified snapshot before preparation.
-use super::{SavedReachState, refused};
+use super::refused;
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::{
@@ -80,11 +80,9 @@ impl RamfluxClient {
         wire::group_profile::check(identity, inner.kind, Some(4), true)
             .map_err(SdkError::ReachRefused)?;
         let genesis = candidate.genesis_hash()?;
-        let state: SavedReachState = serde_json::from_value(
-            self.account_db()?.client_record("reach", "state")?.ok_or_else(|| {
-                SdkError::InboundPending("verified recipient reach state unavailable".into())
-            })?,
-        )?;
+        let state = self.saved_reach_state()?.ok_or_else(|| {
+            SdkError::InboundPending("verified recipient reach state unavailable".into())
+        })?;
         if state.root != route.recipient_root || state.conflict {
             return Err(refused(Reason::HomeFork));
         }
@@ -218,11 +216,8 @@ impl RamfluxClient {
         Ok(())
     }
     fn require_reach_group_grant(&self, route: &Route, genesis: &str) -> Result<(), SdkError> {
-        let state: SavedReachState = serde_json::from_value(
-            self.account_db()?
-                .client_record("reach", "state")?
-                .ok_or_else(|| refused(Reason::ReachPolicyRequired))?,
-        )?;
+        let state =
+            self.saved_reach_state()?.ok_or_else(|| refused(Reason::ReachPolicyRequired))?;
         state.require_positive_ready()?;
         if state.root != route.recipient_root || state.conflict {
             return Err(refused(Reason::HomeFork));

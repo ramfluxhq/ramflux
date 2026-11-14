@@ -359,6 +359,127 @@ async fn retained_clearance() -> TestResult {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cr_restored_denials_hold_positive_use_until_originals_verify_atomically() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), restored_denials()).await?
+}
+
+async fn restored_denials() -> TestResult {
+    let fixture = PolicyFixture::new().await?;
+    fixture.friendship(wire::Permissions::ACCEPTED, 1)?;
+    let db = fixture.owner.client.account_db()?;
+    let before = db.client_record("reach", "state")?.ok_or("pre-denial mirror")?;
+    let subject = Subject::Friendship { root: fixture.route.source.account_anchor.clone() };
+    let block = fixture.update(subject.clone(), wire::Decision::Block, None, 2)?;
+    let restrictions = vec![
+        StateRecord::Block { subject: subject.clone(), update: block.clone() },
+        StateRecord::Floor {
+            subject,
+            revision: 3,
+            denied: true,
+            erase_generation: 3,
+            erased: true,
+        },
+    ];
+    fixture.install(&block, restrictions.clone())?;
+    let originals: serde_json::Value =
+        db.load_actor_state("reach/provenance")?.ok_or("original proof pool")?;
+    // State after a native data merge: live metadata remains local; originals and denials are staged.
+    db.persist_client_record("reach", "state", &before)?;
+    let staged = serde_json::json!({"root":fixture.route.recipient_root,"records":restrictions});
+    db.persist_actor_state(crate::contact_reach::restore::KEY, &staged)?;
+    assert!(matches!(fixture.check(Traffic::Dm), Err(SdkError::InboundPending(_))));
+    let other = fixture.update(
+        Subject::Friendship { root: digest(47) },
+        wire::Decision::Unblock,
+        None,
+        3,
+    )?;
+    db.remove_actor_state("reach/provenance")?;
+    assert!(
+        fixture.install(&other, vec![]).is_err(),
+        "fresh mirror cannot replace missing original denial evidence"
+    );
+    assert!(db.actor_state_exists(crate::contact_reach::restore::KEY)?);
+    assert_eq!(db.client_record("reach", "state")?.ok_or("mirror after refusal")?, before);
+    db.persist_actor_state("reach/provenance", &originals)?;
+    fixture.install(&other, vec![])?;
+    assert!(!db.actor_state_exists(crate::contact_reach::restore::KEY)?);
+    assert_denied(&fixture.check(Traffic::Dm));
+    // Equal-content refresh must also reconcile a newly imported independent restriction set.
+    db.persist_actor_state(crate::contact_reach::restore::KEY, &staged)?;
+    fixture.install(&other, vec![])?;
+    assert!(!db.actor_state_exists(crate::contact_reach::restore::KEY)?);
+    assert_denied(&fixture.check(Traffic::Dm));
+    db.persist_actor_state(
+        crate::contact_reach::restore::KEY,
+        &serde_json::json!({
+            "root":fixture.route.recipient_root,"records":[]
+        }),
+    )?;
+    assert!(matches!(fixture.check(Traffic::Dm), Err(SdkError::InboundPending(_))));
+    fixture.install(&other, vec![])?;
+    assert!(!db.actor_state_exists(crate::contact_reach::restore::KEY)?);
+    assert_denied(&fixture.check(Traffic::Dm));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cr_restored_clearance_with_matching_reference_but_bad_signature_stays_pending()
+-> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), forged_restored_clearance()).await?
+}
+
+async fn forged_restored_clearance() -> TestResult {
+    let fixture = PolicyFixture::new().await?;
+    let subject = Subject::Friendship { root: fixture.route.source.account_anchor.clone() };
+    let block = fixture.update(subject.clone(), wire::Decision::Block, None, 2)?;
+    fixture.install(
+        &block,
+        vec![StateRecord::Block { subject: subject.clone(), update: block.clone() }],
+    )?;
+    let db = fixture.owner.client.account_db()?;
+    let before = db.client_record("reach", "state")?.ok_or("blocked mirror")?;
+    let mut forged = fixture.update(subject.clone(), wire::Decision::Unblock, None, 3)?;
+    forged.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &custody::signing_bytes(wire::ADMISSION_DOMAIN, &forged.body)?,
+        [55; 32],
+    );
+    let record =
+        StateRecord::Retirement { subject, revision: 4, update: forged, group_floor: None };
+    let mut pool: crate::contact_reach::provenance::RetainedProofs =
+        db.load_actor_state("reach/provenance")?.ok_or("native original proof pool")?;
+    let mut references = wire::record_signers(&record)?;
+    for reference in &mut references {
+        let proof = pool
+            .authorities
+            .iter()
+            .find(|proof| {
+                custody::object_hash(&proof.authority.publication.record)
+                    .is_ok_and(|head| head == reference.authority_head_hash)
+            })
+            .ok_or("exact selected original native proof")?;
+        reference.proof_hash.clone_from(&proof.proof_hash);
+    }
+    pool.signers.extend(references);
+    pool.signers.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
+    db.persist_actor_state("reach/provenance", &pool)?;
+    db.persist_actor_state(
+        crate::contact_reach::restore::KEY,
+        &serde_json::json!({"root":fixture.route.recipient_root,"records":[record]}),
+    )?;
+    let verification =
+        crate::contact_reach::restore::verify(db, &fixture.route.recipient_root, None);
+    assert!(
+        matches!(verification, Err(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed))),
+        "matching object/proof hashes cannot replace original cryptographic verification"
+    );
+    assert!(db.actor_state_exists(crate::contact_reach::restore::KEY)?);
+    assert_eq!(db.client_record("reach", "state")?.ok_or("blocked after refusal")?, before);
+    assert!(matches!(fixture.check(Traffic::Dm), Err(SdkError::InboundPending(_))));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cr_recipient_node_denial_needs_authenticated_source_home() -> TestResult {
     tokio::time::timeout(std::time::Duration::from_secs(60), node_denial()).await?
 }

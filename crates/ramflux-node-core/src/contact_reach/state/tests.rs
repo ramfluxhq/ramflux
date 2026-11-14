@@ -46,6 +46,22 @@ fn subjects() -> std::result::Result<(Subject, Subject, String), Box<dyn std::er
         id,
     ))
 }
+
+#[test]
+fn cr_root_clearance_remains_original_after_later_allow_model() -> TestResult {
+    let (friendship, _, conversation) = subjects()?;
+    let mut state = closed_state()?;
+    state.admission(command(friendship.clone(), Decision::Block, 0), Some(&conversation), NOW)?;
+    let unblock = command(friendship.clone(), Decision::Unblock, 1);
+    state.admission(unblock.clone(), Some(&conversation), NOW)?;
+    state.admission(command(friendship.clone(), Decision::Allow, 2), Some(&conversation), NOW)?;
+    assert!(matches!(state.grants.get(&friendship.key()?), Some(StateRecord::Grant { .. })));
+    assert!(
+        matches!(state.retirements.get(&friendship.key()?), Some(StateRecord::Retirement { update, .. }) if update == &unblock),
+        "a new grant cannot replace the original signed unblock needed by older independent denials"
+    );
+    Ok(())
+}
 #[test]
 fn cr_reply_renews_without_friendship_and_expiry_preserves_strangers() -> TestResult {
     let (_, conversation, id) = subjects()?;

@@ -84,7 +84,6 @@ mod schema_receipt_identity;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod sqlite_work;
 
-pub use account_db::AccountDb;
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{
     InboxFailurePolicy, InboxFailureSource, JournalBounds, JournalEvent,
@@ -104,6 +103,7 @@ pub use account_db::raw_inner::{
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
+pub use account_db::{AccountDb, ReachRestoreRestrictions};
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};
 pub use constants::*;
