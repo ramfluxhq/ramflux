@@ -24,22 +24,29 @@ async fn checked_transcript() -> TestResult {
         .ok_or("current native sender authority")?;
     let frame = wrap(&source, envelope, &authority)?;
     let now_ms = now.checked_mul(1000).ok_or("typing clock overflow")?;
-    crypto::verify_ephemeral(&frame, &authority, now_ms)?;
+    crypto::verify_ephemeral(&frame, &authority, now_ms)
+        .map_err(|error| format!("native typing sender/W verification: {error}"))?;
     let branch = source.client.device_branch.as_ref().ok_or("source branch")?;
     let mut generic = frame.frame.envelope.clone();
-    generic.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_seed(&generic, branch.signing_key.to_bytes())?;
+    // The protocol-object signing helper dispatches native envelopes to the checked v2
+    // transcript. Sign these explicit generic bytes to construct the intended negative control.
+    generic.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::signed_bytes(&generic)?,
+        branch.signing_key.to_bytes(),
+    );
     ramflux_crypto::verify_canonical_signature(
         &ramflux_protocol::signed_bytes(&generic)?,
         &generic.signed.signature,
         &ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().as_bytes()),
-    )?;
+    )
+    .map_err(|error| format!("generic-signature control setup: {error}"))?;
     assert!(
         crypto::verify_ephemeral(&wrap(&source, generic, &authority)?, &authority, now_ms).is_err(),
         "a valid generic object signature must not replace the native v2 sender transcript"
     );
     let mut wrong_target = frame.clone();
-    wrong_target.frame.envelope.target_delivery_id = source.config.target_delivery_id.clone();
+    wrong_target.frame.envelope.target_delivery_id =
+        ramflux_protocol::qualified_device_id(&root, &branch.device_id)?;
     wrong_target.frame.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
         &ramflux_protocol::envelope_sender_signed_bytes(&wrong_target.frame.envelope)?,
         branch.signing_key.to_bytes(),
@@ -47,7 +54,8 @@ async fn checked_transcript() -> TestResult {
     ramflux_protocol::verify_envelope_sender_signature(
         &wrong_target.frame.envelope,
         &ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().as_bytes()),
-    )?;
+    )
+    .map_err(|error| format!("changed-target sender control setup: {error}"))?;
     wrong_target.route.body.envelope_hash =
         custody::framed_hash(wire::EPHEMERAL_HASH_DOMAIN, &wrong_target.frame)?;
     wrong_target.route = crypto::sign_route(wrong_target.route.body, branch)?;

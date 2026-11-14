@@ -348,11 +348,11 @@ fn cr_source_submit_requires_original_return_grant_before_first_dm() -> TestResu
     // The composite writer's Notice/evidence/outbox atomicity has separate controls.
     state.admission(grant, Some(&conversation), NOW)?;
     require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW)?;
-    for traffic in [Traffic::ReceiptDelivered, Traffic::ReceiptRead] {
+    for traffic in [Traffic::ReceiptDelivered, Traffic::ReceiptRead, Traffic::Typing] {
         outgoing.traffic = traffic;
         assert!(
             require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW).is_err(),
-            "default conversation grants cannot authorize optional outbound receipt signals"
+            "default conversation grants cannot authorize optional outbound receipt or typing signals"
         );
     }
     outgoing.traffic = Traffic::Dm;
@@ -394,4 +394,156 @@ fn renewed_primary(f: &Fixture, expires: u64) -> TestResult<VerifiedRecord> {
     primary.branch_certificate = Some(f.key.certify_branch(branch)?);
     let record = f.key.sign_record(body)?;
     Ok(ramflux_crypto::custody::verify_record(&record, expires, None, None)?)
+}
+
+#[test]
+fn cr_current_recipient_primary_revocation_fences_persisted_group_authority() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("revoked-recipient-primary.redb");
+    let (store, f) = initialize(&path)?;
+    install_live_group(&store, &f)?;
+    let tx = store.begin_write()?;
+    let state = load(&tx, &f.root)?;
+    drop(tx);
+    let mut sibling = f
+        .authority
+        .envelope()
+        .body
+        .devices
+        .first()
+        .and_then(|device| device.branch_certificate.as_ref())
+        .ok_or("primary certificate")?
+        .body
+        .clone();
+    sibling.device_id = "sibling".into();
+    sibling.cert_id = digest(80);
+    sibling.branch_signing_public_key = ramflux_crypto::public_key_base64url_from_seed([81; 32]);
+    let enrolled = f.key.enroll_device(&f.authority, f.key.certify_branch(sibling)?, NOW + 1)?;
+    let enrolled = ramflux_crypto::custody::verify_record(&enrolled, NOW + 1, None, None)?;
+    state.classify_current(&route(&f), "peer.example", &enrolled, NOW + 1)?;
+    let revoked = f.key.revoke_device(&enrolled, &f.actor.device_id, NOW + 2)?;
+    let current = ramflux_crypto::custody::verify_record(&revoked, NOW + 2, None, None)?;
+    let sibling =
+        DeviceRef { account_anchor: f.root.clone(), device_id: "sibling".into(), device_epoch: 1 };
+    current.authorize(&sibling, "message", NOW + 2)?;
+    let tx = store.begin_write()?;
+    let mut saved = account(&tx, &f.root)?;
+    saved.pins.observe(&enrolled)?;
+    saved.pins.observe(&current)?;
+    saved.publication.record = revoked;
+    tx.open_table(CUSTODY)?.insert(f.root.as_str(), encoded(&saved)?.as_slice())?;
+    tx.commit()?;
+    drop(store);
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let tx = store.begin_write()?;
+    let saved = load(&tx, &f.root)?;
+    let authority = authority(&tx, &f.root, NOW + 2)?;
+    authority.authorize(&sibling, "message", NOW + 2)?;
+    assert_eq!(
+        saved.classify(&route(&f), "peer.example", NOW + 2)?.0,
+        crate::contact_reach::ReachClass::Accepted,
+        "the old signed grant and roster remain present; the control must reach current authority checks"
+    );
+    assert!(
+        saved.classify_current(&route(&f), "peer.example", &authority, NOW + 2).is_err(),
+        "a live sibling cannot reactivate policy/grants approved by the now-revoked original primary"
+    );
+    assert_eq!(
+        saved.records()?,
+        state.records()?,
+        "authority revocation must fence use without rewriting or forging original recipient decisions"
+    );
+    Ok(())
+}
+
+#[test]
+fn cr_volatile_source_home_binding_requires_prior_recipient_adoption() -> TestResult {
+    use crate::contact_reach::store::require_adopted_source_home;
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("volatile-home-binding.redb"))?;
+    let recipient = digest(83);
+    let home = {
+        let tx = store.begin_write()?;
+        home(&tx, &f.root)?
+    };
+    let peer_node = home.record.home().0.to_owned();
+    let read = store.migration_db().begin_read()?;
+    assert!(
+        require_adopted_source_home(&read, &recipient, &f.authority, &peer_node).is_err(),
+        "an unrelated known custody key cannot bootstrap volatile peer trust"
+    );
+    drop(read);
+    let mut pins = ramflux_crypto::custody::AuthorityPins::default();
+    pins.observe(&f.authority)?;
+    let adopted = AdoptedPeer {
+        home,
+        authority_pins: pins,
+        custodian_pins: ramflux_crypto::custody::AuthorityPins::default(),
+    };
+    let bytes = encoded(&adopted)?;
+    let trust_key = key(&recipient, &f.root)?;
+    let tx = store.begin_write()?;
+    tx.open_table(TRUST)?.insert(trust_key.as_str(), bytes.as_slice())?;
+    tx.commit()?;
+    let read = store.migration_db().begin_read()?;
+    require_adopted_source_home(&read, &recipient, &f.authority, &peer_node)?;
+    assert!(
+        require_adopted_source_home(&read, &recipient, &f.authority, "other.example").is_err(),
+        "a valid W cannot be relayed through another authenticated node to bypass a node denial"
+    );
+    assert!(
+        require_adopted_source_home(&read, &digest(84), &f.authority, &peer_node).is_err(),
+        "another recipient's adoption cannot grant this recipient volatile authority"
+    );
+    assert_eq!(
+        read.open_table(TRUST)?.get(trust_key.as_str())?.ok_or("adopted row")?.value(),
+        bytes.as_slice(),
+        "volatile success and refusal must preserve the exact adopted row"
+    );
+    Ok(())
+}
+
+#[test]
+fn cr_volatile_recipient_home_check_refuses_a_moved_home() -> TestResult {
+    use crate::contact_reach::store::require_ephemeral_local_home;
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("volatile-local-home.redb"))?;
+    let home = {
+        let tx = store.begin_write()?;
+        home(&tx, &f.root)?
+    };
+    let own_node = home.record.home().0.to_owned();
+    let node = crate::MigrationNode::new(
+        home.node_record,
+        [8; 32],
+        crate::MigrationEndpoints {
+            gateway_tcp_addr: format!("{own_node}:443"),
+            federation_endpoint: format!("https://{own_node}"),
+            discovery_hash: digest(85),
+            server_record_hash: digest(86),
+        },
+        NOW,
+    )?;
+    let read = store.migration_db().begin_read()?;
+    require_ephemeral_local_home(&read, &node, &f.root)?;
+    assert!(
+        require_ephemeral_local_home(&read, &node, &digest(87)).is_err(),
+        "a cached target device alone cannot establish that its receiving home is local"
+    );
+    drop(read);
+    let vector: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../ramflux-crypto/tests/fixtures/home_migration_v1.json"
+    ))?;
+    let moved: ramflux_protocol::home_migration::RecordEvidence = serde_json::from_value(
+        vector.get("committed_home").ok_or("committed move vector")?.clone(),
+    )?;
+    let tx = store.begin_write()?;
+    tx.open_table(HEADS)?.insert(f.root.as_str(), encoded(&moved)?.as_slice())?;
+    tx.commit()?;
+    let read = store.migration_db().begin_read()?;
+    assert!(
+        require_ephemeral_local_home(&read, &node, &f.root).is_err(),
+        "the old home must stop volatile publication even while its custody rows and session still exist"
+    );
+    Ok(())
 }

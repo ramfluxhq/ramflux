@@ -814,3 +814,6 @@ mod tests;
 mod denials;
 
 mod rosters;
+
+mod ephemeral;
+pub(super) use ephemeral::{require_adopted_source_home, require_ephemeral_local_home};

@@ -111,7 +111,10 @@ pub(in crate::contact_reach) fn require_return_grant(
     now: u64,
 ) -> Result<()> {
     use wire::{StateRecord, Subject, Traffic};
-    if !matches!(route.traffic, Traffic::Dm | Traffic::ReceiptDelivered | Traffic::ReceiptRead) {
+    if !matches!(
+        route.traffic,
+        Traffic::Dm | Traffic::ReceiptDelivered | Traffic::ReceiptRead | Traffic::Typing
+    ) {
         return Ok(());
     }
     if route.source.account_anchor != authority.envelope().body.account_anchor {
@@ -149,6 +152,7 @@ pub(in crate::contact_reach) fn require_return_grant(
             Traffic::Dm => true,
             Traffic::ReceiptDelivered => permissions.user_delivered,
             Traffic::ReceiptRead => permissions.read,
+            Traffic::Typing => permissions.typing,
             _ => false,
         };
         return if allowed { Ok(()) } else { Err(refuse(Reason::ForeignReadRefused)) };

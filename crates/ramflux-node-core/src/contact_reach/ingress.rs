@@ -18,6 +18,9 @@ use ramflux_protocol::{
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+// Both independently bounded pools share this table. Owner reads and denial erasure must
+// cover their sum, including unsolicited rows sequenced after a full accepted pool.
+const MAX_PENDING_SCAN_ROWS: usize = 65_536 + 4096;
 const PENDING: TableDefinition<u64, &[u8]> = TableDefinition::new("contact_reach_pending_v1");
 const DEDUP: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach_dedup_v1");
 const COUNTERS: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach_counters_v1");
@@ -451,7 +454,7 @@ impl RouterRedbStore {
         let mut bytes = 0_usize;
         let mut expired = Vec::new();
         let state = store::load(&tx, owner.recipient_root)?;
-        for item in table.range(after..).map_err(storage)?.take(65_536) {
+        for item in table.range(after..).map_err(storage)?.take(MAX_PENDING_SCAN_ROWS) {
             let (seq, raw) = item.map_err(storage)?;
             if seq.value() <= after {
                 continue;
@@ -516,7 +519,7 @@ pub(super) fn erase_denied(
     }
     let table = tx.open_table(PENDING).map_err(storage)?;
     let mut removed = Vec::new();
-    for value in table.iter().map_err(storage)?.take(65_536) {
+    for value in table.iter().map_err(storage)?.take(MAX_PENDING_SCAN_ROWS) {
         let (seq, bytes) = value.map_err(storage)?;
         let pending: ReachPending = row(bytes.value())?;
         if pending.recipient_root != recipient {
