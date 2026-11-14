@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use std::path::PathBuf;
 #[derive(Args)]
 pub(crate) struct TransferCommand {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) account: String,
     #[arg(long, global = true)]
     pub(crate) sas_out: Option<PathBuf>,
@@ -28,11 +28,11 @@ pub(crate) enum TransferAction {
         lease_expires_at: u64,
         #[arg(long)]
         invitation_out: PathBuf,
-        #[arg(long, requires_all = ["destination_epoch", "account_anchor"])]
+        #[arg(long, requires_all = ["destination_epoch", "account_anchor"], allow_hyphen_values = true)]
         destination_device: Option<String>,
         #[arg(long, requires = "destination_device")]
         destination_epoch: Option<u64>,
-        #[arg(long, requires = "destination_device")]
+        #[arg(long, requires = "destination_device", allow_hyphen_values = true)]
         account_anchor: Option<String>,
     },
     Join {
@@ -44,7 +44,7 @@ pub(crate) enum TransferAction {
     Confirm {
         #[command(flatten)]
         operation: PairingOperation,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         transcript_hash: String,
         #[arg(long, action = clap::ArgAction::Set, required = true)]
         matches: bool,
@@ -57,7 +57,7 @@ pub(crate) enum TransferAction {
     Prepare {
         #[command(flatten)]
         operation: PairingOperation,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         transcript_hash: String,
     },
     Status(PairingOperation),
@@ -68,9 +68,9 @@ pub(crate) enum TransferAction {
     Affirm {
         #[command(flatten)]
         operation: PairingOperation,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         transcript_hash: String,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         new_record_hash: String,
         #[arg(long,action=clap::ArgAction::Set,required=true)]
         approved: bool,

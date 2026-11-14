@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub(crate) struct PairingCommand {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) account: String,
     /// Write the seven SAS names to a new private file when no terminal is available.
     #[arg(long, global = true)]
@@ -17,7 +17,7 @@ pub(crate) struct PairingCommand {
 }
 #[derive(Args)]
 pub(crate) struct PairingOperation {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: String,
     #[arg(long)]
     pub(crate) generation: u64,
@@ -47,7 +47,7 @@ pub(crate) enum PairingAction {
     Confirm {
         #[command(flatten)]
         operation: PairingOperation,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         transcript_hash: String,
         #[arg(long, action = clap::ArgAction::Set, required = true)]
         matches: bool,
@@ -61,9 +61,9 @@ pub(crate) enum PairingAction {
     Approve {
         #[command(flatten)]
         operation: PairingOperation,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         transcript_hash: String,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         proposal_hash: String,
         #[arg(long, action = clap::ArgAction::Set, required = true)]
         approved: bool,
