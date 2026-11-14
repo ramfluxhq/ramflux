@@ -517,6 +517,7 @@ async fn fanout_generated(
     plan: &SendPlan,
 ) -> Result<Vec<String>, SdkError> {
     let mut delivered = Vec::new();
+    let mut failure = None;
     for (device, envelope) in &plan.generated {
         let envelope = envelope.clone();
         let device = device.clone();
@@ -530,10 +531,20 @@ async fn fanout_generated(
                 },
                 context.call_deadline(),
             )
-            .await?;
-        delivered.push(submitted);
+            .await;
+        match submitted {
+            Ok(device) => delivered.push(device),
+            Err(error) => {
+                // The target stays unconfirmed, so the existing per-target retry parks it.
+                tracing::warn!(%error, "own-device target copy deferred");
+                failure = failure.or(Some(error));
+            }
+        }
     }
-    Ok(delivered)
+    match failure {
+        Some(error) if delivered.is_empty() => Err(error),
+        _ => Ok(delivered),
+    }
 }
 
 #[cfg(test)]

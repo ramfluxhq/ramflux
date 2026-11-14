@@ -223,6 +223,13 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     assert!(targets.iter().any(|target| target["device"] == "dead-sibling"
         && target["acknowledged"] == false
         && target["next_at"].as_i64().is_some_and(|at| at > attempted_at)));
+    // The failed target was never delivered: the gateway nacked it, so the sibling holds only
+    // the live copies and the dead target carries no ACK.
+    assert_eq!(
+        targets.iter().filter(|target| target["acknowledged"] == true).count(),
+        1,
+        "only the live sibling is acknowledged"
+    );
     retry::exhaust_parked_target(&mut source, &key, &own).await?;
     directory.abort();
     drop(sibling);
