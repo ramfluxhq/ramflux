@@ -19,7 +19,7 @@ impl RamfluxClient {
             .ok_or_else(|| {
                 SdkError::InboundPending("own-device local manifest unavailable".into())
             })?;
-        super::identity_authority::verify_manifest(&manifest, local.root_commitment())?;
+        self.verify_own_copy_manifest(&manifest, local.root_commitment())?;
         if let Some(native) = &manifest.custody {
             let current = self
                 .current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
@@ -35,6 +35,30 @@ impl RamfluxClient {
         }
         Ok(manifest)
     }
+    fn verify_own_copy_manifest(
+        &self,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+        expected: &str,
+    ) -> Result<(), SdkError> {
+        if manifest.custody.is_none() {
+            return super::identity_authority::verify_manifest(manifest, expected);
+        }
+        let wall = now_unix_timestamp();
+        let network = crate::custody::network_now()?;
+        let bytes = serde_json::to_vec(&(expected, manifest, wall, network))?;
+        let fingerprint = *blake3::hash(&bytes).as_bytes();
+        if self.verified_authority_cache.borrow().own_manifest_verified(&fingerprint) {
+            return Ok(());
+        }
+        super::identity_authority::verify_manifest(manifest, expected)?;
+        // Both clock domains and every manifest byte bind this signature-work cache.
+        // Current custody pins and live-head authorization are still checked by the caller.
+        if wall == now_unix_timestamp() && network == crate::custody::network_now()? {
+            self.verified_authority_cache.borrow_mut().remember_own_manifest(fingerprint);
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare_own_copy_manifest_refresh(
         &self,
     ) -> Result<Option<crate::prekey::SdkDeviceManifestResponse>, SdkError> {

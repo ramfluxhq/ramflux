@@ -20,8 +20,9 @@ pub use store::RecoveryCeremony;
 pub(crate) use store::sibling_fixture::{SiblingSetup, install_sibling_fixture};
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
-    accept_publication, account_exists, custody_vault_reference, export_agent_credentials,
-    failed_setup, failed_setup_error, list_accounts, load_data_account, pending_head_fence_blocks,
+    PublicAuthorityCache, accept_publication, account_exists, custody_vault_reference,
+    export_agent_credentials, failed_setup, failed_setup_error, list_accounts,
+    load_account_with_cache, load_data_account, pending_head_fence_blocks,
     reconcile_incomplete_markers, reserve_pairing_account,
 };
 pub(crate) use store::{finish_recovery, pending_restore};

@@ -298,16 +298,9 @@ fn thirty_two_single_hold_pairs_cannot_exclude_a_new_honest_sender() -> TestResu
     drop(peers);
     Ok(())
 }
-#[test]
-fn rejected_no_role_group_tasks_never_hold_their_followup_events() -> TestResult {
-    let f = Fixture::new()?;
-    f.human.create_group("group", "human-device")?;
-    f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
-    f.human.account_db()?.persist_client_record(
-        "conversation",
-        "group-thread",
-        &json!({"kind":"group","group_id":"group"}),
-    )?;
+#[tokio::test]
+async fn rejected_no_role_group_tasks_never_hold_their_followup_events() -> TestResult {
+    let f = Box::pin(native_group::fixture(false, "other")).await?;
     let c = sign(
         &f.agent,
         "group-thread",

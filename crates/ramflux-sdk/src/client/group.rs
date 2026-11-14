@@ -289,7 +289,6 @@ impl RamfluxClient {
             ),
             _ => Err(SdkError::LocalBus("unsupported group control event body".to_owned())),
         }?;
-        self.observe_verified_task_roster(event, &state);
         Ok(state)
     }
 
@@ -754,33 +753,12 @@ impl RamfluxClient {
         target_member_id: &str,
         reason: &str,
     ) -> Result<(ramflux_protocol::GroupEvent, GroupState), SdkError> {
-        let group = self.group_state(group_id)?;
-        let new_group_epoch = group.group_epoch + 1;
-        let event_id = group_member_banned_event_id(
-            group_id,
-            actor_device_id,
-            target_member_id,
-            new_group_epoch,
-        );
-        let ban_id = format!("group.ban:{group_id}:{target_member_id}:{new_group_epoch}");
-        let event = self.signed_group_control_base(
-            group_id,
-            actor_device_id,
-            event_id,
-            "group.member_banned",
-            new_group_epoch,
-            ramflux_protocol::GroupEventBody::MemberBanned {
-                group_id: group_id.to_owned(),
-                previous_epoch: group.group_epoch,
-                new_group_epoch,
-                banned_identity: target_member_id.to_owned(),
-                reason: reason.to_owned(),
-                ban_id,
-            },
-        )?;
-        let event = self.sign_group_control_event(event)?;
-        let state = self.apply_group_control_event(&event)?;
-        Ok((event, state))
+        let _ = (group_id, actor_device_id, target_member_id, reason);
+        Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired group ban event carrier; use native signed group membership changes"
+                .into(),
+        })
     }
 
     /// # Errors

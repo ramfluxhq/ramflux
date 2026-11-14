@@ -3,7 +3,6 @@
 
 //! Real encrypted head checks, transferee countersignatures and stale-owner repair.
 use super::*;
-use crate::client::identity_authority::HeadUse;
 use crate::client::shared_group::{TRANSFER_SEND_PREFIX, TransferBody, TransferDelivery};
 
 type Capture = Arc<Mutex<Vec<ramflux_protocol::Envelope>>>;
@@ -32,29 +31,19 @@ impl Rig {
         old.abort();
         let own_root = phone.client.owned_device_identity()?.root_commitment().to_owned();
         let next_root = next.client.owned_device_identity()?.root_commitment().to_owned();
-        let mut own: crate::prekey::SdkDeviceManifestResponse = phone
+        let own: crate::prekey::SdkDeviceManifestResponse = phone
             .client
             .account_db()?
             .load_actor_state(&format!("identity/manifest-root/{own_root}"))?
             .ok_or("own manifest")?;
-        let mut remote: crate::prekey::SdkDeviceManifestResponse = phone
+        let remote: crate::prekey::SdkDeviceManifestResponse = phone
             .client
             .account_db()?
             .load_actor_state(&format!("identity/manifest-root/{next_root}"))?
             .ok_or("next manifest")?;
-        crate::client::identity_authority::test_support::sign_manifest(
-            phone.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &mut own,
-            3,
-        )?;
-        crate::client::identity_authority::test_support::sign_manifest(
-            next.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &mut remote,
-            3,
-        )?;
         for client in [&phone.client, &laptop.client, &next.client] {
-            client.persist_root_verified_directory(&own)?;
-            client.persist_root_verified_directory(&remote)?;
+            client.persist_fetched_identity_directory(&own)?;
+            client.persist_fetched_identity_directory(&remote)?;
         }
         let (address, directory) = super::super::fixture::directory(
             &root,
@@ -88,6 +77,7 @@ impl Rig {
             .map(|(index, sender)| {
                 let mut gateway =
                     super::super::fixture::RecordingGateway::new(self.captures[index].clone());
+                gateway.own = self.captures[index].clone();
                 for recipient in &states {
                     if sender.owned_device_identity()? != recipient.owned_device_identity()? {
                         gateway.prekeys.extend(fresh_sibling_gateway(sender, recipient)?.prekeys);
@@ -99,22 +89,8 @@ impl Rig {
         for (account, gateway) in
             [&mut self.phone, &mut self.laptop, &mut self.next].into_iter().zip(gateways)
         {
-            let own = account.client.owned_device_identity()?;
-            let row = account.client.trusted_device(HeadUse::NewAuthorization, &own)?;
-            let mut config = self.config.clone();
-            config.principal_id = account
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .principal_id
-                .clone();
-            config.device_id = own.device_id().into();
-            config.target_delivery_id = row["target_delivery_id"]
-                .as_str()
-                .ok_or(StorageError::GroupPermissionDenied)?
-                .into();
-            config = config.with_account_identity(&account.client)?;
+            let config =
+                crate::client::native_test_support::bus::config_for(&account.client, &self.config)?;
             account.gateway_config = config.clone();
             account.target_delivery_id = config.target_delivery_id.clone();
             account.install_test_session(GatewaySessionEngine::with_test_transport(
@@ -125,17 +101,21 @@ impl Rig {
         Ok(())
     }
     fn create_group(&mut self) -> TestResult {
-        self.phone.client.shared_group_create(
+        self.phone.client.fixture_group_create(
             "group",
             "group-thread",
             None,
             &self.phone.target_delivery_id,
         )?;
-        self.phone.client.shared_group_change(
+        self.phone.client.fixture_group_change(
             "group",
             &self.phone.target_delivery_id,
             ramflux_protocol::GroupStateChange::Add {
-                member: self.next.client.owned_group_actor(&self.next.target_delivery_id)?.identity,
+                member: self
+                    .next
+                    .client
+                    .fixture_group_actor(&self.next.target_delivery_id)?
+                    .identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
@@ -146,16 +126,16 @@ impl Rig {
             Arc::new(AtomicBool::new(false)),
         )?;
         self.removed_root = outsider.client.owned_device_identity()?.root_commitment().into();
-        let base = self.phone.client.shared_group_change(
+        let base = self.phone.client.fixture_group_change(
             "group",
             &self.phone.target_delivery_id,
             ramflux_protocol::GroupStateChange::Add {
-                member: outsider.client.owned_group_actor("mallory")?.identity,
+                member: outsider.client.fixture_group_actor("mallory")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        self.laptop.client.accept_shared_group_state(&base, &self.laptop.target_delivery_id)?;
-        self.next.client.accept_shared_group_state(&base, &self.next.target_delivery_id)?;
+        self.laptop.client.fixture_accept_group_state(&base, &self.laptop.target_delivery_id)?;
+        self.next.client.fixture_accept_group_state(&base, &self.next.target_delivery_id)?;
         Ok(())
     }
     async fn authorize(&self) -> Result<ramflux_protocol::GroupTransferAcceptance, SdkError> {
@@ -168,7 +148,7 @@ impl Rig {
         Box::pin(self.laptop.client.group_transfer_authorization(
             &self.laptop.gateway_config,
             &state,
-            &self.next.client.owned_group_actor(&self.next.target_delivery_id)?,
+            &self.next.client.fixture_group_actor(&self.next.target_delivery_id)?,
             &self.laptop.target_delivery_id,
         ))
         .await
@@ -238,7 +218,7 @@ async fn r6_shared_group_stale_laptop_gets_signed_refusal_and_reissues_without_u
 async fn check_handover(stale: bool) -> TestResult {
     let mut rig = Box::pin(Rig::new()).await?;
     if stale {
-        rig.phone.client.shared_group_change(
+        rig.phone.client.fixture_group_change(
             "group",
             &rig.phone.target_delivery_id,
             ramflux_protocol::GroupStateChange::Remove {
@@ -246,7 +226,7 @@ async fn check_handover(stale: bool) -> TestResult {
                 device_id: "device-mallory".into(),
             },
         )?;
-        rig.phone.client.shared_group_change(
+        rig.phone.client.fixture_group_change(
             "group",
             &rig.phone.target_delivery_id,
             ramflux_protocol::GroupStateChange::SetName { name: "current creator head".into() },
@@ -267,7 +247,7 @@ async fn check_handover(stale: bool) -> TestResult {
         let blocked = rig
             .phone
             .client
-            .shared_group_change(
+            .fixture_group_change(
                 "group",
                 &rig.phone.target_delivery_id,
                 ramflux_protocol::GroupStateChange::SetName { name: "must wait".into() },
@@ -313,11 +293,11 @@ async fn check_handover(stale: bool) -> TestResult {
     let acceptance = rig.authorize().await?;
     let old = rig.laptop.client.account_db()?.shared_group_state("group")?.ok_or("old head")?;
     assert_eq!(acceptance.base_hash, old.snapshot().state_hash);
-    let handover = rig.laptop.client.shared_group_change(
+    let handover = rig.laptop.client.fixture_group_change(
         "group",
         &rig.laptop.target_delivery_id,
         ramflux_protocol::GroupStateChange::TransferOwnership {
-            creator: rig.next.client.owned_group_actor(&rig.next.target_delivery_id)?,
+            creator: rig.next.client.fixture_group_actor(&rig.next.target_delivery_id)?,
             acceptance: Box::new(acceptance),
         },
     )?;
@@ -345,24 +325,24 @@ async fn stale_snapshot() -> TestResult {
     // Model a stale/malicious issuer bypassing the honest SDK's freshness gate.
     let acceptance = ramflux_crypto::accept_group_transfer(
         rig.next.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &rig.next.client.owned_group_actor(&rig.next.target_delivery_id)?,
+        &rig.next.client.fixture_group_actor(&rig.next.target_delivery_id)?,
         &base,
         &ramflux_protocol::encode_base64url([73; 32]),
         now_unix_timestamp(),
     )?;
-    let stale = ramflux_crypto::advance_group_state(
-        rig.laptop.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+    let stale = ramflux_crypto::advance_native_group_state(
+        &rig.laptop.client.fixture_primary()?.ok_or(SdkError::CustodyVaultUnavailable)?,
         rig.laptop.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &rig.laptop.client.owned_group_actor(&rig.laptop.target_delivery_id)?,
+        &rig.laptop.client.fixture_group_actor(&rig.laptop.target_delivery_id)?,
         &base,
         ramflux_protocol::GroupStateChange::TransferOwnership {
-            creator: rig.next.client.owned_group_actor(&rig.next.target_delivery_id)?,
+            creator: rig.next.client.fixture_group_actor(&rig.next.target_delivery_id)?,
             acceptance: Box::new(acceptance),
         },
     )?;
     // The issuing device has committed the handover before a lagging peer refuses it.
-    rig.laptop.client.accept_shared_group_state(&stale, &rig.laptop.target_delivery_id)?;
-    rig.phone.client.shared_group_change(
+    rig.laptop.client.fixture_accept_group_state(&stale, &rig.laptop.target_delivery_id)?;
+    rig.phone.client.fixture_group_change(
         "group",
         &rig.phone.target_delivery_id,
         ramflux_protocol::GroupStateChange::Remove {
@@ -370,7 +350,7 @@ async fn stale_snapshot() -> TestResult {
             device_id: "device-mallory".into(),
         },
     )?;
-    let head = rig.phone.client.shared_group_change(
+    let head = rig.phone.client.fixture_group_change(
         "group",
         &rig.phone.target_delivery_id,
         ramflux_protocol::GroupStateChange::SetName { name: "current head".into() },
@@ -391,18 +371,19 @@ async fn stale_snapshot() -> TestResult {
         created_at: now_unix_timestamp(),
         ttl: 60,
     };
-    message.encrypted_body = serde_json::to_vec(
-        &rig.laptop
-            .client
-            .seal_routed_as(
-                &mut engine,
-                &message,
-                &rig.laptop.client.shared_group_packet(&stale, false)?,
-                crate::client::routed::Route::group_control("group"),
-            )
-            .await?,
-    )?;
-    let envelope = crate::dm::gateway_direct_message_envelope(&engine.config, &message, None)?;
+    let body = rig.laptop.client.shared_group_packet(&stale, false)?;
+    let sealed = rig
+        .laptop
+        .client
+        .seal_routed_as(
+            &mut engine,
+            &message,
+            &body,
+            crate::client::routed::Route::from_inner(&body)?,
+        )
+        .await?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&engine.config, &mut message, sealed)?;
     rig.laptop.install_test_session(engine);
     let error = deliver(&mut rig.phone, envelope).await.err().ok_or("stale transfer accepted")?;
     let sdk = error.downcast_ref::<SdkError>().ok_or("typed SDK error missing")?;

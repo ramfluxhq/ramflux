@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 pub mod a2i;
-mod a2i_identity;
 pub mod account;
 mod account_authority;
 pub(crate) mod attachment_diagnostics;
@@ -69,6 +68,7 @@ pub(crate) mod own_device_copy;
 mod own_device_group_pins;
 #[cfg(test)]
 mod own_device_group_restore;
+mod own_device_group_state;
 pub mod own_device_sync;
 #[cfg(test)]
 mod own_device_sync_receipts;
@@ -107,6 +107,9 @@ pub struct RamfluxClient {
     pub(crate) self_sync_restore_clock:
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
+    pub(crate) verified_authority_cache:
+        std::cell::RefCell<identity_authority::VerifiedAuthorityCache>,
+    pub(crate) verified_durable_authority: std::cell::RefCell<crate::custody::PublicAuthorityCache>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
     // One account-owned plan crosses the synchronous receive transaction's commit boundary.
@@ -127,16 +130,22 @@ pub struct RamfluxClient {
     pub(crate) object_store: ObjectStore,
     pub(crate) mcp_registry: McpRegistry,
     pub(crate) federation_mesh: FederationMesh,
+    #[cfg(test)]
+    pub(crate) native_bus_fixture: Option<Box<native_test_support::bus::Material>>,
 }
 
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            native_bus_fixture: None,
             typing_receiver: std::cell::RefCell::default(),
             typing_sender: std::cell::RefCell::default(),
             self_sync_live_generation: std::cell::Cell::new(None),
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
+            verified_authority_cache: std::cell::RefCell::default(),
+            verified_durable_authority: std::cell::RefCell::default(),
             born_v3_account: None,
             voice_calls: BTreeMap::new(),
             voice_transition: std::cell::RefCell::new(None),

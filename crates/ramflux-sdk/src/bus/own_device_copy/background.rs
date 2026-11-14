@@ -25,6 +25,7 @@ pub(crate) struct Plan {
     config: GatewaySessionConfig,
     root: String,
     manifest: Option<SdkDeviceManifestResponse>,
+    cached_manifest: bool,
 }
 pub(crate) struct DraftPlan {
     plan: Plan,
@@ -224,8 +225,7 @@ fn finish(
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
     for (key, mut work) in pending_ordered(&account.client, now)? {
-        if (!work.local_manifest && message_owner(&work).is_some())
-            || work.intent.expiry() <= now
+        if work.intent.expiry() <= now
             || (!sealed(&work) && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
@@ -280,6 +280,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             key,
             root: account.client.surface_local_root_commitment()?,
             config: account.gateway_config.clone(),
+            cached_manifest: manifest.is_some(),
             manifest,
         }));
     }
@@ -305,12 +306,19 @@ fn draft(
         return resume_generated(account, plan, generated)
             .map(|plan| plan.map(|plan| Prepared::Send(Box::new(plan))));
     }
-    let manifest = account.client.accept_fetched_device_manifest(
-        manifest?
-            .ok_or_else(|| SdkError::InboundPending("own-device manifest unavailable".into()))?,
-        &plan.root,
-        "own_device_message",
-    )?;
+    let manifest = manifest?
+        .ok_or_else(|| SdkError::InboundPending("own-device manifest unavailable".into()))?;
+    let manifest = if plan.cached_manifest {
+        let current = account.client.local_own_copy_manifest()?;
+        if serde_json::to_value(&current)? != serde_json::to_value(&manifest)? {
+            return Err(SdkError::InboundPending(
+                "own-device local manifest changed during preparation".into(),
+            ));
+        }
+        current
+    } else {
+        account.client.accept_fetched_device_manifest(manifest, &plan.root, "own_device_message")?
+    };
     let body = zeroize::Zeroizing::new(
         ramflux_protocol::decode_base64url(&plan.work.intent.body)
             .map_err(|_| SdkError::LocalBus("own-device intent encoding".into()))?,

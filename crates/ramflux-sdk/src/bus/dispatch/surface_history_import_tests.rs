@@ -177,25 +177,16 @@ async fn retired_relay_keys_refuse_device_sync_ipc_before_cached_receipts_or_ses
         let mut source = runtime_tests::account(
             &root.join("source"), "sender", None, Arc::new(AtomicBool::new(false)),
         )?;
-        let (mut target, config, receiver, server) =
+        let (mut target, config, _receiver, server) =
             super::own_tests::sibling_fixture(root, &mut source).await?;
         source.client.send_direct_message(
             "history-thread", "history-message", "device-sender", b"ciphertext",
         )?;
         let envelope = Box::pin(cached_history(&source, &mut target, config)).await?;
-        let pool = ramflux_transport::RelayQuicPool::new(
-            ramflux_transport::RelayQuicPoolConfig::functional_default()?,
-        );
-        let mut engine = GatewaySessionEngine::with_test_transport(
-            receiver, Box::new(super::fixture::RecordingGateway::new(Arc::default())),
-        );
-        target.client.import_own_device_sync(
-            &mut engine, &pool, &envelope.principal_commitment, &envelope, None,
-        ).await?;
         server.abort();
         let receipt = RamfluxClient::own_sync_receipt_key(&envelope)?;
+        target.client.account_db()?.persist_actor_state(&receipt, &json!({"retired_cached_receipt":true}))?;
         let before = serde_json::to_value(target.client.account_db()?.load_actor_state::<Value>(&receipt)?)?;
-        assert!(!before.is_null(), "test: real import must populate its durable receipt");
         let messages = serde_json::to_value(target.client.direct_messages("history-thread")?)?;
         let object = serde_json::to_value(target.client.object_store_object(&envelope.history_ref.object_id)?)?;
         let engine_present = target.engine.is_some();
@@ -214,9 +205,14 @@ async fn retired_relay_keys_refuse_device_sync_ipc_before_cached_receipts_or_ses
             let error = super::super::device::dispatch_device_bus_request(&request, &mut state)
                 .await.err().ok_or("test: retired key was accepted by device sync IPC")?;
             match error {
-                SdkError::CapabilityDenied(message) => assert_eq!(message,
-                    "relay service keys are unsupported; use gateway-issued QUIC tokens",
-                    "device sync must return the exact retired-key refusal"),
+                SdkError::CapabilityDenied(message) if method == "device.sync.export" => {
+                    assert_eq!(message, "relay service keys are unsupported; use gateway-issued QUIC tokens");
+                },
+                SdkError::GeneratedRefused { code, reason } if method == "device.sync.import" => {
+                    assert_eq!(code, crate::error::GeneratedRefusalCode::Content);
+                    assert!(reason.contains("retired object history carrier"),
+                        "device sync must refuse the retired carrier: {reason}");
+                },
                 other => return Err(format!("test: unexpected device sync refusal: {other}").into()),
             }
             let account = state.accounts.get("target").ok_or("test: target account")?;

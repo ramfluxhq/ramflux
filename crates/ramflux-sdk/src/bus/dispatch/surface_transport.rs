@@ -41,6 +41,9 @@ pub(crate) async fn send(
         created_at: now_unix_timestamp(),
         ttl: account.client.content_ttl()?,
     };
+    if group.is_none() {
+        Box::pin(prepare_direct_target(account, carrier, &thread, &mut authored)).await?;
+    }
     let prepared = account.client.prepare_authored_content(
         &mut authored,
         group,
@@ -164,6 +167,31 @@ async fn send_direct(
     }
     Ok((devices, failure))
 }
+async fn prepare_direct_target(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    thread: &Value,
+    authored: &mut GatewayDirectMessage,
+) -> Result<(), SdkError> {
+    let root = peer_commitments(account, carrier, thread)?
+        .into_keys()
+        .next()
+        .ok_or_else(|| invalid("surface direct peer missing"))?;
+    let engine = account.session_client().await?;
+    let manifest = account
+        .client
+        .cache_verified_device_manifest(engine.config(), &root, "surface_prepare")
+        .await;
+    account.apply_session_metadata(engine);
+    let manifest = manifest?;
+    let target =
+        manifest.devices.first().ok_or_else(|| invalid("surface peer has no active device"))?;
+    authored.recipient_principal_commitment = Some(root);
+    authored.recipient_device_id = Some(target.device_id.clone());
+    authored.target_delivery_id.clone_from(&target.target_delivery_id);
+    Ok(())
+}
+
 fn copy_own(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,

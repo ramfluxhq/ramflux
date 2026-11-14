@@ -131,8 +131,8 @@ impl RamfluxClient {
         self.require_backup_outbound_ready()?;
         self.current_custody_authority(own.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
-        let own_only = message.recipient_principal_commitment.as_deref()
-            == Some(own.root_commitment())
+        let own_only = group.is_none()
+            && message.recipient_principal_commitment.as_deref() == Some(own.root_commitment())
             && !matches!(content.value, Some(g::content::Value::Message(_)));
         if group.is_none() && !own_only {
             let peer = self.device_identity(&Self::qualified_recipient(message)?)?;

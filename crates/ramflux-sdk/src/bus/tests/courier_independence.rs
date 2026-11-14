@@ -76,10 +76,10 @@ async fn rig() -> Case<Rig> {
 }
 async fn send(started: &Started, peer: &str, id: &str) -> Case {
     started.actor.request(command("message.submit",json!({
-        "conversation_id":"healthy","message_id":id,"envelope_id":id,
+        "conversation_id":started.conversation,"message_id":id,"envelope_id":id,
         "source_principal_id":"sender","sender_id":"device-sender",
         "recipient_device_id":"device-peer","recipient_principal_commitment":peer,
-        "target_delivery_id":"peer","encrypted_body_base64":"",
+        "target_delivery_id":ramflux_protocol::qualified_device_id(peer, "device-peer")?,"encrypted_body_base64":"",
         "plaintext_body_base64":ramflux_protocol::encode_base64url(b"other couriers keep progressing"),
         "created_at":now_unix_timestamp(),"ttl":600,
     }))).await?;

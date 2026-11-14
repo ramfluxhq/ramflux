@@ -265,10 +265,14 @@ impl RamfluxClient {
         if kind == 1
             && let Some(stored) = self.account_db()?.message_content(&routing.message_id)?
         {
-            if stored != bytes {
+            if stored == bytes {
+                return Ok(true);
+            }
+            if routing.kind != Kind::GroupMessage {
                 return Err(SdkError::ReplayMismatch);
             }
-            return Ok(true);
+            // An authenticated authored copy may have arrived first. Decrypt and
+            // compare the entire plaintext Inner before accepting its sealed form.
         }
         let now_ms = crate::client::generated_identity::now_ms();
         self.merge_generated_clock(identity.hlc, now_ms)?;
@@ -360,13 +364,25 @@ impl RamfluxClient {
         validation::validate_message(&message).map_err(|_| invalid("invalid group content"))?;
         Self::attachment_message_content(&message.text, &message.media)?;
         self.merge_routed_group_link(&sealed.group_id, &opened.routing.conversation_id)?;
-        self.append_plaintext_projection_once(
-            &opened.routing.conversation_id,
-            &opened.routing.message_id,
-            entry,
-            scanned.exact_inner,
-            metadata,
-        )?;
+        let db = self.account_db()?;
+        if let Some(stored) = db.message_content(&opened.routing.message_id)? {
+            let mut normalized = g::Inner::decode(scanned.exact_inner)
+                .map_err(|_| invalid("group Inner malformed"))?;
+            normalized.body.clone_from(plaintext);
+            let exact = zeroize::Zeroizing::new(normalized.encode_to_vec());
+            zeroize::Zeroize::zeroize(&mut normalized.body);
+            if stored != scanned.exact_inner && stored != exact.as_slice() {
+                return Err(SdkError::ReplayMismatch);
+            }
+        } else {
+            self.append_plaintext_projection_once(
+                &opened.routing.conversation_id,
+                &opened.routing.message_id,
+                entry,
+                scanned.exact_inner,
+                metadata,
+            )?;
+        }
         let db = self.account_db()?;
         if let Some(origin) = origin.as_ref() {
             self.persist_known_origin(&opened.routing.message_id, origin)?;

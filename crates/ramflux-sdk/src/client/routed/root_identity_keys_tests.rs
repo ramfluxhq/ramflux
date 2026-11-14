@@ -119,8 +119,8 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
 }
 
 #[tokio::test]
-async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_root()
--> Result<(), SdkError> {
+async fn retired_replay_rows_cannot_replace_current_root_qualified_receipts() -> Result<(), SdkError>
+{
     let mut alice = Fixture::native_principal("alice", "alice").await?;
     let bob = Fixture::native_principal("bob", "bob").await?;
     let mallory = Fixture::native_principal("bob", "mallory").await?;
@@ -135,23 +135,24 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let entry = generated_delivery(&bob, &alice, "migrate-id", "body")?.entry;
     alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    let source = alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
     let key = alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let db = alice.client.account_db()?;
     let receipt =
         db.load_actor_state::<serde_json::Value>(&key)?.ok_or_else(|| invalid("receipt"))?;
-    // The legacy fixture predates the identity-independent seen marker.
+    // An unqualified retained row is never translated into current replay authority.
     let seen = db.routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
     db.remove_actor_state(&seen)?;
     db.remove_actor_state(&key)?;
-    db.remove_actor_state(&format!("identity/replay-upgrade/v3/{}", source.storage_key()))?;
     db.persist_actor_state("routed/committed/old-name-digest", &receipt)?;
     db.persist_actor_state("legacy/committed/migrate-id", &"mallory-thread")?;
     assert_eq!(alice.client.committed_direct_context(&entry)?, None);
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    assert!(
+        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err(),
+        "retired receipts cannot resurrect an already consumed ratchet counter"
+    );
     let db = alice.client.account_db()?;
-    assert!(db.actor_state_exists(&key)?);
-    assert!(!db.actor_state_exists("routed/committed/old-name-digest")?);
+    assert!(!db.actor_state_exists(&key)?);
+    assert!(db.actor_state_exists("routed/committed/old-name-digest")?);
     let attack = generated_delivery(&mallory, &alice, "migrate-id", "attack")?.entry;
     assert_eq!(alice.client.committed_direct_context(&attack)?, None);
     let messages = alice.client.direct_messages(
@@ -161,28 +162,35 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
     Ok(())
 }
 
-#[test]
-fn legacy_reset_work_requires_the_root_bound_pair_key_and_preserves_attempts()
--> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 31)?;
+#[tokio::test]
+async fn reset_work_requires_current_root_bound_state_without_translation() -> Result<(), SdkError>
+{
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
     trust(&alice, &bob)?;
-    alice.client.establish_friend_link("friend", "alice", "bob")?;
     let local = alice.client.owned_device_identity()?;
-    let remote = alice.client.device_identity(&bob.reference()?)?;
+    let remote = bob.client.owned_device_identity()?;
     let key = RamfluxClient::reset_work_key(&local, &remote)?;
-    let value = serde_json::json!({"local":"alice","remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
+    let value = serde_json::json!({"local":local.storage_key(),"remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
     let db = alice.client.account_db()?;
     db.persist_actor_state(&key, &value)?;
-    db.persist_actor_state("dm-pair/reset-work/unproven", &value)?;
-    let restored = alice.client.legacy_upgrade_reset_work(&local)?;
+    let restored = alice.client.retained_reset_work(&local)?;
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].local, local.storage_key());
     assert_eq!(restored[0].attempts, 5);
     assert_eq!(restored[0].first_at, Some(10));
     assert_eq!(restored[0].next_at, 120);
-    assert!(!db.actor_state_exists("dm-pair/reset-work/unproven")?);
-    assert_eq!(db.actor_state_keys("legacy/reset-work/")?.len(), 1);
+    let malformed = serde_json::json!({"local":"alice","remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
+    db.persist_actor_state("dm-pair/reset-work/unproven", &malformed)?;
+    assert!(
+        alice.client.retained_reset_work(&local).is_err(),
+        "rootless work must fail without translation"
+    );
+    assert_eq!(db.load_actor_state::<serde_json::Value>(&key)?, Some(value));
+    assert_eq!(
+        db.load_actor_state::<serde_json::Value>("dm-pair/reset-work/unproven")?,
+        Some(malformed)
+    );
+    assert_eq!(db.actor_state_keys("legacy/reset-work/")?, Vec::<String>::new());
     Ok(())
 }
 
@@ -205,5 +213,31 @@ fn colliding_device_names_never_escape_inbox_failure_policy() -> Result<(), SdkE
         now_unix_timestamp(),
     )?);
     assert_ne!(alice.client.owned_device_identity()?, bob.client.owned_device_identity()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cold_native_head_defers_reset_without_retiring_durable_work() -> Result<(), SdkError> {
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    trust(&alice, &bob)?;
+    let local = alice.client.owned_device_identity()?;
+    let remote = bob.client.owned_device_identity()?;
+    alice.client.establish_friend_link(
+        "reset-peer",
+        local.root_commitment(),
+        remote.root_commitment(),
+    )?;
+    assert!(alice.client.begin_pair_recovery(&local, &remote, now_unix_timestamp())?);
+    let key = RamfluxClient::reset_work_key(&local, &remote)?;
+    let before = alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?;
+    *alice.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    assert!(
+        matches!(alice.client.pair_recovery_allowed(&local, &remote),
+        Err(SdkError::FreshHeadRequired { root }) if root == remote.root_commitment()),
+        "a missing live observation must defer recovery instead of retiring the pair"
+    );
+    assert_eq!(alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?, before);
     Ok(())
 }

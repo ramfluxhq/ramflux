@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct Harness {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     account: crate::bus::state::LocalBusAccountState,
 }
 
@@ -47,7 +47,7 @@ fn open() -> Result<Harness, SdkError> {
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
     let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?;
-    Ok(Harness { _root: root, account })
+    Ok(Harness { root, account })
 }
 
 /// W1 unit tests cover the Push/Terminal path unless they opt into Legacy/Compat.
@@ -77,13 +77,19 @@ fn envelope(
     device: &str,
     seq: u64,
 ) -> serde_json::Value {
+    // These transaction-boundary fixtures carry the active sender profile even when
+    // their intentionally opaque application bytes are handled by a fault hook.
+    let payload = ramflux_protocol::decode_base64url(payload)
+        .ok()
+        .filter(|bytes| ramflux_protocol::encode_base64url(bytes) == payload)
+        .map_or_else(|| encode_base64url(payload.as_bytes()), |_| payload.to_owned());
     json!({
         "inbox_seq": seq,
         "target_delivery_id": target,
         "envelope": {
-            "schema": "test",
-            "version": 1,
-            "domain": "test",
+            "schema": "ramflux.envelope.v2",
+            "version": 2,
+            "domain": "ramflux.envelope.v2",
             "signing_key_id": "key",
             "signature_alg": "ed25519",
             "signature": "sig",
@@ -96,7 +102,11 @@ fn envelope(
             "ttl": 60,
             "created_at": 1,
             "encrypted_payload": payload,
-            "payload_hash": format!("H{seq}")
+            "payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, payload.as_bytes()),
+            "delivery_mode":"durable",
+            "collapse_tag":encode_base64url([0x22;32]),
+            "report_commitment":encode_base64url([0x33;32]),
+            "ext":{"source_root_commitment":encode_base64url([0x11;32])}
         }
     })
 }
@@ -130,7 +140,11 @@ fn routed_payload() -> String {
             "ciphertext": []
         }
     });
-    encode_base64url(serde_json::to_vec(&inner).expect("routed"))
+    let sidecar = serde_json::to_vec(&inner).expect("test: routed sidecar");
+    encode_base64url(
+        ramflux_protocol::message::outer::encode_compact_cryptobox(&[7; 16], &sidecar)
+            .expect("test: compact routed fixture"),
+    )
 }
 
 thread_local! {
@@ -307,36 +321,28 @@ async fn apply_page_refuses_stale_generation_after_await() -> Result<(), SdkErro
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a2i_binding_change_refuses_before_legacy_retry() -> Result<(), SdkError> {
+async fn retired_a2i_bytes_settle_without_binding_retry() -> Result<(), SdkError> {
     let mut harness = open()?;
-    let target = harness.account.target_delivery_id.clone();
-    queue_unbound_answers(std::iter::repeat_n(true, 8));
     legacy_w1::set_fault(Fault::BindingAppeared);
-    let dummy = encode_base64url(b"legacy-a2i-dummy");
-    let device = harness.account.gateway_config.device_id.clone();
-    let principal = harness.account.gateway_config.principal_id.clone();
-    let refused =
-        drive(&mut harness.account, prepared_from(&target, &dummy, &principal, &device), || 1)
-            .await;
+    let entry = own_dummy(&harness.account);
+    let result = drive(&mut harness.account, entry, || 1).await;
     legacy_w1::set_fault(Fault::None);
-    let error = refused.as_ref().err();
-    assert!(
-        matches!(
-            error,
-            Some(SdkError::GeneratedRefused {
-                code: crate::error::GeneratedRefusalCode::Authority,
-                ..
-            })
-        ),
-        "A2I must refuse before legacy binding retries: {error:?}"
-    );
-    assert_eq!(binding_attempts(), 0, "refused A2I never enters a binding retry");
+    result?;
+    let db = harness.account.client.account_db()?;
+    assert_eq!(binding_attempts(), 0, "retired bytes must never enter binding retries");
     assert_eq!(
-        harness.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("staged".into()), 1),
-        "W0 stays staged"
+        db.receive_state_for_test(1)?,
+        (None, 0),
+        "deterministic refusal settles the staged input"
     );
-    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0, "no hold journal");
+    assert_eq!(cursor(&harness.account)?, 1, "retired input cannot block the next sequence");
+    assert_eq!(db.unrouted_count()?, 0, "retired A2I never creates a hold");
+    assert_eq!(db.actor_state_usage("legacy/a2i/")?.0, 0, "retired A2I has no application receipt");
+    assert_eq!(
+        db.actor_state_usage(OUTBOX)?.0,
+        0,
+        "refusal cannot create an application projection"
+    );
     Ok(())
 }
 
@@ -344,7 +350,26 @@ async fn a2i_binding_change_refuses_before_legacy_retry() -> Result<(), SdkError
 async fn active_routed_requires_live_session() -> Result<(), SdkError> {
     let mut harness = open()?;
     let target = harness.account.target_delivery_id.clone();
-    let refused = drive(&mut harness.account, prepared(&target, &routed_payload()), || 1).await;
+    let source = runtime_tests::account(
+        &harness.root.path().join("source"),
+        "source",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let manifest =
+        crate::client::identity_authority::test_support::public_manifest(&source.client)?;
+    harness.account.client.persist_identity_directory(&manifest)?;
+    let mut entry = prepared_from(&target, &routed_payload(), "source", "device-source");
+    entry.entry.envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::Value::String(manifest.principal_commitment),
+    );
+    entry.entry.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &ramflux_protocol::envelope_sender_signed_bytes(&entry.entry.envelope)?,
+        source.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+    );
+    crate::client::routed::decode(&entry.entry.envelope)?;
+    let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::GatewaySessionNotEstablished)),
@@ -581,26 +606,20 @@ async fn held_entries_cover_cursor_in_one_pass() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a2i_receipt_inbound_rejected_is_not_a_hold() -> Result<(), SdkError> {
+async fn retired_a2i_refusal_does_not_manufacture_a_hold_or_receipt() -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_unbound_answers(std::iter::repeat_n(false, 4));
     let entry = own_dummy(&harness.account);
-    let refused = drive(&mut harness.account, entry, || 1).await;
-    let error = refused.as_ref().err();
-    assert!(
-        matches!(
-            error,
-            Some(SdkError::InboundRejected(text))
-                if text == "identity authority: device metadata absent"
-        ),
-        "receipt load InboundRejected stays a rejection: {error:?}"
-    );
+    drive(&mut harness.account, entry, || 1).await?;
+    let db = harness.account.client.account_db()?;
     assert_eq!(
-        harness.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("staged".into()), 1)
+        db.receive_state_for_test(1)?,
+        (None, 0),
+        "retired carrier is terminal rather than retryable"
     );
-    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0);
-    assert_eq!(cursor(&harness.account)?, 0);
+    assert_eq!(unrouted_journals(db)?, 0, "no legacy hold event is published");
+    assert_eq!(db.unrouted_count()?, 0, "no retired application bytes remain held");
+    assert_eq!(cursor(&harness.account)?, 1, "refusal advances the committed receive cursor");
+    assert_eq!(db.actor_state_usage("legacy/a2i/")?.0, 0, "no legacy receipt is manufactured");
     Ok(())
 }
 

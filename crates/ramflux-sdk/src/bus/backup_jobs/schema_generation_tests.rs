@@ -19,7 +19,7 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
     let context = BackupContext {
         account_id: "acct".into(),
         created_at: 1,
-        totals: BTreeMap::from([(ARCHIVE_GENERATION_KEY.into(), 1)]),
+        totals: BTreeMap::from([(ARCHIVE_GENERATION_KEY.into(), 2)]),
     };
     // Authenticated future-generation input deliberately has no valid payload or counts.
     // Refusal must precede both payload decoding and staging-directory allocation.
@@ -41,7 +41,7 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
     assert_eq!(std::fs::read(&path)?, original);
     assert!(!jobs.root.join(format!("job_{}", job.job_id)).exists());
     let storage =
-        ramflux_storage::StorageError::SchemaResetRequired { generation: 1, supported: 0 };
+        ramflux_storage::StorageError::SchemaResetRequired { generation: 2, supported: 1 };
     assert_eq!(
         super::workers::storage_error(&storage).code,
         BackupFailureCode::SchemaResetRequired
@@ -54,7 +54,7 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
         rows[0].error.as_ref().ok_or("install failure")?.code,
         BackupFailureCode::SchemaResetRequired
     );
-    for generation in [None, Some(0), Some(1), Some(u64::MAX)] {
+    for generation in [None, Some(0), Some(1), Some(2), Some(u64::MAX)] {
         let context = BackupContext {
             account_id: "acct".into(),
             created_at: 1,
@@ -64,7 +64,7 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
         };
         assert_eq!(
             super::workers::require_archive_generation(&context).is_ok(),
-            generation.is_none_or(|value| value == 0)
+            generation == Some(1)
         );
     }
     Ok(())

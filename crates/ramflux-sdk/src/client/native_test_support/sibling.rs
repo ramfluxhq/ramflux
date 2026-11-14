@@ -16,7 +16,7 @@ impl Fixture {
         let primary = self.vault.primary_for_public_key(
             &native.publication.record.body.master_certificate.body.self_signing_public_key,
         )?;
-        let now = crate::custody::network_now()?;
+        let now = crate::custody::network_now()?.max(native.publication.record.body.issued_at);
         let current =
             ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
         let mut seeds = Zeroizing::new([0; 64]);

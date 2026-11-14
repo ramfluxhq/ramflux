@@ -644,7 +644,7 @@ impl RamfluxClient {
         }
         let floor_by_group = self.restore_own_groups(bundle)?;
         let blocked = self.restore_own_device_group_member_pins(bundle, &floor_by_group)?;
-        self.import_own_task_packets(&bundle.task_packets, &bundle.source_device_id)?;
+        self.import_own_task_packets(&bundle.task_packets)?;
         let imported_messages =
             self.import_own_history_messages(bundle, &floor_by_group, &blocked)?;
         let imported_dm_sessions = 0;

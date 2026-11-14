@@ -98,6 +98,11 @@ impl RamfluxClient {
                     .map_err(|_| invalid("invalid typed sent message"))?;
                 let sent = g::OwnSentMessage::decode(body)
                     .map_err(|_| invalid("invalid typed sent message"))?;
+                self.authorize_generated_own_sent(
+                    &self.owned_device_identity()?,
+                    &draft.conversation,
+                    &sent,
+                )?;
                 own_message_copy::Payload::Sent(sent)
             }
             super::OwnPayloadKind::Control => {

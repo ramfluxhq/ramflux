@@ -25,6 +25,8 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<i64>,
     owner_record: Option<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    surface_reference: Option<String>,
 }
 impl Intent {
     fn expiry(&self) -> i64 {
@@ -128,6 +130,7 @@ fn stage_inner(
     held: bool,
     audience: Option<ramflux_protocol::message::QualifiedDevice>,
 ) -> Result<(), SdkError> {
+    client.require_backup_outbound_ready()?;
     let id = copy_id(client, input.id)?;
     let key = format!("{PREFIX}{id}");
     let db = client.account_db()?;
@@ -149,12 +152,13 @@ fn stage_inner(
             created_at: input.created_at,
             expires_at: Some(input.created_at.saturating_add(i64::from(client.content_ttl()?))),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
+            surface_reference: surface_reference(input)?,
         },
 
         attempts: 0,
         next_at: input.created_at,
         held,
-        local_manifest: held,
+        local_manifest: true,
         targets: Vec::new(),
         context_delivery: None,
         generated: None,
@@ -273,19 +277,41 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         now_unix_timestamp(),
         crate::client::own_device_copy::MAX_DELIVERY_ROWS,
     )?;
-    if let Some((directory, record)) = &work.intent.owner_record
-        && matches!(directory.as_str(), "surface" | "message")
-        && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {
-            (directory == "message")
-                .then(|| json!({"id":record,"conversation_id":work.intent.conversation}))
-        })
-        && (latest || row["own_copy_message_id"].as_str() == Some(id.as_str()))
+    for (directory, record) in work
+        .intent
+        .owner_record
+        .iter()
+        .map(|(directory, record)| (directory.as_str(), record.as_str()))
+        .chain(
+            work.intent.surface_reference.iter().map(|reference| ("surface", reference.as_str())),
+        )
     {
-        row["own_copy_message_id"] = json!(id);
-        row["own_device_copy_state"] = json!(value);
-        db.persist_client_record(directory, record, &row)?;
+        if matches!(directory, "surface" | "message")
+            && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {
+                (directory == "message")
+                    .then(|| json!({"id":record,"conversation_id":work.intent.conversation}))
+            })
+            && (latest || row["own_copy_message_id"].as_str() == Some(id.as_str()))
+        {
+            row["own_copy_message_id"] = json!(id);
+            row["own_device_copy_state"] = json!(value);
+            db.persist_client_record(directory, record, &row)?;
+        }
     }
     Ok(())
+}
+
+fn surface_reference(input: OwnMessageInput<'_>) -> Result<Option<String>, SdkError> {
+    if !matches!(input.payload_kind, crate::client::own_device_copy::OwnPayloadKind::Surface) {
+        return Ok(None);
+    }
+    let control = crate::client::surface::SurfaceControl::decode(input.body)?
+        .ok_or_else(|| SdkError::InboundRejected("own Surface control missing".into()))?;
+    let bytes = ramflux_protocol::decode_base64url(&control.carrier_base64)
+        .map_err(|_| SdkError::InboundRejected("own Surface carrier encoding".into()))?;
+    let carrier = crate::client::surface::Carrier::decode(&bytes)?
+        .ok_or_else(|| SdkError::InboundRejected("own Surface carrier missing".into()))?;
+    carrier.surface_reference().map(Some)
 }
 
 fn sealed(work: &Work) -> bool {
@@ -332,9 +358,6 @@ pub(crate) fn finish_held(
 
 mod background;
 pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_background};
-
-#[cfg(test)]
-pub(crate) use background::drive_once;
 
 #[cfg(test)]
 mod retention_compatibility_tests {

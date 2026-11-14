@@ -450,14 +450,11 @@ async fn failed_verification_and_cancellation_leave_existing_accounts_and_output
                 supervisor.index.account("alice")?.db_relative_path,
                 original_record.db_relative_path
             );
-            let read = call(
-                &supervisor,
-                "message.read",
-                Some("alice"),
-                json!({"conversation_id":"thread"}),
-            )
-            .await?;
-            assert!(read.to_string().contains("m5"));
+            let read = call(&supervisor, "contact.list", Some("alice"), json!({})).await?;
+            assert!(
+                read.to_string().contains("friend-0"),
+                "failed restore changed existing contacts"
+            );
         }
         rejects_identity_replacement_and_rollback(&supervisor, &root, &archive, secret).await?;
         let verify = call(
@@ -575,11 +572,11 @@ async fn archive_while_reading(
     .await?;
     let concurrent = tokio::time::timeout(
         Duration::from_secs(2),
-        call(supervisor, "message.read", Some("alice"), json!({"conversation_id":"thread"})),
+        call(supervisor, "contact.list", Some("alice"), json!({})),
     )
     .await??;
     assert!(
-        concurrent.to_string().contains("m5"),
+        concurrent.to_string().contains("friend-0"),
         "archive workers must not hold the account actor"
     );
     finished(supervisor, create["job"]["job_id"].as_str().ok_or("id")?, BackupJobState::Done)

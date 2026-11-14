@@ -2241,7 +2241,12 @@ mod spool_tests {
                 .ok_or_else(|| SdkError::LocalBus("fixture account or session missing".into()))?
                 .file,
         );
-        account.client.delete_direct_message("thread", "message", "local", "erase-spool")?;
+        account.client.delete_direct_message(
+            "thread",
+            "message",
+            "local",
+            &ramflux_protocol::encode_base64url([9; 32]),
+        )?;
         assert!(!path.exists());
         assert!(file.lock().map_err(|_| SdkError::ObjectErased)?.is_none());
         assert!(matches!(

@@ -155,11 +155,7 @@ impl RamfluxClient {
         if let Some(group) = &context.group
             && self.group_state(&group.group_id).is_ok()
         {
-            if self
-                .account_db()?
-                .group_member_role(&group.group_id, &self.owned_device_identity()?)?
-                .is_none()
-            {
+            if !self.local_is_group_member(&group.group_id)? {
                 return Err(invalid("own task snapshot cannot restore removed local membership"));
             }
             if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
@@ -294,13 +290,9 @@ impl RamfluxClient {
         {
             return Err(invalid("own task history context or count mismatch"));
         }
-        self.import_task_own_packet(&packet, &entry.envelope.source_device_id).map(|()| true)
+        self.import_task_own_packet(&packet).map(|()| true)
     }
-    fn import_task_own_packet(
-        &self,
-        packet: &TaskOwnPacket,
-        source_device: &str,
-    ) -> Result<(), SdkError> {
+    fn import_task_own_packet(&self, packet: &TaskOwnPacket) -> Result<(), SdkError> {
         self.validate_own_context_namespace(&packet.context)?;
         let conversation = &packet.context.conversation_id;
         self.account_db()?.write_transaction(|| {
@@ -326,7 +318,7 @@ impl RamfluxClient {
                 crate::client::contact::verify_device_manifest(manifest, &commitment)?;
                 self.persist_identity_directory(manifest)?;
             }
-            self.import_surface_context(&packet.context, source_device)?;
+            self.import_surface_context(&packet.context)?;
             let mut active_pins = Vec::new();
             for pin in &packet.pins {
                 if let Some(root) = &pin.principal_commitment
@@ -480,17 +472,13 @@ impl RamfluxClient {
     pub(crate) fn import_own_task_packets(
         &self,
         packets: &[TaskOwnPacket],
-        source: &str,
     ) -> Result<(), SdkError> {
         if packets.len() > 100 || serde_json::to_vec(packets)?.len() > 4 * 1024 * 1024 {
             self.record_task_history_skip("task_import", "task_snapshot_budget_exceeded")?;
             return Ok(());
         }
         for packet in packets {
-            match self
-                .account_db()?
-                .write_transaction(|| self.import_task_own_packet(packet, source))
-            {
+            match self.account_db()?.write_transaction(|| self.import_task_own_packet(packet)) {
                 Ok(()) => {}
                 Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
                 Err(_) => {

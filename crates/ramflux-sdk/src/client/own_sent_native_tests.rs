@@ -83,3 +83,30 @@ async fn native_live_sent_copy_keeps_a_private_replay_claim_after_deletion() -> 
     )
     .await?
 }
+
+#[tokio::test]
+async fn own_manifest_signature_cache_rechecks_changed_native_material() -> TestResult {
+    let own = Fixture::new("own-manifest-cache").await?;
+    let anchor = own.client.own_account_anchor()?;
+    let key = format!("identity/manifest-root/{anchor}");
+    own.client.local_own_copy_manifest()?;
+    own.client.local_own_copy_manifest()?;
+    let db = own.client.account_db()?;
+    let original: crate::prekey::SdkDeviceManifestResponse =
+        db.load_actor_state(&key)?.ok_or("own manifest")?;
+    let mut changed = original.clone();
+    changed
+        .devices
+        .first_mut()
+        .ok_or("native device")?
+        .prekey_bundle
+        .signature_by_device_identity = ramflux_protocol::encode_base64url([0; 64]);
+    db.persist_actor_state(&key, &changed)?;
+    assert!(
+        own.client.local_own_copy_manifest().is_err(),
+        "same-second material mutation must invalidate signature reuse"
+    );
+    db.persist_actor_state(&key, &original)?;
+    own.client.local_own_copy_manifest()?;
+    Ok(())
+}

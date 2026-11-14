@@ -217,7 +217,7 @@ impl RamfluxClient {
             pool,
             entry,
             ApplyOpts { attachments, prepared: None },
-            Self::legacy_persist,
+            Self::standalone_persist,
         );
         #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
@@ -236,7 +236,7 @@ impl RamfluxClient {
             pool,
             entry,
             ApplyOpts { attachments: false, prepared: Some(prepared) },
-            Self::legacy_persist,
+            Self::standalone_persist,
         );
         #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
@@ -264,14 +264,22 @@ impl RamfluxClient {
         apply.await
     }
 
-    fn legacy_persist(
+    #[cfg(test)]
+    pub(crate) fn persist_routed_projection_for_fixture(
+        &self,
+        write: JoinedW1<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+        self.standalone_persist(write)
+    }
+
+    fn standalone_persist(
         &self,
         write: JoinedW1<'_>,
     ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
         match write {
             JoinedW1::Project(ctx) => self.commit_routed_projection(ctx),
             JoinedW1::Cover | JoinedW1::ContactBootstrap { .. } => {
-                Err(invalid("legacy persist requires a projection commit"))
+                Err(invalid("standalone receive requires a projection commit"))
             }
         }
     }
@@ -511,9 +519,6 @@ impl RamfluxClient {
             prepared.map(|value| Ok(value.manifest)),
         )
         .await?;
-        self.upgrade_replay_identity(
-            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
-        )?;
         Ok((native_prepared, directory))
     }
 

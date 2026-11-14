@@ -235,6 +235,7 @@ impl RamfluxClient {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn a2i_key(
     source: &ramflux_crypto::RootQualifiedDeviceRef,
     event: &str,

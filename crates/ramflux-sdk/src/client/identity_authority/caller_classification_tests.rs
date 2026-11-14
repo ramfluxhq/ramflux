@@ -62,7 +62,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/bus/dispatch/shared_group_transfer_tests.rs"
         )),
-        [1, 0, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "bus/dispatch/surface_own_tests.rs",

@@ -39,9 +39,12 @@ impl RamfluxClient {
         if self
             .current_custody_authority(remote.root_commitment(), crate::custody::network_now()?)?
             .is_some()
-            && self.require_current_device_authorization(remote).is_err()
         {
-            return Ok(false);
+            match self.require_current_device_authorization(remote) {
+                Ok(()) => {}
+                Err(error @ SdkError::FreshHeadRequired { .. }) => return Err(error),
+                Err(_) => return Ok(false),
+            }
         }
         let Some(record) = db.client_record("device", remote.storage_key())? else {
             return Ok(false);

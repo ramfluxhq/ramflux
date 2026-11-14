@@ -74,13 +74,19 @@ fn envelope(
     device: &str,
     seq: u64,
 ) -> serde_json::Value {
+    // These transaction-boundary fixtures carry the active sender profile even when
+    // their intentionally opaque application bytes are handled by a fault hook.
+    let payload = ramflux_protocol::decode_base64url(payload)
+        .ok()
+        .filter(|bytes| ramflux_protocol::encode_base64url(bytes) == payload)
+        .map_or_else(|| encode_base64url(payload.as_bytes()), |_| payload.to_owned());
     json!({
         "inbox_seq": seq,
         "target_delivery_id": target,
         "envelope": {
-            "schema": "test",
-            "version": 1,
-            "domain": "test",
+            "schema": "ramflux.envelope.v2",
+            "version": 2,
+            "domain": "ramflux.envelope.v2",
             "signing_key_id": "key",
             "signature_alg": "ed25519",
             "signature": "sig",
@@ -93,7 +99,11 @@ fn envelope(
             "ttl": 60,
             "created_at": 1,
             "encrypted_payload": payload,
-            "payload_hash": format!("H{seq}")
+            "payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, payload.as_bytes()),
+            "delivery_mode":"durable",
+            "collapse_tag":encode_base64url([0x22;32]),
+            "report_commitment":encode_base64url([0x33;32]),
+            "ext":{"source_root_commitment":encode_base64url([0x11;32])}
         }
     })
 }

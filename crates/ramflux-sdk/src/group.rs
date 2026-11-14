@@ -59,20 +59,6 @@ pub(crate) struct SdkGroupEncryptedEnvelope {
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[cfg(test)]
-pub(crate) struct SdkGroupControlEnvelope {
-    pub(crate) schema: String,
-    pub(crate) version: u32,
-    pub(crate) event: ramflux_protocol::GroupEvent,
-}
-
-#[cfg(test)]
-pub(crate) enum GroupGatewayDeliveryResult {
-    Message,
-    SenderKeyDistribution,
-}
-
 pub(crate) struct GroupKeyDependencyApplied;
 
 pub(crate) fn group_sender_key_checkpoint_name(
@@ -137,11 +123,6 @@ pub(crate) fn group_key_associated_data(
         head,
     ))?)
 }
-#[cfg(test)]
-pub(crate) fn group_message_schema(schema: &str) -> bool {
-    schema == "ramflux.sdk.group_sender_key.message.v2"
-}
-
 pub(crate) fn group_sender_session_id(group_id: &str, sender_id: &str, epoch: u64) -> String {
     format!("group:{group_id}:sender:{sender_id}:epoch:{epoch}")
 }
@@ -211,15 +192,6 @@ pub(crate) fn group_member_kicked_event_id(
     new_group_epoch: u64,
 ) -> String {
     format!("group.member_kicked:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
-}
-
-pub(crate) fn group_member_banned_event_id(
-    group_id: &str,
-    actor_device_id: &str,
-    target_member_id: &str,
-    new_group_epoch: u64,
-) -> String {
-    format!("group.member_banned:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
 }
 
 pub(crate) fn group_message_deleted_event_id(

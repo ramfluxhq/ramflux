@@ -86,10 +86,7 @@ fn snap(
 ) -> Result<Snap, SdkError> {
     let db = client.account_db()?;
     let (disposition, work) = db.receive_state_for_test(entry.inbox_seq)?;
-    // The v3 replay migration marker commits in its own transaction before the receive ledger
-    // (replay_migration.rs), is idempotent, and is not a receive effect, so it is excluded.
-    let mut rows = db.durable_rows_for_test()?;
-    rows.retain(|row| !row.contains("identity/replay-upgrade/"));
+    let rows = db.durable_rows_for_test()?;
     Ok(Snap {
         seen: client.routed_seen_marker(entry)?.is_some(),
         rows,

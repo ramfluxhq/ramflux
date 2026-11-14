@@ -7,9 +7,7 @@ use super::{DOMAIN, MAX_PACKET_BYTES, OwnDeviceMessage, PREFIX, RECEIPTS, TOO_LA
 use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::{dm_device_id_hash, now_unix_timestamp};
-use crate::{
-    GatewayInboxEntry, GatewaySessionConfig, RamfluxClient, SdkDeviceManifestResponse, SdkError,
-};
+use crate::{GatewayInboxEntry, RamfluxClient, SdkDeviceManifestResponse, SdkError};
 use zeroize::Zeroize;
 
 struct Pending {
@@ -32,26 +30,6 @@ impl RamfluxClient {
             Check::Other => None,
             Check::Pending(pending) => Some(pending.root),
         })
-    }
-
-    pub(crate) async fn receive_own_device_message(
-        &self,
-        gateway: &GatewaySessionConfig,
-        entry: &GatewayInboxEntry,
-    ) -> Result<bool, SdkError> {
-        match self.prepare_own_receive(entry)? {
-            Check::Other => Ok(false),
-            Check::Pending(pending) => {
-                let manifest = self
-                    .cache_verified_device_manifest(
-                        gateway,
-                        &pending.root,
-                        "own_device_message_receive",
-                    )
-                    .await?;
-                self.apply_own_receive(entry, *pending, &manifest)
-            }
-        }
     }
 
     fn prepare_own_receive(&self, entry: &GatewayInboxEntry) -> Result<Check, SdkError> {

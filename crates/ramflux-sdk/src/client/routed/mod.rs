@@ -39,7 +39,6 @@ pub(crate) use report::{SealedRouted, refuse_a0_mismatch};
 mod pair_lifecycle;
 mod prepared;
 mod recovery;
-mod replay_migration;
 mod reset_policy;
 mod reset_prepare;
 mod reset_work;

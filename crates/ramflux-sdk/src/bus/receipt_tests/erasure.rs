@@ -16,15 +16,16 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
     let mut sender = source.session_client().await?;
-    let entry = source
-        .client
-        .send_plaintext_direct_message_without_franking(
+    let entry = a
+        .send_text(
+            &source.client,
             &mut sender,
             a.message(&b, "privacy-envelope-id"),
             b"private body",
-            crate::client::routed::Route::direct(),
         )
         .await?;
+    let conversation = a.conversation(&b)?;
+    let logical = a.event("privacy-envelope-id")?;
     let mut recipient = b.account(None, mail.clone())?;
     let mut receiver = recipient.session_client().await?;
     let pool = ramflux_transport::RelayQuicPool::new(
@@ -52,15 +53,15 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     ]);
     drop(raw);
     recipient.client.delete_direct_message(
-        "thread",
-        "privacy-envelope-id",
+        &conversation,
+        &logical,
         "local",
-        "delete-marker",
+        &ramflux_protocol::encode_base64url([65; 32]),
     )?;
     assert!(!recipient.client.account_db()?.actor_state_exists(&committed)?);
     let raw = super::erasure_audit::open(&b, &recipient.client)?;
     assert_eq!(identities, super::erasure_audit::identities(&raw)?);
-    super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+    super::erasure_audit::assert_erased(&raw, &forbidden, &logical)?;
     drop(raw);
     for restart in [false, true] {
         if restart {
@@ -70,7 +71,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         }
         // The replay check must not need any retained identity/authority evidence.
         let raw = super::erasure_audit::open(&b, &recipient.client)?;
-        super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+        super::erasure_audit::assert_erased(&raw, &forbidden, &logical)?;
         drop(raw);
         sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
         maybe_legacy_ack(&mut recipient, &mut receiver, &entry).await?;
@@ -78,17 +79,21 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         assert!(
             recipient.client.account_db()?.latest_journal_event("message.undeliverable")?.is_none()
         );
-        assert_eq!(recipient.client.account_db()?.message_content("privacy-envelope-id")?, None);
+        assert_eq!(recipient.client.account_db()?.message_content(&logical)?, None);
     }
-    maybe_assert_legacy_mailbox_ack(&recipient, &mail, &b.device, &entry.envelope.envelope_id)?;
+    maybe_assert_legacy_mailbox_ack(
+        &recipient,
+        &mail,
+        b.identity()?.storage_key(),
+        &entry.envelope.envelope_id,
+    )?;
     // Different bytes miss the marker and go through the normal authenticated/decryption path.
-    let changed = source
-        .client
-        .send_plaintext_direct_message_without_franking(
+    let changed = a
+        .send_text(
+            &source.client,
             &mut sender,
             a.message(&b, "privacy-other-envelope"),
             b"different body",
-            crate::client::routed::Route::direct(),
         )
         .await?;
     let mut conflict = changed;
@@ -100,7 +105,7 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     assert!(recipient.client.authenticated_committed_key(NewAuthorization, &entry).is_err());
     sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
     let raw = super::erasure_audit::open(&b, &recipient.client)?;
-    super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
+    super::erasure_audit::assert_erased(&raw, &forbidden, &logical)?;
     drop(raw);
     drop(recipient);
     drop(source);

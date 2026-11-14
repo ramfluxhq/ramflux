@@ -4,12 +4,106 @@
 //! Loopback TLS gateway that counts real session opens and serves verified manifests.
 
 use crate::bus::runtime_tests;
-use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
 use crate::prelude::*;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[path = "task_courier_custody.rs"]
+mod native;
 pub(super) type Case<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Canonical scope of the two deterministic accounts owned by this transport fixture.
+pub(super) fn direct_conversation(client: &RamfluxClient) -> Result<String, SdkError> {
+    client
+        .account_db()?
+        .load_actor_state("fixture/direct-conversation")?
+        .ok_or_else(|| SdkError::LocalBus("test: fixture canonical conversation missing".into()))
+}
+
+/// Seal typed fixture content through the live compact transport; labels never become DM IDs.
+pub(super) async fn seal_content(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    target: &crate::bus::dispatch::task_transport::Target,
+    content: ramflux_protocol::message::Content,
+    envelope_id: Option<&str>,
+    created_at: Option<i64>,
+) -> Result<crate::bus::task_delivery::Delivery, SdkError> {
+    seal_content_with_identity(account, engine, target, content, envelope_id, created_at)
+        .await
+        .map(|(delivery, _)| delivery)
+}
+
+pub(super) async fn seal_content_with_identity(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    target: &crate::bus::dispatch::task_transport::Target,
+    content: ramflux_protocol::message::Content,
+    envelope_id: Option<&str>,
+    created_at: Option<i64>,
+) -> Result<(crate::bus::task_delivery::Delivery, String), SdkError> {
+    let own = account.client.owned_device_identity()?;
+    let scope = ramflux_protocol::message::dm_scope::derive(
+        own.root_commitment(),
+        target.identity.root_commitment(),
+    )
+    .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    let identity = account.client.allocate_generated_identity(
+        &scope,
+        u64::try_from(now_unix_timestamp()).unwrap_or_default().saturating_mul(1_000),
+        false,
+    )?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: scope,
+        message_id: ramflux_protocol::encode_base64url(&identity.id),
+        envelope_id: envelope_id
+            .map_or_else(crate::new_surface_message_id, |id| Ok(id.to_owned()))?,
+        source_principal_id: engine.config().principal_id.clone(),
+        sender_id: own.device_id().into(),
+        recipient_device_id: Some(target.device.clone()),
+        recipient_principal_commitment: Some(target.identity.root_commitment().into()),
+        target_delivery_id: target.delivery.clone(),
+        encrypted_body: Vec::new(),
+        created_at: created_at.unwrap_or_else(now_unix_timestamp),
+        ttl: 300,
+    };
+    let inner = RamfluxClient::encode_generated_inner(identity, &content)?;
+    let route = crate::client::routed::Route::from_inner(&inner)?;
+    let sealed = Box::pin(account.client.seal_routed_as(engine, &message, &inner, route)).await?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)?;
+    if matches!(content.value, Some(ramflux_protocol::message::content::Value::Message(_))) {
+        assert!(
+            envelope.ext.ext.contains_key(ramflux_protocol::message::original_header::EXT_KEY),
+            "test: Message producer must retain its signed origin commitment"
+        );
+    }
+    Ok((crate::bus::task_delivery::Delivery { envelope, federation: None }, message.message_id))
+}
+pub(super) async fn seal_message(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    target: &crate::bus::dispatch::task_transport::Target,
+    _scenario: &str,
+    text: &[u8],
+    _route: crate::client::routed::Route,
+) -> Result<crate::bus::task_delivery::Delivery, SdkError> {
+    let text =
+        std::str::from_utf8(text).map_err(|_| SdkError::InboundRejected("fixture text".into()))?;
+    seal_content(
+        account,
+        engine,
+        target,
+        ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Message(
+                ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
+            )),
+        },
+        None,
+        None,
+    )
+    .await
+}
 
 #[derive(Clone)]
 pub(super) struct Hold {
@@ -61,7 +155,9 @@ pub(super) struct Gateway {
     pub protocol_errors: Vec<String>,
     pub ack_hold: Option<Arc<AckHold>>,
     pub prekey_hold: Option<Arc<GatewayHold>>,
+    pub prekey_hold_target: Option<String>,
     pub submit_hold: Option<Arc<GatewayHold>>,
+    pub submit_hold_target: Option<String>,
     pub priority_submit_hold: Option<Hold>,
     pub receipt_bypass: bool,
     pub resume_hold: Option<Hold>,
@@ -96,6 +192,7 @@ pub(super) struct Fixture {
     pub source: LocalBusAccountState,
     pub peer: LocalBusAccountState,
     pub sibling: LocalBusAccountState,
+    _stalled: LocalBusAccountState,
     /// A second device of the peer principal, present only for `with_second_peer`.
     /// Read only by the durability-gated refusal tests; other builds never read it.
     #[cfg_attr(not(feature = "durability-test-hooks"), allow(dead_code))]
@@ -105,8 +202,25 @@ pub(super) struct Fixture {
     pub root: ramflux_test_support::TestPath,
 }
 
-fn account(root: &Path, id: &str) -> Result<LocalBusAccountState, SdkError> {
-    runtime_tests::account(root, id, None, Arc::new(AtomicBool::new(false)))
+pub(super) fn open_source(
+    root: &Path,
+    config: &GatewaySessionConfig,
+) -> Result<LocalBusAccountState, SdkError> {
+    let custody = config.custody.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.unlock_account("sender", b"native fixture data passphrase")?;
+    client.initialize_born_v3_branch_for_fixture(&config.device_id, custody.vault.as_ref())?;
+    Ok(LocalBusAccountState::disconnected(
+        client,
+        config.clone(),
+        config
+            .source_identity
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .root_commitment()
+            .into(),
+    ))
 }
 
 pub(super) fn seed_pair(a: &RamfluxClient, b: &RamfluxClient) -> Result<(), SdkError> {
@@ -117,13 +231,15 @@ pub(super) fn seed_pair(a: &RamfluxClient, b: &RamfluxClient) -> Result<(), SdkE
         dm_device_id_hash(ai.device_id()),
         dm_device_id_hash(bi.device_id()),
         [3; 32],
-    )?;
+    )?
+    .with_collapse_key_from_x3dh_sk(&[17; 32], &[4; 32])?;
     let recv = ramflux_crypto::DmSession::recipient(
         [17; 32],
         dm_device_id_hash(bi.device_id()),
         dm_device_id_hash(ai.device_id()),
         [3; 32],
-    )?;
+    )?
+    .with_collapse_key_from_x3dh_sk(&[17; 32], &[4; 32])?;
     a.persist_pair(&ai, &bi, &[4; 32], &send)?;
     b.persist_pair(&bi, &ai, &[4; 32], &recv)?;
     Ok(())
@@ -141,42 +257,75 @@ impl Fixture {
         second_peer: bool,
         frame_timeout: Option<Duration>,
     ) -> Case<Self> {
+        use crate::client::native_test_support::{
+            Fixture as Native, activation_send::tests::publish_layer_four, bus,
+        };
         let root = runtime_tests::root(label);
-        let mut source = account(&root.join("source"), "sender")?;
-        let peer = account(&root.join("peer"), "peer")?;
-        let mut sibling = account(&root.join("sibling"), "sender")?;
-        sibling.client.create_device_branch("sender", "device-sibling", 1, [77; 32]);
-        let mut own = public_manifest(&source.client)?;
-        let mut sibling_manifest = public_manifest(&sibling.client)?;
-        sibling_manifest.devices[0].target_delivery_id = "sibling".into();
-        own.devices.extend(sibling_manifest.devices);
-        sign_manifest(source.client.identity_root.as_ref().ok_or("root")?, &mut own, 2)?;
-        let mut remote = public_manifest(&peer.client)?;
-        let mut peer2 =
-            if second_peer { Some(account(&root.join("peer2"), "peer")?) } else { None };
-        if let Some(second) = &mut peer2 {
-            second.client.create_device_branch("peer", "device-peer2", 1, [78; 32]);
-            let mut manifest = public_manifest(&second.client)?;
-            manifest.devices[0].target_delivery_id = "peer2".into();
-            remote.devices.extend(manifest.devices);
-            sign_manifest(peer.client.identity_root.as_ref().ok_or("root")?, &mut remote, 2)?;
-        }
+        let mut native_source = Box::pin(Native::with_principal_at(
+            root.child("source"),
+            "sender",
+            "device-sender",
+            "sender",
+        ))
+        .await?;
+        Box::pin(publish_layer_four(&mut native_source)).await?;
+        let mut source = native_source.into_bus();
+        let mut native_peer =
+            Box::pin(Native::with_principal_at(root.child("peer"), "peer", "device-peer", "peer"))
+                .await?;
+        Box::pin(publish_layer_four(&mut native_peer)).await?;
+        let mut peer = native_peer.into_bus();
+
+        let sibling = Box::pin(bus::sibling(&mut source, "sender", "device-sibling")).await?;
+        let own =
+            source.client.native_bus_fixture.as_ref().ok_or("native source")?.manifest.clone();
+        let peer2 = if second_peer {
+            Some(Box::pin(bus::sibling(&mut peer, "peer", "device-peer2")).await?)
+        } else {
+            None
+        };
+        let remote =
+            peer.client.native_bus_fixture.as_ref().ok_or("native peer fixture")?.manifest.clone();
+        let config = peer.gateway_config.clone();
+        peer.install_test_session(GatewaySessionEngine::with_test_transport(
+            config,
+            Box::new(NativeNoNetwork),
+        ));
+        let native_source = Native::take_bus(&mut source)?;
+        let native_peer = Native::take_bus(&mut peer)?;
+        native_source.accept_peer(&native_peer)?;
+        native_peer.accept_peer(&native_source)?;
+        source = native_source.into_bus();
+        peer = native_peer.into_bus();
+        let config = peer.gateway_config.clone();
+        peer.install_test_session(GatewaySessionEngine::with_test_transport(
+            config,
+            Box::new(NativeNoNetwork),
+        ));
         source.principal_commitment = own.principal_commitment.clone();
         for local in
             [Some(&source), Some(&peer), Some(&sibling), peer2.as_ref()].into_iter().flatten()
         {
-            local.client.persist_identity_directory(&own)?;
-            local.client.persist_identity_directory(&remote)?;
+            local.client.persist_fetched_identity_directory(&own)?;
+            local.client.persist_fetched_identity_directory(&remote)?;
             local.client.account_db()?.establish_friend_link(
                 "test-friend",
                 &own.principal_commitment,
                 &remote.principal_commitment,
             )?;
-            for conversation in ["healthy", "stalled"] {
+            let canonical = ramflux_protocol::message::dm_scope::derive(
+                &own.principal_commitment,
+                &remote.principal_commitment,
+            )?;
+            local
+                .client
+                .account_db()?
+                .persist_actor_state("fixture/direct-conversation", &canonical)?;
+            for conversation in ["healthy", "stalled", canonical.as_str()] {
                 local.client.account_db()?.persist_client_record(
                     "conversation",
                     conversation,
-                    &json!({"kind":"direct","participants":["sender","peer"]}),
+                    &json!({"kind":"direct","group_id":null,"participants":["sender","peer"],"participant_roots":[own.principal_commitment,remote.principal_commitment]}),
                 )?;
             }
         }
@@ -185,6 +334,25 @@ impl Fixture {
         if let Some(second) = &peer2 {
             seed_pair(&source.client, &second.client)?;
         }
+        let mut stalled =
+            Box::pin(Native::with_principal("stalled-peer", "device-stalled-peer", "stalled-peer"))
+                .await?;
+        Box::pin(publish_layer_four(&mut stalled)).await?;
+        let stalled = stalled.into_bus();
+        let stalled_manifest =
+            stalled.client.native_bus_fixture.as_ref().ok_or("stalled fixture")?.manifest.clone();
+        source.client.persist_fetched_identity_directory(&stalled_manifest)?;
+        let scope = ramflux_protocol::message::dm_scope::derive(
+            &own.principal_commitment,
+            &stalled_manifest.principal_commitment,
+        )?;
+        source.client.account_db()?.persist_actor_state("fixture/stalled-conversation", &scope)?;
+        source.client.account_db()?.persist_client_record("conversation", &scope, &json!({"kind":"direct","group_id":null,"participants":["sender","stalled-peer"],"participant_roots":[own.principal_commitment,stalled_manifest.principal_commitment]}))?;
+        source.client.establish_friend_link(
+            "stalled-task-link",
+            &own.principal_commitment,
+            &stalled_manifest.principal_commitment,
+        )?;
         let gateway = Arc::new(Mutex::new(Gateway {
             manifests: BTreeMap::from([
                 (own.principal_commitment.clone(), serde_json::to_value(own)?),
@@ -207,15 +375,17 @@ impl Fixture {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
+        let native = Arc::new(native::NativeGateway::new(&root)?);
         let shared = gateway.clone();
         let server = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             while let Ok((tcp, _)) = listener.accept().await {
                 let acceptor = acceptor.clone();
                 let shared = shared.clone();
+                let native = native.clone();
                 connections.spawn(async move {
-                    if let Ok(mut stream) = acceptor.accept(tcp).await
-                        && let Err(error) = serve(&mut stream, &shared).await
+                    if let Ok(stream) = acceptor.accept(tcp).await
+                        && let Err(error) = serve(stream, &shared, &native).await
                         && error
                             .downcast_ref::<std::io::Error>()
                             .is_none_or(|error| error.kind() != std::io::ErrorKind::UnexpectedEof)
@@ -233,8 +403,13 @@ impl Fixture {
             ca_cert: root.join("ca.pem"),
             principal_id: "sender".into(),
             device_id: "device-sender".into(),
-            target_delivery_id: "sender".into(),
+            target_delivery_id: source.gateway_config.target_delivery_id.clone(),
             prekey_http_url: None,
+        })
+        .with_native_custody(crate::GatewayCustodyConfig {
+            node_id: "node".into(),
+            node_public_key: ramflux_crypto::fixture_public_key_base64url(),
+            ..source.gateway_config.custody.clone().ok_or("native source custody")?
         })
         .with_account_identity(&source.client)?;
         let session_hold = frame_timeout.unwrap_or(Duration::from_secs(600));
@@ -246,20 +421,20 @@ impl Fixture {
             engine.frame_timeout = frame_timeout;
         }
         source.install_test_session(engine);
-        Ok(Self { source, peer, sibling, peer2, gateway, _server: server, root })
+        Ok(Self { source, peer, sibling, peer2, gateway, _stalled: stalled, _server: server, root })
     }
 
     pub async fn inbound(&mut self) -> Case<String> {
-        use crate::bus::dispatch::task_transport::{Target, seal};
+        use crate::bus::dispatch::task_transport::Target;
         let target = Target {
             device: "device-sender".into(),
             identity: self.source.client.owned_device_identity()?,
-            delivery: "sender".into(),
+            delivery: self.source.gateway_config.target_delivery_id.clone(),
             federation: None,
             own: false,
         };
         let mut engine = self.peer.session_client().await?;
-        let dm = seal(
+        let dm = seal_message(
             &self.peer,
             &mut engine,
             &target,
@@ -269,8 +444,13 @@ impl Fixture {
         )
         .await?;
         let caller = crate::client::call::state::LiveCall::outgoing(
-            ramflux_protocol::encode_base64url([8; 16]),
-            "healthy".into(),
+            ramflux_protocol::encode_base64url(
+                ramflux_crypto::random_32()?.first_chunk::<16>().ok_or("random call id")?,
+            ),
+            ramflux_protocol::message::dm_scope::derive(
+                self.peer.client.owned_device_identity()?.root_commitment(),
+                target.identity.root_commitment(),
+            )?,
             self.peer.client.call_local_endpoint()?,
             vec![self.source.client.call_local_endpoint()?],
             now_unix_timestamp(),
@@ -300,17 +480,17 @@ impl Fixture {
             &crate::client::call::signing_bytes(&control)?,
             self.peer.client.device_branch.as_ref().ok_or("peer device")?,
         );
-        let call = crate::bus::dispatch::task_transport::seal_assigned(
+        let call = seal_content(
             &self.peer,
             &mut engine,
             &target,
-            crate::bus::dispatch::task_transport::AssignedSeal {
-                conversation: "healthy",
-                body: &crate::client::call::bytes(&control)?,
-                kind: crate::client::routed::Route::control(),
-                envelope_id: Some(&bound.envelope_id),
-                created_at: Some(control.created_at),
+            ramflux_protocol::message::Content {
+                value: Some(ramflux_protocol::message::content::Value::Call(
+                    crate::client::generated_call::native::from_native(&control)?,
+                )),
             },
+            Some(&bound.envelope_id),
+            Some(control.created_at),
         )
         .await?;
         self.peer.install_test_session(engine);
@@ -320,7 +500,7 @@ impl Fixture {
             gateway.inbox.push(GatewayInboxEntry {
                 forwarded: false,
                 inbox_seq: u64::try_from(index + 1)?,
-                target_delivery_id: "sender".into(),
+                target_delivery_id: self.source.gateway_config.target_delivery_id.clone(),
                 envelope: delivery.envelope,
             });
         }
@@ -330,10 +510,15 @@ impl Fixture {
 
 #[allow(clippy::too_many_lines)]
 async fn serve(
-    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     shared: &Arc<Mutex<Gateway>>,
+    native: &native::NativeGateway,
 ) -> Case {
     const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
+    let mut stream = ramflux_transport::GatewayTcpTlsStream::Server(stream);
+    let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+    let _disconnect = native::Connection(native, connection.clone());
+    let mut native_session = None;
     let mut push = false;
     let mut call_generation: Option<String> = None;
     let mut session_target = String::new();
@@ -346,6 +531,29 @@ async fn serve(
         let mut bytes = vec![0; usize::try_from(size.min(MAX_FRAME_BYTES))?];
         stream.read_exact(&mut bytes).await?;
         let value: Value = serde_json::from_slice(&bytes)?;
+        if let Ok(frame) =
+            serde_json::from_value::<ramflux_protocol::custody::CustodyClientFrame>(value.clone())
+        {
+            if let ramflux_protocol::custody::CustodyClientFrame::GatewayHandoff { session_id } =
+                frame
+            {
+                assert_eq!(
+                    native_session.as_deref(),
+                    Some(session_id.as_str()),
+                    "native handoff requires the admitted session"
+                );
+            } else {
+                let response = native.dispatch(&stream, &connection, frame)?;
+                if let ramflux_protocol::custody::CustodyServerFrame::SessionEstablished {
+                    session,
+                } = &response
+                {
+                    native_session = Some(session.session_id.clone());
+                }
+                ramflux_transport::write_gateway_session_json(&mut stream, &response).await?;
+            }
+            continue;
+        }
         let response = if let Some(path) = value["path"].as_str() {
             public_lookup(path, shared).await?
         } else if value["frame_type"].as_str() == Some("ack_batch") {
@@ -355,7 +563,7 @@ async fn serve(
                 hold.entered.notify_one();
                 hold.release.notified().await;
             }
-            ack_batch_response(shared, &value, &session_target)?
+            ack_batch_response(shared, &value, &session_target).await?
         } else if value["frame_type"].as_str() == Some("resume")
             && value.get("incarnation_id").is_some()
         {
@@ -435,15 +643,30 @@ async fn serve(
                     }
                 }
                 GatewayClientFrame::PrekeyFetch { device_id } => {
-                    let hold = { shared.lock().map_err(|_| "gateway")?.prekey_hold.take() };
+                    let hold = {
+                        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                        if gateway
+                            .prekey_hold_target
+                            .as_deref()
+                            .is_none_or(|target| target == device_id)
+                        {
+                            gateway.prekey_hold.take()
+                        } else {
+                            None
+                        }
+                    };
                     wait_at(hold).await;
                     GatewayServerFrame::Prekey { response: prekey(shared, &device_id)? }
                 }
                 GatewayClientFrame::Submit { submit } => {
                     let hold = {
                         let gateway = shared.lock().map_err(|_| "gateway")?;
-                        if gateway.receipt_bypass
-                            && submit.envelope.envelope_id.starts_with("receipt_evt_")
+                        if (gateway.receipt_bypass
+                            && submit.envelope.envelope_id.starts_with("receipt_evt_"))
+                            || gateway
+                                .submit_hold_target
+                                .as_deref()
+                                .is_some_and(|target| target != submit.envelope.target_delivery_id)
                         {
                             None
                         } else {
@@ -478,7 +701,8 @@ async fn serve(
                     } else {
                         shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
                         let routed = record_router_submit(shared, &submit.envelope).await?;
-                        refuse_fixture_call(stream, &submit, call_generation.as_deref()).await?;
+                        refuse_fixture_call(&mut stream, &submit, call_generation.as_deref())
+                            .await?;
                         if push {
                             let (_, inbox_seq) = routed.unwrap_or((session_incarnation.clone(), 1));
                             let incarnation_id = &session_incarnation;
@@ -557,7 +781,10 @@ async fn wait_at(hold: Option<Arc<GatewayHold>>) {
         hold.release.notified().await;
     }
 }
-fn prekey(shared: &Arc<Mutex<Gateway>>, selector: &str) -> Case<crate::prekey::SdkPrekeyResponse> {
+pub(super) fn prekey(
+    shared: &Arc<Mutex<Gateway>>,
+    selector: &str,
+) -> Case<crate::prekey::SdkPrekeyResponse> {
     let qualified = ramflux_protocol::parse_qualified_device_id(selector)?;
     let gateway = shared.lock().map_err(|_| "gateway")?;
     for value in gateway.manifests.values() {
@@ -717,7 +944,7 @@ fn record_acked_seqs(gateway: &mut Gateway, seqs: &[u64], target: &str) {
     }
 }
 
-fn ack_batch_response(
+async fn ack_batch_response(
     shared: &Arc<Mutex<Gateway>>,
     value: &Value,
     session_target: &str,
@@ -730,21 +957,26 @@ fn ack_batch_response(
         .iter()
         .map(|seq| seq.as_u64().ok_or("ack_batch seq"))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut gateway = shared.lock().map_err(|_| "gateway")?;
-    if gateway.ack_fail {
-        return Err("ack_batch failed".into());
-    }
-    if let Some((router, store)) = gateway.router.clone() {
+    let bound = {
+        let gateway = shared.lock().map_err(|_| "gateway")?;
+        if gateway.ack_fail {
+            return Err("ack_batch failed".into());
+        }
+        gateway.router.clone()
+    };
+    if let Some((router, store)) = bound {
         let target = session_target.to_owned();
-        drop(gateway);
-        let response = router.session_ack_batch(
-            &store,
-            &ramflux_node_core::SessionAckBatchRequest {
-                target_delivery_id: target.clone(),
-                incarnation_id: incarnation_id.clone(),
-                inbox_seqs: seqs.clone(),
-            },
-        )?;
+        let publication = ramflux_node_core::publication::capture(|| {
+            router.session_ack_batch(
+                &store,
+                &ramflux_node_core::SessionAckBatchRequest {
+                    target_delivery_id: target.clone(),
+                    incarnation_id: incarnation_id.clone(),
+                    inbox_seqs: seqs.clone(),
+                },
+            )
+        })?;
+        let response = publication.published().await?;
         let mut gateway = shared.lock().map_err(|_| "gateway")?;
         record_acked_seqs(&mut gateway, &seqs, &target);
         let results: Vec<Value> = response
@@ -765,6 +997,7 @@ fn ack_batch_response(
             "results": results,
         }));
     }
+    let mut gateway = shared.lock().map_err(|_| "gateway")?;
     gateway.ack_sends = gateway.ack_sends.saturating_add(seqs.len());
     if gateway.ack_target.is_empty() {
         gateway.ack_target = gateway
@@ -805,7 +1038,7 @@ fn ack_batch_response(
 
 /// Scheduling tests admit the control but retain media hold without native call authority.
 async fn refuse_fixture_call(
-    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    stream: &mut ramflux_transport::GatewayTcpTlsStream,
     submit: &GatewaySubmitFrame,
     generation: Option<&str>,
 ) -> Case {
@@ -946,4 +1179,34 @@ fn acknowledged_cursor(
         acked_envelope_ids: vec![ack.envelope_id],
         nacked_envelope_ids: BTreeMap::new(),
     })
+}
+
+/// Inbound preparation owns cached verified keys; any unexpected peer I/O fails the fixture.
+struct NativeNoNetwork;
+impl ramflux_transport::GatewaySessionFrameSink for NativeNoNetwork {
+    fn send_frame<'a>(
+        &'a mut self,
+        _: &'a [u8],
+    ) -> ramflux_transport::GatewaySessionFrameFuture<'a, ()> {
+        Box::pin(async {
+            Err(ramflux_transport::TransportError::Quic(
+                "test: unexpected inbound preparation I/O".into(),
+            ))
+        })
+    }
+    fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
+        Ok(())
+    }
+}
+impl ramflux_transport::GatewaySessionFrameSource for NativeNoNetwork {
+    fn recv_idle_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(std::future::pending())
+    }
+    fn recv_frame(&mut self) -> ramflux_transport::GatewaySessionFrameFuture<'_, Vec<u8>> {
+        Box::pin(async {
+            Err(ramflux_transport::TransportError::Quic(
+                "test: unexpected inbound preparation reply".into(),
+            ))
+        })
+    }
 }

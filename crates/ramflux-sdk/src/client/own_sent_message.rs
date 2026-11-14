@@ -517,7 +517,7 @@ impl RamfluxClient {
         {
             return Err(invalid("structured own message requires signed control projection"));
         }
-        self.import_surface_context(&packet.context, source.device_id())?;
+        self.import_surface_context(&packet.context)?;
         if let Some(group) = group {
             self.merge_routed_group_link(group, conversation)?;
         }

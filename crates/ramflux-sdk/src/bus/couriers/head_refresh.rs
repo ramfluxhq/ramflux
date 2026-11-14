@@ -275,6 +275,9 @@ fn apply_verified(
     if ready {
         account.head_refresh.pending.remove(root);
         inbound::refreshed(account, root)?;
+        if let Some(connection) = &account.connection {
+            connection.wake_couriers();
+        }
     }
     Ok(ready)
 }

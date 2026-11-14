@@ -40,6 +40,9 @@ impl RamfluxClient {
         group: &str,
         raw: &str,
     ) -> Result<Option<ramflux_crypto::RootQualifiedDeviceRef>, SdkError> {
+        if let Some(state) = self.account_db()?.shared_group_state(group)? {
+            return self.signed_group_route_identity(&state, raw);
+        }
         if let Some(binding) = self.account_db()?.group_member_identity_metadata(group, raw)?
             && let Some(root) = binding.principal_commitment
         {
@@ -82,6 +85,44 @@ impl RamfluxClient {
         let identity = self.device_identity_for_root(root, raw)?;
         Ok(Some((identity, route)))
     }
+    fn signed_group_route_identity(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        raw: &str,
+    ) -> Result<Option<ramflux_crypto::RootQualifiedDeviceRef>, SdkError> {
+        let qualified = ramflux_protocol::parse_qualified_device_id(raw)?;
+        let device = qualified.as_ref().map_or(raw, |(_, device)| device.as_str());
+        let roots = state
+            .view()
+            .members
+            .iter()
+            .map(|member| member.identity.root_commitment.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut matches = BTreeSet::new();
+        for root in roots {
+            if qualified.as_ref().is_some_and(|(expected, _)| expected != root)
+                || state.view().effective_role(root, device).is_none()
+            {
+                continue;
+            }
+            let explicit = state.view().members.iter().any(|member| {
+                member.identity.root_commitment == root && member.identity.device_id == device
+            });
+            let native = self.current_custody_authority(root, crate::custody::network_now()?)?;
+            let certified = native.as_ref().is_some_and(|authority| {
+                authority.envelope().body.devices.iter().any(|entry| entry.device_id == device)
+            });
+            if explicit || certified {
+                matches.insert(self.device_identity_for_root(root, device)?);
+            }
+        }
+        if matches.len() > 1 {
+            return Err(SdkError::InboundPending("ambiguous signed group device root".into()));
+        }
+        // A signed group never falls through to unsigned route or legacy membership metadata.
+        Ok(matches.into_iter().next())
+    }
+
     pub(crate) fn require_group_payload_sender(
         &self,
         group: &str,

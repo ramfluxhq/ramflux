@@ -25,14 +25,35 @@ impl RamfluxClient {
         let root = self.account_index()?.root().to_path_buf();
         let device_id = device_id.to_owned();
         let (account, reference, credentials) = tokio::task::spawn_blocking(move || {
-            let now = crate::custody::network_now()?;
-            let account = crate::custody::load_account(&root, &local_id, now)?;
-            let (reference, credentials) = account.credentials(vault.as_ref(), &device_id, now)?;
-            account.verified().authorize(&reference, "message", now)?;
-            Ok::<_, SdkError>((account, reference, credentials))
+            load_branch(&root, &local_id, &device_id, vault.as_ref())
         })
         .await
         .map_err(|_| SdkError::CustodySetupInvalid)??;
+        self.install_born_v3_credentials(account, &reference, credentials)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_born_v3_branch_for_fixture(
+        &mut self,
+        device_id: &str,
+        vault: &dyn PrimaryVault,
+    ) -> Result<(), SdkError> {
+        let selected = self.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+        let local_id = self.account_db()?.local_account_id.clone();
+        if selected.local_account_id() != local_id {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        let (account, reference, credentials) =
+            load_branch(self.account_index()?.root(), &local_id, device_id, vault)?;
+        self.install_born_v3_credentials(account, &reference, credentials)
+    }
+
+    fn install_born_v3_credentials(
+        &mut self,
+        account: crate::custody::BornAccount,
+        reference: &ramflux_protocol::custody::DeviceRef,
+        credentials: crate::custody::BranchCredentials,
+    ) -> Result<(), SdkError> {
         let bundle = credentials.prekey_bundle()?;
         let state = SdkX3dhPrivateState {
             principal_commitment: Some(reference.account_anchor.clone()),
@@ -96,6 +117,26 @@ impl RamfluxClient {
         }
         Ok(())
     }
+}
+
+fn load_branch(
+    root: &std::path::Path,
+    local_id: &str,
+    device_id: &str,
+    vault: &dyn PrimaryVault,
+) -> Result<
+    (
+        crate::custody::BornAccount,
+        ramflux_protocol::custody::DeviceRef,
+        crate::custody::BranchCredentials,
+    ),
+    SdkError,
+> {
+    let now = crate::custody::network_now()?;
+    let account = crate::custody::load_account(root, local_id, now)?;
+    let (reference, credentials) = account.credentials(vault, device_id, now)?;
+    account.verified().authorize(&reference, "message", now)?;
+    Ok((account, reference, credentials))
 }
 
 #[cfg(test)]

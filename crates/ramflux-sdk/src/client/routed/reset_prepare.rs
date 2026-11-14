@@ -83,8 +83,8 @@ impl RamfluxClient {
         at: i64,
     ) -> Result<Option<PairControlDraft>, SdkError> {
         let local = self.local_device_identity(&config.device_id)?;
-        for mut item in self
-            .legacy_upgrade_reset_work(&local)?
+        for item in self
+            .retained_reset_work(&local)?
             .into_iter()
             .filter(|work| work.local == local.storage_key())
         {
@@ -94,8 +94,7 @@ impl RamfluxClient {
                 continue;
             }
             if at
-                >= self
-                    .normalize_reset_work(&mut item)?
+                >= Self::reset_first_at(&item)?
                     .saturating_add(super::reset_policy::MAX_RESET_LIFETIME)
             {
                 self.mark_pair_manual(&local, &remote, at)?;

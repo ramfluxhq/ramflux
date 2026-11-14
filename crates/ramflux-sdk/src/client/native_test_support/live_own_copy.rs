@@ -73,6 +73,15 @@ pub(crate) async fn exercise_order(erase: bool, history_first: bool) -> TestResu
         }
     }
     sibling.receive(envelope, if history_first { 3 } else { 2 }).await?;
+    assert_eq!(
+        sibling.client.account_db()?.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0,
+        0,
+        "an authenticated same-root copy must not send a peer delivery receipt"
+    );
+    assert_eq!(
+        sibling.client.message_origin(&conversation, &owner)?.ok_or("own provenance")?["direction"],
+        "outgoing"
+    );
     assert_eq!(sibling.client.account_db()?.message_content(&owner)?, Some(exact.clone()));
     assert_eq!(
         sibling

@@ -23,18 +23,14 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
-    source
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            a.message(&b, "first"),
-            b"first",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    a.send_text(&source.client, &mut engine, a.message(&b, "first"), b"first").await?;
     drop(engine);
     drop(source);
-    let receipt = crate::client::delivery_receipts::id("thread", "first", &b.identity()?)?;
+    let receipt = crate::client::delivery_receipts::id(
+        &a.conversation(&b)?,
+        &a.event("first")?,
+        &b.identity()?,
+    )?;
     mail.lock().map_err(|_| "mailbox")?.reject_id = Some(format!("receipt_evt_{receipt}"));
     let mut receiver = b.account(None, mail.clone())?;
     crate::bus::sync_driver::run(&mut receiver).await?;
@@ -113,15 +109,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     p.receiver.client.account_db()?.persist_actor_state(&p.key, &held)?;
     let mut sender = p.a.account(None, p.mail.clone())?;
     let mut engine = sender.session_client().await?;
-    sender
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            p.a.message(&p.b, "second"),
-            b"second",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    p.a.send_text(&sender.client, &mut engine, p.a.message(&p.b, "second"), b"second").await?;
     drop(engine);
     drop(sender);
     crate::bus::sync_driver::run(&mut p.receiver).await?;
@@ -129,7 +117,11 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "second", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("second")?,
+                &p.b.identity()?
+            )?
             .ok_or("second status")?["state"],
         "sent"
     );
@@ -146,14 +138,22 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
             .ok_or("terminal")?["state"],
         "failed"
     );
     assert_eq!(p.receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
     let second_id = format!(
         "receipt_evt_{}",
-        crate::client::delivery_receipts::id("thread", "second", &p.b.identity()?)?
+        crate::client::delivery_receipts::id(
+            &p.a.conversation(&p.b)?,
+            &p.a.event("second")?,
+            &p.b.identity()?
+        )?
     );
     let packets = p
         .mail
@@ -214,7 +214,11 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
         assert_eq!(
             p.receiver
                 .client
-                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                .delivery_receipt_status(
+                    &p.a.conversation(&p.b)?,
+                    &p.a.event("first")?,
+                    &p.b.identity()?
+                )?
                 .ok_or("terminal")?["state"],
             "failed"
         );
@@ -232,15 +236,7 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
-    let entry = source
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            a.message(&b, "first"),
-            b"first",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    let entry = a.send_text(&source.client, &mut engine, a.message(&b, "first"), b"first").await?;
     drop(engine);
     drop(source);
     let mut receiver = b.account(None, mail)?;
@@ -248,7 +244,16 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     let pool = receiver.relay_quic_pool()?;
     backlog(&receiver.client, &a, &b)?;
     receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert_eq!(receiver.client.account_db()?.message_content("first")?, Some(b"first".to_vec()));
+    assert_eq!(
+        receiver
+            .client
+            .generated_message_detail(&a.conversation(&b)?, &a.event("first")?)?
+            .message
+            .text
+            .as_deref(),
+        Some("first"),
+        "authenticated generated plaintext must commit behind the receipt backlog"
+    );
     assert_eq!(receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 257);
     drop(engine);
     drop(receiver);
@@ -263,110 +268,75 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let source = a.client(None)?;
-    let receiver = b.client(None)?;
-    for (spec, client) in [(&a, &source), (&b, &receiver)] {
-        spec.trust(client, &a)?;
-        spec.trust(client, &b)?;
-        client.create_group("group", a.identity()?.storage_key())?;
-        client.add_group_member_with_root(
-            "group",
-            &b.device,
-            "member",
-            b.identity()?.root_commitment(),
-        )?;
-    }
-    receiver.import_group_sender_key_distribution(
-        &source.export_group_sender_key_distribution("group", &a.device)?,
+    let target = b.client(None)?;
+    a.prepare_group(&source, "group", "thread", &[(&b, &target)])?;
+    let mut account = a.account(None, mail.clone())?;
+    let id =
+        Box::pin(a.send_group_text(&mut account, "group", "group-admission", "group body")).await?;
+    target.import_group_sender_key_distribution(
+        &account.client.export_group_sender_key_distribution("group", &a.device)?,
     )?;
-    let raw = source.encrypt_group_message("group", &a.device, b"group body")?;
-    let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(&raw)?;
-    let mut account = a.account(None, mail)?;
-    let mut engine = account.session_client().await?;
-    let mut message = a.message(&b, "group-admission");
-    let sealed = source
-        .seal_routed_as(
-            &mut engine,
-            &message,
-            &raw,
-            crate::client::routed::Route::group_message("group"),
-        )
-        .await?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.device.clone(),
-        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
-    };
-    backlog(&receiver, &a, &b)?;
-    let db = receiver.account_db()?;
-    let aborted = db.write_transaction(|| -> Result<(), SdkError> {
-        receiver.append_or_pending_group_message(
-            "thread",
-            "group-admission",
-            &entry,
-            &raw,
-            &group,
-        )?;
-        Err(SdkError::LocalBus("injected commit abort".into()))
-    });
-    assert!(aborted.is_err());
-    assert!(receiver.direct_message_by_id("group-admission")?.is_none());
-    assert!(db.message_content("group-admission")?.is_none());
-    assert_eq!(db.actor_state_usage(PREFIX)?.0, 256);
-    assert_eq!(
-        receiver.append_or_pending_group_message(
-            "thread",
-            "group-admission",
-            &entry,
-            &raw,
-            &group
-        )?,
-        b"group body"
-    );
-    assert_eq!(db.message_content("group-admission")?, Some(b"group body".to_vec()));
-    drop(engine);
-    drop(account);
     drop(source);
-    drop(receiver);
+    drop(target);
+    let mut receiver = b.account(None, mail.clone())?;
+    let entry = mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .messages
+        .iter()
+        .rev()
+        .find(|entry| entry.target_delivery_id == receiver.target_delivery_id)
+        .cloned()
+        .ok_or("group delivery")?;
+    let mut engine = receiver.session_client().await?;
+    let pool = receiver.relay_quic_pool()?;
+    backlog(&receiver.client, &a, &b)?;
+    let aborted = Box::pin(receiver.client.apply_routed_entry_joining(
+        &mut engine,
+        &pool,
+        &entry,
+        None,
+        |client, write| {
+            client.account_db()?.write_transaction(|| {
+                client.persist_routed_projection_for_fixture(write)?;
+                Err(SdkError::LocalBus("injected commit abort".into()))
+            })
+        },
+    ))
+    .await;
+    assert!(
+        matches!(aborted, Err(SdkError::LocalBus(reason)) if reason == "injected commit abort"),
+        "native group receive must reach the transactional abort"
+    );
+    assert!(
+        receiver.client.direct_message_by_id(&id)?.is_none(),
+        "aborted group projection leaked"
+    );
+    assert!(
+        receiver.client.account_db()?.message_content(&id)?.is_none(),
+        "aborted generated plaintext leaked"
+    );
+    assert_eq!(
+        receiver.client.account_db()?.actor_state_usage(PREFIX)?.0,
+        256,
+        "receipt must roll back with the group message"
+    );
+    Box::pin(receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false)).await?;
+    assert_eq!(
+        receiver.client.generated_message_detail("thread", &id)?.message.text.as_deref(),
+        Some("group body"),
+        "committed native group content must reach the durable reader"
+    );
+    assert_eq!(
+        receiver.client.account_db()?.actor_state_usage(PREFIX)?.0,
+        257,
+        "one receipt must commit with the native group message"
+    );
     Ok(())
 }
 #[tokio::test]
 async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestResult {
-    let root = runtime_tests::root("receipt-own-exclusion");
-    let a = Spec::new(&root, "alice", 51);
-    let b = Spec::new(&root, "bob", 61);
-    let mail: Shared = Arc::new(Mutex::default());
-    fixture::seed_pair(&a, &b)?;
-    let mut source = a.account(None, mail)?;
-    let engine = source.session_client().await?;
-    let mut message = a.message(&a, "own-message");
-    message.recipient_device_id = Some("own-sibling".into());
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: "own-sibling".into(),
-        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
-    };
-    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
-    assert_eq!(source.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
-    let origin = source.client.message_origin("thread", "own-message")?.ok_or("own provenance")?;
-    assert_eq!(origin["direction"], "outgoing");
-    assert_eq!(
-        origin["sender_root_commitment"],
-        source.client.owned_device_identity()?.root_commitment()
-    );
-    assert_eq!(origin["sender_device_id"], entry.envelope.source_device_id);
-    let db = source.client.account_db()?;
-    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 0);
-    db.send_direct_message("thread", "own-message", "alice", b"body")?;
-    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
-    assert_eq!(db.actor_state_usage(PREFIX)?.0, 0);
-    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 1);
-
-    drop(engine);
-    drop(source);
-    Ok(())
+    Box::pin(crate::client::native_test_support::live_own_copy::exercise(false)).await
 }
 
 #[tokio::test]
@@ -390,7 +360,11 @@ async fn a_page_of_backed_off_receipts_cannot_hide_later_due_work() -> TestResul
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
             .ok_or("sent")?["state"],
         "sent"
     );
@@ -410,15 +384,7 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
     for id in ["first", "second"] {
-        source
-            .client
-            .send_plaintext_direct_message_without_franking(
-                &mut engine,
-                a.message(&b, id),
-                id.as_bytes(),
-                crate::client::routed::Route::direct(),
-            )
-            .await?;
+        a.send_text(&source.client, &mut engine, a.message(&b, id), id.as_bytes()).await?;
     }
     drop(engine);
     drop(source);
@@ -444,8 +410,13 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     );
     for id in ["first", "second"] {
         assert_eq!(
-            receiver.client.account_db()?.message_content(id)?,
-            Some(id.as_bytes().to_vec())
+            receiver
+                .client
+                .generated_message_detail(&a.conversation(&b)?, &a.event(id)?)?
+                .message
+                .text
+                .as_deref(),
+            Some(id)
         );
     }
     let db = receiver.client.account_db()?;
@@ -560,7 +531,7 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
             Some(p.b.principal.clone()),
             "test",
             "message.receipt.delivered",
-            json!({"conversation_id":"thread","message_id":"first","receiver_device_id":p.b.device}),
+            json!({"conversation_id":p.a.conversation(&p.b)?,"message_id":p.a.event("first")?,"receiver_device_id":p.b.device}),
         );
         let response =
             crate::bus::dispatch::dispatch_message_bus_request(&request, &mut state, &connection)
@@ -581,7 +552,11 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
         assert_eq!(
             receiver
                 .client
-                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                .delivery_receipt_status(
+                    &p.a.conversation(&p.b)?,
+                    &p.a.event("first")?,
+                    &p.b.identity()?
+                )?
                 .ok_or("status")?["state"],
             "sent"
         );
@@ -630,7 +605,11 @@ async fn malformed_receipt_retention_metadata_does_not_abort_the_sync_pass() -> 
             assert_eq!(
                 p.receiver
                     .client
-                    .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                    .delivery_receipt_status(
+                        &p.a.conversation(&p.b)?,
+                        &p.a.event("first")?,
+                        &p.b.identity()?
+                    )?
                     .ok_or("status")?["state"],
                 "sent"
             );

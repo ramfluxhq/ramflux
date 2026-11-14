@@ -8,6 +8,9 @@ use ramflux_protocol::{
     TaskAccept, TaskEvent, TaskEventBody, TaskProposal, TaskStart, TaskStatus, TaskStep, TaskUpdate,
 };
 use serde_json::json;
+#[path = "group_fixture.rs"]
+mod native_group;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Fixture {
     human: RamfluxClient,
@@ -22,17 +25,6 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
     c.create_account(id, id)?;
     c.unlock_account(id, b"task-test-secret")?;
     Ok(c)
-}
-fn member(client: &RamfluxClient, name: &str) -> Result<String, SdkError> {
-    if client.device_branch.as_ref().is_some_and(|d| d.device_id == name) {
-        return Ok(client.owned_device_identity()?.storage_key().into());
-    }
-    let row = client
-        .account_db()?
-        .client_record("device", name)?
-        .ok_or_else(|| invalid("fixture member"))?;
-    let root = row["principal_commitment"].as_str().ok_or(SdkError::IdentityRootMissing)?;
-    Ok(client.device_identity_for_root(root, name)?.storage_key().into())
 }
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
@@ -366,26 +358,16 @@ fn an_envelope_clock_or_random_task_ids_cannot_bypass_principal_admission_limits
     Ok(())
 }
 
-#[test]
-fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assignee() -> TestResult {
-    let f = Fixture::new()?;
-    let third = client(&f.root.join("third"), "third", 81)?;
-    for remote in [&f.human, &f.agent] {
-        third.persist_identity_directory(&own::manifest(remote)?)?;
-    }
-    third.create_group("group", "third-device")?;
-    third.add_group_member("group", &member(&third, "human-device")?, "member")?;
-    third.add_group_member("group", &member(&third, "agent-device")?, "member")?;
-    third.account_db()?.persist_client_record(
-        "conversation",
-        "group-thread",
-        &json!({"kind":"group","group_id":"group"}),
-    )?;
+#[tokio::test]
+async fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assignee()
+-> TestResult {
+    let f = Box::pin(native_group::fixture(true, "third")).await?;
+    let third = &f.other;
     let TaskEventBody::Proposal(mut proposal) = proposal() else { return Err("proposal".into()) };
     proposal.conversation_id = "group-thread".into();
     proposal.assignee = "human".into();
     let proposed = sign(&f.agent, "group-thread", "proposed", TaskEventBody::Proposal(proposal))?;
-    assert!(project(&third, &proposed)?.accepted);
+    assert!(project(third, &proposed)?.accepted);
     for actor in [&f.agent, &f.human] {
         let accept = sign(
             actor,
@@ -393,17 +375,16 @@ fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assigne
             &format!("accept-{}", actor.device_branch.as_ref().ok_or("device")?.principal_id),
             TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
         )?;
-        assert!(!project(&third, &accept)?.accepted);
+        assert!(!project(third, &accept)?.accepted);
     }
     let accept = sign(
-        &third,
+        third,
         "group-thread",
         "third-accept",
         TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
     )?;
-    assert!(project(&third, &accept)?.accepted);
+    assert!(project(third, &accept)?.accepted);
     assert_eq!(third.task_get(Some("group-thread"), "proposal")?["requester"], "third");
-    drop(third);
     Ok(())
 }
 

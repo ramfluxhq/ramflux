@@ -111,15 +111,7 @@ async fn case(own: bool, group: bool) -> TestResult {
             )
             .await?
     } else {
-        source
-            .client
-            .send_plaintext_direct_message_without_franking(
-                &mut sender,
-                message,
-                b"private-dm-content",
-                crate::client::routed::Route::direct(),
-            )
-            .await?
+        a.send_text(&source.client, &mut sender, message, b"private-dm-content").await?
     };
     let mut receiver = recipient.session_client().await?;
     let pool = ramflux_transport::RelayQuicPool::new(

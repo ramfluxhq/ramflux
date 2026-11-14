@@ -280,7 +280,7 @@ impl RamfluxClient {
                         return Err(invalid("own surface snapshot is below the joined epoch"));
                     }
                 }
-                self.import_surface_context(context, &entry.envelope.source_device_id)?;
+                self.import_surface_context(context)?;
             } else {
                 self.require_existing_own_surface_context(
                     conversation,

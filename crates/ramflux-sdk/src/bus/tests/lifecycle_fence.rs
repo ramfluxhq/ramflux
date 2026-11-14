@@ -21,12 +21,10 @@ use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{ReceiveExpectation, ReceiveMigrate, ReceiveStage};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(super) const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
-const CONVERSATION: &str = "healthy";
 /// Inner real-time watchdog budget. QA default-thread whole-module wall time
 /// of `held()`+`ack_fence()` was 20.8-25.0 s over 5 runs (worst 24.976 s);
 /// 45 s is ~1.8x that worst case and stays below the CI nextest kill point
@@ -44,12 +42,7 @@ pub(super) fn open_account(
     config: &GatewaySessionConfig,
     commitment: &str,
 ) -> Result<LocalBusAccountState, SdkError> {
-    let mut account = crate::bus::runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
+    let mut account = super::fixture::open_source(&root.join("source"), config)?;
     account.principal_commitment = commitment.to_owned();
     account.gateway_config = config.clone();
     account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
@@ -116,7 +109,10 @@ pub(super) fn account_of(
 }
 
 fn messages(runtime: &super::super::AccountRuntime) -> Result<usize, SdkError> {
-    Ok(account_of(runtime)?.client.direct_messages(CONVERSATION)?.len())
+    Ok(account_of(runtime)?
+        .client
+        .direct_messages(&super::fixture::direct_conversation(&account_of(runtime)?.client)?)?
+        .len())
 }
 
 pub(super) fn acked(
@@ -306,8 +302,10 @@ async fn held() -> Case {
 
     // Real `account.unlock` loads the account from disk; rebind the loopback Push engine.
     let (unlock_reply, unlock_response) = oneshot::channel();
-    let mut unlock =
-        command("account.unlock", serde_json::json!({"passphrase":"actor-test-secret"}));
+    let mut unlock = command(
+        "account.unlock",
+        serde_json::json!({"passphrase":"native fixture data passphrase"}),
+    );
     unlock.reply = Some(unlock_reply);
     runtime.apply(unlock).await?;
     unlock_response.await??;

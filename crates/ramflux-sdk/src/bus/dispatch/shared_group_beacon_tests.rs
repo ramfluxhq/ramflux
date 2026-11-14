@@ -20,16 +20,16 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     let super::dm_tests::PeerFixture { mut peers, config, directory, .. } =
         super::dm_tests::peer_fixture(&root, &mut peer).await?;
     let creator = peers.remove(0);
-    creator.client.shared_group_create("group", "group-thread", None, "device-peer-one")?;
-    let state = creator.client.shared_group_change(
+    creator.client.fixture_group_create("group", "group-thread", None, "device-peer-one")?;
+    let state = creator.client.fixture_group_change(
         "group",
         "device-peer-one",
         ramflux_protocol::GroupStateChange::Add {
-            member: peer.client.owned_group_actor("sender")?.identity,
+            member: peer.client.fixture_group_actor("sender")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    peer.client.accept_shared_group_state(&state, "sender")?;
+    peer.client.fixture_accept_group_state(&state, "sender")?;
     assert_eq!(peer.client.group_state("group")?.members.len(), 3);
     let mut sibling =
         runtime_tests::account(&root.join("new"), "peer", None, Arc::new(AtomicBool::new(false)))?;

@@ -499,3 +499,19 @@ async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity()
     assert_eq!(links[0].state, "pending", "receiving a request never accepts it");
     Ok(())
 }
+
+/// Exercise the actual native producer while surfacing a deferred fixture error to its caller.
+pub(crate) async fn deliver_pending(
+    account: &mut crate::bus::state::LocalBusAccountState,
+) -> TestResult<usize> {
+    let pending =
+        account.client.account_db()?.list_actor_states::<Intent>("contact-request/send/")?;
+    let mut sent = 0;
+    for mut intent in pending {
+        let mut engine = account.session_client().await?;
+        let result = super::delivery::deliver(&account.client, &mut engine, &mut intent).await;
+        account.apply_session_metadata(engine);
+        sent += result?.0;
+    }
+    Ok(sent)
+}

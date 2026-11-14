@@ -23,15 +23,15 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
         super::dm_tests::peer_fixture_devices(&root, &mut source, &["device-peer"]).await?;
     source.gateway_config = config.clone();
     source.target_delivery_id = config.target_delivery_id.clone();
-    source.client.shared_group_create(
+    source.client.fixture_group_create(
         "group",
         "signed-thread",
         None,
         &config.target_delivery_id,
     )?;
     let peer = peers.first_mut().ok_or("peer fixture")?;
-    let member = peer.client.owned_group_actor("device-peer")?.identity;
-    let state = source.client.shared_group_change(
+    let member = peer.client.fixture_group_actor("device-peer")?.identity;
+    let state = source.client.fixture_group_change(
         "group",
         &config.target_delivery_id,
         ramflux_protocol::group_state::GroupStateChange::Add {
@@ -41,7 +41,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
     )?;
     let source_root = source.client.owned_device_identity()?.root_commitment().to_owned();
     peer.client.establish_friend_link("consent", "peer", &source_root)?;
-    peer.client.accept_shared_group_state(&state, "device-peer")?;
+    peer.client.fixture_accept_group_state(&state, "device-peer")?;
     let route = source
         .client
         .shared_group_member_routes(&state)?
@@ -65,10 +65,8 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
         forwarded: false,
         envelope,
     };
-    let mut receiver_config = config;
-    receiver_config.principal_id = "peer".into();
-    receiver_config.device_id = "device-peer".into();
-    receiver_config.target_delivery_id = "device-peer".into();
+    let receiver_config =
+        crate::client::native_test_support::bus::config_for(&peer.client, &config)?;
     let opened = peer.client.open_routed(&entry, "device-peer")?;
     assert_eq!(
         opened.routing.conversation_id,
@@ -76,7 +74,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
         "sender-key snapshot route must match its signed conversation"
     );
     let mut receiver = GatewaySessionEngine::with_test_transport(
-        receiver_config.with_account_identity(&peer.client)?,
+        receiver_config,
         Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
             Arc::default(),
         )),

@@ -249,15 +249,6 @@ impl OwnDeviceMessage {
     fn aad(&self) -> Result<Vec<u8>, SdkError> {
         Ok(ramflux_protocol::canonical_json_bytes(&(DOMAIN, &self.id))?)
     }
-    #[cfg(test)]
-    pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
-        if bytes.len() > MAX_PACKET_BYTES {
-            return Err(invalid(TOO_LARGE));
-        }
-        Ok(bytes)
-    }
 }
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())

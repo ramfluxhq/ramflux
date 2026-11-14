@@ -181,6 +181,7 @@ impl AccountDb {
             prefix,
             "task/rejected/"
                 | "task/verified_roster/"
+                | "task/verified_roster_v2/"
                 | "task/rate/"
                 | "task/ack_sent/"
                 | "task/ack_quarantine/"

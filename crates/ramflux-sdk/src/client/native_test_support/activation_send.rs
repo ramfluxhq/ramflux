@@ -35,12 +35,20 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn publish_layer_four(fixture: &mut Fixture) -> TestResult {
+        let primary_vault = fixture.vault.clone();
+        Box::pin(publish_layer_four_with_primary(fixture, primary_vault)).await
+    }
+
+    pub(crate) async fn publish_layer_four_with_primary(
+        fixture: &mut Fixture,
+        primary_vault: Arc<TestVault>,
+    ) -> TestResult {
         let now = crate::custody::network_now()?;
         let id = fixture.client.account_db()?.local_account_id.clone();
         crate::custody::tests::mark_live(&fixture.root.0, &id, now)?;
         let account = crate::custody::load_account(&fixture.root.0, &id, now)?;
         let now = now.max(account.record().body.issued_at + 1);
-        let primary = fixture.vault.primary_for_public_key(
+        let primary = primary_vault.primary_for_public_key(
             &account.record().body.master_certificate.body.self_signing_public_key,
         )?;
         let (_, branch) =

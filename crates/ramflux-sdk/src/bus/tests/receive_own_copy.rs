@@ -54,7 +54,10 @@ async fn case() -> Case {
     .await??;
     let response = started
         .actor
-        .request(command("message.read", json!({"conversation_id":"healthy"})))
+        .request(command(
+            "message.read",
+            json!({"conversation_id":started.conversation,"read_model":true}),
+        ))
         .await?;
     let messages = response.body["messages"].as_array().ok_or("messages")?;
     assert_eq!(messages.len(), 1);
@@ -72,8 +75,11 @@ async fn case() -> Case {
 pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
     let sibling = &fixture.sibling.client;
     let identity = sibling.owned_device_identity()?;
-    let mut config = fixture.source.gateway_config.clone().with_account_identity(sibling)?;
-    config.device_id = identity.device_id().to_owned();
+    let config = crate::client::native_test_support::bus::config_for(
+        sibling,
+        &fixture.source.gateway_config,
+    )?;
+    let conversation = super::fixture::direct_conversation(sibling)?;
     let manifest = serde_json::from_value(
         fixture
             .gateway
@@ -85,7 +91,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
             .ok_or("manifest")?,
     )?;
     let event = sibling.allocate_generated_identity(
-        "healthy",
+        &conversation,
         u64::try_from(now_unix_timestamp())?.saturating_mul(1000),
         false,
     )?;
@@ -106,7 +112,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
         original_recipients: vec![],
         ciphertext_digest: None,
         context: Some(g::OwnContext {
-            conversation_id: "healthy".into(),
+            conversation_id: conversation.clone(),
             participants: vec![
                 config.principal_id.clone(),
                 fixture.peer.gateway_config.principal_id.clone(),
@@ -125,7 +131,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
                 payload_kind: crate::client::own_device_copy::OwnPayloadKind::Sent,
                 id: "incoming-sibling-envelope",
                 created_at: now_unix_timestamp(),
-                conversation: "healthy",
+                conversation: &conversation,
                 group: None,
                 body: &body,
             },
@@ -147,7 +153,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "sender".into(),
+        target_delivery_id: envelope.target_delivery_id.clone(),
         envelope,
     })
 }

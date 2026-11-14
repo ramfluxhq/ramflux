@@ -17,7 +17,6 @@
 use super::fixture::{Case, Fixture};
 use crate::bus::connection_manager::{ReceiveTrigger, ReceiveTurn};
 use crate::bus::sync_driver::source::w0::{SourceW0, actor_turn, prepare_receive_turn};
-use crate::client::identity_authority::test_support::public_manifest;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{
@@ -90,8 +89,7 @@ fn ledger(account: &LocalBusAccountState) -> Case {
 
 /// A real reopen: the account DB handle is dropped and unlocked again from disk.
 fn reopen(account: &mut LocalBusAccountState) -> Case {
-    account.client.active_account_db = None;
-    account.client.unlock_account("sender", b"actor-test-secret")?;
+    crate::client::native_test_support::bus::reopen_account(account, "sender")?;
     Ok(())
 }
 
@@ -186,7 +184,7 @@ fn reset_prior(
         peer.device_id(),
         peer.root_commitment(),
         "prior-observation",
-        1,
+        now_unix_timestamp(),
     )?;
     Ok(())
 }
@@ -210,7 +208,14 @@ async fn case() -> Case {
     ledger(&fixture.source)?;
     fixture.inbound().await?;
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = public_manifest(&fixture.peer.client)?;
+    let peer_manifest = fixture
+        .peer
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("native peer material")?
+        .manifest
+        .clone();
 
     // Row 1: native.rs prepare, `prepare_inbound_device_manifest` then the committing
     // `apply_inbound_device_manifest` (source "inbound_signature").
@@ -242,7 +247,7 @@ async fn case() -> Case {
     )?;
 
     // Row 3: group.rs `accept_group_actor_manifest` for a received shared-group packet.
-    let group_entry = Box::pin(super::receive_group::group_entry(&mut fixture)).await?;
+    let group_entry = super::receive_group::group_entry(&mut fixture)?;
     let local = fixture.source.gateway_config.device_id.clone();
     let (route, body) =
         fixture.source.client.preview_inbound_route(&group_entry, &local)?.ok_or("group route")?;
@@ -278,7 +283,14 @@ async fn expiry() -> Case {
     ledger(&fixture.source)?;
     let _clock = crate::time::FixedClock::set(now_unix_timestamp());
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = public_manifest(&fixture.peer.client)?;
+    let peer_manifest = fixture
+        .peer
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("native peer material")?
+        .manifest
+        .clone();
     let root = peer_manifest.principal_commitment.clone();
     reset_prior(&fixture.source, &peer)?;
     let accept = |client: &RamfluxClient| {

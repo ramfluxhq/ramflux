@@ -13,6 +13,22 @@ impl Fixture {
         let vault = Arc::new(TestVault::default());
         Box::pin(Self::with_principal_in(root, vault, id, device, principal)).await
     }
+    pub(crate) async fn with_principal_at(
+        root: ramflux_test_support::TestPath,
+        id: &str,
+        device: &str,
+        principal: &str,
+    ) -> TestResult<Self> {
+        std::fs::create_dir_all(&root)?;
+        Box::pin(Self::with_principal_in(
+            Root(root),
+            Arc::new(TestVault::default()),
+            id,
+            device,
+            principal,
+        ))
+        .await
+    }
     pub(crate) async fn peer_at_same_home(
         &self,
         id: &str,

@@ -4,74 +4,69 @@
 //! Contact state events and identity directory rows share one safety-verification source.
 use super::*;
 use serde_json::json;
-#[test]
-fn contact_changes_publish_reachability_kind_and_current_safety_verification()
--> Result<(), SdkError> {
-    let root = root("contact-state");
-    let account = account(&root, "local", None, Arc::new(AtomicBool::new(false)))?;
+#[tokio::test]
+async fn contact_changes_publish_reachability_kind_and_current_safety_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let account =
+        Box::pin(crate::client::native_test_support::Fixture::with_device("local", "device-local"))
+            .await?
+            .into_bus();
     let client = &account.client;
     let db = client.account_db()?;
-    client.establish_friend_link("contact", "local", "peer")?;
-    let manifest = crate::client::identity_authority::test_support::remote_manifest(
-        "peer",
-        "peer-device",
-        [89; 32],
-    )?;
-    client.observe_device_manifest_json(
-        serde_json::to_value(&manifest)?,
-        &manifest.principal_commitment,
-    )?;
+    let mut peer =
+        Box::pin(crate::client::native_test_support::Fixture::with_device("peer", "peer-device"))
+            .await?
+            .into_bus();
+    let _sibling = Box::pin(crate::client::native_test_support::bus::sibling(
+        &mut peer,
+        "peer-secondary",
+        "secondary",
+    ))
+    .await?;
+    let manifest =
+        peer.client.native_bus_fixture.as_ref().ok_or("peer native material")?.manifest.clone();
+    client.persist_fetched_identity_directory(&manifest)?;
     let mut identity = db
-        .client_record("identity", "peer")?
+        .client_record("identity", &manifest.principal_id)?
         .ok_or_else(|| SdkError::LocalBus("fixture identity absent".into()))?;
-    let device_hash = identity["device_set_hash"]
-        .as_str()
-        .ok_or_else(|| SdkError::LocalBus("fixture hash absent".into()))?
-        .to_owned();
     identity["devices"] = json!([]);
     identity["kind_asserted"] = serde_json::Value::Null;
-    db.persist_client_record("identity", "peer", &identity)?;
+    db.persist_client_record("identity", &manifest.principal_id, &identity)?;
     db.persist_client_record(
         "commitment",
         &manifest.principal_commitment,
-        &json!({"principal_id":"peer"}),
+        &json!({"principal_id":manifest.principal_id}),
     )?;
     let mut entry = ramflux_storage::AccountOutboxEntry {
         sequence: 1,
         table_name: "runtime_actor_state".into(),
         change_kind: "update".into(),
         row_id: 1,
-        keys: json!({"state_kind":"directory/identity/peer"}),
+        keys: json!({"state_kind":format!("directory/identity/{}", manifest.principal_id)}),
     };
     let before = super::super::journal::project(client, &entry)?;
     assert!(before.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["reachable"] == false
         && row["verified"] == false));
+    client.establish_friend_link(
+        "contact",
+        &client.own_account_anchor()?,
+        &manifest.principal_commitment,
+    )?;
     identity["devices"] = json!([{"device_id":"peer-device","target_delivery_id":"peer-target"}]);
-    identity["kind_asserted"] = json!("bot");
-    db.persist_client_record("identity", "peer", &identity)?;
+    identity["kind_asserted"] = json!("human");
+    db.persist_client_record("identity", &manifest.principal_id, &identity)?;
     let resolved = super::super::journal::project(client, &entry)?;
     assert!(resolved.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["reachable"] == true
-        && row["kind_asserted"] == "bot"
+        && row["kind_asserted"] == "human"
         && row["verified"] == false));
-    db.mark_contact_verified(ContactVerificationUpdate {
-        contact_identity_commitment: &manifest.principal_commitment,
-        safety_number_hash: "safety",
-        device_set_hash: &device_hash,
-        lineage_head: "lineage",
-        verified_at: now_unix_timestamp(),
-        verified_by_device_id: "local",
-    })?;
-    db.persist_actor_state(
-        &format!("identity/safety_verified_set/{}", manifest.principal_commitment),
-        &crate::client::identity_authority::set_fingerprint(
-            manifest
-                .signed_device_set
-                .as_ref()
-                .ok_or_else(|| SdkError::LocalBus("fixture set absent".into()))?,
-        )?,
+    client.establish_friend_link(
+        "contact",
+        &client.own_account_anchor()?,
+        &manifest.principal_commitment,
     )?;
+    client.mark_contact_safety_verified(&manifest.principal_commitment, "device-local")?;
     entry.table_name = "contact_verification_projection".into();
     entry.keys = json!({"contact_identity_commitment":manifest.principal_commitment});
     let verified = super::super::journal::project(client, &entry)?;
@@ -79,8 +74,10 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
         && row["verified"] == true
         && row["safety_state"] == "verified"));
     assert!(verified.iter().any(|(topic, _, _)| topic == "safety.changed"));
-    identity["device_set_hash"] = json!("changed-device-set");
-    db.persist_client_record("identity", "peer", &identity)?;
+    crate::client::native_test_support::bus::revoke_device(&mut peer, "secondary")?;
+    let changed =
+        &peer.client.native_bus_fixture.as_ref().ok_or("updated peer native material")?.manifest;
+    client.persist_fetched_identity_directory(changed)?;
     let stale = super::super::journal::project(client, &entry)?;
     assert!(stale.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["verified"] == false

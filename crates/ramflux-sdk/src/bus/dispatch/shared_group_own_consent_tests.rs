@@ -21,7 +21,7 @@ async fn check_group_decision(accept: bool) -> TestResult {
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory, peer) =
+    let (mut sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, false).await?;
     let stranger = runtime_tests::account(
         &root.join("stranger"),
@@ -46,8 +46,22 @@ async fn check_group_decision(accept: bool) -> TestResult {
         .cloned()
         .ok_or("consent copy missing")?;
     let incoming = entry(envelope, 1);
-    assert!(sibling.client.receive_own_device_message(&receiver, &incoming).await?);
-    assert!(sibling.client.receive_own_device_message(&receiver, &incoming).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &incoming
+        )
+        .await?
+    );
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &incoming
+        )
+        .await?
+    );
     assert_eq!(sibling.client.group_invitations()?["invitations"], json!([]));
     assert_eq!(sibling.client.local_is_group_member("group")?, accept);
     if accept {
@@ -74,12 +88,12 @@ fn invite_own_devices(
     config: &GatewaySessionConfig,
     receiver: &GatewaySessionConfig,
 ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
-    stranger.client.shared_group_create("group", "group-thread", None, "stranger")?;
-    let state = stranger.client.shared_group_change(
+    stranger.client.fixture_group_create("group", "group-thread", None, "stranger")?;
+    let state = stranger.client.fixture_group_change(
         "group",
         "stranger",
         ramflux_protocol::GroupStateChange::Add {
-            member: source.client.owned_group_actor(&config.target_delivery_id)?.identity,
+            member: source.client.fixture_group_actor(&config.target_delivery_id)?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;

@@ -37,7 +37,7 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert!(source.client.queue_surface_own_copy(&create, None)?);
     let db = source.client.account_db()?;
@@ -56,7 +56,14 @@ async fn context_marker_requires_confirmation_and_failure_restores_context() -> 
         0
     );
     let first = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    assert!(sibling.client.receive_own_device_message(&receiver, &entry(first, 1)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(first, 1)
+        )
+        .await?
+    );
     due(&source.client)?;
     let mut healthy = super::super::fixture::RecordingGateway::new(Arc::default());
     healthy.own = own;
@@ -137,7 +144,7 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
     failed.fail_own_ack = true;
@@ -186,10 +193,12 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     );
     for (index, envelope) in captures.into_iter().enumerate() {
         assert!(
-            sibling
-                .client
-                .receive_own_device_message(&receiver, &entry(envelope, index as u64 + 1))
-                .await?
+            crate::client::native_test_support::bus::receive_copy(
+                &mut sibling.client,
+                &receiver,
+                &entry(envelope, index as u64 + 1)
+            )
+            .await?
         );
     }
     assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 2);
@@ -219,7 +228,8 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, mut receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let (mut sibling, config, mut receiver, directory) =
+        sibling_fixture(&root, &mut source).await?;
     let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
     source
@@ -232,16 +242,22 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
     let incoming = entry(envelope.clone(), 1);
     assert!(
-        sibling
-            .client
-            .receive_own_device_message(&receiver, &incoming)
-            .await
-            .map_err(|error| format!("first receive: {error:?}"))?
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &incoming
+        )
+        .await
+        .map_err(|error| format!("first receive: {error:?}"))?
     );
     let before = sibling.client.surface_get("surface", 0, None)?;
-    let db = sibling.client.account_db()?;
-    let receipt_key = db.actor_state_key_page("own-device/message-receipt/", 1)?.remove(0);
-    let receipt: Value = db.load_actor_state(&receipt_key)?.ok_or("receipt")?;
+    let receipt_key = sibling
+        .client
+        .account_db()?
+        .actor_state_key_page("own-device/message-receipt/", 1)?
+        .remove(0);
+    let receipt: Value =
+        sibling.client.account_db()?.load_actor_state(&receipt_key)?.ok_or("receipt")?;
     assert_eq!(receipt["acknowledged"], false);
     receiver.target_delivery_id = "sibling".into();
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
@@ -255,7 +271,7 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
             .is_err()
     );
     assert_eq!(
-        db.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"],
+        sibling.client.account_db()?.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"],
         false
     );
     let mut gateway = super::super::fixture::RecordingGateway::new(Arc::default());
@@ -266,26 +282,38 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
         .ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp())
         .await
         .map_err(|error| format!("ack receipt: {error:?}"))?;
-    assert_eq!(db.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"], true);
-    db.retain_delivery_actor_states("own-device/message-receipt/", now_unix_timestamp(), 0)?;
-    assert!(!db.actor_state_exists(&receipt_key)?);
-    assert_eq!(db.actor_state_usage("own-device/committed-packet/")?.0, 1);
+    assert_eq!(
+        sibling.client.account_db()?.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"],
+        true
+    );
+    sibling.client.account_db()?.retain_delivery_actor_states(
+        "own-device/message-receipt/",
+        now_unix_timestamp(),
+        0,
+    )?;
+    assert!(!sibling.client.account_db()?.actor_state_exists(&receipt_key)?);
+    assert_eq!(
+        sibling.client.account_db()?.actor_state_usage("own-device/committed-packet/")?.0,
+        1
+    );
     assert!(
-        sibling
-            .client
-            .receive_own_device_message(&receiver, &entry(envelope.clone(), 2))
-            .await
-            .map_err(|error| format!("receive after receipt eviction: {error:?}"))?
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(envelope.clone(), 2)
+        )
+        .await
+        .map_err(|error| format!("receive after receipt eviction: {error:?}"))?
     );
     assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
     let forged = conflicting_own_packet(&source.client, envelope)?;
     assert!(matches!(
-        sibling.client.receive_own_device_message(&receiver, &entry(forged, 3)).await,
+        crate::client::native_test_support::bus::receive_copy(&mut sibling.client, &receiver, &entry(forged, 3)).await,
         Err(SdkError::InboundRejected(reason)) if reason == "own-device message id conflict"
     ));
     assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
-    assert!(db.latest_journal_event("message.undeliverable")?.is_none());
-    assert_durable_acknowledged_proof(db)?;
+    assert!(sibling.client.account_db()?.latest_journal_event("message.undeliverable")?.is_none());
+    assert_durable_acknowledged_proof(sibling.client.account_db()?)?;
     directory.abort();
     drop(sibling);
     drop(source);
@@ -301,7 +329,7 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
     let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
     source
@@ -309,13 +337,12 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
     let create = super::super::dm_tests::create_carrier(&source.client)?;
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
     let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    let db = sibling.client.account_db()?;
     let limit = crate::client::own_device_copy::MAX_DELIVERY_ROWS;
     assert_eq!(limit, 18_000);
     let now = now_unix_timestamp();
-    db.write_transaction(|| {
+    sibling.client.account_db()?.write_transaction(|| {
         for i in 0..limit {
-            db.persist_actor_state(
+            sibling.client.account_db()?.persist_actor_state(
                 &format!("own-device/committed-packet/budget-{i:05}"),
                 &json!({"valid_until":now + 600,"expires_at":now + 900,"acknowledged":true}),
             )?;
@@ -323,18 +350,36 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
         Ok::<_, SdkError>(())
     })?;
     assert!(matches!(
-        sibling.client.receive_own_device_message(&receiver, &entry(envelope.clone(), 1)).await,
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(envelope.clone(), 1)
+        )
+        .await,
         Err(SdkError::InboundPending(_)
             | SdkError::SenderManifestRequired { .. }
             | SdkError::FreshHeadRequired { .. })
     ));
     assert!(sibling.client.surface_get("surface", 0, None)?.is_null());
-    assert_eq!(db.actor_state_usage("own-device/committed-packet/")?.0, u64::from(limit));
-    assert_eq!(db.actor_state_usage("own-device/message-receipt/")?.0, 0);
-    db.remove_actor_state("own-device/committed-packet/budget-00000")?;
-    assert!(sibling.client.receive_own_device_message(&receiver, &entry(envelope, 2)).await?);
+    assert_eq!(
+        sibling.client.account_db()?.actor_state_usage("own-device/committed-packet/")?.0,
+        u64::from(limit)
+    );
+    assert_eq!(sibling.client.account_db()?.actor_state_usage("own-device/message-receipt/")?.0, 0);
+    sibling.client.account_db()?.remove_actor_state("own-device/committed-packet/budget-00000")?;
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(envelope, 2)
+        )
+        .await?
+    );
     assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
-    assert_eq!(db.actor_state_usage("own-device/committed-packet/")?.0, u64::from(limit));
+    assert_eq!(
+        sibling.client.account_db()?.actor_state_usage("own-device/committed-packet/")?.0,
+        u64::from(limit)
+    );
     directory.abort();
     drop(sibling);
     drop(source);

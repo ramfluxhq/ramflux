@@ -187,8 +187,11 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
             json!({"conversation_id":"thread"}),
         ),
     )?;
-    assert_eq!(page["messages"][0]["kind"], "call");
-    assert_eq!(page["messages"][0]["call"]["state"], "ended");
+    assert_eq!(
+        page["messages"],
+        json!([]),
+        "a public call-cache row alone cannot fabricate a generated history event"
+    );
     assert!(crate::bus::readers::is_reader_request("call.list"));
     assert_eq!(crate::bus::readers::read(&account.client, &request("call.list", &id))?, listed);
     drop(state);
@@ -215,9 +218,12 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
         vec![local.clone()],
         now_unix_timestamp(),
     )?;
-    let control = &caller.pending[0];
-    let body = call::bytes(control)?;
-    let incoming = LiveCall::incoming(control, local, now_unix_timestamp())?;
+    let mut control =
+        caller.pending.first().cloned().ok_or_else(|| invalid("test: outgoing call Start"))?;
+    control.signature =
+        ramflux_crypto::sign_canonical_bytes_with_seed(&call::signing_bytes(&control)?, [9; 32]);
+    let body = call::bytes(&control)?;
+    let incoming = LiveCall::incoming(&control, local, now_unix_timestamp())?;
     account.client.persist_call_row(&incoming.row)?;
     account
         .client

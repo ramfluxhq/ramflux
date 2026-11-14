@@ -294,12 +294,12 @@ async fn own_context_import_cannot_rebind_reserved_dm_or_install_reserved_group(
     ] {
         let record = json!({"kind":"direct","group_id":null,"participants":context.participants,"participant_roots":roots});
         db.persist_client_record("conversation", &scope, &record)?;
-        assert!(owner.client.import_surface_context(&context, &owner.config.device_id).is_err());
+        assert!(owner.client.import_surface_context(&context).is_err());
         assert_eq!(db.client_record("conversation", &scope)?, Some(record));
     }
     let bound = json!({"kind":"direct","group_id":null,"participants":context.participants,"participant_roots":[own,peer]});
     db.persist_client_record("conversation", &scope, &bound)?;
-    owner.client.import_surface_context(&context, &owner.config.device_id)?;
+    owner.client.import_surface_context(&context)?;
     assert_eq!(db.client_record("conversation", &scope)?, Some(bound));
     create_group(&owner, "source-group", "source-thread")?;
     let mut group = owner
@@ -313,7 +313,7 @@ async fn own_context_import_cannot_rebind_reserved_dm_or_install_reserved_group(
         group: Some(group),
         friend: None,
     };
-    assert!(owner.client.import_surface_context(&group_context, &owner.config.device_id).is_err());
+    assert!(owner.client.import_surface_context(&group_context).is_err());
     assert!(db.group_snapshot_epoch("must-not-install")?.is_none());
     assert!(db.client_record("conversation", "dm:malformed")?.is_none());
     Ok(())

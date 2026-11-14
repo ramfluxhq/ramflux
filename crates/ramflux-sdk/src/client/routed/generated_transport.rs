@@ -45,7 +45,12 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
         _ => false,
     };
     let kind = match scanned.kind {
-        _ if control && group.is_some() => Kind::GroupControl,
+        8 if group.is_some()
+            && g::Control::decode(scanned.body)
+                .is_ok_and(|value| matches!(value.operation, 4 | 5)) =>
+        {
+            Kind::GroupControl
+        }
         _ if control => Kind::Control,
         6 => Kind::Receipt,
         _ if group.is_some() => Kind::GroupMessage,

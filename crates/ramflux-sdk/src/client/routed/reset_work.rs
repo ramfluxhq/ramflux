@@ -23,24 +23,9 @@ impl RamfluxClient {
         if let Some(target) = record.get("target_delivery_id").and_then(serde_json::Value::as_str) {
             return Ok(target.to_owned());
         }
-        // Older verified manifests cached delivery aliases only in the identity directory.
-        if let Some(principal) = record.get("principal_id").and_then(serde_json::Value::as_str)
-            && let Some(identity) = self.account_db()?.client_record("identity", principal)?
-            && let Some(target) = identity
-                .get("devices")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|device| {
-                    device["device_id"] == remote.device_id() || device["id"] == remote.device_id()
-                })
-                .and_then(|device| device.get("target_delivery_id"))
-                .and_then(serde_json::Value::as_str)
-        {
-            return Ok(target.to_owned());
-        }
-        Ok(remote.device_id().to_owned())
+        Err(super::invalid("verified pair recipient delivery target missing"))
     }
+
     /// The identity of the reset a submit belongs to: the stored `ResetWork` row (attempt count,
     /// schedule and first attempt) at submit time. A confirmed receive clears it, and a later
     /// reset writes a different one, so a refusal can tell whether it is still current.
@@ -146,43 +131,28 @@ impl RamfluxClient {
         // Submission is transport acceptance, not peer confirmation. Work remains durable.
         Ok(())
     }
-    pub(super) fn legacy_upgrade_reset_work(
+    pub(super) fn retained_reset_work(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Vec<ResetWork>, SdkError> {
         let db = self.account_db()?;
-        db.write_transaction(|| -> Result<Vec<ResetWork>, SdkError> {
-            let mut retained = Vec::new();
-            for key in db.actor_state_keys("dm-pair/reset-work/")? {
-                let Some(mut item) = db.load_actor_state::<ResetWork>(&key)? else { continue };
-                let remote = self.device_identity(&item.remote).ok();
-                let bound = remote
-                    .as_ref()
-                    .map(|remote| Self::reset_work_key(local, remote))
-                    .transpose()?;
-                if bound.as_deref() == Some(&key)
-                    && (item.local == local.storage_key() || item.local == local.device_id())
-                {
-                    // The existing pair key proves the root context; spelling alone never does.
-                    local.storage_key().clone_into(&mut item.local);
-                    if let Some(remote) = &remote {
-                        remote.storage_key().clone_into(&mut item.remote);
-                    }
-                    db.persist_actor_state(&key, &item)?;
-                    retained.push(item);
-                } else if item.local == local.device_id() || item.local == local.storage_key() {
-                    db.persist_actor_state(
-                        &format!(
-                            "legacy/reset-work/{}",
-                            ramflux_protocol::encode_base64url(key.as_bytes())
-                        ),
-                        &item,
-                    )?;
-                    db.remove_actor_state(&key)?;
-                }
+        let mut retained = Vec::new();
+        for key in db.actor_state_keys("dm-pair/reset-work/")? {
+            let Some(item) = db.load_actor_state::<ResetWork>(&key)? else { continue };
+            let owner = self.device_identity(&item.local)?;
+            let remote = self.device_identity(&item.remote)?;
+            if item.local != owner.storage_key()
+                || item.remote != remote.storage_key()
+                || Self::reset_work_key(&owner, &remote)? != key
+                || item.first_at.is_none()
+            {
+                return Err(super::invalid("reset work requires current root-qualified state"));
             }
-            Ok(retained)
-        })
+            if owner == *local {
+                retained.push(item);
+            }
+        }
+        Ok(retained)
     }
 
     pub(crate) async fn retry_pair_resets(
@@ -191,15 +161,15 @@ impl RamfluxClient {
         at: i64,
     ) -> Result<(), SdkError> {
         let local = self.local_device_identity(&engine.config().device_id)?;
-        let work = self.legacy_upgrade_reset_work(&local)?;
+        let work = self.retained_reset_work(&local)?;
         let mut attempted = false;
-        for mut item in work.into_iter().filter(|work| work.local == local.storage_key()) {
+        for item in work.into_iter().filter(|work| work.local == local.storage_key()) {
             let remote = self.device_identity(&item.remote)?;
             if !self.pair_recovery_allowed(&local, &remote)? {
                 self.remove_device_pair(&remote, "retry_relationship_ended")?;
                 continue;
             }
-            let first = self.normalize_reset_work(&mut item)?;
+            let first = Self::reset_first_at(&item)?;
             if at >= first.saturating_add(MAX_RESET_LIFETIME) {
                 self.mark_pair_manual(&local, &remote, at)?;
                 continue;

@@ -15,6 +15,7 @@ use crate::client::task::{
     carrier::Carrier,
     control::{Ack, AckJob, ForwardJob},
 };
+use prost::Message as _;
 use ramflux_protocol::{NeedsMe, TaskDecision, TaskEvent, TaskEventBody, TaskResolve, TaskStart};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,17 @@ impl CourierEvent {
 }
 
 fn carrier(account: &LocalBusAccountState, conversation: &str, task: &str) -> Case<Carrier> {
+    let scope: String = account
+        .client
+        .account_db()?
+        .load_actor_state(if conversation == "stalled" {
+            "fixture/stalled-conversation"
+        } else {
+            "fixture/direct-conversation"
+        })?
+        .ok_or("canonical task scope")?;
+    let assignee = if conversation == "stalled" { "stalled-peer" } else { "peer" };
+    let conversation = scope.as_str();
     Ok(account.client.sign_task_event(
         TaskEvent::new(
             conversation.into(),
@@ -61,7 +73,7 @@ fn carrier(account: &LocalBusAccountState, conversation: &str, task: &str) -> Ca
                 task_id: task.into(),
                 conversation_id: conversation.into(),
                 requester: "sender".into(),
-                assignee: "peer".into(),
+                assignee: assignee.into(),
                 text: "courier regression".into(),
                 constraints: None,
             }),
@@ -93,40 +105,122 @@ async fn real_time_watchdog<T>(future: impl std::future::Future<Output = Case<T>
 }
 
 fn ack(account: &LocalBusAccountState, key: &str, carrier: &Carrier) -> Case {
+    let task_id = prepare_ack_task(account, carrier)?;
+    let resolution = TaskResolve {
+        task_id,
+        base_revision: 2,
+        step_id: "step".into(),
+        target: NeedsMe::Approval { grant_id: "grant".into() },
+        decision_id: "decision".into(),
+        decision: TaskDecision::Resume,
+    };
+    let original = account.client.sign_task_event(
+        TaskEvent::new(
+            carrier.conversation_id.clone(),
+            TaskEventBody::Resolve(resolution.clone()),
+            sdk_device_signed_fields("device-sender", ""),
+        )?,
+        format!("{}-resolved", carrier.message_id),
+        None,
+    )?;
+    let carrier = &original;
+    let mut ack = Ack {
+        carrier_base64: ramflux_protocol::encode_base64url(carrier.bytes()?),
+        certificate: crate::client::task::certificate::Certificate {
+            conversation_id: carrier.conversation_id.clone(),
+            resolution: resolution.clone(),
+            assignee: "sender".into(),
+            issuer_device: "device-sender".into(),
+            issued_at: now_unix_timestamp(),
+            phase: crate::client::task::certificate::Phase::Committed,
+            committed_version: Some(3),
+            carrier_hash: Some(crate::client::task::certificate::carrier_hash(carrier)?),
+            decision_key: "decision".into(),
+            evidence_hash: "evidence".into(),
+            signature: String::new(),
+        },
+        manifests: Vec::new(),
+        signer_principal: "sender".into(),
+        signer_device: "device-sender".into(),
+        signature: String::new(),
+    };
+    let encoded = account.client.encode_generated_task_certificate(
+        &ramflux_protocol::message::TaskCertificate::try_from(&ack.certificate)?,
+    )?;
+    ack.certificate.signature =
+        ramflux_protocol::message::TaskCertificate::decode(encoded.as_slice())?.signature;
+    let encoded =
+        account.client.encode_generated_task_control(ramflux_protocol::message::TaskControl {
+            value: Some(ramflux_protocol::message::task_control::Value::Ack(
+                ramflux_protocol::message::TaskControlAck { value: Some(ack.to_generated()?) },
+            )),
+        })?;
+    let generated = ramflux_protocol::message::TaskControl::decode(encoded.as_slice())?;
+    let Some(ramflux_protocol::message::task_control::Value::Ack(value)) = generated.value else {
+        return Err("signed Task acknowledgement missing".into());
+    };
+    ack.signature = value.value.ok_or("signed Task acknowledgement body")?.signature;
     account.client.account_db()?.persist_actor_state(
         key,
-        &AckJob {
-            ack: Ack {
-                carrier_base64: ramflux_protocol::encode_base64url(carrier.bytes()?),
-                certificate: crate::client::task::certificate::Certificate {
-                    conversation_id: carrier.conversation_id.clone(),
-                    resolution: TaskResolve {
-                        task_id: carrier.event()?.event().task_id().into(),
-                        base_revision: 1,
-                        step_id: "step".into(),
-                        target: NeedsMe::Approval { grant_id: "grant".into() },
-                        decision_id: "decision".into(),
-                        decision: TaskDecision::Resume,
-                    },
-                    assignee: "sender".into(),
-                    issuer_device: "device-sender".into(),
-                    issued_at: now_unix_timestamp(),
-                    phase: crate::client::task::certificate::Phase::Committed,
-                    committed_version: Some(2),
-                    carrier_hash: None,
-                    decision_key: "decision".into(),
-                    evidence_hash: "evidence".into(),
-                    signature: String::new(),
-                },
-                manifests: Vec::new(),
-                signer_principal: "sender".into(),
-                signer_device: "device-sender".into(),
-                signature: String::new(),
-            },
-            attempts: 0,
-            next_at: 0,
-            created_at: now_unix_timestamp(),
+        &AckJob { ack, attempts: 0, next_at: 0, created_at: now_unix_timestamp() },
+    )?;
+    Ok(())
+}
+
+fn prepare_ack_task(account: &LocalBusAccountState, carrier: &Carrier) -> Case<String> {
+    let task_id = format!("{}-ack", carrier.event()?.event().task_id());
+    let start = account.client.sign_task_event(
+        TaskEvent::new(
+            carrier.conversation_id.clone(),
+            TaskEventBody::Start(TaskStart {
+                task_id: task_id.clone(),
+                conversation_id: carrier.conversation_id.clone(),
+                requester: "sender".into(),
+                assignee: "sender".into(),
+                text: "ack fixture".into(),
+                constraints: None,
+            }),
+            sdk_device_signed_fields("device-sender", ""),
+        )?,
+        format!("{task_id}-start"),
+        None,
+    )?;
+    project_fixture_task(account, &start)?;
+    let update = account.client.sign_task_event(
+        TaskEvent::new(
+            carrier.conversation_id.clone(),
+            TaskEventBody::Update(ramflux_protocol::TaskUpdate {
+                task_id: task_id.clone(),
+                version: 2,
+                state: ramflux_protocol::TaskStatus::NeedsMe,
+                steps: vec![ramflux_protocol::TaskStep {
+                    id: "step".into(),
+                    title: "approve".into(),
+                    state: ramflux_protocol::TaskStatus::NeedsMe,
+                    needs_me: Some(NeedsMe::Approval { grant_id: "grant".into() }),
+                }],
+                result_ref: None,
+                result_summary: None,
+            }),
+            sdk_device_signed_fields("device-sender", ""),
+        )?,
+        format!("{task_id}-update"),
+        None,
+    )?;
+    project_fixture_task(account, &update)?;
+    Ok(task_id)
+}
+
+fn project_fixture_task(account: &LocalBusAccountState, carrier: &Carrier) -> Case {
+    account.client.project_task_message(
+        &crate::client::task::Delivery {
+            conversation: &carrier.conversation_id,
+            message: &carrier.message_id,
+            principal: &carrier.principal_id,
+            device: &carrier.device_id,
+            at: now_unix_timestamp(),
         },
+        &carrier.bytes()?,
     )?;
     Ok(())
 }
@@ -312,6 +406,7 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
                     .persist_actor_state(key, &json!({"invalid_legacy_row":true}))?;
             }
             let call_id = fixture.inbound().await?;
+            let conversation = fixture::direct_conversation(&fixture.source.client)?;
             let inbound = std::mem::take(&mut fixture.gateway.lock().map_err(|_| "gateway")?.inbox);
             let Fixture { root, source, peer, sibling, gateway, .. } = fixture;
             let (mut actor, sender, stop, mut events) = runtime(source, &root.join("source"));
@@ -335,7 +430,7 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
                 }
                 assert_eq!(sent.len(), 3, "valid queue rows did not continue after quarantine");
                 gateway.lock().map_err(|_| "gateway")?.inbox.extend(inbound);
-                inbound_delivered(&sender, &call_id).await?;
+                inbound_delivered(&sender, &call_id, &conversation).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -433,9 +528,11 @@ async fn stall(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let db = account.client.account_db()?;
-    let mut row = db.client_record("conversation", "stalled")?.ok_or("stalled conversation")?;
+    let scope: String =
+        db.load_actor_state("fixture/stalled-conversation")?.ok_or("stalled scope")?;
+    let mut row = db.client_record("conversation", &scope)?.ok_or("stalled conversation")?;
     row["direct_route"] = json!({"federation":{"recipient_prekey_url":url}});
-    db.persist_client_record("conversation", "stalled", &row)?;
+    db.persist_client_record("conversation", &scope, &row)?;
     let (entered, received) = mpsc::channel(16);
     let task = tokio::spawn(async move {
         let mut sockets = Vec::new();
@@ -553,8 +650,14 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
         assert_eq!(failures[0].1["id"], "task/ack/000-stalled");
         assert!(failures[0].1["start"].as_i64().is_some_and(|at| slow.next_at >= at + 2));
         let sent = &gateway.lock().map_err(|_| "gateway")?.sent;
-        assert!(sent.iter().any(|e| e.target_delivery_id == "peer"));
-        assert!(sent.iter().any(|e| e.target_delivery_id == "sibling"));
+        assert!(
+            sent.iter().any(|e| e.target_delivery_id == fixture.peer.target_delivery_id),
+            "healthy peer submission must use its certified destination"
+        );
+        assert!(
+            sent.iter().any(|e| e.target_delivery_id == fixture.sibling.target_delivery_id),
+            "healthy own copy must use its certified destination"
+        );
         drop(actor);
         drop(fixture.peer);
         drop(fixture.sibling);
@@ -612,6 +715,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                 forward(&fixture.source, &format!("task/forward/healthy-{index:02}"), &healthy)?;
             }
             let call_id = fixture.inbound().await?;
+            let conversation = fixture::direct_conversation(&fixture.source.client)?;
             let (stalled, mut entered) = stall(&fixture.source).await?;
             let root = fixture.root.clone();
             let gateway = fixture.gateway.clone();
@@ -646,7 +750,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                     // Each command executes in the live actor and signals the preparation loop.
                     command(&sender, "identity.directory", json!({"limit":16})).await?;
                     if finished == 2 {
-                        inbound_delivered(&sender, &call_id).await?;
+                        inbound_delivered(&sender, &call_id, &conversation).await?;
                     }
                 }
                 assert!(charged >= 20, "courier passes did not contain stalled work");
@@ -665,7 +769,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .any(|envelope| envelope.target_delivery_id == "sibling"),
+                    .any(|envelope| envelope.target_delivery_id == fixture.sibling.target_delivery_id),
                 "healthy forwarding did not progress during stalled courier passes"
             );
             assert_eq!(
@@ -730,7 +834,13 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                 // Requested -> at most two Items -> Finished bounds preparation work.
                 // Pending deliveries may be prepared again before their durable removal.
                 // Independent sends may still be queued: observe durable completion before stop.
-                await_ack_commits(&completion_reader, &gateway, 100).await?;
+                await_ack_commits(
+                    &completion_reader,
+                    &gateway,
+                    &fixture.peer.target_delivery_id,
+                    100,
+                )
+                .await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -751,7 +861,7 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .filter(|e| e.target_delivery_id == "peer")
+                    .filter(|e| e.target_delivery_id == fixture.peer.target_delivery_id)
                     .count(),
                 100
             );
@@ -765,9 +875,10 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
 }
 
 fn intervention(account: &LocalBusAccountState, peer: &LocalBusAccountState) -> Case {
+    let conversation = fixture::direct_conversation(&account.client)?;
     let update = peer.client.sign_task_event(
         TaskEvent::new(
-            "healthy".into(),
+            conversation.clone(),
             TaskEventBody::Update(ramflux_protocol::TaskUpdate {
                 task_id: "healthy-task".into(),
                 version: 2,
@@ -790,7 +901,7 @@ fn intervention(account: &LocalBusAccountState, peer: &LocalBusAccountState) -> 
         .client
         .project_task_message(
             &crate::client::task::Delivery {
-                conversation: "healthy",
+                conversation: &conversation,
                 message: &update.message_id,
                 principal: "peer",
                 device: "device-peer",
@@ -802,7 +913,7 @@ fn intervention(account: &LocalBusAccountState, peer: &LocalBusAccountState) -> 
     assert!(result.accepted, "{:?}", result.reject);
     account.client.account_db()?.delete_task_state(&crate::client::task::scoped(
         "forward",
-        "healthy",
+        &conversation,
         "healthy-task",
     )?)?;
     Ok(())
@@ -844,7 +955,13 @@ async fn r6_application_error_charges_one_forward_and_account_keeps_serving() ->
                 assert_eq!(rows.len(), 2);
                 command(&sender, "identity.directory", json!({"limit":16})).await?;
                 // Preparation completion does not stop its independent healthy delivery.
-                await_ack_commits(&completion_reader, &gateway, 1).await?;
+                await_ack_commits(
+                    &completion_reader,
+                    &gateway,
+                    &fixture.peer.target_delivery_id,
+                    1,
+                )
+                .await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -891,15 +1008,23 @@ fn r6_only_explicit_account_stop_errors_escape_item_isolation() {
     assert!(error.is_some_and(|error| !stop_class(&SdkError::Json(error))));
 }
 
-async fn inbound_delivered(sender: &mpsc::Sender<AccountCommand>, call_id: &str) -> Case {
+async fn inbound_delivered(
+    sender: &mpsc::Sender<AccountCommand>,
+    call_id: &str,
+    conversation: &str,
+) -> Case {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let calls = command(sender, "call.list", json!({})).await?;
-        let messages =
-            command(sender, "message.read", json!({"conversation_id":"healthy"})).await?;
-        let dm = messages["messages"].as_array().is_some_and(|rows| {
-            rows.iter().any(|row| row["body_utf8"] == "courier stays responsive")
-        });
+        let messages = command(
+            sender,
+            "message.read",
+            json!({"conversation_id":conversation,"read_model":true}),
+        )
+        .await?;
+        let dm = messages["messages"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["text"] == "courier stays responsive"));
         if dm && calls["calls"][0]["call_id"] == call_id {
             return Ok(());
         }
@@ -921,6 +1046,7 @@ mod priority_r2;
 async fn await_ack_commits(
     reader: &ramflux_storage::AccountDb,
     gateway: &Arc<Mutex<fixture::Gateway>>,
+    target: &str,
     expected: usize,
 ) -> Case {
     let mut remaining = reader.task_state_usage("task/ack/")?.0;
@@ -938,7 +1064,7 @@ async fn await_ack_commits(
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .filter(|entry| entry.target_delivery_id == "peer")
+                    .filter(|entry| entry.target_delivery_id == target)
                     .count(),
                 expected
             );

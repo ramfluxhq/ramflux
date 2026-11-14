@@ -35,25 +35,25 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
             drop(existing);
             let mut source = a.account(None, mail.clone())?;
             let mut gateway = source.session_client().await?;
-            source
-                .client
-                .send_plaintext_direct_message_without_franking(
-                    &mut gateway,
-                    {
-                        let mut message = a.message(&b, "dm-one");
-                        message.envelope_id = "dm-wire-for-bob".into();
-                        message
-                    },
-                    b"hello",
-                    crate::client::routed::Route::direct(),
-                )
-                .await?;
+            a.send_text(
+                &source.client,
+                &mut gateway,
+                {
+                    let mut message = a.message(&b, "dm-one");
+                    message.envelope_id = "dm-wire-for-bob".into();
+                    message
+                },
+                b"hello",
+            )
+            .await?;
             source.install_test_session(gateway);
             drop(source);
             let sender = a.daemon(mail.clone())?;
             let recipient = b.daemon(mail.clone())?;
             let (bus, server) = fixture::socket(&a, Rc::clone(&sender)).await?;
-            let result = fixture::delivered(&bus, "alice", "dm-one", 1).await?;
+            let result =
+                fixture::delivered(&bus, "alice", &a.event("dm-one")?, &a.conversation(&b)?, 1)
+                    .await?;
             assert_eq!(result["messages"][0]["receipts"][0]["device_id"], b.device);
             recipient.shutdown().await?;
             drop(recipient);
@@ -65,7 +65,8 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
                 envelopes
                     .iter()
                     .filter(|e| e.source_device_id == b.device)
-                    .all(|e| e.target_delivery_id == a.device)
+                    .all(|e| e.target_delivery_id
+                        == a.identity().expect("test: receipt target").storage_key())
             );
             resumed.shutdown().await?;
             sender.shutdown().await?;
@@ -75,11 +76,12 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
             drop(sender);
             drop(resumed);
             let observer = b.client(None)?;
-            let received = observer.direct_messages("thread")?;
+            let received = observer.direct_messages(&a.conversation(&b)?)?;
             assert_eq!(received.len(), 1);
             assert_ne!(received[0].message_id, "dm-wire-for-bob");
-            let origin =
-                observer.message_origin("thread", &received[0].message_id)?.ok_or("origin")?;
+            let origin = observer
+                .message_origin(&a.conversation(&b)?, &received[0].message_id)?
+                .ok_or("origin")?;
             assert_eq!(
                 observer
                     .direct_message_by_id("dm-wire-for-bob")?
@@ -90,7 +92,7 @@ async fn peer_dm_is_delivered_without_a_recipient_ui_and_restart_does_not_send_a
             assert_eq!(origin["sender_device_id"], a.device);
             let sender_root = a.client(None)?.surface_local_root_commitment()?;
             assert_eq!(origin["sender_root_commitment"], sender_root);
-            assert_eq!(origin["sender_device_display"], format!("Laptop@{sender_root}"));
+            assert_eq!(origin["sender_device_display"], format!("{}@{sender_root}", a.device));
             drop(observer);
             std::fs::remove_dir_all(root)?;
             Ok(())
@@ -113,57 +115,14 @@ async fn group_delivery_receipts_go_only_to_the_sender_device_without_recipient_
             let source = a.client(None)?;
             let bob = b.client(None)?;
             let charlie = c.client(None)?;
-            for (spec, client) in [(&a, &source), (&b, &bob), (&c, &charlie)] {
-                for member in [&a, &b, &c] {
-                    spec.trust(client, member)?;
-                }
-                client.create_group("group", a.identity()?.storage_key())?;
-                client.add_group_member_with_root(
-                    "group",
-                    &b.device,
-                    "member",
-                    b.identity()?.root_commitment(),
-                )?;
-                client.add_group_member_with_root(
-                    "group",
-                    &c.device,
-                    "member",
-                    c.identity()?.root_commitment(),
-                )?;
-                client.account_db()?.persist_client_record(
-                    "conversation",
-                    "thread",
-                    &serde_json::json!({"kind":"group","group_id":"group"}),
-                )?;
-            }
-            let distribution = source.export_group_sender_key_distribution("group", &a.device)?;
+            a.prepare_group(&source, "group", "thread", &[(&b, &bob), (&c, &charlie)])?;
+            let mut account = a.account(None, mail.clone())?;
+            let id = Box::pin(a.send_group_text(&mut account, "group", "group-one", "group hello"))
+                .await?;
+            let distribution =
+                account.client.export_group_sender_key_distribution("group", &a.device)?;
             bob.import_group_sender_key_distribution(&distribution)?;
             charlie.import_group_sender_key_distribution(&distribution)?;
-            let encrypted = source.encrypt_group_message("group", &a.device, b"group hello")?;
-            source.send_direct_message("thread", "group-one", &a.device, &encrypted)?;
-            let mut account = a.account(None, mail.clone())?;
-            let mut gateway = account.session_client().await?;
-            for member in [&b, &c] {
-                let mut message = a.message(member, "group-one");
-                message.envelope_id = format!("group-one:{}", member.device);
-                let sealed = source
-                    .seal_routed_as(
-                        &mut gateway,
-                        &message,
-                        &encrypted,
-                        crate::client::routed::Route::group_message("group"),
-                    )
-                    .await?;
-                message.encrypted_body = serde_json::to_vec(&sealed)?;
-                gateway
-                    .submit_envelope(gateway_direct_message_envelope(
-                        &gateway.config,
-                        &message,
-                        None,
-                    )?)
-                    .await?;
-            }
-            drop(gateway);
             drop(account);
             drop(source);
             drop(bob);
@@ -172,7 +131,7 @@ async fn group_delivery_receipts_go_only_to_the_sender_device_without_recipient_
             let recipient = b.daemon(mail.clone())?;
             let third = c.daemon(mail.clone())?;
             let (bus, server) = fixture::socket(&a, Rc::clone(&sender)).await?;
-            let result = fixture::delivered(&bus, "alice", "group-one", 2).await?;
+            let result = fixture::delivered(&bus, "alice", &id, "thread", 2).await?;
             let devices = result["messages"][0]["receipts"]
                 .as_array()
                 .ok_or("receipts")?
@@ -183,10 +142,9 @@ async fn group_delivery_receipts_go_only_to_the_sender_device_without_recipient_
             let packets = mail.lock().map_err(|_| "mailbox")?.submissions.clone();
             assert_eq!(packets.iter().filter(|p| p.source_device_id != a.device).count(), 2);
             assert!(
-                packets
-                    .iter()
-                    .filter(|p| p.source_device_id != a.device)
-                    .all(|p| p.target_delivery_id == a.device)
+                packets.iter().filter(|p| p.source_device_id != a.device).all(|p| p
+                    .target_delivery_id
+                    == a.identity().expect("test: qualified group receipt target").storage_key())
             );
             for daemon in [&sender, &recipient, &third] {
                 daemon.shutdown().await?;
@@ -215,15 +173,7 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
             fixture::seed_pair(&a, &b)?;
             let mut source = a.account(None, mail.clone())?;
             let mut gateway = source.session_client().await?;
-            source
-                .client
-                .send_plaintext_direct_message_without_franking(
-                    &mut gateway,
-                    a.message(&b, "dm-one"),
-                    b"hello",
-                    crate::client::routed::Route::direct(),
-                )
-                .await?;
+            a.send_text(&source.client, &mut gateway, a.message(&b, "dm-one"), b"hello").await?;
             source.install_test_session(gateway);
             drop(source);
             mail.lock().map_err(|_| "mailbox")?.lose_ack = true;
@@ -276,7 +226,8 @@ async fn an_uncertain_receipt_ack_reuses_its_ciphertext_after_restart_and_client
             fixture::explicit_noop(&b, &a, mail.clone(), "sent", 2).await?;
             let mut sender = a.account(None, mail.clone())?;
             crate::bus::sync_driver::run(&mut sender).await?;
-            let message = sender.client.direct_message_by_id("dm-one")?.ok_or("sender row")?;
+            let message =
+                sender.client.direct_message_by_id(&a.event("dm-one")?)?.ok_or("sender row")?;
             assert_eq!(message.receipts.len(), 1);
             assert_eq!(message.receipts[0].state, "delivered");
             assert_eq!(sender.client.account_db()?.actor_state_usage(prefix)?.0, 0);
