@@ -107,6 +107,70 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     Ok(())
 }
 
+/// Native generation-1 group: an owner `sender` and `count` peers, each pair seeded, every peer
+/// added to the group by a signed change, and all manifests served by one loopback directory.
+pub(in crate::bus::dispatch) struct NativeGroup {
+    pub(in crate::bus::dispatch) source: LocalBusAccountState,
+    pub(in crate::bus::dispatch) peers: Vec<LocalBusAccountState>,
+    pub(in crate::bus::dispatch) config: GatewaySessionConfig,
+    pub(in crate::bus::dispatch) directory: tokio::task::JoinHandle<()>,
+}
+
+pub(in crate::bus::dispatch) async fn native_group(
+    root: &ramflux_test_support::TestPath,
+    count: u8,
+) -> Result<NativeGroup, Box<dyn std::error::Error>> {
+    use crate::client::native_test_support::{
+        Fixture, activation_send::tests::publish_layer_four, bus,
+    };
+    std::fs::create_dir_all(root.to_path_buf())?;
+    let mut owner = Box::pin(Fixture::with_principal("sender", "device-sender", "sender")).await?;
+    Box::pin(publish_layer_four(&mut owner)).await?;
+    let mut peers = Vec::new();
+    for i in 0..count {
+        let id = format!("peer-{i}");
+        let mut peer = Box::pin(Fixture::with_principal(&id, &format!("device-{id}"), &id)).await?;
+        Box::pin(publish_layer_four(&mut peer)).await?;
+        peers.push(peer.into_bus());
+    }
+    let mut source = owner.into_bus();
+    let own = super::fixture::manifest(&source.client)?;
+    let mut manifests =
+        BTreeMap::from([(own.principal_commitment.clone(), serde_json::to_value(&own)?)]);
+    for peer in &peers {
+        let manifest = super::fixture::manifest(&peer.client)?;
+        manifests.insert(manifest.principal_commitment.clone(), serde_json::to_value(&manifest)?);
+    }
+    let (address, directory) = super::fixture::directory(root, manifests).await?;
+    let mut config = source.gateway_config.clone();
+    config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+    config.gateway_addr = address;
+    config.tcp_gateway_addr = Some(address);
+    config.server_name = "test-gateway".into();
+    config.ca_cert = root.join("ca.pem");
+    source.gateway_config = config.clone();
+    for peer in &peers {
+        let manifest = super::fixture::manifest(&peer.client)?;
+        source.client.persist_fetched_identity_directory(&manifest)?;
+        peer.client.persist_fetched_identity_directory(&own)?;
+        bus::seed_pair(&source.client, &peer.client)?;
+    }
+    source.client.fixture_group_create("group", "thread", None, "device-sender")?;
+    for peer in &peers {
+        let device = peer.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let member = peer.client.fixture_group_actor(&device.device_id)?.identity;
+        source.client.fixture_group_change(
+            "group",
+            "device-sender",
+            ramflux_protocol::GroupStateChange::Add {
+                member,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+        )?;
+    }
+    Ok(NativeGroup { source, peers, config, directory })
+}
+
 pub(in crate::bus::dispatch) fn members(
     root: &std::path::Path,
     source: &LocalBusAccountState,

@@ -4,7 +4,7 @@
 //! Task carrier and own-control frame limits through the real encrypted transport adapters.
 use super::super::surface_transport::{
     fixture,
-    tests::{directory_config, members as members_count},
+    tests::{NativeGroup, directory_config, members as members_count, native_group},
 };
 use super::*;
 use crate::bus::runtime_tests;
@@ -371,14 +371,7 @@ async fn requester_cancellation_after_compaction_prepares_original_sibling_event
 -> Result<(), Box<dyn std::error::Error>> {
     use ramflux_protocol::{TaskCancel, TaskEvent, TaskEventBody, TaskStart};
     let root = runtime_tests::root("task-compacted-cancel");
-    let mut source = runtime_tests::account(
-        &root.join("sender"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let peers = members_count(&root, &source, 1)?;
-    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let NativeGroup { mut source, peers, config, directory } = native_group(&root, 1).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,

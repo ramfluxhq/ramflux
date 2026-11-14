@@ -55,6 +55,7 @@ impl Rig {
         .await?;
         config.gateway_addr = address;
         config.tcp_gateway_addr = Some(address);
+        config.ca_cert = root.join("ca.pem");
         let mut rig = Self {
             captures: std::array::from_fn(|_| Arc::default()),
             phone,
@@ -66,7 +67,7 @@ impl Rig {
             root,
         };
         rig.configure()?;
-        rig.create_group()?;
+        rig.create_group().await?;
         Ok(rig)
     }
     fn configure(&mut self) -> Result<(), SdkError> {
@@ -100,7 +101,7 @@ impl Rig {
         }
         Ok(())
     }
-    fn create_group(&mut self) -> TestResult {
+    async fn create_group(&mut self) -> TestResult {
         self.phone.client.fixture_group_create(
             "group",
             "group-thread",
@@ -119,12 +120,15 @@ impl Rig {
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        let outsider = runtime_tests::account(
-            &self.root.join("mallory"),
+        // The rig keeps the directory owner; the outsider's native root is a child of it.
+        let outsider = Box::pin(crate::client::native_test_support::Fixture::with_principal_at(
+            self.root.child("mallory"),
             "mallory",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
+            "device-mallory",
+            "mallory",
+        ))
+        .await?
+        .into_bus();
         self.removed_root = outsider.client.owned_device_identity()?.root_commitment().into();
         let base = self.phone.client.fixture_group_change(
             "group",

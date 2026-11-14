@@ -23,12 +23,13 @@ async fn check_group_decision(accept: bool) -> TestResult {
     )?;
     let (mut sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, false).await?;
-    let stranger = runtime_tests::account(
-        &root.join("stranger"),
+    let stranger = Box::pin(crate::client::native_test_support::Fixture::with_principal(
         "stranger",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
+        "device-stranger",
+        "stranger",
+    ))
+    .await?
+    .into_bus();
     let state = invite_own_devices(&stranger, &source, &sibling, &config, &receiver)?;
     assert!(!source.client.friend_link_peer_is_accepted(
         stranger.client.owned_device_identity()?.root_commitment(),
