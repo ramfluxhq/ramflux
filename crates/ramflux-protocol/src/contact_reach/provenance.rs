@@ -320,3 +320,6 @@ pub fn page_signers(pages: &[StatePage]) -> Result<Vec<SignerReference>, Protoco
 
 #[cfg(test)]
 mod tests;
+
+mod stream;
+pub use stream::{ProvenanceDigest, ProvenanceIdentity};

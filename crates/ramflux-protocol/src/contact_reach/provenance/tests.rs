@@ -107,3 +107,61 @@ fn cr_provenance_carrier_closed_native_hash_and_nulls() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_provenance_streaming_identity_matches_complete_canonical_carrier() -> TestResult {
+    let proof = proof()?;
+    let signers = vec![SignerReference {
+        object_hash: d(42),
+        object_kind: ObjectKind::Policy,
+        authority_head_hash: custody::object_hash(&proof.authority.publication.record)?,
+        master_certificate_hash: custody::object_hash(
+            &proof.authority.publication.record.body.master_certificate,
+        )?,
+        proof_hash: proof.proof_hash.clone(),
+    }];
+    let catalogue = Provenance {
+        kind: ProvenanceKind::ReachProvenance,
+        version: 1,
+        account_anchor: proof.authority.publication.record.body.account_anchor.clone(),
+        revision: 7,
+        state_hash: d(43),
+        signers,
+        authorities: vec![proof.clone()],
+    };
+    catalogue.validate()?;
+    let stage = || {
+        ProvenanceDigest::new(
+            &catalogue.account_anchor,
+            catalogue.revision,
+            &catalogue.state_hash,
+            catalogue.signers.clone(),
+        )
+    };
+    let mut streamed = stage()?;
+    streamed.push(&proof)?;
+    let identity = streamed.finish()?;
+    assert_eq!(
+        identity.hash,
+        custody::framed_hash(STATE_CONTENT_DOMAIN, &catalogue)?,
+        "incremental hashing must use exactly the existing catalogue preimage and domain"
+    );
+    assert_eq!(
+        identity.bytes,
+        u64::try_from(crate::canonical_json_bytes(&catalogue)?.len())?,
+        "streaming must charge the complete canonical catalogue, including reference metadata"
+    );
+    assert_eq!(
+        identity.count, 1,
+        "streaming cannot infer missing authorities from reference count"
+    );
+    assert!(stage()?.finish().is_err(), "an incomplete stream cannot publish a catalogue identity");
+    let mut duplicate = stage()?;
+    duplicate.push(&proof)?;
+    assert!(duplicate.push(&proof).is_err(), "duplicate proofs must poison the transfer stage");
+    assert!(
+        duplicate.finish().is_err(),
+        "a caller cannot discard a failed proof and project a partial catalogue"
+    );
+    Ok(())
+}
