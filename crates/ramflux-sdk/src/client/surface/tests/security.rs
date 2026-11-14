@@ -145,7 +145,7 @@ async fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> 
     assert!(!project(&f.human, &unknown, "unknown")?.accepted);
     assert_eq!(
         f.human.surface_list("thread", "", 100)?["surfaces"].as_array().map(Vec::len),
-        Some(2)
+        Some(1)
     );
     Ok(())
 }
@@ -193,7 +193,7 @@ async fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced
     let f = Fixture::new().await?;
     let mut first =
         carrier(&f.author, PayloadKind::Event, "stable", &event(1, C::CreateSurface(snapshot()))?)?;
-    f.author.attach_surface_snapshot(&mut first)?;
+
     first = f.author.sign_surface_carrier(first)?;
     f.author.account_db()?.surface_transaction(|| {
         project(&f.author, &first, "first")?;
@@ -237,5 +237,64 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
     )?;
     f.human.verify_surface_carrier(&other, "outsider", "author-device")?;
     assert!(!project(&f.human, &other, "outsider")?.accepted);
+    Ok(())
+}
+
+#[tokio::test]
+async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_state() -> TestResult {
+    let f = Fixture::new().await?;
+    let outsider = client(&f.root.join("foreign-author"), "outsider", 83)?;
+    f.human.persist_root_verified_directory(
+        &crate::client::identity_authority::test_support::public_manifest(&outsider)?,
+    )?;
+    let event = signed_in(&outsider, "outsider", "thread", "foreign-create", "Plain fallback")?;
+    assert!(
+        project(&f.human, &event, "foreign")?.accepted,
+        "authenticated foreign authors retain their plain fallback"
+    );
+    assert!(
+        !f.human.surface_author_is_own_agent("outsider")?,
+        "a verified peer root is not creator-registry authority"
+    );
+    assert_eq!(
+        f.human.surface_list("thread", "", 100)?["surfaces"],
+        json!([]),
+        "foreign cards cannot create renderer state"
+    );
+    assert_eq!(
+        f.human.surface_message_fallback("foreign")?.ok_or("fallback")?.1,
+        super::super::fallback::render("outsider", "Plain fallback"),
+        "foreign fallback uses the same terminal-safe quoting"
+    );
+    let frame = ramflux_protocol::RpcFrame {
+        schema: ramflux_protocol::RPC_SCHEMA.into(),
+        conversation_id: "thread".into(),
+        surface_id: "~rpc".into(),
+        known_version: 0,
+        known_hash: None,
+        function_call_id: Some("foreign-call".into()),
+        rejected_version: None,
+        a2ui: json!({"version":"1.0","callRendererFunction":{"functionCallId":"foreign-call","callFunction":{"@call":"unknownFunction","catalogId":CATALOG_ID,"args":{}}}}),
+    };
+    let branch = outsider.device_branch.as_ref().ok_or("outsider branch")?;
+    let call = outsider.sign_surface_carrier(Carrier {
+        payload_kind: PayloadKind::FunctionCall,
+        surface_id: "~rpc".into(),
+        message_id: "foreign-call".into(),
+        sender_principal_id: "outsider".into(),
+        sender_device_id: branch.device_id.clone(),
+        author_principal_id: "outsider".into(),
+        wire_base64: ramflux_protocol::encode_base64url(
+            frame.wire_bytes(ramflux_protocol::RpcKind::FunctionCall)?,
+        ),
+        signature: String::new(),
+        ..event.clone()
+    })?;
+    assert!(!project(&f.human, &call, "foreign-call")?.accepted, "foreign calls must be dropped");
+    assert_eq!(
+        f.human.account_db()?.actor_state_usage("surface/rpc-response/")?.0,
+        0,
+        "foreign authors cannot trigger RPC responses or error reports"
+    );
     Ok(())
 }

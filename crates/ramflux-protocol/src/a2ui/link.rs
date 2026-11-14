@@ -27,13 +27,15 @@ pub fn validate_url(input: &str) -> Result<String, Reject> {
     let Some(url::Host::Domain(host)) = url.host() else {
         return Err(Reject::Expression);
     };
-    let host = host.trim_end_matches('.');
-    if !host.contains('.')
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.len() > 253
+        || !host.contains('.')
         || host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
         || host.split('.').any(|label| {
             label.is_empty()
+                || label.len() > 63
                 || label.starts_with('-')
                 || label.ends_with('-')
                 || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -64,6 +66,7 @@ mod tests {
             "https://localhost/",
             "https://printer.local/",
             "https://single/",
+            "https://example.com../",
             "https://example.com/\u{202e}hidden",
         ] {
             assert!(

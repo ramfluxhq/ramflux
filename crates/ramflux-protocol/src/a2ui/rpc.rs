@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! The r3c RPC frame: original request identity is independent of surface sequence consumption.
-use super::wire::{canonical, decode_canonical, identifier};
+use super::wire::{canonical, decode_canonical, validate_identifier};
 use super::{MAX_DELTA_BYTES, Reject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -76,7 +76,7 @@ impl SurfaceRpc {
             return Err(Reject::Encoding);
         }
         if frame.surface_id != "~rpc" {
-            identifier(&frame.surface_id)?;
+            validate_identifier(&frame.surface_id)?;
         }
         if let Some(id) = &frame.function_call_id {
             call_id(id)?;

@@ -179,6 +179,14 @@ fn parse(program: &str) -> Result<Vec<Part>, Reject> {
         }
     }
     out.push(Part::Text(text));
+    let static_bytes = out
+        .iter()
+        .filter_map(|part| if let Part::Text(text) = part { Some(text.len()) } else { None })
+        .try_fold(0usize, usize::checked_add)
+        .ok_or(Reject::Limit)?;
+    if static_bytes > MAX_DELTA_BYTES {
+        return Err(Reject::Limit);
+    }
     Ok(out)
 }
 pub(super) fn expressions(program: &str) -> Result<Vec<Value>, Reject> {

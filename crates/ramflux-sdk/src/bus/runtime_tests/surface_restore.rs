@@ -17,7 +17,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
         "thread",
         &text_snapshot("surface", "Persisted", &("saved")),
     )?)?;
-    let mut carrier = Carrier {
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -33,7 +33,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
         signature: String::new(),
         snapshot: None,
     };
-    account.client.attach_surface_snapshot(&mut carrier)?;
+
     let carrier = account.client.sign_surface_carrier(carrier)?;
     assert!(account.client.stage_surface_outgoing(&carrier, None)?.accepted);
     account.client.surface_get("surface", 0, None)

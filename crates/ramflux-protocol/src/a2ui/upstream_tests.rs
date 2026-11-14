@@ -159,3 +159,55 @@ fn rf_card_catalog_is_upstream_catalog_schema_valid_and_explicit_overrides_fail_
     }
     Ok(())
 }
+
+#[test]
+fn explicit_profile_cases_distinguish_schema_validity_from_egress_and_first_batch_policy()
+-> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/a2ui");
+    let upstream = validator(&root, "catalogs/basic/v1/catalog.json", "agent_to_renderer.json")?;
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../fixtures/protocol/v1/a2ui_surface/profile-cases.json"
+    ))?;
+    let cases = cases.as_array().ok_or("profile cases")?;
+    assert_eq!(cases.len(), 11, "the explicit profile-policy inventory must not silently shrink");
+    for case in cases {
+        let message = case.get("message").ok_or("message")?;
+        assert_eq!(
+            upstream.is_valid(message),
+            case.get("upstreamValid").and_then(Value::as_bool).ok_or("upstream expectation")?,
+            "{} upstream: {:?}",
+            case.get("name").ok_or("name")?,
+            upstream.iter_errors(message).map(|e| e.to_string()).collect::<Vec<_>>()
+        );
+        let mut create = message.get("createSurface").ok_or("create")?.clone();
+        create
+            .as_object_mut()
+            .ok_or("create object")?
+            .insert("catalogId".into(), Value::String(super::CATALOG_ID.into()));
+        let frame = super::EventFrame {
+            schema: super::EVENT_SCHEMA.into(),
+            conversation_id: "conversation".into(),
+            surface_version: 1,
+            base_surface_hash: None,
+            new_surface_hash: String::new(),
+            fallback_text: Some("Profile case".into()),
+            close_reason: None,
+            a2ui: Some(super::MutationMessage::new(super::Mutation::CreateSurface(
+                serde_json::from_value(create)?,
+            ))),
+            append_text: None,
+            resync: None,
+            final_: None,
+            closed: None,
+            metadata: None,
+        };
+        assert_eq!(
+            super::SurfaceState::default().prepare_event(frame).is_ok(),
+            case.get("profileAccepted").and_then(Value::as_bool).ok_or("profile expectation")?,
+            "{}: {}",
+            case.get("name").ok_or("name")?,
+            case.get("reason").ok_or("reason")?
+        );
+    }
+    Ok(())
+}

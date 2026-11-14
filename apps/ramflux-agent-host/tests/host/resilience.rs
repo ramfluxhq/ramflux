@@ -285,3 +285,35 @@ async fn r3_a_sibling_device_revocation_does_not_stop_the_authorized_host() -> T
     assert_eq!(bus.inner.replies.len(), 2);
     Ok(())
 }
+
+#[test]
+fn surface_rule_configuration_uses_v3_identifiers_and_the_real_component_budget() -> TestResult {
+    let mut f = fixture()?;
+    for id in ["has-dash", "constructor", "9starts_with_digit"] {
+        f.config.rules[0].surface.as_mut().ok_or("surface")?.choices =
+            vec![Choice { id: id.into(), label: "Choice".into() }];
+        assert!(
+            matches!(f.config.validate(), Err(Error::Config)),
+            "choice event names must obey the v3 identifier profile: {id}"
+        );
+    }
+    let max_choices = (ramflux_protocol::MAX_COMPONENTS - 3) / 2;
+    f.config.rules[0].surface.as_mut().ok_or("surface")?.choices = (0..max_choices)
+        .map(|i| Choice { id: format!("choice_{i}"), label: "Choice".into() })
+        .collect();
+    assert!(
+        f.config.validate().is_ok(),
+        "the largest actual component tree must remain configurable"
+    );
+    f.config.rules[0]
+        .surface
+        .as_mut()
+        .ok_or("surface")?
+        .choices
+        .push(Choice { id: "overflow".into(), label: "Choice".into() });
+    assert!(
+        matches!(f.config.validate(), Err(Error::Config)),
+        "the producer must refuse choices that exceed the pinned 32-component state cap"
+    );
+    Ok(())
+}

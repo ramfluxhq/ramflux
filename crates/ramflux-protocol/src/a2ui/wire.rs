@@ -257,7 +257,7 @@ impl EventFrame {
         {
             return Err(Reject::Encoding);
         }
-        identifier(self.surface_id())?;
+        validate_identifier(self.surface_id())?;
         if let Some(message) = self.a2ui.as_ref().or_else(|| self.resync.as_ref().map(|r| &r.a2ui))
         {
             if message.version != "1.0" {
@@ -325,12 +325,15 @@ pub(super) fn validate_metadata(metadata: Option<&Metadata>) -> Result<(), Rejec
             return Err(Reject::Encoding);
         }
         for key in m.extensions.keys() {
-            identifier(key)?;
+            validate_identifier(key)?;
         }
     }
     Ok(())
 }
-pub(super) fn identifier(id: &str) -> Result<(), Reject> {
+/// Validate a component, surface, function, property or event name under the P2 profile.
+/// # Errors
+/// Refuses non-ASCII names, reserved prototype names or names longer than 64 bytes.
+pub fn validate_identifier(id: &str) -> Result<(), Reject> {
     let mut bytes = id.bytes();
     let first = bytes.next().ok_or_else(|| Reject::Validation("identifier".into()))?;
     if id.len() > 64

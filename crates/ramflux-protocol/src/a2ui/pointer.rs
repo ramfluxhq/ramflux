@@ -67,7 +67,9 @@ impl JsonPointer {
     /// Refuses arrays, the append marker, missing targets and non-string leaves.
     pub fn text<'a>(&self, model: &'a Value) -> Result<&'a str, Reject> {
         let mut current = model;
-        if self.segments.is_empty() {
+        if self.segments.is_empty()
+            || self.segments.len() == 1 && self.segments.first().is_some_and(String::is_empty)
+        {
             return Err(Reject::Expression);
         }
         for part in &self.segments {
@@ -130,4 +132,39 @@ fn index(part: &str) -> Result<usize, Reject> {
         return Err(Reject::Expression);
     }
     part.parse().map_err(|_| Reject::Expression)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn stream_targets_are_canonical_object_members_and_never_root_array_or_append_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model = json!({"":"root alias","items":[{"text":"array member"}],"object":{"0":"object member","a/b":"slash","a~b":"tilde","-":"append marker"}});
+        for path in ["", "/", "/items/0/text", "/object/-"] {
+            assert!(
+                JsonPointer::parse(path)?.text(&model).is_err(),
+                "streaming must refuse ambiguous or non-object-only target {path:?}"
+            );
+        }
+        for (path, text) in
+            [("/object/0", "object member"), ("/object/a~1b", "slash"), ("/object/a~0b", "tilde")]
+        {
+            let pointer = JsonPointer::parse(path)?;
+            assert_eq!(pointer.canonical(), path, "a finality key has one canonical escaping");
+            assert_eq!(pointer.text(&model)?, text, "object-only pointers may have numeric keys");
+        }
+        for path in ["/object/a~2b", "/object/a~", "/constructor/x"] {
+            assert!(
+                JsonPointer::parse(path).is_err(),
+                "invalid/prototype pointers must fail closed: {path}"
+            );
+        }
+        assert!(
+            !JsonPointer::parse("/a")?.overlaps(&JsonPointer::parse("/ab")?),
+            "overlap is by decoded segments, not string prefix"
+        );
+        Ok(())
+    }
 }

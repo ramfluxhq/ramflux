@@ -71,6 +71,10 @@ pub(crate) fn map_surface_error(error: SdkError) -> SdkError {
     match error {
         SdkError::LocalBus(message) => SurfaceRefusalCode::InvalidRequest.error(message),
         SdkError::Protocol(error) => SurfaceRefusalCode::InvalidRequest.error(error.to_string()),
+        SdkError::SurfaceProtocol(error) => {
+            SurfaceRefusalCode::renderer(&serde_json::json!({"reject":error}))
+                .error(error.to_string())
+        }
         SdkError::Json(error) => SurfaceRefusalCode::InvalidRequest.error(error.to_string()),
         other => other,
     }

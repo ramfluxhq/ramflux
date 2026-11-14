@@ -8,7 +8,7 @@ use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::PrincipalKind;
 use std::{path::Path, sync::Arc};
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-pub(super) async fn owned_pair(
+pub(crate) async fn owned_pair(
     root: &Path,
     human: &str,
     agent: &str,
@@ -162,7 +162,7 @@ pub(crate) fn append_frame(
     Ok(state.prepare_event(frame)?)
 }
 
-pub(super) async fn owned_terminals(root: &Path) -> TestResult<Vec<RamfluxClient>> {
+pub(crate) async fn owned_terminals(root: &Path) -> TestResult<Vec<RamfluxClient>> {
     let (mut human, mut agent, vault) = owned_pair_with_vault(root, "human", "author").await?;
     let human_two =
         enroll_surface_sibling(root, &mut human, &vault, "human-secondary", "human-two").await?;

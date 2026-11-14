@@ -5,6 +5,25 @@
 use super::{Carrier, invalid, key};
 use crate::{RamfluxClient, SdkError};
 pub(super) fn authored_key(carrier: &Carrier) -> Result<(String, String), SdkError> {
+    if carrier.payload_kind.rpc_kind().is_some() {
+        let prefix = format!(
+            "surface/authored/rpc/{}/",
+            ramflux_protocol::hash_base64url(
+                "ramflux.surface.authored.v1",
+                carrier.author_principal_id.as_bytes()
+            )
+        );
+        let suffix = ramflux_protocol::hash_base64url(
+            "ramflux.surface.authored.v1",
+            &ramflux_protocol::canonical_json_bytes(&(
+                &carrier.conversation_id,
+                &carrier.surface_id,
+                &carrier.sender_principal_id,
+                &carrier.message_id,
+            ))?,
+        );
+        return Ok((format!("{prefix}{suffix}"), prefix));
+    }
     let prefix = key("authored", &carrier.surface_reference()?) + "/";
     let suffix = ramflux_protocol::hash_base64url(
         "ramflux.surface.authored.v1",

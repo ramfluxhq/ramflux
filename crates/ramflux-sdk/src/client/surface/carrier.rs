@@ -107,7 +107,9 @@ impl Carrier {
         }
         let (conversation, surface) = match &payload {
             Payload::Event(event) => (event.conversation_id(), event.surface_id()),
-            Payload::Rpc(_, rpc) => (&rpc.frame().conversation_id, &rpc.frame().surface_id),
+            Payload::Rpc(_, rpc) => {
+                (rpc.frame().conversation_id.as_str(), rpc.frame().surface_id.as_str())
+            }
             Payload::Action(action) | Payload::ActionReceipt { action, .. } => {
                 (action.conversation_id(), action.surface_id())
             }

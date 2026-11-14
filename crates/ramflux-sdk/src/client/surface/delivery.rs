@@ -106,7 +106,7 @@ impl RamfluxClient {
                 retryable: false,
                 queued: false,
             };
-            self.store_surface_message_reference(&carrier, message, sender, &outcome)?;
+            self.store_surface_message_reference(&carrier, message, sender, &outcome, true)?;
             return Ok(outcome);
         }
         // A payload claim can never reserve another principal's logical-message id.
@@ -125,7 +125,7 @@ impl RamfluxClient {
             }
             if !receipt.result.retryable {
                 let result = self.refresh_surface_outcome(&carrier, receipt.result)?;
-                self.store_surface_message_reference(&carrier, message, sender, &result)?;
+                self.store_surface_message_reference(&carrier, message, sender, &result, false)?;
                 return Ok(result);
             }
         }
@@ -182,7 +182,7 @@ impl RamfluxClient {
                 &Receipt { fingerprint, result: outcome.clone() },
             )?;
         }
-        self.store_surface_message_reference(&carrier, message, sender, &outcome)?;
+        self.store_surface_message_reference(&carrier, message, sender, &outcome, false)?;
         Ok(outcome)
     }
     fn reject_surface_delivery(
@@ -202,8 +202,9 @@ impl RamfluxClient {
         message: &str,
         sender: SurfaceSender<'_>,
         result: &Outcome,
+        fallback_only: bool,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
+        self.account_db()?.persist_actor_state(&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_only":fallback_only,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
         if result.accepted
             && let Some(epoch) = sender.group_epoch
         {

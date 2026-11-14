@@ -53,7 +53,9 @@ pub(crate) enum SurfaceAction {
         #[arg(long, allow_hyphen_values = true)]
         message: Option<String>,
     },
+    /// Send a canonical Surface v3 event or RPC frame.
     Send(SurfaceSend),
+    /// Submit a canonical Surface v3 action to its author.
     Action(SurfaceSend),
 }
 #[derive(Args)]

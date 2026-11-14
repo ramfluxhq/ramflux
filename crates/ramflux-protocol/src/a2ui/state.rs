@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Immutable signed base state, final text commitments and fenced resync/bootstrap.
-use super::wire::{canonical, decode_canonical, identifier, validate_metadata};
+use super::wire::{canonical, decode_canonical, validate_identifier, validate_metadata};
 use super::{
     AppendText, CATALOG_ID, CreateSurface, EVENT_SCHEMA, EventFrame, FinalRecord, JsonPointer,
     MAX_COMPONENTS, MAX_DELTA_BYTES, MAX_FINAL_RECORDS, MAX_MODEL_BYTES, MAX_STATE_BYTES, Metadata,
@@ -379,7 +379,7 @@ impl SurfaceSnapshot {
         Ok(crate::hash_base64url("ramflux.a2ui.surface_hash.v2", &bytes))
     }
     fn validate(&mut self) -> Result<(), Reject> {
-        identifier(&self.surface_id)?;
+        validate_identifier(&self.surface_id)?;
         if self.catalog_id != CATALOG_ID
             || self.fallback_text.trim().is_empty()
             || !crate::text_safety::free_text_is_safe(&self.fallback_text)
@@ -402,6 +402,7 @@ impl SurfaceSnapshot {
             a.get("id").and_then(Value::as_str).cmp(&b.get("id").and_then(Value::as_str))
         });
         self.validate_finality()?;
+        validate_depth(&serde_json::to_value(&*self).map_err(|_| Reject::Encoding)?, 0)?;
         self.hash()?;
         Ok(())
     }
@@ -458,6 +459,25 @@ impl SurfaceSnapshot {
 }
 fn text_hash(text: &str) -> String {
     crate::hash_base64url("ramflux.a2ui.final_text.v2", text.as_bytes())
+}
+fn validate_depth(value: &Value, depth: usize) -> Result<(), Reject> {
+    if depth > 16 {
+        return Err(Reject::Limit);
+    }
+    match value {
+        Value::Object(map) => {
+            for value in map.values() {
+                validate_depth(value, depth + 1)?;
+            }
+        }
+        Value::Array(array) => {
+            for value in array {
+                validate_depth(value, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 fn safe_model(value: &Value, depth: usize) -> Result<(), Reject> {
     if depth > 16 {

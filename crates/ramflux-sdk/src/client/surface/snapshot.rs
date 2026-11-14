@@ -19,15 +19,6 @@ impl SnapshotProof {
             author_device_id: author.into(),
         })
     }
-    pub(crate) fn is_full(&self) -> bool {
-        !self.wire_base64.is_empty()
-    }
-    pub(super) fn matches_hash(&self, state: &SurfaceState) -> bool {
-        ramflux_protocol::decode_base64url(&self.wire_base64)
-            .ok()
-            .and_then(|bytes| SurfaceEvent::from_wire_bytes(&bytes).ok())
-            .is_some_and(|event| state.hash() == Some(event.frame().new_surface_hash.as_str()))
-    }
     pub(super) fn restore(
         &self,
         carrier: &Carrier,
@@ -52,11 +43,6 @@ impl SnapshotProof {
     }
 }
 impl RamfluxClient {
-    pub(crate) fn attach_surface_snapshot(&self, carrier: &mut Carrier) -> Result<(), SdkError> {
-        // V3 events carry their own result commitment. Full attestations are receipt-only.
-        carrier.payload()?;
-        Ok(())
-    }
     pub(crate) fn prepare_surface_resync(
         &self,
         reference: &str,

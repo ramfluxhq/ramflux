@@ -261,7 +261,8 @@ impl RamfluxClient {
         epoch: Option<u64>,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let bytes = ramflux_protocol::decode_base64url(&entry.response_base64)?;
+        let bytes = ramflux_protocol::decode_base64url(&entry.response_base64)
+            .map_err(|_| invalid("stored RPC response encoding"))?;
         let frame = SurfaceRpc::from_wire_bytes(&bytes, entry.response_kind)?;
         let response = self.sign_surface_carrier(Carrier {
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
@@ -310,10 +311,17 @@ impl RamfluxClient {
                 &entry.response_base64,
             ))?,
         );
-        self.account_db()?.persist_actor_state(
-            &format!("surface/rpc-response/{id}"),
-            &ResyncReply { carrier: response, destination },
-        )?;
+        let queue_key = format!("surface/rpc-response/{id}");
+        let db = self.account_db()?;
+        if !db.actor_state_exists(&queue_key)?
+            && db.actor_state_key_page("surface/rpc-response/", MAX_ENTRIES)?.len()
+                >= MAX_ENTRIES as usize
+        {
+            // The immutable reply stays in the request ledger; an exact retry can enqueue
+            // it after courier backpressure clears. No response can grow an unbounded queue.
+            return Ok(());
+        }
+        db.persist_actor_state(&queue_key, &ResyncReply { carrier: response, destination })?;
         Ok(())
     }
 }
@@ -409,16 +417,19 @@ impl RamfluxClient {
         {
             return Ok(());
         }
-        let marker = super::scoped_key(
-            "rpc-error-reported",
-            &[
+        let prefix = key("rpc-error-reported", &carrier.author_principal_id) + "/";
+        let marker = prefix.clone()
+            + &super::scope::surface_reference(
                 &carrier.conversation_id,
                 &carrier.author_principal_id,
                 &carrier.surface_id,
-                &event.version().to_string(),
-            ],
-        )?;
-        if self.account_db()?.actor_state_exists(&marker)? {
+            )?;
+        let db = self.account_db()?;
+        let previous = db.load_actor_state::<u64>(&marker)?;
+        if previous.is_some_and(|version| version >= event.version())
+            || previous.is_none()
+                && db.actor_state_key_page(&prefix, MAX_ENTRIES)?.len() >= MAX_ENTRIES as usize
+        {
             return Ok(());
         }
         let code = match outcome
@@ -472,7 +483,9 @@ impl RamfluxClient {
             thread.get("group_id").and_then(Value::as_str),
             epoch,
         )?;
-        self.account_db()?.persist_actor_state(&marker, &true)?;
+        // A monotonic per-surface floor coalesces older reports and never reports the
+        // same attempted version twice, without retaining one row per hostile version.
+        self.account_db()?.persist_actor_state(&marker, &event.version())?;
         Ok(())
     }
 }

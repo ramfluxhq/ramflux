@@ -143,7 +143,7 @@ pub(super) fn append(
     carrier.message_id = crate::new_surface_message_id()?;
     carrier.wire_base64 = ramflux_protocol::encode_base64url(wire);
     carrier.snapshot = None;
-    client.attach_surface_snapshot(&mut carrier)?;
+
     client.sign_surface_carrier(carrier)
 }
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_
         "own-device copies must never create peer delivery receipts"
     );
     assert_eq!(sibling_view["version"], 65);
-    assert_eq!(sibling_view["snapshot"]["components"][0]["text"], "x".repeat(64));
+    assert_eq!(sibling_view["snapshot"]["dataModel"]["result"], "x".repeat(64));
     for client in [&source.client, &sibling.client] {
         assert_eq!(
             client.account_db()?.client_directory_ids("object", "", 100)?,
@@ -308,121 +308,7 @@ async fn first_peer_device_failure_does_not_hide_delivery_to_the_second_device()
 #[tokio::test]
 async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_replies() -> TestResult
 {
-    let root = runtime_tests::root("surface-resync-wire");
-    let mut source = runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let fixture = super::dm_tests::peer_fixture(&root, &mut source).await?;
-    let mut peers = fixture.peers;
-    let peer = &mut peers[0];
-    let peer_config = peer_receiver(peer, &source.client, &fixture.config)?;
-    let pool = ramflux_transport::RelayQuicPool::new(
-        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
-    );
-    let initial = Arc::new(Mutex::new(Vec::new()));
-    source.install_test_session(GatewaySessionEngine::with_test_transport(
-        fixture.config.clone(),
-        Box::new(super::fixture::RecordingGateway::new(initial.clone())),
-    ));
-    let create = super::dm_tests::create_carrier(&source.client)?;
-    send(&mut source, &create).await?;
-    let first = initial.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    let incoming = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: first.target_delivery_id.clone(),
-        envelope: first,
-    };
-    let mut receiver = GatewaySessionEngine::with_test_transport(
-        peer_config.clone(),
-        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
-    );
-    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
-    // The author advances while the recipient loses this event.
-    let delta = append(&source.client, &create, 2)?;
-    send(&mut source, &delta).await?;
-    let reference = create.surface_reference()?;
-    let mut view =
-        peer.client.account_db()?.client_record("surface", &reference)?.ok_or("surface")?;
-    view["out_of_sync"] = json!(true);
-    peer.client.account_db()?.persist_client_record("surface", &reference, &view)?;
-    peer.client
-        .account_db()?
-        .persist_actor_state(&crate::client::surface::key("out_of_sync", &reference), &2_u64)?;
-    let controls = Arc::new(Mutex::new(Vec::new()));
-    peer.install_test_session(GatewaySessionEngine::with_test_transport(
-        peer_config.clone(),
-        Box::new(super::fixture::RecordingGateway::new(controls.clone())),
-    ));
-    assert_eq!(
-        super::super::surface::request_resync(peer, &reference).await?["submitted_devices"],
-        1
-    );
-    assert_eq!(
-        super::super::surface::request_resync(peer, &reference).await?["rate_limited"],
-        true
-    );
-    let request = controls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    let replies = Arc::new(Mutex::new(Vec::new()));
-    let mut gateway = super::fixture::RecordingGateway::new(replies.clone());
-    gateway.inbox.push(GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: request.target_delivery_id.clone(),
-        envelope: request,
-    });
-    source.install_test_session(GatewaySessionEngine::with_test_transport(
-        fixture.config,
-        Box::new(gateway),
-    ));
-    assert_eq!(crate::bus::sync_driver::run(&mut source).await?, 1);
-    assert!(crate::bus::couriers::surface::drive_once(&mut source).await?);
-    let reply = replies
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .find(|e| e.target_delivery_id == "device-peer-one")
-        .cloned()
-        .ok_or("resync answer")?;
-    let incoming = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 2,
-        target_delivery_id: reply.target_delivery_id.clone(),
-        envelope: reply,
-    };
-    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
-    let view = peer.client.surface_get("surface", 0, None)?;
-    assert_eq!(view["version"], 2);
-    assert_eq!(view["out_of_sync"], false);
-    assert_eq!(
-        view["surface_hash"],
-        source.client.surface_get("surface", 0, None)?["surface_hash"]
-    );
-    assert_eq!(
-        source.client.account_db()?.actor_state_key_page("surface/resync-response/", 100)?,
-        Vec::<String>::new()
-    );
-    fixture.directory.abort();
-    drop((peers, source));
-    Ok(())
-}
-
-fn peer_receiver(
-    peer: &mut LocalBusAccountState,
-    source: &RamfluxClient,
-    config: &GatewaySessionConfig,
-) -> Result<GatewaySessionConfig, SdkError> {
-    let mut peer_config = config.clone();
-    peer_config.principal_id = "peer".into();
-    peer_config.device_id = "device-peer-one".into();
-    peer_config = peer_config.with_account_identity(&peer.client)?;
-    peer_config.target_delivery_id = "device-peer-one".into();
-    peer.client.persist_identity_directory(&super::fixture::manifest(source)?)?;
-    peer.client.account_db()?.establish_friend_link("source-link", "peer", "sender")?;
-    Ok(peer_config)
+    super::resync_tests::native_pair_resync().await
 }
 
 #[tokio::test]

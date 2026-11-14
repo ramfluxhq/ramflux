@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 
-mod a2i_a2ui;
+mod a2i;
 mod account;
 mod admin;
 mod call_bot;
@@ -27,7 +27,7 @@ mod surface;
 pub(crate) use node::*;
 pub(crate) use surface::*;
 
-pub(crate) use a2i_a2ui::*;
+pub(crate) use a2i::*;
 pub(crate) use account::*;
 pub(crate) use admin::*;
 pub(crate) use call_bot::*;

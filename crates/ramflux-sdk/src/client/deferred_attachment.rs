@@ -712,8 +712,8 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
-    /// Check the retained encrypted reference, rather than mutable display metadata. Surface
-    /// admission must not fetch an object or grant access to a different conversation.
+    /// Check the retained encrypted reference and its registered message conversation. Surface
+    /// admission must not fetch an object or confuse a key-slot session with message scope.
     pub(crate) fn surface_attachment_in_conversation(
         &self,
         selector: &str,
@@ -726,8 +726,13 @@ impl RamfluxClient {
             return Ok(false);
         };
         let reference = &stored.reference;
-        if reference.manifest_hash != manifest || reference.key_slot.conversation_id != conversation
-        {
+        if reference.manifest_hash != manifest {
+            return Ok(false);
+        }
+        let Some(metadata) = db.client_record("object", selector)? else {
+            return Ok(false);
+        };
+        if metadata.get("conversation_id").and_then(Value::as_str) != Some(conversation) {
             return Ok(false);
         }
         db.check_object_access(selector)?;

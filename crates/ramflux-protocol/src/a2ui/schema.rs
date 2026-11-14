@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Offline, immutable upstream schemas plus the closed rf-card profile.
-use super::wire::identifier;
+use super::wire::validate_identifier;
 use super::{CATALOG_ID, JsonPointer, Reject};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::OnceLock};
@@ -120,12 +120,17 @@ fn expressions(value: &Value, in_action: bool, depth: usize) -> Result<(), Rejec
             if let Some(name) = map.get("@call") {
                 let name = name.as_str().ok_or(Reject::Expression)?;
                 if name != "@index" {
-                    identifier(name)?;
+                    validate_identifier(name)?;
                 }
                 if name == "openUrl" && !in_action {
                     return Err(Reject::Expression);
                 }
                 function(value)?;
+                if name == "formatString"
+                    && let Some(program) = value.pointer("/args/value").and_then(Value::as_str)
+                {
+                    validate_program(program, depth + 1)?;
+                }
                 if name == "regex" {
                     super::expression::validate_regex(
                         value
@@ -164,6 +169,15 @@ fn expressions(value: &Value, in_action: bool, depth: usize) -> Result<(), Rejec
     }
     Ok(())
 }
+pub(super) fn validate_program(program: &str, depth: usize) -> Result<(), Reject> {
+    if depth > 16 {
+        return Err(Reject::Limit);
+    }
+    for expression in super::format_string::expressions(program)? {
+        expressions(&expression, false, depth + 1)?;
+    }
+    Ok(())
+}
 pub(super) fn date_time_input(
     component: &Value,
     value: &Value,
@@ -173,27 +187,16 @@ pub(super) fn date_time_input(
     let Some(text) = value.as_str() else {
         return Ok(false);
     };
-    if text.is_empty() {
-        return Ok(true);
-    }
     let date = component.get("enableDate").and_then(Value::as_bool).unwrap_or(false);
     let time = component.get("enableTime").and_then(Value::as_bool).unwrap_or(false);
-    let valid = match (date, time) {
-        (true, true) => {
-            time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-                .is_ok()
-        }
-        (true, false) => time::format_description::parse_borrowed::<2>("[year]-[month]-[day]")
-            .ok()
-            .is_some_and(|format| time::Date::parse(text, &format).is_ok()),
-        (false, true) => time::format_description::parse_borrowed::<2>("[hour]:[minute]:[second]")
-            .ok()
-            .is_some_and(|format| time::Time::parse(text, &format).is_ok()),
-        (false, false) => false,
-    };
-    if !valid {
+    let instant = if text.is_empty() {
+        None
+    } else if let Some(value) = temporal_value(text, date, time) {
+        Some(value)
+    } else {
         return Ok(false);
-    }
+    };
+    let (mut minimum, mut maximum) = (None, None);
     for (key, lower) in [("min", true), ("max", false)] {
         if let Some(bound) = component.get(key) {
             let bound = if let Some(text) = bound.as_str() {
@@ -207,12 +210,51 @@ pub(super) fn date_time_input(
                 })?;
                 pointer.get(model).and_then(Value::as_str).ok_or(Reject::Expression)?.to_owned()
             };
-            if lower && text < bound.as_str() || !lower && text > bound.as_str() {
+            let bound = temporal_value(&bound, date, time).ok_or(Reject::Expression)?;
+            if lower {
+                minimum = Some(bound);
+            } else {
+                maximum = Some(bound);
+            }
+            if instant.is_some_and(|instant| lower && instant < bound || !lower && instant > bound)
+            {
                 return Ok(false);
             }
         }
     }
+    if matches!((minimum, maximum), (Some(min), Some(max)) if min > max) {
+        return Err(Reject::Expression);
+    }
     Ok(true)
+}
+
+fn temporal_value(text: &str, date: bool, time: bool) -> Option<i128> {
+    use time::format_description::well_known::Iso8601;
+    match (date, time) {
+        (true, true) => time::OffsetDateTime::parse(text, &Iso8601::PARSING)
+            .ok()
+            .or_else(|| {
+                time::PrimitiveDateTime::parse(text, &Iso8601::PARSING)
+                    .ok()
+                    .map(time::PrimitiveDateTime::assume_utc)
+            })
+            .map(time::OffsetDateTime::unix_timestamp_nanos),
+        (true, false) if !text.contains('T') => time::Date::parse(text, &Iso8601::DATE)
+            .ok()
+            .map(|date| date.midnight().assume_utc().unix_timestamp_nanos()),
+        (false, true) if !text.contains('T') => {
+            let datetime = format!("1970-01-01T{text}");
+            time::OffsetDateTime::parse(&datetime, &Iso8601::PARSING)
+                .ok()
+                .or_else(|| {
+                    time::Time::parse(text, &Iso8601::TIME)
+                        .ok()
+                        .map(|time| time::OffsetDateTime::UNIX_EPOCH.replace_time(time))
+                })
+                .map(time::OffsetDateTime::unix_timestamp_nanos)
+        }
+        _ => None,
+    }
 }
 
 const AGENT: &str =
@@ -245,6 +287,14 @@ pub(super) fn rpc_message(value: &Value, kind: super::RpcKind) -> Result<(), Rej
         super::RpcKind::Error => "error",
     };
     let body = value.get(key).and_then(Value::as_object).ok_or(Reject::Encoding)?;
+    if kind == super::RpcKind::FunctionCall {
+        validate_identifier(
+            body.get("callFunction")
+                .and_then(|v| v.get("@call"))
+                .and_then(Value::as_str)
+                .ok_or(Reject::Expression)?,
+        )?;
+    }
     let allowed: &[&str] = match kind {
         super::RpcKind::FunctionCall => &["surfaceId", "functionCallId", "callFunction"],
         super::RpcKind::FunctionResponse => &["functionCallId", "value", "error"],

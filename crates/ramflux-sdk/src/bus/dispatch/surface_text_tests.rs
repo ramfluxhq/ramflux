@@ -64,7 +64,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
         signature: String::new(),
         snapshot: None,
     };
-    source.client.attach_surface_snapshot(&mut carrier)?;
+
     carrier = source.client.sign_surface_carrier(carrier)?;
     let response = send(&mut source, &carrier).await?;
     assert_eq!(response["delivery_state"], "submitted");
@@ -238,7 +238,21 @@ pub(in crate::bus::dispatch) fn assert_receivers(
                     )?
                     .ok_or_else(|| SdkError::LocalBus("projection".into()))?;
                 assert!(result.accepted, "{:?}", result.renderer_error);
-                assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], version);
+                let carrier =
+                    Carrier::decode(&plaintext)?.ok_or_else(|| invalid("surface carrier"))?;
+                let event = ramflux_protocol::SurfaceEvent::from_wire_bytes(
+                    &ramflux_protocol::decode_base64url(&carrier.wire_base64)
+                        .map_err(|_| invalid("surface wire"))?,
+                )?;
+                assert_eq!(
+                    event.version(),
+                    version,
+                    "encrypted transport preserves the signed v3 version"
+                );
+                assert!(
+                    peer.client.surface_get("surface", 0, None)?.is_null(),
+                    "human-authored group cards stay fallback-only"
+                );
                 assert!(result.fallback_text.contains("中文 é 🦀"));
             }
         }
@@ -361,14 +375,21 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let carrier = maximal_carrier(&source.client)?;
-    assert!(carrier.snapshot.as_ref().is_some_and(|proof| !proof.is_full()));
+    assert!(carrier.snapshot.is_none(), "v3 events have a single frame commitment");
     assert_eq!(send(&mut source, &carrier).await?["delivery_state"], "submitted");
     let epoch = source.client.group_state("group")?.group_epoch;
     finalize_all_blocks(&source.client, &carrier, epoch)?;
     let resync = source
         .client
         .prepare_surface_resync(&carrier.surface_reference()?, &crate::new_surface_message_id()?)?;
-    assert!(resync.snapshot.as_ref().ok_or("resync metadata")?.is_full());
+    assert!(resync.snapshot.is_none(), "v3 resync has no legacy proof sidecar");
+    assert!(
+        ramflux_protocol::SurfaceEvent::from_wire_bytes(&ramflux_protocol::decode_base64url(
+            &resync.wire_base64
+        )?)?
+        .is_resync(),
+        "the complete proof must be in the v3 resync frame"
+    );
     assert_eq!(send(&mut source, &resync).await?["delivery_state"], "submitted");
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(envelopes.len(), 3); // The existing text adapter reuses the distributed sender key.
@@ -404,7 +425,10 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
         )?
         .ok_or("resync projection")?;
     assert!(result.accepted, "{:?}", result.renderer_error);
-    assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 65);
+    assert!(
+        peer.client.surface_get("surface", 0, None)?.is_null(),
+        "a complete foreign resync cannot grant render authority"
+    );
     {
         let lengths = frame_lengths.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let largest = lengths.iter().max().copied().ok_or("no frames")?;
@@ -501,7 +525,7 @@ fn maximal_carrier_in(
         signature: String::new(),
         snapshot: None,
     };
-    source.attach_surface_snapshot(&mut carrier)?;
+
     carrier = source.sign_surface_carrier(carrier)?;
     Ok(carrier)
 }
@@ -529,7 +553,7 @@ fn finalize_all_blocks(
         delta.message_id = crate::new_surface_message_id()?;
         delta.wire_base64 = ramflux_protocol::encode_base64url(wire);
         delta.snapshot = None;
-        source.attach_surface_snapshot(&mut delta)?;
+
         delta = source.sign_surface_carrier(delta)?;
         if carrier.conversation_id.len() <= 32 && carrier.sender_device_id.len() <= 32 {
             assert!(delta.bytes()?.len() < 2048);
@@ -573,11 +597,9 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
     // Transport framing must also fit the longest valid I-JSON version representation.
     let mut wire: Value =
         serde_json::from_slice(&ramflux_protocol::decode_base64url(&resync.wire_base64)?)?;
-    wire["version"] = json!(9_007_199_254_740_991_u64);
+    wire["surfaceVersion"] = json!(9_007_199_254_740_991_u64);
     resync.wire_base64 =
         ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&wire)?);
-    resync.snapshot.as_mut().ok_or("compact proof")?.metadata.as_mut().ok_or("metadata")?["version"] =
-        wire["version"].clone();
     resync.posted_at = Some(253_402_300_799);
     resync.updated_at = Some(253_402_300_799);
     resync = source.client.sign_surface_carrier(resync)?;

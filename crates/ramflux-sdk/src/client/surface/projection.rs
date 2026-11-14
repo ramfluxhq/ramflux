@@ -133,12 +133,6 @@ impl RamfluxClient {
         )?;
         let state = saved.map_or_else(SurfaceState::default, |(_, state)| state);
         let next = state.apply(event).map_err(|error| Outcome::protocol_rejected(&error));
-        if let Ok(next) = &next
-            && let Some(proof) = &carrier.snapshot
-            && !proof.matches_hash(next)
-        {
-            return Ok(Err(Outcome::rejected(json!({"code":"surface_hash_mismatch"}))));
-        }
         if let Ok(state) = &next
             && let Err(error) = self.validate_surface_attachments(state)?
         {

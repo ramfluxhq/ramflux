@@ -1,0 +1,362 @@
+[
+  {
+    "name": "ordinary_text",
+    "upstreamValid": true,
+    "profileAccepted": true,
+    "reason": "complete static state",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Text",
+            "text": "Hello"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "send_data_model",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "P5 forbids sendDataModel true",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Text",
+            "text": "Hello"
+          }
+        ],
+        "dataModel": {},
+        "sendDataModel": true
+      }
+    }
+  },
+  {
+    "name": "basic_remote_image",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "Image is attachment-only in rf-card",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Image",
+            "url": "https://example.com/image.png"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "deferred_video",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "Video is deferred from the first batch",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Video",
+            "url": "https://example.com/video.mp4"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "obscured_input",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "obscured input is a profile rejection",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "TextField",
+            "value": {
+              "@path": "/note"
+            },
+            "variant": "obscured"
+          }
+        ],
+        "dataModel": {
+          "note": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "literal_context",
+    "upstreamValid": true,
+    "profileAccepted": true,
+    "reason": "author literals have no hidden egress source",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Button",
+            "child": "label",
+            "action": {
+              "event": {
+                "name": "save",
+                "context": {
+                  "mode": "save"
+                }
+              }
+            }
+          },
+          {
+            "id": "label",
+            "component": "Text",
+            "text": "Save"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "computed_context",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "4.3 forbids every computed context value",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Button",
+            "child": "label",
+            "action": {
+              "event": {
+                "name": "save",
+                "context": {
+                  "mode": {
+                    "@call": "formatString",
+                    "args": {
+                      "value": "save"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": "label",
+            "component": "Text",
+            "text": "Save"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "lookahead",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "lookahead is upstream-valid and profile-rejected",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Button",
+            "child": "label",
+            "action": {
+              "event": {
+                "name": "save",
+                "context": {
+                  "mode": "save"
+                }
+              }
+            },
+            "@checks": [
+              {
+                "condition": {
+                  "@call": "regex",
+                  "args": {
+                    "value": "a12345678",
+                    "pattern": "^(?=.*\\d).{8,}$"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "label",
+            "component": "Text",
+            "text": "Save"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "locale_check",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "controller clarification forbids locale-sensitive button checks",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Button",
+            "child": "label",
+            "action": {
+              "event": {
+                "name": "save",
+                "context": {
+                  "mode": "save"
+                }
+              }
+            },
+            "@checks": [
+              {
+                "condition": {
+                  "@call": "length",
+                  "args": {
+                    "value": {
+                      "@call": "formatDate",
+                      "args": {
+                        "value": "2026-06-22T17:00:00Z",
+                        "format": "MMMM"
+                      }
+                    },
+                    "min": 5
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "label",
+            "component": "Text",
+            "text": "Save"
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "locale_display",
+    "upstreamValid": true,
+    "profileAccepted": true,
+    "reason": "display-only locale formatting remains allowed",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Text",
+            "text": {
+              "@call": "formatDate",
+              "args": {
+                "value": "2026-06-22T17:00:00Z",
+                "format": "MMMM"
+              }
+            }
+          }
+        ],
+        "dataModel": {}
+      }
+    }
+  },
+  {
+    "name": "input_bound_link",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "links cannot read input-owned pointers",
+    "message": {
+      "version": "1.0",
+      "createSurface": {
+        "surfaceId": "surface",
+        "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
+        "components": [
+          {
+            "id": "root",
+            "component": "Column",
+            "children": [
+              "input",
+              "link"
+            ]
+          },
+          {
+            "id": "input",
+            "component": "TextField",
+            "value": {
+              "@path": "/url"
+            }
+          },
+          {
+            "id": "link",
+            "component": "Button",
+            "child": "label",
+            "action": {
+              "functionCall": {
+                "@call": "openUrl",
+                "args": {
+                  "url": {
+                    "@path": "/url"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": "label",
+            "component": "Text",
+            "text": "Save"
+          }
+        ],
+        "dataModel": {
+          "url": "https://example.com/"
+        }
+      }
+    }
+  }
+]

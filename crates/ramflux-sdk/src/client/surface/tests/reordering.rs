@@ -147,7 +147,7 @@ async fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> T
         assert!(project(&f.author, signed, &signed.message_id)?.accepted);
     }
     let mut four = stream(&f.author, "v4", 4, "three")?;
-    f.author.attach_surface_snapshot(&mut four)?;
+
     four = f.author.sign_surface_carrier(four)?;
     assert!(four.snapshot.is_none(), "v3 delta commitments live in the one event frame");
     assert!(project(&f.author, &four, "v4")?.accepted);
@@ -275,7 +275,7 @@ async fn explicit_signed_resync_fills_a_gap_without_waiting_for_holdback_expiry(
     let two = stream(&f.author, "v2", 2, "one")?;
     assert!(project(&f.author, &two, "two")?.accepted);
     let mut three = stream(&f.author, "v3", 3, "two")?;
-    f.author.attach_surface_snapshot(&mut three)?;
+
     three = f.author.sign_surface_carrier(three)?;
     assert!(project(&f.author, &three, "three-author")?.accepted);
     assert!(project(&f.human, &three, "three-human")?.queued);

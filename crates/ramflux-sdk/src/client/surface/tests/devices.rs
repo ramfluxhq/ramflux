@@ -81,7 +81,7 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision() -> 
     let [b1, b2, a1, a2] = t.clients.as_slice() else { return Err("terminals".into()) };
     let mut create =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    b1.attach_surface_snapshot(&mut create)?;
+
     create = b1.sign_surface_carrier(create)?;
     project(b1, &create, "b1-create")?;
     project(a1, &create, "a1-create")?;
@@ -149,7 +149,7 @@ async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches()
     let b2 = &t.clients[1];
     let mut c =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    b1.attach_surface_snapshot(&mut c)?;
+
     c = b1.sign_surface_carrier(c)?;
     let db = b2.account_db()?;
     let mut record = db.client_record("device", "author-device")?.ok_or("device")?;
@@ -172,7 +172,7 @@ async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallb
     let target = &t.clients[1];
     let mut first =
         carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    source.attach_surface_snapshot(&mut first)?;
+
     first = source.sign_surface_carrier(first)?;
     project(source, &first, "create")?;
     let mut close = carrier(
@@ -181,7 +181,7 @@ async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallb
         "close",
         &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
-    source.attach_surface_snapshot(&mut close)?;
+
     close = source.sign_surface_carrier(close)?;
     project(source, &close, "close")?;
     let exported = source.own_surface_history_export(None)?;
@@ -207,7 +207,7 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
     db.persist_client_record("conversation", "thread", &json!({"kind":"group","group_id":"g"}))?;
     let mut first =
         carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    source.attach_surface_snapshot(&mut first)?;
+
     first = source.sign_surface_carrier(first)?;
     source.project_surface_message(
         "thread",

@@ -70,7 +70,8 @@ fn non_author_send_is_typed_before_delta_hash_construction()
         Some(ramflux_protocol::MutationMessage::new(ramflux_protocol::Mutation::DeleteSurface(
             ramflux_protocol::DeleteSurface { surface_id: "surface".into() },
         )));
-    let update = crate::SurfaceSendRequest::event(&previous.prepare_event(update)?)?;
+    let mut update = crate::SurfaceSendRequest::event(&previous.prepare_event(update)?)?;
+    update.author_principal_id = Some("author".into());
     let body: Send = serde_json::from_value(serde_json::to_value(&update)?)?;
     let raw = ramflux_protocol::decode_base64url(&update.wire_base64)?;
     let error = prepare_carrier(&reader.client, &body, PayloadKind::Event, &raw, "surface")

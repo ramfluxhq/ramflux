@@ -235,8 +235,8 @@ selector_group_test!(
 selector_group_test!(keychain_account_ids_accept_hyphens, "keychain status --account -abc");
 selector_group_test!(a2i_ids_accept_hyphens, "a2i ack --account -abc --event -abc");
 selector_group_test!(
-    a2ui_ids_accept_hyphens,
-    "a2ui render --account -abc --surface surface --catalog -abc --permission -abc"
+    surface_send_ids_accept_hyphens,
+    "surface send --account -abc --conversation -abc --author -abc --wire-file surface.json"
 );
 selector_group_test!(
     surface_ids_accept_hyphens,

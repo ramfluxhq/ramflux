@@ -188,7 +188,12 @@ impl RamfluxClient {
             return Ok(Some((id.to_owned(), super::fallback::render(author, text))));
         }
         if reference["accepted"] == true {
-            return Ok(Some((id.to_owned(), "[Surface unavailable]".into())));
+            let text = if reference["fallback_only"] == true {
+                reference["fallback_text"].as_str().unwrap_or("[Surface unavailable]")
+            } else {
+                "[Surface unavailable]"
+            };
+            return Ok(Some((id.to_owned(), text.into())));
         }
         // Rejected receipts contain only fixed local text.
         Ok(Some((

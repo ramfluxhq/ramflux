@@ -285,7 +285,7 @@ pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError
         "thread",
         &text_snapshot("surface", "Safe fallback", &("")),
     )?)?;
-    let mut carrier = Carrier {
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -301,7 +301,7 @@ pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError
         signature: String::new(),
         snapshot: None,
     };
-    source.attach_surface_snapshot(&mut carrier)?;
+
     let carrier = source.sign_surface_carrier(carrier)?;
     Ok(carrier)
 }
@@ -354,7 +354,10 @@ async fn assert_deliveries(
                 let result =
                     peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
                 assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
-                assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 1);
+                assert!(
+                    peer.client.surface_get("surface", 0, None)?.is_null(),
+                    "human-authored peer cards remain fallback-only"
+                );
                 assert_eq!(peer.client.direct_messages("thread")?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
                 assert_eq!(

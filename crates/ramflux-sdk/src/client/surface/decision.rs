@@ -172,3 +172,42 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_hash_matches_independent_v3_instance_oracle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let action = SurfaceAction::from_wire_bytes(include_bytes!(
+            "../../../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/submit.action.json"
+        ))?;
+        let carrier = Carrier {
+            schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
+            content_type: "surface".into(),
+            posted_at: None,
+            updated_at: None,
+            payload_kind: PayloadKind::Action,
+            conversation_id: "conversation".into(),
+            surface_id: "surface".into(),
+            message_id: "decision-oracle".into(),
+            sender_principal_id: "human".into(),
+            sender_device_id: "human-device".into(),
+            author_principal_id: "author".into(),
+            wire_base64: ramflux_protocol::encode_base64url(action.frame().wire_bytes()?),
+            signature: String::new(),
+            snapshot: None,
+        };
+        let key = decision_key(&carrier, &action)?;
+        assert_eq!(
+            key.rsplit('/').next().ok_or("decision digest")?,
+            include_str!(
+                "../../../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/decision.hash"
+            )
+            .trim(),
+            "decision dedup must use the pinned v2 domain and source-instance tuple"
+        );
+        Ok(())
+    }
+}

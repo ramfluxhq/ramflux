@@ -697,7 +697,7 @@ async fn retained_a2i_rows_cannot_be_exposed_or_acknowledged_after_reopen() -> R
             serde_json::json!({"event_id":"ack-event"}),
         );
         assert_a2i_authority_refused(
-            crate::bus::dispatch::a2i_a2ui::dispatch_a2i_bus_request(&request, &mut state).await,
+            crate::bus::dispatch::a2i::dispatch_a2i_bus_request(&request, &mut state).await,
         );
     }
     let account = state.accounts.get_mut("bob").ok_or_else(|| invalid("account"))?;

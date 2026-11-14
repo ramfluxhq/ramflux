@@ -47,7 +47,8 @@ def fixtures():
               'a2ui': {'version': '1.0', 'action': {'name': 'submit', 'surfaceId': 'surface', 'sourceComponentId': 'button',
                         'timestamp': '2026-11-14T00:00:00Z', 'context': args['context'], 'userMessage': 'Saved'}}}
     return {'snapshot.json': canonical(snapshot), 'create.event.json': canonical(create), 'submit.action.json': canonical(action),
-            'surface.hash': state_hash.encode() + b'\n'}
+            'surface.hash': state_hash.encode() + b'\n',
+            'decision.hash': digest('ramflux.surface.decision.v2', canonical([1, 'button', [], 'submit', 'human'])).encode() + b'\n'}
 
 
 def main():

@@ -20,7 +20,7 @@ thread_local! { static AUTHOR_STATES: RefCell<BTreeMap<(String,u64),SurfaceState
 
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Fixture {
     author: RamfluxClient,
     human: RamfluxClient,
@@ -500,10 +500,16 @@ async fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> Te
     let f = Fixture::new().await?;
     let mut signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    signed.wire_base64 = ramflux_protocol::encode_base64url(
-        br#"{"schema":"ramflux.a2ui.conversation.v2","version":1,"version":2}"#,
+    let raw = String::from_utf8(ramflux_protocol::decode_base64url(&signed.wire_base64)?)?;
+    let duplicated =
+        raw.replace("\"surfaceVersion\":1", "\"surfaceVersion\":1,\"surfaceVersion\":2");
+    assert_ne!(
+        duplicated, raw,
+        "control: duplicate injection must change exactly the v3 sequence member"
     );
-    assert!(signed.payload().is_err());
+    signed.wire_base64 = ramflux_protocol::encode_base64url(duplicated.as_bytes());
+    let signed = raw_signature(&f.author, signed)?;
+    assert!(signed.payload().is_err(), "original duplicate-key evidence must reach the v3 codec");
     assert!(!project(&f.human, &signed, "invalid")?.accepted);
     assert!(f.human.surface_get("s", 0, None)?.is_null());
     assert!(f.human.surface_state("s")?.is_none());
@@ -707,5 +713,164 @@ async fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size(
     }
     let size = SdkError::SurfaceDeliveryTooLarge { bytes: 10, limit: 9 };
     assert_eq!(crate::bus::io::local_bus_error_body(&size).code, "too_large");
+    Ok(())
+}
+
+fn raw_signature(sender: &RamfluxClient, mut carrier: Carrier) -> Result<Carrier, SdkError> {
+    let mut body = serde_json::to_value(&carrier)?;
+    body.as_object_mut().ok_or_else(|| super::invalid("carrier body"))?.remove("signature");
+    carrier.signature = ramflux_crypto::sign_with_device_branch(
+        sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &json!({"domain":ramflux_protocol::domain::SURFACE_CARRIER,"body":body}),
+    )?;
+    Ok(carrier)
+}
+#[tokio::test]
+async fn signed_resync_bootstraps_missed_create_and_only_then_admits_n_plus_one() -> TestResult {
+    let f = Fixture::new().await?;
+    let first = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "create-only-at-author",
+        &event(1, C::CreateSurface(snapshot()))?,
+    )?;
+    assert!(
+        project(&f.author, &first, "author-create")?.accepted,
+        "author must have a complete base"
+    );
+    let append = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "author-append",
+        &event(
+            2,
+            C::AppendText(AppendText {
+                surface_id: "s".into(),
+                path: "/stream".into(),
+                delta: "missed".into(),
+                final_: false,
+            }),
+        )?,
+    )?;
+    assert!(
+        project(&f.author, &append, "author-append")?.accepted,
+        "author must advance independently"
+    );
+    let (_, state) = f.author.surface_state("s")?.ok_or("author state")?;
+    let mut frame = state.resync_frame()?;
+    frame.surface_version = 19;
+    let resync = carrier(&f.author, PayloadKind::Event, "bootstrap-19", &frame.wire_bytes()?)?;
+    assert!(
+        project(&f.author, &resync, "author-resync")?.accepted,
+        "author replacement must bind the same complete state"
+    );
+    for (label, mut wrong) in
+        [("conversation", resync.clone()), ("author", resync.clone()), ("device", resync.clone())]
+    {
+        match label {
+            "conversation" => wrong.conversation_id = "another-thread".into(),
+            "author" => wrong.author_principal_id = "human".into(),
+            _ => wrong.sender_device_id = "human-device".into(),
+        }
+        wrong.message_id = format!("wrong-{label}");
+        let wrong = raw_signature(&f.author, wrong)?;
+        assert!(
+            !project(&f.human, &wrong, label)?.accepted,
+            "authenticated bootstrap must refuse a wrong {label} binding"
+        );
+        assert!(
+            f.human.surface_get("s", 0, None)?.is_null(),
+            "wrong bootstrap scope cannot create a state placeholder"
+        );
+    }
+    assert!(
+        project(&f.human, &resync, "recipient-bootstrap")?.accepted,
+        "missed create must recover through an authenticated full proof"
+    );
+    let (_, state) = f.author.surface_state("s")?.ok_or("advanced state")?;
+    let next = super::test_support::append_frame(&state, "/stream", " next", false)?;
+    assert_eq!(next.surface_version, 20, "the next author delta must consume N+1");
+    let next = carrier(&f.author, PayloadKind::Event, "after-bootstrap", &next.wire_bytes()?)?;
+    assert!(
+        project(&f.human, &next, "after-bootstrap")?.accepted,
+        "a valid next delta must apply after bootstrap"
+    );
+    let view = f.human.surface_get("s", 0, None)?;
+    assert_eq!(view["version"], 20, "bootstrap sequence must persist");
+    assert_eq!(
+        view["snapshot"]["dataModel"]["stream"], "missed next",
+        "receiver must retain the bootstrapped data model"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn signed_self_consistent_resync_cannot_erase_finality_live_or_after_native_reopen()
+-> TestResult {
+    let mut f = Fixture::new().await?;
+    create(&f)?;
+    let final_event = carrier(
+        &f.author,
+        PayloadKind::Event,
+        "final",
+        &event(
+            2,
+            C::AppendText(AppendText {
+                surface_id: "s".into(),
+                path: "/stream".into(),
+                delta: "immutable".into(),
+                final_: true,
+            }),
+        )?,
+    )?;
+    assert!(
+        project(&f.author, &final_event, "author-final")?.accepted,
+        "author finality must commit"
+    );
+    assert!(
+        project(&f.human, &final_event, "human-final")?.accepted,
+        "recipient finality must commit"
+    );
+    let before = f.human.surface_get("s", 0, None)?;
+    let (_, state) = f.author.surface_state("s")?.ok_or("final state")?;
+    let mut frame = state.resync_frame()?;
+    frame.surface_version += 1;
+    frame.final_ = Some(Vec::new());
+    let mut content = state.content().ok_or("snapshot")?.clone();
+    content.final_.clear();
+    frame.new_surface_hash = content.hash()?;
+    let malicious = carrier(&f.author, PayloadKind::Event, "omit-finality", &frame.wire_bytes()?)?;
+    let proof = ramflux_protocol::SurfaceEvent::from_wire_bytes(
+        &ramflux_protocol::decode_base64url(&malicious.wire_base64)?,
+    )?;
+    assert!(
+        SurfaceState::validate_proof(&proof).is_ok(),
+        "control: the incoming full proof must validate against empty context"
+    );
+    for reopened in [false, true] {
+        if reopened {
+            f.human = RamfluxClient::new();
+            f.human.open_account_index(&f.root)?;
+            f.human.unlock_account("human", b"surface-test-secret")?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
+            )
+            .await??;
+        }
+        let mut fresh = malicious.clone();
+        fresh.message_id = if reopened { "omit-after-reopen" } else { "omit-live" }.into();
+        let fresh = f.author.sign_surface_carrier(fresh)?;
+        assert!(
+            !project(&f.human, &fresh, if reopened { "after-reopen" } else { "live" })?.accepted,
+            "known finality cannot be discarded to enter bootstrap"
+        );
+        let view = f.human.surface_get("s", 0, None)?;
+        for field in ["snapshot", "version", "surface_hash", "hash_history"] {
+            assert_eq!(
+                view[field], before[field],
+                "failed replacement must preserve {field}; reopened={reopened}"
+            );
+        }
+    }
     Ok(())
 }

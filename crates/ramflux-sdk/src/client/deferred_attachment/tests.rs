@@ -469,3 +469,50 @@ async fn legacy_attachment_half_import_survives_reopen_and_receive_retry() -> Re
     assert_eq!(retry["transfer_state"], "available");
     Ok(())
 }
+
+#[test]
+fn surface_image_authority_uses_registered_conversation_and_exact_manifest() -> Result<(), SdkError>
+{
+    let f = Fixture::new()?;
+    assert!(
+        f.client.surface_attachment_in_conversation(
+            &f.reference.object_id,
+            &f.reference.manifest_hash,
+            "conversation"
+        )?,
+        "the registered attachment belongs to its authenticated message conversation"
+    );
+    assert!(
+        !f.client.surface_attachment_in_conversation(
+            &f.reference.object_id,
+            &f.reference.manifest_hash,
+            "attachment-slot"
+        )?,
+        "the cryptographic key-slot session name cannot grant another conversation access"
+    );
+    assert!(
+        !f.client.surface_attachment_in_conversation(
+            &f.reference.object_id,
+            &f.reference.manifest_hash,
+            "other-conversation"
+        )?,
+        "a valid encrypted reference cannot cross conversation scope"
+    );
+    assert!(
+        !f.client.surface_attachment_in_conversation(
+            &f.reference.object_id,
+            "wrong-manifest",
+            "conversation"
+        )?,
+        "manifest mismatch must fail closed"
+    );
+    assert!(
+        !f.client.surface_attachment_in_conversation(
+            "missing",
+            &f.reference.manifest_hash,
+            "conversation"
+        )?,
+        "unknown references cannot grant Image authority"
+    );
+    Ok(())
+}

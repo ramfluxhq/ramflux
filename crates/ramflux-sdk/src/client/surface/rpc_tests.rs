@@ -227,3 +227,97 @@ fn response_key(reply: &ResyncReply) -> Result<String, SdkError> {
         )
     ))
 }
+
+#[tokio::test]
+async fn rpc_rate_cap_and_expired_ledger_entries_bound_work_without_surface_mutation() -> TestResult
+{
+    let f = Fixture::new().await?;
+    let before = f.human.surface_list("thread", "", 100)?;
+    let first = f.carrier(&f.call(None, "first"), "first")?;
+    assert!(f.deliver(&first)?.accepted, "first call must be answered");
+    let original_key = ledger_key(&first, "first")?;
+    let db = f.human.account_db()?;
+    let entry = db.load_actor_state::<Value>(&original_key)?.ok_or("first ledger entry")?;
+    for index in 1..8 {
+        let id = format!("rate-{index}");
+        assert!(
+            f.deliver(&f.carrier(&f.call(None, &id), &id)?)?.accepted,
+            "eight calls per author per minute are permitted"
+        );
+    }
+    assert!(
+        !f.deliver(&f.carrier(&f.call(None, "excess"), "excess")?)?.accepted,
+        "the ninth call is silently dropped"
+    );
+    assert_eq!(f.replies()?.len(), 8, "excess calls cannot queue responses");
+    db.remove_actor_state(&super::key("rpc-rate", "agent"))?;
+    let prefix = super::key("rpc-ledger", "agent") + "/";
+    for candidate in db.actor_state_key_page(&prefix, 257)? {
+        db.remove_actor_state(&candidate)?;
+    }
+    for index in 0..256 {
+        db.persist_actor_state(&ledger_key(&first, &format!("retained-{index}"))?, &entry)?;
+    }
+    assert!(
+        !f.deliver(&f.carrier(&f.call(None, "at-cap"), "at-cap")?)?.accepted,
+        "new calls cannot overwrite retained entries at the per-author cap"
+    );
+    assert_eq!(db.actor_state_key_page(&prefix, 257)?.len(), 256, "the cap must remain exact");
+    let mut expired = entry;
+    expired
+        .as_object_mut()
+        .ok_or("entry object")?
+        .insert("expires_at".into(), json!(crate::prelude::now_unix_timestamp() - 1));
+    for candidate in db.actor_state_key_page(&prefix, 257)? {
+        db.persist_actor_state(&candidate, &expired)?;
+    }
+    assert!(
+        f.deliver(&f.carrier(&f.call(None, "after-expiry"), "after-expiry")?)?.accepted,
+        "expired entries free capacity without an overwrite"
+    );
+    assert_eq!(
+        db.actor_state_key_page(&prefix, 257)?.len(),
+        1,
+        "expired entries are pruned before admission"
+    );
+    assert_eq!(
+        f.human.surface_list("thread", "", 100)?,
+        before,
+        "rate limits and ledger maintenance cannot create renderer state"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_rejected_versions_queue_one_error_report_and_never_bootstrap_state() -> TestResult
+{
+    let f = Fixture::new().await?;
+    let snapshot = super::test_support::text_snapshot("s1", "Rejected", "hello");
+    let mut event = super::test_support::create_frame("thread", &snapshot)?;
+    event.new_surface_hash = "incorrect".into();
+    for attempt in 0..2 {
+        let mut carrier = f.carrier(&f.call(None, "template"), &format!("rejected-{attempt}"))?;
+        carrier.payload_kind = PayloadKind::Event;
+        carrier.surface_id = "s1".into();
+        carrier.wire_base64 = ramflux_protocol::encode_base64url(event.wire_bytes()?);
+        carrier = f.agent.sign_surface_carrier(carrier)?;
+        assert!(!f.deliver(&carrier)?.accepted, "a signed hash mismatch must be rejected");
+    }
+    let replies = f.replies()?;
+    assert_eq!(replies.len(), 1, "the same attempted surface version reports at most once");
+    let report = replies.first().ok_or("error report")?;
+    assert_eq!(
+        report.carrier.payload_kind,
+        PayloadKind::Error,
+        "the report uses the error carrier kind"
+    );
+    let bytes = ramflux_protocol::decode_base64url(&report.carrier.wire_base64)?;
+    let error = SurfaceRpc::from_wire_bytes(&bytes, RpcKind::Error)?;
+    assert_eq!(error.frame().rejected_version, Some(1), "report binds the rejected event version");
+    assert_eq!(error.frame().known_version, 0, "rejection cannot install the offered state");
+    assert!(
+        f.human.surface_get("s1", 0, None)?.get("snapshot").is_none_or(Value::is_null),
+        "rejected creates cannot bootstrap renderer state"
+    );
+    Ok(())
+}

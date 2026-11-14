@@ -190,6 +190,7 @@ impl RamfluxClient {
         if repeated {
             return Ok(());
         }
+        self.validate_surface_attachments(&state)?.map_err(SdkError::from)?;
         let db = self.account_db()?;
         if let Some(existing) = db.client_record("conversation", &record.conversation_id)? {
             if existing["kind"] != owned.conversation["kind"]

@@ -232,23 +232,51 @@ fn locale_sensitive_button_checks_are_refused_for_en_and_zh_cn_but_display_is_al
                 "formatCurrency" => json!({"value":1000,"currency":"USD"}),
                 _ => json!({"value":1,"one":"item","other":"items"}),
             };
-            let mut frame = base.clone();
-            let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) =
-                &mut frame.a2ui
-            else {
-                return Err("fixture must create a surface".into());
-            };
-            let components = create.components.as_mut().ok_or("fixture components")?;
-            let button = components
-                .iter_mut()
-                .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("button"))
-                .ok_or("fixture button")?;
-            button["@checks"] = json!([{"condition":{"@call":"length","args":{"value":{"@call":function,"args":args},"min":5}}}]);
-            assert_eq!(
-                SurfaceState::default().prepare_event(frame),
-                Err(Reject::LocaleDependentCheck),
-                "{locale}: {function} must never gate an action through host locale"
-            );
+            let rendered_args = args
+                .as_object()
+                .ok_or("formatter args")?
+                .iter()
+                .map(|(key, value)| {
+                    serde_json::to_string(value).map(|value| format!("{key}:{value}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",");
+            let program = format!("${{{function}({rendered_args})}}");
+            for form in ["direct", "program", "bound_program"] {
+                let mut frame = base.clone();
+                let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) =
+                    &mut frame.a2ui
+                else {
+                    return Err("fixture create".into());
+                };
+                if form == "bound_program" {
+                    create
+                        .data_model
+                        .as_mut()
+                        .and_then(serde_json::Value::as_object_mut)
+                        .ok_or("model")?
+                        .insert("program".into(), json!(program));
+                }
+                let value = match form {
+                    "direct" => json!({"@call":function,"args":args}),
+                    "program" => json!({"@call":"formatString","args":{"value":program}}),
+                    _ => json!({"@call":"formatString","args":{"value":{"@path":"/program"}}}),
+                };
+                let button = create
+                    .components
+                    .as_mut()
+                    .ok_or("components")?
+                    .iter_mut()
+                    .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("button"))
+                    .ok_or("button")?;
+                button["@checks"] =
+                    json!([{"condition":{"@call":"length","args":{"value":value,"min":5}}}]);
+                assert_eq!(
+                    SurfaceState::default().prepare_event(frame),
+                    Err(Reject::LocaleDependentCheck),
+                    "{locale}: {function} in {form} must never gate an action through host locale"
+                );
+            }
         }
     }
     let mut frame = base;
@@ -269,5 +297,93 @@ fn locale_sensitive_button_checks_are_refused_for_en_and_zh_cn_but_display_is_al
         SurfaceState::default().prepare_event(frame).is_ok(),
         "the same locale formatter must remain valid in display-only bindings"
     );
+    Ok(())
+}
+
+#[test]
+fn repeated_large_binding_obeys_the_expanded_tree_byte_cap() -> TestResult {
+    let mut frame = frame(&SurfaceState::default());
+    frame.fallback_text = Some("Repeated display".into());
+    frame.a2ui = Some(MutationMessage::new(Mutation::CreateSurface(CreateSurface {
+        surface_id: "surface".into(),
+        catalog_id: CATALOG_ID.into(),
+        send_data_model: None,
+        metadata: None,
+        components: Some(vec![
+            json!({"id":"root","component":"List","children":{"componentId":"item","path":"/items"}}),
+            json!({"id":"item","component":"Text","text":{"@path":"/large"}}),
+        ]),
+        data_model: Some(json!({"items":vec![json!({});16],"large":"x".repeat(4096)})),
+    })));
+    assert_eq!(
+        SurfaceState::default().prepare_event(frame.clone()),
+        Err(Reject::Limit),
+        "small signed state cannot expand into more than 64 KiB of component values"
+    );
+    let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) = &mut frame.a2ui
+    else {
+        return Err("create".into());
+    };
+    create.data_model = Some(json!({"items":vec![json!({});16],"large":"x".repeat(1024)}));
+    assert!(
+        SurfaceState::default().prepare_event(frame).is_ok(),
+        "control: bounded repetition must remain valid"
+    );
+    Ok(())
+}
+
+#[test]
+fn date_time_owned_inputs_accept_iso_minute_precision_and_compare_offsets_as_instants() -> TestResult
+{
+    let base: EventFrame = serde_json::from_slice(include_bytes!(
+        "../../fixtures/protocol/v1/a2ui_surface/create.event.json"
+    ))?;
+    for (date, time, value, min, max) in [
+        (false, true, "12:30", "10:00:00Z", "14:00:00Z"),
+        (true, true, "2026-06-22T12:30", "2026-06-22T12:30:00+01:00", "2026-06-22T12:30:00Z"),
+        (true, true, "2026-06-22T13:30:00+01:00", "2026-06-22T12:30:00Z", "2026-06-22T12:30:00Z"),
+    ] {
+        let mut frame = base.clone();
+        let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) =
+            &mut frame.a2ui
+        else {
+            return Err("fixture create".into());
+        };
+        create.data_model = Some(json!({"note":value,"text":"Hello"}));
+        let input = create
+            .components
+            .as_mut()
+            .and_then(|components| {
+                components
+                    .iter_mut()
+                    .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("input"))
+            })
+            .ok_or("input")?;
+        let map = input.as_object_mut().ok_or("input object")?;
+        map.insert("component".into(), json!("DateTimeInput"));
+        map.insert("enableDate".into(), json!(date));
+        map.insert("enableTime".into(), json!(time));
+        map.insert("min".into(), json!(min));
+        map.insert("max".into(), json!(max));
+        let state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(
+            &SurfaceState::default().prepare_event(frame)?.wire_bytes()?,
+        )?)?;
+        let mut action: ActionFrame = serde_json::from_slice(include_bytes!(
+            "../../fixtures/protocol/v1/a2ui_surface/submit.action.json"
+        ))?;
+        action.surface_hash = state.hash().ok_or("hash")?.into();
+        action.a2ui.action.context.insert("note".into(), json!(value));
+        action.args_hash = action.arguments_hash()?;
+        assert!(
+            state.validate_action(&SurfaceAction::from_wire_bytes(&action.wire_bytes()?)?).is_ok(),
+            "ISO date/time witness must use deterministic bounds: {value}"
+        );
+        action.a2ui.action.context.insert("note".into(), json!("invalid"));
+        action.args_hash = action.arguments_hash()?;
+        assert!(
+            state.validate_action(&SurfaceAction::from_wire_bytes(&action.wire_bytes()?)?).is_err(),
+            "invalid date/time raw input must not pass the author witness check"
+        );
+    }
     Ok(())
 }

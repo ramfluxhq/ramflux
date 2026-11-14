@@ -206,7 +206,7 @@ fn prepare_carrier(
             crate::SurfaceRefusalCode::NotAuthor.error("only the author may update a surface")
         );
     }
-    let mut carrier = Carrier {
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -225,7 +225,7 @@ fn prepare_carrier(
     if let Some(previous) = client.reuse_authored_surface(&carrier)? {
         return Ok(previous);
     }
-    client.attach_surface_snapshot(&mut carrier)?;
+
     client.sign_surface_carrier(carrier)
 }
 

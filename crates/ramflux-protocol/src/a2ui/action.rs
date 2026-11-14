@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Action frames and the author-literal/raw-owned-input egress grammar.
-use super::wire::{canonical, decode_canonical, identifier, validate_metadata};
+use super::wire::{canonical, decode_canonical, validate_identifier, validate_metadata};
 use super::{
     ACTION_SCHEMA, JsonPointer, MAX_CONTEXT_ENTRIES, MAX_DELTA_BYTES, MAX_STATE_BYTES, Metadata,
     Reject, SurfaceSnapshot, SurfaceState,
@@ -121,6 +121,7 @@ impl SurfaceAction {
         if frame.schema != ACTION_SCHEMA
             || frame.a2ui.version != "1.0"
             || frame.conversation_id.is_empty()
+            || frame.conversation_id.len() > 256
             || !(1..=crate::MAX_SAFE_JSON_INTEGER).contains(&frame.surface_version)
             || frame.source_instance.len() > 2
             || frame.a2ui.action.context.len() > MAX_CONTEXT_ENTRIES
@@ -132,13 +133,13 @@ impl SurfaceAction {
             &frame.a2ui.action.source_component_id,
             &frame.a2ui.action.name,
         ] {
-            identifier(id)?;
+            validate_identifier(id)?;
         }
         for pointer in &frame.source_instance {
             JsonPointer::parse(pointer)?;
         }
         for key in frame.a2ui.action.context.keys() {
-            identifier(key)?;
+            validate_identifier(key)?;
         }
         validate_metadata(frame.a2ui.action.metadata.as_ref())?;
         if frame.args_hash != frame.arguments_hash()? {
@@ -250,15 +251,19 @@ impl<'a> Graph<'a> {
         let mut definitions = BTreeMap::new();
         for component in &snapshot.components {
             let name = id(component)?;
-            identifier(name)?;
-            identifier(kind(component)?)?;
+            validate_identifier(name)?;
+            validate_identifier(kind(component)?)?;
             if definitions.insert(name, component).is_some() {
                 return Err(Reject::Integrity);
             }
         }
         let mut graph = Self { instances: Vec::new(), reached: BTreeSet::new() };
         let context = WalkContext { definitions: &definitions, snapshot };
-        graph.reached = static_references("root", &definitions, &mut BTreeSet::new(), 0, false)?;
+        for name in definitions.keys() {
+            // Pruning does not excuse dangling references or cycles in supplied definitions.
+            static_references(name, &definitions, &mut BTreeSet::new(), 0, 0, false)?;
+        }
+        graph.reached = static_references("root", &definitions, &mut BTreeSet::new(), 0, 0, false)?;
         graph.walk(
             WalkFrame {
                 name: "root",
@@ -271,6 +276,23 @@ impl<'a> Graph<'a> {
             &context,
             &mut BTreeSet::new(),
         )?;
+        let mut expanded_bytes = 0usize;
+        for instance in &graph.instances {
+            expanded_bytes = expanded_bytes
+                .checked_add(
+                    canonical(&expanded_value(
+                        instance.component,
+                        &snapshot.data_model,
+                        &instance.prefix,
+                        0,
+                    )?)?
+                    .len(),
+                )
+                .ok_or(Reject::Limit)?;
+            if expanded_bytes > 64 * 1024 {
+                return Err(Reject::Limit);
+            }
+        }
         let mut controls = BTreeSet::new();
         for instance in &graph.instances {
             if (input(kind(instance.component)?) || kind(instance.component)? == "Button")
@@ -426,13 +448,71 @@ impl<'a> Graph<'a> {
     }
 }
 
+fn expanded_value(
+    value: &Value,
+    model: &Value,
+    prefix: &str,
+    depth: usize,
+) -> Result<Value, Reject> {
+    if depth > 16 {
+        return Err(Reject::Limit);
+    }
+    match value {
+        Value::Object(map) => {
+            if let Some(name) = map.get("@call").and_then(Value::as_str) {
+                if name == "@index" && prefix.is_empty() {
+                    return Err(Reject::Expression);
+                }
+                if name == "formatString"
+                    && matches!(
+                        super::expression::evaluate(value, model, prefix, 0),
+                        Err(Reject::Limit)
+                    )
+                {
+                    return Err(Reject::Limit);
+                }
+                if name == "formatString"
+                    && let Some(source) = value.pointer("/args/value")
+                    && source.get("@path").is_some()
+                {
+                    let pointer = binding(source, prefix)?;
+                    if let Some(program) = pointer.get(model).and_then(Value::as_str) {
+                        super::schema::validate_program(program, depth + 1)?;
+                    }
+                }
+            }
+            if let Some(path) = map.get("@path") {
+                return Ok(resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?
+                    .get(model)
+                    .cloned()
+                    .unwrap_or(Value::Null));
+            }
+            let mut expanded = Map::new();
+            for (key, value) in map {
+                expanded.insert(key.clone(), expanded_value(value, model, prefix, depth + 1)?);
+            }
+            Ok(Value::Object(expanded))
+        }
+        Value::Array(array) => array
+            .iter()
+            .map(|v| expanded_value(v, model, prefix, depth + 1))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        _ => Ok(value.clone()),
+    }
+}
+
 fn static_references(
     name: &str,
     definitions: &BTreeMap<&str, &Value>,
     stack: &mut BTreeSet<String>,
     depth: usize,
+    templates: usize,
     in_modal: bool,
 ) -> Result<BTreeSet<String>, Reject> {
+    if templates > 2 {
+        return Err(Reject::Limit);
+    }
     if depth >= 16 || !stack.insert(name.into()) {
         return Err(Reject::Integrity);
     }
@@ -445,29 +525,34 @@ fn static_references(
     let mut children = Vec::new();
     for property in ["child", "trigger", "content"] {
         if let Some(child) = component.get(property) {
-            children.push(child.as_str().ok_or(Reject::Encoding)?);
+            children.push((child.as_str().ok_or(Reject::Encoding)?, false));
         }
     }
     if let Some(tabs) = component.get("tabs") {
         for tab in tabs.as_array().ok_or(Reject::Encoding)? {
-            children.push(tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?);
+            children
+                .push((tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?, false));
         }
     }
     if let Some(list) = component.get("children") {
         if let Some(array) = list.as_array() {
             for child in array {
-                children.push(child.as_str().ok_or(Reject::Encoding)?);
+                children.push((child.as_str().ok_or(Reject::Encoding)?, false));
             }
         } else {
-            children.push(list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?);
+            children.push((
+                list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?,
+                true,
+            ));
         }
     }
-    for child in children {
+    for (child, template) in children {
         reached.extend(static_references(
             child,
             definitions,
             stack,
             depth + 1,
+            templates + usize::from(template),
             in_modal || component_kind == "Modal",
         )?);
     }
@@ -507,7 +592,7 @@ fn validate_declaration(
         if event.keys().any(|k| !["name", "context", "userMessage"].contains(&k.as_str())) {
             return Err(Reject::Encoding);
         }
-        identifier(event.get("name").and_then(Value::as_str).ok_or(Reject::Encoding)?)?;
+        validate_identifier(event.get("name").and_then(Value::as_str).ok_or(Reject::Encoding)?)?;
         if event.get("userMessage").is_some_and(|v| !v.is_string()) {
             return Err(Reject::Expression);
         }
@@ -522,7 +607,7 @@ fn validate_declaration(
         }
         let mut sent = BTreeSet::new();
         for (key, value) in context {
-            identifier(key)?;
+            validate_identifier(key)?;
             if literal(value) {
                 continue;
             }
@@ -657,10 +742,13 @@ fn validate_input(
                 && component.get("variant").and_then(Value::as_str) != Some("obscured")
         }
         "CheckBox" => value.is_boolean(),
-        "Slider" => value.as_i64().is_some_and(|v| {
-            v >= component.get("min").and_then(Value::as_i64).unwrap_or(0)
-                && component.get("max").and_then(Value::as_i64).is_some_and(|max| v <= max)
-        }),
+        "Slider" => {
+            value.as_i64().is_some()
+                && value.as_f64().is_some_and(|v| {
+                    v >= component.get("min").and_then(Value::as_f64).unwrap_or(0.0)
+                        && component.get("max").and_then(Value::as_f64).is_some_and(|max| v <= max)
+                })
+        }
         "ChoicePicker" => value.as_array().is_some_and(|a| {
             let options = component.get("options").and_then(Value::as_array);
             let unique: BTreeSet<_> = a.iter().filter_map(Value::as_str).collect();
@@ -766,5 +854,51 @@ impl std::fmt::Debug for SurfaceAction {
             .field("version", &self.version())
             .field("context", &"[redacted]")
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn slider_integer_witness_uses_fractional_literal_bounds_without_rounding() {
+        let slider = json!({"component":"Slider","min":0.5,"max":2.5});
+        assert!(
+            validate_input(&slider, &json!(1), &json!({}), "").is_ok(),
+            "an integer inside basic-catalog numeric bounds is valid"
+        );
+        assert!(
+            validate_input(&slider, &json!(0), &json!({}), "").is_err(),
+            "a fractional minimum must not silently become zero"
+        );
+        assert!(
+            validate_input(&slider, &json!(3), &json!({}), "").is_err(),
+            "an integer above a fractional maximum is rejected"
+        );
+        assert!(
+            validate_input(&slider, &json!(1.5), &json!({}), "").is_err(),
+            "the profile requires the submitted Slider value to be an integer"
+        );
+    }
+
+    #[test]
+    fn empty_date_input_still_validates_author_bound_types_and_order() {
+        let input =
+            json!({"component":"DateTimeInput","enableDate":true,"min":{"@path":"/minimum"}});
+        assert!(
+            validate_input(&input, &json!(""), &json!({"minimum":"2026-06-22"}), "").is_ok(),
+            "an unset date may have a valid author bound"
+        );
+        assert!(
+            validate_input(&input, &json!(""), &json!({"minimum":"invalid"}), "").is_err(),
+            "unset input cannot hide an invalid author bound"
+        );
+        let inverted = json!({"component":"DateTimeInput","enableDate":true,"min":"2026-06-23","max":"2026-06-22"});
+        assert!(
+            validate_input(&inverted, &json!(""), &json!({}), "").is_err(),
+            "inverted limits cannot enter a signed card"
+        );
     }
 }

@@ -23,12 +23,14 @@ The pinned upstream schemas/catalog/cases live under
 `crates/ramflux-protocol/vendor/a2ui`, with their license and byte-hash manifest.
 Upstream schema validity and the stricter ramflux profile are separate checks.
 
-Only `urn:ramflux:catalog:rf-card:1.0` is admitted. State is complete: `root` and
+Only `urn:ramflux:catalog:rf-card:1.0` is admitted; its upstream-format catalog is
+`crates/ramflux-protocol/catalogs/rf-card-v1.json`. State is complete: `root` and
 all references must resolve, cycles are refused, and unreachable components are
 pruned. Inputs have unique, nonoverlapping owned model pointers. Whole canonical
 state is limited to 16 KiB, the data model to 12 KiB, and component declarations
 to 32. Templates have at most 16 items, at most two nested template scopes, and
-at most 256 expanded nodes. Model numbers are safe integers.
+at most 256 expanded nodes and 64 KiB of expanded component values. Model numbers
+are safe integers.
 
 `appendText` targets an existing string through a canonically escaped object-only
 JSON Pointer. It never traverses arrays or `-`. A final append records the pointer
@@ -51,7 +53,9 @@ outer-to-inner template-instance pointers. Declared context entries are either
 author literals or raw values of enabled inputs owned by the same form scope.
 Computed context, author-data paths and computed `userMessage` are refused.
 Button checks may read only author data and inputs sent by that action;
-input-level checks are local display only. The author reconstructs the submitted
+input-level checks are local display only. Locale-sensitive functions are refused
+in button checks, including nested or indirect `formatString` programs. Display-only
+bindings can still use locale formatting. The author reconstructs the submitted
 input overlay, checks types and button checks, and verifies `argsHash`.
 Decision identity includes the source instance; receipts bind the original signed
 action carrier. Actions travel to the author through authenticated pair controls,
@@ -85,7 +89,8 @@ response frame bytes. An exact bound retry in a fresh carrier reuses those bytes
 including their original known version/hash. Changed scope or inner bytes under
 the same key are refused and cannot replace or rebind the entry. Calls, replies,
 retries and refusals do not mutate surface state. Error reports go only to own
-agents, once per surface and rejected event version.
+agents, at most once per surface and rejected event version. Reports and response
+queues are bounded; courier backpressure cannot grow an unbounded control queue.
 
 ## Local transport and retries
 
@@ -112,6 +117,7 @@ does not establish recipient projection or native host acceptance.
 
 The card runtime/session and platform host adapters are separate modules. A link
 is declarative `Button.action.functionCall` `openUrl`, with commit-time Rust URL
-validation. Actual opening requires a later host-owned sheet and a qualified
+validation. Only HTTPS URLs with DNS hosts are allowed, with no credentials, local
+hosts or IP literals. A URL binding cannot read an input-owned pointer. Actual opening requires a later host-owned sheet and a qualified
 browser-only path. Wire admission does not launch a URL or confer approval
 execution authority.
