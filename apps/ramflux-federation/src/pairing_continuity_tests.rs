@@ -411,7 +411,7 @@ fn spawn_tls_front(
     let worker_stop = Arc::clone(&stop);
     listener.set_nonblocking(true)?;
     let thread = std::thread::spawn(move || {
-        serve_tls_front(&listener, backend, &server_config, &worker_stop)
+        serve_tls_front(&listener, backend, &server_config, &worker_stop);
     });
     Ok(TlsFront { stop, addr, thread: Some(thread) })
 }
