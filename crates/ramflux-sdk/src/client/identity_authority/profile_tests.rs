@@ -155,7 +155,7 @@ fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contac
     assert_eq!(row["kind_verified"], true);
     assert_eq!(row["kind_asserted"], "headless_ai");
     assert_eq!(row["display_name"], "Café Agent");
-    assert_eq!(row["safety_state"], "unverified");
+    assert!(row["safety_state"].is_null(), "incomplete authority is not unverified");
     let contact = peer.client.contact_entry("agent")?;
     assert_eq!(contact["kind_asserted"], "headless_ai");
     assert_eq!(contact["display_name"], "Café Agent");

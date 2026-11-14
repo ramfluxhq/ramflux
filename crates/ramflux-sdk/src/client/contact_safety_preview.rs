@@ -84,7 +84,7 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         principal: &str,
         root: &str,
-    ) -> Result<SdkContactSafetyNumber, SdkError> {
+    ) -> Result<serde_json::Value, SdkError> {
         let old = self
             .account_db()?
             .client_record("identity", principal)?
@@ -116,37 +116,20 @@ impl RamfluxClient {
         if self.born_v3_account.is_some() {
             let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
                 let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-                Ok(ramflux_crypto::custody::verify_publication(
+                ramflux_crypto::custody::verify_publication(
                     &ramflux_protocol::custody::CustodyAuthority {
                         publication: native.publication.clone(),
                         custodian_publication: native.custodian_publication.clone(),
                     },
                     crate::custody::network_now()?,
-                )?)
+                )
+                .map_err(SdkError::from)
             };
-            return super::native_safety::safety_from_native(
-                &verify(&own)?,
-                &verify(&peer)?,
-                "unverified".into(),
-            );
+            let _ = verify(&own)?;
+            let _ = verify(&peer)?;
+            self.persist_fetched_identity_directory(&own)?;
+            self.persist_fetched_identity_directory(&peer)?;
         }
-        let a = super::contact::contact_safety_material_from_manifest(&own)?;
-        let b = super::contact::contact_safety_material_from_manifest(&peer)?;
-        let fingerprint = ramflux_crypto::safety_fingerprint(&a, &b);
-        Ok(SdkContactSafetyNumber {
-            algorithm_version: 1,
-            contact_identity_commitment: root.into(),
-            self_identity_commitment: own_root,
-            safety_number: ramflux_crypto::safety_number(&a, &b),
-            fingerprint_hex: super::contact::bytes_to_hex(&fingerprint),
-            safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
-            self_device_count: a.devices.len(),
-            contact_device_count: b.devices.len(),
-            contact_device_set_hash: ramflux_protocol::encode_base64url(
-                ramflux_crypto::device_set_hash(&b.devices),
-            ),
-            contact_lineage_head: ramflux_protocol::encode_base64url(&b.lineage_head),
-            verification_state: "unverified".into(),
-        })
+        super::contact_verification_cas::compared_safety_json(self, root)
     }
 }

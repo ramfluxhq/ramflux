@@ -71,7 +71,7 @@ async fn contact_verification_status_is_a_local_read_with_stored_authority_disti
         verified_by_device_id: "primary",
     })?;
     let expired_status = pool.request(read()).await?;
-    assert_eq!(expired_status["verification_state"], "verification_stale");
+    assert_eq!(expired_status["verification_state"], "unverified");
     assert_eq!(expired_status["safety_number"], unverified["safety_number"]);
     crate::client::contact_verification_cas::verify_linked_contact(&account.client, &peer_root)?;
     let verified = pool.request(read()).await?;
@@ -98,7 +98,10 @@ fn read_request(peer: &str) -> LocalBusFrame {
 }
 
 async fn read_view(pool: &AccountReaders, peer: &str) -> Result<serde_json::Value, SdkError> {
-    pool.request(read_request(peer)).await
+    match tokio::time::timeout(Duration::from_secs(5), pool.request(read_request(peer))).await {
+        Ok(result) => result,
+        Err(_) => Err(SdkError::LocalBus("contact verification read deadline exceeded".into())),
+    }
 }
 
 fn rename_peer(
@@ -166,27 +169,30 @@ async fn matching_then_stale(
     let unverified = read_view(pool, peer_root).await?;
     assert_eq!(unverified["verification_state"], "unverified");
     let client = &state.accounts.get("cas-views").ok_or("account")?.client;
-    let mut bad = crate::client::contact_verification_cas::current_contact_safety_expectation(
-        client, peer_root,
-    )?;
+    let mut bad: ramflux_protocol::message::ExpectedContactSafety =
+        serde_json::from_value(unverified["expected"].clone())?;
     bad.link_id.clear();
     assert!(matches!(
         client.compare_and_record_contact_safety_verified(&bad),
         Err(crate::SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
     ));
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "unverified");
-    let verified =
-        crate::client::contact_verification_cas::verify_linked_contact(client, peer_root)?;
+    let submitted: ramflux_protocol::message::ExpectedContactSafety =
+        serde_json::from_value(read_view(pool, peer_root).await?["expected"].clone())?;
+    let verified = client.compare_and_record_contact_safety_verified(&submitted)?;
     assert_eq!(verified.verification_state, "verified");
-    let again = crate::client::contact_verification_cas::verify_linked_contact(client, peer_root)?;
+    let again: ramflux_protocol::message::ExpectedContactSafety =
+        serde_json::from_value(read_view(pool, peer_root).await?["expected"].clone())?;
+    let again = client.compare_and_record_contact_safety_verified(&again)?;
     assert_eq!(again.verification_state, "verified");
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "verified");
     rename_peer(client, peer)?;
     let after_rename = read_view(pool, peer_root).await?;
     assert_eq!(after_rename["verification_state"], "verification_stale");
     assert_eq!(after_rename["safety_number"], serde_json::json!(safety_number));
-    let recovered =
-        crate::client::contact_verification_cas::verify_linked_contact(client, peer_root)?;
+    let recovered: ramflux_protocol::message::ExpectedContactSafety =
+        serde_json::from_value(after_rename["expected"].clone())?;
+    let recovered = client.compare_and_record_contact_safety_verified(&recovered)?;
     assert_eq!(recovered.verification_state, "verified");
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "verified");
     Ok(())
@@ -206,9 +212,8 @@ async fn changed_blocked_and_restore(
         db.observe_contact_fork(peer_root, "fork-1", 1)?;
     }
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "changed");
-    let mut bad = crate::client::contact_verification_cas::current_contact_safety_expectation(
-        client, peer_root,
-    )?;
+    let mut bad: ramflux_protocol::message::ExpectedContactSafety =
+        serde_json::from_value(read_view(pool, peer_root).await?["expected"].clone())?;
     bad.safety_number_hash.push('x');
     assert!(matches!(
         client.compare_and_record_contact_safety_verified(&bad),

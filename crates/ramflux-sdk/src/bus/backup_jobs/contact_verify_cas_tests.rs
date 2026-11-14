@@ -7,6 +7,7 @@ use super::tests::{call, finished};
 use crate::client::native_test_support::Fixture;
 use crate::custody::tests::{Root, TestVault, create};
 use crate::prelude::*;
+use prost::Message as _;
 use ramflux_crypto::backup_stream::BackupStreamDecoder;
 use ramflux_protocol::message as g;
 use serde_json::json;
@@ -52,6 +53,43 @@ fn live_grants(root: &std::path::Path) -> TestResult<(bool, bool)> {
     client.unlock_account("account", LOCAL_SECRET.as_bytes())?;
     let db = client.account_db()?;
     Ok((db.actor_state_exists(GRANT)?, db.actor_state_exists(ORIGIN)?))
+}
+
+async fn real_safety_evidence() -> TestResult<(String, String)> {
+    let source = Fixture::new("cas-archive-source").await?;
+    let peer = Fixture::new("cas-archive-peer").await?;
+    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.establish_friend_link(
+        "archive-link",
+        &source.manifest.principal_commitment,
+        &peer.manifest.principal_commitment,
+    )?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &source.client,
+        &peer.manifest.principal_commitment,
+    )?;
+    let db = source.client.account_db()?;
+    let grant = db
+        .load_actor_state::<String>(&format!(
+            "identity/contact_safety_confirmation/{}",
+            peer.manifest.principal_commitment
+        ))?
+        .ok_or("confirmation")?;
+    let origin = db
+        .load_actor_state::<String>(&format!(
+            "identity/contact_safety_origin_inner/{}",
+            peer.manifest.principal_commitment
+        ))?
+        .ok_or("origin")?;
+    g::ContactSafetyConfirmation::decode(
+        ramflux_protocol::decode_base64url(&grant).map_err(|_| "grant bytes")?.as_slice(),
+    )
+    .map_err(|_| "grant is not a confirmation")?;
+    g::Inner::decode(
+        ramflux_protocol::decode_base64url(&origin).map_err(|_| "origin bytes")?.as_slice(),
+    )
+    .map_err(|_| "origin is not an inner")?;
+    Ok((grant, origin))
 }
 
 async fn history_denial(root: &std::path::Path) -> TestResult {
@@ -148,9 +186,10 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
                 &account.record().body.account_anchor,
                 crate::custody::network_now()?,
             )?;
+            let evidence = real_safety_evidence().await?;
             let db = client.account_db()?;
-            db.persist_actor_state(GRANT, &"archived-grant")?;
-            db.persist_actor_state(ORIGIN, &"archived-origin")?;
+            db.persist_actor_state(GRANT, &evidence.0)?;
+            db.persist_actor_state(ORIGIN, &evidence.1)?;
             db.persist_actor_state(MERGED, &json!({"merged": true}))?;
             drop(client);
             let source = native_tests::supervisor(&root.0)?;

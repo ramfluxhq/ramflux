@@ -303,10 +303,14 @@ impl RamfluxClient {
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
         let verified = if let Some(commitment) = commitment {
-            self.contact_safety_verification_state(
-                commitment,
-                identity["device_set_hash"].as_str(),
-            )? == "verified"
+            match self
+                .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
+            {
+                Ok(state) => state == "verified",
+                // Authority unavailable and a rootless session are refusals, not U.
+                Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => false,
+                Err(error) => return Err(error),
+            }
         } else {
             false
         };

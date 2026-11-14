@@ -152,10 +152,15 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved["devices"] = json!([]);
     }
     let commitment = saved.get("contact_identity_commitment").and_then(Value::as_str).unwrap_or("");
-    saved["safety_state"] = json!(client.contact_safety_verification_state(
+    saved["safety_state"] = match client.contact_safety_verification_state(
         commitment,
         saved.get("device_set_hash").and_then(Value::as_str),
-    )?);
+    ) {
+        Ok(state) => json!(state),
+        // A and a rootless session are refusals, not a persisted U state.
+        Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => Value::Null,
+        Err(error) => return Err(error),
+    };
     let profile = client.read_profile_facts(id).map(|facts| facts.profile.clone());
     saved["kind_verified"] = json!(profile.is_some());
     if let Some(profile) = &profile {

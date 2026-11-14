@@ -334,6 +334,96 @@ fn addition_and_convergence(
     Ok(())
 }
 
+fn rewrite_clock(client: &RamfluxClient, commitment: &str, hlc: u64) -> TestResult<Vec<u8>> {
+    let (_, inner) = load_pair(client, commitment)?;
+    let exact = raise_clock(&inner, hlc)?;
+    let confirmation = sync_of(&exact)?.safety_confirmation.ok_or("confirmation")?;
+    let db = client.account_db()?;
+    db.persist_actor_state(
+        &confirmation_key(commitment),
+        &ramflux_protocol::encode_base64url(confirmation.encode_to_vec()),
+    )?;
+    db.persist_actor_state(&origin_key(commitment), &ramflux_protocol::encode_base64url(&exact))?;
+    Ok(exact)
+}
+
+fn install_current(client: &RamfluxClient, commitment: &str) -> TestResult<Vec<u8>> {
+    let value = crate::client::contact_verification_cas::compared_safety_json(client, commitment)?;
+    let expected: g::ExpectedContactSafety =
+        serde_json::from_value(value.get("expected").cloned().ok_or("expected")?)?;
+    let origin = client.allocate_generated_identity(
+        "own-contact",
+        crate::client::generated_identity::now_ms(),
+        true,
+    )?;
+    let sync = g::OwnContactSync {
+        safety_confirmation: Some(g::ContactSafetyConfirmation {
+            expected: Some(expected),
+            origin: Some(origin.clone()),
+            verified_at: Some(1),
+        }),
+        ..Default::default()
+    };
+    let exact = encode_sync(origin, sync.clone())?;
+    install(client, &sync, &exact)?;
+    Ok(exact)
+}
+
+async fn prepared_pair(name: &str) -> TestResult<(Fixture, String)> {
+    let local = Fixture::new(name).await?;
+    let peer = Fixture::new(&format!("{name}-peer")).await?;
+    local.client.persist_fetched_identity_directory(&peer.manifest)?;
+    let peer_root = peer.manifest.principal_commitment.clone();
+    local.client.establish_friend_link(
+        "cas-order-link",
+        &local.client.own_account_anchor()?,
+        &peer_root,
+    )?;
+    crate::client::contact_verification_cas::verify_linked_contact(&local.client, &peer_root)?;
+    Ok((local, peer_root))
+}
+
+async fn order_only_current_confirmations() -> TestResult {
+    let (local, peer_root) = prepared_pair("cas-order-high").await?;
+    let stale = load_pair(&local.client, &peer_root)?.1;
+    enroll_sibling(&local)?;
+    assert_eq!(state(&local.client, &peer_root)?, "verification_stale");
+    rewrite_clock(&local.client, &peer_root, u64::MAX)?;
+    install_current(&local.client, &peer_root)?;
+    let kept = origin_id(&load_pair(&local.client, &peer_root)?.0)?;
+    assert_eq!(state(&local.client, &peer_root)?, "verified");
+    install(&local.client, &sync_of(&stale)?, &stale)?;
+    assert_eq!(
+        origin_id(&load_pair(&local.client, &peer_root)?.0)?,
+        kept,
+        "a stale high clock cannot replace the current confirmation"
+    );
+    let (second, peer_root) = prepared_pair("cas-order-reverse").await?;
+    let stale = load_pair(&second.client, &peer_root)?.1;
+    enroll_sibling(&second)?;
+    install_current(&second.client, &peer_root)?;
+    let kept = origin_id(&load_pair(&second.client, &peer_root)?.0)?;
+    let stale = raise_clock(&stale, u64::MAX)?;
+    install(&second.client, &sync_of(&stale)?, &stale)?;
+    assert_eq!(
+        origin_id(&load_pair(&second.client, &peer_root)?.0)?,
+        kept,
+        "reversed delivery of a stale high clock leaves the current confirmation"
+    );
+    Ok(())
+}
+
+fn raise_clock(inner: &[u8], hlc: u64) -> TestResult<Vec<u8>> {
+    let mut sync = sync_of(inner)?;
+    let mut identity =
+        sync.safety_confirmation.as_ref().and_then(|c| c.origin.clone()).ok_or("origin")?;
+    identity.hlc = hlc;
+    if let Some(confirmation) = sync.safety_confirmation.as_mut() {
+        confirmation.origin = Some(identity.clone());
+    }
+    encode_sync(identity, sync)
+}
+
 #[tokio::test]
 async fn verify_cas_sibling_evidence_is_context_bound() -> TestResult {
     let local = Fixture::new("cas-origin").await?;
@@ -378,5 +468,10 @@ async fn verify_cas_sibling_evidence_is_context_bound() -> TestResult {
         "history promotion drops a safety grant"
     );
     addition_and_convergence(&local, &peer, &peer_root, &inner)?;
+    order_only_current_confirmations().await?;
+    Box::pin(
+        crate::bus::dispatch::surface_transport::own_tests::deliver_compared_safety_to_sibling_device(),
+    )
+    .await?;
     Ok(())
 }

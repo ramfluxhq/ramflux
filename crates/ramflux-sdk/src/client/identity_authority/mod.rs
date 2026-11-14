@@ -80,14 +80,14 @@ impl RamfluxClient {
         let Some(commitment) = identity["contact_identity_commitment"].as_str() else {
             return Ok(None);
         };
-        if self
-            .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())?
-            == "verified"
+        let verified = match self
+            .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
         {
-            self.root_asserted_principal_kind(principal)
-        } else {
-            Ok(None)
-        }
+            Ok(state) => state == "verified",
+            Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => false,
+            Err(error) => return Err(error),
+        };
+        if verified { self.root_asserted_principal_kind(principal) } else { Ok(None) }
     }
     /// Verify and atomically cache a live manifest, including rollback and key lifecycle checks.
     /// # Errors

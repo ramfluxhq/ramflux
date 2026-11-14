@@ -48,7 +48,7 @@ impl RamfluxClient {
         if let Some(authority) = self.current_custody_authority(peer, now)? {
             return safety_from_native(own.verified(), &authority, state);
         }
-        if state == "blocked_by_policy" || state == "unverified" {
+        if state == "blocked_by_policy" {
             return anchor_only_safety(self, own.verified(), peer, state);
         }
         Err(SdkError::NetworkingPending)

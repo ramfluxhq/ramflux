@@ -39,6 +39,7 @@ fn without_cas(inventory: &Value) -> Value {
     let methods = legacy["method_policy"]["methods"].as_array_mut().expect("test: methods");
     for row in methods.iter_mut().filter(|row| row["name"] == "contact.verify") {
         let object = row.as_object_mut().expect("test: row");
+        object.insert("capability".to_owned(), json!("contact"));
         object.remove("cas_capability");
         object.remove("contract");
         object.remove("request_type");
@@ -83,6 +84,86 @@ fn verify_cas_v2_preserves_typed_refusal_and_reconciliation() {
     poll_resync_and_free();
 }
 
+fn refuse_real_account() {
+    let created = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test: runtime")
+        .block_on(crate::client::native_test_support::Fixture::new("cas-abi-refuse"))
+        .expect("test: account");
+    let root = created.root.0.clone();
+    drop(created);
+    let root_text = root.to_path_buf().display().to_string();
+    let config = serde_json::to_vec(&json!({"data_root": root_text})).expect("test: config");
+    let mut handle = 0;
+    assert_eq!(
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle),
+        0,
+        "supervisor opens the real account root"
+    );
+    let submit = |method: &str, body: Value| {
+        let request = serde_json::to_vec(&json!({
+            "account_id":"cas-abi-refuse",
+            "sdk_api":"contact",
+            "method":method,
+            "body":body,
+            "deadline_ms":deadline(),
+        }))
+        .expect("test: request");
+        let mut operation = 0;
+        assert_eq!(
+            ramflux_v2_execute(handle, request.as_ptr(), request.len(), &raw mut operation),
+            0,
+            "admission does not write"
+        );
+        super::tests::wait_result(handle, operation)
+    };
+    let unlock = serde_json::to_vec(&json!({
+        "account_id":"cas-abi-refuse",
+        "sdk_api":"account",
+        "method":"account.unlock",
+        "body":{"passphrase":"native fixture data passphrase"},
+        "deadline_ms":deadline(),
+    }))
+    .expect("test: unlock");
+    let mut operation = 0;
+    assert_eq!(ramflux_v2_execute(handle, unlock.as_ptr(), unlock.len(), &raw mut operation), 0);
+    let unlocked = super::tests::wait_result(handle, operation);
+    assert_eq!(unlocked["code"], 0, "real account unlock: {unlocked}");
+    let missing = submit("contact.verify", json!({}));
+    assert!(
+        missing.to_string().contains("expected_safety_required"),
+        "a real account keeps the typed refusal: {missing}"
+    );
+    let peer = ramflux_protocol::encode_base64url([9; 32]);
+    let mismatch = submit(
+        "contact.verify",
+        json!({"expected":{
+            "algorithm_version":2,
+            "self_identity_commitment":peer,
+            "contact_identity_commitment":peer,
+            "safety_number_hash":"hash",
+            "contact_device_set_hash":"devices",
+            "contact_lineage_head":"lineage",
+            "self_authority_head":"self-head",
+            "contact_authority_head":"contact-head",
+            "principal_id":"principal",
+            "link_id":"missing-link"
+        }}),
+    );
+    assert_ne!(mismatch["code"], 0, "mismatched material is not recorded: {mismatch}");
+    assert_eq!(ramflux_v2_client_close(handle), 0, "real account supervisor releases its writer");
+    let mut reader = crate::RamfluxClient::new();
+    reader.open_account_index(&root).expect("test: index");
+    reader.unlock_account("cas-abi-refuse", b"native fixture data passphrase").expect("test: read");
+    let keys = reader
+        .account_db()
+        .expect("test: database")
+        .actor_state_keys("identity/contact_safety_")
+        .expect("test: keys");
+    assert!(keys.is_empty(), "refusal writes no confirmation: {keys:?}");
+}
+
 fn refuse_execute_and_reconcile() {
     let fixture = super::tests::Fixture::open();
     let expired = serde_json::to_vec(&json!({
@@ -101,6 +182,7 @@ fn refuse_execute_and_reconcile() {
     let refused = fixture.submit_body("contact.verify", &json!({"expected":{}}), deadline());
     let refused_result = fixture.result(refused);
     assert_ne!(refused_result["code"], 0, "an empty supervisor cannot record verification");
+    refuse_real_account();
     assert_eq!(ramflux_v2_operation_cancel(fixture.handle, refused), 0, "cancel the waiter");
     assert_eq!(fixture.result(refused), refused_result, "cancel keeps the terminal refusal");
     assert_eq!(ramflux_v2_operation_release(fixture.handle, refused), 0);

@@ -96,7 +96,7 @@ policies! {
     "contact.safety_number" => ("contact", true, true, false, false),
     "contact.unblock" => ("contact", true, true, false, false),
     "contact.verification.status" => ("contact", false, true, false, false),
-    "contact.verify" => ("contact", true, true, false, false),
+    "contact.verify" => ("contact.verify.cas", true, true, false, false),
     "conversation.directory" => ("conversation", false, true, false, false),
     "conversation.disappearing.expire" => ("conversation", true, true, false, false),
     "conversation.disappearing.set" => ("conversation", true, true, false, false),
@@ -254,27 +254,31 @@ pub(super) fn allowed(name: &str) -> bool {
 
 pub(super) const CONTACT_VERIFY_CAS_CONTRACT: &str = "CONTACT-VERIFY-CAS-01";
 pub(super) const CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas";
-// The method manifest generator matches `const NAME: &str = "...";` on one line.
-#[rustfmt::skip]
-pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str = "ramflux.message.v1.ContactSafetyVerifyRequest";
-#[rustfmt::skip]
-pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str = "ramflux.message.v1.ContactSafetyVerifyResult";
+pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyRequest";
+pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
-#[rustfmt::skip]
-pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str = "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
-/// blake3 of the contract line followed by those descriptor bytes.
-#[rustfmt::skip]
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "de9789f507ed75696e62ec27b7e4ff1904b9db6fff27dcafa789cd04b27eab8e";
-
-pub(super) fn contact_verify_rows() -> usize {
-    METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify").count()
-}
+pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
+    "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
+/// Reviewed immutable product pin. Design baseline `main` at this commit.
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "61af7c513a201619c6f37f060f117720cf1c0251";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
-    contact_verify_rows() == 1
-        && allowed("contact.verify")
+    let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
+    let Some(row) = rows.next() else {
+        return false;
+    };
+    if rows.next().is_some() {
+        return false;
+    }
+    allowed("contact.verify")
+        && row.capability == CONTACT_VERIFY_CAS_CAPABILITY
         && descriptor_hex == CONTACT_VERIFY_CAS_DESCRIPTOR
-        && !CONTACT_VERIFY_CAS_PRODUCT_PIN.is_empty()
+        && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
+        && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
+        && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "61af7c513a201619c6f37f060f117720cf1c0251"
 }
 
 #[cfg(test)]
@@ -294,9 +298,9 @@ pub(super) fn contact_verify_cas_inventory_admits(inventory: &serde_json::Value)
         return false;
     };
     row.get("bridge_allowed").and_then(serde_json::Value::as_bool) == Some(true)
-        && row.get("capability").and_then(serde_json::Value::as_str) == Some("contact")
-        && row.get("cas_capability").and_then(serde_json::Value::as_str)
+        && row.get("capability").and_then(serde_json::Value::as_str)
             == Some(CONTACT_VERIFY_CAS_CAPABILITY)
+        && row.get("cas_capability").is_none()
         && row.get("contract").and_then(serde_json::Value::as_str)
             == Some(CONTACT_VERIFY_CAS_CONTRACT)
         && row.get("request_type").and_then(serde_json::Value::as_str)
@@ -318,8 +322,6 @@ fn method_value(policy: &MethodPolicy) -> serde_json::Value {
     if policy.name == "contact.verify"
         && let Some(object) = value.as_object_mut()
     {
-        object
-            .insert("cas_capability".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_CAPABILITY));
         object.insert("contract".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_CONTRACT));
         object
             .insert("request_type".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_REQUEST_TYPE));

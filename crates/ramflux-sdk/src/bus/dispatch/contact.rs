@@ -126,20 +126,10 @@ async fn dispatch_contact_safety_number(
     let engine = account.session_client().await?;
     let safety = account
         .client
-        .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
+        .fetch_compared_contact_safety(&engine.config, &body.contact_identity_commitment)
         .await;
     account.apply_session_metadata(engine);
-    let safety = safety?;
-    let mut value = serde_json::to_value(safety)?;
-    if let Ok(expected) =
-        crate::client::contact_verification_cas::current_contact_safety_expectation(
-            &account.client,
-            &body.contact_identity_commitment,
-        )
-    {
-        value["expected"] = serde_json::to_value(expected)?;
-    }
-    Ok(local_bus_ok(value))
+    Ok(local_bus_ok(safety?))
 }
 
 fn dispatch_contact_verify(
@@ -166,14 +156,29 @@ async fn dispatch_contact_verification_status(
     let engine = account.session_client().await?;
     let safety = account
         .client
-        .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
+        .fetch_compared_contact_safety(&engine.config, &body.contact_identity_commitment)
         .await;
     account.apply_session_metadata(engine);
     let safety = safety?;
-    let status = account.client.contact_verification_status(&body.contact_identity_commitment)?;
+    Ok(local_bus_ok(verification_body(
+        &account.client,
+        &body.contact_identity_commitment,
+        &safety,
+    )?))
+}
+
+fn verification_body(
+    client: &crate::RamfluxClient,
+    commitment: &str,
+    safety: &serde_json::Value,
+) -> Result<serde_json::Value, SdkError> {
+    let status = client.contact_verification_status(commitment)?;
+    let state = safety.get("verification_state").cloned().ok_or_else(|| {
+        SdkError::LocalBus("contact safety snapshot missing verification_state".into())
+    })?;
     let mut value = serde_json::json!({
-        "contact_identity_commitment": body.contact_identity_commitment,
-        "verification_state": safety.verification_state,
+        "contact_identity_commitment": commitment,
+        "verification_state": state,
         "stored_verification_state": status
             .as_ref()
             .map_or("unverified", |record| record.verification_state.as_str()),
@@ -181,18 +186,13 @@ async fn dispatch_contact_verification_status(
         "verified_by_device_id": status
             .as_ref()
             .map(|record| record.verified_by_device_id.clone()),
-        "safety_number": safety.safety_number,
-        "fingerprint_hex": safety.fingerprint_hex,
+        "safety_number": safety.get("safety_number").cloned().unwrap_or(serde_json::Value::Null),
+        "fingerprint_hex": safety.get("fingerprint_hex").cloned().unwrap_or(serde_json::Value::Null),
     });
-    if let Ok(expected) =
-        crate::client::contact_verification_cas::current_contact_safety_expectation(
-            &account.client,
-            &body.contact_identity_commitment,
-        )
-    {
-        value["expected"] = serde_json::to_value(expected)?;
+    if let Some(expected) = safety.get("expected") {
+        value["expected"] = expected.clone();
     }
-    Ok(local_bus_ok(value))
+    Ok(value)
 }
 
 fn contact_list(
@@ -247,10 +247,23 @@ async fn provisional_safety(
     }
     let body: ProvisionalSafety = serde_json::from_value(request.body.clone())
         .map_err(|_| crate::ContactReason::InvalidCard)?;
-    if body.replace_provisional_root.is_some() {
-        return Err(crate::ContactReason::InvalidCard.into());
+    if body.replace_provisional_root.as_ref().is_some_and(String::is_empty) {
+        return Err(crate::ContactReason::ExpectedSafetyRequired.into());
     }
     let account = local_bus_account_mut(state, id)?;
+    if let Some(selector) = body.replace_provisional_root.as_deref() {
+        let identity = account
+            .client
+            .account_db()?
+            .client_record("identity", &body.principal_id)?
+            .ok_or(crate::ContactReason::UnknownPrincipal)?;
+        account.client.contact_replacement(
+            &identity,
+            &body.principal_id,
+            &body.contact_identity_commitment,
+            Some(selector),
+        )?;
+    }
     let engine = account.session_client().await?;
     let gateway = engine.config.clone();
     let result = async {
@@ -258,7 +271,7 @@ async fn provisional_safety(
             .client
             .preview_contact_safety(&gateway, &body.principal_id, &body.contact_identity_commitment)
             .await?;
-        Ok::<_, SdkError>(local_bus_ok(serde_json::to_value(safety)?))
+        Ok::<_, SdkError>(local_bus_ok(safety))
     }
     .await;
     account.apply_session_metadata(engine);

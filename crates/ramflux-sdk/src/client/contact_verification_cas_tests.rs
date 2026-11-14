@@ -4,7 +4,17 @@
 use super::{test_before_cas_transaction, test_clear_cas_hooks, test_interrupt_cas_at};
 use crate::client::native_test_support::{Fixture, TestResult};
 use crate::{ContactReason, RamfluxClient, SdkError};
+use ramflux_protocol::message as g;
 use serde_json::json;
+
+fn compared_expected(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> TestResult<g::ExpectedContactSafety> {
+    let value = super::compared_safety_json(client, commitment)?;
+    let expected = value.get("expected").cloned().ok_or("public snapshot omits expected")?;
+    Ok(serde_json::from_value(expected)?)
+}
 
 struct ClearHooks;
 impl Drop for ClearHooks {
@@ -52,7 +62,7 @@ async fn verify_cas_records_only_compared_material() -> TestResult {
     let recorded = RamfluxClient::record_contact_safety_verified(&peer_root, "primary", &safety);
     expect_reason(&recorded.expect_err("test: record"), ContactReason::ExpectedSafetyRequired);
     absent(&local.client, &peer_root)?;
-    let mut expected = super::current_contact_safety_expectation(&local.client, &peer_root)?;
+    let mut expected = compared_expected(&local.client, &peer_root)?;
     expected.algorithm_version = None;
     expect_reason(
         &local
@@ -70,7 +80,7 @@ async fn verify_cas_records_only_compared_material() -> TestResult {
             .expect_err("test: empty"),
         ContactReason::ExpectedSafetyRequired,
     );
-    let expected = super::current_contact_safety_expectation(&local.client, &peer_root)?;
+    let expected = compared_expected(&local.client, &peer_root)?;
     for mutate in [
         "self",
         "contact",
@@ -130,18 +140,13 @@ async fn provisional_replacement() -> TestResult {
     identity["root_source"] = json!("lookup");
     identity["devices"] = json!([]);
     db.persist_client_record("identity", &principal, &identity)?;
-    let link_id = local
-        .client
-        .friend_links()?
-        .into_iter()
-        .find(|link| link.state == "accepted")
-        .ok_or("link")?
-        .link_id;
-    let mut expected =
-        super::preview_contact_safety_expectation(&local.client, &peer_root, &link_id)?;
-    let missing =
-        local.client.compare_and_record_contact_safety_verified(&expected).expect_err("test: pin");
-    assert!(matches!(missing, SdkError::ContactConfirmationRequired(_)));
+    let mut expected = compared_expected(&local.client, &peer_root)?;
+    assert_eq!(expected.replace_provisional_root.as_deref(), Some(old.as_str()));
+    let mut missing = expected.clone();
+    missing.replace_provisional_root = None;
+    let refused =
+        local.client.compare_and_record_contact_safety_verified(&missing).expect_err("test: pin");
+    assert!(matches!(refused, SdkError::ContactConfirmationRequired(_)));
     absent(&local.client, &peer_root)?;
     expected.replace_provisional_root = Some("other-pin".into());
     expect_reason(
@@ -228,7 +233,21 @@ fn signed_actor(
 async fn verify_cas_orders_authority_updates_and_rolls_back() -> TestResult {
     let _hooks = ClearHooks;
     let (mut local, peer, peer_root) = linked().await?;
-    let expected = super::current_contact_safety_expectation(&local.client, &peer_root)?;
+    let expected = compared_expected(&local.client, &peer_root)?;
+    let own = local.client.own_account_anchor()?;
+    test_before_cas_transaction(Box::new(move |client| {
+        client.account_db()?.remove_actor_state(&format!("identity/custody/{own}"))?;
+        Ok(())
+    }));
+    let own_barrier = local
+        .client
+        .compare_and_record_contact_safety_verified(&expected)
+        .expect_err("test: own authority barrier");
+    assert!(matches!(own_barrier, SdkError::NetworkingPending));
+    absent(&local.client, &peer_root)?;
+    local.restart_authored_source().await?;
+    local.client.persist_fetched_identity_directory(&peer.manifest)?;
+    let expected = compared_expected(&local.client, &peer_root)?;
     for step in 1..=5 {
         test_interrupt_cas_at(step);
         let error = local

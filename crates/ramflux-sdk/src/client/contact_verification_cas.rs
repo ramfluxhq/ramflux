@@ -112,6 +112,7 @@ fn material_eq(left: &g::ExpectedContactSafety, right: &g::ExpectedContactSafety
 struct Snapshot {
     expected: g::ExpectedContactSafety,
     stamp: String,
+    safety: SdkContactSafetyNumber,
 }
 
 fn signed_head(record: &ramflux_protocol::SignedDeviceSetRecord) -> Result<String, SdkError> {
@@ -131,22 +132,14 @@ fn custody_snapshot(
         client.current_custody_authority(commitment, now)?.ok_or(SdkError::NetworkingPending)?;
     let safety = super::native_safety::safety_from_native(&own, &peer, "unverified".into())?;
     let stamp = safety.contact_device_set_hash.clone();
-    Ok(Snapshot {
-        expected: g::ExpectedContactSafety {
-            algorithm_version: Some(safety.algorithm_version),
-            self_identity_commitment: safety.self_identity_commitment,
-            contact_identity_commitment: safety.contact_identity_commitment,
-            safety_number_hash: safety.safety_number_hash,
-            contact_device_set_hash: safety.contact_device_set_hash,
-            contact_lineage_head: safety.contact_lineage_head,
-            self_authority_head: ramflux_protocol::custody::object_hash(own.envelope())?,
-            contact_authority_head: ramflux_protocol::custody::object_hash(peer.envelope())?,
-            principal_id: peer.envelope().body.principal_id.clone(),
-            link_id: link_id.to_owned(),
-            replace_provisional_root: None,
-        },
-        stamp,
-    })
+    let expected = expected_from_safety(
+        &safety,
+        ramflux_protocol::custody::object_hash(own.envelope())?,
+        ramflux_protocol::custody::object_hash(peer.envelope())?,
+        peer.envelope().body.principal_id.clone(),
+        link_id,
+    );
+    Ok(Snapshot { expected, stamp, safety })
 }
 
 fn signed_safety(
@@ -186,22 +179,67 @@ fn signed_snapshot(
     }
     let safety = signed_safety(client, &own, commitment)?;
     let stamp = super::identity_authority::set_fingerprint(&peer_set)?;
-    Ok(Snapshot {
-        expected: g::ExpectedContactSafety {
-            algorithm_version: Some(safety.algorithm_version),
-            self_identity_commitment: safety.self_identity_commitment,
-            contact_identity_commitment: safety.contact_identity_commitment,
-            safety_number_hash: safety.safety_number_hash,
-            contact_device_set_hash: safety.contact_device_set_hash,
-            contact_lineage_head: safety.contact_lineage_head,
-            self_authority_head: signed_head(&self_set)?,
-            contact_authority_head: signed_head(&peer_set)?,
-            principal_id: peer_set.principal_id.clone(),
-            link_id: link_id.to_owned(),
-            replace_provisional_root: None,
-        },
-        stamp,
-    })
+    let expected = expected_from_safety(
+        &safety,
+        signed_head(&self_set)?,
+        signed_head(&peer_set)?,
+        peer_set.principal_id.clone(),
+        link_id,
+    );
+    Ok(Snapshot { expected, stamp, safety })
+}
+
+fn expected_from_safety(
+    safety: &SdkContactSafetyNumber,
+    self_authority_head: String,
+    contact_authority_head: String,
+    principal_id: String,
+    link_id: &str,
+) -> g::ExpectedContactSafety {
+    g::ExpectedContactSafety {
+        algorithm_version: Some(safety.algorithm_version),
+        self_identity_commitment: safety.self_identity_commitment.clone(),
+        contact_identity_commitment: safety.contact_identity_commitment.clone(),
+        safety_number_hash: safety.safety_number_hash.clone(),
+        contact_device_set_hash: safety.contact_device_set_hash.clone(),
+        contact_lineage_head: safety.contact_lineage_head.clone(),
+        self_authority_head,
+        contact_authority_head,
+        principal_id,
+        link_id: link_id.to_owned(),
+        replace_provisional_root: None,
+    }
+}
+
+fn fill_replacement(
+    client: &RamfluxClient,
+    expected: &mut g::ExpectedContactSafety,
+) -> Result<(), SdkError> {
+    let Some(identity) = client.account_db()?.client_record("identity", &expected.principal_id)?
+    else {
+        return Ok(());
+    };
+    let Some(old) = identity["contact_identity_commitment"].as_str() else {
+        return Ok(());
+    };
+    if old == expected.contact_identity_commitment {
+        return Ok(());
+    }
+    if client.contact_root_source(&identity)? != crate::ContactRootSource::Lookup {
+        return Ok(());
+    }
+    expected.replace_provisional_root = Some(old.to_owned());
+    if expected.link_id.is_empty() {
+        let anchor = client.own_account_anchor()?;
+        if let Some(link) = client
+            .friend_links()?
+            .into_iter()
+            .find(|link| link.state == "accepted" && contact_peer(link, &anchor) == Some(old))
+        {
+            expected.link_id = link.link_id;
+        }
+    }
+    Ok(())
 }
 
 fn load_snapshot(
@@ -209,11 +247,13 @@ fn load_snapshot(
     commitment: &str,
     link_id: &str,
 ) -> Result<Snapshot, SdkError> {
-    if client.born_v3_account.is_some() {
-        custody_snapshot(client, commitment, link_id)
+    let mut snapshot = if client.born_v3_account.is_some() {
+        custody_snapshot(client, commitment, link_id)?
     } else {
-        signed_snapshot(client, commitment, link_id)
-    }
+        signed_snapshot(client, commitment, link_id)?
+    };
+    fill_replacement(client, &mut snapshot.expected)?;
+    Ok(snapshot)
 }
 
 pub(crate) fn retain_compared_manifest(
@@ -247,6 +287,7 @@ pub(crate) fn retain_compared_manifest(
 ///
 /// # Errors
 /// Returns authority, link, and storage errors. Missing authority is [`SdkError::NetworkingPending`].
+#[cfg(test)]
 #[must_use = "the snapshot is the only value a later compare-and-record may submit"]
 pub(crate) fn preview_contact_safety_expectation(
     client: &RamfluxClient,
@@ -256,6 +297,7 @@ pub(crate) fn preview_contact_safety_expectation(
     Ok(load_snapshot(client, commitment, link_id)?.expected)
 }
 
+#[cfg(test)]
 pub(crate) fn current_contact_safety_expectation(
     client: &RamfluxClient,
     commitment: &str,
@@ -318,130 +360,114 @@ fn confirmation_is_current(
         && decoded.identity.as_ref().is_some_and(|identity| identity.group_epoch.is_none())
 }
 
-fn legacy_view(stored: &str, stored_hash: &str, current_hash: &str, confirmed: bool) -> String {
-    if stored == "changed" {
+enum Decision {
+    Blocked,
+    Ready { state: String, snapshot: Box<Snapshot> },
+}
+
+fn link_id_for(client: &RamfluxClient, anchor: &str, commitment: &str) -> Result<String, SdkError> {
+    Ok(client
+        .friend_links()?
+        .into_iter()
+        .find(|link| link.state == "accepted" && contact_peer(link, anchor) == Some(commitment))
+        .map(|link| link.link_id)
+        .unwrap_or_default())
+}
+
+fn restricted(client: &RamfluxClient, anchor: &str, commitment: &str) -> Result<bool, SdkError> {
+    Ok(client.friend_links()?.iter().any(|link| {
+        contact_peer(link, anchor) == Some(commitment) && contact_link_restricted(link)
+    }))
+}
+
+fn derive_available(
+    stored: Option<&ramflux_storage::ContactVerificationRecord>,
+    saved: Option<&(g::ContactSafetyConfirmation, Vec<u8>)>,
+    snapshot: &Snapshot,
+) -> String {
+    if let Some((confirmation, inner)) = saved
+        && confirmation_is_current(confirmation, inner, &snapshot.expected)
+    {
+        return "verified".into();
+    }
+    if stored.is_some_and(|row| row.verification_state == "changed") {
         return "changed".into();
     }
-    if stored == "verified" && (confirmed || stored_hash != current_hash) {
+    if saved.is_some() {
         return "verification_stale".into();
     }
     "unverified".into()
 }
 
-fn legacy_observed(state: &str, stored_hash: &str, observed_hash: Option<&str>) -> String {
-    legacy_view(state, stored_hash, observed_hash.unwrap_or(""), false)
-}
-
-fn legacy_stored(
-    client: &RamfluxClient,
-    commitment: &str,
-    stored: Option<&ramflux_storage::ContactVerificationRecord>,
-    observed_hash: Option<&str>,
-) -> Result<String, SdkError> {
-    // A corrupt signed set stays a storage error. Absence is a legacy baseline, never V.
-    let _ = client.observed_device_set(commitment)?;
-    let Some(row) = stored else {
-        return Ok("unverified".into());
-    };
-    Ok(legacy_observed(&row.verification_state, &row.verified_device_set_hash, observed_hash))
-}
-
-fn effective_in_place(
-    client: &RamfluxClient,
-    commitment: &str,
-    observed_hash: Option<&str>,
-) -> Result<String, SdkError> {
+fn decide(client: &RamfluxClient, commitment: &str) -> Result<Decision, SdkError> {
     let db = client.account_db()?;
     let stored = db.contact_verification(commitment)?;
     if stored.as_ref().is_some_and(|row| row.verification_state == "blocked_by_policy") {
-        return Ok("blocked_by_policy".into());
+        return Ok(Decision::Blocked);
     }
+    let anchor = client.own_account_anchor()?;
+    if restricted(client, &anchor, commitment)? {
+        return Ok(Decision::Blocked);
+    }
+    let link_id = link_id_for(client, &anchor, commitment)?;
+    let snapshot = load_snapshot(client, commitment, &link_id)?;
     let saved = stored_confirmation(client, commitment)?;
-    let has_evidence = stored_has_evidence(stored.as_ref(), saved.as_ref());
-    match client.own_account_anchor() {
-        Ok(anchor) => anchored_state(
-            client,
-            commitment,
-            &anchor,
-            stored.as_ref(),
-            saved.as_ref(),
-            observed_hash,
-        ),
-        Err(SdkError::IdentityRootMissing) if saved.is_none() && !has_evidence => {
-            Ok("unverified".into())
-        }
-        Err(SdkError::IdentityRootMissing) if saved.is_none() => {
-            legacy_stored(client, commitment, stored.as_ref(), observed_hash)
-        }
-        Err(error) => Err(error),
-    }
+    let state = derive_available(stored.as_ref(), saved.as_ref(), &snapshot);
+    Ok(Decision::Ready { state, snapshot: Box::new(snapshot) })
 }
 
-fn stored_has_evidence(
-    stored: Option<&ramflux_storage::ContactVerificationRecord>,
-    saved: Option<&(g::ContactSafetyConfirmation, Vec<u8>)>,
-) -> bool {
-    saved.is_some()
-        || stored
-            .is_some_and(|row| matches!(row.verification_state.as_str(), "verified" | "changed"))
-}
-
-fn anchored_state(
-    client: &RamfluxClient,
-    commitment: &str,
-    anchor: &str,
-    stored: Option<&ramflux_storage::ContactVerificationRecord>,
-    saved: Option<&(g::ContactSafetyConfirmation, Vec<u8>)>,
-    observed_hash: Option<&str>,
-) -> Result<String, SdkError> {
-    let links = client.friend_links()?;
-    if links
-        .iter()
-        .any(|link| contact_peer(link, anchor) == Some(commitment) && contact_link_restricted(link))
-    {
-        return Ok("blocked_by_policy".into());
-    }
-    if !stored_has_evidence(stored, saved) {
-        return Ok("unverified".into());
-    }
-    let link_id = links
-        .iter()
-        .find(|link| link.state == "accepted" && contact_peer(link, anchor) == Some(commitment))
-        .map_or("", |link| link.link_id.as_str());
-    let snapshot = match load_snapshot(client, commitment, link_id) {
-        Ok(snapshot) => snapshot,
-        Err(SdkError::NetworkingPending) if saved.is_none() => {
-            return legacy_stored(client, commitment, stored, observed_hash);
-        }
-        Err(error) => return Err(error),
-    };
-    if let Some((confirmation, inner)) = saved
-        && confirmation_is_current(confirmation, inner, &snapshot.expected)
-    {
-        return Ok("verified".into());
-    }
-    let Some(row) = stored else {
-        return Ok("unverified".into());
-    };
-    Ok(legacy_view(
-        &row.verification_state,
-        &row.verified_device_set_hash,
-        &snapshot.expected.contact_device_set_hash,
-        saved.is_some(),
-    ))
+fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String, SdkError> {
+    Ok(match decide(client, commitment)? {
+        Decision::Blocked => "blocked_by_policy".into(),
+        Decision::Ready { state, .. } => state,
+    })
 }
 
 pub(crate) fn effective_state(
     client: &RamfluxClient,
     commitment: &str,
-    observed_hash: Option<&str>,
+    _observed_hash: Option<&str>,
 ) -> Result<String, SdkError> {
     let db = client.account_db()?;
     if db.is_query_only()? || db.in_transaction()? {
-        effective_in_place(client, commitment, observed_hash)
+        effective_in_place(client, commitment)
     } else {
-        db.read_snapshot(|| effective_in_place(client, commitment, observed_hash))
+        db.read_snapshot(|| effective_in_place(client, commitment))
     }
+}
+
+pub(crate) fn compared_safety_json(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> Result<serde_json::Value, SdkError> {
+    match decide(client, commitment)? {
+        Decision::Blocked => blocked_compared_json(client, commitment),
+        Decision::Ready { state, snapshot } => ready_compared_json(state, *snapshot),
+    }
+}
+
+fn ready_compared_json(state: String, snapshot: Snapshot) -> Result<serde_json::Value, SdkError> {
+    let mut safety = snapshot.safety;
+    safety.verification_state = state;
+    let mut value = serde_json::to_value(safety)?;
+    value["expected"] = serde_json::to_value(snapshot.expected)?;
+    Ok(value)
+}
+
+fn blocked_compared_json(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> Result<serde_json::Value, SdkError> {
+    let mut safety = client.contact_safety_number(commitment)?;
+    safety.verification_state = "blocked_by_policy".into();
+    let mut value = serde_json::to_value(safety)?;
+    if let Ok(anchor) = client.own_account_anchor() {
+        let link_id = link_id_for(client, &anchor, commitment)?;
+        if let Ok(snapshot) = load_snapshot(client, commitment, &link_id) {
+            value["expected"] = serde_json::to_value(snapshot.expected)?;
+        }
+    }
+    Ok(value)
 }
 
 fn author_matches(
@@ -527,7 +553,11 @@ fn install_matching(
         if stored_origin.id == origin.id && stored_inner != exact_inner {
             return Err(SdkError::ReplayMismatch);
         }
-        if stored_origin.id != origin.id && !higher_order(origin, stored_origin)? {
+        let stored_is_current = confirmation_is_current(&stored, &stored_inner, &snapshot.expected);
+        if stored_is_current
+            && stored_origin.id != origin.id
+            && !higher_order(origin, stored_origin)?
+        {
             return Ok(());
         }
     }

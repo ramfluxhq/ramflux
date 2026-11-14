@@ -40,23 +40,22 @@ async fn legacy_card_synthetic_verification_agrees_across_views_without_authenti
     ));
     let stamp_key = format!("identity/safety_verified_set/{root}");
     assert!(peer.client.account_db()?.load_actor_state::<String>(&stamp_key)?.is_none());
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "unverified");
+    assert!(matches!(peer.client.contact_safety_number(&root), Err(SdkError::NetworkingPending)));
     assert!(peer.client.verified_principal_kind("owner")?.is_none());
     assert_eq!(peer.client.contact_entry("owner")?["verified"], false);
-    assert_eq!(peer.client.contact_entry("owner")?["kind_verified"], false);
     peer.reopen()?;
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "unverified");
+    assert!(matches!(peer.client.contact_safety_number(&root), Err(SdkError::IdentityRootMissing)));
     let db = peer.client.account_db()?;
-    let result = crate::bus::test_account_reader_request(db, directory_request(&peer.id)).await?;
-    let row = result["identities"]
+    let directory =
+        crate::bus::test_account_reader_request(db, directory_request(&peer.id)).await?;
+    let row = directory["identities"]
         .as_array()
         .ok_or("identities")?
         .iter()
-        .find(|r| r["principal_id"] == "owner")
+        .find(|row| row["principal_id"] == "owner")
         .ok_or("owner")?;
-    assert_eq!(row["safety_state"], "unverified");
+    assert!(row["safety_state"].is_null(), "missing authority is not unverified");
     assert_eq!(row["verified"], false);
-    assert_eq!(row["kind_verified"], false);
     assert!(db.load_actor_state::<String>(&stamp_key)?.is_none());
     Ok(())
 }
@@ -90,13 +89,13 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
         assert!(query.persist_actor_state("must-stay-read-only", &true).is_err());
         let mut reader = RamfluxClient::new();
         reader.active_account_db = Some(query);
-        assert_eq!(
+        assert!(matches!(
             reader.contact_safety_verification_state(
                 &manifest.principal_commitment,
                 Some(current_hash)
-            )?,
-            if matches { "unverified" } else { "verification_stale" }
-        );
+            ),
+            Err(SdkError::IdentityRootMissing)
+        ));
         assert!(db.load_actor_state::<String>(&stamp_key)?.is_none());
         drop(reader);
         peer.reopen()?;
@@ -110,17 +109,16 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
             .iter()
             .find(|r| r["principal_id"] == "owner")
             .ok_or("owner")?;
-        let expected = if matches { "unverified" } else { "verification_stale" };
-        assert_eq!(row["safety_state"], expected);
+        assert!(row["safety_state"].is_null(), "a rootless directory does not claim unverified");
         assert_eq!(row["verified"], false);
         assert_eq!(row["kind_verified"], true);
-        assert_eq!(
+        assert!(matches!(
             peer.client.contact_safety_verification_state(
                 &manifest.principal_commitment,
                 Some(current_hash)
-            )?,
-            expected
-        );
+            ),
+            Err(SdkError::IdentityRootMissing)
+        ));
         let stamp = db.load_actor_state::<String>(&stamp_key)?;
         if matches {
             assert_eq!(
@@ -204,13 +202,13 @@ async fn sealed_migration_never_absorbs_new_unstamped_records_or_rescans_on_read
     legacy_record(&peer.client, &manifest)?;
     let row = db.client_record("identity", "owner")?.ok_or("identity")?;
     let key = format!("identity/safety_verified_set/{}", manifest.principal_commitment);
-    assert_eq!(
+    assert!(matches!(
         peer.client.contact_safety_verification_state(
             &manifest.principal_commitment,
             row["device_set_hash"].as_str()
-        )?,
-        "unverified"
-    );
+        ),
+        Err(SdkError::NetworkingPending)
+    ));
     migrate_legacy_contact_verifications(db)?;
     assert!(db.load_actor_state::<String>(&key)?.is_none());
     assert_eq!(peer.client.contact_entry("owner")?["verified"], false);
@@ -222,7 +220,7 @@ async fn sealed_migration_never_absorbs_new_unstamped_records_or_rescans_on_read
         .iter()
         .find(|r| r["principal_id"] == "owner")
         .ok_or("owner")?;
-    assert_eq!(owner_row["safety_state"], "unverified");
+    assert!(owner_row["safety_state"].is_null());
     assert!(db.load_actor_state::<String>(&key)?.is_none());
     // A later malformed authority would fail the old full scan. Sealed startup must not scan it.
     db.persist_actor_state(
@@ -310,21 +308,18 @@ fn legacy_unlock_skips_corrupt_contact_warns_once_and_migrates_healthy_contact()
         .is_none()
     );
     let healthy = db.client_record("identity", "alpha")?.ok_or("alpha")?;
-    assert_eq!(
+    assert!(matches!(
         peer.client.contact_safety_verification_state(
             &a.principal_commitment,
             healthy["device_set_hash"].as_str()
-        )?,
-        "unverified"
-    );
+        ),
+        Err(SdkError::IdentityRootMissing)
+    ));
     assert!(matches!(
         peer.client.contact_safety_verification_state(&b.principal_commitment, Some("hash")),
-        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
+        Err(SdkError::IdentityRootMissing)
     ));
-    assert!(matches!(
-        peer.client.verified_principal_kind("beta"),
-        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
-    ));
+    assert_eq!(peer.client.verified_principal_kind("beta")?, None);
     tracing::subscriber::with_default(logs.clone(), || peer.reopen())?;
     let entries = logs.0.lock().map_err(|_| "log lock")?;
     let warnings = entries
@@ -424,13 +419,13 @@ fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> Te
             .is_none()
         );
         let local = db.client_record("identity", "other")?.ok_or("other")?;
-        assert_eq!(
+        assert!(matches!(
             reader.contact_safety_verification_state(
                 &unrelated.principal_commitment,
                 local["device_set_hash"].as_str()
-            )?,
-            "unverified"
-        );
+            ),
+            Err(SdkError::IdentityRootMissing)
+        ));
         assert!(
             db.load_actor_state::<String>(&format!(
                 "identity/safety_verified_set/{}",
@@ -456,13 +451,13 @@ fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> Te
             assert!(imported.is_none());
         } else {
             let imported = imported.ok_or("imported")?;
-            assert_eq!(
+            assert!(matches!(
                 reader.contact_safety_verification_state(
                     &incoming.principal_commitment,
                     imported["device_set_hash"].as_str()
-                )?,
-                "unverified"
-            );
+                ),
+                Err(SdkError::IdentityRootMissing)
+            ));
         }
     }
     Ok(())

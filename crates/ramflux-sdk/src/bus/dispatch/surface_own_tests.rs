@@ -713,6 +713,47 @@ fn fresh_sibling_gateway(
     Ok(gateway)
 }
 
+pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
+    let root = runtime_tests::root("cas-sibling-e2ee");
+    let mut source = runtime_tests::account(
+        &root.join("source"),
+        "sender",
+        None,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    let (sibling, config, receiver, directory, peer) =
+        sibling_fixture_with_peer(&root, &mut source, true).await?;
+    let own = source.client.own_account_anchor()?;
+    let peer_root = peer.client.own_account_anchor()?;
+    source.client.establish_friend_link("cas-e2ee", &own, &peer_root)?;
+    sibling.client.establish_friend_link("cas-e2ee", &own, &peer_root)?;
+    let recorded =
+        crate::client::contact_verification_cas::verify_linked_contact(&source.client, &peer_root)?;
+    assert_eq!(recorded.verification_state, "verified");
+    assert_eq!(recorded.sibling_delivery_pending, Some(true), "roster stages the sibling copy");
+    let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
+    let sent = Arc::clone(&gateway.own);
+    source
+        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
+    let packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    assert_eq!(
+        sibling.client.contact_safety_number(&peer_root)?.verification_state,
+        "verified",
+        "the sibling device installs the compared confirmation"
+    );
+    assert!(
+        sibling
+            .client
+            .account_db()?
+            .actor_state_exists(&format!("identity/contact_safety_confirmation/{peer_root}"))?
+    );
+    directory.abort();
+    drop((source, sibling, peer));
+    Ok(())
+}
+
 #[tokio::test]
 async fn sibling_control_is_applied_and_acked_without_entering_message_receive_projection()
 -> TestResult {
