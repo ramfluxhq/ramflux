@@ -24,21 +24,6 @@ pub(super) fn wipe(value: &mut Value) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn wipes_nested_passphrases_and_seed_bytes_after_serialization() -> Result<(), serde_json::Error>
-    {
-        let mut value = serde_json::json!({"passphrase":"secret","create":{"root_seed":[41,42,43]},"restore":{"account_secret":"restore-secret"}});
-        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&value)?);
-        assert!(String::from_utf8_lossy(&bytes).contains("restore-secret"));
-        wipe(&mut value);
-        assert_eq!(value, serde_json::json!({}), "wiping retires keys as well as secret values");
-        Ok(())
-    }
-}
-
 fn wipe_string(value: &mut String) {
     #[cfg(all(test, feature = "c-abi"))]
     let observed = canary::observed(value);
@@ -82,5 +67,20 @@ pub(crate) mod canary {
             let (active, n, prior) = s.get();
             s.set((active, n + 1, prior && ok));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wipes_nested_passphrases_and_seed_bytes_after_serialization() -> Result<(), serde_json::Error>
+    {
+        let mut value = serde_json::json!({"passphrase":"secret","create":{"root_seed":[41,42,43]},"restore":{"account_secret":"restore-secret"}});
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&value)?);
+        assert!(String::from_utf8_lossy(&bytes).contains("restore-secret"));
+        wipe(&mut value);
+        assert_eq!(value, serde_json::json!({}), "wiping retires keys as well as secret values");
+        Ok(())
     }
 }
