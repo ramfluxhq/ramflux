@@ -101,12 +101,9 @@ impl Group {
                 1,
             )?;
             for identity in &identities {
-                client.account_db()?.upsert_root_bound_group_member_snapshot(
-                    "group",
-                    identity,
-                    "member",
-                    1,
-                )?;
+                client
+                    .account_db()?
+                    .upsert_root_bound_group_member_snapshot("group", identity, "member", 1)?;
             }
             client.pin_local_group_member("group")?;
             client.pin_joined_group_member("group", source_identity.storage_key())?;
