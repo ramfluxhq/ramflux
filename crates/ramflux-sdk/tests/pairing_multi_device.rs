@@ -157,20 +157,7 @@ async fn full_acceptance() -> ResultOf<()> {
         assert_eq!(dh.public, agreement, "test: transfer replaced a device agreement identity");
         assert_eq!(current, reference, "test: transfer replaced a device reference");
     }
-    for device in [&mut fixture.a, &mut fixture.b] {
-        for iteration in [2, 8, 16] {
-            assert!(
-                device.with_db(|db| Ok(matches!(
-                    db.check_object_identity(
-                        &format!("concurrent-{iteration}"),
-                        "concurrent-manifest"
-                    ),
-                    Err(ramflux_storage::StorageError::ObjectErased)
-                )))?,
-                "test: concurrent B veto lost in actual union/tail"
-            );
-        }
-    }
+    assert_transfer_vetoes(&mut fixture)?;
     assert_retained_devices(&fixture, &original)?;
     // C reconnects to its own independently queried native authority after the handoff.
     fixture.c.participant.take_client(&mut fixture.c.client)?;
@@ -191,6 +178,35 @@ async fn full_acceptance() -> ResultOf<()> {
     fixture.a.actor.lock().await?;
     fixture.b.actor.lock().await?;
     fixture.c.actor.lock().await?;
+    Ok(())
+}
+
+fn assert_transfer_vetoes(fixture: &mut full::Fixture) -> ResultOf<()> {
+    // The one frozen reverse cut reaches A before its signed semantic receipt.
+    // Later B writes are rebased into B; their delivery to A uses ordinary sync.
+    for device in [&mut fixture.a, &mut fixture.b] {
+        for key in ["source-veto", "target-veto"] {
+            assert!(
+                device.with_db(|db| Ok(matches!(
+                    db.check_object_identity(
+                        key,
+                        if key == "source-veto" { "source-manifest" } else { "target-manifest" }
+                    ),
+                    Err(ramflux_storage::StorageError::ObjectErased)
+                )))?,
+                "test: frozen original-branch veto lost in actual duplex/tail"
+            );
+        }
+    }
+    for iteration in [2, 8, 16] {
+        assert!(
+            fixture.b.with_db(|db| Ok(matches!(
+                db.check_object_identity(&format!("concurrent-{iteration}"), "concurrent-manifest"),
+                Err(ramflux_storage::StorageError::ObjectErased)
+            )))?,
+            "test: concurrent B veto lost in actual union/tail"
+        );
+    }
     Ok(())
 }
 
