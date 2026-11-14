@@ -148,8 +148,6 @@ typedef int32_t RamfluxV2Status;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
-struct Option_CredentialCallback;
-
 struct RamfluxClient {
   uint8_t _private[0];
 };
@@ -197,6 +195,19 @@ struct RamfluxV2CustodyProvider {
    */
   int32_t (*invoke)(uint64_t context, struct RamfluxV2CustodyRequest *request);
 };
+
+/*
+ Nullable host callback; null unregisters and drains outstanding uses.
+ */
+typedef int32_t (*CredentialProviderCallback)(const uint8_t*,
+                                              size_t,
+                                              uint8_t*,
+                                              size_t,
+                                              size_t*,
+                                              uint8_t*,
+                                              size_t,
+                                              size_t*,
+                                              void*);
 
 #ifdef __cplusplus
 extern "C" {
@@ -429,7 +440,7 @@ int32_t ramflux_pairing_event_poll(struct RamfluxClient *client, struct RamfluxB
  this client from its callback; cancel its own waiting UI before closing the client.
  */
 int32_t ramflux_pairing_set_credential_provider(struct RamfluxClient *client,
-                                                struct Option_CredentialCallback callback,
+                                                CredentialProviderCallback callback,
                                                 void *user_data);
 
 #ifdef __cplusplus

@@ -52,16 +52,33 @@ async fn prepare_race() -> Result<Linked, Box<dyn std::error::Error>> {
     let a = fixture.rig.source.client.account_db()?;
     seed(a, &["race-shared-parent", "race-a-parent"])?;
     seed(fixture.target.account_db()?, &["race-shared-parent"])?;
+    assert_shared_dependency(&fixture.target, "before DATA")?;
     let mut fixture = Box::pin(run_data_in(fixture, false)).await?;
+    assert_shared_dependency(&fixture.target, "after DATA")?;
     // The signed prepublication chain is immutable; these changes belong to J6's tail.
     let a = fixture.rig.source.client.account_db()?;
     // An absence removes only A's assertion. Retiring a transport payload also
     // creates a restrictive erasure fence, which must dominate both contributors.
     a.remove_full_transfer_dependency_for_test("race-shared-parent", HASH, CHILD, HASH)?;
     a.retire_transport_object("race-a-parent", HASH)?;
+    assert_shared_dependency(&fixture.target, "after source deletion")?;
     fixture = Box::pin(install_in(fixture, 3)).await?;
+    assert_shared_dependency(&fixture.target, "after G3 before explicit tail drive")?;
     Box::pin(merge(&mut fixture)).await?;
     Ok(fixture)
+}
+
+fn assert_shared_dependency(client: &crate::RamfluxClient, phase: &str) -> TestResult {
+    assert!(
+        client.account_db()?.full_transfer_dependency_present_for_test(
+            "race-shared-parent",
+            HASH,
+            CHILD,
+            HASH,
+        )?,
+        "test: B independent dependency lost {phase}"
+    );
+    Ok(())
 }
 
 #[tokio::test(start_paused = true)]
