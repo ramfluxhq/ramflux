@@ -148,6 +148,10 @@ mod tests {
         )
         .await
         .map_err(|error| format!("test: linked B sync ({position}): {error}"))?;
+        // The sync turn may have completed A3 or exposed a new stream request.
+        // Service both actual writers before charging another relay poll interval.
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        rig.secondary.service_full_transfer(target.account_db()?)?;
         settle_stream_work(rig).await;
         Ok(())
     }
@@ -744,6 +748,9 @@ mod tests {
             false,
         )
         .await?;
+        // The cold owners discarded their bearer tokens; wait for the specified
+        // ten-second native epoch idle expiry before requesting fresh A3 keys.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
         drive(
             Box::pin(rig.primary.resume_full_data(&a)),
             source_service,
