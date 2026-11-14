@@ -878,8 +878,6 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
-        // Legacy entrypoints do not expose local search; v2 owns its status policy.
-        SdkError::Search(_) => RamfluxErrorCode::UnsupportedVersion,
         SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
@@ -888,7 +886,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
-        SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
+        // Legacy entrypoints do not expose local search; v2 owns its status policy.
+        SdkError::Search(_)
+        | SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
