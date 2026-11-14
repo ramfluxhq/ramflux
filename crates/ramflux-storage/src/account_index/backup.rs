@@ -83,7 +83,7 @@ impl AccountIndex {
         // The hint precedes commit, so false positives only cause an index lookup. Sync newly
         // created account-parent entries as well as files before publishing the generation.
         for directory in [&parent, &accounts, &self.root] {
-            std::fs::File::open(directory)?.sync_all()?;
+            crate::sync_path::sync_path(directory)?;
         }
         Ok(())
     }

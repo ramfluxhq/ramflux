@@ -36,6 +36,15 @@ mod bus;
 pub mod c_abi;
 mod client;
 mod platform;
+/// Default data root on Windows: `%LOCALAPPDATA%\ramflux\<profile>`, resolved with the Known
+/// Folder API. `None` selects the profile `default`. The roaming folder is never used.
+///
+/// # Errors
+/// Returns an error for an invalid profile name or when the shell reports no folder.
+#[cfg(windows)]
+pub fn windows_default_data_root(profile: Option<&str>) -> Result<std::path::PathBuf, SdkError> {
+    platform::fs::default_data_root(profile.unwrap_or(platform::fs::DEFAULT_PROFILE))
+}
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,

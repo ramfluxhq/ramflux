@@ -148,7 +148,7 @@ impl AccountDb {
             target.close().map_err(|(_, error)| error)?;
             Ok(Ok(counts))
         })??;
-        std::fs::File::open(destination)?.sync_all()?;
+        crate::sync_path::sync_path(destination)?;
         Ok(AccountBackupSnapshot { key, counts })
     }
 }

@@ -4,9 +4,10 @@
 //! Listener descriptor reservation and recoverable accept failures.
 use crate::{CustodyPoolSettings, NodeCoreError};
 use std::{collections::HashSet, io, time::Duration};
-/// Raise the soft descriptor ceiling to the hard limit and check listener reservations.
+/// On Unix, raise the soft descriptor ceiling to the hard limit and check listener reservations.
+/// Other platforms have no `RLIMIT_NOFILE`; the in-process limiter remains the cap.
 /// # Errors
-/// Refuses an unsupported platform, a failed resource-limit update or insufficient descriptors.
+/// Refuses a failed resource-limit update or insufficient descriptors.
 pub fn custody_listener_resources(
     settings: CustodyPoolSettings,
     listeners: usize,
@@ -48,12 +49,13 @@ pub fn custody_listener_resources(
     }
     #[cfg(not(unix))]
     {
+        // Router startup reserves zero listeners. A configured gateway reserves two.
+        // Neither can consult RLIMIT_NOFILE on this platform.
         let _ = (settings, listeners);
-        Err(NodeCoreError::InvalidConfiguration(
-            "custody listeners require RLIMIT_NOFILE support".into(),
-        ))
+        Ok(())
     }
 }
+#[cfg_attr(not(unix), allow(dead_code))]
 fn validate_nofile(h: usize, a: usize, soft: u64) -> Result<(), NodeCoreError> {
     if (h as u64) + (a as u64) + 512 > soft {
         return Err(NodeCoreError::InvalidConfiguration(format!(
@@ -141,6 +143,7 @@ fn pending_connection_error(error: &io::Error) -> bool {
     let _ = error;
     false
 }
+#[cfg_attr(not(unix), allow(dead_code))]
 fn pending_linux_connection_error(errno: i32) -> bool {
     #[cfg(target_os = "linux")]
     {

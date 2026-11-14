@@ -6,6 +6,9 @@ use crate::{RfError, cli::VaultCommand};
 #[cfg(target_os = "linux")]
 use crate::cli::VaultAction;
 
+// Linux awaits the vault installation. Other hosts return before any await, and the
+// signature stays async so every caller uses the same path.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
 pub(crate) async fn handle(command: VaultCommand) -> Result<(), RfError> {
     #[cfg(target_os = "linux")]
     {

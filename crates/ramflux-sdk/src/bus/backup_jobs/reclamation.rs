@@ -14,7 +14,7 @@ pub(super) fn remember(
     let mut file = crate::platform::fs::create_new_owner_only(&generation.join(MARKER))?;
     file.write_all(&serde_json::to_vec(&previous.db_relative_path)?)?;
     file.sync_all()?;
-    std::fs::File::open(generation)?.sync_all()?;
+    crate::platform::fs::sync_path(generation)?;
     Ok(())
 }
 pub(super) fn complete(
@@ -75,8 +75,8 @@ pub(super) fn complete(
             Err(e) => return Err(e.into()),
         }
     }
-    std::fs::File::open(&account)?.sync_all()?;
+    crate::platform::fs::sync_path(&account)?;
     std::fs::remove_file(marker)?;
-    std::fs::File::open(generation)?.sync_all()?;
+    crate::platform::fs::sync_path(generation)?;
     Ok(())
 }

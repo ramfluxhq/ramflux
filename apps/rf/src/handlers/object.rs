@@ -353,9 +353,17 @@ fn object_get_temp_path(out: &std::path::Path) -> PathBuf {
 /// or a final symlink (`create_new`/`O_EXCL` never follows or truncates), so a symlink or clobber planted
 /// in the output directory cannot redirect or destroy the download. The caller fails closed and
 /// removes the temp on any error; the temp is renamed into place only after the streamed hash checks.
+#[cfg(unix)]
 fn object_get_open_temp(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+/// Windows: `create_new` refuses an existing name, including a link, and never truncates. The
+/// file takes the access list of the output directory the user chose, like any saved download.
+#[cfg(windows)]
+fn object_get_open_temp(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// A stable `operation_id` for a logical `object.get`, bound to `object_id` + normalized relay

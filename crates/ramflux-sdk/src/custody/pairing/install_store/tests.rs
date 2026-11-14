@@ -5,6 +5,7 @@ use super::{Install, LIMIT, decode, encode, list_pending, pending_path, write_pe
 use crate::SdkError;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::encode_base64url;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 fn h(byte: u8) -> String {
@@ -158,6 +159,8 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
     fourth.operation_id = h(40);
     assert!(matches!(write_pending(&root, &fourth), Err(SdkError::PairingField("pending_cap"))));
     let path = pending_path(&root, "acct", &h(30));
+    assert!(path.is_file(), "pending enrollment file missing");
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     assert_eq!(list_pending(&root, "acct")?.len(), 3);
     let fourth_path = pending_path(&root, "acct", &h(40));

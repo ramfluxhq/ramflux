@@ -487,6 +487,9 @@ fn wait_for_ready_mode(
         _ => return Err(format!("unknown shutdown-test service {service}").into()),
     };
     let extra: &[&str] = match service {
+        // QUIC and TCP bind on separate tasks. The public check is a TCP connect, so the QUIC
+        // line alone is not proof that the TCP port accepts.
+        "ramflux-gateway" => &["gateway TCP-TLS session surface listening"],
         "ramflux-router" => &["router async QUIC ingress listening"],
         "ramflux-retention" => &["retention async QUIC ingress listening"],
         "ramflux-federation" => {

@@ -189,7 +189,7 @@ pub(super) fn save_metadata(
     let mut bytes = nonce[..12].to_vec();
     bytes.extend(sealed);
     std::fs::write(path, &bytes)?;
-    std::fs::File::open(path)?.sync_all()?;
+    crate::platform::fs::sync_path(path)?;
     Ok(())
 }
 pub(super) fn load_metadata(path: &Path, key: &[u8; 32]) -> Result<Metadata, SdkError> {

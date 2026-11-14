@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Connection-local secret ceremony, deliberately bypassing actors, retry journals and events.
+#[cfg(not(windows))]
+use crate::custody::NativePrimaryVault;
 use crate::{
     LocalBusConfig, LocalBusFrame, SdkError,
-    custody::{CreateInput, CreationCeremony, NativePrimaryVault},
+    custody::{CreateInput, CreationCeremony},
 };
 use serde::Serialize;
 use std::{path::Path, sync::Arc};
@@ -150,9 +152,16 @@ pub(super) fn primary_provider(
     if let Some(vault) = &config.custody_vault {
         return vault.clone();
     }
-    #[cfg(not(any(test, feature = "itest-memory-vault")))]
-    let _ = config;
-    std::sync::Arc::new(NativePrimaryVault)
+    #[cfg(windows)]
+    {
+        std::sync::Arc::new(crate::custody::WindowsDpapiVault::for_data_root(&config.data_root))
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(not(any(test, feature = "itest-memory-vault")))]
+        let _ = config;
+        std::sync::Arc::new(NativePrimaryVault)
+    }
 }
 
 async fn apply(

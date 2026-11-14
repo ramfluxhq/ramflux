@@ -11,13 +11,13 @@ pub(super) fn remember_partial_output(stage: &Path, path: &Path) -> Result<(), S
     let mut file = crate::platform::fs::create_new_owner_only(&stage.join(OUTPUT_MARKER))?;
     file.write_all(&serde_json::to_vec(path)?)?;
     file.sync_all()?;
-    std::fs::File::open(stage)?.sync_all()?;
+    crate::platform::fs::sync_path(stage)?;
     Ok(())
 }
 pub(super) fn mark_install(generation: &Path) -> Result<(), SdkError> {
     let file = crate::platform::fs::create_new_owner_only(&generation.join(INSTALL_MARKER))?;
     file.sync_all()?;
-    std::fs::File::open(generation)?.sync_all()?;
+    crate::platform::fs::sync_path(generation)?;
     Ok(())
 }
 pub(super) fn selected(generation: &Path) {
