@@ -611,7 +611,9 @@ async fn durable_edit_retry() -> TestResult {
     let conversation = g::dm_scope::derive(&own, &remote)?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (target, recipients) =
-        Box::pin(seed_durable_edit(&mut source, &mut first, &mut second, &conversation)).await?;
+        Box::pin(seed_durable_edit(&mut source, &mut first, &mut second, &conversation))
+            .await
+            .map_err(|error| format!("seed authenticated edit: {error}"))?;
     let mut request = crate::LocalBusFrame::request(
         "edit",
         Some("source".into()),
@@ -657,6 +659,7 @@ async fn durable_edit_retry() -> TestResult {
     drop(prepared);
     drop(wire);
     source.restart_authored_source().await?;
+    source.client.persist_fetched_identity_directory(&first.manifest)?;
     let prepared = mutation::prepare(&source.client, &request)?;
     assert_eq!(prepared.identity.id, event, "lost reply cannot allocate another mutation identity");
     assert_eq!(
@@ -795,6 +798,7 @@ async fn finish_durable_edit_retry(case: EditRetry) -> TestResult {
     drop(refused);
     drop(retry);
     source.restart_authored_source().await?;
+    source.client.persist_fetched_identity_directory(&first.manifest)?;
     let config = engine(&source, &first, false)?;
     let client = std::mem::replace(&mut source.client, RamfluxClient::new());
     let mut account = crate::prelude::LocalBusAccountState::new(client, config, own);
