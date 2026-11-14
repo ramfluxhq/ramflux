@@ -266,14 +266,24 @@ impl FullTransferStage<'_> {
             Err(error) => return Err(error),
         };
         file.seek(SeekFrom::Start(slot_offset(index)))?;
+        #[cfg(test)]
+        super::stage_tests::process_cuts::checkpoint(0)?;
         file.write_all(encrypted.as_file_bytes())?;
+        #[cfg(test)]
+        super::stage_tests::process_cuts::checkpoint(1)?;
         file.sync_all()?;
+        #[cfg(test)]
+        super::stage_tests::process_cuts::checkpoint(2)?;
         std::fs::File::open(&self.directory)?.sync_all()?;
+        #[cfg(test)]
+        super::stage_tests::process_cuts::checkpoint(3)?;
         self.require_io()?;
         self.connection.execute(
             "INSERT INTO chunk(direction,manifest_hash,idx,length,digest,file_durable) VALUES(0,?1,?2,?3,?4,1)",
             params![manifest_hash,index,expected,digest.as_slice()],
         )?;
+        #[cfg(test)]
+        super::stage_tests::process_cuts::checkpoint(4)?;
         Ok(true)
     }
 

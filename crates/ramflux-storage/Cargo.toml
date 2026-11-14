@@ -40,6 +40,7 @@ insecure-test-sqlite = ["rusqlite/bundled"]
 workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "process", "io-util", "time"] }
 ramflux-test-support.workspace = true
 tempfile.workspace = true
 ed25519-dalek.workspace = true
