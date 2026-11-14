@@ -276,7 +276,7 @@ fn primary_transfer_full_census_every_family() -> TestResult {
 }
 
 #[test]
-fn pairing_full_baseline_catalog_rule_and_census_hashes_match_independent_vectors() -> TestResult {
+fn primary_transfer_full_catalog_hashes_are_pinned() -> TestResult {
     let declarations: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../ramflux-protocol/fixtures/full_transfer/catalog-baseline-rules.json"
     ))?;

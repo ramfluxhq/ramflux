@@ -212,15 +212,18 @@ async fn merge(
     request: &StatusRequest,
 ) -> TestResult {
     let mut merged = false;
-    for _ in 0..96 {
+    for turn in 0..96 {
+        eprintln!("test: tail merge turn={turn} source step");
         if !rig.primary.full_data_worker_owns_relay() {
             rig.clock.advance_ms(1001);
         }
         drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
+        eprintln!("test: tail merge turn={turn} target step");
         if !rig.secondary.full_data_worker_owns_relay() {
             rig.clock.advance_ms(1001);
         }
         drive(Box::pin(rig.secondary.sync_relay()), target, client).await?;
+        eprintln!("test: tail merge turn={turn} status step");
         let a = rig.primary.transfer_status(request).await?;
         let b = rig.secondary.transfer_status(request).await?;
         if is_merged(&a) && is_merged(&b) {
@@ -264,12 +267,14 @@ fn tail_progress(reply: &LocalResult) -> String {
 #[tokio::test(start_paused = true)]
 async fn pairing_stage_unlock_snapshot_resume_and_cleanup() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(cold_cleanup())).await;
+    let result =
+        crate::bus::credentials::contract_tests::deadline(Box::pin(cold_cleanup(false))).await;
     hold.finish().await?;
     result
 }
-async fn cold_cleanup() -> TestResult {
+async fn cold_cleanup(replay: bool) -> TestResult {
     let (mut rig, mut source, client, mut target, request) = Box::pin(setup()).await?;
+    let replay = if replay { Some(replay::original(&rig, &request)?) } else { None };
     Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;
     for (participant, db) in [
         (&rig.participant_a, rig.source.client.account_db()?),
@@ -304,6 +309,18 @@ async fn cold_cleanup() -> TestResult {
     });
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
+    if let Some((hello, origin)) = replay {
+        // The data-only node can forget its idle epoch while durable endpoint
+        // completion remains authoritative. A replayed live lease is no resume proof.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        source_relay
+            .as_ref()
+            .ok_or("test: original replay transport")?
+            .full_transport()
+            .ok_or("test: original full relay port")?
+            .hello_full(&origin, &hello)
+            .await?;
+    }
     rig.source.client = crate::RamfluxClient::new();
     drop(client);
     let source_client = reopen(&rig.participant_a, b"fresh-source-data")?;
@@ -379,6 +396,13 @@ async fn cold_status(
         PairingConfig { enabled: true, extra_root_ca_pem: None },
     );
     actor.set_participant(participant);
+    actor.set_full_node(
+        crate::custody::network_tests::node(
+            crate::custody::network_now()?,
+            encode_base64url([29; 32]),
+        )
+        .map_err(|error| error.to_string())?,
+    );
     let mut service = actor.bind_frontend_writer(client.account_db()?)?;
     let result = drive(Box::pin(actor.transfer_status(request)), &mut service, client).await?;
     assert!(is_merged(&result), "test: removed stage lost durable terminal status");
@@ -387,6 +411,15 @@ async fn cold_status(
         "test: terminal cold status restored SAS context"
     );
     assert!(actor.displayed_proposal().is_err(), "test: terminal cold status restored approval");
+    assert!(
+        matches!(
+            drive(Box::pin(actor.resume_full_data(request)), &mut service, client).await,
+            Err(SdkError::PairingCode("PublicationPending"))
+        ),
+        "test: a completed endpoint did not enforce its durable terminal phase"
+    );
+    let repeated = drive(Box::pin(actor.transfer_status(request)), &mut service, client).await?;
+    assert!(is_merged(&repeated), "test: replay changed durable completion");
     actor.lock().await?;
     Ok(())
 }
@@ -399,3 +432,4 @@ mod hostile;
 mod attachment;
 
 mod hostile_context;
+mod replay;

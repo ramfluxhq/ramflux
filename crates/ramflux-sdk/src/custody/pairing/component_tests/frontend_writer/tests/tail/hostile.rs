@@ -7,11 +7,13 @@ use super::*;
 async fn pairing_full_tail_relay_admission_is_data_only_endpoints_enforce() -> TestResult {
     let hold = ClockHold::new();
     crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await?;
+    eprintln!("test: hostile tail cold positive merge complete; checking signed context attacks");
     for fault in [
         super::hostile_context::Fault::Parent,
         super::hostile_context::Fault::Transfer,
         super::hostile_context::Fault::DeltaAfterJ6,
     ] {
+        eprintln!("test: hostile tail signed context case {fault:?}");
         crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
             fault,
         )))

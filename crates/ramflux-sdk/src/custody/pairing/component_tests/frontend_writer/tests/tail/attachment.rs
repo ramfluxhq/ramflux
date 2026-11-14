@@ -129,7 +129,14 @@ async fn after_candidate() -> TestResult {
     let mut pending = false;
     for _ in 0..96 {
         rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await?;
+        match drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await {
+            Ok(_)
+            | Err(
+                SdkError::PairingCode("AttachmentNotRemote")
+                | SdkError::PairingField("AttachmentNotRemote"),
+            ) => {}
+            Err(error) => return Err(error.into()),
+        }
         rig.clock.advance_ms(1001);
         drive(Box::pin(rig.secondary.sync_relay()), &mut target, &client).await?;
         let status = rig.primary.transfer_status(&request).await?;

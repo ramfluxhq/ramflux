@@ -157,7 +157,7 @@ fn commit_batch(
     records: &[Record],
 ) -> Result<(), StorageError> {
     let current = read_progress(
-        &tx,
+        tx,
         &scope.operation,
         &scope.nonce,
         &scope.digest,
@@ -174,12 +174,12 @@ fn commit_batch(
         }
         if record.header.op == RecordOp::Absent {
             if !rule.restrictive {
-                absent_dependency(&tx, &scope.operation, &record.header)?;
+                absent_dependency(tx, &scope.operation, &record.header)?;
             }
             continue;
         }
         apply_fixed_base_in_transaction(
-            &tx,
+            tx,
             &scope.source,
             &record.header,
             &mut record.bytes.as_slice(),

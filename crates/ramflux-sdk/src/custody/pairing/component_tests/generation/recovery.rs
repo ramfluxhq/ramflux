@@ -174,13 +174,25 @@ mod tests {
                 generation,
             }
         };
-        let db = crate::bus::unlock_for_test(
+        if crate::custody::pairing::install_store::read_pending(
             &rig.participant_b.root,
             &rig.participant_b.account_id,
-            &request,
-            rig.participant_b.provider.as_ref(),
-        )?;
-        *rig.participant_b.db.lock().map_err(|_| "test: original B owner")? = Some(db);
+            &operation,
+        )?
+        .is_some()
+        {
+            let db = crate::bus::unlock_for_test(
+                &rig.participant_b.root,
+                &rig.participant_b.account_id,
+                &request,
+                rig.participant_b.provider.as_ref(),
+            )?;
+            *rig.participant_b.db.lock().map_err(|_| "test: original B owner")? = Some(db);
+        } else {
+            frontend
+                .unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")?;
+            rig.participant_b.take_client(&mut frontend)?;
+        }
         Box::pin(exercise_recovered_actor(
             &rig,
             install,

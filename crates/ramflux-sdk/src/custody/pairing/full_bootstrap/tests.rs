@@ -148,7 +148,7 @@ impl PairingNative for Native {
     }
 }
 #[tokio::test]
-async fn pairing_full_bootstrap_orders_four_controls_and_authenticates_exact_lease() -> Result {
+async fn pairing_full_lease_bootstrap_carriers_are_closed_and_ordered() -> Result {
     let f = fixture()?;
     let mut a =
         FullBootstrap::new(PairingRole::Initiator, f.a, f.context.clone(), f.node.clone(), f.now)?;
@@ -173,7 +173,27 @@ async fn pairing_full_bootstrap_orders_four_controls_and_authenticates_exact_lea
     let signed = b2.receive(&offer, f.now, sign)?.ok_or("signed grant")?;
     assert_eq!(signed.counter, 0);
     assert!(a.receive(&signed, f.now, refused)?.is_none());
+    closed::carrier(&FullSasControl::GrantOffer(GrantOfferFull {
+        grant: f.grant.clone(),
+        kind: "grant_offer_full".into(),
+        profile: PROFILE.into(),
+    }))?;
+    closed::carrier(&FullSasControl::GrantSigned(GrantSignedFull {
+        destination_signature: a
+            .request
+            .as_ref()
+            .ok_or("test: exact signed grant")?
+            .destination_signature
+            .clone(),
+        kind: "grant_signed_full".into(),
+        profile: PROFILE.into(),
+    }))?;
     let (lease, local, _a_trust) = a.issue_source_lease(&native, f.now).await?;
+    closed::carrier(&FullSasControl::Lease(LeaseFull {
+        lease: local.clone(),
+        kind: "lease_full".into(),
+        profile: PROFILE.into(),
+    }))?;
     assert_eq!(lease.counter, 2);
     assert!(
         a.start.is_none() && a.prepared_source.is_none() && a.request.is_none(),
@@ -190,10 +210,15 @@ async fn pairing_full_bootstrap_orders_four_controls_and_authenticates_exact_lea
     assert!(b2.accept_destination_lease(&lease, f.now).is_err());
     // A foreign ceremony cannot decrypt/adopt the lease.
     assert!(b.accept_destination_lease(&lease, f.now).is_err());
+    reject_unfrozen_grants()?;
+    closed::reject_changed_lease().await?;
     Ok(())
 }
 #[test]
 fn pairing_full_bootstrap_rebuilds_grant_before_signer_and_enforces_original_expiry() -> Result {
+    reject_unfrozen_grants()
+}
+fn reject_unfrozen_grants() -> Result {
     for change in 0..6 {
         let f = fixture()?;
         let mut b = FullBootstrap::new(PairingRole::Responder, f.b, f.context, f.node, f.now)?;
@@ -254,3 +279,5 @@ pub(in crate::custody::pairing) async fn epoch_trusts() -> Result<(FullResumeTru
     let (_, bt) = b.accept_destination_lease(&frame, f.now)?;
     Ok((at, bt))
 }
+
+mod closed;

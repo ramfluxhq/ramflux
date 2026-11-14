@@ -588,10 +588,12 @@ mod tests {
             target_service,
             target,
         )
-        .await?;
+        .await
+        .map_err(|error| format!("test: linked B attended prepare: {error}"))?;
         for _ in 0..72 {
             poll_management(fixture, false).await?;
             poll_management(fixture, true).await?;
+            affirm_displayed_candidate(fixture, &prepare.operation_id).await?;
             let Linked { rig, target, source_service, target_service, .. } = fixture;
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
             rig.secondary.service_full_transfer(target.account_db()?)?;
@@ -602,12 +604,39 @@ mod tests {
                 target_service,
                 target,
             )
-            .await?
+            .await
+            .map_err(|error| format!("test: linked source publication: {error}"))?
             {
                 return Ok(());
             }
         }
         Err("test: linked candidate did not reach actual native publication".into())
+    }
+    async fn affirm_displayed_candidate(fixture: &mut Linked, operation: &str) -> TestResult {
+        let Linked { rig, target, source_service, target_service, .. } = fixture;
+        if rig.primary.affirmed_full_source_preservation().is_ok() {
+            return Ok(());
+        }
+        let Ok(candidate) = rig.primary.displayed_proposal() else { return Ok(()) };
+        let affirm = ramflux_protocol::custody::pairing::local_dto::TransferAffirm {
+            schema: "ramflux.pairing.TransferAffirm.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: rig.primary.actor_generation(),
+            transcript_hash: rig.primary.displayed_transcript()?,
+            new_record_hash: candidate,
+            approved: true,
+        };
+        drive(
+            Box::pin(rig.primary.affirm_full_transfer(&affirm)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            target,
+        )
+        .await?;
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        Ok(())
     }
     fn resume_request(
         client: &crate::RamfluxClient,
