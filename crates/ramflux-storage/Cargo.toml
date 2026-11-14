@@ -16,8 +16,8 @@ ramflux-protocol = { workspace = true }
 fs2 = "0.4"
 zeroize = "1.8"
 # Search pins Unicode 16 separately; existing protocol normalization stays unchanged.
-search-normalization = { package = "unicode-normalization", git = "https://github.com/unicode-rs/unicode-normalization", rev = "c9921309f09ebd05108920fda92efbf5f8124a7d" }
-search-segmentation = { package = "unicode-segmentation", git = "https://github.com/unicode-rs/unicode-segmentation", rev = "9e3f88c06ca275294ef4cb1daf0789f06a28611d" }
+search-normalization = { package = "unicode-normalization", version = "=0.1.24", git = "https://github.com/unicode-rs/unicode-normalization", rev = "c9921309f09ebd05108920fda92efbf5f8124a7d" }
+search-segmentation = { package = "unicode-segmentation", version = "=1.12.0", git = "https://github.com/unicode-rs/unicode-segmentation", rev = "9e3f88c06ca275294ef4cb1daf0789f06a28611d" }
 caseless = "=0.2.2"
 blake3 = "1.8.5"
 hkdf = { workspace = true }
