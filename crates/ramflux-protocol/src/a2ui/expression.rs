@@ -106,15 +106,7 @@ pub(super) fn evaluate(
                 && regex::Regex::new(&translated).map_err(|_| Reject::Expression)?.is_match(text);
             Ok(json!({"valid":matched}))
         }
-        "email" => {
-            let value = get("value")?;
-            let text = value.as_str().ok_or(Reject::Expression)?;
-            let validator = jsonschema::options()
-                .should_validate_formats(true)
-                .build(&json!({"format":"email","type":"string"}))
-                .map_err(|_| Reject::Expression)?;
-            Ok(json!({"valid":validator.is_valid(&json!(text))}))
-        }
+        "email" => email_check(&get("value")?),
         "and" | "or" => {
             let values = args.get("values").and_then(Value::as_array).ok_or(Reject::Expression)?;
             let mut result = name == "and";
@@ -135,6 +127,15 @@ pub(super) fn evaluate(
         _ => Err(Reject::Expression),
     }
 }
+fn email_check(value: &Value) -> Result<Value, Reject> {
+    let text = value.as_str().ok_or(Reject::Expression)?;
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&json!({"format":"email","type":"string"}))
+        .map_err(|_| Reject::Expression)?;
+    Ok(json!({"valid":validator.is_valid(&json!(text))}))
+}
+
 fn evaluate_index(
     args: &serde_json::Map<String, Value>,
     model: &Value,
