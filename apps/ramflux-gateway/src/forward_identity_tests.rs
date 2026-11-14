@@ -40,7 +40,7 @@ struct TestPeerCerts {
 struct ForwardServer {
     endpoint: String,
     hub: Arc<GatewaySessionHub>,
-    _root: ramflux_test_support::TestPath,
+    root: ramflux_test_support::TestPath,
 }
 
 fn temp_cert_root(
@@ -199,7 +199,7 @@ fn start_gw_b_listener()
     let gw_b = issue_test_service_cert(&ca, NODE, "ramflux-gateway", Some("gw-b"))?;
     let hub = Arc::new(GatewaySessionHub::default());
     let endpoint = spawn_forward_listener(gw_b.tls.clone(), ca.pem.clone(), Arc::clone(&hub))?;
-    Ok((ForwardServer { endpoint, hub, _root: root }, ca, gw_b))
+    Ok((ForwardServer { endpoint, hub, root }, ca, gw_b))
 }
 
 fn post_json<T: serde::Serialize>(
@@ -524,7 +524,7 @@ pub(crate) fn ephemeral_pair() -> Result<EphemeralPair, Box<dyn std::error::Erro
         hub: server.hub,
         receiver_tls: gw_b.tls,
         ca_pem: ca.pem,
-        _root: server._root,
+        root: server.root,
     })
 }
 
@@ -533,7 +533,7 @@ pub(crate) struct EphemeralPair {
     pub hub: Arc<GatewaySessionHub>,
     pub receiver_tls: MeshTlsConfig,
     pub ca_pem: String,
-    pub(crate) _root: ramflux_test_support::TestPath,
+    pub(crate) root: ramflux_test_support::TestPath,
 }
 
 /// Two instance-bound gateways under a CA trusted by the same real test node.
@@ -551,6 +551,6 @@ pub(crate) fn ephemeral_pair_for_node(
         hub,
         receiver_tls: gw_b.tls,
         ca_pem: ca.pem,
-        _root: root,
+        root,
     })
 }

@@ -1153,7 +1153,7 @@ async fn cross_gateway_setup() -> anyhow::Result<CrossGateway> {
     )?;
     ready(&context).await?;
     ready(&destination).await?;
-    Ok(CrossGateway { child, context, destination, remote, _peer_root: pair._root })
+    Ok(CrossGateway { child, context, destination, remote, _peer_root: pair.root })
 }
 
 async fn calibrate_cross_gateway_wake(
