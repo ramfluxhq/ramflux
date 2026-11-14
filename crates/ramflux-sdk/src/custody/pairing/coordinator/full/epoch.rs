@@ -10,10 +10,7 @@ use crate::{
 };
 use ramflux_crypto::custody::pairing::{FullResumeKeyOwner, FullResumeTrust, PairingRole};
 use std::sync::Arc;
-use tokio::{
-    task::JoinHandle,
-    time::{Duration, timeout},
-};
+use tokio::time::{Duration, timeout};
 
 struct FullEpochFinished {
     trust: FullResumeTrust,
@@ -21,35 +18,20 @@ struct FullEpochFinished {
     packet: Result<FullPacketEpoch, SdkError>,
 }
 pub(in crate::custody::pairing::coordinator) struct FullEpochJob(
-    Option<JoinHandle<FullEpochFinished>>,
-    Arc<std::sync::atomic::AtomicBool>,
+    super::cancel::Joined<FullEpochFinished>,
 );
-impl Drop for FullEpochJob {
-    fn drop(&mut self) {
-        if let Some(task) = &self.0 {
-            task.abort();
-        }
-    }
-}
 impl FullEpochJob {
     pub(super) fn finished(&self) -> bool {
-        self.1.load(std::sync::atomic::Ordering::Acquire)
+        self.0.finished()
     }
     pub(super) async fn packet(self) -> Result<FullPacketEpoch, SdkError> {
         self.finish().await?.packet
     }
-    pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(mut self) {
-        if let Some(task) = self.0.take() {
-            task.abort();
-            let _ = task.await;
-        }
+    pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(self) {
+        self.0.abort_and_drain().await;
     }
-    async fn finish(mut self) -> Result<FullEpochFinished, SdkError> {
-        self.0
-            .take()
-            .ok_or(SdkError::PairingCode("WrongContext"))?
-            .await
-            .map_err(|_| SdkError::PairingCode("Retired"))
+    async fn finish(self) -> Result<FullEpochFinished, SdkError> {
+        self.0.finish().await
     }
 }
 struct FullEpochWork {
@@ -73,10 +55,7 @@ fn start(
     let FullEpochWork { signer, cancelled, trust, mut keys } = work;
     stop.require_live()?;
     let owner = stop.clone();
-    let completion = stop.completion();
-    let finished = completion.flag();
     let task = tokio::spawn(async move {
-        let _completion = completion;
         let packet = timeout(Duration::from_secs(10), async {
             stop.require_live()?;
             let signing_stop = stop.clone();
@@ -160,7 +139,7 @@ fn start(
             let _ = owner.register_tail_epoch(task.abort_handle());
         }
     }
-    Ok(FullEpochJob(Some(task), finished))
+    Ok(FullEpochJob(owner.own_join(task)))
 }
 pub(super) fn start_tail(
     relay: Arc<dyn FullPairingTransport>,

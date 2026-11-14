@@ -41,18 +41,18 @@ impl FullRuntimeCancel {
             // On caller cancellation the private result drops here, BEFORE completion.
             let _ = send.send(result);
         });
-        {
-            let mut jobs =
-                self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            jobs.retain(|job| !job.completion.is_finished());
-            if self.require_live().is_err() {
-                abort.abort();
-            }
-            jobs.push(LocalJob { abort, completion });
-        }
+        self.retain_completion(abort, completion);
         let value = receive.await.map_err(|_| SdkError::PairingCode("Retired"))??;
         self.require_live()?;
         Ok(value)
+    }
+    pub(super) fn retain_completion(&self, abort: AbortHandle, completion: JoinHandle<()>) {
+        let mut jobs = self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        jobs.retain(|job| !job.completion.is_finished());
+        if self.require_live().is_err() {
+            abort.abort();
+        }
+        jobs.push(LocalJob { abort, completion });
     }
     pub(super) fn abort_local_jobs(&self) {
         let jobs = self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -26,7 +26,7 @@ impl PairingActor {
         let (Some((operation, generation)), Some(participant)) =
             (operation, self.participant.clone())
         else {
-            return Ok(true);
+            return Ok(false);
         };
         let phase = phase.to_owned();
         if let Some(writer) = &self.local_writer {

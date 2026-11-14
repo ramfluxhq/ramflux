@@ -34,7 +34,7 @@ impl LocalPairingParticipant {
         let Some(mut row) =
             db.pairing_live_rows()?.into_iter().find(|row| row.operation_id == operation)
         else {
-            return Ok(true);
+            return Ok(false);
         };
         if row.generation != generation {
             return Err(wrong());
@@ -43,7 +43,8 @@ impl LocalPairingParticipant {
             return Ok(false);
         }
         if row.full_stage_reference()?.is_none() {
-            return Ok(true);
+            // This owner cannot discharge an ordinary enrollment's provisional cleanup.
+            return Ok(false);
         }
         // Close data durably before changing the account projection. A later exact
         // installation may change that projection without reviving the data epoch.

@@ -14,7 +14,6 @@ use crate::{
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::pairing::full_transfer::SourceManifest;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 
 mod work;
 
@@ -32,25 +31,14 @@ pub(super) struct FullStreamState {
     pub(super) progress: Arc<std::sync::Mutex<super::status::FullProgress>>,
 }
 pub(in crate::custody::pairing::coordinator) struct FullStreamJob(
-    Option<JoinHandle<Result<FullStreamFinished, SdkError>>>,
-    Arc<std::sync::atomic::AtomicBool>,
+    super::cancel::Joined<Result<FullStreamFinished, SdkError>>,
 );
-impl Drop for FullStreamJob {
-    fn drop(&mut self) {
-        if let Some(job) = &self.0 {
-            job.abort();
-        }
-    }
-}
 impl FullStreamJob {
     pub(super) fn finished(&self) -> bool {
-        self.1.load(std::sync::atomic::Ordering::Acquire)
+        self.0.finished()
     }
-    pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(mut self) {
-        if let Some(job) = self.0.take() {
-            job.abort();
-            let _ = job.await;
-        }
+    pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(self) {
+        self.0.abort_and_drain().await;
     }
 }
 impl FullStreamState {
@@ -62,8 +50,8 @@ impl FullStreamState {
             return Ok(None);
         }
         if self.job.as_ref().is_some_and(FullStreamJob::finished) {
-            let mut job = self.job.take().ok_or_else(wrong)?;
-            let outcome = job.0.take().ok_or_else(wrong)?.await;
+            let job = self.job.take().ok_or_else(wrong)?;
+            let outcome = job.0.finish().await;
             self.service.take();
             let result = outcome
                 .map_err(|_| SdkError::PairingCode("Retired"))
@@ -244,10 +232,7 @@ impl PairingActor {
             new_target,
             linked_target,
         };
-        let completion = runtime.completion();
-        let finished = completion.flag();
         let job = tokio::spawn(async move {
-            let _completion = completion;
             match role {
                 PairingRole::Initiator => Box::pin(work.source(manifest.ok_or_else(wrong)?)).await,
                 PairingRole::Responder => Box::pin(work.destination()).await,
@@ -257,7 +242,7 @@ impl PairingActor {
         state.stream = Some(FullStreamState {
             progress,
             service: Some(service),
-            job: Some(FullStreamJob(Some(job), finished)),
+            job: Some(FullStreamJob(runtime.own_join(job))),
             complete: None,
             receiver: None,
             failure: None,

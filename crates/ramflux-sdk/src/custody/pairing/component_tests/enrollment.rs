@@ -80,3 +80,58 @@ pub(super) async fn enroll(rig: &mut Rig) -> TestResult {
     }
     Err("test: original linked enrollment did not complete".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_cleanup_cannot_discharge_an_enrollment_without_a_full_stage() -> TestResult
+    {
+        let hold = ClockHold::new();
+        let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await;
+        hold.finish().await?;
+        result
+    }
+    async fn run() -> TestResult {
+        let mut rig = Box::pin(Rig::open()).await?;
+        let result = rig
+            .primary
+            .begin(Begin {
+                schema: "ramflux.pairing.Begin.v2".into(),
+                version: 2,
+                capabilities: vec!["message".into(), "sync".into()],
+                lease_not_before: rig.now,
+                lease_expires_at: rig.now + 86_400,
+                display_name: "Ordinary enrollment".into(),
+            })
+            .await?;
+        let Outcome::Begin { value } = result.outcome else {
+            return Err("test: actual enrollment invitation missing".into());
+        };
+        let before = {
+            let slot =
+                rig.participant_a.db.lock().map_err(|_| "test: original enrollment writer")?;
+            slot.as_ref().ok_or("test: original writer absent")?.pairing_live_rows()?
+        };
+        assert_eq!(before.len(), 1, "test: enrollment cleanup oracle had no live row");
+        assert!(
+            !rig.participant_a.mark_full_data_terminal(
+                &value.operation_id,
+                value.generation,
+                "cancelled"
+            )?,
+            "test: a full-data owner discharged an ordinary enrollment obligation"
+        );
+        {
+            let slot =
+                rig.participant_a.db.lock().map_err(|_| "test: retained enrollment writer")?;
+            assert_eq!(
+                slot.as_ref().ok_or("test: retained writer absent")?.pairing_live_rows()?,
+                before,
+                "test: unrelated full cleanup rewrote ordinary enrollment state"
+            );
+        }
+        rig.primary.lock().await?;
+        Ok(())
+    }
+}

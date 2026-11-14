@@ -10,7 +10,9 @@ use std::sync::{
 };
 
 mod activity;
+mod joined;
 mod local_jobs;
+pub(crate) use joined::Joined;
 
 #[derive(Default)]
 pub(crate) struct FullRuntimeCancel {
