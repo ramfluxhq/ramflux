@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
+pub(crate) const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
 const NODE_ID: &str = "localhost";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);

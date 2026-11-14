@@ -15,6 +15,8 @@ use e2e::{
     start_daemon_at, unique, unlock_account, wait_dm_texts, wait_json,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const REFUSAL: &str = "peer_upgrade_required";
@@ -232,48 +234,160 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
     if peer_copy["state"] == "tombstone" {
         return Err(format!("local delete reached the peer: {peer_copy}").into());
     }
-    let typing_ids = observe_typing(world)?;
-    assert_typing_absent(world, &typing_ids)?;
+    let typing = observe_typing(world)?;
+    assert_typing_absent(world, &typing)?;
     if wait_view(world, false, &local_id, |view| view["text"] == "local delete body").is_err() {
         return Err("peer lost the locally deleted copy after typing".into());
     }
     Ok(())
 }
 
-fn observe_typing(world: &mut World<'_>) -> e2e::Result<Vec<String>> {
-    let before = message_ids(world, false)?;
+const NODE_STORES: &[&str] =
+    &["ramflux-router", "ramflux-federation", "ramflux-gateway", "ramflux-retention"];
+const RATCHET_PREFIXES: &[&str] =
+    &["dm-pair/session/", "dm-pair/ephemeral-seals/", "dm-pair/active/", "dm-pair/local/"];
+const STORE_CAP: u64 = 32 * 1024 * 1024;
+
+type TableRows = BTreeMap<String, Vec<String>>;
+type AccountTables = BTreeMap<String, TableRows>;
+
+struct TypingObservation {
+    ids: Vec<String>,
+    before: Persistence,
+}
+
+struct Persistence {
+    client: AccountTables,
+    node: AccountTables,
+    wal: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
+fn observe_typing(world: &mut World<'_>) -> e2e::Result<TypingObservation> {
+    let before_ids = message_ids(world, false)?;
+    let before = capture_stores(world)?;
+    let mut ids = explicit_stop(world)?;
+    ids.push(unforced_expiry(world)?);
+    ids.push(replay_while_live(world)?);
+    ids.push(offline_then_reconnect(world)?);
+    let after_ids = message_ids(world, false)?;
+    if after_ids != before_ids {
+        return Err(format!(
+            "typing changed message ids: before={before_ids:?} after={after_ids:?}"
+        )
+        .into());
+    }
+    Ok(TypingObservation { ids, before })
+}
+
+fn explicit_stop(world: &World<'_>) -> e2e::Result<Vec<String>> {
     let start_op = unique("live-typing-start");
     let stop_op = unique("live-typing-stop");
     let watched = watch_ready(world, 8, &start_op, Some(&stop_op))?;
     assert_typing_cleared(&watched)?;
-    let after = message_ids(world, false)?;
-    if after != before {
-        return Err(format!("typing changed message ids: before={before:?} after={after:?}").into());
-    }
-    let replay_op = unique("live-typing-replay");
-    let seen = watch_ready(world, 2, &replay_op, None)?;
-    let shown = first_active_ms(&seen)?;
+    Ok(vec![start_op, stop_op])
+}
+
+/// No stop is sent. The observed frame's `expires_at` is the clear: it must be
+/// within 5s of display, and this watch stays open through that deadline.
+fn unforced_expiry(world: &World<'_>) -> e2e::Result<String> {
+    let operation = unique("live-typing-expire");
+    let watched = watch_ready(world, 8, &operation, None)?;
+    assert_unforced_expiry(&watched, 8)?;
+    Ok(operation)
+}
+
+fn replay_while_live(world: &mut World<'_>) -> e2e::Result<String> {
+    let operation = unique("live-typing-replay");
+    let seen = watch_ready(world, 1, &operation, None)?;
     reconnect_bob(world)?;
-    let again = watch(world, 2)?;
+    let again = watch(world, 1)?;
     expect_empty_watch(&again)?;
     let restarted = again["started_at_ms"].as_u64().ok_or("restarted watch started_at_ms")?;
-    if restarted.saturating_sub(shown) > 5_000 {
+    assert_replay_within_frame(&seen, restarted)?;
+    Ok(operation)
+}
+
+fn offline_then_reconnect(world: &mut World<'_>) -> e2e::Result<String> {
+    let operation = unique("live-typing-offline");
+    let (socket, root) = take_bob(world)?;
+    let emitted = match typing_emit(world, "start", &operation) {
+        Ok(value) => value,
+        Err(error) => {
+            restore_bob(world, socket, root)?;
+            return Err(error);
+        }
+    };
+    restore_bob(world, socket, root)?;
+    if emitted.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("typing while bob was offline: {emitted}").into());
+    }
+    let again = watch(world, 2)?;
+    expect_empty_watch(&again)?;
+    Ok(operation)
+}
+
+fn assert_unforced_expiry(watched: &Value, secs: u64) -> e2e::Result<()> {
+    let started = watched["started_at_ms"].as_u64().ok_or("started_at_ms")?;
+    let active = first_active(watched)?;
+    let observed = active["observed_at_ms"].as_u64().ok_or("observed_at_ms")?;
+    let expires_ms = frame_deadline_ms(active)?;
+    let life = expires_ms.saturating_sub(observed);
+    if !(1..=5_000).contains(&life) {
+        return Err(
+            format!("unforced typing lifetime {life} ms is outside 1..=5000: {active}").into()
+        );
+    }
+    let window_end = started.saturating_add(secs.saturating_mul(1_000));
+    if expires_ms > window_end {
         return Err(format!(
-            "reconnect watch started after the live indicator expired: shown={shown} watch={restarted}"
+            "watch ended before the unforced typing deadline: expires={expires_ms} window_end={window_end}"
         )
         .into());
     }
-    Ok(vec![start_op, stop_op, replay_op])
+    let rows = watched["indicators"].as_array().ok_or("indicators")?;
+    for row in rows {
+        let at = row["observed_at_ms"].as_u64().ok_or("observed_at_ms")?;
+        if row["active"].as_bool() == Some(true) && at >= expires_ms {
+            return Err(
+                format!("typing still active at {at} after deadline {expires_ms}: {row}").into()
+            );
+        }
+        if row["active"].as_bool() == Some(false) && at.saturating_sub(observed) > 5_000 {
+            return Err(format!("unforced clear took more than 5s: {watched}").into());
+        }
+    }
+    Ok(())
 }
 
-fn first_active_ms(watched: &Value) -> e2e::Result<u64> {
-    let rows = watched["indicators"].as_array().ok_or("indicators")?;
-    rows.iter()
-        .find(|row| row["active"].as_bool() == Some(true))
-        .and_then(|row| row["observed_at_ms"].as_u64())
-        .ok_or_else(|| {
-            format!("peer did not show a live typing frame before reconnect: {watched}").into()
-        })
+fn assert_replay_within_frame(seen: &Value, restarted_at_ms: u64) -> e2e::Result<()> {
+    let active = first_active(seen)?;
+    let expires_ms = frame_deadline_ms(active)?;
+    if restarted_at_ms >= expires_ms {
+        return Err(format!(
+            "reconnect watch started at {restarted_at_ms} after the frame deadline {expires_ms}: {active}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn first_active(watched: &Value) -> e2e::Result<&Value> {
+    watched
+        .get("indicators")
+        .and_then(Value::as_array)
+        .ok_or("indicators")?
+        .iter()
+        .find(|row| row.get("active").and_then(Value::as_bool) == Some(true))
+        .ok_or_else(|| format!("peer did not show a live typing frame: {watched}").into())
+}
+
+fn frame_deadline_ms(row: &Value) -> e2e::Result<u64> {
+    let expires_at = row.get("expires_at").and_then(Value::as_u64).ok_or("expires_at")?;
+    if expires_at == 0 {
+        return Err(format!("active typing frame has no deadline: {row}").into());
+    }
+    Ok(expires_at.saturating_mul(1_000))
 }
 
 fn watch_ready(
@@ -415,23 +529,22 @@ fn message_ids(world: &World<'_>, author: bool) -> e2e::Result<Vec<String>> {
     Ok(rows.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect())
 }
 
-fn assert_typing_absent(world: &World<'_>, operation_ids: &[String]) -> e2e::Result<()> {
+fn assert_typing_absent(world: &World<'_>, typing: &TypingObservation) -> e2e::Result<()> {
     for author in [false, true] {
         let page = read_model(world, author, &["--limit", "100"])?;
-        reject_typing_document(&page, operation_ids)?;
+        reject_typing_document(&page, &typing.ids)?;
         let changes = read_model(world, author, &["--after-seq", "0", "--limit", "100"])?;
-        reject_typing_document(&changes, operation_ids)?;
+        reject_typing_document(&changes, &typing.ids)?;
     }
+    let after = capture_stores(world)?;
+    assert_same_stores(&typing.before, &after)?;
     let mut needles = vec!["message.transient".to_owned()];
-    needles.extend(operation_ids.iter().cloned());
-    for root in [
-        world.alice_d.data_root.as_path(),
-        world.bob_daemon()?.data_root.as_path(),
-        world.stack.root.as_ref(),
-    ] {
-        scan_absent(root, &needles)?;
-    }
-    Ok(())
+    needles.extend(typing.ids.iter().cloned());
+    let mut files = typing.before.files.clone();
+    files.extend(after.files);
+    files.sort();
+    files.dedup();
+    scan_files(&files, &needles)
 }
 
 fn read_model(world: &World<'_>, author: bool, extra: &[&str]) -> e2e::Result<Value> {
@@ -474,51 +587,188 @@ fn value_rows<'a>(value: &'a Value, key: &str) -> Vec<&'a Value> {
     value.get(key).and_then(Value::as_array).map(|rows| rows.iter().collect()).unwrap_or_default()
 }
 
-fn scan_absent(root: &std::path::Path, needles: &[String]) -> e2e::Result<()> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut files = 0u32;
-    while let Some(dir) = pending.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("read {}: {error}", dir.display()).into()),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| format!("read {}: {error}", dir.display()))?;
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push(path);
-                continue;
+fn capture_stores(world: &World<'_>) -> e2e::Result<Persistence> {
+    let mut client = BTreeMap::new();
+    let mut files = Vec::new();
+    for (name, root, account) in [
+        ("alice", world.alice_d.data_root.as_path(), world.alice.id.as_str()),
+        ("bob", world.bob_daemon()?.data_root.as_path(), world.bob.id.as_str()),
+    ] {
+        let (tables, paths) = client_tables(root, account)?;
+        client.insert(name.to_owned(), tables);
+        files.extend(paths);
+    }
+    let state = world.stack.root.join("state");
+    let mut node = BTreeMap::new();
+    for service in NODE_STORES {
+        let path = state.join(format!("{service}.redb"));
+        require_regular(&path)?;
+        files.push(path.clone());
+        node.insert((*service).to_owned(), ramflux_node_core::logical_redb_rows(&path)?);
+    }
+    let wal = ramflux_node_core::logical_wal_records(&state.join("ramflux-router.redb.wal"))?;
+    for path in &wal.files {
+        require_regular(path)?;
+    }
+    files.extend(wal.files);
+    Ok(Persistence { client, node, wal: wal.records, files })
+}
+
+fn client_tables(data_root: &Path, account: &str) -> e2e::Result<(TableRows, Vec<PathBuf>)> {
+    let vault = ramflux_storage::read_existing_vault_secret(data_root, account)?;
+    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes());
+    let (path, key) = ramflux_storage::load_account_db_key(data_root, account, &kek)?;
+    require_regular(&path)?;
+    let tables = ramflux_storage::logical_table_rows(&path, &key)?;
+    let mut files = vec![path.clone()];
+    if let Some(wal) = sqlite_wal(&path)? {
+        files.push(wal);
+    }
+    Ok((tables, files))
+}
+
+fn sqlite_wal(db: &Path) -> e2e::Result<Option<PathBuf>> {
+    let Some(name) = db.file_name().and_then(|value| value.to_str()) else {
+        return Err(format!("account database has no file name: {}", db.display()).into());
+    };
+    let sibling = db.with_file_name(format!("{name}-wal"));
+    match std::fs::metadata(&sibling) {
+        Ok(meta) if meta.file_type().is_file() => Ok(Some(sibling)),
+        Ok(_) => Err(format!("account wal is not a regular file: {}", sibling.display()).into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("stat {}: {error}", sibling.display()).into()),
+    }
+}
+
+fn require_regular(path: &Path) -> e2e::Result<()> {
+    let meta =
+        std::fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+    if meta.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(format!("not a regular storage file: {}", path.display()).into())
+    }
+}
+
+fn assert_same_stores(before: &Persistence, after: &Persistence) -> e2e::Result<()> {
+    let left = comparable(before);
+    let right = comparable(after);
+    if let Some(diff) = nested_diff("client", &left.client, &right.client) {
+        return Err(diff.into());
+    }
+    if let Some(diff) = nested_diff("node", &left.node, &right.node) {
+        return Err(diff.into());
+    }
+    if left.wal != right.wal {
+        let source = if left.wal.len() > right.wal.len() { &left.wal } else { &right.wal };
+        return Err(format!(
+            "router wal changed: before={} after={} sample={}",
+            left.wal.len(),
+            right.wal.len(),
+            sample(source.first().map_or("", String::as_str))
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn comparable(snapshot: &Persistence) -> Persistence {
+    let mut client = BTreeMap::new();
+    for (account, tables) in &snapshot.client {
+        let mut kept = BTreeMap::new();
+        for (table, rows) in tables {
+            kept.insert(
+                table.clone(),
+                rows.iter().filter(|row| !exempt_client_row(table, row)).cloned().collect(),
+            );
+        }
+        client.insert(account.clone(), kept);
+    }
+    Persistence {
+        client,
+        node: snapshot.node.clone(),
+        wal: snapshot.wal.clone(),
+        files: Vec::new(),
+    }
+}
+
+fn exempt_client_row(table: &str, line: &str) -> bool {
+    let kind = match table {
+        "runtime_actor_state" => field(line, 0),
+        "runtime_outbox" => field(line, 2),
+        _ => return false,
+    };
+    RATCHET_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
+}
+
+fn rows_of<'a>(tables: Option<&'a TableRows>, table: &str) -> &'a [String] {
+    match tables.and_then(|rows| rows.get(table)) {
+        Some(rows) => rows.as_slice(),
+        None => &[],
+    }
+}
+
+fn field(line: &str, index: usize) -> &str {
+    line.split('\t').nth(index).unwrap_or("")
+}
+
+fn nested_diff(label: &str, before: &AccountTables, after: &AccountTables) -> Option<String> {
+    let mut names = before.keys().chain(after.keys()).collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let left = before.get(name);
+        let right = after.get(name);
+        let mut tables = left.map(|rows| rows.keys().collect::<Vec<_>>()).unwrap_or_default();
+        tables.extend(right.map(|rows| rows.keys().collect::<Vec<_>>()).unwrap_or_default());
+        tables.sort();
+        tables.dedup();
+        for table in tables {
+            let before_rows = rows_of(left, table);
+            let after_rows = rows_of(right, table);
+            if before_rows != after_rows {
+                let extra = after_rows.iter().find(|row| !before_rows.contains(row));
+                let missing = before_rows.iter().find(|row| !after_rows.contains(row));
+                return Some(format!(
+                    "{label}.{name}.{table} before={} after={} sample={}",
+                    before_rows.len(),
+                    after_rows.len(),
+                    sample(extra.or(missing).map_or("", String::as_str))
+                ));
             }
-            files = files.saturating_add(1);
-            if files > 4_000 {
-                return Err("typing at-rest scan exceeded 4000 files".into());
-            }
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
-            if std::path::Path::new(name)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
-                || name.ends_with("-shm")
-                || name.ends_with("-wal")
+        }
+    }
+    None
+}
+
+fn sample(row: &str) -> String {
+    let mut text = row.chars().take(48).collect::<String>();
+    if row.chars().count() > 48 {
+        text.push_str("...");
+    }
+    text
+}
+
+fn scan_files(files: &[PathBuf], needles: &[String]) -> e2e::Result<()> {
+    if files.len() > 4_000 {
+        return Err("typing at-rest scan exceeded 4000 files".into());
+    }
+    for path in files {
+        let meta =
+            std::fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("refusing to read non-regular path {}", path.display()).into());
+        }
+        if meta.len() > STORE_CAP {
+            return Err(format!("typing at-rest file exceeds 32 MiB: {}", path.display()).into());
+        }
+        let bytes =
+            std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+        for needle in needles {
+            if !needle.is_empty()
+                && bytes.windows(needle.len()).any(|window| window == needle.as_bytes())
             {
-                continue;
-            }
-            let len = entry.metadata().map_err(|error| format!("{error}"))?.len();
-            if len > 32 * 1024 * 1024 {
-                return Err(
-                    format!("typing at-rest file exceeds 32 MiB: {}", path.display()).into()
-                );
-            }
-            let bytes = std::fs::read(&path)
-                .map_err(|error| format!("read {}: {error}", path.display()))?;
-            for needle in needles {
-                if !needle.is_empty()
-                    && bytes.windows(needle.len()).any(|window| window == needle.as_bytes())
-                {
-                    return Err(
-                        format!("typing marker {needle} at rest in {}", path.display()).into()
-                    );
-                }
+                return Err(format!("typing marker {needle} at rest in {}", path.display()).into());
             }
         }
     }
@@ -676,13 +926,21 @@ fn join_watch(worker: std::thread::JoinHandle<Result<Value, String>>) -> e2e::Re
     }
 }
 
-fn reconnect_bob(world: &mut World<'_>) -> e2e::Result<()> {
+fn take_bob(world: &mut World<'_>) -> e2e::Result<(PathBuf, PathBuf)> {
     let current = world.bob_d.take().ok_or("bob daemon missing")?;
-    let (socket, root) = crash_daemon(current)?;
+    crash_daemon(current)
+}
+
+fn restore_bob(world: &mut World<'_>, socket: PathBuf, root: PathBuf) -> e2e::Result<()> {
     let restarted = start_daemon_at(socket, root)?;
     unlock_account(&restarted, world.bob)?;
     world.bob_d = Some(restarted);
     Ok(())
+}
+
+fn reconnect_bob(world: &mut World<'_>) -> e2e::Result<()> {
+    let (socket, root) = take_bob(world)?;
+    restore_bob(world, socket, root)
 }
 
 fn required_str<'a>(value: &'a Value, pointer: &str) -> e2e::Result<&'a str> {
@@ -700,6 +958,49 @@ impl World<'_> {
     fn alice_args(&self, args: &[&str]) -> e2e::Result<Value> {
         rf_json(&self.alice_d.socket, args)
     }
+}
+
+#[test]
+fn ratchet_and_seal_rows_are_the_only_client_exemption() {
+    assert!(
+        exempt_client_row("runtime_actor_state", "dm-pair/session/abc\t01"),
+        "test: a session ratchet row is exempt"
+    );
+    assert!(
+        exempt_client_row(
+            "runtime_outbox",
+            "runtime_actor_state\tupdate\tdm-pair/ephemeral-seals/1\t{}"
+        ),
+        "test: an outbox row that only publishes a seal counter is exempt"
+    );
+    assert!(
+        exempt_client_row("runtime_actor_state", "dm-pair/active/pair\t01"),
+        "test: the active pair index written with the ratchet is exempt"
+    );
+    assert!(
+        exempt_client_row("runtime_actor_state", "dm-pair/local/session\t01"),
+        "test: local pair metadata written with the ratchet is exempt"
+    );
+    assert!(
+        !exempt_client_row("runtime_actor_state", "dm-pair/retired/abc\t01"),
+        "test: a retired pair is not a ratchet exemption"
+    );
+    assert!(
+        !exempt_client_row("message_projection", "dm-pair/session/abc"),
+        "test: a message row is never exempt"
+    );
+    assert!(
+        !exempt_client_row("outbox_queue", "id\tenv\tclass\tstate\tcipher"),
+        "test: the delivery outbox is never exempt"
+    );
+    assert!(
+        !exempt_client_row("local_event_log", "event\ttype\tok\tok\tbody"),
+        "test: an event row is never exempt"
+    );
+    assert!(
+        !exempt_client_row("receipt_projection", "receipt\tconv\tmsg\tread\tdevice"),
+        "test: a receipt row is never exempt"
+    );
 }
 
 fn logs(world: &World<'_>) -> String {

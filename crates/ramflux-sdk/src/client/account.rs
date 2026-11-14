@@ -480,7 +480,11 @@ fn fresh_receive_incarnation() -> Result<String, SdkError> {
     Ok(super::contact::bytes_to_hex(&bytes))
 }
 
-pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
+/// Derives the key-encryption key that unwraps an account database key.
+///
+/// The input is `ramflux.account_db_kek.v2`, the file-vault secret, then the passphrase.
+#[must_use]
+pub fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ramflux.account_db_kek.v2");
     hasher.update(vault_secret);
