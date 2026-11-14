@@ -16,11 +16,15 @@ async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
         LocalSet::new()
             .run_until(async {
                 let root = tempfile::tempdir()?;
-                let mut fixture =
-                    Box::pin(Fixture::build_at(root.path().to_path_buf(), false, None)).await?;
-                stop_peer_session(&mut fixture).await;
-                let mut runtime = start_runtime(&mut fixture).await?;
-                let handle = account_of(&runtime)?.connection.clone().ok_or("connection handle")?;
+                let mut account = crate::bus::runtime_tests::account(
+                    root.path(),
+                    "sender",
+                    None,
+                    Arc::new(AtomicBool::new(false)),
+                )?;
+                let (handle, _session_io) = crate::bus::connection_manager::tests::fixture().await?;
+                account.connection = Some(handle.clone());
+                let mut runtime = runtime_for(account, root.path());
                 let (checkpoints, mut queued) = tokio::sync::mpsc::channel(1);
                 let writer =
                     crate::bus::couriers::writer::Writer::new(checkpoints, handle.generation());

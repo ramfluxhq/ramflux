@@ -135,21 +135,13 @@ impl Fixture {
     }
 
     /// `second_peer` adds a second peer device so a control plan has three targets.
+    #[allow(clippy::too_many_lines)]
     pub async fn build(
         label: &str,
         second_peer: bool,
         frame_timeout: Option<Duration>,
     ) -> Case<Self> {
         let root = runtime_tests::root(label);
-        Box::pin(Self::build_at(root, second_peer, frame_timeout)).await
-    }
-
-    #[allow(clippy::too_many_lines)]
-    pub(super) async fn build_at(
-        root: PathBuf,
-        second_peer: bool,
-        frame_timeout: Option<Duration>,
-    ) -> Case<Self> {
         let mut source = account(&root.join("source"), "sender")?;
         let peer = account(&root.join("peer"), "peer")?;
         let mut sibling = account(&root.join("sibling"), "sender")?;

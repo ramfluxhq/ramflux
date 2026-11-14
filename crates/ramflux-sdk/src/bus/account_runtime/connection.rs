@@ -110,10 +110,10 @@ impl AccountRuntime {
         &mut self,
         work: AccountWork,
     ) -> Result<(), SdkError> {
-        // The account owns a current-thread runtime. A ready writer queue must not
-        // run synchronous durable transactions until Tokio's message budget runs out:
-        // give the session reader and its heartbeat a turn before the next checkpoint.
-        tokio::task::yield_now().await;
+        // The account's LocalSet can keep its current-thread runtime busy with ready
+        // synchronous checkpoints. Join a spawned task so the Send queue containing
+        // session I/O and heartbeat tasks gets a turn before the next checkpoint.
+        tokio::spawn(async {}).await.map_err(|_| SdkError::NetworkingPending)?;
         let publish_networking = self.apply_connection_work_inner(work).await?;
         if let Some(pool) = self.readers.lock().map_err(|_| super::stopped())?.as_ref() {
             pool.set_account_view(&self.state, &self.id)?;
