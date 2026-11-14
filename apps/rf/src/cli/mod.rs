@@ -12,6 +12,7 @@ mod account;
 mod admin;
 mod call_bot;
 mod contact;
+mod conversation_ops;
 mod daemon;
 mod device;
 mod dm;
@@ -32,6 +33,7 @@ pub(crate) use account::*;
 pub(crate) use admin::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;
+pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use dm::*;
@@ -58,6 +60,7 @@ pub(crate) enum Command {
     Contact(ContactCommand),
     Device(DeviceCommand),
     Dm(DmCommand),
+    Conversation(ConversationCommand),
     Group(GroupCommand),
     Object(ObjectCommand),
     Call(CallCommand),

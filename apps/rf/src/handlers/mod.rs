@@ -12,6 +12,7 @@ pub(crate) mod admin;
 pub(crate) mod bot;
 pub(crate) mod call;
 pub(crate) mod contact;
+pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
 pub(crate) mod device;
 pub(crate) mod dm;

@@ -265,3 +265,6 @@ pub use ephemeral::{
 
 mod session_push_frames;
 pub use session_push_frames::*;
+
+mod logical_snapshot;
+pub use logical_snapshot::{LogicalWal, logical_redb_rows, logical_wal_records};
