@@ -215,7 +215,6 @@ fn closed_command_channel_returns_closed_before_atomic_shutdown_flags() {
         &mut std::sync::Arc::get_mut(&mut client).expect("test: not registered yet").commands,
         sender,
     );
-    client.shared.allow_secret_exports.store(true, std::sync::atomic::Ordering::Release);
     let handle = super::exports::register_test_client(client.clone());
     assert!(
         !client.shared.closed.load(std::sync::atomic::Ordering::Acquire),

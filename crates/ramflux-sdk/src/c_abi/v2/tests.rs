@@ -152,7 +152,8 @@ fn executes_real_supervisor_and_releases_writer_on_close() {
 
 #[test]
 fn expired_requests_have_no_effects_and_real_custody_is_reachable() {
-    let fixture = Fixture::open();
+    // This test intentionally exercises a key-export ceremony after host opt-in.
+    let fixture = Fixture::configured_exports(false, true);
     let expired = fixture.submit("account.list", 1);
     let result = fixture.result(expired);
     assert_eq!(result["code"], 10, "expired request must return typed Timeout");
