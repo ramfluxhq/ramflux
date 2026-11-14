@@ -20,7 +20,7 @@ impl FullStreamWork {
             copy
         } else {
             let pinned = self.io.pin_original_receiver_base().await.inspect_err(|error| {
-                Self::note_failure("pin current recipient contribution", error)
+                Self::note_failure("pin current recipient contribution", error);
             })?;
             self.runtime
                 .clone()
@@ -41,7 +41,7 @@ impl FullStreamWork {
             .await
             .inspect_err(|error| Self::note_failure("replay recipient input", error))?;
         let (copy, draft) = self.io.prepare_data_verified(prepared).await.inspect_err(|error| {
-            Self::note_failure("prepare recipient application receipt", error)
+            Self::note_failure("prepare recipient application receipt", error);
         })?;
         let participant = self.participant.clone();
         let (draft, verified) =
@@ -57,7 +57,7 @@ impl FullStreamWork {
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
         let copy =
             self.io.record_data_verified(copy, draft, &verified).await.inspect_err(|error| {
-                Self::note_failure("record recipient application receipt", error)
+                Self::note_failure("record recipient application receipt", error);
             })?;
         let encrypted = self
             .packet

@@ -42,7 +42,18 @@ impl FullStreamWork {
     async fn receive(&mut self) -> Result<DataPacket, SdkError> {
         loop {
             self.runtime.require_live()?;
-            if let Some(packet) = self.packet.poll(self.relay.as_ref(), &self.origin).await? {
+            if let Some(packet) =
+                self.packet.poll(self.relay.as_ref(), &self.origin).await.inspect_err(|error| {
+                    Self::note_failure(
+                        if self.role == ramflux_crypto::custody::pairing::PairingRole::Initiator {
+                            "source DATA poll"
+                        } else {
+                            "recipient DATA poll"
+                        },
+                        error,
+                    );
+                })?
+            {
                 self.runtime.require_live()?;
                 if let Some(data) = self.packet.open_packet(&packet).inspect_err(|error| {
                     Self::note_failure("packet authentication/position", error);
@@ -62,6 +73,7 @@ impl FullStreamWork {
         loop {
             let packet = self.receive().await?;
             if let Some(manifest) = assembler.push(&packet).map_err(|error| wire(&error))? {
+                tracing::debug!(role = self.role.as_str(), "full data manifest received");
                 return Ok(manifest);
             }
         }
@@ -84,6 +96,7 @@ impl FullStreamWork {
         } else {
             self.send_manifest(&manifest).await?;
         }
+        tracing::debug!("full source first position sent");
         // The responder's first data object MUST be its actual restrictive manifest,
         // even for a new empty target. A receipt cannot replace that position.
         let reverse = self.receive_manifest().await?;
@@ -99,7 +112,7 @@ impl FullStreamWork {
             .await
             .inspect_err(|error| Self::note_failure("apply reverse", error))?;
         let draft = self.io.prepare_reverse_data_verified().await.inspect_err(|error| {
-            Self::note_failure("prepare reverse application receipt", error)
+            Self::note_failure("prepare reverse application receipt", error);
         })?;
         let participant = self.participant.clone();
         let (draft, verified) =
@@ -133,7 +146,7 @@ impl FullStreamWork {
                     .await
                     .inspect_err(|error| Self::note_failure("source durable duplex", error))?;
                 self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
-                    Self::note_failure("authenticate durable duplex control gate", error)
+                    Self::note_failure("authenticate durable duplex control gate", error);
                 })?;
                 return Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None });
             }
@@ -163,13 +176,14 @@ impl FullStreamWork {
             .await
             .inspect_err(|error| Self::note_failure("source durable duplex", error))?;
         self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
-            Self::note_failure("authenticate durable duplex control gate", error)
+            Self::note_failure("authenticate durable duplex control gate", error);
         })?;
         // A signed DV still grants neither publication nor immutable-cut deletion.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
     pub(super) async fn destination(mut self) -> Result<FullStreamFinished, SdkError> {
         let (mut manifest, idle) = self.receive_position().await?;
+        tracing::debug!("full recipient first position received");
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
         let mut prefix = if idle {
             None
@@ -229,7 +243,7 @@ impl FullStreamWork {
             .await
             .inspect_err(|error| Self::note_failure("recipient durable duplex", error))?;
         self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
-            Self::note_failure("authenticate durable duplex control gate", error)
+            Self::note_failure("authenticate durable duplex control gate", error);
         })?;
         // Final signed input and reverse application precede user preparation/publication.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver })

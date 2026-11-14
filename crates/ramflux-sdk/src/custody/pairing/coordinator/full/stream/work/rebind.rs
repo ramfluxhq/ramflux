@@ -50,7 +50,9 @@ impl FullStreamWork {
     ) -> Result<(), SdkError> {
         self.send_manifest_inner(manifest).await.inspect_err(|error| {
             Self::note_failure("manifest send/rebind", error);
-        })
+        })?;
+        tracing::debug!(role = self.role.as_str(), "full data manifest sent");
+        Ok(())
     }
     async fn send_manifest_inner(&mut self, manifest: &SourceManifest) -> Result<(), SdkError> {
         let bytes =
