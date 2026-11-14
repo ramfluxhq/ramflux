@@ -1450,11 +1450,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -3483,7 +3482,6 @@ dependencies = [
 name = "ramflux-gateway"
 version = "0.1.0"
 dependencies = [
- "tempfile",
  "anyhow",
  "compio",
  "ed25519-dalek",
@@ -3526,7 +3524,6 @@ dependencies = [
 name = "ramflux-node-core"
 version = "0.1.0"
 dependencies = [
- "tempfile",
  "aes-gcm 0.10.3",
  "arc-swap",
  "blake3",
@@ -3549,6 +3546,7 @@ dependencies = [
  "sha2 0.11.1",
  "signal-hook",
  "subtle",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

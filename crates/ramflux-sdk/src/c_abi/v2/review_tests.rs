@@ -244,7 +244,7 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
     let fixture = Fixture::open();
     let exports: std::collections::BTreeSet<_> = super::method_policy::METHOD_POLICIES
         .iter()
-        .filter(|row| row.key_export)
+        .filter(|row| row.key_export == super::method_policy::KeyExport::RequiresPermission)
         .map(|row| row.name)
         .collect();
     assert_eq!(
@@ -269,7 +269,10 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
         let result = fixture.result(id);
         assert_ne!(result["code"], 12, "{method} reaches SDK validation without export permission");
     }
-    for policy in super::method_policy::METHOD_POLICIES.iter().filter(|row| row.key_export) {
+    for policy in super::method_policy::METHOD_POLICIES
+        .iter()
+        .filter(|row| row.key_export == super::method_policy::KeyExport::RequiresPermission)
+    {
         let request=serde_json::to_vec(&json!({"sdk_api":policy.capability,"method":policy.name,"body":{},"deadline_ms":deadline()})).expect("test: classified operation");
         let mut operation = 99;
         assert_eq!(

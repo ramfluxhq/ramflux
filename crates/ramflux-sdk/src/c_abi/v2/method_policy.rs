@@ -4,20 +4,26 @@
 //! Explicit buffer-handling policy. No fallback classification: new operations need a reviewed row.
 //! Secret flags are conservative; capability is a discovery namespace, never an authorization grant.
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyExport {
+    Ordinary,
+    RequiresPermission,
+}
+
 pub(super) struct MethodPolicy {
     pub name: &'static str,
     pub capability: &'static str,
     pub secret_input: bool,
     pub secret_output: bool,
     pub show_once: bool,
-    pub key_export: bool,
+    pub key_export: KeyExport,
 }
 
 macro_rules! policies {
     ($($name:literal => ($capability:literal, $input:literal, $output:literal, $once:literal, $export:literal)),* $(,)?) => {
         pub(super) const METHOD_POLICIES: &[MethodPolicy] = &[
             $(MethodPolicy { name: $name, capability: $capability, secret_input: $input,
-                secret_output: $output, show_once: $once, key_export: $export },)*
+                secret_output: $output, show_once: $once, key_export: if $export { KeyExport::RequiresPermission } else { KeyExport::Ordinary } },)*
         ];
     };
 }
@@ -219,7 +225,10 @@ policies! {
 pub(super) const DENIED_METHODS: &[&str] = &["daemon.stop"];
 
 pub(super) fn requires_key_export(name: &str) -> bool {
-    METHOD_POLICIES.iter().find(|row| row.name == name).is_none_or(|row| row.key_export)
+    METHOD_POLICIES
+        .iter()
+        .find(|row| row.name == name)
+        .is_none_or(|row| row.key_export == KeyExport::RequiresPermission)
 }
 
 pub(super) fn allowed(name: &str) -> bool {

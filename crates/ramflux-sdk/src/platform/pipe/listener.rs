@@ -58,6 +58,10 @@ pub(crate) trait BusStream: Sized {
 
     fn into_halves(self) -> (Self::ReadHalf, Self::WriteHalf);
 
+    fn subscription_generations(&self) -> bool {
+        false
+    }
+
     /// # Errors
     /// Returns [`SdkError::LocalBusPermissionDenied`] when the peer is not `expected`.
     fn matches_peer(&self, expected: PeerCred) -> Result<(), SdkError>;
