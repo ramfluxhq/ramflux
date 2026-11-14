@@ -79,6 +79,35 @@ impl AccountDb {
 }
 
 impl crate::AccountDb {
+    /// Remove only a source-local dependency assertion to exercise an authenticated absence.
+    /// # Errors
+    /// Returns local writer or database errors.
+    pub fn remove_full_transfer_dependency_for_test(
+        &self,
+        parent_wire: &str,
+        parent_manifest: &str,
+        child_wire: &str,
+        child_manifest: &str,
+    ) -> Result<(), crate::StorageError> {
+        let parent = ramflux_crypto::object_erasure_commitment(
+            &self.principal_commitment,
+            parent_wire,
+            parent_manifest,
+        );
+        let child = ramflux_crypto::object_erasure_commitment(
+            &self.principal_commitment,
+            child_wire,
+            child_manifest,
+        );
+        self.write_transaction(|| {
+            self.connection.execute(
+                "DELETE FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",
+                rusqlite::params![parent, child],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Inspect one actual portable dependency in component fixtures without exposing SQL.
     /// # Errors
     /// Returns local database errors.

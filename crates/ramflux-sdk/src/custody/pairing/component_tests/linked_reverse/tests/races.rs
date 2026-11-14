@@ -54,9 +54,11 @@ async fn prepare_race() -> Result<Linked, Box<dyn std::error::Error>> {
     seed(fixture.target.account_db()?, &["race-shared-parent"])?;
     let mut fixture = Box::pin(run_data_in(fixture, false)).await?;
     // The signed prepublication chain is immutable; these changes belong to J6's tail.
-    for parent in ["race-shared-parent", "race-a-parent"] {
-        fixture.rig.source.client.account_db()?.retire_transport_object(parent, HASH)?;
-    }
+    let a = fixture.rig.source.client.account_db()?;
+    // An absence removes only A's assertion. Retiring a transport payload also
+    // creates a restrictive erasure fence, which must dominate both contributors.
+    a.remove_full_transfer_dependency_for_test("race-shared-parent", HASH, CHILD, HASH)?;
+    a.retire_transport_object("race-a-parent", HASH)?;
     fixture = Box::pin(install_in(fixture, 3)).await?;
     Box::pin(merge(&mut fixture)).await?;
     Ok(fixture)
