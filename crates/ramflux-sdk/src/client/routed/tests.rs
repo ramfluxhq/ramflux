@@ -970,13 +970,13 @@ fn r5_legacy_group_messages_have_a_seven_day_upgrade_window() -> Result<(), SdkE
 #[tokio::test]
 async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), SdkError> {
     use crate::client::shared_group::{GroupControlBody, GroupControlPacket};
-    let outsider = Fixture::new("alice", 11)?;
-    let owner = Fixture::new("bob", 21)?;
-    owner.client.shared_group_create("g", "thread", None, "bob")?;
+    let outsider = Box::pin(Fixture::native("alice", 11)).await?;
+    let owner = Box::pin(Fixture::native("bob", 21)).await?;
+    owner.create_shared_group("g", "thread")?;
     let entry = seal(&outsider, &owner, message("outsider", "thread"), b"hello")?;
     let packet = GroupControlPacket::new(GroupControlBody::DeviceSet {
         group_id: "g".into(),
-        actor: outsider.client.owned_group_actor("alice")?,
+        actor: outsider.client.owned_group_actor(&outsider.config()?.target_delivery_id)?,
         device_set_epoch: 1,
     });
     let engine = GatewaySessionEngine::with_test_transport(owner.config()?, Box::new(NoNetwork));
@@ -985,11 +985,12 @@ async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), S
         owner.client.prepare_group_control(&engine, &entry, &route, &packet).await,
         Err(SdkError::Storage(StorageError::GroupPermissionDenied))
     ));
-    owner.client.shared_group_change(
+    let outsider_actor =
+        outsider.client.owned_group_actor(&outsider.config()?.target_delivery_id)?;
+    owner.change_shared_group(
         "g",
-        "bob",
         ramflux_protocol::GroupStateChange::Add {
-            member: outsider.client.owned_group_actor("alice")?.identity,
+            member: outsider_actor.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
