@@ -26,8 +26,10 @@ struct JoinIntent {
     notice: GroupJoinNotice,
     grant_id: String,
     roster_id: String,
+    #[serde(deserialize_with = "super::required_option")]
     grant: Option<Operation>,
     grant_applied: bool,
+    #[serde(deserialize_with = "super::required_option")]
     roster: Option<Operation>,
     complete: bool,
 }

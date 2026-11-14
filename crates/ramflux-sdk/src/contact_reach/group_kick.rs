@@ -23,6 +23,7 @@ struct KickIntent {
     operation_id: String,
     grant_hash: String,
     subject: Subject,
+    #[serde(deserialize_with = "super::required_option")]
     operation: Option<Operation>,
     complete: bool,
 }

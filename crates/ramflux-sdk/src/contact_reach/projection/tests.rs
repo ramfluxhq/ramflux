@@ -11,13 +11,13 @@ use std::collections::BTreeMap;
 const NOW: u64 = 1000;
 fn state() -> SavedReachState {
     SavedReachState {
-        provenance_hash: None,
+        provenance_hash: "provenance".into(),
         positive_pending: false,
         root: "owner".into(),
         revision: 1,
         admission_revision: 1,
         home_head_hash: "home".into(),
-        home_node_key: None,
+        home_node_key: "home-node-key".into(),
         authority_head_hash: "authority".into(),
         custodian_head_hash: None,
         state_hash: "content".into(),
@@ -25,6 +25,38 @@ fn state() -> SavedReachState {
         restrictions: BTreeMap::new(),
         conflict: false,
     }
+}
+
+#[test]
+fn cr_saved_reach_state_requires_the_complete_current_format() -> Result<(), serde_json::Error> {
+    let current = serde_json::to_value(state())?;
+    for field in
+        ["root", "home_node_key", "custodian_head_hash", "provenance_hash", "positive_pending"]
+    {
+        let mut missing = current.clone();
+        if let Some(object) = missing.as_object_mut() {
+            object.remove(field);
+        }
+        assert!(
+            serde_json::from_value::<SavedReachState>(missing).is_err(),
+            "missing {field} must refuse rather than decode an older saved-state shape"
+        );
+    }
+    for field in ["home_node_key", "provenance_hash"] {
+        let mut absent = current.clone();
+        if let Some(object) = absent.as_object_mut() {
+            object.insert(field.into(), serde_json::Value::Null);
+        }
+        assert!(
+            serde_json::from_value::<SavedReachState>(absent).is_err(),
+            "required {field} cannot use a null placeholder for missing verified context"
+        );
+    }
+    assert!(
+        serde_json::from_value::<SavedReachState>(current).is_ok(),
+        "the current complete format preserves explicit null for an inapplicable human custodian"
+    );
+    Ok(())
 }
 fn subject() -> Subject {
     Subject::Conversation { root: "peer".into(), conversation_id: "dm".into() }

@@ -146,7 +146,7 @@ impl RouterRedbStore {
         if !activate || op.phase == Phase::Active {
             return Ok(());
         }
-        crate::contact_reach::require_empty_reach_activation(&tx, &a.account_anchor)?;
+        crate::contact_reach::require_reach_transfer(&tx, &a.account_anchor)?;
         // The destination must retain the verified prefix, not only its new head:
         // later contacts can require the original home as their pinned ancestry floor.
         for predecessor in std::iter::once(&op.base).chain(result.predecessors.iter()) {

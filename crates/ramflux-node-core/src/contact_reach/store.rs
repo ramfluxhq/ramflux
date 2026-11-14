@@ -866,7 +866,7 @@ mod denials;
 mod migration;
 pub(in crate::contact_reach) mod provenance;
 mod rosters;
-pub(crate) use migration::require_empty_reach_activation;
+pub(crate) use migration::require_reach_transfer;
 
 mod ephemeral;
 pub(super) use ephemeral::{require_adopted_source_home, require_ephemeral_local_home};

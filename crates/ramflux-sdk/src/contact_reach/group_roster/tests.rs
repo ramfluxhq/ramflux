@@ -7,6 +7,24 @@ use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_protocol::{contact_reach::Applied, group_state::GroupStateChange};
 
+#[test]
+fn cr_roster_queue_requires_explicit_current_context_fields() -> TestResult {
+    let current = serde_json::to_value(Queue::default())?;
+    for field in ["checkpoint", "active", "next", "success", "refusal"] {
+        let mut missing = current.clone();
+        missing.as_object_mut().ok_or("queue object")?.remove(field);
+        assert!(
+            serde_json::from_value::<Queue>(missing).is_err(),
+            "missing {field} cannot silently select an older roster-queue shape"
+        );
+    }
+    assert!(
+        serde_json::from_value::<Queue>(current).is_ok(),
+        "a current unsigned queue has explicit null context rather than omitted fields"
+    );
+    Ok(())
+}
+
 fn advance(owner: &Fixture, change: GroupStateChange) -> TestResult<VerifiedGroupState> {
     let primary = owner
         .client

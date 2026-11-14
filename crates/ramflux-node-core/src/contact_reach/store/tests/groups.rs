@@ -716,18 +716,24 @@ fn cr_reach_error_lifting_preserves_uncertainty_at_roster_commit() -> TestResult
 }
 
 #[test]
-fn cr_nonempty_reach_state_refuses_home_activation() -> TestResult {
+fn cr_missing_or_nonempty_reach_state_refuses_home_activation() -> TestResult {
     let dir = tempfile::TempDir::new()?;
     let (store, f) = initialize(&dir.path().join("migration-reach.redb"))?;
     {
         let tx = store.begin_write()?;
-        crate::contact_reach::require_empty_reach_activation(&tx, &f.root)?;
+        assert!(
+            matches!(
+                crate::contact_reach::require_reach_transfer(&tx, &f.root),
+                Err(crate::NodeCoreError::ContactReachRefused(Reason::HomeEvidenceRequired))
+            ),
+            "missing reach state is not an authenticated empty image or a migration exemption"
+        );
     }
     install_live_group(&store, &f)?;
     let tx = store.begin_write()?;
     assert!(
         matches!(
-            crate::contact_reach::require_empty_reach_activation(&tx, &f.root),
+            crate::contact_reach::require_reach_transfer(&tx, &f.root),
             Err(crate::NodeCoreError::ContactReachRefused(Reason::HomeEvidenceRequired))
         ),
         "a destination cannot activate an existing reach account without its state-transfer module"

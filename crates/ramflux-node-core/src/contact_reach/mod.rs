@@ -28,7 +28,7 @@ pub use cost::CostIssuerPeer;
 pub use ingress::{ReachIngress, ReachPending};
 pub use state::{AccountReach, ReachClass};
 pub use store::ReachOwner;
-pub(crate) use store::require_empty_reach_activation;
+pub(crate) use store::require_reach_transfer;
 
 mod error;
 pub(crate) use error::owner_error;

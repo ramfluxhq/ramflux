@@ -94,7 +94,7 @@ impl RouterCore {
             };
             let tx = store.begin_write().map_err(storage)?;
             let now = clock(&tx, now)?;
-            crate::contact_reach::require_empty_reach_activation(&tx, anchor)?;
+            crate::contact_reach::require_reach_transfer(&tx, anchor)?;
             super::signer_pin::retain(&tx, node)?;
             super::authority_evidence::remember(&tx, publication, now)?;
             let head = if let Some(head) = read::<RecordEvidence>(&tx, HEADS, anchor)? {
@@ -185,7 +185,7 @@ impl RouterCore {
             if let Some(record) = permanent_commit(&tx, auth, &auth_key)? {
                 return Ok(record);
             }
-            crate::contact_reach::require_empty_reach_activation(&tx, &a.account_anchor)?;
+            crate::contact_reach::require_reach_transfer(&tx, &a.account_anchor)?;
             if read::<Signed<NoncommitFence>>(&tx, super::FENCES, &auth_key)?.is_some() {
                 return Err(refusal(Refusal::CommitExpired));
             }

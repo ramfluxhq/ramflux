@@ -150,18 +150,15 @@ pub(crate) struct SavedReachState {
     revision: u64,
     admission_revision: u64,
     home_head_hash: String,
-    #[serde(default)]
-    home_node_key: Option<String>,
+    home_node_key: String,
     authority_head_hash: String,
-    #[serde(default)]
+    #[serde(deserialize_with = "required_option")]
     custodian_head_hash: Option<String>,
     state_hash: String,
-    #[serde(default)]
-    provenance_hash: Option<String>,
+    provenance_hash: String,
     records: Vec<StateRecord>,
     restrictions: BTreeMap<String, StateRecord>,
     conflict: bool,
-    #[serde(default = "positive_pending_default")]
     positive_pending: bool,
 }
 impl crate::RamfluxClient {
@@ -214,8 +211,7 @@ impl crate::RamfluxClient {
                 }
                 if verified.manifest.revision == saved.revision {
                     if verified.manifest.state_hash == saved.state_hash
-                        && saved.provenance_hash.as_deref()
-                            == Some(verified.manifest.provenance_hash.as_str())
+                        && saved.provenance_hash == verified.manifest.provenance_hash
                     {
                         if restored.is_none() {
                             let mut refreshed = saved.clone();
@@ -257,11 +253,11 @@ impl crate::RamfluxClient {
                 revision: verified.manifest.revision,
                 admission_revision: verified.manifest.admission_revision,
                 home_head_hash: verified.manifest.home_head_hash,
-                home_node_key: Some(verified.home_node_key),
+                home_node_key: verified.home_node_key,
                 authority_head_hash: verified.manifest.authority_head_hash,
                 custodian_head_hash: verified.custodian_head_hash,
                 state_hash: verified.manifest.state_hash,
-                provenance_hash: Some(verified.manifest.provenance_hash),
+                provenance_hash: verified.manifest.provenance_hash,
                 records: verified.records,
                 restrictions,
                 conflict: false,
@@ -286,15 +282,19 @@ impl crate::RamfluxClient {
     }
 }
 
-fn positive_pending_default() -> bool {
-    true
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 impl SavedReachState {
     fn refresh_current(&mut self, verified: &VerifiedReachState) {
         self.positive_pending = !verified.positives_ready;
         self.custodian_head_hash.clone_from(&verified.custodian_head_hash);
         self.home_head_hash.clone_from(&verified.manifest.home_head_hash);
-        self.home_node_key = Some(verified.home_node_key.clone());
+        self.home_node_key.clone_from(&verified.home_node_key);
         self.authority_head_hash.clone_from(&verified.manifest.authority_head_hash);
     }
     fn require_positive_ready(&self) -> Result<(), SdkError> {

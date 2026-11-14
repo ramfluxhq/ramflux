@@ -26,21 +26,25 @@ struct Intent {
     operation_id: String,
     epoch: u64,
     hash: String,
+    #[serde(deserialize_with = "super::required_option")]
     operation: Option<Operation>,
-    #[serde(default)]
+    #[serde(deserialize_with = "super::required_option")]
     context: Option<recovery::RepairContext>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Queue {
     grant_hash: String,
+    #[serde(deserialize_with = "super::required_option")]
     checkpoint: Option<GroupRoster>,
+    #[serde(deserialize_with = "super::required_option")]
     active: Option<Intent>,
+    #[serde(deserialize_with = "super::required_option")]
     next: Option<Intent>,
     pending_fork: bool,
-    #[serde(default)]
+    #[serde(deserialize_with = "super::required_option")]
     success: Option<recovery::RosterSuccess>,
-    #[serde(default)]
+    #[serde(deserialize_with = "super::required_option")]
     refusal: Option<recovery::RosterRefusal>,
 }
 pub(super) fn pin_originals(
