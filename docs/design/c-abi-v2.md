@@ -472,3 +472,7 @@ TTL and are bounded to 1,024 live rows per namespace. Admission at capacity refu
 new operations rather than evicting an unexpired retry guarantee. Private pending
 rows have the same expiry. After expiry, old keys have no retry guarantee; hosts
 must reconcile history and use fresh operation keys.
+
+The bundled SDK Card release is epoch/version 1/2 on the current catalog. Hosts
+must refresh their independently pinned trust-index and exact-descriptor digests
+when adopting this SDK commit; ABI majors remain SDK 2 and Card 4.
