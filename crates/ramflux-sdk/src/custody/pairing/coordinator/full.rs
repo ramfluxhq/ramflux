@@ -36,6 +36,7 @@ mod source_observation;
 mod status;
 mod stream;
 pub(super) mod tail;
+mod terminal;
 
 pub(super) struct FullCeremony {
     prepared_resume: bool,

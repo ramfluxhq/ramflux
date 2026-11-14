@@ -479,3 +479,59 @@ fn pairing_full_terminal_live_row_refuses_data_reopen_and_retains_stage() -> Tes
     }
     Ok(())
 }
+
+#[test]
+fn pairing_full_terminal_unprepared_stage_requires_drain_and_reclaims_only_private_data()
+-> TestResult {
+    use ramflux_crypto::custody::pairing::PairingRole;
+    let (root, db) = crate::tests::test_db("full-terminal-unprepared-reclaim")?;
+    let stage = db.create_full_stage_for_test(local_stage_record_fixture()?, 604_900)?;
+    let reference = stage.reference().clone();
+    let mut row = linked_row()?;
+    row.context = Some(reference.to_wire_bytes()?);
+    db.put_pairing_live(&row)?;
+    let ordinary = db.path.clone();
+    assert!(
+        db.reclaim_unprepared_full_stage(&row.operation_id, PairingRole::Initiator, 100).is_err(),
+        "test: active data stage was reclaimed"
+    );
+    drop(stage);
+    db.mark_full_transfer_data_terminal(
+        &row.operation_id,
+        PairingRole::Initiator,
+        "rejected",
+        100,
+    )?;
+    row.phase = "rejected".into();
+    db.put_pairing_live(&row)?;
+    let worker = std::fs::OpenOptions::new().read(true).write(true).open(
+        root.join("custody_accounts/acct/full-transfer")
+            .join(&reference.stage_id)
+            .join("stage.lock"),
+    )?;
+    fs2::FileExt::try_lock_exclusive(&worker)?;
+    assert!(
+        db.reclaim_unprepared_full_stage(&row.operation_id, PairingRole::Initiator, 100).is_err(),
+        "test: terminal cleanup deleted an active private worker's stage"
+    );
+    drop(worker);
+    assert!(
+        db.reclaim_unprepared_full_stage(&row.operation_id, PairingRole::Initiator, 100)?,
+        "test: drained unprepared terminal stage was retained"
+    );
+    assert!(
+        !root.join("custody_accounts/acct/full-transfer").join(&reference.stage_id).try_exists()?,
+        "test: terminal cleanup retained private bytes or wrapped stage key"
+    );
+    assert!(ordinary.try_exists()?, "test: private cleanup deleted the ordinary account database");
+    assert_eq!(
+        db.privacy_erasure_generation()?,
+        0,
+        "test: private cleanup changed ordinary privacy state"
+    );
+    assert!(
+        db.reclaim_unprepared_full_stage(&row.operation_id, PairingRole::Initiator, 100)?,
+        "test: terminal cleanup was not idempotent"
+    );
+    Ok(())
+}

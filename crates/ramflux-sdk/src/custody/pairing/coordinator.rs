@@ -586,6 +586,7 @@ impl PairingActor {
             Ok(false) => {}
             Err(error) => {
                 self.note_background_error(&error);
+                self.reject_invalid_full_head(&error).await?;
                 return Err(error);
             }
         }
@@ -1412,26 +1413,16 @@ impl PairingActor {
         self.full_runtime.drain_local_work();
         // Full owners/caches/readers were cancelled above, before waiting for the DB loan.
         // Preserve candidate and stage metadata even when publication might have escaped.
-        let durable_terminal = if let (Some((operation, generation)), Some(participant)) =
-            (full_terminal, self.participant.clone())
-        {
-            let phase = phase.to_owned();
-            self.full_runtime
-                .clone()
-                .run_blocking(move || {
-                    participant.mark_full_data_terminal(&operation, generation, &phase)
-                })
-                .await
-        } else {
-            Ok(())
-        };
+        let durable_terminal = self.persist_full_data_terminal(full_terminal, phase).await;
         if let Some((origin, close)) = close {
             let _ = self.transport.close(origin, close).await;
             if let Some(c) = self.ceremony.as_mut() {
                 c.token.zeroize();
             }
         }
-        durable_terminal?;
+        if durable_terminal? && let Some(c) = &mut self.ceremony {
+            c.cleanup = "done".into();
+        }
         self.actor_generation = self.actor_generation.saturating_add(1);
         self.status_update()
     }

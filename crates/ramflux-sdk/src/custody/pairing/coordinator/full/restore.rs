@@ -38,14 +38,15 @@ impl PairingActor {
             .run_blocking(move || {
                 local.full_native_stream_head(&anchor, Some((&operation, &target)))
             })
-            .await?;
+            .await;
+        let current = self.close_invalid_full_data(current).await?;
         let owned = request.clone();
         let pinned_node = node.clone();
         let action = move |db: &ramflux_storage::AccountDb| {
             participant.restore_full_data_in(db, &owned, &pinned_node, &current, &reference)
         };
         let snapshot = if let Some(writer) = &self.local_writer {
-            writer.request(action).await?
+            writer.request(action).await
         } else {
             let participant =
                 self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
@@ -57,8 +58,9 @@ impl PairingActor {
                     let slot = participant.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
                     action(slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?)
                 })
-                .await?
+                .await
         };
+        let snapshot = self.close_invalid_full_data(snapshot).await?;
         self.accept_data_resume(snapshot, node)?;
         self.transfer_status(request).await
     }

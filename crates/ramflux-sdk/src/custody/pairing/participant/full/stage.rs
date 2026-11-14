@@ -7,34 +7,43 @@ use super::{
 };
 
 impl LocalPairingParticipant {
-    /// Persist a terminal data fence while preserving every stage and uncertain candidate.
-    /// Before a lease is linked there is no data stage to reopen; legacy early rows stay fenced
-    /// by their absence of a stage reference. Only the own encrypted terminal marker is written.
+    /// Persist a terminal data fence, then reclaim only unprepared private DATA.
+    /// A durable candidate, adoption or selected generation retains reconciliation bytes.
+    /// Returns whether cleanup is complete; a missing early stage grants no data opportunity.
     pub(crate) fn mark_full_data_terminal(
         &self,
         operation: &str,
         generation: u64,
         phase: &str,
-    ) -> Result<(), SdkError> {
+    ) -> Result<bool, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        self.mark_full_data_terminal_in(db, operation, generation, phase)
+    }
+    pub(crate) fn mark_full_data_terminal_in(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        operation: &str,
+        generation: u64,
+        phase: &str,
+    ) -> Result<bool, SdkError> {
         if !matches!(phase, "cancelled" | "expired" | "rejected") {
             return Err(wrong());
         }
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, None)?;
         let Some(mut row) =
             db.pairing_live_rows()?.into_iter().find(|row| row.operation_id == operation)
         else {
-            return Ok(());
+            return Ok(true);
         };
         if row.generation != generation {
             return Err(wrong());
         }
-        if matches!(row.phase.as_str(), "completed" | "cancelled" | "expired" | "rejected") {
-            return Ok(());
+        if row.phase == "completed" {
+            return Ok(false);
         }
         if row.full_stage_reference()?.is_none() {
-            return Ok(());
+            return Ok(true);
         }
         // Close data durably before changing the account projection. A later exact
         // installation may change that projection without reviving the data epoch.
@@ -43,11 +52,13 @@ impl LocalPairingParticipant {
         } else {
             ramflux_crypto::custody::pairing::PairingRole::Responder
         };
-        db.mark_full_transfer_data_terminal(operation, role, phase, custody::network_now()?)?;
-        // An uncertain publication is retained verbatim for a separate reconciliation owner.
-        row.phase = phase.into();
-        db.put_pairing_live(&row)?;
-        Ok(())
+        if !matches!(row.phase.as_str(), "cancelled" | "expired" | "rejected") {
+            db.mark_full_transfer_data_terminal(operation, role, phase, custody::network_now()?)?;
+            // An uncertain publication is retained verbatim for a separate reconciliation owner.
+            row.phase = phase.into();
+            db.put_pairing_live(&row)?;
+        }
+        Ok(db.reclaim_unprepared_full_stage(operation, role, custody::network_now()?)?)
     }
     /// Commit/fsync the encrypted data-only record before updating its actual live-row link.
     /// Source binding consumes only a locally prepared cut and original-source-signed manifest.
