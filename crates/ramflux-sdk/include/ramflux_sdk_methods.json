@@ -39,24 +39,6 @@
     },
     {
       "bridge_allowed": true,
-      "capability": "a2ui",
-      "key_export": false,
-      "name": "a2ui.action",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "a2ui",
-      "key_export": false,
-      "name": "a2ui.render",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "account.backup.cancel",

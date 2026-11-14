@@ -21,7 +21,25 @@ pub(crate) struct SiblingSetup<'a> {
 /// Returns native authority, vault, reservation or storage failures.
 pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), SdkError> {
     let SiblingSetup { root, id, device, record, branch, vault, passphrase, now } = setup;
-    let verified = verify_record(&record, now, None, None)?;
+    let custodian = record.body.profile.custodian.as_ref().and_then(|wanted| {
+        list_accounts(root, now).ok()?.into_iter().find_map(|summary| {
+            let id = summary.get("local_account_id")?.as_str()?;
+            load_account(root, id, now)
+                .ok()
+                .filter(|account| {
+                    account.record().body.account_anchor == wanted.account_anchor
+                        && account.record().body.principal_kind
+                            == ramflux_protocol::PrincipalKind::Human
+                })
+                .map(|account| (id.to_owned(), account))
+        })
+    });
+    let verified = verify_record(
+        &record,
+        now,
+        None,
+        custodian.as_ref().map(|(_, account)| account.verified()),
+    )?;
     let entry =
         record.body.devices.iter().find(|entry| entry.device_id == device).ok_or_else(invalid)?;
     let reference = ramflux_protocol::custody::DeviceRef {
@@ -66,9 +84,11 @@ pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), Sdk
         )?,
         record,
         compacted_ids: None,
-        custodian_publication: None,
+        custodian_publication: custodian
+            .as_ref()
+            .map(|(_, account)| Box::new(account.publication())),
         pins,
-        custodian_account_id: None,
+        custodian_account_id: custodian.map(|(id, _)| id),
         agent_provisioning_vault_ref: None,
     };
     vault.store_branch(&branch_ref, branch)?;

@@ -4,7 +4,7 @@
 //! Shared DM transport journals one logical surface across peer devices and retries.
 use super::*;
 use crate::bus::runtime_tests;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -281,22 +281,11 @@ fn configure_receiver(
     Ok(())
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
-    let request = crate::SurfaceSendRequest::event(
+    let request = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        1,
-        &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Safe fallback".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":""})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
-    let mut carrier = Carrier {
+        &text_snapshot("surface", "Safe fallback", ""),
+    )?)?;
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -312,7 +301,7 @@ pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError
         signature: String::new(),
         snapshot: None,
     };
-    source.attach_surface_snapshot(&mut carrier)?;
+
     let carrier = source.sign_surface_carrier(carrier)?;
     Ok(carrier)
 }
@@ -365,7 +354,10 @@ async fn assert_deliveries(
                 let result =
                     peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
                 assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
-                assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 1);
+                assert!(
+                    peer.client.surface_get("surface", 0, None)?.is_null(),
+                    "human-authored peer cards remain fallback-only"
+                );
                 assert_eq!(peer.client.direct_messages("thread")?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
                 assert_eq!(

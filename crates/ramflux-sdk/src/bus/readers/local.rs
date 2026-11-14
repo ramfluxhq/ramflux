@@ -39,6 +39,12 @@ pub(super) struct AccountView {
 }
 
 impl AccountView {
+    pub(super) fn install_reader_authority(&self, client: &mut RamfluxClient) {
+        client.reader_principal_id = (!self.principal.is_empty()).then(|| self.principal.clone());
+        client.born_v3_account.clone_from(&self.native);
+        client.reader_account_root.clone_from(&self.account_root);
+    }
+
     pub(super) fn capture(state: &LocalBusDaemonState, id: &str) -> Result<Self, SdkError> {
         let account = local_bus_account(state, id)?;
         let client = &account.client;
@@ -53,6 +59,7 @@ impl AccountView {
             views.insert(
                 "device.list",
                 serde_json::to_value(LocalBusDeviceListResponse {
+                    a2ui_renderer_capabilities: ramflux_protocol::renderer_capabilities(),
                     principal_id: account.gateway_config.principal_id.clone(),
                     local_device_id: account.gateway_config.device_id.clone(),
                     devices,

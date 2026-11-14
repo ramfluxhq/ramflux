@@ -26,11 +26,11 @@ pub(crate) use ramflux_storage::{
     WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
-    A2iControlEvent, A2uiAction, A2uiSurface, ChunkManifest, ChunkPayload, EncryptedObject,
-    FederationMesh, FederationMessage, McpCapability, McpGrantState, McpRegistry, McpToolManifest,
-    ObjectStore, ObjectSyncSession, OpaqueCallSignal, PreparedEncryptedObject, RenderedSurface,
-    ResumeToken, RiskLevel, SignalingRelay, SyncError, bot_install_grant_signing_body,
-    bot_manifest_hash, bot_manifest_signing_body, chunk_manifest_for_object, decrypt_chunk_payload,
+    A2iControlEvent, ChunkManifest, ChunkPayload, EncryptedObject, FederationMesh,
+    FederationMessage, McpCapability, McpGrantState, McpRegistry, McpToolManifest, ObjectStore,
+    ObjectSyncSession, OpaqueCallSignal, PreparedEncryptedObject, ResumeToken, RiskLevel,
+    SignalingRelay, SyncError, bot_install_grant_signing_body, bot_manifest_hash,
+    bot_manifest_signing_body, chunk_manifest_for_object, decrypt_chunk_payload,
     grant_matches_manifest, mcp_capability_wire_name, parse_mcp_capability,
     risk_requires_explicit_approval, verify_bot_install_grant, verify_bot_manifest,
 };

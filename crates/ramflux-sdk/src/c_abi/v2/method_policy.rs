@@ -33,8 +33,6 @@ policies! {
     "a2i.append" => ("a2i", true, true, false, false),
     "a2i.list" => ("a2i", false, true, false, false),
     "a2i.list_pending" => ("a2i", false, true, false, false),
-    "a2ui.action" => ("a2ui", true, true, false, false),
-    "a2ui.render" => ("a2ui", true, true, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
     "account.backup.export" => ("account", true, true, false, true),

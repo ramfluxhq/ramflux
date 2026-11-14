@@ -4,8 +4,9 @@
 //! Group recovery is a bounded pair reply, without group broadcasts or unrelated timeline writes.
 use super::*;
 use crate::bus::runtime_tests;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use crate::client::surface::SurfaceSender;
+use crate::client::surface::test_support::{create_frame, native_transport_config, text_snapshot};
+use std::sync::{Arc, Mutex};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Group {
     source: LocalBusAccountState,
@@ -18,101 +19,175 @@ struct Group {
 impl Group {
     async fn new() -> TestResult<Self> {
         let root = runtime_tests::root("surface-private-resync");
-        let mut source = runtime_tests::account(
-            &root.join("source"),
-            "sender",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let peers = super::tests::members(&root, &source, 3)?;
-        let (config, directory) =
-            super::tests::directory_config(&root, &mut source, &peers).await?;
-        source.client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"group","group_id":"group"}),
-        )?;
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        source.install_test_session(GatewaySessionEngine::with_test_transport(
-            config.clone(),
-            Box::new(super::fixture::RecordingGateway::new(Arc::clone(&captured))),
-        ));
-        let wire = crate::SurfaceSendRequest::event(
-            "thread",
-            1,
-            &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-                surface_id: "surface".into(),
-                surface_type: SurfaceType::StatusPanel,
-                catalog: "basic".into(),
-                catalog_version: "1".into(),
-                fallback_text: "中文 é 🦀".into(),
-                fallback_markdown: None,
-                components: vec![json!({"id":"result","text":""})],
-                data_model: serde_json::Map::default(),
-                allowed_actions: Vec::new(),
-            }),
-        )?;
-        let mut create = super::dm_tests::create_carrier(&source.client)?;
-        create.wire_base64 = wire.wire_base64;
-        create.snapshot = None;
-        source.client.attach_surface_snapshot(&mut create)?;
-        create = source.client.sign_surface_carrier(create)?;
-        send(&mut source, &create).await?;
-        let frames = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        let mut deliveries = Vec::new();
-        for peer in &peers {
-            let principal = &peer
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .principal_id;
-            deliveries.extend(
-                frames
-                    .iter()
-                    .filter(|frame| &frame.target_delivery_id == principal)
-                    .cloned()
-                    .map(|envelope| super::tests::Delivery { envelope }),
-            );
+        let mut clients = crate::client::surface::test_support::owned_terminals(&root).await?;
+        let author_sibling = clients.remove(1);
+        let source_client = clients.remove(0);
+        clients.push(author_sibling);
+        let source_identity = source_client.owned_device_identity()?;
+        source_client.create_group("group", source_identity.storage_key())?;
+        let identities = clients
+            .iter()
+            .map(RamfluxClient::owned_device_identity)
+            .collect::<Result<Vec<_>, _>>()?;
+        for identity in &identities {
+            source_client.add_group_member("group", identity.storage_key(), "member")?;
         }
-        super::tests::assert_receivers(
-            &peers,
-            &deliveries,
-            source.client.group_state("group")?.group_epoch,
-            1,
-        )?;
-        for peer in &peers {
-            peer.client.persist_identity_directory(&super::fixture::manifest(&source.client)?)?;
-            let branch = peer.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            let envelope = frames
-                .iter()
-                .rev()
-                .find(|e| e.target_delivery_id == branch.principal_id)
-                .ok_or("delivery")?
-                .clone();
-            let entry = GatewayInboxEntry {
-                forwarded: false,
-                inbox_seq: 2,
-                target_delivery_id: envelope.target_delivery_id.clone(),
-                envelope,
-            };
-            let opened = peer.client.open_routed(&entry, &branch.device_id)?;
-            peer.client.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
-            peer.client.send_direct_message(
+        let epoch = source_client.group_state("group")?.group_epoch;
+        let mut manifests = BTreeMap::new();
+        for client in std::iter::once(&source_client).chain(&clients) {
+            let manifest = client.local_own_copy_manifest()?;
+            manifests
+                .insert(manifest.principal_commitment.clone(), serde_json::to_value(manifest)?);
+            client.account_db()?.persist_client_record(
+                "conversation",
                 "thread",
-                "initial-visible",
-                "device-sender",
-                b"encrypted",
+                &json!({"kind":"group","group_id":"group"}),
             )?;
         }
-        let delta = super::own_tests::append(&source.client, &create, 2)?;
-        send(&mut source, &delta).await?;
+        let (address, directory) = super::fixture::directory(&root, manifests).await?;
+        let branch = source_client.device_branch.as_ref().ok_or("source branch")?;
+        let config = native_transport_config(
+            GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+                bind_addr: "127.0.0.1:0".parse()?,
+                gateway_addr: address,
+                server_name: "test-gateway".into(),
+                ca_cert: root.join("ca.pem"),
+                principal_id: branch.principal_id.clone(),
+                device_id: branch.device_id.clone(),
+                target_delivery_id: branch.device_id.clone(),
+                prekey_http_url: None,
+            }),
+            &source_client,
+        )?;
+        let snapshot = text_snapshot("surface", "中文 é 🦀", "");
+        let request = crate::SurfaceSendRequest::event(&create_frame("thread", &snapshot)?)?;
+        let create = source_client.sign_surface_carrier(Carrier {
+            schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
+            content_type: "surface".into(),
+            posted_at: None,
+            updated_at: None,
+            payload_kind: PayloadKind::Event,
+            conversation_id: "thread".into(),
+            surface_id: "surface".into(),
+            message_id: request.message_id,
+            sender_principal_id: branch.principal_id.clone(),
+            sender_device_id: branch.device_id.clone(),
+            author_principal_id: branch.principal_id.clone(),
+            wire_base64: request.wire_base64,
+            signature: String::new(),
+            snapshot: None,
+        })?;
+        assert!(
+            source_client.stage_surface_outgoing(&create, Some(epoch))?.accepted,
+            "author create"
+        );
+        for (index, client) in clients.iter().enumerate() {
+            Self::prepare_peer(&source_client, client, &create, epoch, index, &identities)?;
+        }
+        let delta = super::own_tests::append(&source_client, &create, 2)?;
+        assert!(
+            source_client.stage_surface_outgoing(&delta, Some(epoch))?.accepted,
+            "author advances without recipient delivery"
+        );
+        let wrap = |client: RamfluxClient| -> TestResult<LocalBusAccountState> {
+            let branch = client.device_branch.as_ref().ok_or("branch")?;
+            let mut endpoint = config.clone();
+            endpoint.principal_id = branch.principal_id.clone();
+            endpoint.device_id = branch.device_id.clone();
+            endpoint.target_delivery_id = branch.device_id.clone();
+            endpoint = native_transport_config(endpoint, &client)?;
+            let commitment = client.local_own_copy_manifest()?.principal_commitment;
+            let engine = GatewaySessionEngine::with_test_transport(
+                endpoint,
+                Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+            );
+            Ok(LocalBusAccountState::new(client, engine, commitment))
+        };
+        let mut source = wrap(source_client)?;
+        // Setup authored two ordinary events, which legitimately queue sibling copies.
+        // Finish that work before observing the private resync request/reply exchange.
+        assert_eq!(
+            crate::bus::own_device_copy::flush(&mut source).await?,
+            2,
+            "the initial create and delta must finish their own-device submission"
+        );
+        let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
         Ok(Self { source, peers, config, directory, create, _root: root })
+    }
+    fn prepare_peer(
+        source_client: &RamfluxClient,
+        client: &RamfluxClient,
+        create: &Carrier,
+        epoch: u64,
+        index: usize,
+        identities: &[ramflux_crypto::RootQualifiedDeviceRef],
+    ) -> TestResult {
+        let source_identity = source_client.owned_device_identity()?;
+        let source_device = source_identity.device_id().to_owned();
+        let local = client.device_branch.as_ref().ok_or("peer branch")?;
+        client.account_db()?.upsert_group_local_membership_snapshot(
+            "group",
+            epoch,
+            128,
+            "none",
+            &local.device_id,
+            "member",
+            1,
+        )?;
+        client.account_db()?.upsert_root_bound_group_member_snapshot(
+            "group",
+            &source_identity,
+            "owner",
+            1,
+        )?;
+        for identity in identities {
+            client
+                .account_db()?
+                .upsert_root_bound_group_member_snapshot("group", identity, "member", 1)?;
+        }
+        client.pin_local_group_member("group")?;
+        client.pin_joined_group_member("group", source_identity.storage_key())?;
+        let session_secret = [u8::try_from(index + 1)?; 32];
+        let send = ramflux_crypto::DmSession::initiator(
+            session_secret,
+            dm_device_id_hash(&source_device),
+            dm_device_id_hash(&local.device_id),
+            [3; 32],
+        )?;
+        let recv = ramflux_crypto::DmSession::recipient(
+            session_secret,
+            dm_device_id_hash(&local.device_id),
+            dm_device_id_hash(&source_device),
+            [3; 32],
+        )?;
+        source_client.persist_pair(
+            &source_identity,
+            &client.owned_device_identity()?,
+            &[4; 32],
+            &send,
+        )?;
+        client.persist_pair(&client.owned_device_identity()?, &source_identity, &[4; 32], &recv)?;
+        assert!(
+            client
+                .project_surface_message(
+                    "thread",
+                    &create.message_id,
+                    SurfaceSender {
+                        principal: &create.sender_principal_id,
+                        device: &source_device,
+                        envelope_id: "native-create",
+                        expires_at: None,
+                        group_epoch: Some(epoch),
+                    },
+                    &create.bytes()?,
+                    false
+                )?
+                .ok_or("create projection")?
+                .accepted,
+            "native own-agent create"
+        );
+        client.send_direct_message("thread", "initial-visible", &source_device, b"encrypted")?;
+        Ok(())
     }
     fn peer_config(&self, index: usize) -> TestResult<GatewaySessionConfig> {
         let branch =
@@ -120,8 +195,8 @@ impl Group {
         let mut config = self.config.clone();
         config.principal_id = branch.principal_id.clone();
         config.device_id = branch.device_id.clone();
-        config.target_delivery_id = branch.principal_id.clone();
-        config = config.with_account_identity(&self.peers[index].client)?;
+        config.target_delivery_id = branch.device_id.clone();
+        config = native_transport_config(config, &self.peers[index].client)?;
         Ok(config)
     }
     async fn request(&mut self, index: usize) -> TestResult<ramflux_protocol::Envelope> {
@@ -192,7 +267,10 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
     }
     let frames = replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(frames.len(), 2);
-    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    assert!(
+        own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+        "private resync replies must never be copied to the author's other devices"
+    );
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
@@ -200,7 +278,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         let config = group.peer_config(index)?;
         let envelope = frames
             .iter()
-            .find(|e| e.target_delivery_id == config.principal_id)
+            .find(|e| e.target_delivery_id == config.target_delivery_id)
             .ok_or("targeted reply")?
             .clone();
         let mut engine = GatewaySessionEngine::with_test_transport(
@@ -245,5 +323,99 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
     group.directory.abort();
     drop(group.peers);
     drop(group.source);
+    Ok(())
+}
+
+pub(super) async fn native_pair_resync() -> TestResult {
+    let mut pair = Box::pin(Group::new()).await?;
+    let author_root = pair.source.client.owned_device_identity()?.root_commitment().to_owned();
+    for account in std::iter::once(&pair.source).chain(&pair.peers) {
+        account.client.account_db()?.persist_client_record(
+            "conversation",
+            "thread",
+            &json!({"kind":"direct","participants":["author","human"]}),
+        )?;
+        if account.client.device_branch.as_ref().ok_or("branch")?.principal_id == "human" {
+            let human_root = account.client.owned_device_identity()?.root_commitment().to_owned();
+            account.client.establish_friend_link("native-resync", &author_root, &human_root)?;
+            pair.source.client.establish_friend_link("native-resync", &author_root, &human_root)?;
+        }
+    }
+    let before = pair.source.client.direct_messages("thread")?.len();
+    let request = pair.request(0).await?;
+    assert_eq!(
+        super::super::surface::request_resync(
+            &mut pair.peers[0],
+            &pair.create.surface_reference()?
+        )
+        .await?["rate_limited"],
+        true,
+        "repeated UI requests remain bounded"
+    );
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let mut gateway = super::fixture::RecordingGateway::new(replies.clone());
+    gateway.inbox.push(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: request.target_delivery_id.clone(),
+        envelope: request,
+    });
+    pair.source.install_test_session(GatewaySessionEngine::with_test_transport(
+        pair.config.clone(),
+        Box::new(gateway),
+    ));
+    assert_eq!(
+        crate::bus::sync_driver::run(&mut pair.source).await?,
+        1,
+        "authenticated pair request must be consumed"
+    );
+    assert!(
+        crate::bus::couriers::surface::drive_once(&mut pair.source).await?,
+        "private reply must be delivered"
+    );
+    let peer_config = pair.peer_config(0)?;
+    let reply = replies
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|e| e.target_delivery_id == peer_config.target_delivery_id)
+        .cloned()
+        .ok_or("private reply")?;
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()?,
+    );
+    let mut receiver = GatewaySessionEngine::with_test_transport(
+        peer_config,
+        Box::new(super::fixture::RecordingGateway::new(Arc::default())),
+    );
+    let incoming = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: reply.target_delivery_id.clone(),
+        envelope: reply,
+    };
+    pair.peers[0].client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    let view = pair.peers[0].client.surface_get("surface", 0, None)?;
+    assert_eq!(view["version"], 2, "resync must recover the missed version");
+    assert_eq!(view["out_of_sync"], false, "valid resync clears the recovery fence");
+    assert_eq!(
+        view["surface_hash"],
+        pair.source.client.surface_get("surface", 0, None)?["surface_hash"],
+        "recipient and author commit the same signed base"
+    );
+    assert_eq!(
+        pair.source.client.direct_messages("thread")?.len(),
+        before,
+        "resync controls never add timeline rows"
+    );
+    assert!(
+        pair.source
+            .client
+            .account_db()?
+            .actor_state_key_page("surface/resync-response/", 100)?
+            .is_empty(),
+        "acknowledged replies leave no pending courier row"
+    );
+    pair.directory.abort();
     Ok(())
 }

@@ -359,23 +359,6 @@ fn fixture_value(object: FixtureObject) -> Value {
             "source_device_id": "dev_app",
             "target_device_id": "dev_cli"
         }),
-        "a2ui_surface" => json!({
-            "schema": domain::A2UI_SURFACE,
-            "version": 1,
-            "domain": domain::A2UI_SURFACE,
-            "event_type": "ramflux.a2ui.surface",
-            "surface_id": "surf_01",
-            "a2ui_profile": "ramflux.a2ui.v1",
-            "a2ui_profile_version": 1,
-            "upstream_a2ui_version": "0.9.1",
-            "catalog_id": "ramflux.basic.v1",
-            "catalog_version": "1.0.0",
-            "surface_hash": b64("surface-hash"),
-            "source_device_id": "dev_cli",
-            "target_device_id": "dev_app",
-            "correlation_id": "corr_01",
-            "encrypted_surface_payload": b64("a2ui-payload")
-        }),
         "mcp_grant" => json!({
             "schema": domain::MCP_GRANT,
             "version": 1,

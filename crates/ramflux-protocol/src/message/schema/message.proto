@@ -483,181 +483,37 @@ message VoiceLeaseConsent {
 message SurfaceEvent {
   string schema = 1;
   string conversation_id = 2;
-  uint64 version = 3;
-  SurfaceCommand command = 4;
+  uint64 surface_version = 3;
+  reserved 4;
+  optional string base_surface_hash = 5;
+  string new_surface_hash = 6;
+  optional string fallback_text = 7;
+  optional string close_reason = 8;
+  oneof operation {
+    JsonObject a2ui = 9;
+    SurfaceAppendText append_text = 10;
+    SurfaceResync resync = 11;
+  }
+  repeated SurfaceFinalEntry final = 12;
+  optional bool closed = 13;
+  optional JsonObject metadata = 14;
 }
 message SurfaceAction {
   string schema = 1;
   string conversation_id = 2;
-  string surface_id = 3;
-  uint64 version = 4;
+  reserved 3, 6, 7;
+  uint64 surface_version = 4;
   string surface_hash = 5;
-  string action_id = 6;
-  JsonValue values = 7;
   string args_hash = 8;
   optional SurfaceTaskBinding task_binding = 9;
+  repeated string source_instance = 10;
+  JsonObject a2ui = 11;
 }
 message SurfaceTaskBinding {
   string task_id = 1;
   string step_id = 2;
 }
-message SurfaceCommandCreateSurface {
-  CreateSurfaceCommand value = 1;
-}
-message SurfaceCommandUpdateComponents {
-  UpdateComponentsCommand value = 1;
-}
-message SurfaceCommandUpdateDataModel {
-  UpdateDataModelCommand value = 1;
-}
-message SurfaceCommandDeleteSurface {
-  DeleteSurfaceCommand value = 1;
-}
-message SurfaceCommandPatchSurface {
-  PatchSurfaceCommand value = 1;
-}
-message SurfaceCommandStreamAppend {
-  StreamAppendCommand value = 1;
-}
-message SurfaceCommand {
-  oneof value {
-    SurfaceCommandCreateSurface create_surface = 1;
-    SurfaceCommandUpdateComponents update_components = 2;
-    SurfaceCommandUpdateDataModel update_data_model = 3;
-    SurfaceCommandDeleteSurface delete_surface = 4;
-    SurfaceCommandPatchSurface patch_surface = 5;
-    SurfaceCommandStreamAppend stream_append = 6;
-  }
-}
-message PatchSurfaceCommand {
-  string surface_id = 1;
-  string base_surface_hash = 2;
-  repeated SurfacePatchOp ops = 3;
-  string new_surface_hash = 4;
-}
-message SurfacePatchOpReplaceBlock {
-  JsonValue component = 1;
-}
-message SurfacePatchOpInsertBlock {
-  uint64 index = 1;
-  JsonValue component = 2;
-}
-message SurfacePatchOpRemoveBlock {
-  string component_id = 1;
-}
-message SurfacePatchOpSetActions {
-  repeated JsonValue actions = 1;
-}
-message SurfacePatchOpSetFallbackText {
-  string fallback_text = 1;
-}
-message SurfacePatchOp {
-  oneof value {
-    SurfacePatchOpReplaceBlock replace_block = 1;
-    SurfacePatchOpInsertBlock insert_block = 2;
-    SurfacePatchOpRemoveBlock remove_block = 3;
-    SurfacePatchOpSetActions set_actions = 4;
-    SurfacePatchOpSetFallbackText set_fallback_text = 5;
-  }
-}
-message StreamAppendCommand {
-  string surface_id = 1;
-  string component_id = 2;
-  string text_delta = 3;
-  bool final_ = 4;
-}
-message CreateSurfaceCommand {
-  string surface_id = 1;
-  SurfaceType surface_type = 2;
-  string catalog = 3;
-  string catalog_version = 4;
-  string fallback_text = 5;
-  optional string fallback_markdown = 6;
-  repeated JsonValue components = 7;
-  JsonObject data_model = 8;
-  repeated JsonValue allowed_actions = 9;
-}
-message UpdateComponentsCommand {
-  string surface_id = 1;
-  string base_surface_hash = 2;
-  repeated JsonValue components = 3;
-  repeated string remove_component_ids = 4;
-  string new_surface_hash = 5;
-}
-message UpdateDataModelCommand {
-  string surface_id = 1;
-  string base_surface_hash = 2;
-  JsonObject data_patch = 3;
-  string new_surface_hash = 4;
-}
-message DeleteSurfaceCommand {
-  string surface_id = 1;
-  optional DeleteSurfaceReason reason = 2;
-}
-message SurfaceTypeMessageCard {
 
-}
-message SurfaceTypeApprovalCard {
-
-}
-message SurfaceTypeFormCard {
-
-}
-message SurfaceTypeStatusPanel {
-
-}
-message SurfaceTypeTaskCard {
-
-}
-message SurfaceTypeFilePreview {
-
-}
-message SurfaceTypeCallCard {
-
-}
-message SurfaceTypeAgentResult {
-
-}
-message SurfaceTypeNotificationCard {
-
-}
-message SurfaceType {
-  oneof value {
-    SurfaceTypeMessageCard message_card = 1;
-    SurfaceTypeApprovalCard approval_card = 2;
-    SurfaceTypeFormCard form_card = 3;
-    SurfaceTypeStatusPanel status_panel = 4;
-    SurfaceTypeTaskCard task_card = 5;
-    SurfaceTypeFilePreview file_preview = 6;
-    SurfaceTypeCallCard call_card = 7;
-    SurfaceTypeAgentResult agent_result = 8;
-    SurfaceTypeNotificationCard notification_card = 9;
-  }
-}
-message DeleteSurfaceReasonCompleted {
-
-}
-message DeleteSurfaceReasonCancelled {
-
-}
-message DeleteSurfaceReasonReplaced {
-
-}
-message DeleteSurfaceReasonExpired {
-
-}
-message DeleteSurfaceReasonError {
-
-}
-message DeleteSurfaceReason {
-  oneof value {
-    DeleteSurfaceReasonCompleted completed = 1;
-    DeleteSurfaceReasonCancelled cancelled = 2;
-    DeleteSurfaceReasonReplaced replaced = 3;
-    DeleteSurfaceReasonExpired expired = 4;
-    DeleteSurfaceReasonError error = 5;
-  }
-}
 message A2iControlEvent {
   string schema = 1;
   uint32 version = 2;
@@ -874,14 +730,15 @@ message SurfaceCarrier {
     SurfaceEvent event = 16;
     SurfaceAction action = 17;
     SurfaceCarrier action_receipt = 18;
+    SurfaceRpcFrame function_call = 19;
+    SurfaceRpcFrame function_response = 20;
+    SurfaceRpcFrame error = 21;
   }
   reserved 14, 15;
 }
 message SurfaceSnapshotProof {
   SurfaceEvent event = 1;
-  SurfaceCheckpoint checkpoint = 2;
-  optional string surface_hash = 3;
-  SurfaceResyncMetadata metadata = 4;
+  reserved 2, 3, 4;
   string author_device_id = 5;
 }
 message SurfaceDelivery {
@@ -1157,25 +1014,24 @@ message OwnGroupConsent {
   string signature = 7;
 }
 message SurfaceCheckpoint {
-  string schema = 1;
-  optional CreateSurfaceCommand content = 2;
-  optional string conversation_id = 3;
-  uint64 version = 4;
+  reserved 1, 2, 6;
+  string conversation_id = 3;
+  uint64 surface_version = 4;
   bool closed = 5;
-  repeated SurfaceFinalEntry final_text = 6;
+  string surface_id = 7;
+  string catalog_id = 8;
+  string fallback_text = 9;
+  optional JsonObject metadata = 10;
+  repeated JsonValue components = 11;
+  JsonObject data_model = 12;
+  repeated SurfaceFinalEntry final = 13;
 }
 message SurfaceFinalEntry {
-  string id = 1;
-  bool nested = 2;
+  reserved 1, 2;
   string text_hash = 3;
+  string pointer = 4;
 }
-message SurfaceResyncMetadata {
-  string schema = 1;
-  string conversation_id = 2;
-  uint64 version = 3;
-  bool closed = 4;
-  string finality_base64 = 5;
-}
+
 message SurfaceResyncRequest {
   string kind = 1;
   string conversation_id = 2;
@@ -1520,4 +1376,26 @@ message MessageUpdate {
     UnsupportedView unsupported = 5;
     Delete tombstone = 6;
   }
+}
+
+// A2UI 1.0 append and full-state replacement operations. RPC/error awaits its audited pin.
+message SurfaceAppendText {
+  string surface_id = 1;
+  string path = 2;
+  string delta = 3;
+  bool final = 4;
+}
+message SurfaceResync {
+  JsonObject a2ui = 1;
+}
+
+message SurfaceRpcFrame {
+  string schema = 1;
+  string conversation_id = 2;
+  string surface_id = 3;
+  uint64 known_version = 4;
+  optional string known_hash = 5;
+  optional string function_call_id = 6;
+  optional uint64 rejected_version = 7;
+  JsonObject a2ui = 8;
 }

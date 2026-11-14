@@ -445,10 +445,7 @@ impl<E: EngineProvider> AgentHost<E> {
                     self.state.last_refusal = Some(crate::OutputRefusal {
                         group_reason: None,
                         conversation_id: conversation_id.into(),
-                        surface_id: intents
-                            .first()
-                            .and_then(Intent::command)
-                            .map(|command| crate::runner_output::command_id(&command).to_owned()),
+                        surface_id: intents.first().and_then(Intent::surface_id).map(str::to_owned),
                         reason,
                     });
                     self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
@@ -468,7 +465,11 @@ impl<E: EngineProvider> AgentHost<E> {
             if !matches!(intents.first(), Some(Intent::CreateSurface(_))) {
                 return Err(Error::State);
             }
-            crate::runner_output::surface_outputs(conversation_id, &intents, 1)?
+            crate::runner_output::surface_outputs(
+                conversation_id,
+                &intents,
+                &ramflux_protocol::SurfaceState::default(),
+            )?
         };
         if serde_json::to_vec(&outputs).map_err(|_| Error::State)?.len() > 262_144 {
             return Err(Error::Limit);

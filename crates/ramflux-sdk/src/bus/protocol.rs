@@ -262,6 +262,8 @@ pub struct LocalBusDeviceRecord {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusDeviceListResponse {
+    #[serde(rename = "a2uiRendererCapabilities")]
+    pub a2ui_renderer_capabilities: serde_json::Value,
     pub principal_id: String,
     pub local_device_id: String,
     pub devices: Vec<LocalBusDeviceRecord>,
@@ -1022,19 +1024,6 @@ pub struct LocalBusA2iAppendRequest {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusA2iAcknowledgeRequest {
     pub event_id: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusA2uiRenderRequest {
-    pub surface: A2uiSurface,
-    pub supported_catalogs: Vec<String>,
-    pub granted_permissions: Vec<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusA2uiActionRequest {
-    pub surface: A2uiSurface,
-    pub action: A2uiAction,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

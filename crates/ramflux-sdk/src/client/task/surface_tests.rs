@@ -49,12 +49,32 @@ fn surface_project(
         )?
         .ok_or_else(|| invalid("surface absent"))
 }
-fn exercise(input: bool, read_only: bool) -> TestResult {
-    exercise_with_restart(input, read_only, false)
-}
-fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
+async fn native_fixture()
+-> Result<(Fixture, std::sync::Arc<crate::custody::tests::TestVault>), Box<dyn std::error::Error>> {
     let mut f = Fixture::new()?;
+    let (human, agent, vault) = crate::client::surface::test_support::owned_pair_with_vault(
+        &f.root.join("surface-native"),
+        "human",
+        "agent",
+    )
+    .await?;
+    f.human = human;
+    f.agent = agent;
+    for client in [&f.human, &f.agent] {
+        client.account_db()?.persist_client_record(
+            "conversation",
+            "thread",
+            &json!({"kind":"direct","participants":["human","agent"]}),
+        )?;
+    }
     create_form(&f)?;
+    Ok((f, vault))
+}
+async fn exercise(input: bool, read_only: bool) -> TestResult {
+    exercise_with_restart(input, read_only, false).await
+}
+async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
+    let (mut f, vault) = native_fixture().await?;
     let start = sign(&f.human, "thread", "start", start("task", "thread"))?;
     let target = if input {
         NeedsMe::Input { surface_id: "form".into() }
@@ -83,12 +103,7 @@ fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestRes
         assert!(project(local, &start)?.accepted);
         assert!(project(local, &update)?.accepted);
     }
-    let view = f.agent.surface_get("form", 0, None)?;
-    let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
-    let action = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"form","version":1,"surfaceHash":view["surface_hash"],"actionId":"answer","taskBinding":{"task_id":"task","step_id":"step"},"values":values,"argsHash":ramflux_protocol::surface_args_hash(&values)?}),
-    )?;
-    let action = surface_carrier(&f.human, PayloadKind::Action, "answer-form", &action)?;
+    let action = answer_action(&f.human, &f.agent)?;
     if restart {
         assert!(f.human.stage_surface_outgoing(&action, None)?.accepted);
     }
@@ -103,7 +118,12 @@ fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestRes
 
     let binding = if restart {
         drop(f.human.active_account_db.take());
-        f.human.unlock_account("human", b"task-test-secret")?;
+        f.human.unlock_account("human", b"surface-test-secret")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            f.human.initialize_born_v3_branch("human-device", vault.clone()),
+        )
+        .await??;
         let recovered = f.human.surface_get("form", 0, None)?;
         assert_eq!(recovered["actions"][0]["receipt_verified"], false);
         assert_eq!(recovered["actions"][0]["actionable"], false);
@@ -146,21 +166,55 @@ fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestRes
     }
     Ok(())
 }
-#[test]
-fn choice_resolution_uses_a_creator_validated_surface_action_without_exporting_values() -> TestResult
-{
-    exercise(false, false)
+fn answer_action(
+    requester: &RamfluxClient,
+    author: &RamfluxClient,
+) -> Result<SurfaceCarrier, Box<dyn std::error::Error>> {
+    let view = author.surface_get("form", 0, None)?;
+    let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
+    let mut frame = ramflux_protocol::ActionFrame {
+        schema: ramflux_protocol::ACTION_SCHEMA.into(),
+        conversation_id: "thread".into(),
+        surface_version: 1,
+        surface_hash: view["surface_hash"].as_str().ok_or("surface hash")?.into(),
+        source_instance: Vec::new(),
+        task_binding: Some(ramflux_protocol::TaskBinding {
+            task_id: "task".into(),
+            step_id: "step".into(),
+        }),
+        args_hash: String::new(),
+        a2ui: ramflux_protocol::ActionMessage {
+            version: "1.0".into(),
+            action: ramflux_protocol::Action {
+                name: "answer".into(),
+                surface_id: "form".into(),
+                source_component_id: "answer".into(),
+                timestamp: "2026-11-14T00:00:00Z".into(),
+                context: values.as_object().ok_or("context")?.clone(),
+                user_message: None,
+                metadata: None,
+            },
+        },
+    };
+    frame.args_hash = frame.arguments_hash()?;
+    let action = frame.wire_bytes()?;
+    surface_carrier(requester, PayloadKind::Action, "answer-form", &action).map_err(Into::into)
 }
-#[test]
-fn input_resolution_uses_a_creator_validated_surface_action_without_exporting_values() -> TestResult
-{
-    exercise(true, false)
+#[tokio::test]
+async fn choice_resolution_uses_a_creator_validated_surface_action_without_exporting_values()
+-> TestResult {
+    exercise(false, false).await
+}
+#[tokio::test]
+async fn input_resolution_uses_a_creator_validated_surface_action_without_exporting_values()
+-> TestResult {
+    exercise(true, false).await
 }
 
-#[test]
-fn a_read_only_creator_receipt_confirms_the_task_without_executing_a_surface_action() -> TestResult
-{
-    exercise(true, true)
+#[tokio::test]
+async fn a_read_only_creator_receipt_confirms_the_task_without_executing_a_surface_action()
+-> TestResult {
+    exercise(true, true).await
 }
 
 fn mark_read_only(
@@ -182,29 +236,25 @@ fn mark_read_only(
     Ok(())
 }
 
-#[test]
-fn r5_a_retained_signed_action_names_the_task_and_step_after_requester_restart_before_creator_receipt_arrival()
+#[tokio::test]
+async fn r5_a_retained_signed_action_names_the_task_and_step_after_requester_restart_before_creator_receipt_arrival()
 -> TestResult {
-    exercise_with_restart(true, false, true)
+    exercise_with_restart(true, false, true).await
 }
 
 fn create_form(f: &Fixture) -> TestResult {
-    let command = ramflux_protocol::A2uiConversationCommand::CreateSurface(
-        ramflux_protocol::CreateSurfaceCommand {
-            surface_id: "form".into(),
-            surface_type: ramflux_protocol::SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Decision needed".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"answer","text":"Choose"})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: vec![json!({"name":"answer"})],
-        },
-    );
-    let create = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.conversation.v2","conversationId":"thread","version":1,"command":command}),
-    )?;
+    let mut snapshot =
+        crate::client::surface::test_support::text_snapshot("form", "Decision needed", "Choose");
+    snapshot.components = vec![
+        json!({"id":"root","component":"Card","child":"form"}),
+        json!({"id":"form","component":"Column","children":["input","answer"]}),
+        json!({"id":"input","component":"TextField","label":"Private input","value":{"@path":"/private_input"}}),
+        json!({"id":"label","component":"Text","text":"Answer"}),
+        json!({"id":"answer","component":"Button","child":"label","action":{"event":{"name":"answer","context":{"decision":"resume","private_input":{"@path":"/private_input"}}}}}),
+    ];
+    snapshot.data_model = json!({"private_input":""});
+    let create =
+        crate::client::surface::test_support::create_frame("thread", &snapshot)?.wire_bytes()?;
     let c = surface_carrier(&f.agent, PayloadKind::Event, "create-form", &create)?;
     for local in [&f.human, &f.agent] {
         assert!(surface_project(local, &c)?.accepted);

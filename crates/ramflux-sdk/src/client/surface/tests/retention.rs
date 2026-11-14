@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Span Brain
 use super::*;
 
-#[test]
-fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     for version in 2..=270 {
         let signed = carrier(
@@ -13,10 +13,10 @@ fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
             &format!("v{version}"),
             &event(
                 version,
-                C::StreamAppend(StreamAppendCommand {
+                C::AppendText(AppendText {
                     surface_id: "s".into(),
-                    component_id: "stream".into(),
-                    text_delta: "x".into(),
+                    path: "/stream".into(),
+                    delta: "x".into(),
                     final_: false,
                 }),
             )?,
@@ -39,9 +39,10 @@ fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
     assert_eq!(f.author.surface_get("s", 0, None)?["version"], 270);
     Ok(())
 }
-#[test]
-fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write() -> TestResult
+{
+    let f = Fixture::new().await?;
     let db = f.author.account_db()?;
     let prefix = key("actions", "retention") + "/";
     for version in 1..=5 {
@@ -65,19 +66,41 @@ fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write(
     assert_eq!(db.surface_history_page::<Value>(&prefix, &prefix, 100)?, before);
     Ok(())
 }
-#[test]
-fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
-    let f = Fixture::new()?;
-    create(&f)?;
+#[tokio::test]
+async fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
+    let f = Fixture::new().await?;
+    let mut content = snapshot();
+    content.components = vec![
+        json!({"id":"root","component":"Column","children":["input","approve"]}),
+        json!({"id":"input","component":"TextField","label":"Note","value":{"@path":"/note"}}),
+        json!({"id":"label","component":"Text","text":"Submit"}),
+        json!({"id":"approve","component":"Button","child":"label","action":{"event":{"name":"approve","context":{"note":{"@path":"/note"}}}}}),
+    ];
+    content.data_model = json!({"note":""});
+    let create =
+        carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(content))?)?;
+    assert!(project(&f.author, &create, "create-author")?.accepted, "author base must commit");
+    assert!(project(&f.human, &create, "create-human")?.accepted, "owned-agent form must render");
     let view = f.author.surface_get("s", 0, None)?;
-    let values = json!({"note":"x".repeat(10_000)});
-    let raw = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"s","version":1,"surfaceHash":view["surface_hash"],"actionId":"approve","values":values,"argsHash":surface_args_hash(&values)?}),
+    let baseline = action(&f.human, "large", 1, view["surface_hash"].as_str().ok_or("hash")?)?;
+    let parsed = ramflux_protocol::SurfaceAction::from_wire_bytes(
+        &ramflux_protocol::decode_base64url(&baseline.wire_base64)?,
     )?;
+    let mut frame = parsed.frame().clone();
+    frame.a2ui.action.context = serde_json::from_value(json!({"note":"x".repeat(4000)}))?;
+    frame.args_hash = frame.arguments_hash()?;
+    let raw = frame.wire_bytes()?;
+    let signed = carrier(&f.human, PayloadKind::Action, "large", &raw)?;
+    assert!(
+        project(&f.author, &signed, "large")?.accepted,
+        "the bounded raw owned input must remain readable"
+    );
     let mut padded = b" ".repeat(160_000);
-    padded.extend(raw);
-    let signed = carrier(&f.human, PayloadKind::Action, "large", &padded)?;
-    assert!(project(&f.author, &signed, "large")?.accepted);
+    padded.extend(&raw);
+    assert!(
+        ramflux_protocol::SurfaceAction::from_wire_bytes(&padded).is_err(),
+        "noncanonical oversized action bytes must fail closed"
+    );
     let result = f.author.surface_get("s", 0, None)?;
     let id = result["last_action_id"].as_str().ok_or("action")?;
     let selected = f.author.surface_get("s", 0, Some(id))?;
@@ -86,7 +109,7 @@ fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
         ramflux_protocol::decode_base64url(
             selected["actions"][0]["wire_base64"].as_str().ok_or("wire")?
         )?,
-        padded
+        raw
     );
     assert!(serde_json::to_vec(&selected)?.len() < 512 * 1024);
     assert!(selected["actions"][0].get("carrier").is_none(), "wire must be present only once");

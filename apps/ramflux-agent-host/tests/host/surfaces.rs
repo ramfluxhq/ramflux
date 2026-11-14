@@ -30,10 +30,10 @@ async fn streamed_reply_choice_result_and_restart_have_no_duplicate_surfaces() -
     host.start(&mut bus).await?;
     host.apply(&mut bus, incoming(11, true), 2000).await?;
     let content = bus.state.content().ok_or("surface")?;
-    assert_eq!(content.components[0]["text"], f.config.rules[0].reply);
+    assert_eq!(content.data_model["reply"], f.config.rules[0].reply);
     assert_eq!(content.fallback_text, f.config.rules[0].reply);
     assert!(!bus.state.is_closed());
-    assert_eq!(bus.state.stream_states()["reply"], ramflux_protocol::SurfaceStreamState::Final);
+    assert_eq!(bus.state.stream_states()["/reply"], ramflux_protocol::SurfaceStreamState::Final);
     assert!(bus.sent.len() > 3);
     for body in &bus.sent {
         assert_eq!(
@@ -69,10 +69,7 @@ async fn lost_response_in_a_stream_batch_reuses_wire_and_resumes_remaining_chunk
     resumed.start(&mut bus).await?;
     assert_eq!(bus.requests[1], bus.requests[2]);
     assert_eq!(bus.id()?, id);
-    assert_eq!(
-        bus.state.content().ok_or("surface")?.components[0]["text"],
-        f.config.rules[0].reply
-    );
+    assert_eq!(bus.state.content().ok_or("surface")?.data_model["reply"], f.config.rules[0].reply);
     assert_eq!(resumed.checkpoint().cursor, Some(11));
     Ok(())
 }
@@ -90,12 +87,12 @@ async fn conflict_reloads_current_snapshot_and_rebuilds_the_result_patch() -> Te
     assert_eq!(bus.requests.len() - before, 3, "conflict, rebuilt result, close");
     assert_ne!(bus.requests[before]["message_id"], bus.requests[before + 1]["message_id"]);
     let decode = |row: &serde_json::Value| -> std::result::Result<
-        ramflux_protocol::A2uiConversationEvent,
+        ramflux_protocol::SurfaceEvent,
         Box<dyn std::error::Error>,
     > {
-        Ok(ramflux_protocol::A2uiConversationEvent::from_wire_bytes(
-            &ramflux_protocol::decode_base64url(row["wire_base64"].as_str().ok_or("wire")?)?,
-        )?)
+        Ok(ramflux_protocol::SurfaceEvent::from_wire_bytes(&ramflux_protocol::decode_base64url(
+            row["wire_base64"].as_str().ok_or("wire")?,
+        )?)?)
     };
     assert_eq!(
         decode(&bus.requests[before + 1])?.version(),
@@ -140,7 +137,8 @@ async fn r3_repeated_conflicts_stop_durably_without_resending_a_known_stale_resu
     assert_eq!(host.checkpoint().cursor, Some(20));
     assert_eq!(
         host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason,
-        ramflux_sdk::SurfaceRefusalCode::StaleVersion
+        ramflux_sdk::SurfaceRefusalCode::StaleHash,
+        "a same-version v3 resync with a different commitment is a hash conflict"
     );
     let requests = bus.requests.len();
     drop(host);

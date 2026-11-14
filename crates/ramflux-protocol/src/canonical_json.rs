@@ -8,11 +8,10 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
 use crate::{
-    A2iControlEvent, A2uiSurfaceEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof,
-    ConversationEvent, Cursor, DeviceProof, Envelope, EventId, FederationHandshake,
-    FriendLinkEvent, GroupEvent, HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent,
-    McpGrant, MessageEvent, Nack, NotificationWake, ObjectChunkRequest, ObjectManifest,
-    SignedRequest,
+    A2iControlEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof, ConversationEvent,
+    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent, GroupEvent,
+    HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent, McpGrant, MessageEvent, Nack,
+    NotificationWake, ObjectChunkRequest, ObjectManifest, SignedRequest,
 };
 use crate::{FixtureObject, ProtocolError, ProtocolObject, domain};
 
@@ -134,7 +133,6 @@ pub fn parse_fixture_value(object: FixtureObject, value: Value) -> Result<(), se
             serde_json::from_value::<ObjectChunkRequest>(value).map(|_value| ())
         }
         "a2i_control" => serde_json::from_value::<A2iControlEvent>(value).map(|_value| ()),
-        "a2ui_surface" => serde_json::from_value::<A2uiSurfaceEvent>(value).map(|_value| ()),
         "mcp_grant" => serde_json::from_value::<McpGrant>(value).map(|_value| ()),
         "bot_manifest" => serde_json::from_value::<BotManifest>(value).map(|_value| ()),
         "bot_event" => serde_json::from_value::<BotEvent>(value).map(|_value| ()),

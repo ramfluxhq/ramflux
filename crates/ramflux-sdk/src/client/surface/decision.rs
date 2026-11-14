@@ -4,19 +4,18 @@
 //! A creator-device decision ledger with authenticated, non-executable replicas.
 use super::{Carrier, Outcome, Payload, PayloadKind, SnapshotProof, invalid, key};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::A2uiSurfaceAction;
+use ramflux_protocol::SurfaceAction;
 use serde_json::{Value, json};
-pub(super) fn decision_key(
-    carrier: &Carrier,
-    action: &A2uiSurfaceAction,
-) -> Result<String, SdkError> {
+pub(super) fn decision_key(carrier: &Carrier, action: &SurfaceAction) -> Result<String, SdkError> {
     Ok(format!(
         "{}/{}",
         key("decisions", &carrier.surface_reference()?),
         ramflux_protocol::hash_base64url(
-            "ramflux.surface.decision.v1",
+            "ramflux.surface.decision.v2",
             &ramflux_protocol::canonical_json_bytes(&(
                 action.version(),
+                action.source_component_id(),
+                action.source_instance(),
                 action.action_id(),
                 &carrier.sender_principal_id
             ))?
@@ -28,7 +27,7 @@ impl RamfluxClient {
         &self,
         receipt: &Carrier,
         original: &Carrier,
-        action: &A2uiSurfaceAction,
+        action: &SurfaceAction,
     ) -> Result<Outcome, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let Some((record, current)) = self.surface_state_ref(&receipt.surface_reference()?)? else {
@@ -73,7 +72,7 @@ impl RamfluxClient {
     pub(super) fn persist_surface_decision(
         &self,
         original: &Carrier,
-        action: &A2uiSurfaceAction,
+        action: &SurfaceAction,
         actionable: bool,
         group_epoch: Option<u64>,
     ) -> Result<(), SdkError> {
@@ -170,6 +169,45 @@ impl RamfluxClient {
         })?;
         self.store_surface_action_attestation(original, &receipt)?;
         self.queue_surface_own_copy(&receipt, group_epoch)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_hash_matches_independent_v3_instance_oracle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let action = SurfaceAction::from_wire_bytes(include_bytes!(
+            "../../../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/submit.action.json"
+        ))?;
+        let carrier = Carrier {
+            schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
+            content_type: "surface".into(),
+            posted_at: None,
+            updated_at: None,
+            payload_kind: PayloadKind::Action,
+            conversation_id: "conversation".into(),
+            surface_id: "surface".into(),
+            message_id: "decision-oracle".into(),
+            sender_principal_id: "human".into(),
+            sender_device_id: "human-device".into(),
+            author_principal_id: "author".into(),
+            wire_base64: ramflux_protocol::encode_base64url(action.frame().wire_bytes()?),
+            signature: String::new(),
+            snapshot: None,
+        };
+        let key = decision_key(&carrier, &action)?;
+        assert_eq!(
+            key.rsplit('/').next().ok_or("decision digest")?,
+            include_str!(
+                "../../../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/decision.hash"
+            )
+            .trim(),
+            "decision dedup must use the pinned v2 domain and source-instance tuple"
+        );
         Ok(())
     }
 }

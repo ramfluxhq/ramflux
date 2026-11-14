@@ -74,7 +74,7 @@ pub fn render_text_fallback(signer: &str, kind: &str, content: &str) -> String {
     )
 }
 
-impl crate::CreateSurfaceCommand {
+impl crate::SurfaceSnapshot {
     /// Safe P5 text rendering using the caller's verified signer identity.
     #[must_use]
     pub fn safe_fallback_text(&self, signer: &str) -> String {

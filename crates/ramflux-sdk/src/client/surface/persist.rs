@@ -56,13 +56,13 @@ impl RamfluxClient {
         Ok(())
     }
     pub(super) fn bootstrap_owned_surface(&self, carrier: &Carrier) -> Result<(), SdkError> {
-        let Some(proof) = carrier.snapshot.as_ref().filter(|proof| proof.is_full()) else {
+        let Some(proof) = carrier.snapshot.as_ref() else {
             return Ok(());
         };
         let version = match carrier.payload()? {
             super::Payload::Event(event) => event.version(),
             super::Payload::ActionReceipt { action, .. } => action.version(),
-            super::Payload::Action(_) => return Ok(()),
+            super::Payload::Action(_) | super::Payload::Rpc(..) => return Ok(()),
         };
         let previous = self
             .surface_state_ref(&carrier.surface_reference()?)?

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned surfaces in authenticated conversation messages, independent of pair sessions.
+mod attachments;
 mod authored;
 mod backfill;
 pub(crate) mod carrier;
@@ -28,12 +29,14 @@ mod resync_request;
 pub(crate) use resync_request::ResyncReply;
 #[cfg(test)]
 pub(crate) use resync_request::with_fixed_surface_envelope_id;
+mod author_gate;
+mod rpc;
 mod scope;
 mod signer;
 mod snapshot;
 mod task_action_read;
 mod task_decision;
-pub(crate) use carrier::{Carrier, Payload, PayloadKind, command_id, invalid};
+pub(crate) use carrier::{Carrier, Payload, PayloadKind, invalid};
 pub(crate) use read::surface_metadata;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -85,7 +88,7 @@ impl Outcome {
 
     fn protocol_rejected(error: &ramflux_protocol::SurfaceReject) -> Self {
         let retryable = matches!(error, ramflux_protocol::SurfaceReject::NotCreated)
-            || matches!(error,ramflux_protocol::SurfaceReject::Version { expected, actual } if actual>expected);
+            || matches!(error, ramflux_protocol::SurfaceReject::Version { expected,actual } if actual > expected);
         let mut outcome =
             Self::rejected(serde_json::json!({"code":"renderer_error","reject":error}));
         outcome.retryable = retryable;
@@ -141,3 +144,9 @@ pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), crate::SdkError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+mod rpc_tests;

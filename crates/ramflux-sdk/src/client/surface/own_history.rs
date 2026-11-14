@@ -78,25 +78,7 @@ impl RamfluxClient {
                 result.metadata.skip("checkpoint_unavailable_or_below_floor");
                 continue;
             };
-            let prefix = key("history", reference) + "/";
-            let normal = db
-                .load_actor_state::<Value>(&format!("{prefix}{:020}", checkpoint.version))?
-                .and_then(|history| {
-                    serde_json::from_value::<Carrier>(history["carrier"].clone()).ok()
-                })
-                .filter(|carrier| {
-                    carrier.snapshot.as_ref().is_some_and(super::snapshot::SnapshotProof::is_full)
-                })
-                .and_then(|carrier| {
-                    self.surface_control_packet(&carrier, ControlKind::Own, checkpoint.group_epoch)
-                        .ok()
-                })
-                .filter(|control| control.bytes().is_ok());
-            let size = if let Some(control) = &normal {
-                serde_json::to_vec(control)?.len()
-            } else {
-                serde_json::to_vec(&checkpoint)?.len()
-            };
+            let size = serde_json::to_vec(&checkpoint)?.len();
             if bytes + size > 8 * 1024 * 1024 {
                 result.metadata.truncated = true;
                 result.metadata.skip("surface_byte_budget");
@@ -110,11 +92,7 @@ impl RamfluxClient {
             } else {
                 None
             };
-            if let Some(control) = normal {
-                block.push(control);
-            } else {
-                result.checkpoints.push(checkpoint);
-            }
+            result.checkpoints.push(checkpoint);
             block.extend(self.surface_export_decisions(
                 reference,
                 floor,

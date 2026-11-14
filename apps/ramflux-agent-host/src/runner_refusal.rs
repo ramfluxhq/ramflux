@@ -35,9 +35,9 @@ impl<E: EngineProvider> AgentHost<E> {
                 pending.body["wire_base64"].as_str().ok_or(Error::State)?,
             )
             .map_err(|_| Error::State)?;
-            let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&raw)
-                .map_err(|_| Error::State)?;
-            json!({"surface_id":crate::runner_output::command_id(event.command()),"conversation_id":pending.conversation_id,"author_principal_id":self.state.principal_id})
+            let event =
+                ramflux_protocol::SurfaceEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?;
+            json!({"surface_id":event.surface_id(),"conversation_id":pending.conversation_id,"author_principal_id":self.state.principal_id})
         };
         let view = bus.request("surface.get", body, None).await?;
         if view.is_null() {
@@ -132,11 +132,7 @@ impl<E: EngineProvider> AgentHost<E> {
                 Ok(intents) => crate::runner_output::surface_outputs(
                     &pending.conversation_id,
                     &intents,
-                    view["version"]
-                        .as_u64()
-                        .ok_or(Error::State)?
-                        .checked_add(1)
-                        .ok_or(Error::Limit)?,
+                    &crate::runner_output::state_from_view(&pending.conversation_id, view)?,
                 ),
                 Err(error) => Err(error),
             }

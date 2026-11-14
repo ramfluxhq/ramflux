@@ -7,40 +7,53 @@ use crate::{AgentBus, AgentHost, EngineProvider, Error, Intent, Result, particip
 pub(crate) fn surface_outputs(
     conversation: &str,
     intents: &[Intent],
-    start: u64,
+    initial: &ramflux_protocol::SurfaceState,
 ) -> Result<Vec<Output>> {
     if intents.is_empty() || intents.len() > 96 {
         return Err(Error::Limit);
     }
-    let expected = intents.first().and_then(Intent::command).ok_or(Error::State)?;
-    let expected_id = command_id(&expected);
-    if intents
-        .iter()
-        .any(|intent| intent.command().is_none_or(|command| command_id(&command) != expected_id))
-    {
+    let expected = intents.first().and_then(Intent::surface_id).ok_or(Error::State)?;
+    if intents.iter().any(|intent| intent.surface_id() != Some(expected)) {
         return Err(Error::State);
     }
-    let outputs = intents
-        .iter()
-        .enumerate()
-        .map(|(index, intent)| {
-            let command = intent.command().ok_or(Error::State)?;
-            let version = start
-                .checked_add(u64::try_from(index).map_err(|_| Error::Limit)?)
-                .ok_or(Error::Limit)?;
-            let request = ramflux_sdk::SurfaceSendRequest::event(conversation, version, &command)
-                .map_err(|_| Error::Limit)?;
-            Ok(Output {
-                method: "surface.send".into(),
-                operation_id: request.message_id.clone(),
-                body: serde_json::to_value(request).map_err(|_| Error::State)?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut state = initial.clone();
+    let mut outputs = Vec::new();
+    for intent in intents {
+        let frame = intent.frame(conversation, &state)?;
+        let wire = frame.wire_bytes().map_err(|_| Error::State)?;
+        state = state
+            .apply(
+                &ramflux_protocol::SurfaceEvent::from_wire_bytes(&wire)
+                    .map_err(|_| Error::State)?,
+            )
+            .map_err(|_| Error::State)?;
+        let request = ramflux_sdk::SurfaceSendRequest::event(&frame).map_err(|_| Error::Limit)?;
+        outputs.push(Output {
+            method: "surface.send".into(),
+            operation_id: request.message_id.clone(),
+            body: serde_json::to_value(request).map_err(|_| Error::State)?,
+        });
+    }
     if serde_json::to_vec(&outputs).map_err(|_| Error::State)?.len() > 262_144 {
         return Err(Error::Limit);
     }
     Ok(outputs)
+}
+pub(crate) fn state_from_view(
+    conversation: &str,
+    view: &serde_json::Value,
+) -> Result<ramflux_protocol::SurfaceState> {
+    let mut snapshot =
+        view.get("snapshot").and_then(serde_json::Value::as_object).cloned().ok_or(Error::State)?;
+    snapshot.insert("conversationId".into(), serde_json::json!(conversation));
+    snapshot.insert("surfaceVersion".into(), view.get("version").cloned().ok_or(Error::State)?);
+    let bytes = ramflux_protocol::canonical_json_bytes(&snapshot).map_err(|_| Error::State)?;
+    let state =
+        ramflux_protocol::SurfaceState::from_checkpoint_bytes(&bytes).map_err(|_| Error::State)?;
+    if state.hash() != view.get("surface_hash").and_then(serde_json::Value::as_str) {
+        return Err(Error::State);
+    }
+    Ok(state)
 }
 impl<E: EngineProvider> AgentHost<E> {
     pub(crate) async fn recover_pending(&mut self, bus: &mut impl AgentBus) -> Result<()> {
@@ -171,8 +184,8 @@ fn output_scope_matches(
             pending.body["wire_base64"].as_str().ok_or(Error::State)?,
         )
         .map_err(|_| Error::State)?;
-        let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&bytes)
-            .map_err(|_| Error::State)?;
+        let event =
+            ramflux_protocol::SurfaceEvent::from_wire_bytes(&bytes).map_err(|_| Error::State)?;
         if event.conversation_id() != pending.conversation_id {
             return Err(Error::State);
         }
@@ -198,15 +211,4 @@ pub(crate) fn action_key(reference: &str, id: &str) -> String {
         "ramflux.agent.handled_action.v1",
         format!("{}:{reference}{id}", reference.len()).as_bytes(),
     )
-}
-pub(crate) fn command_id(command: &ramflux_protocol::A2uiConversationCommand) -> &str {
-    use ramflux_protocol::A2uiConversationCommand as C;
-    match command {
-        C::CreateSurface(c) => &c.surface_id,
-        C::UpdateComponents(c) => &c.surface_id,
-        C::UpdateDataModel(c) => &c.surface_id,
-        C::DeleteSurface(c) => &c.surface_id,
-        C::PatchSurface(c) => &c.surface_id,
-        C::StreamAppend(c) => &c.surface_id,
-    }
 }

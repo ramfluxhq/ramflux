@@ -195,7 +195,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
 
     let mut surface = crate::client::surface::carrier::PREFIX.to_vec();
     surface.extend(serde_json::to_vec(&json!({
-        "schema": "ramflux.surface.carrier.v2",
+        "schema": ramflux_protocol::domain::SURFACE_CARRIER,
         "content_type": "surface",
         "payload_kind": "event",
         "conversation_id": "direct",

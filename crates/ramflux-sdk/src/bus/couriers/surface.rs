@@ -50,8 +50,12 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     let client = &account.client;
     client.prune_surface_resync_state()?;
     let db = client.account_db()?;
-    let Some(key) = db.actor_state_key_page("surface/resync-response/", 1)?.into_iter().next()
-    else {
+    let key = db
+        .actor_state_key_page("surface/rpc-response/", 1)?
+        .into_iter()
+        .next()
+        .or(db.actor_state_key_page("surface/resync-response/", 1)?.into_iter().next());
+    let Some(key) = key else {
         return Ok(None);
     };
     let Some(fingerprint) = db.load_actor_state::<serde_json::Value>(&key)? else {

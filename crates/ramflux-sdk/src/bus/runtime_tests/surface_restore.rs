@@ -4,31 +4,20 @@
 //! Reads admitted during restore use the same methods and persisted surface as warm readers.
 use super::{AccountActor, AccountCommand, ActorResponse};
 use crate::bus::runtime_tests;
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use crate::client::surface::{Carrier, PayloadKind};
 use crate::prelude::*;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::oneshot;
 
 fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
     let account = runtime_tests::account(root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let create = crate::SurfaceSendRequest::event(
+    let create = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        1,
-        &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Persisted".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":"saved"})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
-    let mut carrier = Carrier {
+        &text_snapshot("surface", "Persisted", "saved"),
+    )?)?;
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -44,7 +33,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
         signature: String::new(),
         snapshot: None,
     };
-    account.client.attach_surface_snapshot(&mut carrier)?;
+
     let carrier = account.client.sign_surface_carrier(carrier)?;
     assert!(account.client.stage_surface_outgoing(&carrier, None)?.accepted);
     account.client.surface_get("surface", 0, None)

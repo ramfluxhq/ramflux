@@ -12,9 +12,35 @@ pub struct SurfaceEvent {
     #[prost(string, tag = "2")]
     pub conversation_id: ::prost::alloc::string::String,
     #[prost(uint64, tag = "3")]
-    pub version: u64,
-    #[prost(message, optional, tag = "4")]
-    pub command: ::core::option::Option<SurfaceCommand>,
+    pub surface_version: u64,
+    #[prost(string, optional, tag = "5")]
+    pub base_surface_hash: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "6")]
+    pub new_surface_hash: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "7")]
+    pub fallback_text: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "8")]
+    pub close_reason: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "12")]
+    pub r#final: ::prost::alloc::vec::Vec<SurfaceFinalEntry>,
+    #[prost(bool, optional, tag = "13")]
+    pub closed: ::core::option::Option<bool>,
+    #[prost(message, optional, tag = "14")]
+    pub metadata: ::core::option::Option<JsonObject>,
+    #[prost(oneof = "surface_event::Operation", tags = "9, 10, 11")]
+    pub operation: ::core::option::Option<surface_event::Operation>,
+}
+/// Nested message and enum types in `SurfaceEvent`.
+pub mod surface_event {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Operation {
+        #[prost(message, tag = "9")]
+        A2ui(super::JsonObject),
+        #[prost(message, tag = "10")]
+        AppendText(super::SurfaceAppendText),
+        #[prost(message, tag = "11")]
+        Resync(super::SurfaceResync),
+    }
 }
 impl serde::Serialize for SurfaceEvent {
     #[allow(deprecated)]
@@ -30,10 +56,31 @@ impl serde::Serialize for SurfaceEvent {
         if !self.conversation_id.is_empty() {
             len += 1;
         }
-        if self.version != 0 {
+        if self.surface_version != 0 {
             len += 1;
         }
-        if self.command.is_some() {
+        if self.base_surface_hash.is_some() {
+            len += 1;
+        }
+        if !self.new_surface_hash.is_empty() {
+            len += 1;
+        }
+        if self.fallback_text.is_some() {
+            len += 1;
+        }
+        if self.close_reason.is_some() {
+            len += 1;
+        }
+        if !self.r#final.is_empty() {
+            len += 1;
+        }
+        if self.closed.is_some() {
+            len += 1;
+        }
+        if self.metadata.is_some() {
+            len += 1;
+        }
+        if self.operation.is_some() {
             len += 1;
         }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.SurfaceEvent", len)?;
@@ -43,13 +90,47 @@ impl serde::Serialize for SurfaceEvent {
         if !self.conversation_id.is_empty() {
             struct_ser.serialize_field("conversationId", &self.conversation_id)?;
         }
-        if self.version != 0 {
+        if self.surface_version != 0 {
             #[allow(clippy::needless_borrow)]
             #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field("version", ToString::to_string(&self.version).as_str())?;
+            struct_ser.serialize_field(
+                "surfaceVersion",
+                ToString::to_string(&self.surface_version).as_str(),
+            )?;
         }
-        if let Some(v) = self.command.as_ref() {
-            struct_ser.serialize_field("command", v)?;
+        if let Some(v) = self.base_surface_hash.as_ref() {
+            struct_ser.serialize_field("baseSurfaceHash", v)?;
+        }
+        if !self.new_surface_hash.is_empty() {
+            struct_ser.serialize_field("newSurfaceHash", &self.new_surface_hash)?;
+        }
+        if let Some(v) = self.fallback_text.as_ref() {
+            struct_ser.serialize_field("fallbackText", v)?;
+        }
+        if let Some(v) = self.close_reason.as_ref() {
+            struct_ser.serialize_field("closeReason", v)?;
+        }
+        if !self.r#final.is_empty() {
+            struct_ser.serialize_field("final", &self.r#final)?;
+        }
+        if let Some(v) = self.closed.as_ref() {
+            struct_ser.serialize_field("closed", v)?;
+        }
+        if let Some(v) = self.metadata.as_ref() {
+            struct_ser.serialize_field("metadata", v)?;
+        }
+        if let Some(v) = self.operation.as_ref() {
+            match v {
+                surface_event::Operation::A2ui(v) => {
+                    struct_ser.serialize_field("a2ui", v)?;
+                }
+                surface_event::Operation::AppendText(v) => {
+                    struct_ser.serialize_field("appendText", v)?;
+                }
+                surface_event::Operation::Resync(v) => {
+                    struct_ser.serialize_field("resync", v)?;
+                }
+            }
         }
         struct_ser.end()
     }
@@ -60,14 +141,43 @@ impl<'de> serde::Deserialize<'de> for SurfaceEvent {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] =
-            &["schema", "conversation_id", "conversationId", "version", "command"];
+        const FIELDS: &[&str] = &[
+            "schema",
+            "conversation_id",
+            "conversationId",
+            "surface_version",
+            "surfaceVersion",
+            "base_surface_hash",
+            "baseSurfaceHash",
+            "new_surface_hash",
+            "newSurfaceHash",
+            "fallback_text",
+            "fallbackText",
+            "close_reason",
+            "closeReason",
+            "final",
+            "closed",
+            "metadata",
+            "a2ui",
+            "append_text",
+            "appendText",
+            "resync",
+        ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Schema,
             ConversationId,
-            Version,
-            Command,
+            SurfaceVersion,
+            BaseSurfaceHash,
+            NewSurfaceHash,
+            FallbackText,
+            CloseReason,
+            Final,
+            Closed,
+            Metadata,
+            A2ui,
+            AppendText,
+            Resync,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -93,8 +203,23 @@ impl<'de> serde::Deserialize<'de> for SurfaceEvent {
                             "conversationId" | "conversation_id" => {
                                 Ok(GeneratedField::ConversationId)
                             }
-                            "version" => Ok(GeneratedField::Version),
-                            "command" => Ok(GeneratedField::Command),
+                            "surfaceVersion" | "surface_version" => {
+                                Ok(GeneratedField::SurfaceVersion)
+                            }
+                            "baseSurfaceHash" | "base_surface_hash" => {
+                                Ok(GeneratedField::BaseSurfaceHash)
+                            }
+                            "newSurfaceHash" | "new_surface_hash" => {
+                                Ok(GeneratedField::NewSurfaceHash)
+                            }
+                            "fallbackText" | "fallback_text" => Ok(GeneratedField::FallbackText),
+                            "closeReason" | "close_reason" => Ok(GeneratedField::CloseReason),
+                            "final" => Ok(GeneratedField::Final),
+                            "closed" => Ok(GeneratedField::Closed),
+                            "metadata" => Ok(GeneratedField::Metadata),
+                            "a2ui" => Ok(GeneratedField::A2ui),
+                            "appendText" | "append_text" => Ok(GeneratedField::AppendText),
+                            "resync" => Ok(GeneratedField::Resync),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -114,8 +239,15 @@ impl<'de> serde::Deserialize<'de> for SurfaceEvent {
             {
                 let mut schema__ = None;
                 let mut conversation_id__ = None;
-                let mut version__ = None;
-                let mut command__ = None;
+                let mut surface_version__ = None;
+                let mut base_surface_hash__ = None;
+                let mut new_surface_hash__ = None;
+                let mut fallback_text__ = None;
+                let mut close_reason__ = None;
+                let mut r#final__ = None;
+                let mut closed__ = None;
+                let mut metadata__ = None;
+                let mut operation__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -134,27 +266,94 @@ impl<'de> serde::Deserialize<'de> for SurfaceEvent {
                             }
                             conversation_id__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::Version => {
-                            if version__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("version"));
+                        GeneratedField::SurfaceVersion => {
+                            if surface_version__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("surfaceVersion"));
                             }
-                            version__ = Some(
+                            surface_version__ = Some(
                                 map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
                             );
                         }
-                        GeneratedField::Command => {
-                            if command__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("command"));
+                        GeneratedField::BaseSurfaceHash => {
+                            if base_surface_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("baseSurfaceHash"));
                             }
-                            command__ = map_.next_value()?;
+                            base_surface_hash__ = map_.next_value()?;
+                        }
+                        GeneratedField::NewSurfaceHash => {
+                            if new_surface_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("newSurfaceHash"));
+                            }
+                            new_surface_hash__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::FallbackText => {
+                            if fallback_text__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("fallbackText"));
+                            }
+                            fallback_text__ = map_.next_value()?;
+                        }
+                        GeneratedField::CloseReason => {
+                            if close_reason__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("closeReason"));
+                            }
+                            close_reason__ = map_.next_value()?;
+                        }
+                        GeneratedField::Final => {
+                            if r#final__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("final"));
+                            }
+                            r#final__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Closed => {
+                            if closed__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("closed"));
+                            }
+                            closed__ = map_.next_value()?;
+                        }
+                        GeneratedField::Metadata => {
+                            if metadata__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("metadata"));
+                            }
+                            metadata__ = map_.next_value()?;
+                        }
+                        GeneratedField::A2ui => {
+                            if operation__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("a2ui"));
+                            }
+                            operation__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_event::Operation::A2ui);
+                        }
+                        GeneratedField::AppendText => {
+                            if operation__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("appendText"));
+                            }
+                            operation__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_event::Operation::AppendText);
+                        }
+                        GeneratedField::Resync => {
+                            if operation__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("resync"));
+                            }
+                            operation__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_event::Operation::Resync);
                         }
                     }
                 }
                 Ok(SurfaceEvent {
                     schema: schema__.unwrap_or_default(),
                     conversation_id: conversation_id__.unwrap_or_default(),
-                    version: version__.unwrap_or_default(),
-                    command: command__,
+                    surface_version: surface_version__.unwrap_or_default(),
+                    base_surface_hash: base_surface_hash__,
+                    new_surface_hash: new_surface_hash__.unwrap_or_default(),
+                    fallback_text: fallback_text__,
+                    close_reason: close_reason__,
+                    r#final: r#final__.unwrap_or_default(),
+                    closed: closed__,
+                    metadata: metadata__,
+                    operation: operation__,
                 })
             }
         }

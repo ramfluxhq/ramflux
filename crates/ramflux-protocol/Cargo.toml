@@ -7,6 +7,11 @@ license.workspace = true
 repository = "https://github.com/ramflux/ramflux-protocol"
 
 [dependencies]
+jsonschema = { version = "=0.37.1", default-features = false }
+url = "=2.5.8"
+regex = "=1.13.0"
+regex-syntax = "=0.8.11"
+time = { version = "=0.3.51", features = ["parsing", "formatting"] }
 prost.workspace = true
 prost-reflect = "=0.16.5"
 unicode-segmentation = "=1.13.3"

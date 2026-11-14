@@ -109,6 +109,7 @@ pub struct RamfluxClient {
         std::cell::RefCell<Option<Box<identity_authority::profile_read::ProfileReadCache>>>,
     pub(crate) identity_root: Option<IdentityRoot>,
     pub(crate) reader_device_identity: Option<ramflux_crypto::RootQualifiedDeviceRef>,
+    pub(crate) reader_principal_id: Option<String>,
     // Public authority files are read directly; readers never open the mutable index.
     pub(crate) reader_account_root: Option<PathBuf>,
     pub(crate) device_branch: Option<DeviceBranch>,
@@ -136,6 +137,7 @@ impl Default for RamfluxClient {
             profile_read_cache: std::cell::RefCell::new(None),
             identity_root: None,
             reader_device_identity: None,
+            reader_principal_id: None,
             reader_account_root: None,
             device_branch: None,
             account_index: None,

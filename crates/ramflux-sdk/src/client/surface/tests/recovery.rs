@@ -3,9 +3,10 @@
 
 //! Hash disagreement and recipient-driven resync preserve state and bound response amplification.
 use super::*;
-#[test]
-fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advancing() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advancing()
+-> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.human.surface_get("s", 0, None)?;
     let delta = carrier(
@@ -14,26 +15,37 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
         "v2",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "hello".into(),
+                path: "/stream".into(),
+                delta: "hello".into(),
                 final_: false,
             }),
         )?,
     )?;
-    let mut missing = delta.clone();
-    missing.snapshot = None;
-    missing.message_id = "missing".into();
-    missing = f.author.sign_surface_carrier(missing)?;
-    assert!(!project(&f.human, &missing, "missing")?.accepted);
-    assert_eq!(f.human.surface_get("s", 0, None)?, before);
-    let mut wrong = serde_json::to_value(&delta)?;
-    wrong["snapshot"]["surface_hash"] = json!("incorrect-resulting-hash");
-    let wrong = f.author.sign_surface_carrier(serde_json::from_value(wrong)?)?;
+    let raw = ramflux_protocol::decode_base64url(&delta.wire_base64)?;
+    let mut frame: Value = serde_json::from_slice(&raw)?;
+    frame.as_object_mut().ok_or("frame")?.remove("newSurfaceHash");
+    assert!(
+        ramflux_protocol::SurfaceEvent::from_wire_bytes(&ramflux_protocol::canonical_json_bytes(
+            &frame
+        )?)
+        .is_err(),
+        "a delta without its required commitment cannot enter the signer"
+    );
+    assert_eq!(
+        f.human.surface_get("s", 0, None)?,
+        before,
+        "refused local framing must not change state"
+    );
+    frame["newSurfaceHash"] = json!("incorrect-resulting-hash");
+    let mut wrong = delta;
+    wrong.wire_base64 =
+        ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&frame)?);
+    let wrong = f.author.sign_surface_carrier(wrong)?;
     let outcome = project(&f.human, &wrong, "wrong")?;
     assert!(!outcome.accepted);
-    assert_eq!(outcome.renderer_error.ok_or("typed error")?["code"], "surface_hash_mismatch");
+    assert_eq!(outcome.renderer_error.ok_or("typed error")?["reject"]["reject"], "integrity");
     let after = f.human.surface_get("s", 0, None)?;
     for field in ["snapshot", "version", "surface_hash", "hash_history"] {
         assert_eq!(before[field], after[field]);
@@ -41,10 +53,10 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
     assert_eq!(after["out_of_sync"], true);
     Ok(())
 }
-#[test]
-fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
+#[tokio::test]
+async fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
 -> TestResult {
-    let terminals = devices::Terminals::new()?;
+    let terminals = devices::Terminals::new().await?;
     let [author, sibling, human, human_two] = terminals.clients.as_slice() else {
         return Err("terminals".into());
     };
@@ -59,10 +71,10 @@ fn only_original_author_answers_each_device_once_in_one_surface_window_and_recov
         "v2",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "new state".into(),
+                path: "/stream".into(),
+                delta: "new state".into(),
                 final_: false,
             }),
         )?,

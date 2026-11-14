@@ -281,11 +281,15 @@ impl RamfluxClient {
         reply: &ResyncReply,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if reply.carrier.author_principal_id != local.principal_id
+        let rpc = reply.carrier.payload_kind.rpc_kind().is_some();
+        if (!rpc && reply.carrier.author_principal_id != local.principal_id)
             || reply.carrier.sender_principal_id != local.principal_id
             || reply.carrier.sender_device_id != local.device_id
         {
             return Err(invalid("resync reply requires the original author device"));
+        }
+        if rpc && !self.surface_author_is_own_agent(&reply.carrier.author_principal_id)? {
+            return Err(invalid("RPC replies require an own agent"));
         }
         let target = &reply.destination;
         let device = self.trusted_device(

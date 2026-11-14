@@ -19,8 +19,6 @@ pub enum SyncError {
     InvalidMcpCapability(String),
     #[error("grant invalidated")]
     GrantInvalidated,
-    #[error("A2UI render rejected")]
-    A2uiRejected,
     #[error("bot manifest rejected")]
     BotManifestRejected,
     #[error("bot install grant rejected")]

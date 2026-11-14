@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Surface authoring through the existing message paths; only the account actor mutates state.
-use crate::client::surface::{Carrier, PayloadKind, command_id, invalid};
+use crate::client::surface::{Carrier, PayloadKind, invalid};
 use crate::prelude::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -50,15 +50,26 @@ async fn dispatch_surface_inner(
     let body: Send = serde_json::from_value(request.body.clone())?;
     let raw = ramflux_protocol::decode_base64url(&body.wire_base64)
         .map_err(|_| invalid("invalid surface wire encoding"))?;
-    let kind =
-        if request.method == "surface.send" { PayloadKind::Event } else { PayloadKind::Action };
+    let kind = if request.method == "surface.action" {
+        PayloadKind::Action
+    } else if ramflux_protocol::SurfaceEvent::from_wire_bytes(&raw).is_ok() {
+        PayloadKind::Event
+    } else {
+        match ramflux_protocol::SurfaceRpc::detect(&raw)?.0 {
+            ramflux_protocol::RpcKind::FunctionCall => PayloadKind::FunctionCall,
+            ramflux_protocol::RpcKind::FunctionResponse => PayloadKind::FunctionResponse,
+            ramflux_protocol::RpcKind::Error => PayloadKind::Error,
+        }
+    };
     let surface_id = match kind {
         PayloadKind::Event => {
-            command_id(ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&raw)?.command())
-                .to_owned()
+            ramflux_protocol::SurfaceEvent::from_wire_bytes(&raw)?.surface_id().to_owned()
         }
         PayloadKind::Action => {
-            ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&raw)?.surface_id().to_owned()
+            ramflux_protocol::SurfaceAction::from_wire_bytes(&raw)?.surface_id().to_owned()
+        }
+        PayloadKind::FunctionCall | PayloadKind::FunctionResponse | PayloadKind::Error => {
+            ramflux_protocol::SurfaceRpc::detect(&raw)?.1.frame().surface_id.clone()
         }
         PayloadKind::ActionReceipt => return Err(invalid("action receipts are internal")),
     };
@@ -163,11 +174,16 @@ fn prepare_carrier(
 ) -> Result<Carrier, SdkError> {
     let device = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let create = kind == PayloadKind::Event
-        && matches!(
-            ramflux_protocol::A2uiConversationEvent::from_wire_bytes(raw)?.command(),
-            ramflux_protocol::A2uiConversationCommand::CreateSurface(_)
-        );
-    let owner = if create {
+        && ramflux_protocol::SurfaceEvent::from_wire_bytes(raw)?.is_create();
+    let owner = if kind.rpc_kind().is_some() {
+        if kind == PayloadKind::FunctionCall {
+            device.principal_id.clone()
+        } else {
+            body.author_principal_id
+                .clone()
+                .ok_or_else(|| invalid("RPC response author required"))?
+        }
+    } else if create {
         if body.author_principal_id.as_deref().is_some_and(|author| author != device.principal_id) {
             return Err(invalid("surface create author must be the authenticated account"));
         }
@@ -190,7 +206,7 @@ fn prepare_carrier(
             crate::SurfaceRefusalCode::NotAuthor.error("only the author may update a surface")
         );
     }
-    let mut carrier = Carrier {
+    let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -209,7 +225,7 @@ fn prepare_carrier(
     if let Some(previous) = client.reuse_authored_surface(&carrier)? {
         return Ok(previous);
     }
-    client.attach_surface_snapshot(&mut carrier)?;
+
     client.sign_surface_carrier(carrier)
 }
 

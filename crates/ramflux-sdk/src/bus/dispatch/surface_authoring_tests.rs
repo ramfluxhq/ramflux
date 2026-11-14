@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
-use ramflux_protocol::{A2uiConversationCommand as C, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, atomic::AtomicBool};
 #[test]
 fn non_author_send_is_typed_before_delta_hash_construction()
@@ -23,21 +23,10 @@ fn non_author_send_is_typed_before_delta_hash_construction()
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let create = crate::SurfaceSendRequest::event(
+    let create = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        1,
-        &C::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "safe".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":""})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
+        &text_snapshot("surface", "safe", ""),
+    )?)?;
     let body: Send = serde_json::from_value(serde_json::to_value(&create)?)?;
     let raw = ramflux_protocol::decode_base64url(&create.wire_base64)?;
     let carrier = prepare_carrier(&author.client, &body, PayloadKind::Event, &raw, "surface")?;
@@ -67,14 +56,22 @@ fn non_author_send_is_typed_before_delta_hash_construction()
         .ok_or("projection")?;
     assert!(outcome.accepted);
     let before = reader.client.surface_get("surface", 0, None)?;
-    let update = crate::SurfaceSendRequest::event(
-        "thread",
-        2,
-        &C::DeleteSurface(ramflux_protocol::DeleteSurfaceCommand {
-            surface_id: "surface".into(),
-            reason: None,
-        }),
-    )?;
+    let create_event = ramflux_protocol::SurfaceEvent::from_wire_bytes(&raw)?;
+    let previous = ramflux_protocol::SurfaceState::validate_proof(&create_event)?;
+    let mut update = previous.resync_frame()?;
+    update.surface_version = 2;
+    update.base_surface_hash = previous.hash().map(str::to_owned);
+    update.fallback_text = None;
+    update.resync = None;
+    update.final_ = None;
+    update.closed = None;
+    update.metadata = None;
+    update.a2ui =
+        Some(ramflux_protocol::MutationMessage::new(ramflux_protocol::Mutation::DeleteSurface(
+            ramflux_protocol::DeleteSurface { surface_id: "surface".into() },
+        )));
+    let mut update = crate::SurfaceSendRequest::event(&previous.prepare_event(update)?)?;
+    update.author_principal_id = Some("author".into());
     let body: Send = serde_json::from_value(serde_json::to_value(&update)?)?;
     let raw = ramflux_protocol::decode_base64url(&update.wire_base64)?;
     let error = prepare_carrier(&reader.client, &body, PayloadKind::Event, &raw, "surface")
@@ -142,21 +139,10 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    let event = crate::SurfaceSendRequest::event(
+    let event = crate::SurfaceSendRequest::event(&create_frame(
         "group_thread_k2b",
-        1,
-        &C::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface-group".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Working".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":""})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
+        &text_snapshot("surface_group", "Working", ""),
+    )?)?;
     let request = LocalBusFrame::request(
         "surface-create",
         Some("agent".into()),
@@ -172,7 +158,7 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
     eprintln!(
         "native fixture reproduction: account=agent conversation=group_thread_k2b roster=2 error={error}"
     );
-    assert_eq!(state.accounts["agent"].client.surface_get("surface-group", 0, None)?, Value::Null);
+    assert_eq!(state.accounts["agent"].client.surface_get("surface_group", 0, None)?, Value::Null);
     drop(state);
     drop(owner);
     Ok(())

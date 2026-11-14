@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 pub(in crate::bus::dispatch) struct Delivery {
     pub(in crate::bus::dispatch) envelope: ramflux_protocol::Envelope,
@@ -46,18 +46,8 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let epoch = source.client.group_state("group")?.group_epoch;
-    let command = A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-        surface_id: "surface".into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
-        fallback_text: "中文 é 🦀".into(),
-        fallback_markdown: None,
-        components: vec![json!({"id":"result","text":"🦀".repeat(1500)})],
-        data_model: serde_json::Map::default(),
-        allowed_actions: Vec::new(),
-    });
-    let request = crate::SurfaceSendRequest::event("thread", 1, &command)?;
+    let command = text_snapshot("surface", "中文 é 🦀", &("🦀".repeat(1500)));
+    let request = crate::SurfaceSendRequest::event(&create_frame("thread", &command)?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -74,7 +64,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
         signature: String::new(),
         snapshot: None,
     };
-    source.client.attach_surface_snapshot(&mut carrier)?;
+
     carrier = source.client.sign_surface_carrier(carrier)?;
     let response = send(&mut source, &carrier).await?;
     assert_eq!(response["delivery_state"], "submitted");
@@ -157,6 +147,30 @@ pub(in crate::bus::dispatch) fn members(
     }
     Ok(peers)
 }
+fn install_receiver_group(client: &RamfluxClient, epoch: u64) -> Result<(), SdkError> {
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    client.account_db()?.upsert_group_local_membership_snapshot(
+        "group",
+        epoch,
+        128,
+        "none",
+        &local.device_id,
+        "member",
+        1,
+    )?;
+    client.account_db()?.upsert_group_member_snapshot("group", "device-sender", "owner", 1)?;
+    client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    client.pin_local_group_member("group")?;
+    client.pin_joined_group_member(
+        "group",
+        client.peer_device_identity("sender", "device-sender")?.storage_key(),
+    )?;
+    Ok(())
+}
 pub(in crate::bus::dispatch) fn assert_receivers(
     peers: &[LocalBusAccountState],
     deliveries: &[Delivery],
@@ -175,31 +189,7 @@ pub(in crate::bus::dispatch) fn assert_receivers(
             })
             .ok_or_else(|| SdkError::LocalBus("recipient fixture absent".into()))?;
         let local = peer.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        peer.client.account_db()?.upsert_group_local_membership_snapshot(
-            "group",
-            epoch,
-            128,
-            "none",
-            &local.device_id,
-            "member",
-            1,
-        )?;
-        peer.client.account_db()?.upsert_group_member_snapshot(
-            "group",
-            "device-sender",
-            "owner",
-            1,
-        )?;
-        peer.client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"group","group_id":"group"}),
-        )?;
-        peer.client.pin_local_group_member("group")?;
-        peer.client.pin_joined_group_member(
-            "group",
-            peer.client.peer_device_identity("sender", "device-sender")?.storage_key(),
-        )?;
+        install_receiver_group(&peer.client, epoch)?;
         for (index, delivery) in pair.iter().enumerate() {
             let entry = GatewayInboxEntry {
                 forwarded: false,
@@ -248,7 +238,21 @@ pub(in crate::bus::dispatch) fn assert_receivers(
                     )?
                     .ok_or_else(|| SdkError::LocalBus("projection".into()))?;
                 assert!(result.accepted, "{:?}", result.renderer_error);
-                assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], version);
+                let carrier =
+                    Carrier::decode(&plaintext)?.ok_or_else(|| invalid("surface carrier"))?;
+                let event = ramflux_protocol::SurfaceEvent::from_wire_bytes(
+                    &ramflux_protocol::decode_base64url(&carrier.wire_base64)
+                        .map_err(|_| invalid("surface wire"))?,
+                )?;
+                assert_eq!(
+                    event.version(),
+                    version,
+                    "encrypted transport preserves the signed v3 version"
+                );
+                assert!(
+                    peer.client.surface_get("surface", 0, None)?.is_null(),
+                    "human-authored group cards stay fallback-only"
+                );
                 assert!(result.fallback_text.contains("中文 é 🦀"));
             }
         }
@@ -371,14 +375,21 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let carrier = maximal_carrier(&source.client)?;
-    assert!(carrier.snapshot.as_ref().is_some_and(|proof| !proof.is_full()));
+    assert!(carrier.snapshot.is_none(), "v3 events have a single frame commitment");
     assert_eq!(send(&mut source, &carrier).await?["delivery_state"], "submitted");
     let epoch = source.client.group_state("group")?.group_epoch;
     finalize_all_blocks(&source.client, &carrier, epoch)?;
     let resync = source
         .client
         .prepare_surface_resync(&carrier.surface_reference()?, &crate::new_surface_message_id()?)?;
-    assert!(resync.snapshot.as_ref().ok_or("resync metadata")?.is_full());
+    assert!(resync.snapshot.is_none(), "v3 resync has no legacy proof sidecar");
+    assert!(
+        ramflux_protocol::SurfaceEvent::from_wire_bytes(&ramflux_protocol::decode_base64url(
+            &resync.wire_base64
+        )?)?
+        .is_resync(),
+        "the complete proof must be in the v3 resync frame"
+    );
     assert_eq!(send(&mut source, &resync).await?["delivery_state"], "submitted");
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(envelopes.len(), 3); // The existing text adapter reuses the distributed sender key.
@@ -414,7 +425,10 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
         )?
         .ok_or("resync projection")?;
     assert!(result.accepted, "{:?}", result.renderer_error);
-    assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 65);
+    assert!(
+        peer.client.surface_get("surface", 0, None)?.is_null(),
+        "a complete foreign resync cannot grant render authority"
+    );
     {
         let lengths = frame_lengths.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let largest = lengths.iter().max().copied().ok_or("no frames")?;
@@ -448,26 +462,38 @@ fn maximal_carrier_in(
     conversation: &str,
     surface: &str,
 ) -> Result<Carrier, Box<dyn std::error::Error>> {
-    use ramflux_protocol::{MAX_SURFACE_DATA_BYTES, canonical_json_bytes};
-    let mut content = CreateSurfaceCommand {
-        surface_id: surface.into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
-        fallback_text: "中文 é 🦀".into(),
-        fallback_markdown: None,
-        components: (0..64).map(|i| json!({"id":format!("block-{i}"),"text":""})).collect(),
-        data_model: serde_json::Map::from_iter([("padding".into(), json!(""))]),
-        allowed_actions: Vec::new(),
-    };
-    let padding = MAX_SURFACE_DATA_BYTES - canonical_json_bytes(&content)?.len();
-    content.data_model.insert("padding".into(), json!("x".repeat(padding)));
-    assert_eq!(canonical_json_bytes(&content)?.len(), MAX_SURFACE_DATA_BYTES);
-    let request = crate::SurfaceSendRequest::event(
-        conversation,
-        1,
-        &A2uiConversationCommand::CreateSurface(content),
-    )?;
+    use ramflux_protocol::{MAX_STATE_BYTES, canonical_json_bytes};
+    let mut content = text_snapshot(surface, "中文 é 🦀", "");
+    content.components = vec![
+        json!({"id":"root","component":"Column","children":(0..31).map(|i|format!("block_{i}")).collect::<Vec<_>>()}),
+    ];
+    content.components.extend((0..31).map(|i|json!({"id":format!("block_{i}"),"component":"Text","text":{"@path":format!("/block_{i}")}})));
+    let mut model = serde_json::Map::from_iter((0..64).map(|i| (format!("block_{i}"), json!(""))));
+    model.insert("padding".into(), json!(""));
+    content.data_model = json!(model);
+    let mut fully_final = content.clone();
+    fully_final.final_ = (0..64)
+        .map(|i| ramflux_protocol::FinalRecord {
+            pointer: format!("/block_{i}"),
+            text_hash: ramflux_protocol::hash_base64url("ramflux.a2ui.final_text.v2", b""),
+        })
+        .collect();
+    fully_final.final_.sort_by(|a, b| a.pointer.cmp(&b.pointer));
+    let padding = MAX_STATE_BYTES
+        .checked_sub(canonical_json_bytes(&fully_final)?.len())
+        .ok_or("maximal final state overhead")?;
+    content
+        .data_model
+        .as_object_mut()
+        .ok_or("model object")?
+        .insert("padding".into(), json!("x".repeat(padding)));
+    fully_final.data_model = content.data_model.clone();
+    assert_eq!(
+        canonical_json_bytes(&fully_final)?.len(),
+        MAX_STATE_BYTES,
+        "the final state must reach the pinned whole-state cap"
+    );
+    let request = crate::SurfaceSendRequest::event(&create_frame(conversation, &content)?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -499,7 +525,7 @@ fn maximal_carrier_in(
         signature: String::new(),
         snapshot: None,
     };
-    source.attach_surface_snapshot(&mut carrier)?;
+
     carrier = source.sign_surface_carrier(carrier)?;
     Ok(carrier)
 }
@@ -508,30 +534,36 @@ fn finalize_all_blocks(
     carrier: &Carrier,
     epoch: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use ramflux_protocol::StreamAppendCommand;
     for i in 0..64 {
-        let wire = ramflux_protocol::encode_a2ui_conversation_event(
-            &carrier.conversation_id,
-            i + 2,
-            &A2uiConversationCommand::StreamAppend(StreamAppendCommand {
-                surface_id: carrier.surface_id.clone(),
-                component_id: format!("block-{i}"),
-                text_delta: String::new(),
-                final_: true,
-            }),
+        let (_, state) = source
+            .surface_state_scoped(
+                &carrier.conversation_id,
+                &carrier.author_principal_id,
+                &carrier.surface_id,
+            )?
+            .ok_or("author state missing")?;
+        let frame = crate::client::surface::test_support::append_frame(
+            &state,
+            &format!("/block_{i}"),
+            "",
+            true,
         )?;
+        let wire = frame.wire_bytes()?;
         let mut delta = carrier.clone();
         delta.message_id = crate::new_surface_message_id()?;
         delta.wire_base64 = ramflux_protocol::encode_base64url(wire);
         delta.snapshot = None;
-        source.attach_surface_snapshot(&mut delta)?;
+
         delta = source.sign_surface_carrier(delta)?;
         if carrier.conversation_id.len() <= 32 && carrier.sender_device_id.len() <= 32 {
             assert!(delta.bytes()?.len() < 2048);
         } else {
             assert!(delta.bytes()?.len() < crate::client::surface::MAX_DELIVERY_BYTES / 8);
         }
-        assert!(!delta.snapshot.as_ref().ok_or("result hash")?.is_full());
+        assert!(
+            delta.snapshot.is_none(),
+            "append carries its frame commitments without a second snapshot shape"
+        );
         assert!(source.stage_surface_outgoing(&delta, Some(epoch))?.accepted);
     }
     Ok(())
@@ -546,7 +578,7 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
     let principal = "a".repeat(256);
     let device = "d".repeat(256);
     let conversation = "c".repeat(256);
-    let surface = "s".repeat(256);
+    let surface = "s".repeat(64);
     let remote = "r".repeat(256);
     source.client.create_identity_root(&principal, [97; 32]);
     source.client.create_device_branch(&principal, &device, 1, [98; 32]);
@@ -565,11 +597,9 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
     // Transport framing must also fit the longest valid I-JSON version representation.
     let mut wire: Value =
         serde_json::from_slice(&ramflux_protocol::decode_base64url(&resync.wire_base64)?)?;
-    wire["version"] = json!(9_007_199_254_740_991_u64);
+    wire["surfaceVersion"] = json!(9_007_199_254_740_991_u64);
     resync.wire_base64 =
         ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&wire)?);
-    resync.snapshot.as_mut().ok_or("compact proof")?.metadata.as_mut().ok_or("metadata")?["version"] =
-        wire["version"].clone();
     resync.posted_at = Some(253_402_300_799);
     resync.updated_at = Some(253_402_300_799);
     resync = source.client.sign_surface_carrier(resync)?;

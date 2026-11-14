@@ -403,6 +403,47 @@ impl BornAccount {
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
     }
+    /// Resolve renderer authority from the local creator registry and verified custody records.
+    pub(crate) fn owns_surface_agent(
+        &self,
+        author: &str,
+        anchor: &str,
+        now: u64,
+    ) -> Result<bool, SdkError> {
+        if self.authority_blocked
+            || self.record().body.principal_kind != ramflux_protocol::PrincipalKind::Human
+        {
+            return Ok(false);
+        }
+        let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        for summary in list_accounts(root, now)? {
+            let Some(id) = summary.get("local_account_id").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(agent) = load_account(root, id, now) else {
+                continue;
+            };
+            if !agent.authority_blocked
+                && agent.record().body.principal_id == author
+                && agent.record().body.account_anchor == anchor
+                && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
+                && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
+                    load_account(root, id, now).is_ok_and(|custodian| {
+                        !custodian.authority_blocked
+                            && custodian.record().body.account_anchor
+                                == self.record().body.account_anchor
+                    })
+                })
+                && agent.record().body.profile.custodian.as_ref().is_some_and(|custodian| {
+                    custodian.account_anchor == self.record().body.account_anchor
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(crate) fn local_device_id(&self) -> Result<&str, SdkError> {
         let id = if self.stored.local_device_id.is_empty() {
             match self.record().body.devices.as_slice() {

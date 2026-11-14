@@ -208,7 +208,7 @@ async fn r3_an_applied_result_still_closes_after_a_stale_close_refusal() -> Test
 }
 #[tokio::test]
 async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
-    use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
+    use ramflux_protocol::{SurfaceEvent, SurfaceState};
     // The recent-action FIFO holds 2048 ids; 2064 choices wrap it once (evicting 16 ids) and keep going.
     const CHOICES: u64 = 2064;
     let mut f = fixture()?;
@@ -224,13 +224,13 @@ async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps()
             text: "@agent checklist",
         })?;
         let Intent::CreateSurface(content) = &intents[0] else { return Err("create".into()) };
-        let bytes = ramflux_protocol::encode_a2ui_conversation_event(
-            "group-thread",
-            1,
-            &C::CreateSurface(content.clone()),
-        )?;
-        bus.state =
-            SurfaceState::default().apply(&A2uiConversationEvent::from_wire_bytes(&bytes)?)?;
+        let frame: ramflux_protocol::EventFrame = serde_json::from_value(json!({
+            "schema":ramflux_protocol::EVENT_SCHEMA,"conversationId":"group-thread",
+            "surfaceVersion":1,"newSurfaceHash":"","fallbackText":content.fallback_text,
+            "a2ui":{"version":"1.0","createSurface":content.create()}
+        }))?;
+        let bytes = SurfaceState::default().prepare_event(frame)?.wire_bytes()?;
+        bus.state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(&bytes)?)?;
         bus.decision()?;
         let id = format!("choice-{i}");
         bus.action.as_mut().ok_or("action")?["id"] = json!(id);
@@ -281,5 +281,37 @@ async fn r3_a_sibling_device_revocation_does_not_stop_the_authorized_host() -> T
     assert_eq!(host.checkpoint().cursor, Some(11));
     host.apply(&mut bus, incoming(12, false), 4000).await?;
     assert_eq!(bus.inner.replies.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn surface_rule_configuration_uses_v3_identifiers_and_the_real_component_budget() -> TestResult {
+    let mut f = fixture()?;
+    for id in ["has-dash", "constructor", "9starts_with_digit"] {
+        f.config.rules[0].surface.as_mut().ok_or("surface")?.choices =
+            vec![Choice { id: id.into(), label: "Choice".into() }];
+        assert!(
+            matches!(f.config.validate(), Err(Error::Config)),
+            "choice event names must obey the v3 identifier profile: {id}"
+        );
+    }
+    let max_choices = (ramflux_protocol::MAX_COMPONENTS - 3) / 2;
+    f.config.rules[0].surface.as_mut().ok_or("surface")?.choices = (0..max_choices)
+        .map(|i| Choice { id: format!("choice_{i}"), label: "Choice".into() })
+        .collect();
+    assert!(
+        f.config.validate().is_ok(),
+        "the largest actual component tree must remain configurable"
+    );
+    f.config.rules[0]
+        .surface
+        .as_mut()
+        .ok_or("surface")?
+        .choices
+        .push(Choice { id: "overflow".into(), label: "Choice".into() });
+    assert!(
+        matches!(f.config.validate(), Err(Error::Config)),
+        "the producer must refuse choices that exceed the pinned 32-component state cap"
+    );
     Ok(())
 }

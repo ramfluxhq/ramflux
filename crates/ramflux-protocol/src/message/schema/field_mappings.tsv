@@ -36,74 +36,8 @@ VoiceLeaseConsent	scope	1	VoiceLeaseConsent.scope	VoiceAllocationRequest
 VoiceLeaseConsent	lease_id	2	VoiceLeaseConsent.lease_id	string
 VoiceLeaseConsent	expires_at	3	VoiceLeaseConsent.expires_at	uint64
 VoiceLeaseConsent	signature	4	VoiceLeaseConsent.signature	string
-SurfaceEvent	schema	1	EventFields.schema	string
-SurfaceEvent	conversation_id	2	EventFields.conversation_id	string
-SurfaceEvent	version	3	EventFields.version	uint64
-SurfaceEvent	command	4	EventFields.command	SurfaceCommand
-SurfaceAction	schema	1	ActionFields.schema	string
-SurfaceAction	conversation_id	2	ActionFields.conversation_id	string
-SurfaceAction	surface_id	3	ActionFields.surface_id	string
-SurfaceAction	version	4	ActionFields.version	uint64
-SurfaceAction	surface_hash	5	ActionFields.surface_hash	string
-SurfaceAction	action_id	6	ActionFields.action_id	string
-SurfaceAction	values	7	ActionFields.values	JsonValue
-SurfaceAction	args_hash	8	ActionFields.args_hash	string
-SurfaceAction	task_binding	9	ActionFields.task_binding	optional SurfaceTaskBinding
 SurfaceTaskBinding	task_id	1	SurfaceTaskBinding.task_id	string
 SurfaceTaskBinding	step_id	2	SurfaceTaskBinding.step_id	string
-SurfaceCommand	create_surface	1	A2uiConversationCommand::CreateSurface(CreateSurfaceCommand)	SurfaceCommandCreateSurface (CreateSurfaceCommand value = 1;)
-SurfaceCommand	update_components	2	A2uiConversationCommand::UpdateComponents(UpdateComponentsCommand)	SurfaceCommandUpdateComponents (UpdateComponentsCommand value = 1;)
-SurfaceCommand	update_data_model	3	A2uiConversationCommand::UpdateDataModel(UpdateDataModelCommand)	SurfaceCommandUpdateDataModel (UpdateDataModelCommand value = 1;)
-SurfaceCommand	delete_surface	4	A2uiConversationCommand::DeleteSurface(DeleteSurfaceCommand)	SurfaceCommandDeleteSurface (DeleteSurfaceCommand value = 1;)
-SurfaceCommand	patch_surface	5	A2uiConversationCommand::PatchSurface(PatchSurfaceCommand)	SurfaceCommandPatchSurface (PatchSurfaceCommand value = 1;)
-SurfaceCommand	stream_append	6	A2uiConversationCommand::StreamAppend(StreamAppendCommand)	SurfaceCommandStreamAppend (StreamAppendCommand value = 1;)
-PatchSurfaceCommand	surface_id	1	PatchSurfaceCommand.surface_id	string
-PatchSurfaceCommand	base_surface_hash	2	PatchSurfaceCommand.base_surface_hash	string
-PatchSurfaceCommand	ops	3	PatchSurfaceCommand.ops	repeated SurfacePatchOp
-PatchSurfaceCommand	new_surface_hash	4	PatchSurfaceCommand.new_surface_hash	string
-SurfacePatchOp	replace_block	1	SurfacePatchOp::ReplaceBlock{ component: Value }	SurfacePatchOpReplaceBlock (JsonValue component = 1;)
-SurfacePatchOp	insert_block	2	SurfacePatchOp::InsertBlock{ index: usize, component: Value }	SurfacePatchOpInsertBlock (uint64 index = 1;; JsonValue component = 2;)
-SurfacePatchOp	remove_block	3	SurfacePatchOp::RemoveBlock{ component_id: String }	SurfacePatchOpRemoveBlock (string component_id = 1;)
-SurfacePatchOp	set_actions	4	SurfacePatchOp::SetActions{ actions: Vec<Value> }	SurfacePatchOpSetActions (repeated JsonValue actions = 1;)
-SurfacePatchOp	set_fallback_text	5	SurfacePatchOp::SetFallbackText{ fallback_text: String }	SurfacePatchOpSetFallbackText (string fallback_text = 1;)
-StreamAppendCommand	surface_id	1	StreamAppendCommand.surface_id	string
-StreamAppendCommand	component_id	2	StreamAppendCommand.component_id	string
-StreamAppendCommand	text_delta	3	StreamAppendCommand.text_delta	string
-StreamAppendCommand	final_	4	StreamAppendCommand.final_	bool
-CreateSurfaceCommand	surface_id	1	CreateSurfaceCommand.surface_id	string
-CreateSurfaceCommand	surface_type	2	CreateSurfaceCommand.surface_type	SurfaceType
-CreateSurfaceCommand	catalog	3	CreateSurfaceCommand.catalog	string
-CreateSurfaceCommand	catalog_version	4	CreateSurfaceCommand.catalog_version	string
-CreateSurfaceCommand	fallback_text	5	CreateSurfaceCommand.fallback_text	string
-CreateSurfaceCommand	fallback_markdown	6	CreateSurfaceCommand.fallback_markdown	optional string
-CreateSurfaceCommand	components	7	CreateSurfaceCommand.components	repeated JsonValue
-CreateSurfaceCommand	data_model	8	CreateSurfaceCommand.data_model	JsonObject
-CreateSurfaceCommand	allowed_actions	9	CreateSurfaceCommand.allowed_actions	repeated JsonValue
-UpdateComponentsCommand	surface_id	1	UpdateComponentsCommand.surface_id	string
-UpdateComponentsCommand	base_surface_hash	2	UpdateComponentsCommand.base_surface_hash	string
-UpdateComponentsCommand	components	3	UpdateComponentsCommand.components	repeated JsonValue
-UpdateComponentsCommand	remove_component_ids	4	UpdateComponentsCommand.remove_component_ids	repeated string
-UpdateComponentsCommand	new_surface_hash	5	UpdateComponentsCommand.new_surface_hash	string
-UpdateDataModelCommand	surface_id	1	UpdateDataModelCommand.surface_id	string
-UpdateDataModelCommand	base_surface_hash	2	UpdateDataModelCommand.base_surface_hash	string
-UpdateDataModelCommand	data_patch	3	UpdateDataModelCommand.data_patch	JsonObject
-UpdateDataModelCommand	new_surface_hash	4	UpdateDataModelCommand.new_surface_hash	string
-DeleteSurfaceCommand	surface_id	1	DeleteSurfaceCommand.surface_id	string
-DeleteSurfaceCommand	reason	2	DeleteSurfaceCommand.reason	optional DeleteSurfaceReason
-SurfaceType	message_card	1	SurfaceType::MessageCard	SurfaceTypeMessageCard (empty)
-SurfaceType	approval_card	2	SurfaceType::ApprovalCard	SurfaceTypeApprovalCard (empty)
-SurfaceType	form_card	3	SurfaceType::FormCard	SurfaceTypeFormCard (empty)
-SurfaceType	status_panel	4	SurfaceType::StatusPanel	SurfaceTypeStatusPanel (empty)
-SurfaceType	task_card	5	SurfaceType::TaskCard	SurfaceTypeTaskCard (empty)
-SurfaceType	file_preview	6	SurfaceType::FilePreview	SurfaceTypeFilePreview (empty)
-SurfaceType	call_card	7	SurfaceType::CallCard	SurfaceTypeCallCard (empty)
-SurfaceType	agent_result	8	SurfaceType::AgentResult	SurfaceTypeAgentResult (empty)
-SurfaceType	notification_card	9	SurfaceType::NotificationCard	SurfaceTypeNotificationCard (empty)
-DeleteSurfaceReason	completed	1	DeleteSurfaceReason::Completed	DeleteSurfaceReasonCompleted (empty)
-DeleteSurfaceReason	cancelled	2	DeleteSurfaceReason::Cancelled	DeleteSurfaceReasonCancelled (empty)
-DeleteSurfaceReason	replaced	3	DeleteSurfaceReason::Replaced	DeleteSurfaceReasonReplaced (empty)
-DeleteSurfaceReason	expired	4	DeleteSurfaceReason::Expired	DeleteSurfaceReasonExpired (empty)
-DeleteSurfaceReason	error	5	DeleteSurfaceReason::Error	DeleteSurfaceReasonError (empty)
 A2iControlEvent	schema	1	A2iControlEvent.schema	string
 A2iControlEvent	version	2	A2iControlEvent.version	uint32
 A2iControlEvent	domain	3	A2iControlEvent.domain	string
@@ -201,11 +135,6 @@ SurfaceCarrier	snapshot	12	Carrier.snapshot	optional SurfaceSnapshotProof
 SurfaceCarrier	event	16	PayloadKind::Event / wire_base64	SurfaceEvent
 SurfaceCarrier	action	17	PayloadKind::Action / wire_base64	SurfaceAction
 SurfaceCarrier	action_receipt	18	PayloadKind::ActionReceipt / wire_base64	SurfaceCarrier
-SurfaceSnapshotProof	event	1	SnapshotProof.wire_base64	SurfaceEvent
-SurfaceSnapshotProof	checkpoint	2	SnapshotProof.checkpoint_base64	SurfaceCheckpoint
-SurfaceSnapshotProof	surface_hash	3	SnapshotProof.surface_hash	optional string
-SurfaceSnapshotProof	metadata	4	SnapshotProof.metadata	SurfaceResyncMetadata
-SurfaceSnapshotProof	author_device_id	5	SnapshotProof.author_device_id	string
 SurfaceDelivery	kind	1	SurfaceControl.kind	SurfaceControlKind
 SurfaceDelivery	carrier	2	SurfaceControl.carrier_base64	SurfaceCarrier
 SurfaceDelivery	group_epoch	3	SurfaceControl.group_epoch	optional uint64
@@ -353,20 +282,6 @@ OwnGroupConsent	accepted	4	Consent.accepted	bool
 OwnGroupConsent	issued_at	5	Consent.issued_at	int64
 OwnGroupConsent	expires_at	6	Consent.expires_at	int64
 OwnGroupConsent	signature	7	Consent.signature	string
-SurfaceCheckpoint	schema	1	Checkpoint.schema	string
-SurfaceCheckpoint	content	2	Checkpoint.content	optional CreateSurfaceCommand
-SurfaceCheckpoint	conversation_id	3	Checkpoint.conversation_id	optional string
-SurfaceCheckpoint	version	4	Checkpoint.version	uint64
-SurfaceCheckpoint	closed	5	Checkpoint.closed	bool
-SurfaceCheckpoint	final_text	6	Checkpoint.final_text	repeated SurfaceFinalEntry
-SurfaceFinalEntry	id	1	FinalEntry.id	string
-SurfaceFinalEntry	nested	2	FinalEntry.nested	bool
-SurfaceFinalEntry	text_hash	3	FinalEntry.text_hash	string
-SurfaceResyncMetadata	schema	1	ResyncMetadata.schema	string
-SurfaceResyncMetadata	conversation_id	2	ResyncMetadata.conversation_id	string
-SurfaceResyncMetadata	version	3	ResyncMetadata.version	uint64
-SurfaceResyncMetadata	closed	4	ResyncMetadata.closed	bool
-SurfaceResyncMetadata	finality_base64	5	ResyncMetadata.finality_base64	string
 SurfaceResyncRequest	kind	1	ResyncRequest.kind	string
 SurfaceResyncRequest	conversation_id	2	ResyncRequest.conversation_id	string
 SurfaceResyncRequest	surface_ref	3	ResyncRequest.surface_ref	string
@@ -517,3 +432,54 @@ GroupControlBodySnapshot	snapshot	1	SharedGroupPacket.snapshot_base64	NativeGrou
 GroupControlBodySnapshot	distribution	2	SharedGroupPacket.distribution_base64	optional GroupKeyDistribution
 CallControl	call_ref	11	CallControl.call_ref	optional string
 CallControl	call_start	12	CallControl.call_start	optional bytes
+SurfaceEvent	schema	1	a2ui::SurfaceEvent.schema	string
+SurfaceEvent	conversation_id	2	a2ui::SurfaceEvent.conversation_id	string
+SurfaceEvent	surface_version	3	a2ui::SurfaceEvent.surface_version	uint64
+SurfaceEvent	base_surface_hash	5	a2ui::SurfaceEvent.base_surface_hash	optional string
+SurfaceEvent	new_surface_hash	6	a2ui::SurfaceEvent.new_surface_hash	string
+SurfaceEvent	fallback_text	7	a2ui::SurfaceEvent.fallback_text	optional string
+SurfaceEvent	close_reason	8	a2ui::SurfaceEvent.close_reason	optional string
+SurfaceEvent	a2ui	9	a2ui::SurfaceEvent.a2ui	JsonObject
+SurfaceEvent	append_text	10	a2ui::SurfaceEvent.append_text	SurfaceAppendText
+SurfaceEvent	resync	11	a2ui::SurfaceEvent.resync	SurfaceResync
+SurfaceEvent	final	12	a2ui::SurfaceEvent.final	repeated SurfaceFinalEntry
+SurfaceEvent	closed	13	a2ui::SurfaceEvent.closed	optional bool
+SurfaceEvent	metadata	14	a2ui::SurfaceEvent.metadata	optional JsonObject
+SurfaceAction	schema	1	a2ui::SurfaceAction.schema	string
+SurfaceAction	conversation_id	2	a2ui::SurfaceAction.conversation_id	string
+SurfaceAction	surface_version	4	a2ui::SurfaceAction.surface_version	uint64
+SurfaceAction	surface_hash	5	a2ui::SurfaceAction.surface_hash	string
+SurfaceAction	args_hash	8	a2ui::SurfaceAction.args_hash	string
+SurfaceAction	task_binding	9	a2ui::SurfaceAction.task_binding	optional SurfaceTaskBinding
+SurfaceAction	source_instance	10	a2ui::SurfaceAction.source_instance	repeated string
+SurfaceAction	a2ui	11	a2ui::SurfaceAction.a2ui	JsonObject
+SurfaceSnapshotProof	event	1	a2ui::SurfaceSnapshotProof.event	SurfaceEvent
+SurfaceSnapshotProof	author_device_id	5	a2ui::SurfaceSnapshotProof.author_device_id	string
+SurfaceCheckpoint	conversation_id	3	a2ui::SurfaceCheckpoint.conversation_id	string
+SurfaceCheckpoint	surface_version	4	a2ui::SurfaceCheckpoint.surface_version	uint64
+SurfaceCheckpoint	closed	5	a2ui::SurfaceCheckpoint.closed	bool
+SurfaceCheckpoint	surface_id	7	a2ui::SurfaceCheckpoint.surface_id	string
+SurfaceCheckpoint	catalog_id	8	a2ui::SurfaceCheckpoint.catalog_id	string
+SurfaceCheckpoint	fallback_text	9	a2ui::SurfaceCheckpoint.fallback_text	string
+SurfaceCheckpoint	metadata	10	a2ui::SurfaceCheckpoint.metadata	optional JsonObject
+SurfaceCheckpoint	components	11	a2ui::SurfaceCheckpoint.components	repeated JsonValue
+SurfaceCheckpoint	data_model	12	a2ui::SurfaceCheckpoint.data_model	JsonObject
+SurfaceCheckpoint	final	13	a2ui::SurfaceCheckpoint.final	repeated SurfaceFinalEntry
+SurfaceFinalEntry	text_hash	3	a2ui::SurfaceFinalEntry.text_hash	string
+SurfaceFinalEntry	pointer	4	a2ui::SurfaceFinalEntry.pointer	string
+SurfaceAppendText	surface_id	1	a2ui::SurfaceAppendText.surface_id	string
+SurfaceAppendText	path	2	a2ui::SurfaceAppendText.path	string
+SurfaceAppendText	delta	3	a2ui::SurfaceAppendText.delta	string
+SurfaceAppendText	final	4	a2ui::SurfaceAppendText.final	bool
+SurfaceResync	a2ui	1	a2ui::SurfaceResync.a2ui	JsonObject
+SurfaceCarrier	function_call	19	a2ui::SurfaceCarrier.function_call	SurfaceRpcFrame
+SurfaceCarrier	function_response	20	a2ui::SurfaceCarrier.function_response	SurfaceRpcFrame
+SurfaceCarrier	error	21	a2ui::SurfaceCarrier.error	SurfaceRpcFrame
+SurfaceRpcFrame	schema	1	a2ui::SurfaceRpcFrame.schema	string
+SurfaceRpcFrame	conversation_id	2	a2ui::SurfaceRpcFrame.conversation_id	string
+SurfaceRpcFrame	surface_id	3	a2ui::SurfaceRpcFrame.surface_id	string
+SurfaceRpcFrame	known_version	4	a2ui::SurfaceRpcFrame.known_version	uint64
+SurfaceRpcFrame	known_hash	5	a2ui::SurfaceRpcFrame.known_hash	optional string
+SurfaceRpcFrame	function_call_id	6	a2ui::SurfaceRpcFrame.function_call_id	optional string
+SurfaceRpcFrame	rejected_version	7	a2ui::SurfaceRpcFrame.rejected_version	optional uint64
+SurfaceRpcFrame	a2ui	8	a2ui::SurfaceRpcFrame.a2ui	JsonObject
