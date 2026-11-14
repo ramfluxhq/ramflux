@@ -304,7 +304,7 @@ fn assert_refusal(error: &SdkError) {
     assert_eq!(crate::client::inbox_failure::deterministic(error), Some("generated_authority"));
 }
 async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
-    let mut c = Case::new(false, failures).await?;
+    let mut c = Box::pin(Case::new(false, failures)).await?;
     assert_refusal(&c.raw_error().await?);
     // Include the driver's unrelated contact-maintenance markers in the baseline.
     c.b.client.maintain_contact_requests()?;
@@ -399,7 +399,7 @@ async fn e11_ack_driven_replay_is_deterministic_and_idempotent() -> TestResult {
 #[tokio::test]
 async fn e11_authenticated_original_with_cached_manifest_succeeds() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(async {
-        let mut c = Case::new(true, 0).await?;
+        let mut c = Box::pin(Case::new(true, 0)).await?;
         let mut account = c.account()?;
         let applied = sync_driver::run_at(&mut account, now_unix_timestamp()).await?;
         assert!(applied >= 1, "legacy actor must cover, got {applied}");
@@ -423,7 +423,7 @@ async fn e11_authenticated_original_with_cached_manifest_succeeds() -> TestResul
 #[tokio::test]
 async fn e11_storage_io_failure_still_propagates() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(async {
-        let mut c = Case::new(true, 0).await?;
+        let mut c = Box::pin(Case::new(true, 0)).await?;
         c.sql.execute_batch("CREATE TRIGGER fail_revocation BEFORE INSERT ON object_index BEGIN SELECT RAISE(ABORT,'revocation writer failed'); END;")?;
         let error = c.raw_error().await?;
         assert!(matches!(error, SdkError::Storage(ramflux_storage::StorageError::Sqlite(_))), "{error:?}");
@@ -444,7 +444,7 @@ async fn e11_storage_io_failure_still_propagates() -> TestResult {
     })).await
 }
 async fn refused_forged_ack(tamper: &'static str, reason: &'static str) -> TestResult {
-    let mut c = Case::new(false, 0).await?;
+    let mut c = Box::pin(Case::new(false, 0)).await?;
     c.state.lock().map_err(|_| "wire mutex")?.tamper = Some(tamper);
     let mut account = c.account()?;
     let key = account.client.inbox_admission_key(&c.entry)?;

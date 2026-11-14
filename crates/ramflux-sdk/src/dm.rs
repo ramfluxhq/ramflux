@@ -221,7 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn gateway_dm_envelope_surfaces_franking_metadata_from_ciphertext() -> Result<(), SdkError> {
+    fn retired_json_dm_cannot_produce_a_generation_one_envelope_with_franking()
+    -> Result<(), SdkError> {
         let mut session =
             ramflux_crypto::DmSession::initiator([7_u8; 32], [1_u8; 32], [2_u8; 32], [3_u8; 32])?;
         let ciphertext = session.encrypt(b"hello dm", dm_associated_data("conv_franking"))?;
@@ -235,38 +236,39 @@ mod tests {
             report_commitment: None,
         })?;
         let franking = SdkDmFrankingMetadata::from_ciphertext(&ciphertext);
-        let envelope = gateway_direct_message_envelope(
+        let result = gateway_direct_message_envelope(
             &test_gateway_config(),
             &test_message(encrypted_body),
             Some(&franking),
-        )?;
-        let Some(franking_value) = envelope.ext.ext.get("franking") else {
-            return Err(SdkError::LocalBus("franking metadata missing from envelope".to_owned()));
-        };
-        assert_eq!(
-            franking_value["sender_device_id_hash"],
-            ramflux_protocol::encode_base64url(ciphertext.sender_device_id_hash)
         );
-        assert_eq!(franking_value["message_event_id"], ciphertext.message_event_id);
-        assert_eq!(franking_value["commitment"], ciphertext.commitment);
-        assert_eq!(franking_value["ciphertext_hash"], ciphertext.ciphertext_hash);
-        assert_ne!(envelope.signed.signature, "");
-
-        let serialized = serde_json::to_value(&envelope)?;
-        assert_eq!(serialized["ext"]["franking"], *franking_value);
+        assert!(
+            matches!(
+                result,
+                Err(SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(
+                    ramflux_protocol::ProtocolError::SenderTranscriptProfile
+                )))
+            ),
+            "retired JSON cannot select the current sender transcript"
+        );
         Ok(())
     }
 
     #[test]
-    fn gateway_dm_envelope_omits_franking_metadata_when_not_supplied() -> Result<(), SdkError> {
-        let envelope = gateway_direct_message_envelope(
+    fn opaque_untagged_bytes_cannot_produce_a_generation_one_envelope() -> Result<(), SdkError> {
+        let result = gateway_direct_message_envelope(
             &test_gateway_config(),
             &test_message(b"already-encrypted".to_vec()),
             None,
-        )?;
-        assert!(envelope.ext.ext.is_empty());
-        let serialized = serde_json::to_value(&envelope)?;
-        assert!(serialized.get("ext").is_none());
+        );
+        assert!(
+            matches!(
+                result,
+                Err(SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(
+                    ramflux_protocol::ProtocolError::SenderTranscriptProfile
+                )))
+            ),
+            "an opaque unbound body cannot select the current sender transcript"
+        );
         Ok(())
     }
 
