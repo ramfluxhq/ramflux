@@ -126,15 +126,14 @@ impl GatewaySessionFrameSource for RecordingGateway {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(submit.envelope.clone());
+                    // The gateway answers (or loses its answer) only after the configured delay.
+                    self.delayed_own_response().await;
                     if self.fail_own_ack {
                         return Err(TransportError::Quic("injected lost own-copy ACK".into()));
                     }
-                    self.delayed_own_response().await;
-                    if self
-                        .fail_own_target
-                        .as_deref()
-                        .is_some_and(|target| matches!(target, "sibling" | "device-sibling"))
-                    {
+                    if self.fail_own_target.as_deref().is_some_and(|target| {
+                        own_target_device(&submit.envelope).as_deref() == Some(target)
+                    }) {
                         GatewayServerFrame::Nack { reason: "injected own target failure".into() }
                     } else {
                         GatewayServerFrame::Deliver {
@@ -287,4 +286,11 @@ fn own_target(envelope: &ramflux_protocol::Envelope) -> bool {
             envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
                 == Some(root.as_str())
         })
+}
+
+fn own_target_device(envelope: &ramflux_protocol::Envelope) -> Option<String> {
+    ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)
+        .ok()
+        .flatten()
+        .map(|(_, device)| device)
 }

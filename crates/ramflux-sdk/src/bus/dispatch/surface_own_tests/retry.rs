@@ -27,10 +27,13 @@ pub(super) async fn exhaust_parked_target(
             .find(|t| t["device"] == "dead-sibling")
             .ok_or("dead")?;
         assert_eq!(dead["attempts"], attempts, "parked target must retry when due");
-        assert_eq!(work["packet"], previous["packet"], "retry ciphertext stays immutable");
+        assert!(work["generated"].is_array(), "the sealed copies stay in the work row");
+        assert_eq!(work["generated"], previous["generated"], "retry ciphertext stays immutable");
         previous = work;
     }
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), before + 8);
+    // The tenth attempt parks the copy like any other; the exhausted check runs when it is due.
+    due(&source.client)?;
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 0);
     assert!(!source.client.account_db()?.actor_state_exists(key)?, "ten attempts exhaust the copy");
     let copy = previous["intent"]["copy_id"].as_str().ok_or("copy")?;

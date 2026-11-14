@@ -24,6 +24,13 @@ fn due(client: &RamfluxClient) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn addressed_device(envelope: &ramflux_protocol::Envelope) -> Option<String> {
+    ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)
+        .ok()
+        .flatten()
+        .map(|(_, device)| device)
+}
+
 fn context(bytes: &[u8]) -> Result<SurfaceControl, SdkError> {
     SurfaceControl::decode(bytes)?.ok_or_else(|| SdkError::LocalBus("typed Surface missing".into()))
 }
@@ -155,16 +162,17 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "pending");
     let key = source.client.account_db()?.actor_state_key_page("own-device/send/", 1)?.remove(0);
     let mut work: Value = source.client.account_db()?.load_actor_state(&key)?.ok_or("prepared")?;
-    // Model a target revoked after packet preparation. The healthy slot remains real ciphertext.
-    let packet = &mut work["packet"];
-    let mut dead = packet["slots"][0].clone();
-    dead["recipient_device_id"] = json!("dead-sibling");
-    packet["slots"].as_array_mut().ok_or("slots")?.push(dead);
-    packet.as_object_mut().ok_or("packet")?.remove("signature");
-    packet["signature"] = json!(ramflux_crypto::sign_with_device_branch(
-        source.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &json!({"domain":crate::client::own_device_copy::DOMAIN,"body":packet}),
-    )?);
+    // Model a target revoked after preparation. The healthy copy remains real ciphertext.
+    let generated = work["generated"].as_array_mut().ok_or("generated")?;
+    let mut dead = generated.first().cloned().ok_or("generated copy")?;
+    let (anchor, _) = ramflux_protocol::parse_qualified_device_id(
+        dead["envelope"]["target_delivery_id"].as_str().ok_or("target")?,
+    )?
+    .ok_or("qualified target")?;
+    dead["device"] = json!("dead-sibling");
+    dead["envelope"]["target_delivery_id"] =
+        json!(ramflux_protocol::qualified_device_id(&anchor, "dead-sibling")?);
+    generated.push(dead);
     work["targets"] = json!([]);
     work["next_at"] = json!(0);
     source.client.account_db()?.persist_actor_state(&key, &work)?;
@@ -185,13 +193,16 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     source.client.account_db()?.persist_actor_state(&key, &parked)?;
     let next = append(&source.client, &create, 2)?;
     assert_eq!(send(&mut source, &next).await?["own_device_copy_state"], "submitted");
-    let captures = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    assert_eq!(
-        captures.len(),
-        2,
-        "backed-off target must not be retried while the later copy runs"
-    );
-    for (index, envelope) in captures.into_iter().enumerate() {
+    // Every sibling target is its own submission: split the captures by addressed device.
+    let (live, dead): (Vec<_>, Vec<_>) = own
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .into_iter()
+        .partition(|envelope| addressed_device(envelope).as_deref() == Some("device-sibling"));
+    assert_eq!(live.len(), 2, "the live sibling gets the first copy and the next copy");
+    assert_eq!(dead.len(), 1, "backed-off target must not be retried while the later copy runs");
+    for (index, envelope) in live.into_iter().enumerate() {
         assert!(
             crate::client::native_test_support::bus::receive_copy(
                 &mut sibling.client,
@@ -219,27 +230,86 @@ async fn a_dead_prepared_target_is_parked_while_a_live_sibling_gets_the_next_cop
     Ok(())
 }
 
-#[tokio::test]
-async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojection() -> TestResult {
-    let root = runtime_tests::root("own-copy-receipt-eviction");
+/// A real authored Sent copy: the source sends a direct message, its authored-history courier
+/// seals the copy for the active sibling, and the sibling receives that exact envelope.
+struct SentCopy {
+    source: LocalBusAccountState,
+    sibling: LocalBusAccountState,
+    receiver: GatewaySessionConfig,
+    directory: tokio::task::JoinHandle<()>,
+    envelope: ramflux_protocol::Envelope,
+    conversation: String,
+}
+
+async fn authored_sent_copy(root: &Path) -> Result<SentCopy, Box<dyn std::error::Error>> {
     let mut source = runtime_tests::account(
         &root.join("source"),
         "sender",
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (mut sibling, config, mut receiver, directory) =
-        sibling_fixture(&root, &mut source).await?;
+    let (sibling, config, receiver, directory) = sibling_fixture(root, &mut source).await?;
     let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(gateway));
+    let conversation = super::super::dm_tests::conversation(&source.client)?;
+    let peer_root = source
+        .client
+        .account_db()?
+        .client_record("identity", "peer")?
+        .and_then(|v| v["contact_identity_commitment"].as_str().map(str::to_owned))
+        .ok_or("peer root")?;
+    let target = source.client.device_identity_for_root(&peer_root, "device-peer-one")?;
+    let message = GatewayDirectMessage {
+        conversation_id: conversation.clone(),
+        message_id: "sent-message".into(),
+        envelope_id: "sent-envelope".into(),
+        source_principal_id: "sender".into(),
+        sender_id: "device-sender".into(),
+        recipient_device_id: Some("device-peer-one".into()),
+        recipient_principal_commitment: Some(peer_root),
+        target_delivery_id: target.storage_key().into(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 300,
+    };
     source
-        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
-    let create = super::super::dm_tests::create_carrier(&source.client)?;
-    assert_eq!(
-        send(&mut source, &create).await.map_err(|error| format!("send own copy: {error:?}"))?["own_device_copy_state"],
-        "submitted"
+        .client
+        .send_plaintext_direct_message_via_gateway(&mut engine, message, b"sent to peer")
+        .await?;
+    source.install_test_session(engine);
+    assert!(
+        crate::bus::couriers::authored_history::drive_once(&mut source).await?,
+        "the authored copy is sealed for the active sibling"
     );
-    let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
+    let envelope = own
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .first()
+        .cloned()
+        .ok_or("own copy")?;
+    Ok(SentCopy { source, sibling, receiver, directory, envelope, conversation })
+}
+
+/// The sibling's read-model rows of the copied conversation.
+fn sibling_rows(client: &RamfluxClient, conversation: &str) -> Result<Value, SdkError> {
+    crate::bus::readers::read(
+        client,
+        &LocalBusFrame::request(
+            "rows",
+            Some("sender".into()),
+            "message",
+            "message.list",
+            json!({"conversation_id":conversation,"read_model":true}),
+        ),
+    )
+}
+
+#[tokio::test]
+async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojection() -> TestResult {
+    let root = runtime_tests::root("own-copy-receipt-eviction");
+    let SentCopy { source, mut sibling, receiver, directory, envelope, conversation } =
+        Box::pin(authored_sent_copy(&root)).await?;
     let incoming = entry(envelope.clone(), 1);
     assert!(
         crate::client::native_test_support::bus::receive_copy(
@@ -250,38 +320,46 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
         .await
         .map_err(|error| format!("first receive: {error:?}"))?
     );
-    let before = sibling.client.surface_get("surface", 0, None)?;
+    let before = sibling_rows(&sibling.client, &conversation)?;
+    assert_eq!(before["messages"].as_array().ok_or("rows")?.len(), 1);
     let receipt_key = sibling
         .client
         .account_db()?
         .actor_state_key_page("own-device/message-receipt/", 1)?
-        .remove(0);
+        .into_iter()
+        .next()
+        .ok_or("receipt key")?;
     let receipt: Value =
         sibling.client.account_db()?.load_actor_state(&receipt_key)?.ok_or("receipt")?;
     assert_eq!(receipt["acknowledged"], false);
-    receiver.target_delivery_id = "sibling".into();
     let mut failed = super::super::fixture::RecordingGateway::new(Arc::default());
     failed.fail_ack = true;
     let mut engine = GatewaySessionEngine::with_test_transport(receiver.clone(), Box::new(failed));
+    let refused = sibling
+        .client
+        .ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp())
+        .await
+        .err()
+        .ok_or("a lost inbox ACK must fail")?;
     assert!(
-        sibling
-            .client
-            .ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp())
-            .await
-            .is_err()
+        format!("{refused:?}").contains("injected lost inbox ACK"),
+        "the ACK must fail because the gateway lost it, not for another reason: {refused:?}"
     );
     assert_eq!(
         sibling.client.account_db()?.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"],
         false
     );
     let mut gateway = super::super::fixture::RecordingGateway::new(Arc::default());
-    gateway.ack_target = "sibling".into();
+    gateway.ack_target.clone_from(&incoming.target_delivery_id);
     let mut engine = GatewaySessionEngine::with_test_transport(receiver.clone(), Box::new(gateway));
     sibling
         .client
         .ack_gateway_entry(&mut engine, &incoming, now_unix_timestamp())
         .await
         .map_err(|error| format!("ack receipt: {error:?}"))?;
+    // Generated own copies are class Message, so the per-entry ACK helper does not mark them;
+    // the settlement that follows a confirmed ACK marks the replay marker and receipt.
+    sibling.client.record_own_copy_ack(&incoming)?;
     assert_eq!(
         sibling.client.account_db()?.load_actor_state::<Value>(&receipt_key)?.ok_or("receipt")?["acknowledged"],
         true
@@ -305,13 +383,13 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
         .await
         .map_err(|error| format!("receive after receipt eviction: {error:?}"))?
     );
-    assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
+    assert_eq!(sibling_rows(&sibling.client, &conversation)?, before);
     let forged = conflicting_own_packet(&source.client, envelope)?;
     assert!(matches!(
         crate::client::native_test_support::bus::receive_copy(&mut sibling.client, &receiver, &entry(forged, 3)).await,
-        Err(SdkError::InboundRejected(reason)) if reason == "own-device message id conflict"
+        Err(SdkError::InboundRejected(reason)) if reason == "envelope id reused with a different authenticated payload"
     ));
-    assert_eq!(sibling.client.surface_get("surface", 0, None)?, before);
+    assert_eq!(sibling_rows(&sibling.client, &conversation)?, before);
     assert!(sibling.client.account_db()?.latest_journal_event("message.undeliverable")?.is_none());
     assert_durable_acknowledged_proof(sibling.client.account_db()?)?;
     directory.abort();
@@ -323,20 +401,8 @@ async fn an_acknowledged_copy_replays_after_receipt_eviction_without_reprojectio
 #[tokio::test]
 async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratchet() -> TestResult {
     let root = runtime_tests::root("own-copy-replay-capacity");
-    let mut source = runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
-    let gateway = super::super::fixture::RecordingGateway::new(Arc::default());
-    let own = Arc::clone(&gateway.own);
-    source
-        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
-    let create = super::super::dm_tests::create_carrier(&source.client)?;
-    assert_eq!(send(&mut source, &create).await?["own_device_copy_state"], "submitted");
-    let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
+    let SentCopy { source, mut sibling, receiver, directory, envelope, conversation } =
+        Box::pin(authored_sent_copy(&root)).await?;
     let limit = crate::client::own_device_copy::MAX_DELIVERY_ROWS;
     assert_eq!(limit, 18_000);
     let now = now_unix_timestamp();
@@ -360,7 +426,7 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
             | SdkError::SenderManifestRequired { .. }
             | SdkError::FreshHeadRequired { .. })
     ));
-    assert!(sibling.client.surface_get("surface", 0, None)?.is_null());
+    assert_eq!(sibling.client.direct_messages(&conversation)?.len(), 0);
     assert_eq!(
         sibling.client.account_db()?.actor_state_usage("own-device/committed-packet/")?.0,
         u64::from(limit)
@@ -375,7 +441,7 @@ async fn a_full_live_replay_window_defers_new_copies_without_consuming_the_ratch
         )
         .await?
     );
-    assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
+    assert_eq!(sibling.client.direct_messages(&conversation)?.len(), 1);
     assert_eq!(
         sibling.client.account_db()?.actor_state_usage("own-device/committed-packet/")?.0,
         u64::from(limit)
@@ -440,41 +506,21 @@ fn assert_durable_acknowledged_proof(db: &ramflux_storage::AccountDb) -> TestRes
     Ok(())
 }
 
+/// Same envelope id, a different authenticated payload: the ciphertext is altered, the claimed
+/// hash follows it and the source device signs the result, so only the id reuse is wrong.
 fn conflicting_own_packet(
     source: &RamfluxClient,
     mut forged: ramflux_protocol::Envelope,
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
-    let bytes = ramflux_protocol::decode_base64url(&forged.encrypted_payload)?;
-    let raw = bytes.strip_prefix(crate::client::own_device_copy::PREFIX).ok_or("packet prefix")?;
-    let mut packet: Value = serde_json::from_slice(raw)?;
-    assert!(packet.get("context_delivery").is_none());
-    let mut unsigned_local = packet.clone();
-    unsigned_local["context_delivery"] = json!({"included":true});
-    assert!(
-        serde_json::from_value::<crate::client::own_device_copy::OwnDeviceMessage>(unsigned_local)
-            .is_err()
-    );
-    let mut ciphertext = packet["ciphertext"].as_str().ok_or("ciphertext")?.as_bytes().to_vec();
-    let first = ciphertext.first_mut().ok_or("ciphertext bytes")?;
+    let mut payload = forged.encrypted_payload.into_bytes();
+    let first = payload.first_mut().ok_or("ciphertext bytes")?;
     *first = if *first == b'A' { b'B' } else { b'A' };
-    packet["ciphertext"] = json!(String::from_utf8(ciphertext)?);
-    let branch = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    packet
-        .as_object_mut()
-        .ok_or_else(|| SdkError::LocalBus("packet object".into()))?
-        .remove("signature");
-    let signature = ramflux_crypto::sign_with_device_branch(
-        branch,
-        &json!({"domain":crate::client::own_device_copy::DOMAIN,"body":packet}),
-    )?;
-    packet["signature"] = json!(signature);
-    let mut signed = crate::client::own_device_copy::PREFIX.to_vec();
-    signed.extend(serde_json::to_vec(&packet)?);
-    forged.encrypted_payload = ramflux_protocol::encode_base64url(signed);
+    forged.encrypted_payload = String::from_utf8(payload)?;
     forged.payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         forged.encrypted_payload.as_bytes(),
     );
+    let branch = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     forged.signed.signature =
         ramflux_crypto::sign_protocol_object_with_device_branch(branch, &forged)?;
     Ok(forged)
