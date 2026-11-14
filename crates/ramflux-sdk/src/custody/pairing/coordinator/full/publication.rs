@@ -61,6 +61,11 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 impl PairingActor {
+    fn note_full_publication_phase(phase: &'static str) {
+        tracing::debug!(phase, "full source publication phase");
+        #[cfg(test)]
+        eprintln!("test: source publication phase={phase}");
+    }
     /// Complete the original source's submitted intent after its ready artifact was sent.
     /// This never recreates a consumed user approval or authorizes another candidate.
     /// # Errors
@@ -86,7 +91,9 @@ impl PairingActor {
             Ok(c.full.as_ref().ok_or_else(wrong)?.publication.submission.is_some())
         })?;
         if !prepared {
+            Self::note_full_publication_phase("prepare intent");
             let submission = self.prepare_affirmed_source_submission().await?;
+            Self::note_full_publication_phase("intent prepared");
             self.with_ceremony_mut(|c| {
                 let state = &mut c.full.as_mut().ok_or_else(wrong)?.publication;
                 state.submission = Some(submission);
@@ -104,8 +111,10 @@ impl PairingActor {
                     .and_then(|full| full.publication.submission.clone())
                     .ok_or_else(wrong)
             })?;
+            Self::note_full_publication_phase("native submit");
             let published =
                 self.full_runtime.clone().run_blocking(move || submission.submit()).await?;
+            Self::note_full_publication_phase("native observed");
             self.with_ceremony_mut(|c| {
                 let state = &mut c.full.as_mut().ok_or_else(wrong)?.publication;
                 state.published = Some(Box::new(published));
@@ -131,17 +140,21 @@ impl PairingActor {
         })?;
         let participant = self.participant.clone().ok_or_else(wrong)?;
         if !acknowledged {
+            Self::note_full_publication_phase("local J6 and tail capture");
             Box::pin(self.acknowledge_full_source(writer, &published, &operation)).await?;
+            Self::note_full_publication_phase("local J6 complete");
         }
         let root = participant.root.clone();
         let vault = participant.vault.clone();
         let receipt = published.clone();
+        Self::note_full_publication_phase("source retirement");
         let cleanup = writer
             .request(move |db| {
                 let now = crate::custody::network_now()?;
                 receipt.retire_source(&Installation { root: &root, db, vault: vault.as_ref(), now })
             })
             .await?;
+        Self::note_full_publication_phase("source retired");
         self.with_ceremony_mut(|c| {
             let full = c.full.as_mut().ok_or_else(wrong)?;
             full.publication.source = SourcePhase::Retired;
@@ -199,6 +212,7 @@ impl PairingActor {
             c.full.as_mut().ok_or_else(wrong)?.publication.source = SourcePhase::Acknowledged;
             Ok(())
         })?;
+        Self::note_full_publication_phase("J6 pinned");
         let copy_result = if let Some(cut) = cut {
             let operation = operation.to_owned();
             match writer
@@ -212,7 +226,10 @@ impl PairingActor {
                 })
                 .await
             {
-                Ok(work) => self.full_runtime.clone().run_blocking(move || Ok(work.copy()?)).await,
+                Ok(work) => {
+                    Self::note_full_publication_phase("tail private copy");
+                    self.full_runtime.clone().run_blocking(move || Ok(work.copy()?)).await
+                }
                 Err(error) => Err(error),
             }
         } else {
