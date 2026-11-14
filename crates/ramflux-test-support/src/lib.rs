@@ -26,8 +26,14 @@ impl TestPath {
     #[track_caller]
     pub fn new() -> io::Result<Self> {
         let directory = Arc::new(tempfile::Builder::new().prefix("rf-test-").tempdir()?);
-        let path = directory.path().canonicalize()?;
-        record_owner(&path, std::panic::Location::caller())?;
+        let canonical = directory.path().canonicalize()?;
+        record_owner(&canonical, std::panic::Location::caller())?;
+        // Native tools such as OpenSSL do not consistently accept Windows verbatim paths.
+        // Keep the public path absolute without introducing a verbatim prefix.
+        #[cfg(windows)]
+        let path = std::path::absolute(directory.path())?;
+        #[cfg(not(windows))]
+        let path = canonical;
         Ok(Self { path, directory })
     }
 
