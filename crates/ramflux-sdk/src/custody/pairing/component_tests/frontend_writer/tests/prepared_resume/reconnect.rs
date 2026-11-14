@@ -34,9 +34,10 @@ async fn run() -> TestResult {
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
     rig.source.client = crate::RamfluxClient::new();
-    let mut old = crate::RamfluxClient::new();
-    rig.participant_b.return_data_client(&mut old)?;
-    drop(old);
+    assert!(
+        rig.participant_b.db.lock().map_err(|_| "test: retired B writer")?.is_none(),
+        "test: root lock retained the original staged data owner"
+    );
     rig.now = original.body.expires_at;
     rig.clock.set_wall(rig.now);
     crate::time::FixedClock::advance_to(i64::try_from(rig.now)?);

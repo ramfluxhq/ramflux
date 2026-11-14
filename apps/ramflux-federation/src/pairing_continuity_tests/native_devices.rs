@@ -27,31 +27,7 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
         wire.recipient = recipient;
         assert_ne!(a.root.path(), b.root.path(), "test: TLS SDK clients share a data root");
         assert!(!Arc::ptr_eq(&a.vault, &b.vault), "test: TLS SDK clients share a credential vault");
-        let (operation, generation) = Box::pin(begin_native(&mut wire)).await?;
-        for actor in [&mut wire.primary, &mut wire.recipient] {
-            wire.clock.advance_ms(1001);
-            actor.confirm(&confirm_ok(actor, &operation)?).await?;
-        }
-        for _ in 0..24 {
-            drive_once(&mut wire).await?;
-            if wire.primary.displayed_proposal().is_ok() {
-                break;
-            }
-        }
-        let approval = approve_ok(&wire.primary, &operation)?;
-        wire.clock.advance_ms(1001);
-        wire.primary.approve(&approval).await?;
-        let mut complete = false;
-        for _ in 0..32 {
-            drive_once(&mut wire).await?;
-            if phase(&mut wire.primary, &operation, generation).await? == "completed"
-                && phase(&mut wire.recipient, &operation, generation).await? == "completed"
-            {
-                complete = true;
-                break;
-            }
-        }
-        assert!(complete, "test: TLS/Fedwire enrollment did not reach both durable completions");
+        Box::pin(enroll_native(&mut wire)).await?;
         a.admit(&node).await?;
         b.admit(&node).await?;
         assert_eq!(
@@ -89,6 +65,7 @@ async fn pairing_tls_fedwire_enrollment_activates_independent_native_sdk_stores(
 async fn begin_native(wire: &mut Continuity) -> TestResult<(String, u64)> {
     let mut request = begin_body()?;
     request.capabilities = vec!["group".into(), "message".into(), "register".into(), "sync".into()];
+    request.lease_expires_at = request.lease_not_before + 604_800;
     let begun = begin_result(wire.primary.begin(request).await?)?;
     let operation = begun.operation_id.clone();
     let generation = begun.generation;
@@ -108,3 +85,35 @@ async fn deadline(work: impl std::future::Future<Output = TestResult>) -> TestRe
         .await
         .map_err(|_| "test: real TLS/Fedwire SDK enrollment exceeded deadline")?
 }
+
+async fn enroll_native(wire: &mut Continuity) -> TestResult {
+    let (operation, generation) = Box::pin(begin_native(wire)).await?;
+    for actor in [&mut wire.primary, &mut wire.recipient] {
+        wire.clock.advance_ms(1001);
+        actor.confirm(&confirm_ok(actor, &operation)?).await?;
+    }
+    for _ in 0..24 {
+        drive_once(wire).await?;
+        if wire.primary.displayed_proposal().is_ok() {
+            break;
+        }
+    }
+    let approval = approve_ok(&wire.primary, &operation)?;
+    wire.clock.advance_ms(1001);
+    wire.primary.approve(&approval).await?;
+    let mut complete = false;
+    for _ in 0..32 {
+        drive_once(wire).await?;
+        if phase(&mut wire.primary, &operation, generation).await? == "completed"
+            && phase(&mut wire.recipient, &operation, generation).await? == "completed"
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "test: TLS/Fedwire enrollment did not reach both durable completions");
+    Ok(())
+}
+
+#[path = "native_devices/handoff.rs"]
+mod handoff;

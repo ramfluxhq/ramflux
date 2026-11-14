@@ -206,7 +206,21 @@ impl Device {
             let slot = self.participant.db.lock().map_err(|_| "test: own writer loan")?;
             work(slot.as_ref().ok_or("test: own actual writer absent")?)
         })();
-        self.participant.return_client(&mut self.client)?;
+        let staged = self
+            .participant
+            .db
+            .lock()
+            .map_err(|_| "test: own writer scope")?
+            .as_ref()
+            .ok_or("test: original data owner absent")?
+            .pairing_live_rows()?
+            .iter()
+            .any(|row| row.full_stage_reference().is_ok_and(|value| value.is_some()));
+        if staged {
+            self.participant.return_data_client(&mut self.client)?;
+        } else {
+            self.participant.return_client(&mut self.client)?;
+        }
         result
     }
     pub fn selected_path(&self) -> ResultOf<std::path::PathBuf> {
@@ -214,16 +228,8 @@ impl Device {
         Ok(self.root.path().join(index.account(&self.id)?.db_relative_path))
     }
     pub fn service_data(&mut self) -> ResultOf<()> {
-        self.participant.take_client(&mut self.client)?;
-        let result = (|| {
-            let slot = self.participant.db.lock().map_err(|_| "test: local I/O writer loan")?;
-            self.actor.service_full_transfer(
-                slot.as_ref().ok_or("test: actual local I/O writer absent")?,
-            )?;
-            Ok(())
-        })();
-        self.participant.return_client(&mut self.client)?;
-        result
+        self.actor.service_full_transfer_client(&self.client)?;
+        Ok(())
     }
     pub async fn admit_client(&mut self, node: &Node) -> ResultOf<()> {
         let native = custody::load_account(self.root.path(), &self.id, now()?)?;

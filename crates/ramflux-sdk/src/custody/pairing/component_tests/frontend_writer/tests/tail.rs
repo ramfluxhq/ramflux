@@ -223,18 +223,10 @@ async fn merge(
             merged = true;
             break;
         }
-        if rig.primary.has_pending_full_local_work() || rig.secondary.has_pending_full_local_work()
-        {
-            let a = rig.primary.local_work_signal();
-            let b = rig.secondary.local_work_signal();
-            let source_work = source.work_signal();
-            let target_work = target.work_signal();
-            tokio::select! {
-                () = a.notified() => {}, () = b.notified() => {},
-                () = source_work.notified() => { source.try_apply_client(&rig.source.client)?; },
-                () = target_work.notified() => { target.try_apply_client(client)?; },
-            }
-        }
+        // This fixture pauses Tokio time and holds automatic advancement. Advance the
+        // existing A3 relay poll turn after yielding owned work; readiness alone cannot
+        // fire while both fresh epoch workers are waiting for that protocol deadline.
+        settle_stream_work(rig).await;
     }
     assert!(
         merged,

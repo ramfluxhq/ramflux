@@ -114,8 +114,6 @@ impl AccountSessionHarness {
         capabilities: FixtureCapabilities,
     ) -> Result<Self, SdkError> {
         let FixtureCapabilities { incarnation, ephemeral } = capabilities;
-        let id = client.account_db()?.local_account_id.clone();
-        let root = index.root().to_path_buf();
         let principal = client.surface_local_root_commitment()?;
         let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), stream);
         engine.session = session;
@@ -135,6 +133,15 @@ impl AccountSessionHarness {
         account.timeouts.receive_min = Duration::from_secs(600);
         account.timeouts.receive_max = Duration::from_secs(600);
         account.timeouts.keepalive_idle = Duration::from_secs(600);
+        Box::pin(Self::start_account(index, account)).await
+    }
+
+    pub(super) async fn start_account(
+        index: AccountIndex,
+        account: super::super::state::LocalBusAccountState,
+    ) -> Result<Self, SdkError> {
+        let id = account.client.account_db()?.local_account_id.clone();
+        let root = index.root().to_path_buf();
         let timeouts = account.timeouts.clone();
         let state = LocalBusDaemonState {
             account_index: Some(index),
@@ -630,4 +637,4 @@ impl Drop for AccountSessionHarness {
 
 #[path = "testing_pairing.rs"]
 mod pairing;
-pub use pairing::NativePairingSessionFixture;
+pub use pairing::{NativePairingNetworkFixture, NativePairingSessionFixture};

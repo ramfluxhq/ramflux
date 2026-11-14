@@ -22,6 +22,9 @@ impl Access {
             proxy: node.proxy_branch.clone(),
         }
     }
+    pub(super) fn identity(&self) -> ramflux_crypto::custody::VerifiedNodeRecord {
+        self.node.clone()
+    }
     pub(super) fn prove(
         &self,
         device: &device::Local,

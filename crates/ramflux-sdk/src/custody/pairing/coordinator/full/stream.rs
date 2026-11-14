@@ -135,6 +135,16 @@ impl PairingActor {
     pub(crate) async fn settle_full_local_jobs_for_test(&self) {
         self.full_runtime.settle_local_jobs().await;
     }
+    /// Service full-transfer local work using the frontend's actual unlocked client.
+    /// This short borrow retains the ordinary writer and creates no network authority.
+    /// # Errors
+    /// Refuses locked, foreign or retired selected account data and failed local work.
+    pub fn service_full_transfer_client(
+        &mut self,
+        client: &crate::RamfluxClient,
+    ) -> Result<bool, SdkError> {
+        self.service_full_transfer(client.account_db()?)
+    }
     /// Service at most one local request against the ordinary owner's actual writer.
     /// Call between async operations; no DB or stage key enters the background job.
     /// The new-recipient driver applies base, neutral reverse and signed catch-up deltas.

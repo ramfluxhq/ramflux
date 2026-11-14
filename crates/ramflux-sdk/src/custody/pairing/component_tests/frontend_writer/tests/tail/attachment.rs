@@ -23,7 +23,12 @@ async fn after_base() -> TestResult {
     rig.participant_a.return_client(&mut rig.source.client)?;
     let mut source = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
     Box::pin(bootstrap(&mut rig, &mut source)).await?;
+    let base = Box::pin(hold_base_application(&mut rig, &mut source)).await?;
     rig.source.client.put_encrypted_object(MEDIA, PLAINTEXT)?;
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "test: held base target owner")?;
+        base.apply(slot.as_ref().ok_or("test: held base writer absent")?)?;
+    }
     let mut refused = false;
     for _ in 0..128 {
         rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
@@ -70,6 +75,28 @@ async fn after_base() -> TestResult {
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
     Ok(())
+}
+async fn hold_base_application(
+    rig: &mut Rig,
+    source: &mut PairingLocalWriterService,
+) -> Result<FullLocalIoLoan, Box<dyn std::error::Error>> {
+    for _ in 0..96 {
+        rig.primary.service_full_transfer_client(&rig.source.client)?;
+        {
+            let slot = rig.participant_b.db.lock().map_err(|_| "test: base target owner")?;
+            if let Some(loan) = rig.secondary.hold_receiver_application_for_test(
+                slot.as_ref().ok_or("test: base target writer absent")?,
+            )? {
+                return Ok(loan);
+            }
+        }
+        rig.clock.advance_ms(1001);
+        drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
+        rig.clock.advance_ms(1001);
+        drive(Box::pin(rig.secondary.sync_relay()), source, &rig.source.client).await?;
+        settle_stream_work(rig).await;
+    }
+    Err("test: original base never reached actual semantic application".into())
 }
 async fn after_candidate() -> TestResult {
     let (mut rig, mut source, client, mut target, request) = Box::pin(setup_with_hooks(
