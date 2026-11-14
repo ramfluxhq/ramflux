@@ -138,6 +138,15 @@ async fn prepared_retry() -> TestResult {
         Some(before.clone()),
         "test: identical authenticated rebind retry mutated J3"
     );
+    let authority = fixture.rig.node.current_authority(&anchor)?;
+    refresh_authority(
+        &fixture.rig.participant_a.root,
+        fixture.rig.source.client.account_db()?,
+        fixture.rig.participant_a.vault.as_ref(),
+        &fixture.rig.participant_a.account_id,
+        &authority,
+        now,
+    )?;
     advance_profile(&fixture)?;
     let changed = fixture.rig.participant_a.full_native_head(&anchor)?;
     let changed_packet = retain_without_send(&fixture, &changed)?;

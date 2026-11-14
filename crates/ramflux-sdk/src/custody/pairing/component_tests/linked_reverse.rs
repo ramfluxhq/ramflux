@@ -479,6 +479,8 @@ mod tests {
             .await
             .map_err(|error| format!("test: linked publish before handback: {error}"))?;
         for _ in 0..12 {
+            fixture.rig.primary.service_full_transfer(fixture.rig.source.client.account_db()?)?;
+            fixture.rig.secondary.service_full_transfer(fixture.target.account_db()?)?;
             poll_management(&mut fixture, true).await?;
             poll_management(&mut fixture, false).await?;
             let Linked { rig, target, target_service, .. } = &mut fixture;

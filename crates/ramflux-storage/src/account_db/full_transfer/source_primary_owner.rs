@@ -39,7 +39,7 @@ impl FullTransferStage<'_> {
         self.require_io()?;
         let record = self.resume_record()?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Initiator
-            || record.base_record_hash != object_hash(base).map_err(|_| wrong())?
+            || self.full_prepublication_record_hash()? != object_hash(base).map_err(|_| wrong())?
             || record.grant.source_ref != base.body.master_certificate.body.primary_device_ref
         {
             return Err(wrong());

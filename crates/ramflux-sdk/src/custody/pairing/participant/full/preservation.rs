@@ -45,22 +45,21 @@ impl LocalPairingParticipant {
         }
         self.preserve_candidate(db, observation, true)
     }
-    fn preserve_candidate(
+    fn verified_preservation_candidate(
         &self,
-        db: &ramflux_storage::AccountDb,
         observation: &super::FullSourceCandidateObservation,
-        allow_new_signature: bool,
-    ) -> Result<Envelope<PreservationFull>, SdkError> {
-        let (operation, generation, th) = &observation.scope;
+        now: u64,
+    ) -> Result<
+        (ramflux_crypto::custody::VerifiedRecord, ramflux_crypto::custody::VerifiedRecord),
+        SdkError,
+    > {
         self.require_source_observation(observation, &observation.scope)?;
         let candidate = &observation.candidate;
         let authority = &observation.authority;
-        let anchor = &candidate.record.body.account_anchor;
-        let now = custody::network_now()?;
-        let current = ramflux_crypto::custody::verify_publication(authority, now)?;
         if candidate.compacted_ids != authority.publication.compacted_ids {
             return Err(wrong());
         }
+        let current = ramflux_crypto::custody::verify_publication(authority, now)?;
         let proposed = ramflux_crypto::custody::verify_publication(
             &ramflux_protocol::custody::CustodyAuthority {
                 publication: candidate.clone(),
@@ -68,6 +67,43 @@ impl LocalPairingParticipant {
             },
             now,
         )?;
+        Ok((current, proposed))
+    }
+    fn preservation_source_account(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        observation: &super::FullSourceCandidateObservation,
+        bound_hash: &str,
+        now: u64,
+    ) -> Result<custody::BornAccount, SdkError> {
+        let installed =
+            crate::custody::pairing::install_store::read_installed(&self.root, &self.account_id)?;
+        if installed.as_ref().is_some_and(|row| row.record_hash.as_deref() != Some(bound_hash)) {
+            // Own native observation advanced the floor; converge the existing
+            // install/adoption owners before asking the original primary to sign.
+            // Pending publication and local-key checks remain with the refresh owner.
+            crate::custody::pairing::refresh_authority(
+                &self.root,
+                db,
+                self.vault.as_ref(),
+                &self.account_id,
+                &observation.authority,
+                now,
+            )?;
+        }
+        custody::load_account(&self.root, &self.account_id, now)
+    }
+    fn preserve_candidate(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        observation: &super::FullSourceCandidateObservation,
+        allow_new_signature: bool,
+    ) -> Result<Envelope<PreservationFull>, SdkError> {
+        let (operation, generation, th) = &observation.scope;
+        let candidate = &observation.candidate;
+        let now = custody::network_now()?;
+        let (current, proposed) = self.verified_preservation_candidate(observation, now)?;
+        let anchor = &candidate.record.body.account_anchor;
         self.full_selected_db(db, Some(anchor))?;
         let live = db
             .pairing_live_rows()?
@@ -100,7 +136,7 @@ impl LocalPairingParticipant {
             .map_err(|error| super::super::super::transport::wire(&error))?;
         require_destination(&context, &proposed, &record.grant.destination_ref, now)?;
         let proof = stage.verified_duplex(now)?;
-        let account = custody::load_account(&self.root, &self.account_id, now)?;
+        let account = self.preservation_source_account(db, observation, &bound_hash, now)?;
         if object_hash(account.record())? != bound_hash {
             return Err(wrong());
         }

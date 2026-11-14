@@ -51,7 +51,8 @@ impl AccountDb {
             return Err(pending());
         }
         let record = stage.resume_record()?;
-        if head.base_record_hash != record.base_record_hash
+        if head.base_record_hash != stage.full_prepublication_record_hash()?
+            || head.base_epoch != stage.full_prepublication_record_epoch()?
             || head.publisher_ref != canonical_json_bytes(&record.grant.source_ref)?
             || head.recipient_ref.as_deref()
                 != Some(canonical_json_bytes(&record.grant.destination_ref)?.as_slice())

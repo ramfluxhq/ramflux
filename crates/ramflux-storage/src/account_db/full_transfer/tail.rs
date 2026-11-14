@@ -53,10 +53,10 @@ impl FullTransferStage<'_> {
             || linked != *reference
             || head.invitation_id.as_deref() != Some(live.invitation_id.as_str())
             || live.invitation_id != context.initiator.common.invitation_id
-            || head.base_epoch != context.initiator.common.device_set_epoch
+            || live.base_epoch != context.initiator.common.device_set_epoch
             || head.generation != live.generation
-            || head.base_epoch != live.base_epoch
-            || head.base_record_hash != record.base_record_hash
+            || head.base_epoch != self.full_prepublication_record_epoch()?
+            || head.base_record_hash != self.full_prepublication_record_hash()?
             || head.publisher_ref != canonical_json_bytes(&record.grant.source_ref)?
             || head.recipient_ref.as_deref()
                 != Some(canonical_json_bytes(&record.grant.destination_ref)?.as_slice())
