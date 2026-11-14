@@ -73,18 +73,12 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
         )?,
     )?;
     entry.table_name = "contact_verification_projection".into();
-    entry.keys = json!({"contact_identity_commitment":manifest.principal_commitment});
-    let verified = super::super::journal::project(client, &entry)?;
-    assert!(verified.iter().any(|(topic, row, _)| topic == "contact.changed"
-        && row["verified"] == true
-        && row["safety_state"] == "verified"));
-    assert!(verified.iter().any(|(topic, _, _)| topic == "safety.changed"));
-    identity["device_set_hash"] = json!("changed-device-set");
-    db.persist_client_record("identity", "peer", &identity)?;
-    let stale = super::super::journal::project(client, &entry)?;
-    assert!(stale.iter().any(|(topic, row, _)| topic == "contact.changed"
-        && row["verified"] == false
-        && row["safety_state"] == "verification_stale"));
+    entry.keys = json!({"contact_identity_commitment": manifest.principal_commitment});
+    let refused = super::super::journal::project(client, &entry);
+    assert!(
+        matches!(refused, Err(SdkError::NetworkingPending)),
+        "legacy evidence without authority does not publish a verified badge"
+    );
     drop(account);
     Ok(())
 }

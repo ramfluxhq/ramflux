@@ -314,20 +314,20 @@ fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String
     if restricted {
         return Ok("blocked_by_policy".into());
     }
-    let link_id = links
-        .iter()
-        .find(|link| link.state == "accepted" && contact_peer(link, &own) == Some(commitment))
-        .map_or("", |link| link.link_id.as_str());
     let saved = stored_confirmation(client, commitment)?;
     let has_evidence = saved.is_some()
         || stored
             .as_ref()
             .is_some_and(|row| matches!(row.verification_state.as_str(), "verified" | "changed"));
-    let snapshot = match load_snapshot(client, commitment, link_id) {
-        Ok(snapshot) => snapshot,
-        Err(SdkError::NetworkingPending) if !has_evidence => return Ok("unverified".into()),
-        Err(error) => return Err(error),
-    };
+    // No complete evidence is unverified. A snapshot is only needed to judge evidence.
+    if !has_evidence {
+        return Ok("unverified".into());
+    }
+    let link_id = links
+        .iter()
+        .find(|link| link.state == "accepted" && contact_peer(link, &own) == Some(commitment))
+        .map_or("", |link| link.link_id.as_str());
+    let snapshot = load_snapshot(client, commitment, link_id)?;
     if let Some((confirmation, inner)) = saved.as_ref()
         && confirmation_is_current(confirmation, inner, &snapshot.expected)
     {
