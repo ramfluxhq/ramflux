@@ -55,12 +55,11 @@ impl RamfluxClient {
         now_ms: u64,
         own_only: bool,
     ) -> Result<g::EventIdentity, SdkError> {
-        self.account_db()?.write_transaction(|| {
-            self.allocate_generated_identity_in(conversation, now_ms, own_only)
-        })
+        self.account_db()?
+            .join_write(|| self.allocate_generated_identity_in(conversation, now_ms, own_only))
     }
 
-    fn allocate_generated_identity_in(
+    pub(crate) fn allocate_generated_identity_in(
         &self,
         conversation: &str,
         now_ms: u64,

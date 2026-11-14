@@ -69,7 +69,7 @@ pub(crate) async fn dispatch_contact_bus_request(
         }
         "contact.list" => contact_list(state, account_id),
         "contact.safety_number" => dispatch_contact_safety_number(request, state, account_id).await,
-        "contact.verify" => dispatch_contact_verify(request, state, account_id).await,
+        "contact.verify" => dispatch_contact_verify(request, state, account_id),
         "contact.verification.status" => {
             dispatch_contact_verification_status(request, state, account_id).await
         }
@@ -130,39 +130,30 @@ async fn dispatch_contact_safety_number(
         .await;
     account.apply_session_metadata(engine);
     let safety = safety?;
-    Ok(local_bus_ok(serde_json::to_value(safety)?))
+    let mut value = serde_json::to_value(safety)?;
+    if let Ok(expected) =
+        crate::client::contact_verification_cas::current_contact_safety_expectation(
+            &account.client,
+            &body.contact_identity_commitment,
+        )
+    {
+        value["expected"] = serde_json::to_value(expected)?;
+    }
+    Ok(local_bus_ok(value))
 }
 
-async fn dispatch_contact_verify(
+fn dispatch_contact_verify(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    if request.body.get("principal_id").is_some() {
-        return provisional_safety(request, state, account_id, true).await;
-    }
+    let parsed: ramflux_protocol::message::ContactSafetyVerifyRequest =
+        serde_json::from_value(request.body.clone())
+            .map_err(|_| crate::ContactReason::ExpectedSafetyRequired)?;
+    let expected = parsed.expected.ok_or(crate::ContactReason::ExpectedSafetyRequired)?;
     let account = local_bus_account_mut(state, account_id)?;
-    let body = contact_safety_request(request)?;
-    let engine = account.session_client().await?;
-    let safety = account
-        .client
-        .contact_safety_number_via_gateway(&engine.config, &body.contact_identity_commitment)
-        .await;
-    account.apply_session_metadata(engine);
-    let safety = safety?;
-    let record = account.client.record_contact_safety_verified(
-        &body.contact_identity_commitment,
-        &account.gateway_config.device_id,
-        &safety,
-    )?;
-    Ok(local_bus_ok(serde_json::json!({
-        "contact_identity_commitment": record.contact_identity_commitment,
-        "verification_state": record.verification_state,
-        "verified_at": record.verified_at,
-        "verified_by_device_id": record.verified_by_device_id,
-        "safety_number": safety.safety_number,
-        "fingerprint_hex": safety.fingerprint_hex,
-    })))
+    let result = account.client.compare_and_record_contact_safety_verified(&expected)?;
+    Ok(local_bus_ok(serde_json::to_value(result)?))
 }
 
 async fn dispatch_contact_verification_status(
@@ -180,7 +171,7 @@ async fn dispatch_contact_verification_status(
     account.apply_session_metadata(engine);
     let safety = safety?;
     let status = account.client.contact_verification_status(&body.contact_identity_commitment)?;
-    Ok(local_bus_ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "contact_identity_commitment": body.contact_identity_commitment,
         "verification_state": safety.verification_state,
         "stored_verification_state": status
@@ -192,7 +183,16 @@ async fn dispatch_contact_verification_status(
             .map(|record| record.verified_by_device_id.clone()),
         "safety_number": safety.safety_number,
         "fingerprint_hex": safety.fingerprint_hex,
-    })))
+    });
+    if let Ok(expected) =
+        crate::client::contact_verification_cas::current_contact_safety_expectation(
+            &account.client,
+            &body.contact_identity_commitment,
+        )
+    {
+        value["expected"] = serde_json::to_value(expected)?;
+    }
+    Ok(local_bus_ok(value))
 }
 
 fn contact_list(
@@ -242,45 +242,22 @@ async fn provisional_safety(
     id: &str,
     verify: bool,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if verify {
+        return Err(crate::ContactReason::ExpectedSafetyRequired.into());
+    }
     let body: ProvisionalSafety = serde_json::from_value(request.body.clone())
         .map_err(|_| crate::ContactReason::InvalidCard)?;
-    if !verify && body.replace_provisional_root.is_some() {
+    if body.replace_provisional_root.is_some() {
         return Err(crate::ContactReason::InvalidCard.into());
     }
     let account = local_bus_account_mut(state, id)?;
-    let mut engine = account.session_client().await?;
+    let engine = account.session_client().await?;
     let gateway = engine.config.clone();
     let result = async {
-        let mut safety = account
+        let safety = account
             .client
             .preview_contact_safety(&gateway, &body.principal_id, &body.contact_identity_commitment)
             .await?;
-        if verify {
-            account
-                .client
-                .resolve_contact(
-                    &gateway,
-                    &account.gateway_config,
-                    crate::client::contact_resolution::ContactResolution {
-                        send_request: false,
-                        request_note: None,
-                        selector: &body.principal_id,
-                        expected_root: Some(&body.contact_identity_commitment),
-                        card: None,
-                        link_id: crate::client::contact_roots::contact_link_id(
-                            &gateway.principal_id,
-                            &body.principal_id,
-                        )?,
-                        allow_commitment: false,
-                        requester_is_peer: false,
-                        replace_provisional_root: body.replace_provisional_root.as_deref(),
-                        verification: Some(&safety),
-                    },
-                    &mut engine,
-                )
-                .await?;
-            safety.verification_state = "verified".into();
-        }
         Ok::<_, SdkError>(local_bus_ok(serde_json::to_value(safety)?))
     }
     .await;

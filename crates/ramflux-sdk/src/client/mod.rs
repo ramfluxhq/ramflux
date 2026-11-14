@@ -15,6 +15,7 @@ pub(crate) mod contact_resolution;
 pub(crate) mod contact_roots;
 mod contact_safety_preview;
 pub(crate) mod contact_verification;
+pub(crate) mod contact_verification_cas;
 pub mod conversation;
 mod deferred_attachment;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};

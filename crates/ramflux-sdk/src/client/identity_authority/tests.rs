@@ -400,7 +400,10 @@ fn signed_kind_is_asserted_until_user_verification_and_complete_set_changes_inva
         &own.principal_commitment,
         &original.principal_commitment,
     )?;
-    peer.client.mark_contact_safety_verified(&original.principal_commitment, "bob")?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &original.principal_commitment,
+    )?;
     assert_eq!(peer.client.verified_principal_kind("agent")?, Some(PrincipalKind::HeadlessAi));
     let mut changed = original.clone();
     changed.devices.extend(second.manifest()?.devices);
@@ -474,7 +477,10 @@ fn dormant_sibling_readiness_does_not_change_safety_number_or_directory_hash() -
         &own.principal_commitment,
         &full.principal_commitment,
     )?;
-    peer.client.mark_contact_safety_verified(&full.principal_commitment, "peer")?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &full.principal_commitment,
+    )?;
     let before = peer.client.contact_safety_number(&full.principal_commitment)?;
     let row = peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?;
     let mut served = full.clone();

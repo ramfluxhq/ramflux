@@ -120,7 +120,7 @@ fn stage_inner(
         context_delivery: None,
         generated: None,
     };
-    db.write_transaction(|| {
+    db.join_write(|| {
         let (rows, bytes) = db.own_copy_actor_usage(PREFIX)?;
         if input.body.len() > crate::client::own_device_copy::MAX_PACKET_BYTES
             || rows >= u64::from(MAX_PENDING)

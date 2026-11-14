@@ -27,9 +27,24 @@ def main():
     rows = ROW.findall(source)
     if not rows or len({row[0] for row in rows}) != len(rows):
         raise SystemExit("missing or duplicate SDK method policy rows")
-    methods = [dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
-                    secret_output=out == "true", show_once=once == "true", key_export=export == "true")
-               for name, capability, inp, out, once, export in rows]
+    consts = dict(re.findall(r'const (CONTACT_VERIFY_CAS_[A-Z0-9_]+): &str = "([^"]*)";', source))
+    cas_fields = {
+        "cas_capability": consts.get("CONTACT_VERIFY_CAS_CAPABILITY"),
+        "contract": consts.get("CONTACT_VERIFY_CAS_CONTRACT"),
+        "request_type": consts.get("CONTACT_VERIFY_CAS_REQUEST_TYPE"),
+        "response_type": consts.get("CONTACT_VERIFY_CAS_RESPONSE_TYPE"),
+        "message_descriptor_blake3": consts.get("CONTACT_VERIFY_CAS_DESCRIPTOR"),
+        "product_pin": consts.get("CONTACT_VERIFY_CAS_PRODUCT_PIN"),
+    }
+    if any(value is None or value == "" for value in cas_fields.values()):
+        raise SystemExit("contact.verify CAS metadata constants are incomplete")
+    methods = []
+    for name, capability, inp, out, once, export in rows:
+        row = dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
+                   secret_output=out == "true", show_once=once == "true", key_export=export == "true")
+        if name == "contact.verify":
+            row.update(cas_fields)
+        methods.append(row)
     data = dict(abi_major=2, policy_version=2, methods=methods)
     encoded = json.dumps(data, indent=2, sort_keys=True) + "\n"
     if args.check:

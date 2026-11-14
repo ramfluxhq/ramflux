@@ -99,15 +99,38 @@ async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_th
     let (_a, _b, _fake, _d, _origin, mut s, old) = lying_lookup().await?;
     let root = s.accounts.get("bob").ok_or_else(|| invalid("bob"))?.principal_commitment.clone();
     let body = json!({"principal_id":"bob","contact_identity_commitment":root});
-    let preview = call(&mut s, "alice", "contact.safety_number", body.clone()).await?;
+    let preview = call(&mut s, "alice", "contact.safety_number", body).await?;
     assert_eq!(preview["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
+    let link_id = client(&s)?
+        .friend_links()?
+        .into_iter()
+        .find(|link| link.state == "accepted")
+        .ok_or_else(|| invalid("link"))?
+        .link_id;
+    let mut expected = crate::client::contact_verification_cas::preview_contact_safety_expectation(
+        client(&s)?,
+        &root,
+        &link_id,
+    )?;
+    let first = serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+        expected: Some(expected.clone()),
+    })?;
     assert!(matches!(
-        call(&mut s, "alice", "contact.verify", body).await,
+        call(&mut s, "alice", "contact.verify", first).await,
         Err(SdkError::ContactConfirmationRequired(_))
     ));
-    let verified=call(&mut s,"alice","contact.verify",json!({"principal_id":"bob","contact_identity_commitment":root,"replace_provisional_root":old})).await?;
-    assert_eq!(verified["safety_number"], preview["safety_number"]);
+    expected.replace_provisional_root = Some(old);
+    let verified = call(
+        &mut s,
+        "alice",
+        "contact.verify",
+        serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+            expected: Some(expected),
+        })?,
+    )
+    .await?;
+    assert_eq!(verified["verificationState"], "verified");
     let set = client(&s)?.observed_device_set(&root)?.ok_or_else(|| invalid("verified set"))?;
     assert_eq!(
         client(&s)?
@@ -149,8 +172,7 @@ async fn card_and_manually_verified_roots_refuse_replacement_even_with_confirmat
     for verified in [false, true] {
         let (_a, _b, _fake, _d, _origin, mut s, old) = lying_lookup().await?;
         if verified {
-            call(&mut s, "alice", "contact.verify", json!({"contact_identity_commitment":old}))
-                .await?;
+            crate::client::contact_verification_cas::verify_linked_contact(client(&s)?, &old)?;
         } else {
             let db = client(&s)?.account_db()?;
             let mut identity =
@@ -471,13 +493,10 @@ async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> R
         .ok_or_else(|| invalid("bob manifest"))?;
     for source in ["card", "verified"] {
         if source == "verified" {
-            call(
-                &mut s,
-                "alice",
-                "contact.verify",
-                json!({"contact_identity_commitment":manifest.principal_commitment}),
-            )
-            .await?;
+            crate::client::contact_verification_cas::verify_linked_contact(
+                client(&s)?,
+                &manifest.principal_commitment,
+            )?;
         }
         client(&s)?.persist_root_verified_directory(&manifest)?;
         let db = client(&s)?.account_db()?;

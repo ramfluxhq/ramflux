@@ -33,18 +33,19 @@ async fn legacy_card_synthetic_verification_agrees_across_views_without_authenti
         }),
     )?;
     assert!(peer.client.observed_device_set(&root)?.is_none());
-    assert_eq!(
-        peer.client.mark_contact_safety_verified(&root, "peer")?.verification_state,
-        "verified"
-    );
+    let refused = peer.client.mark_contact_safety_verified(&root, "peer");
+    assert!(matches!(
+        refused,
+        Err(SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
+    ));
     let stamp_key = format!("identity/safety_verified_set/{root}");
     assert!(peer.client.account_db()?.load_actor_state::<String>(&stamp_key)?.is_none());
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verified");
+    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "unverified");
     assert!(peer.client.verified_principal_kind("owner")?.is_none());
-    assert_eq!(peer.client.contact_entry("owner")?["verified"], true);
+    assert_eq!(peer.client.contact_entry("owner")?["verified"], false);
     assert_eq!(peer.client.contact_entry("owner")?["kind_verified"], false);
     peer.reopen()?;
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verified");
+    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "unverified");
     let db = peer.client.account_db()?;
     let result = crate::bus::test_account_reader_request(db, directory_request(&peer.id)).await?;
     let row = result["identities"]
@@ -53,8 +54,8 @@ async fn legacy_card_synthetic_verification_agrees_across_views_without_authenti
         .iter()
         .find(|r| r["principal_id"] == "owner")
         .ok_or("owner")?;
-    assert_eq!(row["safety_state"], "verified");
-    assert_eq!(row["verified"], true);
+    assert_eq!(row["safety_state"], "unverified");
+    assert_eq!(row["verified"], false);
     assert_eq!(row["kind_verified"], false);
     assert!(db.load_actor_state::<String>(&stamp_key)?.is_none());
     Ok(())
@@ -94,7 +95,7 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
                 &manifest.principal_commitment,
                 Some(current_hash)
             )?,
-            "verification_stale"
+            if matches { "unverified" } else { "verification_stale" }
         );
         assert!(db.load_actor_state::<String>(&stamp_key)?.is_none());
         drop(reader);
@@ -109,9 +110,9 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
             .iter()
             .find(|r| r["principal_id"] == "owner")
             .ok_or("owner")?;
-        let expected = if matches { "verified" } else { "verification_stale" };
+        let expected = if matches { "unverified" } else { "verification_stale" };
         assert_eq!(row["safety_state"], expected);
-        assert_eq!(row["verified"], matches);
+        assert_eq!(row["verified"], false);
         assert_eq!(row["kind_verified"], true);
         assert_eq!(
             peer.client.contact_safety_verification_state(
@@ -163,12 +164,13 @@ fn confirmed_safety_commit_writes_authority_before_any_later_read() -> TestResul
         &manifest.principal_commitment,
     )?;
     let safety = peer.client.contact_safety_number(&manifest.principal_commitment)?;
-    let own_material = crate::client::contact::contact_safety_material_from_manifest(&own)?;
-    let material = crate::client::contact::contact_safety_material_from_manifest(&manifest)?;
     let key = format!("identity/safety_verified_set/{}", manifest.principal_commitment);
     let db = peer.client.account_db()?;
     assert!(db.load_actor_state::<String>(&key)?.is_none());
-    peer.client.commit_contact_safety(&safety, &own_material, &material, "peer")?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &manifest.principal_commitment,
+    )?;
     let stamp = set_fingerprint(manifest.signed_device_set.as_ref().ok_or("set")?)?;
     assert_eq!(
         db.load_actor_state::<String>(&key)?,
@@ -207,7 +209,7 @@ async fn sealed_migration_never_absorbs_new_unstamped_records_or_rescans_on_read
             &manifest.principal_commitment,
             row["device_set_hash"].as_str()
         )?,
-        "verification_stale"
+        "unverified"
     );
     migrate_legacy_contact_verifications(db)?;
     assert!(db.load_actor_state::<String>(&key)?.is_none());
@@ -220,7 +222,7 @@ async fn sealed_migration_never_absorbs_new_unstamped_records_or_rescans_on_read
         .iter()
         .find(|r| r["principal_id"] == "owner")
         .ok_or("owner")?;
-    assert_eq!(owner_row["safety_state"], "verification_stale");
+    assert_eq!(owner_row["safety_state"], "unverified");
     assert!(db.load_actor_state::<String>(&key)?.is_none());
     // A later malformed authority would fail the old full scan. Sealed startup must not scan it.
     db.persist_actor_state(
@@ -427,7 +429,7 @@ fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> Te
                 &unrelated.principal_commitment,
                 local["device_set_hash"].as_str()
             )?,
-            "verification_stale"
+            "unverified"
         );
         assert!(
             db.load_actor_state::<String>(&format!(
@@ -459,7 +461,7 @@ fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> Te
                     &incoming.principal_commitment,
                     imported["device_set_hash"].as_str()
                 )?,
-                if mode == "legacy" { "verified" } else { "verification_stale" }
+                "unverified"
             );
         }
     }

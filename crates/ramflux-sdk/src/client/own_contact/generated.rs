@@ -62,9 +62,26 @@ impl RamfluxClient {
         value: &g::OwnContactSync,
     ) -> Result<(), SdkError> {
         let contact = self.generated_own_contact(value)?;
-        self.account_db()?.write_transaction(|| {
+        self.account_db()?.join_write(|| {
             self.apply_own_contact(&contact)?;
             self.bind_generated_contact_conversation(&contact)
+        })
+    }
+
+    pub(crate) fn receive_generated_own_contact_with_origin(
+        &self,
+        value: &g::OwnContactSync,
+        identity: &g::EventIdentity,
+        exact_inner: &[u8],
+    ) -> Result<(), SdkError> {
+        self.receive_generated_own_contact(value)?;
+        self.account_db()?.join_write(|| {
+            super::super::contact_verification_cas::install_sibling_confirmation(
+                self,
+                value,
+                identity,
+                exact_inner,
+            )
         })
     }
 
@@ -153,8 +170,11 @@ mod tests {
             state: "accepted".into(),
             ..Default::default()
         };
-        let value =
-            g::OwnContactSync { manifest: Some(manifest(&peer)?), link: Some(link.clone()) };
+        let value = g::OwnContactSync {
+            manifest: Some(manifest(&peer)?),
+            link: Some(link.clone()),
+            ..Default::default()
+        };
         let db = own.client.account_db()?;
         assert!(db.client_record("identity", &peer.manifest.principal_id)?.is_none());
         own.client.authorize_generated_own_contact(&value)?;
@@ -172,6 +192,7 @@ mod tests {
                 target_id: foreign.client.own_account_anchor()?,
                 ..link.clone()
             }),
+            ..Default::default()
         };
         assert!(
             own.client.authorize_generated_own_contact(&collision).is_err(),

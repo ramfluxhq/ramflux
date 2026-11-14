@@ -165,13 +165,7 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
     )
     .await?;
     assert_eq!(safety["safety_number"].as_array().map(Vec::len), Some(12));
-    call(
-        &mut s,
-        "bob",
-        "contact.verify",
-        json!({"contact_identity_commitment":parsed.root_commitment}),
-    )
-    .await?;
+    call(&mut s, "bob", "contact.verify", json!({"expected": safety["expected"]})).await?;
     let contacts = call(&mut s, "bob", "contact.list", json!({})).await?;
     assert_eq!(contacts["contacts"][0]["verified"], true);
     assert_eq!(contacts["contacts"][0]["root_commitment"], parsed.root_commitment);

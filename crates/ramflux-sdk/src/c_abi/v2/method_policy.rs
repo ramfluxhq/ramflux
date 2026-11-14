@@ -252,16 +252,93 @@ pub(super) fn allowed(name: &str) -> bool {
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 
-pub(super) fn manifest() -> serde_json::Value {
-    let methods = METHOD_POLICIES
+pub(super) const CONTACT_VERIFY_CAS_CONTRACT: &str = "CONTACT-VERIFY-CAS-01";
+pub(super) const CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas";
+pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyRequest";
+pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyResult";
+/// blake3 of the generated message descriptor set.
+pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
+    "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
+/// blake3 of the contract line followed by those descriptor bytes.
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str =
+    "de9789f507ed75696e62ec27b7e4ff1904b9db6fff27dcafa789cd04b27eab8e";
+
+pub(super) fn contact_verify_rows() -> usize {
+    METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify").count()
+}
+
+pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
+    contact_verify_rows() == 1
+        && allowed("contact.verify")
+        && descriptor_hex == CONTACT_VERIFY_CAS_DESCRIPTOR
+        && !CONTACT_VERIFY_CAS_PRODUCT_PIN.is_empty()
+}
+
+#[cfg(test)]
+pub(super) fn contact_verify_cas_inventory_admits(inventory: &serde_json::Value) -> bool {
+    let Some(methods) = inventory
+        .get("method_policy")
+        .and_then(|policy| policy.get("methods"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let rows = methods
         .iter()
-        .map(|policy| {
-            serde_json::json!({
-                "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
-                "secret_input":policy.secret_input,"secret_output":policy.secret_output,
-                "show_once":policy.show_once,"key_export":requires_key_export(policy.name),
-            })
-        })
+        .filter(|row| row.get("name").and_then(serde_json::Value::as_str) == Some("contact.verify"))
         .collect::<Vec<_>>();
+    let Some(row) = rows.first().filter(|_| rows.len() == 1) else {
+        return false;
+    };
+    row.get("bridge_allowed").and_then(serde_json::Value::as_bool) == Some(true)
+        && row.get("capability").and_then(serde_json::Value::as_str) == Some("contact")
+        && row.get("cas_capability").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_CAPABILITY)
+        && row.get("contract").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_CONTRACT)
+        && row.get("request_type").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_REQUEST_TYPE)
+        && row.get("response_type").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_RESPONSE_TYPE)
+        && row.get("message_descriptor_blake3").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_DESCRIPTOR)
+        && row.get("product_pin").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_PRODUCT_PIN)
+}
+
+fn method_value(policy: &MethodPolicy) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
+        "secret_input":policy.secret_input,"secret_output":policy.secret_output,
+        "show_once":policy.show_once,"key_export":requires_key_export(policy.name),
+    });
+    if policy.name == "contact.verify"
+        && let Some(object) = value.as_object_mut()
+    {
+        object
+            .insert("cas_capability".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_CAPABILITY));
+        object.insert("contract".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_CONTRACT));
+        object
+            .insert("request_type".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_REQUEST_TYPE));
+        object.insert(
+            "response_type".to_owned(),
+            serde_json::json!(CONTACT_VERIFY_CAS_RESPONSE_TYPE),
+        );
+        object.insert(
+            "message_descriptor_blake3".to_owned(),
+            serde_json::json!(CONTACT_VERIFY_CAS_DESCRIPTOR),
+        );
+        object.insert("product_pin".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_PRODUCT_PIN));
+    }
+    value
+}
+
+pub(super) fn manifest() -> serde_json::Value {
+    // The build script compiles this file alone. Keep the execute predicate
+    // referenced here so that isolated compile still type-checks it.
+    let _ = loaded_cas_descriptor_matches(CONTACT_VERIFY_CAS_DESCRIPTOR);
+    let methods = METHOD_POLICIES.iter().map(method_value).collect::<Vec<_>>();
     serde_json::json!({"abi_major":2,"policy_version":2,"methods":methods})
 }

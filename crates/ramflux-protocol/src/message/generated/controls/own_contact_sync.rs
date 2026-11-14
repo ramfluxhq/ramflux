@@ -11,6 +11,8 @@ pub struct OwnContactSync {
     pub manifest: ::core::option::Option<NativeDeviceManifest>,
     #[prost(message, optional, tag = "2")]
     pub link: ::core::option::Option<FriendLinkRecord>,
+    #[prost(message, optional, tag = "3")]
+    pub safety_confirmation: ::core::option::Option<ContactSafetyConfirmation>,
 }
 impl serde::Serialize for OwnContactSync {
     #[allow(deprecated)]
@@ -26,6 +28,9 @@ impl serde::Serialize for OwnContactSync {
         if self.link.is_some() {
             len += 1;
         }
+        if self.safety_confirmation.is_some() {
+            len += 1;
+        }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.OwnContactSync", len)?;
         if let Some(v) = self.manifest.as_ref() {
@@ -33,6 +38,9 @@ impl serde::Serialize for OwnContactSync {
         }
         if let Some(v) = self.link.as_ref() {
             struct_ser.serialize_field("link", v)?;
+        }
+        if let Some(v) = self.safety_confirmation.as_ref() {
+            struct_ser.serialize_field("safetyConfirmation", v)?;
         }
         struct_ser.end()
     }
@@ -43,11 +51,12 @@ impl<'de> serde::Deserialize<'de> for OwnContactSync {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["manifest", "link"];
+        const FIELDS: &[&str] = &["manifest", "link", "safety_confirmation", "safetyConfirmation"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Manifest,
             Link,
+            SafetyConfirmation,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -71,6 +80,9 @@ impl<'de> serde::Deserialize<'de> for OwnContactSync {
                         match value {
                             "manifest" => Ok(GeneratedField::Manifest),
                             "link" => Ok(GeneratedField::Link),
+                            "safetyConfirmation" | "safety_confirmation" => {
+                                Ok(GeneratedField::SafetyConfirmation)
+                            }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -90,6 +102,7 @@ impl<'de> serde::Deserialize<'de> for OwnContactSync {
             {
                 let mut manifest__ = None;
                 let mut link__ = None;
+                let mut safety_confirmation__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -108,9 +121,21 @@ impl<'de> serde::Deserialize<'de> for OwnContactSync {
                             }
                             link__ = map_.next_value()?;
                         }
+                        GeneratedField::SafetyConfirmation => {
+                            if safety_confirmation__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "safetyConfirmation",
+                                ));
+                            }
+                            safety_confirmation__ = map_.next_value()?;
+                        }
                     }
                 }
-                Ok(OwnContactSync { manifest: manifest__, link: link__ })
+                Ok(OwnContactSync {
+                    manifest: manifest__,
+                    link: link__,
+                    safety_confirmation: safety_confirmation__,
+                })
             }
         }
         deserializer.deserialize_struct(

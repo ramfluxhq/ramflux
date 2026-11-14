@@ -60,7 +60,7 @@ impl RamfluxClient {
             {
                 return Err(ContactReason::RootConflict.into());
             }
-            self.record_contact_safety_verified(
+            Self::record_contact_safety_verified(
                 &safety.contact_identity_commitment,
                 device,
                 &current,
@@ -75,7 +75,7 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         // The shared writer records the confirmation and complete authority stamp atomically.
-        self.record_contact_safety_verified(&safety.contact_identity_commitment, device, safety)?;
+        Self::record_contact_safety_verified(&safety.contact_identity_commitment, device, safety)?;
         Ok(())
     }
 

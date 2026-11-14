@@ -126,7 +126,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let local = self.owned_device_identity()?;
         let db = self.account_db()?;
-        db.write_transaction(|| -> Result<(), SdkError> {
+        db.join_write(|| -> Result<(), SdkError> {
             for id in db.pair_session_ids(&local, remote)? {
                 self.retire_pair(&local, remote, &id)?;
             }

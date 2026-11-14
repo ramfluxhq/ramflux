@@ -138,14 +138,8 @@ impl RamfluxClient {
         commitment: &str,
         device_set_hash: Option<&str>,
     ) -> Result<String, SdkError> {
-        if let Some(state) = self.native_safety_verification_state(commitment)? {
-            return Ok(state);
-        }
-        super::contact_verification::verification_state(
-            self.account_db()?,
-            commitment,
-            device_set_hash,
-        )
+        let _ = device_set_hash;
+        super::contact_verification_cas::effective_state(self, commitment)
     }
 
     /// # Errors
@@ -339,53 +333,17 @@ impl RamfluxClient {
     /// Returns an error when the contact cannot be verified or persisted.
     pub fn mark_contact_safety_verified(
         &self,
-        contact_identity_commitment: &str,
-        verified_by_device_id: &str,
+        _contact_identity_commitment: &str,
+        _verified_by_device_id: &str,
     ) -> Result<ContactVerificationRecord, SdkError> {
-        let safety = self.contact_safety_number(contact_identity_commitment)?;
-        self.record_contact_safety_verified(
-            contact_identity_commitment,
-            verified_by_device_id,
-            &safety,
-        )
+        Err(SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
     }
     pub(crate) fn record_contact_safety_verified(
-        &self,
-        contact_identity_commitment: &str,
-        verified_by_device_id: &str,
-        safety: &SdkContactSafetyNumber,
+        _contact_identity_commitment: &str,
+        _verified_by_device_id: &str,
+        _safety: &SdkContactSafetyNumber,
     ) -> Result<ContactVerificationRecord, SdkError> {
-        self.account_db()?.write_transaction(|| {
-            let result = self.account_db()?.mark_contact_verified(ContactVerificationUpdate {
-                contact_identity_commitment,
-                safety_number_hash: &safety.safety_number_hash,
-                device_set_hash: &safety.contact_device_set_hash,
-                lineage_head: &safety.contact_lineage_head,
-                verified_at: now_unix_timestamp(),
-                verified_by_device_id,
-            })?;
-            if let Some(authority) = self.current_custody_authority(
-                contact_identity_commitment,
-                crate::custody::network_now()?,
-            )? {
-                let current = super::identity_authority::native_authority_fingerprint(&authority)?;
-                if safety.algorithm_version != 2 || safety.contact_device_set_hash != current {
-                    return Err(SdkError::ContactInput(crate::ContactReason::RootConflict));
-                }
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/safety_verified_set/{contact_identity_commitment}"),
-                    &current,
-                )?;
-                return Ok(result);
-            }
-            if let Some(record) = self.observed_device_set(contact_identity_commitment)? {
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/safety_verified_set/{contact_identity_commitment}"),
-                    &super::identity_authority::set_fingerprint(&record)?,
-                )?;
-            }
-            Ok::<_, SdkError>(result)
-        })
+        Err(SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
     }
 
     /// # Errors
@@ -804,7 +762,7 @@ impl RamfluxClient {
         })
     }
 
-    fn cached_contact_safety_material(
+    pub(crate) fn cached_contact_safety_material(
         &self,
         commitment: &str,
     ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {

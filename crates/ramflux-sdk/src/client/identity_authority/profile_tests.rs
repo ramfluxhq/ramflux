@@ -36,25 +36,22 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     )?;
     assert_eq!(
         crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
-        "verified"
+        "unverified"
     );
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verified"
+        "unverified"
     );
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &signed.principal_commitment,
+    )?;
     let stamp_key = format!("identity/safety_verified_set/{}", signed.principal_commitment);
     let stamp = db.load_actor_state::<String>(&stamp_key)?.ok_or("stamp")?;
-    db.remove_actor_state(&stamp_key)?;
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verification_stale"
+        "verified"
     );
-    assert!(
-        db.load_actor_state::<String>(&stamp_key)?.is_none(),
-        "reads cannot repair a missing stamp after migration"
-    );
-    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
-    assert_eq!(db.load_actor_state::<String>(&stamp_key)?, Some(stamp.clone()));
     let next = with_revoked_device(&owner, &signed, &late)?;
     observe(&peer.client, &next)?;
     let row = crate::bus::read_model::row(&peer.client, "identity", "owner")?;
@@ -82,7 +79,10 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
         "verified",
         "stored verification is audit history, not current authority"
     );
-    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &signed.principal_commitment,
+    )?;
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
         "verified"

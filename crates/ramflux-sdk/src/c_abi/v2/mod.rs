@@ -9,6 +9,9 @@ compile_error!("C ABI v2 requires panic=unwind; build with --profile ffi-release
 
 mod buffer;
 mod card;
+#[cfg(test)]
+#[path = "cas_tests.rs"]
+mod cas_tests;
 mod custody;
 #[cfg(test)]
 mod custody_tests;

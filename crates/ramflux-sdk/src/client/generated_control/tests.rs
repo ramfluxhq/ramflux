@@ -183,6 +183,7 @@ fn own_contact_sync() -> Result<Control, SdkError> {
             state: "accepted".into(),
             ..Default::default()
         }),
+        ..Default::default()
     }))
 }
 

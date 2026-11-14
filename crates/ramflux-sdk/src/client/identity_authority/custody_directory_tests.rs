@@ -205,7 +205,7 @@ fn native_safety_uses_stable_anchor_comparison_and_separate_roster_stamp() -> Te
     let before = client.contact_safety_number(&anchor)?;
     assert_eq!(before.algorithm_version, 2);
     assert_eq!(before.safety_number, ramflux_crypto::custody::safety_number(&own, &anchor)?);
-    client.mark_contact_safety_verified(&anchor, "primary")?;
+    crate::client::contact_verification_cas::verify_linked_contact(&client, &anchor)?;
     assert_eq!(client.contact_safety_number(&anchor)?.verification_state, "verified");
     let primary = vault.primary_for_public_key(
         &peer.publication.record.body.master_certificate.body.self_signing_public_key,
@@ -220,7 +220,7 @@ fn native_safety_uses_stable_anchor_comparison_and_separate_roster_stamp() -> Te
     let renamed = client.contact_safety_number(&anchor)?;
     assert_eq!(renamed.safety_number, before.safety_number);
     assert_eq!(renamed.contact_device_set_hash, before.contact_device_set_hash);
-    assert_eq!(renamed.verification_state, "verified");
+    assert_eq!(renamed.verification_state, "verification_stale");
     let current = client.current_custody_authority(&anchor, now)?.ok_or("authority")?;
     peer.publication.record = primary.revoke_device(&current, "primary", now)?;
     peer.devices.clear();

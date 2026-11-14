@@ -168,4 +168,29 @@ impl AccountDb {
         }
         Ok(value)
     }
+
+    /// Runs `write` in the current immediate transaction, or opens one when autocommit is on.
+    ///
+    /// Nested callers share the outer commit. A failure still rolls the outer transaction back.
+    ///
+    /// # Errors
+    /// Returns callback, BEGIN, or COMMIT errors.
+    pub fn join_write<T, E>(&self, write: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        if self.connection.is_autocommit().map_err(StorageError::from)? {
+            self.write_transaction(write)
+        } else {
+            write()
+        }
+    }
+
+    /// Reports whether this connection already holds an immediate or deferred transaction.
+    ///
+    /// # Errors
+    /// Returns the SQLite autocommit query error.
+    pub fn in_transaction(&self) -> Result<bool, StorageError> {
+        Ok(!self.connection.is_autocommit()?)
+    }
 }

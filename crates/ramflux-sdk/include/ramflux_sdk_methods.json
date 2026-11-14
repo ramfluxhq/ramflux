@@ -607,8 +607,14 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "cas_capability": "contact.verify.cas",
+      "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
+      "message_descriptor_blake3": "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5",
       "name": "contact.verify",
+      "product_pin": "de9789f507ed75696e62ec27b7e4ff1904b9db6fff27dcafa789cd04b27eab8e",
+      "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
+      "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
       "secret_output": true,
       "show_once": false

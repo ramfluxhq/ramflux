@@ -42,6 +42,9 @@ pub(super) struct MissingAttachments {
 #[cfg(test)]
 mod native_tests;
 
+#[cfg(test)]
+mod contact_verify_cas_tests;
+
 pub(crate) struct NativeInstallKey {
     pub account_id: String,
     pub key: ramflux_storage::AccountDbKey,
