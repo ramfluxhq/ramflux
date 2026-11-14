@@ -83,7 +83,7 @@ impl Supervisor {
                 let job = control.job_id.ok_or(SearchError::InvalidQuery)?;
                 let cancelled = runtime.start_rebuild(owner, &job)?;
                 let response = serde_json::json!({"job_id":job,"state":"queued","unlock_epoch":runtime.unlock_epoch().to_string()});
-                self.spawn_search_rebuild(actor, runtime, owner, job, cancelled);
+                self.spawn_search_rebuild(actor, runtime, owner, cancelled);
                 response
             }
             _ => return Err(SearchError::InvalidQuery.into()),

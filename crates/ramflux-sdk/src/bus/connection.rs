@@ -160,22 +160,22 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
                     continue;
                 }
-                let request = incoming.take()?;
+                let mut request = incoming.take()?;
                 if let Err(error) = super::requests::deadline(&request) {
-                    outbound.send(rejected_request(request, &error)).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
                     continue;
                 }
                 if request.kind != LocalBusFrameKind::Request {
-                    outbound.send(rejected_request(request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if !inflight.insert(request.request_id.clone()) {
-                    outbound.send(rejected_request(request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
-                        outbound.send(rejected_request(request, &error)).await.map_err(|_|closed())?;
+                        outbound.send(rejected_request(&mut request, &error)).await.map_err(|_|closed())?;
                     }
                     inflight.remove(&request.request_id);
                     continue;
@@ -255,8 +255,8 @@ async fn configure_subscription(
     Ok(())
 }
 
-fn rejected_request(mut request: LocalBusFrame, error: &SdkError) -> LocalBusFrame {
-    let response = local_bus_error(&request, error);
+fn rejected_request(request: &mut LocalBusFrame, error: &SdkError) -> LocalBusFrame {
+    let response = local_bus_error(request, error);
     super::secrets::wipe(&mut request.body);
     response
 }

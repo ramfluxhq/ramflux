@@ -100,13 +100,14 @@ impl AccountDb {
                 match value {None=>Ok(None),Some(Some(value))=>Ok(Some(value)),Some(None)=>Err(SearchError::Capacity)}
             };
             let Some(identity)=actor(format!("routed/generated-identity/{message}"))? else {return Ok(None)};
+            let identity=zeroize::Zeroizing::new(identity);
             let unsupported:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",[format!("routed/unsupported/{message}")],|r|r.get(0))?;
             if unsupported {return Ok(None);}
             let body:Option<Option<Vec<u8>>>=db.query_row("SELECT CASE WHEN length(body)<=131072 THEN body END FROM runtime_message_content WHERE message_id=?1",[&message],|r|r.get(0)).optional()?;
-            let body=match body {None=>return Ok(None),Some(Some(body))=>body,Some(None)=>return Err(SearchError::Capacity)};
+            let body=match body {None=>return Ok(None),Some(Some(body))=>zeroize::Zeroizing::new(body),Some(None)=>return Err(SearchError::Capacity)};
             let revision=actor(format!("routed/edit-revision/{message}"))?.map(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_|SearchError::IndexUnavailable)).transpose()?.and_then(|value|value.get("revision").and_then(serde_json::Value::as_u64)).unwrap_or(0);
             let group_projection=actor(format!("routed/group-projection/{message}"))?.map(zeroize::Zeroizing::new);
-            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,expires_at,body:zeroize::Zeroizing::new(body),identity:zeroize::Zeroizing::new(identity),group_projection,revision}))
+            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,expires_at,body,identity,group_projection,revision}))
         })
     }
 }

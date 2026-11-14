@@ -486,3 +486,29 @@ fn local_search_checkpoint_resumes_and_rejects_reset_races() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn local_search_corrupt_cache_is_discarded_without_canonical_loss() -> TestResult {
+    let f = Fixture::new()?;
+    f.insert("survivor", "repaircanary")?;
+    let before = f.db.search_revision(&f.activation, &SearchControl::new())?;
+    f.db.connection.execute_batch("DROP TABLE local_search_terms;")?;
+    let _watch = f.db.search_prepare(&f.activation)?;
+    let after = f.db.search_revision(&f.activation, &SearchControl::new())?;
+    assert_ne!(before.epoch, after.epoch, "repair must publish a new derived-cache epoch");
+    assert!(
+        f.hits("repaircanary")?.is_empty(),
+        "damaged cache must be discarded instead of serving old terms as fallback"
+    );
+    assert_eq!(
+        f.db.message_content("survivor")?.as_deref(),
+        Some(b"local-content".as_slice()),
+        "cache repair must preserve the canonical source for authorized rebuild"
+    );
+    assert_eq!(
+        f.db.search_index_status(&f.activation, &SearchControl::new())?.coverage,
+        SearchCoverage::Building,
+        "cache repair must report incomplete coverage until reconstruction"
+    );
+    Ok(())
+}

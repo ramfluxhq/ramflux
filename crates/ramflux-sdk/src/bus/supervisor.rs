@@ -108,9 +108,9 @@ impl Supervisor {
         actor: AccountActor,
         runtime: Arc<crate::search::LocalSearch>,
         owner: u64,
-        job: String,
         ticket: crate::search::rebuild_job::RebuildTicket,
     ) {
+        let job = ticket.work_id().to_owned();
         let mut tasks = self.lifecycle_tasks.borrow_mut();
         while tasks.try_join_next().is_some() {}
         tasks.spawn_local(async move {

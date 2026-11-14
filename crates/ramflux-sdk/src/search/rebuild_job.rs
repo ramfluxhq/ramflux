@@ -17,7 +17,13 @@ use std::{
     time::Duration,
 };
 
-pub(super) type Jobs = Arc<Mutex<Option<(u64, String, Arc<AtomicBool>)>>>;
+pub(super) struct Job {
+    pub owner: u64,
+    pub id: String,
+    pub work: String,
+    pub token: Arc<AtomicBool>,
+}
+pub(super) type Jobs = Arc<Mutex<Option<Job>>>;
 pub(super) type Progress = Arc<Mutex<Option<SearchRebuildProgress>>>;
 pub(crate) struct RebuildTicket {
     jobs: Jobs,
@@ -25,33 +31,45 @@ pub(crate) struct RebuildTicket {
     active: Requests,
     owner: u64,
     id: String,
+    work: String,
     token: Arc<AtomicBool>,
 }
 impl RebuildTicket {
+    pub(crate) fn work_id(&self) -> &str {
+        &self.work
+    }
+    fn mark_running(&self) -> bool {
+        let jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !jobs.as_ref().is_some_and(|job| Arc::ptr_eq(&job.token, &self.token)) {
+            return false;
+        }
+        *self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(SearchRebuildProgress {
+                job_id: self.id.as_str().into(),
+                state: SearchRebuildState::Running,
+            });
+        true
+    }
     fn finish(&self, state: SearchRebuildState) {
-        let claimed = {
+        let cancel = {
             let mut jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs.as_ref().is_some_and(|(owner, id, token)| {
-                *owner == self.owner && id == &self.id && Arc::ptr_eq(token, &self.token)
+            if !jobs.as_ref().is_some_and(|job| {
+                job.owner == self.owner && job.id == self.id && Arc::ptr_eq(&job.token, &self.token)
             }) {
-                jobs.take();
-                true
-            } else {
-                false
+                return;
             }
-        };
-        if claimed {
+            jobs.take();
             *self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(SearchRebuildProgress { job_id: self.id.as_str().into(), state });
             self.token.store(true, Ordering::Release);
-            if let Some(request) = self
-                .active
+            self.active
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&(self.owner, self.id.clone()))
-            {
-                request.cancel();
-            }
+                .get(&(self.owner, self.work.clone()))
+                .cloned()
+        };
+        if let Some(request) = cancel {
+            request.cancel();
         }
     }
 }
@@ -73,7 +91,12 @@ impl LocalSearch {
             return Err(SearchError::Capacity.into());
         }
         let token = Arc::new(AtomicBool::new(false));
-        *jobs = Some((owner, id.to_owned(), Arc::clone(&token)));
+        // Public query IDs and maintenance job IDs occupy separate correlation domains.
+        // A fresh private nonce also prevents a late lease from cancelling a reused job ID.
+        let work =
+            format!("rebuild/{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
+        *jobs =
+            Some(Job { owner, id: id.to_owned(), work: work.clone(), token: Arc::clone(&token) });
         *self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(SearchRebuildProgress { job_id: id.into(), state: SearchRebuildState::Queued });
         self.quota_paused.store(false, Ordering::Release);
@@ -83,6 +106,7 @@ impl LocalSearch {
             active: Arc::clone(&self.active),
             owner,
             id: id.to_owned(),
+            work,
             token,
         })
     }
@@ -97,20 +121,24 @@ impl LocalSearch {
         }
         let selected = {
             let mut jobs = self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if jobs.as_ref().is_some_and(|(client, job, _)| *client == owner && job == id) {
-                jobs.take()
-            } else {
-                None
+            if !jobs.as_ref().is_some_and(|job| job.owner == owner && job.id == id) {
+                return Ok(());
             }
-        };
-        if let Some((_, _, token)) = selected {
-            token.store(true, Ordering::Release);
-            self.cancel_request(owner, id);
+            let job = jobs.take().ok_or(SearchError::IndexUnavailable)?;
+            job.token.store(true, Ordering::Release);
             *self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(SearchRebuildProgress {
                     job_id: id.into(),
                     state: SearchRebuildState::Cancelled,
                 });
+            self.active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&(owner, job.work))
+                .cloned()
+        };
+        if let Some(request) = selected {
+            request.cancel();
         }
         Ok(())
     }
@@ -124,16 +152,14 @@ impl LocalSearch {
         Fut: Future<Output = Result<bool, SdkError>>,
     {
         let owner = ticket.owner;
-        let id = ticket.id.clone();
+        let id = ticket.work.clone();
         let run = async {
             let mut reset = true;
             while !ticket.token.load(Ordering::Acquire) {
                 let admission = self.admit(owner, &id).await?;
-                *self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(SearchRebuildProgress {
-                        job_id: id.as_str().into(),
-                        state: SearchRebuildState::Running,
-                    });
+                if !ticket.mark_running() {
+                    return Ok(false);
+                }
                 let done = batch(admission, reset).await?;
                 reset = false;
                 if done {
@@ -170,8 +196,10 @@ impl LocalSearch {
     ) -> Result<SearchIndexStatus, SdkError> {
         self.epoch(client, &SearchControl::new())?;
         let ticket = self.start_rebuild(owner, id)?;
-        self.run_rebuild_with(ticket, |admission, reset| async move {
-            self.rebuild_batch(client, owner, id, &admission, reset)
+        let work = ticket.work.clone();
+        self.run_rebuild_with(ticket, |admission, reset| {
+            let work = work.clone();
+            async move { self.rebuild_batch(client, owner, &work, &admission, reset) }
         })
         .await?;
         self.index_status(client)

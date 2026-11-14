@@ -79,8 +79,8 @@ impl LocalSearch {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .filter(|(client, _, _)| *client == owner)
-            .map(|(_, id, _)| id.clone());
+            .filter(|job| job.owner == owner)
+            .map(|job| job.id.clone());
         if let Some(job) = job {
             let _ = self.cancel_rebuild(owner, self.unlock, &job);
         }

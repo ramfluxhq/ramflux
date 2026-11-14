@@ -52,13 +52,18 @@ fn inner(
     Ok((identity, body))
 }
 async fn rebuild(runtime: &LocalSearch, client: &RamfluxClient) -> TestResult {
-    for _ in 0..32 {
-        let admission = runtime.admit(1, "rebuild").await?;
-        if runtime.rebuild_batch(client, 1, "rebuild", &admission, false)? {
-            return Ok(());
-        }
-    }
-    Err("search rebuild failed to converge within the bounded fixture".into())
+    let status = runtime.rebuild(client, 1, "rebuild").await?;
+    assert_eq!(
+        status.coverage,
+        crate::search::SearchCoverage::Complete,
+        "the real maintenance lease must finish admitted fixture sources without silently pausing"
+    );
+    assert_eq!(
+        status.rebuild.ok_or("completed rebuild job")?.state,
+        crate::search::SearchRebuildState::Complete,
+        "Rust API must use the same tracked lease state machine as bus maintenance"
+    );
+    Ok(())
 }
 async fn hits(
     runtime: &LocalSearch,
@@ -188,6 +193,13 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
                 "old lease destruction must not release a newly reused job ID"
             );
             drop(new_ticket);
+            let ticket = runtime.start_rebuild(7, "shared-id")?;
+            let shared =
+                runtime.query(&fixture.client, 7, &SearchQuery::new("shared-id", "canary")).await?;
+            runtime.cancel_rebuild(7, runtime.unlock_epoch(), "shared-id")?;
+            shared.check_current()?;
+            drop(shared);
+            drop(ticket);
             let query = SearchQuery::new("empty-query", "canary");
             let completion = runtime.query(&fixture.client, 7, &query).await?;
             assert!(

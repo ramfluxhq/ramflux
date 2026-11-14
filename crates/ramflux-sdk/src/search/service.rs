@@ -143,11 +143,16 @@ impl LocalSearch {
         self.invalidate_views();
     }
     pub(crate) fn invalidate_views(&self) {
-        if let Some((owner, id, cancel)) =
+        if let Some(job) =
             self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {
-            cancel.store(true, std::sync::atomic::Ordering::Release);
-            self.cancel_request(owner, &id);
+            job.token.store(true, std::sync::atomic::Ordering::Release);
+            self.cancel_request(job.owner, &job.work);
+            *self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(ramflux_storage::local_search::SearchRebuildProgress {
+                    job_id: job.id.as_str().into(),
+                    state: ramflux_storage::local_search::SearchRebuildState::Cancelled,
+                });
         }
         self.watch.invalidate();
         self.clear_pending();
