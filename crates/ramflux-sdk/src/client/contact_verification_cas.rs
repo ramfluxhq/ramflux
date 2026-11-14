@@ -14,7 +14,6 @@ use std::cell::Cell;
 
 thread_local! {
     static INTERRUPT_AT: Cell<u8> = const { Cell::new(0) };
-    static FAIL_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -37,14 +36,8 @@ pub(crate) fn test_before_cas_transaction(hook: BeforeCasHook) {
 }
 
 #[cfg(test)]
-pub(crate) fn test_fail_cas_commit(fail: bool) {
-    FAIL_COMMIT.with(|flag| flag.set(fail));
-}
-
-#[cfg(test)]
 pub(crate) fn test_clear_cas_hooks() {
     INTERRUPT_AT.with(|interrupt| interrupt.set(0));
-    FAIL_COMMIT.with(|flag| flag.set(false));
     BEFORE_TXN.with(|slot| *slot.borrow_mut() = None);
 }
 
@@ -149,20 +142,19 @@ fn custody_snapshot(
     Ok(Snapshot { expected, stamp, safety })
 }
 
-fn signed_safety(
-    client: &RamfluxClient,
+fn signed_number(
+    self_material: &ramflux_crypto::ContactSafetyMaterial,
+    contact_material: &ramflux_crypto::ContactSafetyMaterial,
     own: &str,
     commitment: &str,
-) -> Result<SdkContactSafetyNumber, SdkError> {
-    let self_material = client.cached_contact_safety_material(own)?;
-    let contact_material = client.cached_contact_safety_material(commitment)?;
-    let fingerprint = ramflux_crypto::safety_fingerprint(&self_material, &contact_material);
+) -> SdkContactSafetyNumber {
+    let fingerprint = ramflux_crypto::safety_fingerprint(self_material, contact_material);
     let device_set_hash = ramflux_crypto::device_set_hash(&contact_material.devices);
-    Ok(SdkContactSafetyNumber {
+    SdkContactSafetyNumber {
         algorithm_version: 1,
         contact_identity_commitment: commitment.to_owned(),
         self_identity_commitment: own.to_owned(),
-        safety_number: ramflux_crypto::safety_number(&self_material, &contact_material),
+        safety_number: ramflux_crypto::safety_number(self_material, contact_material),
         fingerprint_hex: super::contact::bytes_to_hex(&fingerprint),
         safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
         self_device_count: self_material.devices.len(),
@@ -170,7 +162,20 @@ fn signed_safety(
         contact_device_set_hash: ramflux_protocol::encode_base64url(device_set_hash),
         contact_lineage_head: ramflux_protocol::encode_base64url(&contact_material.lineage_head),
         verification_state: "unverified".into(),
-    })
+    }
+}
+
+fn signed_safety(
+    client: &RamfluxClient,
+    own: &str,
+    commitment: &str,
+) -> Result<SdkContactSafetyNumber, SdkError> {
+    Ok(signed_number(
+        &client.cached_contact_safety_material(own)?,
+        &client.cached_contact_safety_material(commitment)?,
+        own,
+        commitment,
+    ))
 }
 
 fn signed_snapshot(
@@ -249,6 +254,103 @@ fn fill_replacement(
     Ok(())
 }
 
+fn held_pair(
+    client: &RamfluxClient,
+    own: &str,
+    commitment: &str,
+) -> (Option<SdkDeviceManifestResponse>, Option<SdkDeviceManifestResponse>) {
+    let held = client.held_manifests.borrow();
+    (held.get(own).cloned(), held.get(commitment).cloned())
+}
+
+fn snapshot_from_signed_manifests(
+    own_manifest: &SdkDeviceManifestResponse,
+    peer_manifest: &SdkDeviceManifestResponse,
+    link_id: &str,
+) -> Result<Snapshot, SdkError> {
+    let self_set = own_manifest.signed_device_set.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let peer_set =
+        peer_manifest.signed_device_set.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+    if self_set.principal_commitment != own_manifest.principal_commitment
+        || peer_set.principal_commitment != peer_manifest.principal_commitment
+    {
+        return Err(SdkError::LocalBus("signed set root mismatch".into()));
+    }
+    let safety = signed_number(
+        &super::contact::contact_safety_material_from_manifest(own_manifest)?,
+        &super::contact::contact_safety_material_from_manifest(peer_manifest)?,
+        &own_manifest.principal_commitment,
+        &peer_manifest.principal_commitment,
+    );
+    let stamp = super::identity_authority::set_fingerprint(peer_set)?;
+    let expected = expected_from_safety(
+        &safety,
+        signed_head(self_set)?,
+        signed_head(peer_set)?,
+        peer_set.principal_id.clone(),
+        link_id,
+    );
+    Ok(Snapshot { expected, stamp, safety })
+}
+
+fn held_custody_snapshot(
+    client: &RamfluxClient,
+    commitment: &str,
+    link_id: &str,
+) -> Result<Snapshot, SdkError> {
+    let own_anchor = client.own_account_anchor()?;
+    let (own_manifest, peer_manifest) = held_pair(client, &own_anchor, commitment);
+    let own_manifest = own_manifest.ok_or(SdkError::NetworkingPending)?;
+    let peer_manifest = peer_manifest.ok_or(SdkError::NetworkingPending)?;
+    let own_native = own_manifest.custody.as_deref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let peer_native = peer_manifest.custody.as_deref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let own = RamfluxClient::authenticate_custody_manifest(own_native, &own_anchor)?;
+    let peer = RamfluxClient::authenticate_custody_manifest(peer_native, commitment)?;
+    let safety = super::native_safety::safety_from_native(&own, &peer, "unverified".into())?;
+    let stamp = safety.contact_device_set_hash.clone();
+    let expected = expected_from_safety(
+        &safety,
+        ramflux_protocol::custody::object_hash(own.envelope())?,
+        ramflux_protocol::custody::object_hash(peer.envelope())?,
+        peer.envelope().body.principal_id.clone(),
+        link_id,
+    );
+    Ok(Snapshot { expected, stamp, safety })
+}
+
+fn born_snapshot(
+    client: &RamfluxClient,
+    commitment: &str,
+    link_id: &str,
+) -> Result<Snapshot, SdkError> {
+    let now = crate::custody::network_now()?;
+    let own = client.own_account_anchor()?;
+    if client.current_custody_authority(&own, now)?.is_some()
+        && client.current_custody_authority(commitment, now)?.is_some()
+    {
+        return custody_snapshot(client, commitment, link_id);
+    }
+    held_custody_snapshot(client, commitment, link_id)
+}
+
+fn admitted_signed_snapshot(
+    client: &RamfluxClient,
+    commitment: &str,
+    link_id: &str,
+) -> Result<Snapshot, SdkError> {
+    let own = client.own_account_anchor()?;
+    if client.observed_device_set(&own)?.is_some()
+        && client.observed_device_set(commitment)?.is_some()
+    {
+        return signed_snapshot(client, commitment, link_id);
+    }
+    let (own_manifest, peer_manifest) = held_pair(client, &own, commitment);
+    if let (Some(own_manifest), Some(peer_manifest)) = (own_manifest, peer_manifest) {
+        return snapshot_from_signed_manifests(&own_manifest, &peer_manifest, link_id);
+    }
+    Err(SdkError::CustodyModeDowngrade)
+}
+
 fn load_snapshot(
     client: &RamfluxClient,
     commitment: &str,
@@ -257,10 +359,41 @@ fn load_snapshot(
     // The replacement selector is display-only. Compare-and-record reads it from the
     // submitted expectation, so a missing selector stays a typed confirmation error.
     if client.born_v3_account.is_some() {
-        custody_snapshot(client, commitment, link_id)
-    } else {
-        signed_snapshot(client, commitment, link_id)
+        return born_snapshot(client, commitment, link_id);
     }
+    // An account that is not born-v3 and has no admitted signed device set is a typed error.
+    // The routed recovery contract still compares an admitted signed set; that stamp is
+    // `set_fingerprint`, and the test that measures it is unchanged.
+    admitted_signed_snapshot(client, commitment, link_id)
+}
+
+fn persist_held_for_commit(client: &RamfluxClient, contact: &str) -> Result<(), SdkError> {
+    let own = client.own_account_anchor()?;
+    let keys = [own, contact.to_owned()];
+    let manifests = {
+        let held = client.held_manifests.borrow();
+        keys.iter().filter_map(|key| held.get(key).cloned()).collect::<Vec<_>>()
+    };
+    for manifest in &manifests {
+        retain_compared_manifest(client, manifest)?;
+        if client.born_v3_account.is_some()
+            && let Some(custody) = manifest.custody.as_deref()
+        {
+            client.stage_candidate_pins(custody, &manifest.principal_commitment)?;
+        }
+    }
+    Ok(())
+}
+
+fn release_compared_manifests(
+    client: &RamfluxClient,
+    expected: &g::ExpectedContactSafety,
+) -> Result<(), SdkError> {
+    let own = client.own_account_anchor()?;
+    let mut held = client.held_manifests.borrow_mut();
+    held.remove(&own);
+    held.remove(&expected.contact_identity_commitment);
+    Ok(())
 }
 
 pub(crate) fn retain_compared_manifest(
@@ -419,6 +552,9 @@ fn decide(client: &RamfluxClient, commitment: &str) -> Result<Decision, SdkError
     let link_id = link_id_for(client, &anchor, commitment)?;
     let snapshot = load_snapshot(client, commitment, &link_id)?;
     let saved = stored_confirmation(client, commitment)?;
+    if stored.as_ref().is_some_and(|row| row.verification_state == "verified") && saved.is_none() {
+        return Err(SdkError::InboundRejected("safety confirmation missing".into()));
+    }
     let state = derive_available(stored.as_ref(), saved.as_ref(), &snapshot);
     Ok(Decision::Ready { state, snapshot: Box::new(snapshot) })
 }
@@ -745,6 +881,7 @@ fn commit_compared(
     if contact_peer(&link, &own).is_none() {
         return Err(required(ContactReason::SafetyMaterialMismatch));
     }
+    persist_held_for_commit(client, &expected.contact_identity_commitment)?;
     let mut snapshot = load_snapshot(client, &expected.contact_identity_commitment, &link.link_id)?;
     if !material_eq(expected, &snapshot.expected) {
         return Err(required(ContactReason::SafetyMaterialMismatch));
@@ -812,9 +949,6 @@ fn commit_compared(
     persist_grant(client, &snapshot, &confirmation, &exact, device, verified_at)?;
     let pending = client.stage_exact_own_contact_inner(&exact)?;
     interrupt(5)?;
-    if FAIL_COMMIT.with(std::cell::Cell::get) {
-        return Err(SdkError::LocalBus("contact safety commit failed".into()));
-    }
     Ok(g::ContactSafetyVerifyResult {
         safety_confirmation: Some(confirmation),
         verification_state: "verified".into(),
@@ -846,7 +980,10 @@ impl RamfluxClient {
         let _ = load_snapshot(self, &expected.contact_identity_commitment, &expected.link_id)?;
         #[cfg(test)]
         before_transaction(self)?;
-        self.account_db()?.write_transaction(|| commit_compared(self, expected))
+        let committed = self.account_db()?.write_transaction(|| commit_compared(self, expected))?;
+        release_compared_manifests(self, expected)?;
+        self.finish_pair_retirement()?;
+        Ok(committed)
     }
 }
 

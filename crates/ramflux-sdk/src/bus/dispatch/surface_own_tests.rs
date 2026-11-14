@@ -759,6 +759,254 @@ fn advance_sender_roster(
     Ok(manifest)
 }
 
+fn origin_bytes(client: &RamfluxClient, peer_root: &str) -> Result<Vec<u8>, SdkError> {
+    let encoded = client
+        .account_db()?
+        .load_actor_state::<String>(&format!("identity/contact_safety_origin_inner/{peer_root}"))?
+        .ok_or_else(|| SdkError::LocalBus("origin absent".into()))?;
+    ramflux_protocol::decode_base64url(&encoded)
+        .map_err(|_| SdkError::LocalBus("origin bytes".into()))
+}
+
+fn confirmation_text(client: &RamfluxClient, peer_root: &str) -> Result<String, SdkError> {
+    client
+        .account_db()?
+        .load_actor_state::<String>(&format!("identity/contact_safety_confirmation/{peer_root}"))?
+        .ok_or_else(|| SdkError::LocalBus("confirmation absent".into()))
+}
+
+fn advance_peer_directory(
+    source: &RamfluxClient,
+    sibling: &RamfluxClient,
+    peer: &LocalBusAccountState,
+    peer_root: &str,
+) -> TestResult {
+    let mut remote = source
+        .account_db()?
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{peer_root}"
+        ))?
+        .ok_or("peer manifest absent")?;
+    let epoch = remote
+        .signed_device_set
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .device_set_epoch
+        .saturating_add(1);
+    crate::client::identity_authority::test_support::sign_manifest(
+        peer.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut remote,
+        epoch,
+    )?;
+    source.persist_root_verified_directory(&remote)?;
+    sibling.persist_root_verified_directory(&remote)?;
+    publish_served_manifest(&remote)?;
+    Ok(())
+}
+
+async fn deliver_staged_copy(
+    source: &mut LocalBusAccountState,
+    sibling: &mut LocalBusAccountState,
+    receiver: &GatewaySessionConfig,
+    sent: &Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
+    sequence: u64,
+) -> TestResult {
+    assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
+    let packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(receiver, &entry(packet, sequence)).await?);
+    Ok(())
+}
+
+fn origin_hlc(
+    confirmation: Option<&ramflux_protocol::message::ContactSafetyConfirmation>,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    confirmation
+        .and_then(|confirmation| confirmation.origin.as_ref())
+        .map(|origin| origin.hlc)
+        .ok_or("confirmation order")
+        .map_err(Into::into)
+}
+
+async fn stale_high_order_yields_to_current_lower(
+    source: &mut LocalBusAccountState,
+    sibling: &mut LocalBusAccountState,
+    peer: &LocalBusAccountState,
+    sent: &Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
+    receiver: &GatewaySessionConfig,
+    peer_root: &str,
+) -> TestResult {
+    let key =
+        format!("message-identity/hlc/{}", source.client.owned_device_identity()?.storage_key());
+    source.client.account_db()?.persist_actor_state(&key, &(60_000_000_000_000u64 << 16))?;
+    let high =
+        crate::client::contact_verification_cas::verify_linked_contact(&source.client, peer_root)?;
+    let high_hlc = origin_hlc(high.safety_confirmation.as_ref())?;
+    let high_inner = origin_bytes(&source.client, peer_root)?;
+    // Install while this head is current, so the stored evidence really is the high order.
+    deliver_staged_copy(source, sibling, receiver, sent, 20).await?;
+    let stored_high = confirmation_text(&sibling.client, peer_root)?;
+    assert_eq!(sibling.client.contact_safety_number(peer_root)?.verification_state, "verified");
+    source.client.account_db()?.persist_actor_state(&key, &0u64)?;
+    advance_peer_directory(&source.client, &sibling.client, peer, peer_root)?;
+    assert_eq!(
+        sibling.client.contact_safety_number(peer_root)?.verification_state,
+        "verification_stale",
+        "the stored high-order confirmation is not the current head"
+    );
+    let low =
+        crate::client::contact_verification_cas::verify_linked_contact(&source.client, peer_root)?;
+    assert!(
+        high_hlc > origin_hlc(low.safety_confirmation.as_ref())?,
+        "the old head keeps the higher clock"
+    );
+    deliver_staged_copy(source, sibling, receiver, sent, 21).await?;
+    let current = confirmation_text(&sibling.client, peer_root)?;
+    assert_ne!(current, stored_high, "the current lower-order confirmation installs");
+    assert_eq!(sibling.client.contact_safety_number(peer_root)?.verification_state, "verified");
+    publish_served_manifest(&advance_sender_roster(&source.client)?)?;
+    assert!(source.client.stage_exact_own_contact_inner(&high_inner)?);
+    assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
+    let stale = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(receiver, &entry(stale, 22)).await?);
+    assert_eq!(
+        confirmation_text(&sibling.client, peer_root)?,
+        current,
+        "the stale high-order confirmation does not replace the current one"
+    );
+    Ok(())
+}
+
+fn stage_receiver_copy(
+    sibling: &LocalBusAccountState,
+    source: &RamfluxClient,
+    incoming: &GatewayInboxEntry,
+) -> Result<crate::client::own_device_copy::receipts::OwnCopyAckBinding, Box<dyn std::error::Error>>
+{
+    let db = sibling.client.account_db()?;
+    let target = incoming.envelope.target_delivery_id.clone();
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(&target, "cas")?;
+    let bytes = serde_json::to_vec(&json!({
+        "inbox_seq": incoming.inbox_seq,
+        "target_delivery_id": target,
+        "envelope": incoming.envelope,
+    }))?;
+    let expected = ramflux_storage::ReceiveExpectation {
+        target: &target,
+        incarnation: "cas",
+        cursor: 0,
+        generation: 1,
+        erasure_generation: db.privacy_erasure_generation()?,
+    };
+    let gate = crate::client::own_device_copy::w1::OwnCopyW1 { expected, generation: 1 };
+    assert_eq!(
+        gate.stage(
+            db,
+            ramflux_storage::ReceiveStage {
+                target: &target,
+                incarnation: "cas",
+                sequence: incoming.inbox_seq,
+                entry_json: &bytes,
+                admission_key: "authenticated-own-copy",
+                retain_until: now_unix_timestamp().saturating_add(300),
+                first_seen: 1,
+            },
+        )?,
+        ramflux_storage::ReceiveStageResult::Staged
+    );
+    let root = source.own_account_anchor()?;
+    let manifest = source
+        .account_db()?
+        .load_actor_state::<crate::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{root}"
+        ))?
+        .ok_or("source manifest")?;
+    assert!(sibling.client.apply_own_copy_w1(
+        incoming,
+        &manifest,
+        ramflux_storage::ReceiveExpectation {
+            target: &target,
+            incarnation: "cas",
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        incoming.inbox_seq,
+        "cas-sibling-ack",
+    )?);
+    let binding = sibling.client.own_copy_ack_binding(incoming)?.ok_or("receiver binding")?;
+    assert_eq!(
+        crate::client::own_device_copy::receipts::own_copy_acknowledged(db, &binding)?,
+        (Some(false), Some(false)),
+        "the sibling copy is committed before settlement"
+    );
+    Ok(binding)
+}
+
+fn settle_receiver_ack(
+    sibling: &LocalBusAccountState,
+    source: &RamfluxClient,
+    incoming: &GatewayInboxEntry,
+) -> TestResult {
+    let binding = stage_receiver_copy(sibling, source, incoming)?;
+    let db = sibling.client.account_db()?;
+    let target = incoming.envelope.target_delivery_id.clone();
+    let erasure = db.privacy_erasure_generation()?;
+    assert_eq!(
+        db.receive_transaction(
+            ramflux_storage::ReceiveExpectation {
+                target: &target,
+                incarnation: "cas",
+                cursor: 0,
+                generation: 1,
+                erasure_generation: erasure,
+            },
+            1,
+            |tx| {
+                tx.cover(ramflux_storage::ReceiveCover {
+                    sequence: incoming.inbox_seq,
+                    kind: ramflux_storage::ReceiveCoverKind::Terminal,
+                    gaps: &[],
+                    retain_until: 0,
+                })
+            },
+        )?,
+        ramflux_storage::ReceiveCoverResult::Covered
+    );
+    let wa = crate::bus::push_receiver::ack_batch::SourceWa {
+        expected: ramflux_storage::ReceiveExpectation {
+            target: &target,
+            incarnation: "cas",
+            cursor: incoming.inbox_seq,
+            generation: 1,
+            erasure_generation: erasure,
+        },
+        generation: 1,
+    };
+    let settled = [ramflux_storage::ReceiveAckResult {
+        sequence: incoming.inbox_seq,
+        outcome: ramflux_storage::ReceiveAckOutcome::AlreadySettled,
+    }];
+    assert_eq!(
+        wa.apply(
+            db,
+            ramflux_storage::ReceiveAckApply {
+                incarnation: "cas",
+                sequences: &[incoming.inbox_seq],
+                results: &settled,
+                now: now_unix_timestamp(),
+            },
+        )?,
+        ramflux_storage::ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
+    );
+    assert_eq!(
+        crate::client::own_device_copy::receipts::own_copy_acknowledged(db, &binding)?,
+        (Some(true), Some(true)),
+        "the receiving device settles the copy"
+    );
+    Ok(())
+}
+
 async fn order_acknowledged_sibling_confirmation(
     source: &mut LocalBusAccountState,
     sibling: &mut LocalBusAccountState,
@@ -767,22 +1015,14 @@ async fn order_acknowledged_sibling_confirmation(
     receiver: &GatewaySessionConfig,
     peer_root: &str,
 ) -> TestResult {
+    stale_high_order_yields_to_current_lower(source, sibling, peer, sent, receiver, peer_root)
+        .await?;
     let confirmation_key = format!("identity/contact_safety_confirmation/{peer_root}");
     let kept = sibling
         .client
         .account_db()?
         .load_actor_state::<String>(&confirmation_key)?
         .ok_or("confirmation")?;
-    let status_keys = source.client.account_db()?.actor_state_key_page("own-device/status/", 8)?;
-    let status_key = status_keys.first().ok_or("sender acknowledgement")?;
-    let status: serde_json::Value =
-        source.client.account_db()?.load_actor_state(status_key)?.ok_or("status")?;
-    assert_eq!(status["state"], "submitted");
-    assert_eq!(status["acknowledged"], true, "the sibling copy is acknowledged");
-    assert!(
-        source.client.account_db()?.actor_state_key_page("own-device/send/", 8)?.is_empty(),
-        "an acknowledged copy leaves the sender queue"
-    );
     let stale_inner = ramflux_protocol::decode_base64url(
         &source
             .client
@@ -875,7 +1115,9 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
         .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
+    let incoming = entry(packet, 1);
+    assert!(sibling.client.receive_own_device_message(&receiver, &incoming).await?);
+    settle_receiver_ack(&sibling, &source.client, &incoming)?;
     assert_eq!(
         sibling.client.contact_safety_number(&peer_root)?.verification_state,
         "verified",

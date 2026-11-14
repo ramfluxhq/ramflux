@@ -636,12 +636,10 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 .request_frame(request("read", "alice", "conversation.list", serde_json::json!({})))
                 .await?;
             let mut found = false;
-            let mut migration = false;
             let mut friend = false;
             let mut sequence = 0;
-            // Startup replays the migration marker as well as the friend and domain changes.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-            for _ in 0..3 {
+            for _ in 0..2 {
                 let event = tokio::time::timeout_at(
                     deadline.min(tokio::time::Instant::now() + Duration::from_secs(2)),
                     client.next_event(),
@@ -654,13 +652,6 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 assert!(next > sequence);
                 sequence = next;
                 match event.body["table_name"].as_str() {
-                    Some("runtime_actor_state") => {
-                        assert_eq!(
-                            event.body["keys"]["state_kind"],
-                            crate::client::contact_verification::MIGRATION_MARKER
-                        );
-                        migration = true;
-                    }
                     Some("friend_link_projection") => {
                         assert_eq!(event.body["keys"]["link_id"], "friend");
                         friend = true;
@@ -669,7 +660,7 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                     _ => return Err(failure("unexpected startup outbox change")),
                 }
             }
-            assert!(found && migration && friend);
+            assert!(found && friend);
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;

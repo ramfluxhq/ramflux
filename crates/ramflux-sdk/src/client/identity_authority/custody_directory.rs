@@ -41,18 +41,62 @@ impl RamfluxClient {
         self.record_custody_observation(manifest, expected, now, true)
     }
 
-    /// Keep an authenticated candidate head for a later compare-and-record.
-    ///
-    /// The principal pin is unchanged. Only the guarded CAS commit may move it.
+    /// Authenticate a fetched custody manifest without storing it.
     /// # Errors
-    /// Rejects malformed evidence, wrong roots, rollback, equivocation and storage errors.
-    pub(crate) fn retain_candidate_custody(
+    /// Rejects a root mismatch, an oversized manifest, or a publication that does not verify.
+    pub(crate) fn authenticate_custody_manifest(
+        manifest: &CustodyManifest,
+        expected: &str,
+    ) -> Result<VerifiedRecord, SdkError> {
+        verify_native_authority(manifest, expected, crate::custody::network_now()?)
+    }
+
+    /// Record candidate pins inside the caller's transaction. The public authority file and
+    /// the principal pin stay unchanged until that transaction commits.
+    /// # Errors
+    /// Rejects malformed evidence, equivocation, and storage errors.
+    pub(crate) fn stage_candidate_pins(
         &self,
         manifest: &CustodyManifest,
         expected: &str,
-        now: u64,
     ) -> Result<(), SdkError> {
-        self.record_custody_observation(manifest, expected, now, false)
+        let now = crate::custody::network_now()?;
+        let verified = verify_native_authority(manifest, expected, now)?;
+        let outcome = self
+            .account_db()?
+            .join_write(|| self.write_observed_pins(manifest, expected, &verified))?;
+        if matches!(outcome, PinOutcome::Fenced(_)) {
+            return Err(invalid("custody authority equivocation fenced"));
+        }
+        Ok(())
+    }
+
+    fn write_observed_pins(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+        verified: &VerifiedRecord,
+    ) -> Result<PinOutcome, SdkError> {
+        let db = self.account_db()?;
+        let state_key = key(expected)?;
+        let mut state = db.load_actor_state::<RetainedAuthority>(&state_key)?.unwrap_or_default();
+        let previous_devices = state.publication.as_ref().map_or_else(Vec::new, |publication| {
+            publication.record.body.devices.iter().map(|entry| entry.device_id.clone()).collect()
+        });
+        let outcome = state
+            .pins
+            .observe_with_previous(verified, state.publication.as_ref().map(|p| &p.record))?;
+        if outcome == PinOutcome::Advanced
+            || (outcome == PinOutcome::Unchanged && state.publication.is_none())
+        {
+            state.publication = Some(manifest.publication.clone());
+            state.custodian.clone_from(&manifest.custodian_publication);
+        }
+        db.persist_actor_state(&state_key, &state)?;
+        if !matches!(outcome, PinOutcome::Fenced(_)) {
+            self.apply_custody_retirements(verified, &previous_devices)?;
+        }
+        Ok(outcome)
     }
 
     fn record_custody_observation(
@@ -65,37 +109,9 @@ impl RamfluxClient {
         let verified = verify_native_authority(manifest, expected, now)?;
         self.prepare_local_custody_floor(manifest, expected, &verified, now, adopt_directory)?;
         let db = self.account_db()?;
-        let state_key = key(expected)?;
         // Persist a detected fence even though the caller receives a refusal.
-        let outcome = db.write_transaction(|| -> Result<PinOutcome, SdkError> {
-            let mut state =
-                db.load_actor_state::<RetainedAuthority>(&state_key)?.unwrap_or_default();
-            let previous_devices =
-                state.publication.as_ref().map_or_else(Vec::new, |publication| {
-                    publication
-                        .record
-                        .body
-                        .devices
-                        .iter()
-                        .map(|entry| entry.device_id.clone())
-                        .collect()
-                });
-            let outcome = state
-                .pins
-                .observe_with_previous(&verified, state.publication.as_ref().map(|p| &p.record))?;
-            if outcome == PinOutcome::Advanced
-                || (outcome == PinOutcome::Unchanged && state.publication.is_none())
-            {
-                state.publication = Some(manifest.publication.clone());
-                state.custodian.clone_from(&manifest.custodian_publication);
-            }
-            db.persist_actor_state(&state_key, &state)?;
-            if !matches!(outcome, PinOutcome::Fenced(_)) {
-                self.apply_custody_retirements(&verified, &previous_devices)?;
-            }
-
-            Ok(outcome)
-        })?;
+        let outcome =
+            db.write_transaction(|| self.write_observed_pins(manifest, expected, &verified))?;
         self.finish_pair_retirement()?;
         if matches!(outcome, PinOutcome::Fenced(_)) {
             return Err(invalid("custody authority equivocation fenced"));

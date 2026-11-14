@@ -110,9 +110,6 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own = fetch(own_root.clone()).await?;
-        // Keep the compared manifests without moving a provisional contact pin.
-        super::contact_verification_cas::retain_compared_manifest(self, &own)?;
-        super::contact_verification_cas::retain_compared_manifest(self, &peer)?;
         if self.born_v3_account.is_some() {
             let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
                 let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
@@ -127,10 +124,11 @@ impl RamfluxClient {
             };
             let _ = verify(&own)?;
             let _ = verify(&peer)?;
-            // The candidate stays off the principal pin until compare-and-record commits.
-            self.retain_fetched_candidate(&own)?;
-            self.retain_fetched_candidate(&peer)?;
         }
+        // Nothing is stored until compare-and-record commits. The expectation is computed
+        // from these held manifests.
+        self.held_manifests.borrow_mut().insert(own.principal_commitment.clone(), own);
+        self.held_manifests.borrow_mut().insert(peer.principal_commitment.clone(), peer);
         super::contact_verification_cas::compared_safety_json(self, root)
     }
 }

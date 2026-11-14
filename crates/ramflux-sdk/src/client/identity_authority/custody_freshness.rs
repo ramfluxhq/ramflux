@@ -67,25 +67,6 @@ impl RamfluxClient {
         Ok(())
     }
 
-    /// A completed directory fetch may retain the candidate without moving the principal pin.
-    /// # Errors
-    /// Returns the custody observation error when the candidate publication does not authenticate.
-    pub(crate) fn retain_fetched_candidate(
-        &self,
-        manifest: &SdkDeviceManifestResponse,
-    ) -> Result<(), SdkError> {
-        let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-        let now = crate::custody::network_now()?;
-        self.retain_candidate_custody(native, &manifest.principal_commitment, now)?;
-        let hash = ramflux_protocol::custody::object_hash(&native.publication.record)?;
-        self.native_head_freshness.borrow_mut().remember(
-            &manifest.principal_commitment,
-            hash,
-            Instant::now(),
-        );
-        Ok(())
-    }
-
     pub(crate) fn invalidate_changed_custody_head(&self, root: &str, hash: &str) {
         let mut cache = self.native_head_freshness.borrow_mut();
         if cache.heads.get(root).is_some_and(|(old, _)| old != hash) {

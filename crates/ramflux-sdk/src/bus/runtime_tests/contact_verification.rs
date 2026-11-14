@@ -59,20 +59,10 @@ async fn contact_verification_status_is_a_local_read_with_stored_authority_disti
         &format!("identity/safety_verified_set/{peer_root}"),
         &safety.contact_device_set_hash,
     )?;
-    let legacy = pool.request(read()).await?;
-    assert_eq!(legacy["verification_state"], "unverified");
-    assert_eq!(legacy["stored_verification_state"], "verified");
-    db.mark_contact_verified(ContactVerificationUpdate {
-        contact_identity_commitment: &peer_root,
-        safety_number_hash: &safety.safety_number_hash,
-        device_set_hash: "different-device-hash",
-        lineage_head: &safety.contact_lineage_head,
-        verified_at: now_unix_timestamp(),
-        verified_by_device_id: "primary",
-    })?;
-    let expired_status = pool.request(read()).await?;
-    assert_eq!(expired_status["verification_state"], "unverified");
-    assert_eq!(expired_status["safety_number"], unverified["safety_number"]);
+    assert!(
+        pool.request(read()).await.is_err(),
+        "a verified row without a confirmation is refused"
+    );
     crate::client::contact_verification_cas::verify_linked_contact(&account.client, &peer_root)?;
     let verified = pool.request(read()).await?;
     assert_eq!(verified["verification_state"], "verified");

@@ -21,14 +21,12 @@ struct Intent {
     group: Option<String>,
     body: String,
     created_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_at: Option<i64>,
+    expires_at: i64,
     owner_record: Option<(String, String)>,
 }
 impl Intent {
     fn expiry(&self) -> i64 {
-        // Pre-parameter queued work retains its original ten-minute lifetime.
-        self.expires_at.unwrap_or(self.created_at.saturating_add(600))
+        self.expires_at
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -108,7 +106,7 @@ fn stage_inner(
             group: input.group.map(str::to_owned),
             body: ramflux_protocol::encode_base64url(input.body),
             created_at: input.created_at,
-            expires_at: Some(input.created_at.saturating_add(i64::from(client.content_ttl()?))),
+            expires_at: input.created_at.saturating_add(i64::from(client.content_ttl()?)),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
         },
         packet: None,
@@ -297,19 +295,18 @@ pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_b
 pub(crate) use background::drive_once;
 
 #[cfg(test)]
-mod retention_compatibility_tests {
+mod retention_tests {
     use super::*;
     #[test]
-    fn legacy_own_copy_intent_keeps_expiry_and_fingerprint() -> Result<(), SdkError> {
-        let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
+    fn own_copy_intent_requires_expiry() -> Result<(), SdkError> {
+        let missing = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
             "group":null,"body":"","created_at":100,"owner_record":null});
-        let intent: Intent = serde_json::from_value(old.clone())?;
-        assert_eq!(intent.expiry(), 700);
-        assert_eq!(
-            serde_json::to_value(intent)?,
-            old,
-            "adding a null changes the in-flight CAS fingerprint"
-        );
+        assert!(serde_json::from_value::<Intent>(missing).is_err());
+        let stored = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
+            "group":null,"body":"","created_at":100,"expires_at":900,"owner_record":null});
+        let intent: Intent = serde_json::from_value(stored.clone())?;
+        assert_eq!(intent.expiry(), 900);
+        assert_eq!(serde_json::to_value(intent)?, stored);
         Ok(())
     }
 }

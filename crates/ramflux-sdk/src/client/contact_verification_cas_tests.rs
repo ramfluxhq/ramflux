@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::{
-    test_before_cas_transaction, test_clear_cas_hooks, test_fail_cas_commit, test_interrupt_cas_at,
-};
+use super::{test_before_cas_transaction, test_clear_cas_hooks, test_interrupt_cas_at};
 use crate::client::native_test_support::{Fixture, TestResult};
 use crate::{ContactReason, RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
@@ -123,7 +121,6 @@ async fn verify_cas_records_only_compared_material() -> TestResult {
     assert_eq!(local.client.contact_safety_number(&peer_root)?.verification_state, "verified");
     assert_eq!(local.client.contact_entry(&peer.manifest.principal_id)?["verified"], true);
     provisional_replacement().await?;
-    signed_set_match()?;
     Ok(())
 }
 
@@ -149,10 +146,16 @@ async fn provisional_replacement() -> TestResult {
     let directory =
         ManifestDirectory::serve(&local.root.0, [local.manifest.clone(), peer.manifest.clone()])
             .await?;
+    let before = local.client.account_db()?.test_table_fingerprints(&[])?;
     let preview = local
         .client
         .preview_contact_safety(&directory.config(&local.config), &principal, &peer_root)
         .await?;
+    assert_eq!(
+        local.client.account_db()?.test_table_fingerprints(&[])?,
+        before,
+        "preview writes nothing before confirmation"
+    );
     let mut expected: g::ExpectedContactSafety =
         serde_json::from_value(preview.get("expected").cloned().ok_or("preview expected")?)?;
     assert_eq!(expected.replace_provisional_root.as_deref(), Some(old.as_str()));
@@ -196,69 +199,10 @@ async fn provisional_replacement() -> TestResult {
     Ok(())
 }
 
-struct SignedActor {
-    client: RamfluxClient,
-    _path: ramflux_test_support::TestPath,
-}
-
-fn signed_set_match() -> TestResult {
-    let owner = signed_actor("alice", "alice-device", 11, 12)?;
-    let peer = signed_actor("bob", "bob-device", 21, 22)?;
-    let own_manifest = crate::client::identity_authority::test_support::manifest(&owner.client)?;
-    let peer_manifest = crate::client::identity_authority::test_support::manifest(&peer.client)?;
-    owner.client.observe_device_manifest_json(
-        serde_json::to_value(&own_manifest)?,
-        &own_manifest.principal_commitment,
-    )?;
-    owner.client.observe_device_manifest_json(
-        serde_json::to_value(&peer_manifest)?,
-        &peer_manifest.principal_commitment,
-    )?;
-    owner.client.persist_root_verified_directory(&own_manifest)?;
-    owner.client.persist_root_verified_directory(&peer_manifest)?;
-    owner.client.establish_friend_link(
-        "signed-link",
-        &own_manifest.principal_commitment,
-        &peer_manifest.principal_commitment,
-    )?;
-    let result = super::verify_linked_contact(&owner.client, &peer_manifest.principal_commitment)?;
-    assert_eq!(result.verification_state, "verified");
-    assert_eq!(
-        result
-            .safety_confirmation
-            .as_ref()
-            .and_then(|c| c.expected.as_ref())
-            .map(|e| e.algorithm_version),
-        Some(Some(1))
-    );
-    Ok(())
-}
-
-fn signed_actor(
-    principal: &str,
-    id: &str,
-    root_seed: u8,
-    device_seed: u8,
-) -> Result<SignedActor, SdkError> {
-    let path = ramflux_test_support::TestPath::new().expect("test: directory").child(format!(
-        "rf-cas-signed-{}-{}",
-        std::process::id(),
-        root_seed
-    ));
-    let mut client = RamfluxClient::new();
-    client.create_identity_root(principal, [root_seed; 32]);
-    client.create_device_branch(principal, id, 1, [device_seed; 32]);
-    client.open_account_index(&path)?;
-    client.create_account(id, id)?;
-    client.unlock_account(id, b"test-secret")?;
-    client.initialize_and_publish_prekey_bundle(principal, id, id, [device_seed; 32], None)?;
-    Ok(SignedActor { client, _path: path })
-}
-
 #[tokio::test]
 async fn verify_cas_orders_authority_updates_and_rolls_back() -> TestResult {
     let _hooks = ClearHooks;
-    let (local, peer, peer_root) = linked().await?;
+    let (mut local, peer, peer_root) = linked().await?;
     let expected = compared_expected(&local.client, &peer_root)?;
     let own_vault = std::sync::Arc::clone(&local.vault);
     let own_manifest = local.manifest.clone();
@@ -300,14 +244,18 @@ async fn verify_cas_orders_authority_updates_and_rolls_back() -> TestResult {
         absent(&local.client, &peer_root)?;
         test_interrupt_cas_at(0);
     }
-    test_fail_cas_commit(true);
-    let failed = local
-        .client
-        .compare_and_record_contact_safety_verified(&expected)
-        .expect_err("test: commit");
-    assert!(matches!(failed, SdkError::LocalBus(ref message) if message.contains("commit failed")));
+    let db = local.client.account_db()?;
+    let before = db.test_table_fingerprints(&[])?;
+    let (failed, commits) = db.reject_next_sqlite_commit(|| {
+        local.client.compare_and_record_contact_safety_verified(&expected)
+    })?;
+    assert_eq!(commits, 1, "the rejected write is the compare-and-record commit: {failed:?}");
+    assert!(matches!(failed, Err(SdkError::Storage(_))), "{failed:?}");
+    assert_eq!(db.test_table_fingerprints(&[])?, before, "a rejected commit leaves no row");
     absent(&local.client, &peer_root)?;
-    test_fail_cas_commit(false);
+    local.client.active_account_db.take();
+    local.client.unlock_account("cas-local", b"native fixture data passphrase")?;
+    absent(&local.client, &peer_root)?;
     let restored = super::verify_linked_contact(&local.client, &peer_root)?;
     assert_eq!(restored.verification_state, "verified");
     assert_eq!(restored.sibling_delivery_pending, Some(false));
