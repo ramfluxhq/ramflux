@@ -4,6 +4,7 @@
 //! Shared boot for CLI e2e: mesh certs, four node processes, rf daemons, PTY create.
 #![allow(dead_code)]
 
+mod ceremony_screen;
 #[cfg(windows)]
 mod conpty;
 #[cfg(unix)]
@@ -1424,8 +1425,15 @@ impl PtySession {
             self.wait_until("Press Enter after saving the words to hide them:", cursor, deadline)?;
         let phrase = recovery_phrase(&lock_buf(&self.output))?;
         self.write_line("")?;
+        #[cfg(windows)]
+        let mut checked_hide = false;
         for _ in 0..3 {
             cursor = self.wait_until("Recovery word ", cursor, deadline)?;
+            #[cfg(windows)]
+            if !checked_hide {
+                ceremony_screen::assert_words_hidden(&lock_buf(&self.output), &phrase)?;
+                checked_hide = true;
+            }
             let prompt =
                 lock_buf(&self.output)[cursor.saturating_sub("Recovery word ".len())..].to_owned();
             let position = recovery_position(&prompt)?;
@@ -1444,6 +1452,8 @@ impl PtySession {
         drop(self.stdin.take());
         let status = self.wait_exit(deadline)?;
         let buffer = lock_buf(&self.output).clone();
+        #[cfg(windows)]
+        ceremony_screen::assert_words_hidden(&buffer, &phrase)?;
         if !status.success() {
             return Err(format!("account create exited {status}: {buffer}").into());
         }

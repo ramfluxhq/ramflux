@@ -151,8 +151,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo build --locked -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm f1_two_accounts_contact_dm_receive_ack -- --ignored --exact --test-threads=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Join-Path $env:RUNNER_TEMP 'dm-acceptance.txt'
+          cargo test --locked -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm f1_two_accounts_contact_dm_receive_ack -- --ignored --exact --test-threads=1 *> $log
+          $code = $LASTEXITCODE
+          Get-Content $log | Write-Host
+          if ($code -ne 0) { exit $code }
+          $joined = Get-Content $log -Raw
+          if ($joined -notmatch 'test result: ok\. 1 passed;') {
+            Write-Error 'DM acceptance did not report exactly one passing test'
+            exit 1
+          }
 
       - name: Package rf.exe
         shell: pwsh
