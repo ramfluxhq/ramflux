@@ -412,7 +412,7 @@ impl Connection {
         })
     }
 
-    fn rows(&self, sql: &str, params: impl Parameters) -> Result<Vec<Row>> {
+    pub(crate) fn rows(&self, sql: &str, params: impl Parameters) -> Result<Vec<Row>> {
         let sql = sql.to_owned();
         let values = params.values()?;
         #[cfg(feature = "itest-work-budget")]

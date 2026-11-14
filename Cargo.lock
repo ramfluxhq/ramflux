@@ -3686,6 +3686,7 @@ dependencies = [
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-sdk",
+ "ramflux-storage",
  "ramflux-sync",
  "ramflux-test-support",
  "rustix",
