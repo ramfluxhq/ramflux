@@ -80,8 +80,7 @@ impl Snapshots {
                 Reason::HomeRollback
             }));
         }
-        let state = super::store::load_mirror(&tx, owner.recipient_root)?;
-        super::store::provenance::adopt_current(store, &tx, owner.recipient_root, now)?;
+        let state = reconcile(store, &tx, &mut leases, SnapshotRead { now, ..request })?;
         if state.revision < known {
             return Err(refuse(Reason::HomeRollback));
         }
@@ -92,10 +91,6 @@ impl Snapshots {
         };
         // The clock fence commits before a lease becomes visible; no state record is rewritten.
         tx.commit()?;
-        leases.retain(|_, v| {
-            v.retain(|l| l.manifest.body.expires_at > now);
-            !v.is_empty()
-        });
         if id.is_none() {
             if page != 0 {
                 return Err(refuse(Reason::ForeignInvalidFrame));
@@ -291,6 +286,38 @@ impl Lease {
         );
         Ok(decode(&bytes, MAX_IMAGE_BYTES)?)
     }
+}
+
+/// Runs only under the process-wide snapshot mutex, before publishing a new read index.
+fn reconcile(
+    store: &RouterRedbStore,
+    tx: &redb::WriteTransaction,
+    leases: &mut BTreeMap<String, Vec<Lease>>,
+    request: SnapshotRead<'_>,
+) -> Result<super::AccountReach> {
+    let SnapshotRead { owner, now, id, .. } = request;
+    leases.retain(|_, account| {
+        account.retain(|lease| lease.manifest.body.expires_at > now);
+        !account.is_empty()
+    });
+    let collect = id.is_none() && !leases.contains_key(owner.recipient_root);
+    let state = if collect {
+        // Collection also needs live headers; they are never sent in the state pages.
+        super::store::load(tx, owner.recipient_root)?
+    } else {
+        super::store::load_mirror(tx, owner.recipient_root)?
+    };
+    if collect {
+        super::store::provenance::collect_without_leases(
+            store,
+            tx,
+            owner.recipient_root,
+            &state,
+            now,
+        )?;
+    }
+    super::store::provenance::adopt_current(store, tx, owner.recipient_root, now)?;
+    Ok(state)
 }
 
 mod pages;

@@ -5,6 +5,109 @@
 use super::*;
 use crate::contact_reach::{ReachService, ReachSession};
 use ramflux_protocol::contact_reach::{ProvenanceAuthority, Request, verify_pages};
+
+fn retained(
+    store: &RouterRedbStore,
+    root: &str,
+    reference: &ramflux_protocol::contact_reach::SignerReference,
+    proof: bool,
+) -> TestResult<bool> {
+    use redb::ReadableDatabase;
+    let tx = store.migration_db().begin_read()?;
+    let table = tx.open_table(redb::TableDefinition::<&str, &[u8]>::new(if proof {
+        "contact_reach_provenance_v1"
+    } else {
+        "contact_reach_signer_references_v1"
+    }))?;
+    let selector = if proof {
+        reference.proof_hash.clone()
+    } else {
+        serde_json::to_string(&(reference.object_kind, &reference.object_hash))?
+    };
+    let present = table.get(key(root, &selector)?.as_str())?.is_some();
+    Ok(present)
+}
+
+#[test]
+fn cr_owner_proof_collection_waits_for_snapshot_leases_and_preserves_current_head() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("owner-proof-collection.redb");
+    let (store, mut f) = initialize(&path)?;
+    let node = costs::issuer(&store, &f)?;
+    {
+        let tx = store.begin_write()?;
+        f.home = ramflux_protocol::home_migration::record_hash(&home(&tx, &f.root)?.record)?;
+    }
+    store.reach_owner_commit(owner(&f), &policy(&f, 110, 0, ReachMode::ContactsOnly)?, NOW)?;
+    let service = ReachService::new(node)?;
+    let read = Operation::ReachState { known_revision: 0, snapshot_id: None, page: 0 };
+    let OperationResult::ReachState { manifest, page } =
+        call(&service, &store, &f, read.clone(), NOW)
+    else {
+        return Err("first immutable snapshot".into());
+    };
+    let old = page.signers.first().ok_or("original policy signer")?.clone();
+    let mut body = f.authority.envelope().body.clone();
+    body.device_set_epoch += 1;
+    body.previous_record_hash = Some(custody::object_hash(f.authority.envelope())?);
+    body.issued_at = NOW + 1;
+    let record = f.key.sign_record(body)?;
+    f.authority = ramflux_crypto::custody::verify_record(&record, NOW + 1, None, None)?;
+    let tx = store.begin_write()?;
+    let mut account = account(&tx, &f.root)?;
+    account.pins.observe(&f.authority)?;
+    account.publication.record = record;
+    tx.open_table(CUSTODY)?.insert(f.root.as_str(), encoded(&account)?.as_slice())?;
+    tx.commit()?;
+    store.reach_owner_commit(
+        owner(&f),
+        &policy_at(&f, 111, 1, ReachMode::ContactsOnly, NOW + 2)?,
+        NOW + 2,
+    )?;
+    assert!(
+        matches!(
+            call(&service, &store, &f, read.clone(), NOW + 3),
+            OperationResult::ReachState { .. }
+        ),
+        "a second snapshot must retain the earlier lease's complete proof closure"
+    );
+    assert!(retained(&store, &f.root, &old, false)?, "an active lease pins superseded selectors");
+    assert!(retained(&store, &f.root, &old, true)?, "an active lease pins superseded proof bytes");
+    let proof_read = Operation::ReachProvenance {
+        snapshot_id: manifest.body.snapshot_id.clone(),
+        proof_hash: old.proof_hash.clone(),
+    };
+    assert!(
+        matches!(call(&service, &store, &f, proof_read.clone(), NOW + 4), OperationResult::ReachProvenance { manifest: returned, .. } if returned == manifest),
+        "a native head advance must not substitute the original immutable proof read"
+    );
+    let OperationResult::ReachState { page, .. } = call(&service, &store, &f, read, NOW + 64)
+    else {
+        return Err("fresh snapshot after both leases expired".into());
+    };
+    let current = page.signers.first().ok_or("current policy signer")?;
+    assert!(!retained(&store, &f.root, &old, false)?, "expired leases release obsolete selectors");
+    assert!(
+        !retained(&store, &f.root, &old, true)?,
+        "unreferenced old native tuples can now be collected"
+    );
+    assert!(retained(&store, &f.root, current, true)?, "the current admitted tuple remains pinned");
+    assert!(
+        matches!(
+            call(&service, &store, &f, proof_read, NOW + 64),
+            OperationResult::Error { reason: Reason::ForeignSnapshotExpired, .. }
+        ),
+        "expired snapshot selectors cannot become a general historical lookup"
+    );
+    drop(store);
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    assert!(!retained(&store, &f.root, &old, true)?, "collection survives reopening");
+    assert!(
+        retained(&store, &f.root, current, true)?,
+        "reopening preserves the live original proof"
+    );
+    Ok(())
+}
 fn request(operation: Operation) -> Request {
     Request {
         request_id: digest(98),

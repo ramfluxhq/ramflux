@@ -3,7 +3,9 @@
 
 //! Atomic original signer retention; no TTL and no substitution from a later current head.
 mod adoption;
+mod collection;
 pub(in crate::contact_reach) use adoption::{adopt_current, require_ready};
+pub(in crate::contact_reach) use collection::collect_without_leases;
 
 use super::{AccountReach, Reason, Result, account, encoded, key, refuse, row, storage};
 use ramflux_protocol::{
@@ -202,7 +204,9 @@ pub(in crate::contact_reach) fn index(
                 .transpose()?
                 .ok_or_else(|| refuse(Reason::CustodyRefused))?;
             reference.validate().map_err(|_| refuse(Reason::CustodyRefused))?;
-            if selected.authority_head_hash != reference.authority_head_hash
+            if selected.object_kind != reference.object_kind
+                || selected.object_hash != reference.object_hash
+                || selected.authority_head_hash != reference.authority_head_hash
                 || selected.master_certificate_hash != reference.master_certificate_hash
             {
                 return Err(refuse(Reason::CustodyRefused));
