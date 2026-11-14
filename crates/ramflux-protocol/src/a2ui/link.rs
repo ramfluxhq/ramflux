@@ -30,9 +30,7 @@ pub fn validate_url(input: &str) -> Result<String, Reject> {
     let host = host.strip_suffix('.').unwrap_or(host);
     if host.len() > 253
         || !host.contains('.')
-        || host == "localhost"
-        || host.ends_with(".localhost")
-        || host.ends_with(".local")
+        || matches!(host.rsplit('.').next(), Some("localhost" | "local"))
         || host.split('.').any(|label| {
             label.is_empty()
                 || label.len() > 63

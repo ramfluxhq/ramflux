@@ -41,10 +41,11 @@ impl JsonPointer {
     }
     #[must_use]
     pub fn canonical(&self) -> String {
-        self.segments
-            .iter()
-            .map(|s| format!("/{}", s.replace('~', "~0").replace('/', "~1")))
-            .collect()
+        self.segments.iter().fold(String::new(), |mut pointer, segment| {
+            pointer.push('/');
+            pointer.push_str(&segment.replace('~', "~0").replace('/', "~1"));
+            pointer
+        })
     }
     #[must_use]
     pub fn overlaps(&self, other: &Self) -> bool {
@@ -92,7 +93,7 @@ impl JsonPointer {
         for part in parents {
             current = match current {
                 Value::Object(map) => {
-                    map.entry(part).or_insert_with(|| Value::Object(Default::default()))
+                    map.entry(part).or_insert_with(|| Value::Object(serde_json::Map::default()))
                 }
                 Value::Array(array) => array.get_mut(index(part)?).ok_or(Reject::Expression)?,
                 _ => return Err(Reject::Expression),

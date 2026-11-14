@@ -197,6 +197,7 @@ struct Graph<'a> {
     instances: Vec<Instance<'a>>,
     reached: BTreeSet<String>,
 }
+#[derive(Clone, Copy)]
 struct WalkFrame<'a> {
     name: &'a str,
     source: &'a [String],
@@ -320,9 +321,7 @@ impl<'a> Graph<'a> {
         }
         let component = *definitions.get(name).ok_or(Reject::Integrity)?;
         let component_kind = kind(component)?;
-        if component_kind == "Approval" && depth != 0 || component_kind == "Modal" && in_modal {
-            return Err(Reject::Validation("composition".into()));
-        }
+        validate_composition(component_kind, depth, in_modal)?;
         let next_scope =
             if component_kind == "Card" { format!("{name}:{source:?}") } else { scope.to_owned() };
         self.instances.push(Instance {
@@ -502,6 +501,13 @@ fn expanded_value(
     }
 }
 
+fn validate_composition(kind: &str, depth: usize, in_modal: bool) -> Result<(), Reject> {
+    if kind == "Approval" && depth != 0 || kind == "Modal" && in_modal {
+        return Err(Reject::Validation("composition".into()));
+    }
+    Ok(())
+}
+
 fn static_references(
     name: &str,
     definitions: &BTreeMap<&str, &Value>,
@@ -518,9 +524,7 @@ fn static_references(
     }
     let component = definitions.get(name).ok_or(Reject::Integrity)?;
     let component_kind = kind(component)?;
-    if component_kind == "Approval" && depth != 0 || component_kind == "Modal" && in_modal {
-        return Err(Reject::Validation("composition".into()));
-    }
+    validate_composition(component_kind, depth, in_modal)?;
     let mut reached = BTreeSet::from([name.into()]);
     let mut children = Vec::new();
     for property in ["child", "trigger", "content"] {

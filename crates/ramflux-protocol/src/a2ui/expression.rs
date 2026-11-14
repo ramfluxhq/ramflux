@@ -60,25 +60,7 @@ pub(super) fn evaluate(
     let get =
         |key: &str| evaluate(args.get(key).ok_or(Reject::Expression)?, model, prefix, depth + 1);
     match name {
-        "@index" => {
-            if prefix.is_empty() {
-                return Err(Reject::Expression);
-            }
-            let index = prefix
-                .rsplit('/')
-                .next()
-                .ok_or(Reject::Expression)?
-                .parse::<i64>()
-                .map_err(|_| Reject::Expression)?;
-            let offset = args
-                .get("offset")
-                .map(|v| evaluate(v, model, prefix, depth + 1))
-                .transpose()?
-                .map(|v| v.as_i64().ok_or(Reject::Expression))
-                .transpose()?
-                .unwrap_or(0);
-            Ok(serde_json::json!(index.checked_add(offset).ok_or(Reject::Expression)?))
-        }
+        "@index" => evaluate_index(args, model, prefix, depth),
         "formatString" => {
             let value = get("value")?;
             Ok(serde_json::json!(super::format_string::render(
@@ -152,6 +134,30 @@ pub(super) fn evaluate(
         // formatting belongs to the card runtime; it never becomes an action witness.
         _ => Err(Reject::Expression),
     }
+}
+fn evaluate_index(
+    args: &serde_json::Map<String, Value>,
+    model: &Value,
+    prefix: &str,
+    depth: usize,
+) -> Result<Value, Reject> {
+    if prefix.is_empty() {
+        return Err(Reject::Expression);
+    }
+    let index = prefix
+        .rsplit('/')
+        .next()
+        .ok_or(Reject::Expression)?
+        .parse::<i64>()
+        .map_err(|_| Reject::Expression)?;
+    let offset = args
+        .get("offset")
+        .map(|v| evaluate(v, model, prefix, depth + 1))
+        .transpose()?
+        .map(|v| v.as_i64().ok_or(Reject::Expression))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(serde_json::json!(index.checked_add(offset).ok_or(Reject::Expression)?))
 }
 pub(super) fn validate_regex(pattern: &str) -> Result<(), Reject> {
     translated_regex(pattern).map(|_| ())
@@ -300,8 +306,10 @@ fn safety(ast: &Ast) -> Result<Info, Reject> {
             }
             Ok(info)
         }
-        Ast::Empty(_) | Ast::Assertion(_) => Ok(Info { empty: true, ..Info::default() }),
-        Ast::Flags(_) => Ok(Info { empty: true, ..Info::default() }), // only trusted ASCII-boundary flags are introduced by translation
+        // Only trusted ASCII-boundary flags are introduced by translation.
+        Ast::Empty(_) | Ast::Assertion(_) | Ast::Flags(_) => {
+            Ok(Info { empty: true, ..Info::default() })
+        }
         _ => {
             let hir = regex_syntax::Parser::new()
                 .parse(&ast.to_string())

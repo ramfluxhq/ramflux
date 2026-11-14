@@ -152,7 +152,7 @@ impl SurfaceRpc {
     pub const fn frame(&self) -> &RpcFrame {
         &self.0
     }
-    /// A schema-valid call always gets INVALID_FUNCTION_CALL; unknown functions never execute.
+    /// A schema-valid call always gets `INVALID_FUNCTION_CALL`; unknown functions never execute.
     #[must_use]
     pub fn call_is_well_formed(&self) -> bool {
         super::schema::rpc_message(&self.0.a2ui, RpcKind::FunctionCall).is_ok()

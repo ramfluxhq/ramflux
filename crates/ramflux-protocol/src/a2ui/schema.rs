@@ -303,10 +303,10 @@ pub(super) fn rpc_message(value: &Value, kind: super::RpcKind) -> Result<(), Rej
     if body.keys().any(|k| !allowed.contains(&k.as_str())) {
         return Err(Reject::Encoding);
     }
-    if let Some(error) = body.get("error").and_then(Value::as_object) {
-        if error.keys().any(|k| !["code", "message"].contains(&k.as_str())) {
-            return Err(Reject::Encoding);
-        }
+    if let Some(error) = body.get("error").and_then(Value::as_object)
+        && error.keys().any(|k| !["code", "message"].contains(&k.as_str()))
+    {
+        return Err(Reject::Encoding);
     }
     Ok(())
 }
