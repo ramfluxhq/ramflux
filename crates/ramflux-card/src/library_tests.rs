@@ -215,6 +215,12 @@ fn complete_form_enforces_types_required_errors_disabled_and_owned_submit() {
 }
 #[test]
 fn chart_bar_table_and_approval_host_boundary_are_closed() {
+    fn assert_no_approval_action(node: &crate::Node) {
+        assert!(node.action.is_none(), "single-tap approval actions stay on the host surface");
+        for child in &node.children {
+            assert_no_approval_action(child);
+        }
+    }
     let _guard = guard();
     let chart = FIXTURES.get(2).expect("test: chart fixture");
     let mut spec = CardSpec::parse(chart.input).expect("test: chart");
@@ -234,15 +240,19 @@ fn chart_bar_table_and_approval_host_boundary_are_closed() {
         "chart always has complete table alternative"
     );
     let approval = FIXTURES.get(3).expect("test: approval fixture");
-    let invalid = String::from_utf8(approval.input.to_vec())
-        .expect("test: UTF8")
-        .replace("\"request_ref\":", "\"allow\":true,\"request_ref\":");
-    assert!(CardSpec::parse(invalid.as_bytes()).is_err(), "peer cannot add authority controls");
+    let input = String::from_utf8(approval.input.to_vec()).expect("test: UTF8");
+    for control in ["allow", "deny", "confirm", "onTap"] {
+        let invalid =
+            input.replace("\"request_ref\":", &format!("\"{control}\":true,\"request_ref\":"));
+        assert!(CardSpec::parse(invalid.as_bytes()).is_err(), "peer cannot add {control} controls");
+    }
     let (session, batch) =
         CardSession::open(CardSpec::parse(approval.input).expect("test: approval"), library())
             .expect("test: approval renderer");
     assert_eq!(batch.host_slots.len(), 1, "host receives untrusted reference outside tree");
-    let serialized = serde_json::to_string(&session.tree()).expect("test: approval tree");
+    let tree = session.tree().expect("test: approval tree");
+    assert_no_approval_action(&tree.root);
+    let serialized = serde_json::to_string(&tree).expect("test: serialized approval tree");
     assert!(
         !serialized.contains("request-1") && !serialized.contains("task-1"),
         "authority references never become card controls"

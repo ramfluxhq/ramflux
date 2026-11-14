@@ -75,6 +75,8 @@ DEMO_PROJECT=ramflux-demo
 DEMO_DATA_DIR=/srv/ramflux-demo
 DEMO_TOOL=/path/to/ramflux-itest/target/release/demo-node-tool
 # Optional defaults:
+# Public HTTPS reverse-proxy origin, with no path or trailing slash:
+# DEMO_PUBLIC_ORIGIN=https://demo.example.org
 DEMO_NODE_ID=demo.invalid
 DEMO_GATEWAY_PORT=59443
 DEMO_RELAY_PORT=59447
@@ -100,6 +102,17 @@ the operator's group (`RAMFLUX_SECRET_GID`, set to `id -g` by the wrapper). See
 
 `DEMO_HOST` accepts a DNS name or IPv4 address, without a URL scheme or port.
 `DEMO_NODE_ID` is the stable logical identity, independent of the host name.
+Optional `DEMO_PUBLIC_ORIGIN=https://demo.example.org` selects the advertised
+prekey URL and the discovery verification origin. It must be an HTTPS origin
+with a DNS name or IPv4 address and optional port, without credentials, a path
+(including a trailing slash), query, or fragment. Invalid input is refused as
+`DEMO_PUBLIC_ORIGIN_INVALID` before deployment. Without it, the origin is
+`http://DEMO_HOST:DEMO_HTTP_PORT`. Configure HTTPS termination separately and
+forward discovery and prekey routes to the public HTTP listener.
+Gateway and relay continue to advertise `DEMO_HOST:<port>` with their existing
+server names and pinned TLS. Both `DEMO_HOST` and `DEMO_PUBLIC_ORIGIN` are frozen
+in the owner settings; changing either requires a fresh data directory and
+project. Existing state is never migrated to a new host or origin.
 The data directory must initially be empty and dedicated to this project. Once
 initialized, settings and its canonical path are frozen: restore the original env
 file if they change. Use another project and directory for a separate deployment.
@@ -259,19 +272,17 @@ starting with the new owner. Do not relabel it, use a global volume prune, or re
 another project's volume. Replacing the key starts new source buckets; old quota
 rows still expire naturally. Rollback/purge does not automatically sweep this residue.
 
-The desktop adds the printed `http://DEMO_HOST:DEMO_HTTP_PORT` URL, then confirms
-the node using the expected public key over a trusted channel. Discovery and
-prekey HTTP use the same explicit LAN HTTP origin as the s72 fixture; gateway and
-relay use server-authenticated QUIC with the CA from the signed discovery record.
-This wrapper does not provide public HTTPS termination. Use it on a controlled
-demo LAN: HTTP metadata and prekey traffic are visible there. The SDK's prekey
-probe requires HTTPS and therefore reports failure for this plain-HTTP demo
-origin. This is expected and does not mean discovery, gateway or relay health
-failed; terminate public deployments with HTTPS before treating the prekey probe
-as an availability check.
+The client adds the printed origin, then confirms the node using the expected
+public key over a trusted channel. Discovery and prekey HTTP share that origin;
+gateway and relay use server-authenticated QUIC with the CA from the signed
+discovery record. This wrapper does not provide public HTTPS termination.
+When `DEMO_PUBLIC_ORIGIN` is unset, use the plain-HTTP origin only on a controlled
+demo LAN: metadata and prekey traffic are visible there, and the SDK's HTTPS-only
+prekey probe reports failure. For public deployments, configure an HTTPS reverse
+proxy and set `DEMO_PUBLIC_ORIGIN` before initializing a fresh project.
 The public federation HTTP listener exposes only client reads. Administration uses
 a separate unpublished listener on the Compose network (port 18084). The demo HTTP
-port remains the public origin. See [the route inventory](../docs/federation_http.md).
+port remains the upstream listener when a public HTTPS origin is configured. See [the route inventory](../docs/federation_http.md).
 
 `status` checks all seven container health states, then fetches the client record,
 verifies freshness, signature and the saved operator public key, and prints the

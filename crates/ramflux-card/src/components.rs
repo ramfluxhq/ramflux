@@ -183,6 +183,8 @@ pub struct Approval {
     pub explanation: String,
 }
 /// Outside the card tree: untrusted references for a host-owned security surface.
+/// The host resolves authority and confirms Deny/Allow with a single host-drawn tap.
+/// Approval gestures and events never enter the card renderer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSecuritySlot {
     pub component: String,

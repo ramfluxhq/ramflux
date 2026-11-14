@@ -128,8 +128,8 @@ production bundle. `form.tsx` is the entry point for the four admitted component
   the token-based plot has no approved chart artboard.
 - `rf.approval`: untrusted explanation only. `request_ref` and optional
   `task_binding` become host-slot metadata outside the semantic tree. The host
-  independently resolves facts, warnings, Deny/Allow and confirmation/hold;
-  the card has no security controls or approval events.
+  independently resolves facts and warnings and draws Deny/Allow controls,
+  each confirmed by a single tap. The card has no security controls or approval events.
 
 Every component has JSON/tree/mount/edit fixtures, theme/stale-event tests and
 component-specific over-limit/loop/recursion rejection tests. Generated styles are
