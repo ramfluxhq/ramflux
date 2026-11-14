@@ -366,8 +366,7 @@ pub(super) fn initialize_record(
     let local = local_account_id.to_owned();
     let grant = Zeroizing::new(record.grant.to_wire_bytes().map_err(|_| context())?);
     let role = role_number(record.role);
-    connection.call(move |db| {
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    connection.call_immediate(move |tx| {
         tx.execute_batch(SCHEMA)?;
         tx.execute_batch(super::source_cut::SCHEMA)?;
         tx.execute_batch(super::source_receipt::SCHEMA)?;
@@ -397,7 +396,7 @@ pub(super) fn initialize_record(
                 record.base_record_hash
             ],
         )?;
-        tx.commit()
+        Ok(())
     })?;
     Ok(reference)
 }

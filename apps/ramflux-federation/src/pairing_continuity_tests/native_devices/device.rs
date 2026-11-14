@@ -146,6 +146,7 @@ impl Device {
         }
         let native = custody::load_account(self.root.path(), &self.id, wall()?)?;
         let (_, _, reference) = self.vault.local_branch(native.record())?;
+        let node_identity = node.identity();
         let mut actor = PairingActor::new(
             PairingIdentity {
                 account_id: self.id.clone(),
@@ -157,12 +158,12 @@ impl Device {
                 base_epoch: native.record().body.device_set_epoch,
                 is_primary: primary,
             },
-            primary.then(|| prover(self.local.clone(), node.clone()) as Arc<dyn PairingNative>),
+            primary.then(|| prover(self.local.clone(), node) as Arc<dyn PairingNative>),
             Arc::new(HttpRelay::from_config(config)?),
             config.clone(),
         );
         actor.set_participant(self.participant.clone());
-        actor.set_full_node(node.identity());
+        actor.set_full_node(node_identity);
         let service = {
             let slot = self.participant.db.lock().map_err(|_| "test: original full writer")?;
             actor.bind_frontend_writer(slot.as_ref().ok_or("test: original writer absent")?)?

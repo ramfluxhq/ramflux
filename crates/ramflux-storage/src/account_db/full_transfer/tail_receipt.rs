@@ -217,11 +217,10 @@ fn retain_receipt(
     let hash = application.hash.clone();
     let nonce = super::stage::raw32(&application.nonce)?;
     let bytes = Zeroizing::new(bytes.to_vec());
-    stage.connection.call(move |raw| {
-        let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    stage.connection.call_immediate(move |tx| {
         tx.execute("INSERT INTO receiver_receipt(manifest_hash,generation_nonce,bytes) VALUES(?1,?2,?3) ON CONFLICT(manifest_hash) DO NOTHING", params![hash,nonce.as_slice(),bytes.as_slice()])?;
         if tx.execute("UPDATE manifest SET verified=1 WHERE direction=0 AND manifest_hash=?1 AND kind='tail' AND root_verified=1", params![hash])?!=1 { return Err(rusqlite::Error::InvalidQuery); }
-        tx.commit()
+        Ok(())
     })?;
     super::stage::sync_stage(&stage.directory)
 }

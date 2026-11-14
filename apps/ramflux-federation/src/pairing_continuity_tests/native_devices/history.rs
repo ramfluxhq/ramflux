@@ -7,6 +7,7 @@ use super::*;
 use ramflux_sdk::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 #[path = "history/objects.rs"]
 mod objects;
+const MEDIA: &[u8] = b"ordinary authorized media after independent pairing";
 pub(super) const BODY: &[u8] = b"existing DM authored on phone before enrollment";
 
 struct Network {
@@ -68,7 +69,7 @@ impl Network {
             expires_at: wall()? + 3600,
             enabled: true,
             builtin: false,
-            safety_warnings: Default::default(),
+            safety_warnings: std::collections::BTreeSet::default(),
         };
         let objects = objects::Objects::open(&stack, socket)?;
         Ok(Self {
@@ -141,7 +142,6 @@ async fn run() -> TestResult {
     );
     let before_media = network.objects.gets.load(Ordering::SeqCst);
     let sibling = &original_branch.2.device_id;
-    const MEDIA: &[u8] = b"ordinary authorized media after independent pairing";
     Box::pin(source.send_pairing_media(sibling, BODY, MEDIA)).await?;
     Box::pin(target.wait_pairing_history("paired-ordinary-media-message", BODY)).await?;
     Box::pin(target.fetch_pairing_media(MEDIA)).await?;

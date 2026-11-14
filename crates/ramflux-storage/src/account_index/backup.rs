@@ -161,8 +161,7 @@ impl AccountIndex {
         let manifest = install.manifest_json.to_vec();
         let wrapped = install.wrapped_key.clone();
         let expected = expected.map(|(account, key)| (account.clone(), key.clone()));
-        let committed = self.connection.call(move |raw| {
-            let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let committed = self.connection.call_immediate(move |tx| {
             if let Some((prior, key)) = expected {
                 // One worker job and one SQL transaction: no index call can join the
                 // interval between the prior-selection comparison and the pointer switch.
@@ -173,7 +172,7 @@ impl AccountIndex {
             if previous.as_deref().is_some_and(|root| root != principal) { return Err(rusqlite::Error::InvalidQuery); }
             tx.execute("INSERT INTO local_account(local_account_id,principal_commitment,display_label,db_relative_path,object_dir_relative_path,key_wrapping_provider,key_wrapping_ref,wrapped_key,wrapped_key_nonce,account_state,created_at,last_opened_at) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8,'active',?9,NULL) ON CONFLICT(local_account_id) DO UPDATE SET db_relative_path=excluded.db_relative_path,object_dir_relative_path=excluded.object_dir_relative_path,key_wrapping_provider=excluded.key_wrapping_provider,key_wrapping_ref=excluded.key_wrapping_ref,wrapped_key=excluded.wrapped_key,wrapped_key_nonce=excluded.wrapped_key_nonce",params![account,principal,db_path,object_path,wrapped.key_wrapping_provider,wrapped.key_wrapping_ref,wrapped.wrapped_key,wrapped.nonce.as_slice(),super::unix_now()])?;
             tx.execute("INSERT INTO account_backup_generation VALUES(?1,?2) ON CONFLICT(local_account_id) DO UPDATE SET manifest_json=excluded.manifest_json",params![account,manifest])?;
-            tx.commit()?;
+
             Ok(true)
         })?;
         if !committed {

@@ -151,11 +151,10 @@ impl FullTransferStage<'_> {
         let hash = new_base_record_hash.clone();
         let epoch = current.envelope().body.device_set_epoch;
         let bytes = zeroize::Zeroizing::new(packet.encode_secret().map_err(|_| changed())?);
-        self.connection.call(move |db| {
-            let tx = db.transaction()?;
+        self.connection.call_immediate(move |tx| {
             tx.execute("INSERT INTO rebound_head VALUES(?1,?2) ON CONFLICT(hash) DO NOTHING",params![hash,bytes.as_slice()])?;
             tx.execute("INSERT INTO prepublication_binding VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET hash=excluded.hash,epoch=excluded.epoch",params![hash,epoch])?;
-            tx.commit()
+            Ok(())
         })?;
         super::stage::sync_stage(&self.directory)?;
         self.require_io()

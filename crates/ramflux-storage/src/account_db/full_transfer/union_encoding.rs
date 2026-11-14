@@ -40,18 +40,11 @@ pub struct FullUnionEncoding {
 /// Rows MUST be normalized, actual prepared-generation values from typed merge owners.
 /// Caller still proves complete input, co-ownership, merge semantics and prepared bytes.
 pub struct FullUnionEncodingBuilder<'stage, 'db> {
-    stage: &'stage mut FullTransferStage<'db>,
+    stage: &'stage FullTransferStage<'db>,
+    transaction: crate::database::Transaction<'stage>,
     nonce: [u8; 32],
     owners: [String; 2],
-    committed: bool,
     failed: bool,
-}
-impl Drop for FullUnionEncodingBuilder<'_, '_> {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.stage.connection.execute_batch("ROLLBACK");
-        }
-    }
 }
 impl<'db> FullTransferStage<'db> {
     /// Begin a fresh, independently named local union encoding. Does not restore approval.
@@ -73,8 +66,8 @@ impl<'db> FullTransferStage<'db> {
             super::super::mac_subkeys::full::source_key(&record.grant.destination_ref)?,
         ];
         let nonce = ramflux_crypto::random_32()?;
-        self.connection.execute_batch("BEGIN IMMEDIATE")?;
-        Ok(FullUnionEncodingBuilder { stage: self, nonce, owners, committed: false, failed: false })
+        let transaction = self.connection.immediate_transaction()?;
+        Ok(FullUnionEncodingBuilder { stage: self, transaction, nonce, owners, failed: false })
     }
 }
 impl FullUnionEncodingBuilder<'_, '_> {
@@ -135,7 +128,7 @@ impl FullUnionEncodingBuilder<'_, '_> {
     /// sorted by canonical Ref bytes, family and encoded key. This sets no `verified` bit.
     /// # Errors
     /// Refuses invalid stored rows, arithmetic overflow, unlock loss or durable I/O failure.
-    pub fn finish(mut self) -> Result<FullUnionEncoding, StorageError> {
+    pub fn finish(self) -> Result<FullUnionEncoding, StorageError> {
         if self.failed {
             return Err(invalid());
         }
@@ -162,8 +155,7 @@ impl FullUnionEncodingBuilder<'_, '_> {
         })??;
         self.stage.connection.execute("INSERT INTO full_union_encoding(generation_nonce,records,total_bytes,chunks_root) VALUES(?1,?2,?3,?4)",params![self.nonce.as_slice(),records,total,root.as_slice()])?;
         self.stage.require_io()?;
-        self.stage.connection.execute_batch("COMMIT")?;
-        self.committed = true;
+        self.transaction.commit()?;
         super::stage::sync_stage(&self.stage.directory)?;
         self.stage.require_io()?;
         Ok(FullUnionEncoding {

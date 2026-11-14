@@ -76,7 +76,7 @@ impl Objects {
                     pin_epoch: 1,
                     retired_at: None,
                 }],
-                revoked_cert_ids: Default::default(),
+                revoked_cert_ids: std::collections::BTreeSet::default(),
                 hard_stale_at: now + 3600,
             },
             "localhost",
@@ -91,7 +91,7 @@ impl Objects {
                 service_key: certs.join("ramflux-relay.key"),
             })?;
         let endpoint = quinn::Endpoint::new(
-            Default::default(),
+            quinn::EndpointConfig::default(),
             Some(config),
             socket,
             Arc::new(quinn::TokioRuntime),
@@ -100,7 +100,7 @@ impl Objects {
         let service = ramflux_relay::RelayObjectService::new(
             "localhost".into(),
             Arc::new(Mutex::new(trust)),
-            Arc::new(core::RelayRedbStore::open(&root.path().join("objects.redb"))?),
+            Arc::new(core::RelayRedbStore::open(root.path().join("objects.redb"))?),
             Arc::new(Mutex::new(core::RelayCacheState::with_max_bytes(8 * 1024 * 1024))),
         );
         let puts = Arc::new(AtomicUsize::new(0));

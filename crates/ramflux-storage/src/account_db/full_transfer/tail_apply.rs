@@ -108,10 +108,9 @@ impl FullTailEndpoint<'_> {
             Progress { phase: progress.phase, offset: end }
         };
         self.require_live(now)?;
-        self.stage
-            .db
-            .connection
-            .call(move |raw| Ok(commit_batch(raw, &scope, progress, next, &records)))??;
+        self.stage.db.connection.call_immediate_result(move |transaction| {
+            commit_batch(transaction, &scope, progress, next, &records)
+        })??;
         self.stage.db.require_selected_transfer_source()?;
         self.require_live(now)?;
         Ok(next.phase == 2)
@@ -151,13 +150,12 @@ fn read_record(reader: &mut (impl Read + Seek)) -> Result<Record, StorageError> 
     Ok(record)
 }
 fn commit_batch(
-    raw: &mut Connection,
+    tx: &rusqlite::Transaction<'_>,
     scope: &Scope,
     old: Progress,
     next: Progress,
     records: &[Record],
 ) -> Result<(), StorageError> {
-    let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = read_progress(
         &tx,
         &scope.operation,
@@ -198,7 +196,6 @@ fn commit_batch(
     }
     if tx.execute("UPDATE pairing_full_tail_apply SET phase=?1,next_record=?2 WHERE operation_id=?3 AND generation_nonce=?4 AND tail_hash=?5 AND phase=?6 AND next_record=?7 AND tail_status='pending'",
         params![next.phase,next.offset,scope.operation,scope.nonce,scope.hash,old.phase,old.offset])? != 1 { return Err(wrong()); }
-    tx.commit()?;
     Ok(())
 }
 fn absent_dependency(

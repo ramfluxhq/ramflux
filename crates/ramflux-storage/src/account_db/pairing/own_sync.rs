@@ -98,12 +98,11 @@ impl AccountDb {
         adoption: &AdoptionRow,
         terminal: &TerminalRow,
     ) -> Result<(), StorageError> {
-        self.connection.execute_batch("SAVEPOINT pairing_own_sync")?;
+        let transaction = self.connection.immediate_transaction()?;
         if let Ok(()) = self.queue_enrollment_own_sync_inner(adoption, terminal) {
-            self.connection.execute_batch("RELEASE pairing_own_sync")?;
+            transaction.commit()?;
         } else {
-            self.connection
-                .execute_batch("ROLLBACK TO pairing_own_sync; RELEASE pairing_own_sync")?;
+            drop(transaction);
             tracing::warn!(
                 "pairing history synchronization could not be scheduled; retry with device sync export"
             );

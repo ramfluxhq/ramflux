@@ -84,19 +84,13 @@ impl FullTransferStage<'_> {
             record.bytes = Zeroizing::new(vec![0; usize::try_from(size).map_err(|_| wrong())?]);
             reader.read_exact(&mut record.bytes)?;
             let source = manifest.manifest.source_ref.clone();
-            self.db.connection.call(move |raw| {
-                Ok((|| -> Result<(), StorageError> {
-                    let tx =
-                        raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                    apply_fixed_base_in_transaction(
-                        &tx,
-                        &source,
-                        &record.header,
-                        &mut record.bytes.as_slice(),
-                    )?;
-                    tx.commit()?;
-                    Ok(())
-                })())
+            self.db.connection.call_immediate_result(move |transaction| {
+                apply_fixed_base_in_transaction(
+                    transaction,
+                    &source,
+                    &record.header,
+                    &mut record.bytes.as_slice(),
+                )
             })??;
             self.db.require_selected_transfer_source()?;
             let next = reader.stream_position()?;

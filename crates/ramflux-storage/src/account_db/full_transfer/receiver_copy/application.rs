@@ -185,14 +185,13 @@ impl FullReceiverBaseCopy {
         // at files removed on error. Unreferenced retained orphans are reclaimed by
         // the next independently locked scratch pin; the current metadata owner is kept.
         self.scratch.retain();
-        stage.connection.call(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        stage.connection.call_immediate(move |tx| {
             tx.execute("INSERT INTO receiver_generation VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(singleton) DO UPDATE SET generation_nonce=excluded.generation_nonce,stage_digest=excluded.stage_digest,manifest_hash=excluded.manifest_hash,workspace=excluded.workspace,private_key=excluded.private_key,union_root=excluded.union_root,records=excluded.records,encoded_bytes=excluded.encoded_bytes",params![nonce.as_slice(),digest.as_slice(),hash,workspace,key.as_slice(),root.as_slice(),records,bytes])?;
             if let Some(receipt) = receipt
                 && tx.execute("UPDATE receiver_receipt SET generation_nonce=?1 WHERE manifest_hash=?2 AND bytes=?3", params![nonce.as_slice(),hash,receipt.as_slice()])? != 1 {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            tx.commit()
+            Ok(())
         })?;
         super::super::stage::sync_stage(&stage.directory)?;
         self.observation.require_current(stage.db)
@@ -271,13 +270,12 @@ impl FullReceiverBaseCopy {
         }
         let hash = self.hash.clone();
         let nonce = application.nonce;
-        stage.connection.call(move |db| {
-            let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        stage.connection.call_immediate(move |tx| {
             let old:Option<Vec<u8>>=tx.query_row("SELECT bytes FROM receiver_receipt WHERE manifest_hash=?1",params![hash],|r|r.get(0)).optional()?;
             if old.is_some_and(|old|old.as_slice()!=bytes.as_slice()) { return Err(rusqlite::Error::InvalidQuery); }
             tx.execute("INSERT INTO receiver_receipt(manifest_hash,generation_nonce,bytes) VALUES(?1,?2,?3) ON CONFLICT(manifest_hash) DO UPDATE SET generation_nonce=excluded.generation_nonce",params![hash,nonce.as_slice(),bytes.as_slice()])?;
             if tx.execute("UPDATE manifest SET verified=1 WHERE direction=0 AND manifest_hash=?1 AND root_verified=1",params![hash])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
-            tx.commit()
+            Ok(())
         })?;
         super::super::stage::sync_stage(&stage.directory)?;
         self.observation.require_current(stage.db)

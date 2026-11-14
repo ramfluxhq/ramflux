@@ -166,8 +166,7 @@ impl FullTransferStage<'_> {
         };
         let root = body.chunks_root.clone();
         self.require_io()?;
-        self.connection.call(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.connection.call_immediate(move |tx| {
             tx.execute("DELETE FROM receiver_scalar_record WHERE manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
             tx.execute("DELETE FROM receiver_scalar_input WHERE manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
             tx.execute("DELETE FROM chunk WHERE direction=0 AND manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
@@ -176,7 +175,7 @@ impl FullTransferStage<'_> {
                 "INSERT INTO manifest(direction,cut,manifest_hash,kind,bytes,chunks_root,verified) VALUES(0,?1,?2,?3,?4,?5,0)",
                 params![cut,hash,kind,bytes.as_slice(),root],
             )?;
-            tx.commit()
+            Ok(())
         })?;
         Ok(())
     }

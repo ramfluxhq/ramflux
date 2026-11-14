@@ -3,7 +3,7 @@
 
 //! Durable input provenance only: no live writes, semantic-application bit or signed receipt.
 use super::{FamilyRule, FullTransferStage};
-use crate::{StorageError, database::Connection};
+use crate::StorageError;
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::pairing::full_transfer::RecordOp;
 use rusqlite::params;
@@ -18,18 +18,6 @@ CREATE TABLE IF NOT EXISTS receiver_scalar_record(manifest_hash TEXT NOT NULL,so
 pub struct FullScalarInputCounts {
     pub records: u64,
     pub encoded_bytes: u64,
-}
-
-struct PendingInput {
-    connection: Connection,
-    committed: bool,
-}
-impl Drop for PendingInput {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.connection.execute_batch("ROLLBACK");
-        }
-    }
 }
 
 impl FullTransferStage<'_> {
@@ -58,8 +46,7 @@ impl FullTransferStage<'_> {
             .map_err(|_| invalid())?,
         )
         .map_err(|_| invalid())?;
-        self.connection.execute_batch("BEGIN IMMEDIATE")?;
-        let mut pending = PendingInput { connection: self.connection.clone(), committed: false };
+        let transaction = self.connection.immediate_transaction()?;
         self.connection
             .execute("DELETE FROM receiver_scalar_record WHERE manifest_hash=?1", params![hash])?;
         self.connection
@@ -88,8 +75,7 @@ impl FullTransferStage<'_> {
             params![hash,source,counts.records,counts.encoded_bytes],
         )?;
         self.db.require_full_stage_unlock()?;
-        self.connection.execute_batch("COMMIT")?;
-        pending.committed = true;
+        transaction.commit()?;
         super::stage::sync_stage(&self.directory)?;
         self.db.require_full_stage_unlock()?;
         Ok(counts)

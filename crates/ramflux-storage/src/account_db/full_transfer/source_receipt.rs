@@ -170,8 +170,7 @@ impl FullTransferStage<'_> {
         }
         let hash = hash.clone();
         self.db.require_full_stage_unlock()?;
-        self.connection.call(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.connection.call_immediate(move |tx| {
             tx.execute(
                 "INSERT OR IGNORE INTO source_receipt(manifest_hash,bytes) VALUES(?1,?2)",
                 params![hash, bytes.as_slice()],
@@ -180,7 +179,7 @@ impl FullTransferStage<'_> {
                 "UPDATE manifest SET verified=1 WHERE direction=0 AND manifest_hash=?1",
                 params![hash],
             )?;
-            tx.commit()
+            Ok(())
         })?;
         Ok(())
     }

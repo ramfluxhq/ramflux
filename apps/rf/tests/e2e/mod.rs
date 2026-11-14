@@ -1859,6 +1859,10 @@ fn write_service_toml(
     node_id: &str,
 ) -> Result<()> {
     let certs = root.join("certs");
+    let service_seed = ramflux_protocol::encode_base64url(ramflux_crypto::blake3_256(
+        "ramflux.cli.e2e.node.v1",
+        node_id.as_bytes(),
+    ));
     let database = root.join("state").join(service).join(format!("{service}.redb"));
     if let Some(parent) = database.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1873,7 +1877,7 @@ fn write_service_toml(
             r#"node_id = "{node_id}"
 service_id = "{service}"
 redb_path = "{}"
-node_service_signing_seed_b64url = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio"
+node_service_signing_seed_b64url = "{service_seed}"
 
 [mesh]
 listen_addr = "{listen}"

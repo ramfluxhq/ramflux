@@ -105,8 +105,7 @@ impl FullTransferStage<'_> {
             return Err(wrong());
         }
         self.db.require_selected_transfer_source()?;
-        self.db.connection.call(|raw| {
-            let tx = raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.db.connection.call_immediate(|tx| {
             // Neutral input must not erase or lower any existing A restriction/max.
             if tx.execute(
                 "UPDATE account_erasure_generation SET generation=generation WHERE singleton=1",
@@ -115,7 +114,7 @@ impl FullTransferStage<'_> {
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            tx.commit()
+            Ok(())
         })?;
         self.db.require_selected_transfer_source()?;
         self.retain_reverse_application(&proof)?;
@@ -185,11 +184,10 @@ impl FullTransferStage<'_> {
         let selected = self.db.account_index.account(&self.db.local_account_id)?;
         let hash = manifest_hash.clone();
         let digest = proof.digest;
-        self.connection.call(move |raw| {
-            let tx=raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.connection.call_immediate(move |tx| {
             if tx.execute("UPDATE reverse_application SET receipt=?1 WHERE manifest_hash=?2 AND stage_digest=?3 AND db_path=?4 AND object_path=?5 AND (receipt IS NULL OR receipt=?1)",params![bytes.as_slice(),hash,digest.as_slice(),selected.db_relative_path,selected.object_dir_relative_path])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
             if tx.execute("UPDATE manifest SET verified=1,root_verified=1 WHERE direction=1 AND manifest_hash=?1",params![hash])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
-            tx.commit()
+            Ok(())
         })?;
         super::stage::sync_stage(&self.directory)?;
         self.require_io()
@@ -221,12 +219,11 @@ impl FullTransferStage<'_> {
             return Err(wrong());
         }
         let hash = manifest_hash.clone();
-        self.connection.call(move |raw| {
-            let tx=raw.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.connection.call_immediate(move |tx| {
             let old:Option<Vec<u8>>=tx.query_row("SELECT bytes FROM reverse_source_receipt WHERE manifest_hash=?1",params![hash],|r|r.get(0)).optional()?;
             if old.is_some_and(|old| old.as_slice()!=bytes.as_slice()) {return Err(rusqlite::Error::InvalidQuery);}
             tx.execute("INSERT INTO reverse_source_receipt VALUES(?1,?2) ON CONFLICT(manifest_hash) DO NOTHING",params![hash,bytes.as_slice()])?;
-            tx.commit()
+            Ok(())
         })?;
         super::stage::sync_stage(&self.directory)?;
         self.require_io()

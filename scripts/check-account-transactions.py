@@ -16,6 +16,26 @@ from pathlib import Path
 
 BASE = 'crates/ramflux-storage/src/'
 ALLOW = {
+    ('database.rs', 'call_immediate_result'): 'managed atomic worker transaction; borrowed transaction cannot escape',
+    ('account_db/backup/tail.rs', 'commit_full_ack_tail'): 'single call_generation job owns the live writer generation fence and requires autocommit before the J6 transaction',
+    ('account_db/full_transfer/target_observation.rs', 'commit_prepared_generation'): 'single call_generation job owns the old-B generation fence; read transaction is rolled back before retiring that writer',
+    ('account_db/full_transfer/receiver_contributions/delta.rs', 'drop'): 'rollback of the private receiver-copy database only',
+    ('account_db/full_transfer/receiver_contributions/delta.rs', 'advance'): 'atomic private receiver-copy and separate encrypted contribution-ledger updates',
+    ('account_db/full_transfer/receiver_contributions/target.rs', 'rebase_target'): 'separate encrypted contribution ledger; actual B is a read-only input',
+    ('account_db/full_transfer/receiver_contributions.rs', 'capture'): 'new encrypted private contribution-ledger capture; no live account connection',
+    ('account_db/full_transfer/receiver_contributions.rs', 'finish'): 'private contribution-ledger root commit; no live account connection',
+    ('account_db/full_transfer/receiver_copy/generation/incremental.rs', 'rebase_current_target'): 'savepoint on the unselected encrypted private generation; current B is only a pinned snapshot',
+    ('account_db/full_transfer/receiver_copy/generation.rs', 'write'): 'writes the private G1 database before account-index selection',
+    ('account_db/full_transfer/receiver_copy/incremental.rs', 'rebase_current_target'): 'savepoint on the private receiver-copy database; current B is only a pinned snapshot',
+    ('account_db/full_transfer/receiver_materialization.rs', 'run'): 'independent private contribution ledger plus private verifier database; live B is not written',
+    ('account_db/full_transfer/receiver_materialization.rs', 'actual'): 'savepoint in the private attached verification database, not a live account',
+    ('account_db/full_transfer/receiver_projection.rs', 'drop'): 'rollback on the unselected private receiver-copy database',
+    ('account_db/full_transfer/receiver_projection.rs', 'project_fixed'): 'restrictive-first projection into the unselected private receiver-copy database',
+    ('account_db/full_transfer/source_wire.rs', 'drop'): 'self-owned encrypted wire spool rollback; no live account connection',
+    ('account_db/full_transfer/source_wire.rs', 'wire_spool'): 'begin on the self-owned encrypted wire spool; no live account connection',
+    ('account_db/full_transfer/source_wire.rs', 'finish'): 'commit the self-owned encrypted wire spool only after complete byte/root computation',
+    ('account_db/pairing/schema.rs', 'install'): 'exclusive account-open schema initialization before the managed connection worker starts',
+    ('account_db/pairing/schema.rs', 'install_full_adoption_columns'): 'exclusive account-open schema migration before the managed connection worker starts',
     ('database.rs', 'deferred_transaction'): 'managed deferred entrypoint',
     ('database.rs', 'immediate_transaction'): 'managed immediate entrypoint',
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
@@ -228,9 +248,16 @@ def violations(source, path):
     tests = test_ranges(masked)
     functions = []
     for match in FUNCTION.finditer(masked):
-        opening = masked.find('{', match.end())
-        semicolon = masked.find(';', match.end())
-        if opening >= 0 and not (0 <= semicolon < opening):
+        parameters_end = closing_pair(masked, match.end() - 1)
+        opening = masked.find('{', parameters_end)
+        brackets = 0
+        terminated = False
+        for char in masked[parameters_end:opening if opening >= 0 else len(masked)]:
+            brackets += (char == '[') - (char == ']')
+            if char == ';' and brackets == 0:
+                terminated = True
+                break
+        if opening >= 0 and not terminated:
             functions.append((match.start(), closing(masked, opening), match[1]))
     hits = [(match.start(), 'raw transaction/savepoint API') for match in METHOD.finditer(masked)]
     hits.extend(

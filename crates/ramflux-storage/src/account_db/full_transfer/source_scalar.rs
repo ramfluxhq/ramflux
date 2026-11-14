@@ -201,17 +201,6 @@ fn counts(
     })
     .transpose()
 }
-struct Build {
-    db: Connection,
-    committed: bool,
-}
-impl Drop for Build {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.db.execute_batch("ROLLBACK");
-        }
-    }
-}
 fn build(
     source: &mut rusqlite::Connection,
     spool: &Connection,
@@ -224,8 +213,7 @@ fn build(
     if let Some(counts) = counts(spool, snapshot, rule)? {
         return Ok(counts);
     }
-    spool.execute_batch("BEGIN IMMEDIATE")?;
-    let mut guard = Build { db: spool.clone(), committed: false };
+    let transaction = spool.immediate_transaction()?;
     spool.execute(
         "DELETE FROM source_scalar_row WHERE snapshot_id=?1 AND family=?2",
         params![snapshot, rule.id],
@@ -268,8 +256,7 @@ fn build(
     }
     spool.execute("INSERT INTO source_scalar_family(snapshot_id,family,rule_hash,records,encoded_bytes) VALUES(?1,?2,?3,?4,?5)",params![snapshot,rule.id,rule.rule_hash()?.as_slice(),total.records,total.encoded_bytes])?;
     source_guard.require()?;
-    spool.execute_batch("COMMIT")?;
-    guard.committed = true;
+    transaction.commit()?;
     Ok(total)
 }
 fn write_sorted<W: Write>(

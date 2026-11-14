@@ -445,6 +445,38 @@ impl Connection {
         self.call(|db| Ok(db.is_autocommit()))
     }
 
+    /// Execute one complete immediate transaction in a single managed worker job.
+    /// The borrowed SQLite transaction cannot escape or leave an untracked BEGIN.
+    pub(crate) fn call_immediate<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.call_immediate_result(action)?
+    }
+
+    /// Preserve domain errors while rolling back their complete atomic callback.
+    /// A managed outer transaction is deliberately refused; no worker job may
+    /// join this callback's BEGIN-to-COMMIT interval.
+    pub(crate) fn call_immediate_result<T: Send + 'static, E: Send + 'static>(
+        &self,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, E> + Send + 'static,
+    ) -> Result<std::result::Result<T, E>> {
+        self.call(move |db| {
+            if !db.is_autocommit() {
+                return Err(Error::InvalidQuery);
+            }
+            let transaction =
+                db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            match action(&transaction) {
+                Ok(value) => {
+                    transaction.commit()?;
+                    Ok(Ok(value))
+                }
+                Err(error) => Ok(Err(error)),
+            }
+        })
+    }
+
     pub(crate) fn deferred_transaction(&self) -> Result<Transaction<'_>> {
         self.transaction(false)
     }
@@ -818,6 +850,45 @@ mod tests {
         }
         let count: i64 = db.query_row("SELECT count(*) FROM state", [], |row| row.get(0))?;
         assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_worker_transaction_rolls_back_errors_and_refuses_nested_begin() -> rusqlite::Result<()>
+    {
+        let db = Connection::open(":memory:")?;
+        db.execute_batch("CREATE TABLE private_record(value INTEGER)")?;
+        let failed = db.call_immediate(|transaction| {
+            transaction.execute("INSERT INTO private_record VALUES(1)", [])?;
+            Err::<(), _>(rusqlite::Error::InvalidQuery)
+        });
+        assert!(failed.is_err(), "test: failed atomic writer callback committed");
+        let count: u64 =
+            db.query_row("SELECT count(*) FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(count, 0, "test: failed atomic callback retained a partial record");
+        let refused = db.call_immediate_result(|transaction| {
+            transaction
+                .execute("INSERT INTO private_record VALUES(3)", [])
+                .map_err(|_| "sqlite refusal")?;
+            Err::<(), _>("semantic refusal")
+        })?;
+        assert_eq!(refused, Err("semantic refusal"), "test: atomic callback lost its domain error");
+        let count: u64 =
+            db.query_row("SELECT count(*) FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(count, 0, "test: semantic refusal committed partial application");
+        db.call_immediate(|transaction| {
+            transaction.execute("INSERT INTO private_record VALUES(2)", [])?;
+            Ok(())
+        })?;
+        let value: u64 = db.query_row("SELECT value FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(value, 2, "test: successful atomic callback did not commit");
+        let outer = db.immediate_transaction()?;
+        assert!(
+            db.call_immediate(|_| Ok(())).is_err(),
+            "test: atomic callback joined an already managed outer transaction"
+        );
+        drop(outer);
+        assert!(db.is_autocommit()?, "test: nested refusal damaged outer transaction cleanup");
         Ok(())
     }
 
