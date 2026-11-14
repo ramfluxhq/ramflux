@@ -31,12 +31,103 @@ impl AccountDb {
         };
         // Tombstones first: the update below drops the bindings and copies they come from.
         self.capture_erased_inputs(message)?;
+        // Read before the update drops this message's bindings.
+        let carriers = self.envelope_carriers(message)?;
+        let owned_states = self.owned_actor_keys(message, &carriers)?;
         self.persist_deleted_envelope_markers(message)?;
         // The update trigger drains only locators owned by this message, in this transaction.
         self.connection.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1,is_own=?3 WHERE conversation_id=?1 AND message_id=?2",params![conversation,message,i64::from(is_own)])?;
+        for carrier in &carriers {
+            self.erase_carrier_bookkeeping(carrier)?;
+        }
+        // Their delete notices would still name envelope-derived keys.
+        for key in &owned_states {
+            self.connection.execute(
+                "DELETE FROM runtime_outbox INDEXED BY runtime_outbox_actor_kind
+                  WHERE actor_state_kind=?1 AND table_name='runtime_actor_state'
+                  AND change_kind='delete'",
+                params![key],
+            )?;
+        }
         self.persist_deletion_marker(message)?;
         self.remove_message_origin(conversation, message)?;
         Ok(!was_deleted)
+    }
+
+    /// Actor-state keys footprinted by the message and its carriers.
+    fn owned_actor_keys(
+        &self,
+        message: &str,
+        carriers: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        let mut keys = BTreeSet::new();
+        let mut query = self.connection.prepare(
+            "SELECT locator FROM message_footprint WHERE message_id=?1 AND kind='actor'",
+        )?;
+        for owner in std::iter::once(message).chain(carriers.iter().map(String::as_str)) {
+            for key in query.query_map(params![owner], |row| row.get::<_, String>(0))? {
+                keys.insert(key?);
+            }
+        }
+        Ok(keys.into_iter().collect())
+    }
+
+    /// Message ids, other than `message`, that arrived in one of its envelopes and have no live
+    /// projection: the Control carrier of an own-device copy.
+    fn envelope_carriers(&self, message: &str) -> Result<Vec<String>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT DISTINCT other.message_id FROM message_copy_binding mine
+             JOIN message_copy_binding other ON other.copy_id=mine.copy_id
+             WHERE mine.message_id=?1 AND mine.copy_id GLOB 'envelope:*'
+               AND other.message_id<>?1
+               AND NOT EXISTS(SELECT 1 FROM direct_message_projection p
+                              WHERE p.message_id=other.message_id AND p.deleted=0)",
+        )?;
+        let carriers = query
+            .query_map(params![message], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(carriers)
+    }
+
+    /// Drops everything an erased message's carrier keeps about the carrying envelope: its
+    /// actor states (identity, order, commit pointer), events and bindings. Runs in the erasing
+    /// transaction. The keyed deleted-envelope marker alone stops redelivery.
+    fn erase_carrier_bookkeeping(&self, carrier: &str) -> Result<(), StorageError> {
+        const OWNED: &str =
+            "SELECT locator FROM message_footprint WHERE message_id=?1 AND kind='actor'";
+        for sql in [
+            "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND row_id IN
+              (SELECT a.rowid FROM runtime_actor_state a JOIN message_footprint f
+               ON f.kind='actor' AND f.locator=a.state_kind WHERE f.message_id=?1)",
+            "DELETE FROM runtime_outbox WHERE sequence IN (
+              SELECT outbox.sequence FROM message_footprint footprint
+              CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind
+              WHERE footprint.message_id=?1 AND footprint.kind='actor'
+               AND outbox.actor_state_kind=footprint.locator
+               AND outbox.table_name='runtime_actor_state')",
+            &format!("DELETE FROM runtime_receipt_retention WHERE state_kind IN ({OWNED})"),
+            &format!(
+                "DELETE FROM runtime_actor_state WHERE state_kind IN ({OWNED})
+                  AND NOT EXISTS(SELECT 1 FROM message_footprint shared
+                   WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind
+                    AND shared.message_id<>?1 AND shared.message_id NOT GLOB 'copy:*')
+                  AND state_kind NOT IN (SELECT locator FROM message_footprint
+                                         WHERE message_id=?1 AND kind='replay_actor')"
+            ),
+            "DELETE FROM runtime_outbox WHERE sequence IN (
+              SELECT outbox.sequence FROM message_footprint footprint
+              CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind
+              WHERE footprint.message_id=?1 AND footprint.kind='actor'
+               AND outbox.actor_state_kind=footprint.locator
+               AND outbox.table_name='runtime_actor_state' AND outbox.change_kind='delete')",
+            "DELETE FROM local_event_log WHERE event_id IN
+              (SELECT locator FROM message_footprint WHERE message_id=?1 AND kind='event')",
+            "DELETE FROM message_copy_binding WHERE message_id=?1",
+            "DELETE FROM message_footprint WHERE message_id=?1",
+        ] {
+            self.connection.execute(sql, params![carrier])?;
+        }
+        Ok(())
     }
 
     /// Returns the verified device identifiers bound to this account root.
@@ -773,6 +864,66 @@ mod tests {
         assert!(row.deleted);
         assert_eq!(row.sender_id, "");
         assert_eq!(db.message_content("group-message")?, None);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    fn seed_carrier(db: &AccountDb) -> Result<(), StorageError> {
+        db.import_direct_message_projection(crate::DirectMessageWrite {
+            conversation_id: "thread",
+            message_id: "owner",
+            sender_id: "private-sender",
+            encrypted_body: b"private-body",
+            metadata: &MessageMetadata::default(),
+            created_at: 1,
+        })?;
+        db.persist_message_actor_state(
+            "carrier",
+            "routed/generated-identity/carrier",
+            &json!({"deviceId":"private-device"}),
+        )?;
+        db.persist_message_actor_state(
+            "carrier",
+            "routed/commit-watermark/opaque",
+            &"routed/committed/unkeyed-envelope-hash",
+        )?;
+        for message in ["owner", "carrier"] {
+            db.connection.execute(
+                "INSERT INTO message_copy_binding VALUES('envelope:carrier-envelope',?1)",
+                params![message],
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn erasing_an_owner_erases_the_envelope_carrier_bookkeeping_atomically()
+    -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("erase-envelope-carrier")?;
+        seed_carrier(&db)?;
+        let failed: Result<(), StorageError> = db.write_transaction(|| {
+            db.delete_direct_message("thread", "owner", "local", "delete")?;
+            Err(StorageError::AuthorizationRejected)
+        });
+        assert!(failed.is_err());
+        assert!(
+            db.actor_state_exists("routed/generated-identity/carrier")?,
+            "a rolled-back erase must leave the carrier untouched"
+        );
+        db.delete_direct_message("thread", "owner", "local", "delete")?;
+        for key in ["routed/generated-identity/carrier", "routed/commit-watermark/opaque"] {
+            assert!(!db.actor_state_exists(key)?, "carrier state {key} survived the erase");
+        }
+        let bindings: u64 = db.connection.query_row(
+            "SELECT count(*) FROM message_copy_binding WHERE copy_id='envelope:carrier-envelope'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(bindings, 0, "raw envelope bindings survived the erase");
+        assert!(
+            db.envelope_refers_to_deleted_message("carrier-envelope")?,
+            "the keyed marker must still stop redelivery"
+        );
+        drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

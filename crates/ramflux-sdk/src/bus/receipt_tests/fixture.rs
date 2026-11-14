@@ -211,6 +211,78 @@ impl Spec {
         }
         Ok(())
     }
+    /// Enrols `self` as a second native device of `primary`'s account and returns the merged
+    /// two-device manifest. The sibling lives under `self.root` with the receipt passphrase and
+    /// its own vault, so `erasure_audit::open` reads it exactly like any other receipt account.
+    pub fn enroll_sibling_of(
+        &self,
+        primary: &Spec,
+        source: &RamfluxClient,
+    ) -> Result<crate::SdkDeviceManifestResponse, Box<dyn std::error::Error>> {
+        let mut native =
+            *primary.manifest(source)?.custody.ok_or("test: native primary manifest")?;
+        let record = native.publication.record.clone();
+        let key = primary
+            .vault
+            .primary_for_public_key(&record.body.master_certificate.body.self_signing_public_key)?;
+        let now = crate::custody::network_now()?.max(record.body.issued_at);
+        let current = ramflux_crypto::custody::verify_record(&record, now, None, None)?;
+        let mut seeds = zeroize::Zeroizing::new([0_u8; 64]);
+        getrandom::fill(&mut *seeds).map_err(|_| SdkError::CustodyRandomUnavailable)?;
+        let signing: [u8; 32] = seeds[..32].try_into()?;
+        let agreement: [u8; 32] = seeds[32..].try_into()?;
+        let branch =
+            ramflux_crypto::create_device_branch(&primary.principal, &self.device, 1, signing);
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed(agreement);
+        let mut certificate = record.body.devices[0]
+            .branch_certificate
+            .as_ref()
+            .ok_or("test: primary branch certificate")?
+            .body
+            .clone();
+        certificate.device_id.clone_from(&self.device);
+        certificate.branch_signing_public_key =
+            ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().as_bytes());
+        certificate.agreement_identity_public_key =
+            ramflux_protocol::encode_base64url(&agreement.public);
+        certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        native.publication.record =
+            key.enroll_device(&current, key.certify_branch(certificate)?, now)?;
+        crate::custody::accept_publication(
+            &primary.root,
+            &primary.principal,
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: native.publication.clone(),
+                custodian_publication: None,
+            },
+            now,
+        )?;
+        std::fs::create_dir_all(&self.root)?;
+        crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
+            root: &self.root,
+            id: &self.principal,
+            device: &self.device,
+            record: native.publication.record.clone(),
+            branch: &seeds,
+            vault: self.vault.as_ref(),
+            passphrase: b"receipt-test",
+            now,
+        })?;
+        let sibling = self.client(None)?;
+        native.devices.extend(
+            self.manifest(&sibling)?.custody.ok_or("test: native sibling manifest")?.devices,
+        );
+        let full = crate::SdkDeviceManifestResponse::from_native(native)?;
+        source.persist_fetched_identity_directory(&full)?;
+        sibling.persist_fetched_identity_directory(&full)?;
+        for spec in [primary, self] {
+            spec.directory
+                .lock()
+                .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
+                .insert(full.principal_commitment.clone(), full.clone());
+        }
+        Ok(full)
+    }
     pub fn identity(&self) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
         let account = crate::custody::load_account(
             &self.root,
