@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Restore cannot clear local restrictions or resume positive use before original-proof validation.
-use super::{SavedReachState, provenance::RetainedProofs, refused};
+use super::{SavedReachState, provenance::store_error, refused};
 use crate::SdkError;
 use ramflux_protocol::contact_reach::{self as wire, Reason, StateRecord};
 use ramflux_storage::AccountDb;
@@ -58,29 +58,19 @@ fn verify_originals(
     records: &[StateRecord],
     home: Option<&ramflux_crypto::home_migration::VerifiedHome>,
 ) -> Result<(), SdkError> {
-    let (count, bytes) = db.actor_state_usage("reach/provenance")?;
-    if count != 1 || bytes > wire::MAX_PROVENANCE_BYTES as u64 {
-        return Err(refused(Reason::CustodyRefused));
-    }
-    let pool: RetainedProofs =
-        db.load_actor_state("reach/provenance")?.ok_or_else(|| refused(Reason::CustodyRefused))?;
     let mut signers = BTreeMap::new();
     for record in records {
         for selector in wire::record_signers(record)? {
-            let original = pool
-                .signers
-                .iter()
-                .find(|reference| {
-                    reference.object_kind == selector.object_kind
-                        && reference.object_hash == selector.object_hash
-                })
+            let original = db
+                .reach_provenance_reference(selector.object_kind, &selector.object_hash)
+                .map_err(store_error)?
                 .ok_or_else(|| refused(Reason::CustodyRefused))?;
             if original.authority_head_hash != selector.authority_head_hash
                 || original.master_certificate_hash != selector.master_certificate_hash
             {
                 return Err(refused(Reason::CustodyRefused));
             }
-            signers.insert((original.object_kind, original.object_hash.clone()), original.clone());
+            signers.insert((original.object_kind, original.object_hash.clone()), original);
         }
     }
     let required: BTreeSet<_> =
@@ -93,10 +83,12 @@ fn verify_originals(
         &state_hash,
         signers.into_values().collect(),
     )?;
-    for proof in pool.authorities {
-        if required.contains(&proof.proof_hash) {
-            builder.push(&proof)?;
-        }
+    for hash in required {
+        let proof = db
+            .reach_provenance_proof(root, &hash)
+            .map_err(store_error)?
+            .ok_or_else(|| refused(Reason::CustodyRefused))?;
+        builder.push(&proof)?;
     }
     builder.finish()?.verify_originals_with_home(records, home)?;
     Ok(())

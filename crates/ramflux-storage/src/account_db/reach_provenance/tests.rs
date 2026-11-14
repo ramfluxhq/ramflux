@@ -78,8 +78,8 @@ fn cr_provenance_backup_merge_unions_originals_and_refuses_conflicts() -> TestRe
         let local = AccountDb::open(&local_index, "acct", &AccountDbKey::generate()?)?;
         let original = pool(false)?;
         let incoming = pool(true)?;
-        source.persist_actor_state(KEY, &incoming)?;
-        local.persist_actor_state(KEY, &original)?;
+        persist(&source, &incoming)?;
+        persist(&local, &original)?;
         let incoming_path = temp.path().join("incoming.db");
         let snapshot = source.write_backup_snapshot(&incoming_path)?;
         let merged_path = temp.path().join("merged.db");
@@ -105,7 +105,7 @@ fn cr_provenance_backup_merge_unions_originals_and_refuses_conflicts() -> TestRe
         let mut conflict = pool(true)?;
         conflict.signers.first_mut().ok_or("incoming reference")?.object_hash =
             original.signers.first().ok_or("local reference")?.object_hash.clone();
-        source.persist_actor_state(KEY, &conflict)?;
+        persist(&source, &conflict)?;
         let conflict_path = temp.path().join("conflict.db");
         let bad = source.write_backup_snapshot(&conflict_path)?;
         let result = if native {

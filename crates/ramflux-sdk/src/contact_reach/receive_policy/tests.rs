@@ -381,8 +381,9 @@ async fn restored_denials() -> TestResult {
         },
     ];
     fixture.install(&block, restrictions.clone())?;
-    let originals: serde_json::Value =
-        db.load_actor_state("reach/provenance")?.ok_or("original proof pool")?;
+    let originals =
+        crate::contact_reach::provenance::read_pool_for_tests(db, &fixture.route.recipient_root)?
+            .ok_or("original proof pool")?;
     // State after a native data merge: live metadata remains local; originals and denials are staged.
     db.persist_client_record("reach", "state", &before)?;
     let staged = serde_json::json!({"root":fixture.route.recipient_root,"records":restrictions});
@@ -394,14 +395,14 @@ async fn restored_denials() -> TestResult {
         None,
         3,
     )?;
-    db.remove_actor_state("reach/provenance")?;
+    crate::contact_reach::provenance::clear_pool_for_tests(db)?;
     assert!(
         fixture.install(&other, vec![]).is_err(),
         "fresh mirror cannot replace missing original denial evidence"
     );
     assert!(db.actor_state_exists(crate::contact_reach::restore::KEY)?);
     assert_eq!(db.client_record("reach", "state")?.ok_or("mirror after refusal")?, before);
-    db.persist_actor_state("reach/provenance", &originals)?;
+    crate::contact_reach::provenance::write_pool_for_tests(db, &originals)?;
     fixture.install(&other, vec![])?;
     assert!(!db.actor_state_exists(crate::contact_reach::restore::KEY)?);
     assert_denied(&fixture.check(Traffic::Dm));
@@ -446,8 +447,9 @@ async fn forged_restored_clearance() -> TestResult {
     );
     let record =
         StateRecord::Retirement { subject, revision: 4, update: forged, group_floor: None };
-    let mut pool: crate::contact_reach::provenance::RetainedProofs =
-        db.load_actor_state("reach/provenance")?.ok_or("native original proof pool")?;
+    let mut pool =
+        crate::contact_reach::provenance::read_pool_for_tests(db, &fixture.route.recipient_root)?
+            .ok_or("native original proof pool")?;
     let mut references = wire::record_signers(&record)?;
     for reference in &mut references {
         let proof = pool
@@ -462,7 +464,7 @@ async fn forged_restored_clearance() -> TestResult {
     }
     pool.signers.extend(references);
     pool.signers.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
-    db.persist_actor_state("reach/provenance", &pool)?;
+    crate::contact_reach::provenance::write_pool_for_tests(db, &pool)?;
     db.persist_actor_state(
         crate::contact_reach::restore::KEY,
         &serde_json::json!({"root":fixture.route.recipient_root,"records":[record]}),

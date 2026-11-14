@@ -40,10 +40,10 @@ fn read(
 ) -> Result<Option<Vec<u8>>, StorageError> {
     let query = match database {
         "main" => {
-            "SELECT length(state_json),CASE WHEN length(state_json)<=?2 THEN state_json ELSE NULL END FROM main.runtime_actor_state WHERE state_kind=?1"
+            "SELECT length(CAST(state_json AS BLOB)),CASE WHEN length(CAST(state_json AS BLOB))<=?2 THEN state_json ELSE NULL END FROM main.runtime_actor_state WHERE state_kind=?1"
         }
         "incoming" => {
-            "SELECT length(state_json),CASE WHEN length(state_json)<=?2 THEN state_json ELSE NULL END FROM incoming.runtime_actor_state WHERE state_kind=?1"
+            "SELECT length(CAST(state_json AS BLOB)),CASE WHEN length(CAST(state_json AS BLOB))<=?2 THEN state_json ELSE NULL END FROM incoming.runtime_actor_state WHERE state_kind=?1"
         }
         _ => return Err(invalid()),
     };

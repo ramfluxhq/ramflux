@@ -10,7 +10,7 @@ async fn cr_provenance_historical_primary_revocation_never_reactivates_grants() 
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let (owner, mut phone, _) = roster_fixture().await?;
         let before = phone.client.group_reach_mirror()?.ok_or("original reach mirror")?;
-        let original_pool: RetainedProofs = phone.client.account_db()?.load_actor_state(POOL_KEY)?.ok_or("retained original proof pool")?;
+        let original_pool: RetainedProofs = read_pool_for_tests(phone.client.account_db()?, &before.root)?.ok_or("retained original proof pool")?;
         let sibling = phone.enroll_sibling("historical-reach-sibling", "second").await?;
         let now = crate::custody::network_now()?;
         let mut native = sibling.manifest.custody.as_ref().ok_or("sibling native manifest")?.as_ref().clone();
@@ -22,7 +22,7 @@ async fn cr_provenance_historical_primary_revocation_never_reactivates_grants() 
         // An authenticated original sibling may supply exact original historical bytes. This
         // fixture transfers that data inside the real encrypted account DB, with no current pin.
         sibling.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            sibling.client.account_db()?.persist_actor_state(POOL_KEY, &original_pool)?;
+            write_pool_for_tests(sibling.client.account_db()?, &original_pool)?;
             Ok(())
         })?;
         let historical = verified_records(&sibling, &before.home_head_hash, before.records.clone(), now)?;

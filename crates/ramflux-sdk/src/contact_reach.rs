@@ -197,7 +197,11 @@ impl crate::RamfluxClient {
             )?;
             let previous: Option<SavedReachState> =
                 db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
-            provenance::retain_snapshot(db, &verified.provenance)?;
+            provenance::retain_snapshot(
+                db,
+                &verified.manifest.account_anchor,
+                &verified.provenance,
+            )?;
             let restored =
                 restore::verify(db, &verified.manifest.account_anchor, verified.home.as_ref())?;
             if let Some(saved) = &previous {

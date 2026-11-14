@@ -180,10 +180,7 @@ pub(super) fn verified_records(
     let hash = state_hash(root, revision, policy_revision, admission_revision, &records)?;
     let count = u64::try_from(records.len())?;
     let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    let previous = peer
-        .client
-        .account_db()?
-        .load_actor_state::<super::provenance::RetainedProofs>("reach/provenance")?;
+    let previous = super::provenance::read_pool_for_tests(peer.client.account_db()?, root)?;
     let provenance = fixture_provenance(&authority, revision, &hash, &records, previous.as_ref())?;
     let signers = provenance.signers.clone();
     let pages =

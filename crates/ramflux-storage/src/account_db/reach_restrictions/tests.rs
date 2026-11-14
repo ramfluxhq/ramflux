@@ -66,10 +66,7 @@ fn seed(db: &AccountDb, peer: u8, expected: u64) -> TestResult<String> {
     for signer in &mut signers {
         signer.proof_hash.clone_from(&proof.proof_hash);
     }
-    db.persist_actor_state(
-        "reach/provenance",
-        &serde_json::json!({"signers":signers,"authorities":[proof]}),
-    )?;
+    db.retain_reach_provenance(&root, &signers, [Ok(proof)])?;
     db.persist_client_record("reach", "state", &serde_json::json!({
         "root":root,"revision":100-expected,"records":[],"restrictions":{"block":denial,"floor":floor}
     }))?;
@@ -119,13 +116,8 @@ fn merge_mode(native: bool) -> TestResult {
             .count(),
         2
     );
-    let proofs: serde_json::Value = serde_json::from_slice(
-        &read(&merged.db, "main", "reach/provenance")?.ok_or("proof union")?,
-    )?;
-    assert_eq!(
-        proofs.get("signers").and_then(serde_json::Value::as_array).ok_or("signer array")?.len(),
-        2
-    );
+    let references: u64 = merged.db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'reach/provenance/reference/%'", [], |row| row.get(0))?;
+    assert_eq!(references, 2, "both original reference sets survive the encrypted merge");
     source.persist_client_record(
         "reach",
         "state",

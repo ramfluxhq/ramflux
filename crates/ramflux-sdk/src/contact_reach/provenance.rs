@@ -56,76 +56,28 @@ pub(super) fn retirement(
     Ok(())
 }
 
-/// Local originals may outlive the home's current subset. They are historical data only.
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RetainedProofs {
-    pub(super) signers: Vec<wire::SignerReference>,
-    pub(super) authorities: Vec<ProvenanceAuthority>,
-}
-impl RetainedProofs {
-    pub(super) fn merge(
-        previous: Option<Self>,
-        incoming: &EncryptedProvenanceStage,
-    ) -> Result<Self, SdkError> {
-        Self::extend(
-            previous,
-            incoming.signers().to_vec(),
-            incoming.proof_hashes().map(|hash| incoming.read_proof(hash).map_err(SdkError::from)),
-        )
-    }
-    fn extend(
-        previous: Option<Self>,
-        incoming_signers: Vec<wire::SignerReference>,
-        incoming_authorities: impl IntoIterator<Item = Result<ProvenanceAuthority, SdkError>>,
-    ) -> Result<Self, SdkError> {
-        let previous = previous.unwrap_or_default();
-        let mut signers = std::collections::BTreeMap::new();
-        let mut authorities = std::collections::BTreeMap::new();
-        for reference in previous.signers.into_iter().chain(incoming_signers) {
-            let key = (reference.object_kind, reference.object_hash.clone());
-            if let Some(old) = signers.insert(key, reference.clone())
-                && old != reference
-            {
-                return Err(refused(Reason::ForeignSnapshotInvalid));
-            }
+pub(super) fn store_error(error: ramflux_storage::StorageError) -> SdkError {
+    match error {
+        ramflux_storage::StorageError::SegmentResourceCapacity { .. } => {
+            refused(Reason::ForeignCapacity)
         }
-        for proof in previous.authorities.into_iter().map(Ok).chain(incoming_authorities) {
-            let proof = proof?;
-            if let Some(old) = authorities.insert(proof.proof_hash.clone(), proof.clone())
-                && old != proof
-            {
-                return Err(refused(Reason::CustodyRefused));
-            }
-        }
-        let retained = Self {
-            signers: signers.into_values().collect(),
-            authorities: authorities.into_values().collect(),
-        };
-        let mut native = std::collections::BTreeSet::new();
-        for proof in &retained.authorities {
-            native.extend(proof.native_hashes()?);
-        }
-        if native.len() > wire::MAX_PROVENANCE_OBJECTS
-            || retained.signers.len() > wire::MAX_SIGNER_REFERENCES
-            || retained.authorities.len() > wire::MAX_PROVENANCE_OBJECTS
-            || ramflux_protocol::canonical_json_bytes(&retained)?.len() > wire::MAX_PROVENANCE_BYTES
-        {
-            return Err(refused(Reason::ForeignCapacity));
-        }
-        Ok(retained)
+        ramflux_storage::StorageError::Integrity(_) => refused(Reason::CustodyRefused),
+        error => SdkError::from(error),
     }
 }
-
-const POOL_KEY: &str = "reach/provenance";
 pub(super) fn retain_snapshot(
     db: &ramflux_storage::AccountDb,
+    root: &str,
     snapshot: &EncryptedProvenanceStage,
 ) -> Result<(), SdkError> {
-    let previous = db.load_actor_state::<RetainedProofs>(POOL_KEY)?;
-    let retained = RetainedProofs::merge(previous, snapshot)?;
-    db.persist_actor_state(POOL_KEY, &retained)?;
-    Ok(())
+    db.retain_reach_provenance(
+        root,
+        snapshot.signers(),
+        snapshot
+            .proof_hashes()
+            .map(|hash| snapshot.read_proof(hash).map_err(ramflux_storage::StorageError::from)),
+    )
+    .map_err(store_error)
 }
 
 impl crate::RamfluxClient {
@@ -183,12 +135,74 @@ impl crate::RamfluxClient {
             reference.proof_hash.clone_from(&proof.proof_hash);
         }
         let db = self.account_db()?;
-        let previous = db.load_actor_state::<RetainedProofs>(POOL_KEY)?;
-        let retained = RetainedProofs::extend(previous, references, [Ok(proof)])?;
-        db.persist_actor_state(POOL_KEY, &retained)?;
+        db.retain_reach_provenance(root, &references, [Ok(proof)]).map_err(store_error)?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetainedProofs {
+    pub(super) signers: Vec<wire::SignerReference>,
+    pub(super) authorities: Vec<ProvenanceAuthority>,
+}
+#[cfg(test)]
+pub(super) fn read_pool_for_tests(
+    db: &ramflux_storage::AccountDb,
+    root: &str,
+) -> Result<Option<RetainedProofs>, SdkError> {
+    let signers = db.reach_provenance_references()?;
+    let hashes = db.reach_provenance_proof_hashes()?;
+    if signers.is_empty() && hashes.is_empty() {
+        return Ok(None);
+    }
+    let authorities = hashes
+        .into_iter()
+        .map(|hash| {
+            db.reach_provenance_proof(root, &hash)?.ok_or_else(|| refused(Reason::CustodyRefused))
+        })
+        .collect::<Result<Vec<_>, SdkError>>()?;
+    Ok(Some(RetainedProofs { signers, authorities }))
+}
+#[cfg(test)]
+pub(super) fn write_pool_for_tests(
+    db: &ramflux_storage::AccountDb,
+    pool: &RetainedProofs,
+) -> Result<(), SdkError> {
+    let root = &pool
+        .authorities
+        .first()
+        .ok_or_else(|| refused(Reason::CustodyRefused))?
+        .authority
+        .publication
+        .record
+        .body
+        .account_anchor;
+    db.retain_reach_provenance(root, &pool.signers, pool.authorities.iter().cloned().map(Ok))
+        .map_err(store_error)
+}
+#[cfg(test)]
+pub(super) fn clear_pool_for_tests(db: &ramflux_storage::AccountDb) -> Result<(), SdkError> {
+    db.write_transaction(|| {
+        let prefix = "reach/provenance/";
+        let mut removed = 0_usize;
+        loop {
+            let keys = db.actor_state_key_page_after(prefix, "", 128)?;
+            if keys.is_empty() {
+                break;
+            }
+            for key in keys {
+                removed += 1;
+                if removed > wire::MAX_PROVENANCE_OBJECTS + wire::MAX_SIGNER_REFERENCES {
+                    return Err(refused(Reason::ForeignCapacity));
+                }
+                db.remove_actor_state(&key)?;
+            }
+        }
+        Ok(())
+    })
+}

@@ -57,6 +57,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+mod reach_proof_records;
 mod reach_provenance;
 mod reach_restrictions;
 pub use reach_restrictions::ReachRestoreRestrictions;
