@@ -13,9 +13,21 @@ impl LocalSearch {
     pub(super) fn install_observer(&mut self) -> Result<(), SdkError> {
         let cursors = Arc::downgrade(&self.cursors);
         let pending = Arc::downgrade(&self.pending);
+        let watch = Arc::downgrade(&self.watch);
+        let active = Arc::downgrade(&self.active);
         self.observer = Some(self.watch.observe(
             format!("runtime/{}", self.unlock),
             Arc::new(move || {
+                // Index changes revoke views; writer closure also interrupts workers/queues.
+                if watch.upgrade().is_some_and(|watch| watch.is_closed())
+                    && let Some(active) = active.upgrade()
+                {
+                    for request in
+                        active.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values()
+                    {
+                        request.cancel();
+                    }
+                }
                 if let Some(cursors) = cursors.upgrade() {
                     cursors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
                 }

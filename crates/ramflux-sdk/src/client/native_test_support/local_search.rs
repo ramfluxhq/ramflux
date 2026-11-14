@@ -247,7 +247,14 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
             let completion = runtime
                 .query(&fixture.client, 7, &SearchQuery::new("lock-query", "canary"))
                 .await?;
+            let mut closing = Box::pin(runtime.admit(7, "closing-queued"));
+            std::future::poll_fn(|cx| {
+                use std::future::Future as _;
+                assert!(closing.as_mut().poll(cx).is_pending(), "closure fixture must have a real queued admission behind the held completion");
+                std::task::Poll::Ready(())
+            }).await;
             drop(fixture.client.active_account_db.take());
+            assert!(matches!(closing.await, Err(crate::SdkError::Search(SearchError::Cancelled))), "closing the real writer must wake queued work while the old executor is still held");
             assert!(
                 matches!(completion.take(), Err(SearchError::CursorStale)),
                 "closing the real account writer must revoke pending plaintext without an explicit service callback"
