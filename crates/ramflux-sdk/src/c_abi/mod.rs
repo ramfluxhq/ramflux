@@ -878,6 +878,8 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
+        // Legacy entrypoints do not expose local search; v2 owns its status policy.
+        SdkError::Search(_) => RamfluxErrorCode::UnsupportedVersion,
         SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
@@ -1115,6 +1117,14 @@ fn custody_busy_data_root_maps_to_c_abi_account_busy() {
     let error = map_sdk_error(&SdkError::DataRootInUse);
     assert_eq!(error.code, RamfluxErrorCode::AccountBusy);
     assert_eq!(error.message, "data root is in use by another daemon");
+}
+
+#[cfg(test)]
+#[test]
+fn local_search_legacy_refusal_preserves_existing_codes() {
+    let error = SdkError::Search(ramflux_storage::local_search::SearchError::NotActivated);
+    assert_eq!(sdk_error_code(&error), RamfluxErrorCode::UnsupportedVersion);
+    assert_eq!(RamfluxErrorCode::UnsupportedVersion as i32, 3);
 }
 
 #[cfg(test)]
