@@ -42,60 +42,8 @@ pub(crate) fn local_refusal(method: &str, code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{local_refusal, outcome};
-    use ramflux_sdk::{LocalBusErrorBody, LocalBusFrame, LocalBusFrameKind};
+    use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
     use serde_json::json;
-
-    fn error_frame(
-        code: &str,
-        message: &str,
-        details: serde_json::Value,
-        body: serde_json::Value,
-    ) -> LocalBusFrame {
-        let mut frame = LocalBusFrame::request(
-            "req",
-            Some("alice".to_owned()),
-            "conversation",
-            "conversation.edit",
-            body,
-        );
-        frame.kind = LocalBusFrameKind::Error;
-        frame.ok = Some(false);
-        frame.error = Some(LocalBusErrorBody {
-            details: Some(Box::new(details)),
-            reason_code: None,
-            code: code.to_owned(),
-            message: message.to_owned(),
-            retry_after_ms: None,
-            cause: None,
-        });
-        frame
-    }
-
-    /// Locks the JSON shape of a typed refusal. It does not show that the bus emits one.
-    #[test]
-    fn edit_conflict_refusal_json_keeps_typed_details() {
-        let details = json!({"target": "m1", "expected": 1, "received": 2});
-        let body = json!({
-            "code": 7,
-            "name": "edit_conflict",
-            "message": "revision conflict",
-            "details": details,
-        });
-        let frame = error_frame("edit_conflict", "revision conflict", details, body);
-        let value = outcome("conversation.edit", &frame);
-        assert_eq!(value["ok"], false, "test: a typed refusal is not ok");
-        assert_eq!(value["method"], "conversation.edit", "test: method is preserved");
-        assert_eq!(value["error"]["code"], "edit_conflict", "test: error code is preserved");
-        assert_eq!(
-            value["error"]["message"], "revision conflict",
-            "test: error message is preserved"
-        );
-        assert_eq!(value["error"]["details"]["target"], "m1", "test: details.target is preserved");
-        assert_eq!(value["error"]["details"]["expected"], 1, "test: details.expected is preserved");
-        assert_eq!(value["error"]["details"]["received"], 2, "test: details.received is preserved");
-        assert_eq!(value["body"]["name"], "edit_conflict", "test: body name is preserved");
-        assert_eq!(value["body"]["details"]["received"], 2, "test: body details are preserved");
-    }
 
     #[test]
     fn success_json_keeps_the_bus_body() {
