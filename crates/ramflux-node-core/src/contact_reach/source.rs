@@ -121,6 +121,8 @@ impl ReachService {
         if query.source_node != context.peer_node || query.target_node != self.node.node_id() {
             return Err(refuse(Reason::ForeignPolicyDenied));
         }
+        let context =
+            ReachSnapshotContext { now: context.store.reach_fenced_now(context.now)?, ..context };
         self.assemble_public_snapshot(context, query)
     }
     fn assemble_public_snapshot(
@@ -148,8 +150,7 @@ impl ReachService {
                 )
             })
             .transpose()?;
-        let tx = context.store.begin_write()?;
-        let now = store::clock(&tx, context.now)?;
+        let (tx, now) = context.store.begin_reach_write(context.now)?;
         let authority = store::authority(&tx, &query.account_anchor, now)?;
         let current = store::home(&tx, &query.account_anchor)?;
         let hash = ramflux_protocol::home_migration::record_hash(&current.record)?;

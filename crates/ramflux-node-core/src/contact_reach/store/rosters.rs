@@ -4,7 +4,7 @@
 //! Live derived rosters have a separate bounded compartment and never enter state-read pages.
 use super::{
     AccountReach, Applied, OPERATION_HASH_DOMAIN, OPERATIONS, OperationResult, OperationRow,
-    ReachOwner, Reason, Result, RouterRedbStore, authority, clock, custody, encoded, key, refuse,
+    ReachOwner, Reason, Result, RouterRedbStore, authority, custody, encoded, key, refuse,
     retain_operation, row, storage,
 };
 use redb::{ReadableTable, TableDefinition};
@@ -81,8 +81,7 @@ impl RouterRedbStore {
             return Err(refuse(Reason::ForeignInvalidFrame));
         }
         let _home_gate = self.acquire_home_operation(owner.recipient_root)?;
-        let tx = self.begin_write()?;
-        let now = clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let authority = authority(&tx, owner.recipient_root, now)?;
         authority.authorize_primary_management(owner.actor, "contact_consent", now)?;
         let operation_key = key(owner.recipient_root, operation_id)?;

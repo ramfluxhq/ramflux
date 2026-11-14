@@ -46,8 +46,7 @@ impl ReachService {
             .checked_add(Duration::from_millis(request.remaining_ms))
             .ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
         {
-            let tx = store.begin_write()?;
-            let now = store::clock(&tx, now)?;
+            let (tx, now) = store.begin_reach_write(now)?;
             let authority = store::authority(&tx, &challenge.source_root, now)?;
             authority.authorize(owner.actor, "message", now)?;
             if store::home(&tx, &challenge.source_root)?.record.home()

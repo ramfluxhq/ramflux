@@ -68,8 +68,7 @@ impl Snapshots {
     ) -> Result<OperationResult> {
         let SnapshotRead { owner, session, known, id, page, now, proof } = request;
         let mut leases = self.leases.lock().map_err(storage)?;
-        let tx = store.begin_write()?;
-        let now = super::store::clock(&tx, now)?;
+        let (tx, now) = store.begin_reach_write(now)?;
         let authority = super::store::authority(&tx, owner.recipient_root, now)?;
         super::store::authorize_read(&authority, owner.actor, now)
             .map_err(|_| refuse(Reason::ForeignReadRefused))?;

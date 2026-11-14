@@ -170,8 +170,7 @@ impl RouterRedbStore {
             return Err(refuse(Reason::CostInvalid));
         }
         let nonce = ramflux_crypto::random_32()?;
-        let tx = self.begin_write()?;
-        let now = super::store::clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let recipient =
             request.recipient_root.as_deref().ok_or_else(|| refuse(Reason::CostInvalid))?;
         let home = super::store::home(&tx, recipient).map_err(|error| match error {

@@ -134,14 +134,14 @@ impl crate::RouterRedbStore {
         if !ramflux_protocol::contact_reach::enabled() {
             return Err(refuse(Reason::ForeignCapabilityMissing));
         }
+        let now = self.reach_fenced_now(now)?;
         let target =
             ramflux_protocol::qualified_device_id(&device.account_anchor, &device.device_id)?;
         let response = router
             .custody_prekey_response(&target, now, self)?
             .ok_or_else(|| refuse(Reason::ForeignReadRefused))?;
         let bundle = response.bundle.as_ref().ok_or_else(|| refuse(Reason::ForeignReadRefused))?;
-        let tx = self.begin_write()?;
-        let now = super::store::clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let authority = super::store::authority(&tx, &device.account_anchor, now)?;
         let home = super::store::home(&tx, &device.account_anchor)?;
         if home.record.home() != (node.node_id(), node.public_key()) {

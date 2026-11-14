@@ -46,8 +46,7 @@ impl RouterRedbStore {
             return Err(refuse(Reason::ForeignInvalidFrame));
         }
         let _home_gate = self.acquire_home_operation(owner.recipient_root)?;
-        let tx = self.begin_write()?;
-        let now = store::clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let authority = store::authority(&tx, owner.recipient_root, now)?;
         authority.authorize_primary_management(owner.actor, "profile", now)?;
         let home = store::home(&tx, owner.recipient_root)?;

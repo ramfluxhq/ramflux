@@ -48,6 +48,15 @@ fn initialize(path: &std::path::Path) -> TestResult<(RouterRedbStore, Fixture)> 
     Ok((store, fixture))
 }
 fn policy(f: &Fixture, id: u8, revision: u64, mode: ReachMode) -> TestResult<Operation> {
+    policy_at(f, id, revision, mode, NOW)
+}
+fn policy_at(
+    f: &Fixture,
+    id: u8,
+    revision: u64,
+    mode: ReachMode,
+    now: u64,
+) -> TestResult<Operation> {
     Ok(Operation::Policy {
         update: f.key.sign_reach_policy(
             ReachPolicy {
@@ -63,11 +72,11 @@ fn policy(f: &Fixture, id: u8, revision: u64, mode: ReachMode) -> TestResult<Ope
                     &f.authority.envelope().body.master_certificate,
                 )?,
                 actor: f.actor.clone(),
-                issued_at: NOW,
-                expires_at: NOW + 300,
+                issued_at: now,
+                expires_at: now + 300,
             },
             &f.authority,
-            NOW,
+            now,
         )?,
     })
 }
@@ -101,12 +110,12 @@ fn cr_home_policy_cas_exact_retry_and_closed_default_survive_reopen() -> TestRes
         ),
         "changed bytes under the same operation id must conflict"
     );
-    let next = policy(&f, 12, 1, ReachMode::Open)?;
-    store.reach_owner_commit(owner(&f), &next, NOW)?;
-    let stale = policy(&f, 13, 1, ReachMode::ContactsOnly)?;
+    let next = policy_at(&f, 12, 1, ReachMode::Open, NOW + 301)?;
+    store.reach_owner_commit(owner(&f), &next, NOW + 301)?;
+    let stale = policy_at(&f, 13, 1, ReachMode::ContactsOnly, NOW + 301)?;
     assert!(
         matches!(
-            store.reach_owner_commit(owner(&f), &stale, NOW),
+            store.reach_owner_commit(owner(&f), &stale, NOW + 301),
             Err(super::super::ReachError::Revision(2))
         ),
         "stale policy CAS cannot overwrite a newer decision"
@@ -192,3 +201,39 @@ mod costs;
 mod groups;
 
 mod provenance;
+
+#[test]
+fn cr_refused_command_clock_floor_survives_rollback_and_reopen() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("refusal-clock.redb");
+    let (store, f) = initialize(&path)?;
+    store.reach_owner_commit(owner(&f), &policy(&f, 100, 0, ReachMode::ContactsOnly)?, NOW)?;
+    let expired = policy(&f, 101, 1, ReachMode::Open)?;
+    assert!(
+        store.reach_owner_commit(owner(&f), &expired, NOW + 300).is_err(),
+        "the actual command must reach and fail its exact submission expiry"
+    );
+    drop(store);
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    assert_eq!(
+        store.reach_fenced_now(NOW + 1)?,
+        NOW + 300,
+        "a refused transaction cannot roll back the durable restrictive UTC observation"
+    );
+    assert!(
+        store.reach_owner_commit(owner(&f), &expired, NOW + 1).is_err(),
+        "wall-clock rollback and restart cannot revive the same expired signed command"
+    );
+    let saved = store.reach_account(&f.root)?.ok_or("original policy")?;
+    assert_eq!(
+        saved.policy_revision(),
+        1,
+        "neither refusal may acknowledge or partially apply a new policy"
+    );
+    assert_eq!(
+        saved.policy.ok_or("retained policy")?.body.mode,
+        ReachMode::ContactsOnly,
+        "time rollback must not manufacture an open-account transition"
+    );
+    Ok(())
+}

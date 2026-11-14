@@ -339,6 +339,7 @@ impl RouterRedbStore {
         let source_home = peer.node();
         let envelope = &submission.envelope;
         let _home_gate = self.acquire_submission(&envelope.target_delivery_id)?;
+        let now = self.reach_fenced_now(now)?;
         verify_source(peer, submission, now)?;
         let (root, device) =
             ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)?
@@ -346,8 +347,7 @@ impl RouterRedbStore {
         if root != route.recipient_root {
             return Err(refuse(Reason::ReachRouteInvalid));
         }
-        let tx = self.begin_write()?;
-        let now = store::clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         maintenance::clean(&tx, now)?;
         // The writer's durable clock may have advanced beyond the pre-writer proof check.
         verify_source(peer, submission, now)?;
@@ -440,8 +440,7 @@ impl RouterRedbStore {
         {
             return Err(refuse(Reason::ForeignInvalidFrame));
         }
-        let tx = self.begin_write()?;
-        let now = store::clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         maintenance::clean(&tx, now)?;
         let authority = store::authority(&tx, owner.recipient_root, now)?;
         authority.authorize(owner.actor, "message", now)?;

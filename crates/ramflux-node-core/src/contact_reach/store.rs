@@ -80,9 +80,14 @@ pub(super) fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64> {
         return Err(refuse(Reason::ForeignUnavailable));
     }
     let mut table = tx.open_table(CLOCK).map_err(storage)?;
-    let previous = table.get("floor").map_err(storage)?.map_or(0, |v| v.value());
-    let fenced = now.max(previous);
-    table.insert("floor", fenced).map_err(storage)?;
+    let previous = table.get("floor").map_err(storage)?.map(|v| v.value());
+    let fenced = now.max(previous.unwrap_or(0));
+    if fenced > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+        return Err(refuse(Reason::ForeignUnavailable));
+    }
+    if previous != Some(fenced) {
+        table.insert("floor", fenced).map_err(storage)?;
+    }
     Ok(fenced)
 }
 pub(super) fn load(tx: &redb::WriteTransaction, root: &str) -> Result<AccountReach> {
@@ -187,6 +192,44 @@ fn key(root: &str, id: &str) -> Result<String> {
 }
 
 impl RouterRedbStore {
+    /// Commit the restrictive UTC observation independently of an operation that may refuse.
+    pub(in crate::contact_reach) fn reach_fenced_now(&self, now: u64) -> Result<u64> {
+        if now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+            return Err(refuse(Reason::ForeignUnavailable));
+        }
+        {
+            let read = self.migration_db().begin_read().map_err(storage)?;
+            match read.open_table(CLOCK) {
+                Ok(table) => {
+                    if let Some(floor) = table.get("floor").map_err(storage)?.map(|v| v.value()) {
+                        if floor > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+                            return Err(refuse(Reason::ForeignUnavailable));
+                        }
+                        if floor >= now {
+                            return Ok(floor);
+                        }
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(error) => return Err(storage(error)),
+            }
+        }
+        let mut tx = self.begin_write()?;
+        tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        let fenced = clock(&tx, now)?;
+        tx.commit()?;
+        Ok(fenced)
+    }
+    pub(in crate::contact_reach) fn begin_reach_write(
+        &self,
+        now: u64,
+    ) -> Result<(crate::router_store::direct_write::DirectWrite<'_>, u64)> {
+        let now = self.reach_fenced_now(now)?;
+        let tx = self.begin_write()?;
+        let now = clock(&tx, now)?;
+        Ok((tx, now))
+    }
+
     /// Retain bounded query correlation separately from permanent authority pins.
     /// Calling this does not grant contact, delivery, directory or own-copy permission.
     /// # Errors
@@ -201,8 +244,7 @@ impl RouterRedbStore {
         if encoded(query)?.len() > 4096 {
             return Err(refuse(Reason::ForeignPayloadTooLarge));
         }
-        let tx = self.begin_write()?;
-        let now = clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let authority = authority(&tx, owner.recipient_root, now)?;
         authority.authorize(owner.actor, "message", now)?;
         let home = home(&tx, owner.recipient_root)?;
@@ -280,8 +322,7 @@ impl RouterRedbStore {
         peer_root: &str,
         now: u64,
     ) -> Result<Option<ramflux_protocol::home_migration::RecordEvidence>> {
-        let tx = self.begin_write()?;
-        let now = clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         authority(&tx, owner.recipient_root, now)?.authorize(owner.actor, "message", now)?;
         let trust_key = key(owner.recipient_root, peer_root)?;
         let previous = tx
@@ -307,8 +348,7 @@ impl RouterRedbStore {
         peer: &ramflux_crypto::contact_reach::VerifiedPeer,
         now: u64,
     ) -> Result<()> {
-        let tx = self.begin_write()?;
-        let now = clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         authority(&tx, owner.recipient_root, now)?.authorize(owner.actor, "message", now)?;
         let key = key(owner.recipient_root, &query.nonce)?;
         let mut table = tx.open_table(QUERIES).map_err(storage)?;
@@ -365,8 +405,7 @@ impl RouterRedbStore {
             _ => custody::framed_hash(OPERATION_HASH_DOMAIN, operation)?,
         };
         let operation_key = key(owner.recipient_root, id)?;
-        let tx = self.begin_write()?;
-        let now = clock(&tx, now)?;
+        let (tx, now) = self.begin_reach_write(now)?;
         let current = authority(&tx, owner.recipient_root, now)?;
         let local_home = home(&tx, owner.recipient_root)?;
         let home_hash = ramflux_protocol::home_migration::record_hash(&local_home.record)?;

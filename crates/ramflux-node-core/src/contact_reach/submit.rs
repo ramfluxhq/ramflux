@@ -66,8 +66,7 @@ impl ReachService {
         // No writer or account lock survives the network call. Verify the current local source,
         // including its original branch signature; an authenticated session alone is insufficient.
         {
-            let tx = store.begin_write()?;
-            let now = store::clock(&tx, now)?;
+            let (tx, now) = store.begin_reach_write(now)?;
             let source = &submission.route.body.source.account_anchor;
             if source != owner.recipient_root || source != &owner.actor.account_anchor {
                 return Err(refuse(Reason::ForeignReadRefused));
