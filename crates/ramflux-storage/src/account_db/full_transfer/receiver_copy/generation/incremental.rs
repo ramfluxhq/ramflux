@@ -75,7 +75,7 @@ impl FullPreparedReceiverDatabase {
         }
         result?;
         drop(target);
-        super::super::super::stage::open_regular(&self.0.path, false)?.sync_all()?;
+        super::super::super::stage::sync_regular(&self.0.path)?;
         let sealed = self.0.verify_prepared(stage)?;
         *self.1.lock().map_err(|_| wrong())? = sealed;
         Ok(union)

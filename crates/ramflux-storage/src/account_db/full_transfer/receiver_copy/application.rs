@@ -167,10 +167,20 @@ impl FullReceiverBaseCopy {
         stage: &FullTransferStage<'_>,
         receipt: Option<Zeroizing<Vec<u8>>>,
     ) -> Result<(), StorageError> {
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(5)?;
         for name in ["private.db", "contributions.db"] {
-            super::super::stage::open_regular(&self.scratch.path.join(name), false)?.sync_all()?;
+            super::super::stage::sync_regular(&self.scratch.path.join(name))?;
+            #[cfg(test)]
+            super::super::stage_tests::process_cuts::checkpoint(if name == "private.db" {
+                6
+            } else {
+                7
+            })?;
         }
         crate::sync_path::sync_path(&self.scratch.path)?;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(8)?;
         let workspace =
             self.scratch.path.file_name().and_then(|n| n.to_str()).ok_or_else(wrong)?.to_owned();
         let key = Zeroizing::new(*self.key.bytes());
@@ -193,7 +203,11 @@ impl FullReceiverBaseCopy {
             }
             Ok(())
         })?;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(9)?;
         super::super::stage::sync_stage(&stage.directory)?;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(10)?;
         self.observation.require_current(stage.db)
     }
     pub(super) fn retain_for_installation(
@@ -270,6 +284,8 @@ impl FullReceiverBaseCopy {
         }
         let hash = self.hash.clone();
         let nonce = application.nonce;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(11)?;
         stage.connection.call_immediate(move |tx| {
             let old:Option<Vec<u8>>=tx.query_row("SELECT bytes FROM receiver_receipt WHERE manifest_hash=?1",params![hash],|r|r.get(0)).optional()?;
             if old.is_some_and(|old|old.as_slice()!=bytes.as_slice()) { return Err(rusqlite::Error::InvalidQuery); }
@@ -277,7 +293,11 @@ impl FullReceiverBaseCopy {
             if tx.execute("UPDATE manifest SET verified=1 WHERE direction=0 AND manifest_hash=?1 AND root_verified=1",params![hash])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
             Ok(())
         })?;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(12)?;
         super::super::stage::sync_stage(&stage.directory)?;
+        #[cfg(test)]
+        super::super::stage_tests::process_cuts::checkpoint(13)?;
         self.observation.require_current(stage.db)
     }
 }

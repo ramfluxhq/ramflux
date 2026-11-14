@@ -166,7 +166,7 @@ impl FullReceiverDatabaseWork {
         tx.execute("INSERT INTO pairing_adoption(account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref,full_generation_nonce,full_initial_union_root) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(account_id) DO UPDATE SET operation_id=excluded.operation_id,record_hash=excluded.record_hash,local_ref=excluded.local_ref,local_role=excluded.local_role,branch_vault_ref=excluded.branch_vault_ref,data_vault_ref=excluded.data_vault_ref,primary_vault_ref=excluded.primary_vault_ref,full_generation_nonce=excluded.full_generation_nonce,full_initial_union_root=excluded.full_initial_union_root",params![row.account_id,row.operation_id,row.record_hash,row.local_ref,row.local_role,row.branch_vault_ref,row.data_vault_ref,row.primary_vault_ref,row.full_generation_nonce,row.full_initial_union_root])?;
         tx.commit()?;
         drop(target);
-        super::super::stage::open_regular(&self.path, false)?.sync_all()?;
+        super::super::stage::sync_regular(&self.path)?;
         crate::sync_path::sync_path(parent)?;
         Ok(())
     }

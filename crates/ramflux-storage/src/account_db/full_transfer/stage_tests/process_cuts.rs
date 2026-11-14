@@ -15,6 +15,7 @@ use std::{
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 const ROOT: &str = "RAMFLUX_TEST_PAIRING_CHUNK_CUT_ROOT";
 const CUT: &str = "RAMFLUX_TEST_PAIRING_CHUNK_CUT";
+mod application;
 const CHILD: &str = "account_db::full_transfer::stage_tests::process_cuts::chunk_writer_child";
 const PASSWORD: &[u8] = b"original-process-cut-password";
 thread_local! { static ARMED: Cell<Option<u8>> = const { Cell::new(None) }; }
@@ -45,10 +46,13 @@ fn reference(root: &Path) -> TestResult<FullStageReference> {
 fn chunk_writer_child() -> TestResult {
     let Some(root) = std::env::var_os(ROOT) else { return Ok(()) };
     let cut: u8 = std::env::var(CUT)?.parse()?;
-    if cut > 4 {
-        return Err("test: unknown chunk durability cut".into());
+    if cut > 13 {
+        return Err("test: unknown stage durability cut".into());
     }
     let root = std::path::PathBuf::from(root);
+    if cut >= 5 {
+        return application::write(&root, cut);
+    }
     let db = open(&root)?;
     let (_, manifest, bytes) = fixture()?;
     let stage = db.open_full_stage_reference(reference(&root)?, PairingRole::Responder, 604_801)?;

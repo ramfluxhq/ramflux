@@ -343,8 +343,13 @@ pub(super) fn write_new_atomic(
     crate::sync_path::sync_path(directory)?;
     Ok(())
 }
+pub(super) fn sync_regular(path: &Path) -> Result<(), StorageError> {
+    // Windows FlushFileBuffers requires write access, even for a metadata-only flush.
+    open_regular(path, cfg!(windows))?.sync_all()?;
+    Ok(())
+}
 pub(super) fn sync_stage(directory: &Path) -> Result<(), StorageError> {
-    open_regular(&directory.join("stage.db"), false)?.sync_all()?;
+    sync_regular(&directory.join("stage.db"))?;
     crate::sync_path::sync_path(directory)?;
     Ok(())
 }
