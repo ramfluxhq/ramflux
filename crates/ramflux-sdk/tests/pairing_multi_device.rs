@@ -263,7 +263,10 @@ fn diagnostics() {
         let filtered = tracing_subscriber::fmt::layer().with_test_writer().with_filter(
             tracing_subscriber::filter::filter_fn(|metadata| {
                 *metadata.level() <= tracing::Level::DEBUG
-                    && metadata.target().starts_with("ramflux_sdk::custody::pairing::coordinator")
+                    && (metadata.target().starts_with("ramflux_sdk::custody::pairing::coordinator")
+                        || metadata
+                            .target()
+                            .starts_with("ramflux_sdk::custody::pairing::full_epoch"))
             }),
         );
         let _ = tracing_subscriber::registry().with(filtered).try_init();

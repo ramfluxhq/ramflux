@@ -308,12 +308,17 @@ impl dyn FullPairingTransport + '_ {
             loop {
                 run.live()?;
                 if let Some(proof) = &run.proof {
+                    tracing::debug!(
+                        role = run.role.as_str(),
+                        "full original-branch proof submitted"
+                    );
                     let reply = self.prove_full(origin, proof).await?;
                     if let Some(ready) = run.token(reply)? {
                         return Ok(ready);
                     }
                 } else {
                     let reply = if !sent_hello && let Some(hello) = &run.hello {
+                        tracing::debug!(role = run.role.as_str(), "full discovery hello submitted");
                         let value = self.hello_full(origin, hello).await?;
                         sent_hello = true;
                         value
@@ -327,6 +332,11 @@ impl dyn FullPairingTransport + '_ {
                             Err(error) => return Err(error),
                         }
                     };
+                    tracing::debug!(
+                        role = run.role.as_str(),
+                        template = reply.template.is_some(),
+                        "full discovery reply received"
+                    );
                     let had_hello = run.hello.is_some();
                     run.discovery(&reply, &mut sign)?;
                     if !had_hello {
