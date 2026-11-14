@@ -90,6 +90,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         self.require_group_join_primary()?;
         self.check_group_decline_fence(group)?;
+        self.require_reach_group_roster_unforked(group)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             let state = db.shared_group_state(group)?.ok_or_else(invalid)?;
@@ -134,6 +135,7 @@ impl RamfluxClient {
     ) -> Result<Operation, SdkError> {
         self.require_group_join_primary()?;
         self.check_group_decline_fence(group)?;
+        self.require_reach_group_roster_unforked(group)?;
         let db = self.account_db()?;
         let mut intent: JoinIntent = db.load_actor_state(&key(group))?.ok_or_else(invalid)?;
         if intent.complete {
@@ -182,6 +184,7 @@ impl RamfluxClient {
         db.write_transaction(|| {
             let current: JoinIntent = db.load_actor_state(&key(group))?.ok_or_else(invalid)?;
             self.require_group_join_primary()?;
+            self.require_reach_group_roster_unforked(group)?;
             if ramflux_protocol::canonical_json_bytes(&current)? != old
                 || self.reach_group_join_notice(group)? != intent.notice
                 || !self.own_group_acceptance(&state)?
@@ -254,6 +257,7 @@ fn initial_roster(
     let Some(Operation::Admission { update, .. }) = &intent.grant else {
         return Err(invalid());
     };
+    ramflux_crypto::contact_reach::verify_retained_admission(update, authority, now)?;
     let roots: BTreeSet<_> = state
         .view()
         .members

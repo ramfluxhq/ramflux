@@ -74,6 +74,22 @@ fn full_state_projects_all_three_members_and_the_same_epoch_and_name() -> Result
         let (root, db) = test_db(&format!("group-complete-{name}"))?;
         assert!(db.commit_shared_group_state(&third, &local)?);
         assert!(!db.commit_shared_group_state(&third, &local)?, "replay has no new epoch");
+        let current = db
+            .shared_group_state_range("group", 2, 3)?
+            .ok_or(StorageError::GroupPermissionDenied)?;
+        assert_eq!(
+            current.first().map(VerifiedGroupState::view),
+            Some(third.view()),
+            "a bounded retained range includes the current authenticated head"
+        );
+        assert!(
+            db.shared_group_state_range("group", 0, 3)?.is_none(),
+            "missing intermediate heads cannot be invented from a later snapshot"
+        );
+        assert!(
+            db.shared_group_state_range("group", 0, 65)?.is_none(),
+            "an excessive range is refused before loading history"
+        );
         assert_eq!(db.group_state("group")?.members.len(), 3);
         assert_eq!(db.group_state("group")?.group_epoch, 3);
         assert_eq!(

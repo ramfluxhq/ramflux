@@ -2,75 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native adopted-head/writer test; transport submission remains a separate boundary.
+use super::super::group_test_support::install_grant;
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
-use ramflux_protocol::{
-    contact_reach::{GROUP_JOIN_NOTICE_DOMAIN, GroupJoinNotice, Permissions},
-    group_state::GroupStateChange,
-};
-use std::{collections::BTreeMap, sync::atomic::Ordering};
-
-fn install_grant(peer: &Fixture, state: &VerifiedGroupState) -> TestResult {
-    let account = peer.client.born_v3_account.as_ref().ok_or("native peer")?;
-    let now = crate::custody::network_now()?;
-    let subject = Subject::Group {
-        group_id: state.view().group_id.clone(),
-        conversation_id: state.view().conversation_id.clone(),
-        genesis_hash: state.genesis_hash()?,
-        group_epoch: state.view().epoch,
-        membership_hash: state.snapshot().state_hash.clone(),
-    };
-    let home = ramflux_protocol::encode_base64url([24; 32]);
-    let context = ReachCommandContext {
-        actor: &account.record().body.master_certificate.body.primary_device_ref,
-        home_head_hash: &home,
-        expected_revision: 1,
-        now,
-    };
-    let notice = GroupJoinNotice {
-        version: 1,
-        recipient_root: account.record().body.account_anchor.clone(),
-        group_id: state.view().group_id.clone(),
-        conversation_id: state.view().conversation_id.clone(),
-        genesis_hash: state.genesis_hash()?,
-        epoch: state.view().epoch,
-        membership_hash: state.snapshot().state_hash.clone(),
-        inviter_root: state.creator().identity.root_commitment.clone(),
-        member_root_count: 2,
-    };
-    let mut body = account.reach_decision_body(&context, subject.clone(), Decision::Allow)?;
-    body.permissions = Some(Permissions::UNACCEPTED);
-    body.grant_until = Some(0);
-    body.notice_hash = Some(custody::framed_hash(GROUP_JOIN_NOTICE_DOMAIN, &notice)?);
-    body.evidence_hash = Some(state.snapshot().state_hash.clone());
-    let update = account.group_primary(peer.vault.as_ref())?.sign_reach_admission(
-        body,
-        account.verified(),
-        now,
-    )?;
-    let mirror = SavedReachState {
-        root: account.record().body.account_anchor.clone(),
-        revision: 2,
-        admission_revision: 2,
-        home_head_hash: home,
-        state_hash: ramflux_protocol::encode_base64url([25; 32]),
-        records: vec![StateRecord::Grant {
-            subject,
-            permissions: Permissions::UNACCEPTED,
-            grant_until: 0,
-            update,
-        }],
-        restrictions: BTreeMap::new(),
-        conflict: false,
-    };
-    // Seed the already verified mirror boundary; this test does not assert home/page verification.
-    peer.client.account_db()?.persist_client_record(
-        "reach",
-        "state",
-        &serde_json::to_value(mirror)?,
-    )?;
-    Ok(())
-}
+use ramflux_protocol::group_state::GroupStateChange;
+use std::sync::atomic::Ordering;
 
 async fn kick_fixture() -> TestResult<(Fixture, VerifiedGroupState, VerifiedGroupState)> {
     let owner = Fixture::new("reach-kick-owner").await?;
@@ -169,6 +105,17 @@ async fn cr_group_own_kick_stages_with_head_and_signs_after_commit() -> TestResu
         peer.client.prepare_reach_group_kick(peer.vault.as_ref(), context, "kick-group")?,
         operation,
         "uncertain outcomes preserve the exact signed negative command"
+    );
+    let applied = OperationResult::Admission {
+        revision: mirror.admission_revision + 1,
+        outcome: ramflux_protocol::contact_reach::Applied::Applied,
+    };
+    peer.client.apply_reach_group_kick_result("kick-group", &operation, &applied)?;
+    peer.client.apply_reach_group_kick_result("kick-group", &operation, &applied)?;
+    peer.client.stage_reach_group_kick_repair("kick-group")?;
+    assert!(
+        peer.client.prepare_reach_group_kick(peer.vault.as_ref(), context, "kick-group").is_err(),
+        "settlement and restart repair cannot resubmit or replace a completed revoke"
     );
     Ok(())
 }

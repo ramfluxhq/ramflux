@@ -204,12 +204,13 @@ impl RamfluxClient {
         }
         Ok(state)
     }
-    fn group_conflict_event(
+    pub(crate) fn group_conflict_event(
         &self,
         state: &VerifiedGroupState,
         reason: &str,
     ) -> Result<(), SdkError> {
         let group = &state.view().group_id;
+        self.pause_reach_group_roster(group)?;
         let key =
             format!("group-state/conflict-rate/{}", ramflux_protocol::encode_base64url(group));
         let now = now_unix_timestamp();

@@ -9,7 +9,9 @@ use crate::{
 };
 use ramflux_crypto::{GroupStateRelation, VerifiedGroupState};
 use ramflux_protocol::{
-    contact_reach::{Decision, OPERATION_HASH_DOMAIN, Operation, Reason, StateRecord, Subject},
+    contact_reach::{
+        Decision, OPERATION_HASH_DOMAIN, Operation, OperationResult, Reason, StateRecord, Subject,
+    },
     custody,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,7 @@ struct KickIntent {
     grant_hash: String,
     subject: Subject,
     operation: Option<Operation>,
+    complete: bool,
 }
 
 #[cfg(test)]
@@ -35,7 +38,7 @@ fn pending() -> SdkError {
     )
 }
 impl RamfluxClient {
-    fn group_reach_mirror(&self) -> Result<Option<SavedReachState>, SdkError> {
+    pub(super) fn group_reach_mirror(&self) -> Result<Option<SavedReachState>, SdkError> {
         self.account_db()?
             .client_record("reach", "state")?
             .map(serde_json::from_value)
@@ -49,20 +52,31 @@ impl RamfluxClient {
         adopted: &VerifiedGroupState,
         previous: Option<&VerifiedGroupState>,
     ) -> Result<(), SdkError> {
-        let Some(mirror) = self.group_reach_mirror()? else {
-            return Ok(());
-        };
-        if mirror.conflict {
-            return Err(pending());
-        }
-        let own = self.owned_device_identity()?;
         let Some(previous) = previous else {
             return Ok(());
         };
+        self.stage_reach_group_roster(adopted, previous)?;
         if !matches!(
             adopted.relation_to(previous)?,
             GroupStateRelation::Extension | GroupStateRelation::IncomingPreferred
-        ) || adopted
+        ) {
+            return Ok(());
+        }
+        self.enqueue_reach_group_kick(adopted)
+    }
+
+    pub(super) fn enqueue_reach_group_kick(
+        &self,
+        adopted: &VerifiedGroupState,
+    ) -> Result<(), SdkError> {
+        let Some(mirror) = self.group_reach_mirror()? else {
+            return Ok(());
+        };
+        let own = self.owned_device_identity()?;
+        if mirror.conflict || mirror.root != own.root_commitment() {
+            return Err(pending());
+        }
+        if adopted
             .view()
             .members
             .iter()
@@ -112,9 +126,21 @@ impl RamfluxClient {
                     membership_hash: adopted.snapshot().state_hash.clone(),
                 },
                 operation: None,
+                complete: false,
             },
         )?;
         Ok(())
+    }
+
+    /// Reconstruct a missing own-kick intent from the current adopted head after restore/restart.
+    /// # Errors
+    /// Refuses absent native state or unverifiable grant binding; creates no allow or roster.
+    pub fn stage_reach_group_kick_repair(&self, group: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let state = db.shared_group_state(group)?.ok_or_else(pending)?;
+            self.enqueue_reach_group_kick(&state)
+        })
     }
 
     /// Sign a committed own-kick intent against the exact verified live grant and CAS observation.
@@ -129,6 +155,9 @@ impl RamfluxClient {
     ) -> Result<Operation, SdkError> {
         let db = self.account_db()?;
         let mut intent: KickIntent = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
+        if intent.complete {
+            return Err(pending());
+        }
         if let Some(operation) = &intent.operation {
             return Ok(operation.clone());
         }
@@ -177,5 +206,48 @@ impl RamfluxClient {
             Ok::<_, SdkError>(())
         })?;
         Ok(operation)
+    }
+
+    /// Settle only the exact persisted revoke after its correlated home result.
+    /// # Errors
+    /// Refuses a changed operation or a result outside its Admission CAS binding.
+    pub fn apply_reach_group_kick_result(
+        &self,
+        group: &str,
+        operation: &Operation,
+        result: &OperationResult,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            let mut intent: KickIntent = db.load_actor_state(&key(group))?.ok_or_else(pending)?;
+            if intent.operation.as_ref() != Some(operation)
+                || !matches!(result, OperationResult::Admission { .. })
+            {
+                return Err(pending());
+            }
+            operation.validate_result(result)?;
+            intent.complete = true;
+            db.persist_actor_state(&key(group), &intent)?;
+            Ok(())
+        })
+    }
+
+    /// Submit the committed own-kick revoke outside the account writer.
+    /// # Errors
+    /// Returns primary, state, session and correlated home-result refusals without changing retries.
+    pub async fn send_reach_group_kick<S>(
+        &self,
+        connection: &mut crate::custody::CustodyConnection<S>,
+        vault: &dyn PrimaryVault,
+        context: ReachCommandContext<'_>,
+        group: &str,
+    ) -> Result<OperationResult, SdkError>
+    where
+        S: ramflux_transport::GatewaySessionTransport + Send,
+    {
+        let operation = self.prepare_reach_group_kick(vault, context, group)?;
+        let result = connection.reach_operation(operation.clone()).await?;
+        self.apply_reach_group_kick_result(group, &operation, &result)?;
+        Ok(result)
     }
 }

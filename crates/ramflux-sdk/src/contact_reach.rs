@@ -8,6 +8,9 @@ mod group_join;
 mod group_kick;
 mod group_profile;
 mod group_restrictions;
+mod group_roster;
+#[cfg(test)]
+mod group_test_support;
 mod inner;
 mod projection;
 mod verification;
@@ -182,6 +185,7 @@ impl crate::RamfluxClient {
         if saved.conflict {
             return Err(refused(Reason::HomeFork));
         }
+        self.stage_reach_group_repairs()?;
         Ok(())
     }
 }

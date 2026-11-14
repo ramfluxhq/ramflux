@@ -70,15 +70,23 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let identity = inner.identity.as_ref().ok_or_else(invalid)?;
         let group = route.group.as_ref().ok_or_else(invalid)?;
+        self.require_reach_group_roster_unforked(&group.group_id)?;
         let candidate =
             if inner.kind == 8 { crate::client::shared_group::decode_packet(body)? } else { None };
-        if let Some(candidate) = &candidate
-            && let Some(current) =
-                self.account_db()?.shared_group_state(&candidate.view().group_id)?
-        {
-            // Pure relation computation precedes binding; consent, directory and refusal staging follow it.
-            candidate.relation_to(&current)?;
-        }
+        let comparison = candidate
+            .as_ref()
+            .map(|candidate| {
+                self.account_db()?
+                    .shared_group_state(&candidate.view().group_id)
+                    .map_err(SdkError::from)
+            })
+            .transpose()?
+            .flatten();
+        // Compute the relation without effects; handle a fork only after all W/identity bindings.
+        let relation = candidate
+            .as_ref()
+            .zip(comparison.as_ref())
+            .map(|(candidate, current)| candidate.relation_to(current));
         if identity.group_id.as_deref() != Some(group.group_id.as_str())
             || identity.group_epoch != Some(group.group_epoch)
             || identity.conversation_id != route.conversation_id
@@ -105,6 +113,7 @@ impl RamfluxClient {
             {
                 return Err(invalid());
             }
+            self.require_reach_group_relation(route, &candidate, comparison.as_ref(), relation)?;
             self.require_reach_group_grant(route, &candidate.genesis_hash()?)?;
             return Ok(());
         }
@@ -139,6 +148,30 @@ impl RamfluxClient {
             return Err(invalid());
         }
         self.require_reach_group_grant(route, &adopted.genesis_hash()?)
+    }
+    fn require_reach_group_relation(
+        &self,
+        route: &Route,
+        candidate: &ramflux_crypto::VerifiedGroupState,
+        current: Option<&ramflux_crypto::VerifiedGroupState>,
+        relation: Option<Result<ramflux_crypto::GroupStateRelation, ramflux_crypto::CryptoError>>,
+    ) -> Result<(), SdkError> {
+        use ramflux_crypto::{CryptoError, GroupStateRelation};
+        let fork = match relation {
+            Some(Ok(GroupStateRelation::RemovalConflict | GroupStateRelation::Unrelated))
+            | Some(Err(CryptoError::Protocol(
+                ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+            ))) => true,
+            Some(Err(error)) => return Err(error.into()),
+            _ => false,
+        };
+        if fork {
+            let current = current.ok_or_else(invalid)?;
+            self.require_reach_group_grant(route, &current.genesis_hash()?)?;
+            self.group_conflict_event(candidate, "pending_fork")?;
+            return Err(SdkError::InboundPending("group roster is pending_fork".into()));
+        }
+        Ok(())
     }
     fn require_reach_group_grant(&self, route: &Route, genesis: &str) -> Result<(), SdkError> {
         let state: SavedReachState = serde_json::from_value(

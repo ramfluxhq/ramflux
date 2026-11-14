@@ -56,6 +56,53 @@ impl AccountDb {
             .transpose()
             .map_err(Into::into)
     }
+
+    /// Reverify one contiguous retained range, reading the history row only once.
+    /// The lower epoch is exclusive; an absent epoch or range over 64 heads returns `None`.
+    /// # Errors
+    /// Returns storage/signature errors and refuses a snapshot whose binding differs from its index.
+    pub fn shared_group_state_range(
+        &self,
+        group: &str,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<Vec<ramflux_crypto::VerifiedGroupState>>, StorageError> {
+        let Some(count) = through.checked_sub(after) else {
+            return Ok(None);
+        };
+        if count == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        if count > 64 {
+            return Ok(None);
+        }
+        let heads: Vec<Head> = self.load_actor_state(&key(group))?.unwrap_or_default();
+        let mut snapshots = std::collections::BTreeMap::new();
+        for head in heads.into_iter().rev() {
+            if head.epoch > after && head.epoch <= through {
+                snapshots.entry(head.epoch).or_insert(head.snapshot);
+            }
+        }
+        if let Some(current) = self.shared_group_state(group)?
+            && current.view().epoch > after
+            && current.view().epoch <= through
+        {
+            snapshots.insert(current.view().epoch, Some(current.snapshot().clone()));
+        }
+        let first = after.checked_add(1).ok_or(StorageError::GroupPermissionDenied)?;
+        let mut verified = Vec::new();
+        for epoch in first..=through {
+            let Some(Some(snapshot)) = snapshots.remove(&epoch) else {
+                return Ok(None);
+            };
+            let state = ramflux_crypto::verify_group_state_snapshot(snapshot)?;
+            if state.view().group_id != group || state.view().epoch != epoch {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+            verified.push(state);
+        }
+        Ok(Some(verified))
+    }
     /// # Errors
     /// Returns storage errors; only previously committed verified snapshots are known.
     pub fn knows_shared_group_head(

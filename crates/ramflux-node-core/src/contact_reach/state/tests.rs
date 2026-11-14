@@ -113,7 +113,7 @@ fn cr_reply_renews_without_friendship_and_expiry_preserves_strangers() -> TestRe
 #[test]
 fn cr_root_block_removes_all_peer_grants_but_conversation_block_is_scoped() -> TestResult {
     let (friendship, conversation, id) = subjects()?;
-    let mut state = AccountReach::default();
+    let mut state = closed_state()?;
     state.admission(command(friendship.clone(), Decision::Allow, 0), Some(&id), NOW)?;
     state.admission(command(conversation.clone(), Decision::Allow, 1), Some(&id), NOW)?;
     state.admission(command(conversation.clone(), Decision::Block, 2), Some(&id), NOW)?;
