@@ -37,6 +37,12 @@ impl Drop for DisplayMessage {
 #[serde(rename_all = "camelCase")]
 pub(super) struct DisplayEntity {
     #[serde(default)]
+    #[prost(uint32, tag = "1")]
+    pub offset: u32,
+    #[serde(default)]
+    #[prost(uint32, tag = "2")]
+    pub length: u32,
+    #[serde(default)]
     #[prost(enumeration = "g::EntityKind", tag = "3")]
     #[serde(deserialize_with = "entity_kind")]
     pub kind: i32,

@@ -120,6 +120,29 @@ fn local_search_cjk_and_normalization() -> TestResult {
         ),
         "derived terms must be bounded before deduplication or SQL"
     );
+    let visible =
+        visible_source_text("visiblecanary secretcanary", &[(14, 26)], &SearchControl::new())?;
+    f.insert("spoiler", visible.expose())?;
+    assert_eq!(
+        f.hits("visiblecanary")?.len(),
+        1,
+        "whole visible words around a spoiler remain searchable"
+    );
+    assert!(f.hits("secretcanary")?.is_empty(), "concealed words must never enter FTS tokens");
+    assert!(
+        visible_source_text("catalog", &[(3, 7)], &SearchControl::new())?
+            .expose()
+            .trim()
+            .is_empty(),
+        "hiding a word suffix must not invent an exact cat prefix"
+    );
+    assert!(
+        visible_source_text("cafe\u{301}", &[(4, 5)], &SearchControl::new())?
+            .expose()
+            .trim()
+            .is_empty(),
+        "concealment within a combining sequence must remove its whole word"
+    );
     f.insert("separated", "甲乙 乙丙")?;
     let control = SearchControl::new();
     let query = compile_query(&SearchQuery::new("test", "甲乙丙"), &control)?;

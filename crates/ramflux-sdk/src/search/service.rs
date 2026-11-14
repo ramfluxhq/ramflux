@@ -310,6 +310,14 @@ impl LocalSearch {
             }
             bytes = bytes.saturating_add(source_bytes);
             for source in sources {
+                match source.validate() {
+                    Ok(()) => {}
+                    Err(SearchError::Capacity) => {
+                        db.search_mark_partial(&self.activation, false, control)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 match db.search_replace(&self.activation, source, batch.canonical, control) {
                     Err(SearchError::Capacity) => {
                         db.search_mark_partial(&self.activation, true, control)?;

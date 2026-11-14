@@ -166,15 +166,16 @@ impl AccountDb {
         let object = object.to_owned();
         let manifest = manifest.to_owned();
         self.search_call(control,move |db| {
-            let mut statement=db.prepare("SELECT CASE WHEN length(CAST(p.commitment AS BLOB))<=256 THEN p.commitment END,CASE WHEN length(CAST(r.reference_hash AS BLOB))<=256 THEN r.reference_hash END FROM object_retention_payload p INDEXED BY object_retention_wire CROSS JOIN object_retention_reference r INDEXED BY object_reference_payload ON r.commitment=p.commitment CROSS JOIN object_message_reference m ON m.reference_hash=r.reference_hash AND m.message_id=?1 WHERE p.wire_id=?2 AND p.manifest_hash=?3 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment) LIMIT 129")?;
+            let mut statement=db.prepare("SELECT CASE WHEN length(CAST(p.commitment AS BLOB))<=256 THEN p.commitment END,CASE WHEN length(CAST(r.reference_hash AS BLOB))<=256 THEN r.reference_hash END,CASE WHEN length(CAST(r.selector AS BLOB))<=256 THEN r.selector END FROM object_message_reference m CROSS JOIN object_retention_reference r ON r.reference_hash=m.reference_hash CROSS JOIN object_retention_payload p ON p.commitment=r.commitment WHERE m.message_id=?1 AND p.wire_id=?2 AND p.manifest_hash=?3 AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=p.commitment) AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id IN(p.wire_id,r.selector) AND (o.tombstoned<>0 OR o.object_state='tombstoned')) LIMIT 129")?;
             let mut rows=statement.query(params![message,object,manifest])?;
             let mut dependencies=Vec::new();let mut references=0;
             while let Some(row)=rows.next()? {
                 references+=1;if references>128 {return Err(SearchError::Capacity);}
-                let commitment:String=row.get(0)?;let reference:String=row.get(1)?;
+                let commitment:String=row.get(0)?;let reference:String=row.get(1)?;let selector:String=row.get(2)?;
                 dependencies.push(SearchDependency{table:"object_retention_payload".into(),key:commitment.clone()});
                 dependencies.push(SearchDependency{table:"object_erasure_fence".into(),key:commitment});
                 dependencies.push(SearchDependency{table:"object_retention_reference".into(),key:reference});
+                dependencies.push(SearchDependency{table:"object_index".into(),key:selector});
             }
             Ok((references>0).then_some(dependencies))
         })

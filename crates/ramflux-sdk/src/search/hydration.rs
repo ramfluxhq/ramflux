@@ -95,9 +95,7 @@ pub(super) fn sources(
         };
         display
     };
-    if message.sealed_group.is_some()
-        || message.entities.iter().any(|entity| entity.kind == g::EntityKind::EntitySpoiler as i32)
-    {
+    if message.sealed_group.is_some() {
         return Ok(Vec::new());
     }
     let mut dependencies = vec![
@@ -116,8 +114,25 @@ pub(super) fn sources(
         dependencies.push(dependency("shared_group_member_projection", group));
         dependencies.push(dependency("group_projection", group));
     }
+    if message.entities.len() > 1024 {
+        return Err(SearchError::Capacity.into());
+    }
+    let concealed = message
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == g::EntityKind::EntitySpoiler as i32)
+        .map(|entity| {
+            entity
+                .offset
+                .checked_add(entity.length)
+                .map(|end| (entity.offset, end))
+                .ok_or(SearchError::IndexUnavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let visible =
+        ramflux_storage::local_search::visible_source_text(&message.text, &concealed, control)?;
     let mut output = Vec::new();
-    if !message.text.is_empty() {
+    if !visible.expose().trim().is_empty() {
         output.push(SearchSource {
             kind: SearchKind::Message,
             source_ref: key.into(),
@@ -127,10 +142,25 @@ pub(super) fn sources(
             revision: input.revision,
             timestamp: input.created_at,
             expires_at: input.expires_at,
-            text: message.text.as_str().into(),
+            text: visible,
             dependencies: dependencies.clone(),
         });
     }
+    output.extend(attachment_sources(db, activation, &input, &message, &dependencies, control)?);
+    Ok(output)
+}
+
+fn attachment_sources(
+    db: &ramflux_storage::AccountDb,
+    activation: &SearchActivation,
+    input: &ramflux_storage::local_search::SearchMessageInput,
+    message: &super::projection::DisplayMessage,
+    dependencies: &[SearchDependency],
+    control: &SearchControl,
+) -> Result<Vec<SearchSource>, SdkError> {
+    let key = input.message_id.as_str();
+    let mut output = Vec::new();
+    let mut bytes = 0usize;
     for (ordinal, media) in message.media.iter().take(32).enumerate() {
         control.check()?;
         let Some(name) = media.file_name.as_ref() else { continue };
@@ -149,10 +179,10 @@ pub(super) fn sources(
         else {
             continue;
         };
-        let mut dependencies = dependencies.clone();
+        let mut dependencies = dependencies.to_vec();
         dependencies.extend(admitted);
         dependencies.push(dependency("object_index", &media.object_id));
-        output.push(SearchSource {
+        let source = SearchSource {
             kind: SearchKind::Attachment,
             source_ref: format!("{key}/{}/{ordinal}", media.object_id),
             source_key: key.into(),
@@ -163,7 +193,32 @@ pub(super) fn sources(
             expires_at: input.expires_at,
             text: basename.into(),
             dependencies,
-        });
+        };
+        source.validate()?;
+        let strings = source
+            .text
+            .expose()
+            .len()
+            .saturating_add(source.source_ref.len())
+            .saturating_add(source.source_key.len())
+            .saturating_add(source.conversation_id.len())
+            .saturating_add(source.message_id.as_ref().map_or(0, String::len))
+            .saturating_add(source.dependencies.iter().fold(0usize, |total, dependency| {
+                total.saturating_add(dependency.table.len()).saturating_add(dependency.key.len())
+            }));
+        bytes = bytes
+            .saturating_add(strings.saturating_mul(2))
+            .saturating_add(
+                source
+                    .dependencies
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SearchDependency>()),
+            )
+            .saturating_add(std::mem::size_of::<SearchSource>());
+        if bytes > ramflux_storage::local_search::MAX_REBUILD_BYTES {
+            return Err(SearchError::Capacity.into());
+        }
+        output.push(source);
     }
     Ok(output)
 }

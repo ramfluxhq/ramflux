@@ -196,3 +196,54 @@ pub fn search_excerpt(text: &str) -> SearchText {
     }
     std::mem::take(&mut *output).into()
 }
+
+/// Removes concealed scalar ranges and every word they intersect, preserving separators.
+/// Partial hidden words must not manufacture an exact visible prefix match.
+/// # Errors
+/// Refuses malformed spans, oversized inputs and cancellation/deadline failures.
+pub fn visible_source_text(
+    source: &str,
+    concealed: &[(u32, u32)],
+    control: &SearchControl,
+) -> SearchResult<SearchText> {
+    const MAX_CONCEALED_RANGES: usize = 1024;
+    if source.len() > MAX_NORMALIZED_BYTES || concealed.len() > MAX_CONCEALED_RANGES {
+        return Err(SearchError::Capacity);
+    }
+    control.check()?;
+    if concealed.is_empty() {
+        return Ok(source.into());
+    }
+    let mut ranges = concealed.to_vec();
+    if ranges.iter().any(|(start, end)| start >= end) {
+        return Err(SearchError::IndexUnavailable);
+    }
+    ranges.sort_unstable();
+    let mut range = 0usize;
+    let mut offset = 0u32;
+    let mut hidden_previous = false;
+    let mut output = Zeroizing::new(String::new());
+    for segment in source.split_word_bounds() {
+        control.check()?;
+        let end = offset
+            .checked_add(u32::try_from(segment.chars().count()).map_err(|_| SearchError::Capacity)?)
+            .ok_or(SearchError::Capacity)?;
+        while ranges.get(range).is_some_and(|(_, end)| *end <= offset) {
+            range += 1;
+        }
+        let hidden = ranges.get(range).is_some_and(|(start, _)| *start < end);
+        if hidden {
+            if !hidden_previous {
+                output.push(' ');
+            }
+        } else {
+            output.push_str(segment);
+        }
+        hidden_previous = hidden;
+        offset = end;
+    }
+    if ranges.iter().any(|(_, end)| *end > offset) {
+        return Err(SearchError::IndexUnavailable);
+    }
+    Ok(std::mem::take(&mut *output).into())
+}

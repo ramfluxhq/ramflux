@@ -17,7 +17,7 @@ pub use sources::SearchMessageInput;
 mod types;
 mod watch;
 pub use control::SearchControl;
-pub use normalizer::{NormalizedDocument, normalize_document, search_excerpt};
+pub use normalizer::{NormalizedDocument, normalize_document, search_excerpt, visible_source_text};
 pub use query::{CompiledQuery, compile_query};
 pub use types::*;
 pub use watch::{SearchRegistration, SearchWatch};

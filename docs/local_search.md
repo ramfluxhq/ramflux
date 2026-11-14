@@ -21,6 +21,8 @@ the archive cannot grant itself admission.
 Ordinary words match exactly, using pinned Unicode 16 normalization, case folding
 and word segmentation. Accents remain significant. Han, Hiragana, Katakana and
 Hangul use unigrams/bigrams and authoritative contiguous matching for longer runs.
+Words intersecting a spoiler are omitted as a whole, so hiding a suffix cannot
+create a prefix match; other visible words and admitted basenames remain eligible.
 There are no prefix, wildcard, boolean or FTS expression operators in user input.
 Queries contain at most 1,024 UTF-8 bytes, 16 clauses and 128 derived terms; words
 contain at most 256 bytes. Source normalization processes at most 32 KiB at a

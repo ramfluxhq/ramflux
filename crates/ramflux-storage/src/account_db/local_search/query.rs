@@ -129,6 +129,20 @@ pub fn compile_query(
         write!(&mut *expression, "\"{}\"", term.expose())
             .map_err(|_| SearchError::IndexUnavailable)?;
     }
+    let fingerprint = query_fingerprint(request, &expression, &cjk_runs)?;
+    Ok(CompiledQuery {
+        expression: std::mem::take(&mut *expression).into(),
+        fingerprint,
+        terms,
+        cjk_runs,
+    })
+}
+
+fn query_fingerprint(
+    request: &SearchQuery,
+    expression: &str,
+    cjk_runs: &[SearchText],
+) -> SearchResult<[u8; 32]> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"ramflux.local-search.query.v1");
     hash.update(
@@ -138,7 +152,7 @@ pub fn compile_query(
     hash.update(
         &u64::try_from(cjk_runs.len()).map_err(|_| SearchError::InvalidQuery)?.to_le_bytes(),
     );
-    for run in &cjk_runs {
+    for run in cjk_runs {
         hash.update(
             &u64::try_from(run.expose().len())
                 .map_err(|_| SearchError::InvalidQuery)?
@@ -160,12 +174,7 @@ pub fn compile_query(
         hash.update(scope.as_bytes());
     }
     hash.update(&[u8::from(request.include_snippets)]);
-    Ok(CompiledQuery {
-        expression: std::mem::take(&mut *expression).into(),
-        fingerprint: *hash.finalize().as_bytes(),
-        terms,
-        cjk_runs,
-    })
+    Ok(*hash.finalize().as_bytes())
 }
 
 impl CompiledQuery {

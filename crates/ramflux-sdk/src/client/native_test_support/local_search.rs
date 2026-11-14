@@ -147,6 +147,8 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 1,
                 "rebuild must index the accepted replacement"
             );
+            spoiler_scope(&source, &mut target, &runtime, &conversation).await?;
+            attachment_scope(&source, &mut target, &runtime, &conversation).await?;
             expiry_boundary(&mut target, &runtime, &original.id).await?;
             target
                 .client
@@ -364,13 +366,10 @@ async fn expiry_boundary(target: &mut Fixture, runtime: &LocalSearch, id: &[u8])
         hits(runtime, &target.client, "newcanary").await?.items.is_empty(),
         "authoritative hydration must refuse expired sources before the cleanup sweep"
     );
-    assert_eq!(
-        target
-            .client
-            .account_db()?
-            .expire_disappearing_messages(&input.conversation_id, expiry)?
-            .len(),
-        1,
+    let retired =
+        target.client.account_db()?.expire_disappearing_messages(&input.conversation_id, expiry)?;
+    assert!(
+        retired.iter().any(|tombstone| tombstone.message_id == message),
         "real expiry must retire the original source and its search footprints"
     );
     target
@@ -379,5 +378,165 @@ async fn expiry_boundary(target: &mut Fixture, runtime: &LocalSearch, id: &[u8])
         .as_mut()
         .ok_or("unlocked database")?
         .set_clock(ramflux_storage::AccountClock::Real);
+    Ok(())
+}
+
+async fn spoiler_scope(
+    source: &Fixture,
+    target: &mut Fixture,
+    runtime: &LocalSearch,
+    conversation: &str,
+) -> TestResult {
+    let identity = source.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let body = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "visiblecanary secretcanary".into(),
+                entities: vec![g::Entity {
+                    offset: 14,
+                    length: 12,
+                    kind: g::EntityKind::EntitySpoiler as i32,
+                    value: None,
+                }],
+                ..Default::default()
+            })),
+        },
+    )?;
+    target.receive(source.seal_inner_to(target, &body)?, 3).await?;
+    rebuild(runtime, &target.client).await?;
+    assert!(
+        hits(runtime, &target.client, "secretcanary").await?.items.is_empty(),
+        "authenticated spoiler content must never be searchable"
+    );
+    let mut query = SearchQuery::new("spoiler-visible", "visiblecanary");
+    query.kinds = vec![SearchKind::Message];
+    query.include_snippets = true;
+    let page = runtime.query(&target.client, 1, &query).await?.take()?;
+    let item = page.items.first().ok_or("visible spoiler-free word")?;
+    assert!(
+        !item.snippet.as_ref().ok_or("opt-in snippet")?.expose().contains("secretcanary"),
+        "an opt-in snippet must not disclose concealed content while retaining whole visible words"
+    );
+    Ok(())
+}
+
+async fn attachment_scope(
+    source: &Fixture,
+    target: &mut Fixture,
+    runtime: &LocalSearch,
+    conversation: &str,
+) -> TestResult {
+    let identity = source.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let message = ramflux_protocol::encode_base64url(&identity.id);
+    let manifest = ramflux_protocol::encode_base64url([7; 32]);
+    let media =
+        [("search-wire", "/private/parent/reportcanary.pdf"), ("other-wire", "survivorcanary.pdf")]
+            .into_iter()
+            .map(|(wire, name)| g::MediaRef {
+                object_id: wire.into(),
+                manifest_digest: vec![7; 32],
+                mime_type: "application/octet-stream".into(),
+                file_name: Some(name.into()),
+                ..Default::default()
+            })
+            .collect();
+    let body = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message { media, ..Default::default() })),
+        },
+    )?;
+    target.receive(source.seal_inner_to(target, &body)?, 4).await?;
+    let query = |text: &str| {
+        let mut request = SearchQuery::new("attachment-query", text);
+        request.kinds = vec![SearchKind::Attachment];
+        request.include_snippets = true;
+        request
+    };
+    for (wire, reference) in
+        [("other-wire", "other-reference"), ("search-wire", "search-reference")]
+    {
+        admit_attachment_reference(target, &message, wire, &manifest, reference)?;
+        rebuild(runtime, &target.client).await?;
+        if wire == "other-wire" {
+            assert!(
+                runtime
+                    .query(&target.client, 1, &query("reportcanary.pdf"))
+                    .await?
+                    .take()?
+                    .items
+                    .is_empty(),
+                "an unrelated admitted attachment must not authorize the requested wire/manifest"
+            );
+        }
+    }
+    let page = runtime.query(&target.client, 1, &query("reportcanary.pdf")).await?.take()?;
+    let item = page.items.first().ok_or("admitted attachment basename")?;
+    assert!(
+        !item.snippet.as_ref().ok_or("attachment snippet")?.expose().contains("private"),
+        "attachment snippets must contain the basename without a private path"
+    );
+    let mut scoped = query("reportcanary.pdf");
+    scoped.conversation_id = Some("wrong-scope".into());
+    assert!(
+        runtime.query(&target.client, 1, &scoped).await?.take()?.items.is_empty(),
+        "attachment scope must be checked against its owning message"
+    );
+    target.client.account_db()?.set_object_tombstoned("search-wire")?;
+    assert!(
+        runtime
+            .query(&target.client, 1, &query("reportcanary.pdf"))
+            .await?
+            .take()?
+            .items
+            .is_empty(),
+        "canonical revocation must synchronously purge the filename before maintenance"
+    );
+    rebuild(runtime, &target.client).await?;
+    assert!(
+        runtime
+            .query(&target.client, 1, &query("reportcanary.pdf"))
+            .await?
+            .take()?
+            .items
+            .is_empty(),
+        "a retained reference cannot rebuild a tombstoned filename"
+    );
+    assert_eq!(
+        runtime.query(&target.client, 1, &query("survivorcanary.pdf")).await?.take()?.items.len(),
+        1,
+        "revoking one attachment must preserve an independently admitted survivor in the same message"
+    );
+    Ok(())
+}
+
+fn admit_attachment_reference(
+    target: &Fixture,
+    message: &str,
+    wire: &str,
+    manifest: &str,
+    reference: &str,
+) -> TestResult {
+    target.client.account_db()?.register_object_reference(
+        ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+        &ramflux_storage::ObjectReferenceOwner {
+            reference_hash: reference,
+            wire_id: wire,
+            manifest_hash: manifest,
+            selector: wire,
+            message_id: message,
+            reference: &serde_json::json!({"object_id":wire,"manifest_hash":manifest}),
+            metadata: &serde_json::json!({"message_id":message,"object_id":wire}),
+        },
+    )?;
     Ok(())
 }
