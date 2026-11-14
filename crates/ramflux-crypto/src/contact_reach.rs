@@ -419,6 +419,7 @@ pub fn solve_cost(
 mod provenance;
 pub use provenance::{
     verify_historical_admission, verify_historical_policy, verify_historical_roster_header,
+    verify_historical_state_records,
 };
 
 fn original_management_time(

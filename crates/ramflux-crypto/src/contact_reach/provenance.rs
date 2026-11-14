@@ -127,3 +127,6 @@ pub fn verify_historical_roster_header(
     )?;
     verify(wire::GROUP_ROSTER_DOMAIN, header, &cert.self_signing_public_key)
 }
+
+mod records;
+pub use records::verify_historical_state_records;

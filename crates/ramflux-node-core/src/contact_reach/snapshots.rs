@@ -71,10 +71,15 @@ impl Snapshots {
         let tx = store.begin_write()?;
         let now = super::store::clock(&tx, now)?;
         let authority = super::store::authority(&tx, owner.recipient_root, now)?;
-        super::store::authorize_read(&authority, owner.actor, now)?;
+        super::store::authorize_read(&authority, owner.actor, now)
+            .map_err(|_| refuse(Reason::ForeignReadRefused))?;
         let home = super::store::home(&tx, owner.recipient_root)?;
         if home.record.home() != (node.node_id(), node.public_key()) {
-            return Err(refuse(Reason::HomeRollback));
+            return Err(refuse(if proof.is_some() {
+                Reason::ForeignReadRefused
+            } else {
+                Reason::HomeRollback
+            }));
         }
         let state = super::store::load(&tx, owner.recipient_root)?;
         if state.revision < known {
@@ -128,19 +133,7 @@ impl Snapshots {
         if lease.session != session || &lease.manifest.body.requesting_device != owner.actor {
             return Err(refuse(Reason::ForeignReadRefused));
         }
-        let cipher = Aes256Gcm::new_from_slice(self.key.as_ref()).map_err(storage)?;
-        let bytes = zeroize::Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&lease.nonce),
-                    Payload {
-                        msg: &lease.ciphertext,
-                        aad: lease.manifest.body.snapshot_id.as_bytes(),
-                    },
-                )
-                .map_err(|_| refuse(Reason::ForeignUnavailable))?,
-        );
-        let image: Image = decode(&bytes, MAX_IMAGE_BYTES)?;
+        let image = lease.image(self.key.as_ref())?;
         if let Some(hash) = proof {
             let selected = image
                 .provenance
@@ -273,5 +266,23 @@ impl Snapshots {
             )
             .map_err(|_| refuse(Reason::ForeignUnavailable))?;
         Ok(Lease { manifest, ciphertext, nonce, session: session.into() })
+    }
+}
+
+impl Lease {
+    fn image(&self, key: &[u8]) -> Result<Image> {
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(storage)?;
+        let bytes = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(
+                    Nonce::from_slice(&self.nonce),
+                    Payload {
+                        msg: &self.ciphertext,
+                        aad: self.manifest.body.snapshot_id.as_bytes(),
+                    },
+                )
+                .map_err(|_| refuse(Reason::ForeignUnavailable))?,
+        );
+        Ok(decode(&bytes, MAX_IMAGE_BYTES)?)
     }
 }

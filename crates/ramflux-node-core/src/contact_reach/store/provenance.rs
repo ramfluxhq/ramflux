@@ -213,6 +213,8 @@ pub(in crate::contact_reach) fn catalogue(
         signers: signers.into_values().collect(),
         authorities: proofs.into_values().collect(),
     };
-    catalogue.validate()?;
+    catalogue.validate().map_err(|_| refuse(Reason::CustodyRefused))?;
+    ramflux_crypto::contact_reach::verify_historical_state_records(&records, &catalogue)
+        .map_err(|_| refuse(Reason::CustodyRefused))?;
     Ok(catalogue)
 }
