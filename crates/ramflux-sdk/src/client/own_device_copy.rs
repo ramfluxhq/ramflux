@@ -9,9 +9,12 @@ use aes_gcm::{
     aead::{Aead, Payload},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+#[cfg(test)]
+use serde_json::Value;
+use serde_json::json;
 use zeroize::Zeroize;
 pub(crate) const DOMAIN: &str = "ramflux.sdk.own_device_message.v2";
+#[cfg(test)]
 pub(crate) const PREFIX: &[u8] = b"ramflux.own_device_message.v2\n";
 pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
 pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
@@ -19,6 +22,7 @@ pub(crate) mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
 mod generated;
 mod generated_authority;
+#[cfg(test)]
 mod receive;
 pub(crate) mod w1;
 pub(super) const RECEIPTS: &str = "own-device/message-receipt/";
@@ -35,6 +39,7 @@ pub(crate) struct OwnDeviceMessage {
     pub(crate) context_delivery: Option<super::surface::OwnContextDelivery>,
 }
 impl OwnDeviceMessage {
+    #[cfg(test)]
     fn verify_source(
         &self,
         entry: &GatewayInboxEntry,
@@ -67,6 +72,7 @@ impl OwnDeviceMessage {
         Ok(())
     }
 
+    #[cfg(test)]
     fn recipient_slot(&self, device: &str) -> Result<&OwnKeySlot, SdkError> {
         let mut slots = self.slots.iter().filter(|slot| slot.recipient_device_id == device);
         let slot = slots.next().ok_or_else(|| invalid("own-device recipient slot ambiguity"))?;
@@ -85,6 +91,7 @@ pub(crate) struct OwnKeySlot {
     ciphertext: ramflux_crypto::DmCiphertext,
 }
 impl OwnKeySlot {
+    #[cfg(test)]
     fn object_slot(&self, id: &str, root: &str) -> SdkObjectKeySlot {
         SdkObjectKeySlot {
             schema: "ramflux.sdk.object_key_slot.dm.v2".into(),
@@ -166,6 +173,7 @@ enum ReceiptScope {
     Private { private_scope: String },
 }
 impl Receipt {
+    #[cfg(test)]
     fn validate(
         &self,
         db: &ramflux_storage::AccountDb,
@@ -219,6 +227,7 @@ impl OwnDeviceMessage {
         let body = zeroize::Zeroizing::new(plaintext[split + 1..].to_vec());
         Ok((context, body))
     }
+    #[cfg(test)]
     fn validate(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
         if self.schema != DOMAIN
             || self.id.is_empty()
@@ -231,6 +240,7 @@ impl OwnDeviceMessage {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn signing(&self) -> Result<Value, SdkError> {
         let mut body = serde_json::to_value(self)?;
         body.as_object_mut().ok_or_else(|| invalid("own-device body missing"))?.remove("signature");
@@ -239,6 +249,7 @@ impl OwnDeviceMessage {
     fn aad(&self) -> Result<Vec<u8>, SdkError> {
         Ok(ramflux_protocol::canonical_json_bytes(&(DOMAIN, &self.id))?)
     }
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
         let mut bytes = PREFIX.to_vec();
         bytes.extend(serde_json::to_vec(self)?);
@@ -251,8 +262,17 @@ impl OwnDeviceMessage {
 fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(reason.into())
 }
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum OwnPayloadKind {
+    RawInner,
+    Sent,
+    Control,
+    Surface,
+    Task,
+}
 #[derive(Clone, Copy)]
 pub(crate) struct OwnMessageInput<'a> {
+    pub payload_kind: OwnPayloadKind,
     pub id: &'a str,
     pub created_at: i64,
     pub conversation: &'a str,
@@ -260,6 +280,8 @@ pub(crate) struct OwnMessageInput<'a> {
     pub body: &'a [u8],
 }
 pub(crate) struct OwnCopyDraft {
+    group: Option<String>,
+    pub(super) payload_kind: OwnPayloadKind,
     pub(crate) packet: OwnDeviceMessage,
     pub(super) key: zeroize::Zeroizing<[u8; 32]>,
     pub(super) messages: Vec<GatewayDirectMessage>,
@@ -271,6 +293,25 @@ pub(crate) struct OwnCopyDraft {
 }
 
 impl RamfluxClient {
+    pub(crate) fn restrict_own_copy_target(
+        draft: &mut OwnCopyDraft,
+        target: &ramflux_protocol::message::QualifiedDevice,
+    ) -> Result<(), SdkError> {
+        draft.messages.retain(|message| {
+            message.recipient_principal_commitment.as_deref()
+                == Some(target.account_anchor.as_str())
+                && message.recipient_device_id.as_deref() == Some(target.device_id.as_str())
+        });
+        draft.siblings.retain(|sibling| {
+            sibling.account_anchor == target.account_anchor.as_str()
+                && sibling.device_id == target.device_id.as_str()
+                && sibling.device_epoch == target.device_epoch
+        });
+        if draft.messages.len() != 1 || draft.siblings.len() != 1 {
+            return Err(invalid("own history target is not an active sibling"));
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn prepare_own_copy_draft(
         &self,
@@ -330,8 +371,11 @@ impl RamfluxClient {
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let (body, context_delivery) =
-            self.prepare_own_surface_context(input.body, &target_keys)?;
+        let (body, context_delivery) = if matches!(input.payload_kind, OwnPayloadKind::Surface) {
+            self.prepare_own_surface_context(input.body, &target_keys)?
+        } else {
+            (zeroize::Zeroizing::new(input.body.to_vec()), None)
+        };
         let context = PrivateContext {
             message: input.id.into(),
             principal: config.principal_id.clone(),
@@ -370,6 +414,8 @@ impl RamfluxClient {
         let (messages, siblings) =
             self.own_copy_target_messages(&context, &packet, &source, &targets, input.created_at)?;
         Ok(Some(OwnCopyDraft {
+            group: context.group.clone(),
+            payload_kind: input.payload_kind,
             packet,
             key,
             messages,
@@ -424,52 +470,7 @@ impl RamfluxClient {
             .collect()
     }
 
-    pub(crate) fn seal_own_copy_prepared(
-        &self,
-        config: &GatewaySessionConfig,
-        mut draft: OwnCopyDraft,
-        materials: Vec<crate::client::routed::SendMaterial>,
-    ) -> Result<OwnDeviceMessage, SdkError> {
-        if materials.len() != draft.messages.len() {
-            return Err(invalid("own-device material count mismatch"));
-        }
-        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
-        for (message, material) in draft.messages.iter().zip(materials) {
-            let recipient = Self::qualified_recipient(message)?;
-            self.require_native_operation(
-                &self.device_identity(&recipient)?,
-                NativeOperation::Sync,
-            )?;
-            let slot = self.make_prepared_pair_object_slot(
-                crate::client::routed::PairObjectSlotRequest {
-                    config,
-                    message,
-                    object_id: &draft.packet.id,
-                    key: &draft.key,
-                    conversation: "",
-                },
-                material,
-            )?;
-            draft.packet.slots.push(OwnKeySlot {
-                recipient_device_id: slot.recipient_device_id,
-                x3dh: slot.x3dh,
-                ciphertext: slot.ciphertext,
-            });
-        }
-        self.finish_own_copy_packet(draft.packet)
-    }
-
-    fn finish_own_copy_packet(
-        &self,
-        mut packet: OwnDeviceMessage,
-    ) -> Result<OwnDeviceMessage, SdkError> {
-        packet.signature = ramflux_crypto::sign_with_device_branch(
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &packet.signing()?,
-        )?;
-        packet.bytes()?;
-        Ok(packet)
-    }
+    #[cfg(test)]
     fn apply_own_device_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -483,6 +484,7 @@ impl RamfluxClient {
             && self.receive_own_sent_message(
                 source_identity,
                 OwnMessageInput {
+                    payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
                     id: &context.message,
                     conversation: &context.conversation,
                     group: context.group.as_deref(),

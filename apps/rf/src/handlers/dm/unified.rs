@@ -3,7 +3,7 @@
 
 //! Unified message read model for `rf dm list` and `rf dm read`.
 //!
-//! Dormant until message schema v1 is the active storage generation. Output is the contract in
+//! Message schema v1 reads use the durable typed projection. Output is the contract in
 //! `docs/unified_message_read_model.md`, read from the durable store through `message.read`.
 //! The in-memory delivery page of `message.receive` is never printed on this path.
 use super::*;
@@ -17,27 +17,7 @@ pub(super) struct Query {
     pub(super) message: Option<String>,
 }
 
-impl Query {
-    fn has_read_model_flag(&self) -> bool {
-        self.limit.is_some()
-            || self.before.is_some()
-            || self.after_seq.is_some()
-            || self.message.is_some()
-    }
-}
-
-/// True when the unified path serves this command. Read-model flags are refused while dormant.
-pub(super) fn selected(query: &Query) -> Result<bool, RfError> {
-    if ramflux_protocol::schema_profile::schema_v1_live() {
-        return Ok(true);
-    }
-    if query.has_read_model_flag() {
-        return Err(RfError::Message(
-            "--limit, --before, --after-seq and --message require message schema v1".to_owned(),
-        ));
-    }
-    Ok(false)
-}
+impl Query {}
 
 /// Request body of the durable reader. Exactly one of page, change batch or single message.
 pub(super) fn request_body(query: &Query) -> Result<serde_json::Value, RfError> {
@@ -68,11 +48,11 @@ pub(super) fn request_body(query: &Query) -> Result<serde_json::Value, RfError> 
 
 /// Print one read-model response. `sync` first asks the daemon to pull and commit deliveries;
 /// its response page is discarded because only the durable store is authoritative.
-pub(super) async fn print(
+pub(super) async fn read(
     bus: &mut LocalBusClient,
     query: &Query,
     sync: bool,
-) -> Result<(), RfError> {
+) -> Result<serde_json::Value, RfError> {
     let body = request_body(query)?;
     if sync {
         bus.request(
@@ -82,12 +62,12 @@ pub(super) async fn print(
             serde_json::json!({
                 "limit": 100,
                 "conversation_id": query.conversation,
-                "auto_fetch_attachments": false,
+                "auto_fetch_attachments": true,
             }),
         )
         .await?;
     }
-    print_json(&bus.request(Some(query.account.clone()), "message", "message.read", body).await?)
+    Ok(bus.request(Some(query.account.clone()), "message", "message.read", body).await?)
 }
 
 /// `rf group read` on the unified path: sync the group through the daemon, then print the
@@ -97,10 +77,7 @@ pub(crate) async fn print_group_read(
     account: &str,
     group: &str,
     conversation: &str,
-) -> Result<bool, RfError> {
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        return Ok(false);
-    }
+) -> Result<(), RfError> {
     bus.request(
         Some(account.to_owned()),
         "group",
@@ -117,7 +94,15 @@ pub(crate) async fn print_group_read(
         message: None,
     };
     print(bus, &query, false).await?;
-    Ok(true)
+    Ok(())
+}
+
+pub(super) async fn print(
+    bus: &mut LocalBusClient,
+    query: &Query,
+    sync: bool,
+) -> Result<(), RfError> {
+    print_json(&read(bus, query, sync).await?)
 }
 
 #[cfg(test)]
@@ -136,11 +121,20 @@ mod tests {
     }
 
     #[test]
-    fn dormant_generation_keeps_the_existing_output_and_refuses_read_model_flags() {
-        assert!(matches!(selected(&query()), Ok(false)));
-        let mut flagged = query();
-        flagged.after_seq = Some(4);
-        assert!(selected(&flagged).is_err());
+    fn single_message_refuses_conflicting_cursors() {
+        let mut invalid = query();
+        invalid.message = Some("message".into());
+        invalid.before = Some("{}".into());
+        assert!(
+            request_body(&invalid).is_err(),
+            "single-message requests must refuse page cursors"
+        );
+        invalid.before = None;
+        invalid.after_seq = Some(1);
+        assert!(
+            request_body(&invalid).is_err(),
+            "single-message requests must refuse change cursors"
+        );
     }
 
     #[test]

@@ -100,12 +100,12 @@ fn forwarded_envelope_is_never_forwarded_a_second_hop() -> TestResult {
     Ok(())
 }
 #[test]
-fn committed_forward_refuses_named_fields_while_gate_off() -> TestResult {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn committed_forward_refuses_missing_named_binding() -> TestResult {
+    assert!(ramflux_protocol::schema_profile::schema_v1_live());
     let s = Scenario::prepared()?;
     s.commit(&s.seal()?)?;
     let (source, mut envelope) = input(&s)?;
-    envelope.delivery_mode = Some("durable".into());
+    envelope.collapse_tag = None;
     match s.a.core.prepare_committed_home_forward(s.a.store()?, &source, envelope, NOW + 3, 5) {
         Err(crate::NodeCoreError::DeliveryModeRefused) => Ok(()),
         other => Err(format!("exact DeliveryModeRefused, got {other:?}").into()),

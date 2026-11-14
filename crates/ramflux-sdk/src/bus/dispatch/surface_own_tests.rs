@@ -514,6 +514,7 @@ async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retr
         crate::bus::own_device_copy::stage(
             &source.client,
             OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
                 id,
                 created_at: now,
                 conversation: "thread",
@@ -588,6 +589,7 @@ async fn an_oversized_prepared_copy_is_terminal_after_one_ratchet_step() -> Test
     crate::bus::own_device_copy::stage(
         &source.client,
         OwnMessageInput {
+            payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
             id: "large",
             created_at: now_unix_timestamp(),
             conversation: "thread",

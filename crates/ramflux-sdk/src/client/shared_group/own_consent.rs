@@ -8,7 +8,8 @@ use ramflux_crypto::{RootQualifiedDeviceRef, VerifiedGroupState};
 use ramflux_protocol::{GroupStateActor, GroupStateSnapshot};
 use serde::{Deserialize, Serialize};
 const DOMAIN: &str = "ramflux.sdk.own_group_consent.v1";
-const PREFIX: &[u8] = b"ramflux.own_group_consent.v1\n";
+use prost::Message as _;
+use ramflux_protocol::message as g;
 const STORED: &str = "group-account-consent/";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,26 @@ struct Consent {
     expires_at: i64,
     signature: String,
 }
+impl Consent {
+    fn bytes(&self) -> Result<Vec<u8>, SdkError> {
+        Ok(crate::client::generated_control::control_from_payload(
+            g::control::Payload::OwnGroupConsent(g::OwnGroupConsent {
+                schema: self.schema.clone(),
+                actor: Some(g::NativeGroupActor {
+                    canonical: ramflux_protocol::canonical_json_bytes(&self.actor)?,
+                }),
+                snapshot: Some(g::NativeGroupSnapshot {
+                    canonical: ramflux_protocol::canonical_json_bytes(&self.snapshot)?,
+                }),
+                accepted: self.accepted,
+                issued_at: self.issued_at,
+                expires_at: self.expires_at,
+                signature: self.signature.clone(),
+            }),
+        )?
+        .encode_to_vec())
+    }
+}
 #[derive(Serialize, Deserialize)]
 struct Decision {
     genesis_hash: String,
@@ -31,14 +52,16 @@ struct Decision {
 fn key(group: &str) -> String {
     format!("{STORED}{}", ramflux_protocol::encode_base64url(group))
 }
-fn signing(consent: &Consent) -> Result<serde_json::Value, SdkError> {
-    let mut value = serde_json::to_value(consent)?;
-    value
-        .as_object_mut()
-        .ok_or_else(|| super::invalid("group consent object"))?
-        .remove("signature");
-    Ok(serde_json::json!({"domain":DOMAIN,"body":value}))
+fn signing(consent: &Consent) -> Result<Vec<u8>, SdkError> {
+    let control = g::Control::decode(consent.bytes()?.as_slice())
+        .map_err(|_| super::invalid("group consent typed encoding invalid"))?;
+    let Some(g::control::Payload::OwnGroupConsent(mut value)) = control.payload else {
+        return Err(super::invalid("group consent typed payload missing"));
+    };
+    value.signature.clear();
+    crate::client::task::generated::typed_transcript("OwnGroupConsent", &value.encode_to_vec())
 }
+
 fn canonical_leaf<T: serde::de::DeserializeOwned + serde::Serialize>(
     bytes: &[u8],
 ) -> Result<T, SdkError> {
@@ -151,19 +174,19 @@ impl RamfluxClient {
             expires_at: now.saturating_add(7 * 86400),
             signature: String::new(),
         };
-        consent.signature = ramflux_crypto::sign_with_device_branch(
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
             &signing(&consent)?,
-        )?;
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        );
         if !self.save_own_group_decision(&consent, state)? {
             return Err(super::invalid("local group decision did not supersede stored state"));
         }
-        let mut body = PREFIX.to_vec();
-        body.extend(serde_json::to_vec(&consent)?);
+        let body = consent.bytes()?;
         let id = ramflux_protocol::hash_base64url(DOMAIN, &body);
         crate::bus::own_device_copy::stage(
             self,
             crate::client::own_device_copy::OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::Control,
                 id: &id,
                 created_at: now,
                 conversation: "own-group-consent",
@@ -174,16 +197,25 @@ impl RamfluxClient {
         )
     }
     /// The containing own-device packet must authenticate a current sibling first.
+    #[cfg(test)]
     pub(crate) fn receive_own_group_consent(
         &self,
         source: &RootQualifiedDeviceRef,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Some(raw) = body.strip_prefix(PREFIX) else { return Ok(false) };
-        if raw.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
+        if body.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
             return Err(super::invalid("group consent byte budget"));
         }
-        let consent: Consent = ramflux_protocol::parse_i_json(raw)?;
+        if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(false);
+        }
+        let control =
+            g::Control::decode(body).map_err(|_| super::invalid("invalid own Control"))?;
+        crate::client::generated_control::validate_control_operation(&control)?;
+        let Some(g::control::Payload::OwnGroupConsent(value)) = control.payload else {
+            return Ok(false);
+        };
+        let consent = generated_consent(&value)?;
         self.apply_own_group_consent(source, &consent)
     }
 
@@ -261,10 +293,10 @@ impl RamfluxClient {
             return Err(super::invalid("group consent authority or lifetime mismatch"));
         }
         ramflux_crypto::verify_group_state_actor(&consent.actor)?;
-        ramflux_crypto::verify_device_branch_signature(
-            &actor.signing_public_key,
+        ramflux_crypto::verify_canonical_signature(
             &signing(consent)?,
             &consent.signature,
+            &actor.signing_public_key,
         )?;
         let state = ramflux_crypto::verify_group_state_snapshot(consent.snapshot.clone())?;
         if consent.accepted
@@ -299,7 +331,7 @@ mod tests {
                     role: ramflux_protocol::SharedGroupRole::Member,
                 },
             )?;
-            phone.hold_group_invitation(&state, &super::super::bootstrap::packet_bytes(&state)?)?;
+            phone.hold_group_invitation(&state, &stranger.shared_group_packet(&state, false)?)?;
             let future = now_unix_timestamp() + 120;
             phone.account_db()?.persist_actor_state(
                 &key(group),
@@ -363,12 +395,11 @@ mod tests {
                 expires_at: at + 7 * 86400,
                 signature: String::new(),
             };
-            consent.signature = ramflux_crypto::sign_with_device_branch(
-                client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
                 &signing(&consent)?,
-            )?;
-            let mut bytes = PREFIX.to_vec();
-            bytes.extend(serde_json::to_vec(&consent)?);
+                client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            );
+            let bytes = consent.bytes()?;
             Ok(bytes)
         };
         // Two independently signed devices disagree; delivery order must not choose the winner.
@@ -424,10 +455,10 @@ mod tests {
             expires_at: now + 600,
             signature: String::new(),
         };
-        consent.signature = ramflux_crypto::sign_with_device_branch(
-            own.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        consent.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
             &signing(&consent)?,
-        )?;
+            own.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        );
         let value = g::OwnGroupConsent {
             schema: consent.schema.clone(),
             actor: Some(g::NativeGroupActor {

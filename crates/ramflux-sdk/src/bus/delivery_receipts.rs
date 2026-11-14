@@ -142,8 +142,11 @@ async fn send(
             .client
             .seal_routed_as(engine, &message, &body, crate::client::routed::Route::receipt())
             .await?;
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
-        work.packet = Some(gateway_direct_message_envelope(engine.config(), &message, None)?);
+        work.packet = Some(crate::dm::gateway_generated_envelope_from_sealed(
+            engine.config(),
+            &mut message,
+            sealed,
+        )?);
         account.client.account_db()?.persist_actor_state(key, work)?;
     }
     let packet =
@@ -232,14 +235,14 @@ fn receipt_message(
         reader_device_id: receiver.device_id().into(),
         event: SdkReceiptEventBody::Delivered {
             conversation_id: work.conversation.clone(),
-            message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
+            message_id: work.message.clone(),
             delivered_at: work.at,
             receiver_device_id: receiver.device_id().into(),
             scope: "e2ee_private".into(),
             ttl_seconds: 300,
         },
     };
-    let message = GatewayDirectMessage {
+    let mut message = GatewayDirectMessage {
         conversation_id: work.conversation.clone(),
         message_id: receipt.clone(),
         envelope_id: format!("receipt_evt_{receipt}"),
@@ -252,7 +255,8 @@ fn receipt_message(
         created_at: work.at,
         ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
-    Ok((message, serde_json::to_vec(&event)?))
+    let prepared = account.client.prepare_generated_receipt(&mut message, &event)?;
+    Ok((message, prepared.wire.clone()))
 }
 
 pub(crate) mod background;

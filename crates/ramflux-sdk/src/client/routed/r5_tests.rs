@@ -27,7 +27,7 @@ pub(super) fn fresh(
 ) -> Result<GatewayInboxEntry, SdkError> {
     trust(sender, receiver)?;
     trust(receiver, sender)?;
-    let mut msg = outgoing(sender, receiver, id);
+    let mut msg = native_outgoing(sender, receiver, id)?;
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
@@ -37,9 +37,12 @@ pub(super) fn fresh(
         &msg,
         bundle,
     )?;
+    let exact = candidate_report::text_inner(sender, &msg.conversation_id, b"fresh")?;
+    msg.message_id =
+        ramflux_protocol::encode_base64url(RamfluxClient::decode_generated_inner(&exact)?.0.id);
     let encrypted = sender.client.seal_routed_with_route(
         &msg,
-        b"fresh",
+        &exact,
         Route::direct(),
         SealPair {
             local: &sender.id,
@@ -49,29 +52,44 @@ pub(super) fn fresh(
             bundle,
         },
     )?;
-    msg.encrypted_body = serde_json::to_vec(&encrypted)?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut msg, encrypted)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: receiver.id.clone(),
-        envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
+        target_delivery_id: receiver.config()?.target_delivery_id,
+        envelope,
     })
 }
 pub(super) async fn settle(alice: &mut Fixture, bob: &mut Fixture) -> Result<(), SdkError> {
-    alice.client.establish_friend_link("friend", "alice", "bob")?;
-    bob.client.establish_friend_link("friend", "bob", "alice")?;
+    for local in [&alice.client, &bob.client] {
+        local.establish_friend_link(
+            "friend",
+            &alice.client.own_account_anchor()?,
+            &bob.client.own_account_anchor()?,
+        )?;
+    }
     let entry = fresh(alice, bob, "initial")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false)).await?;
-    let reply = seal(bob, alice, outgoing(bob, alice, "reply"), b"reply")?;
+    let reply = seal(bob, alice, native_outgoing(bob, alice, "reply")?, b"reply")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     Box::pin(alice.client.apply_routed_entry(&mut ae, &pool()?, &reply, false)).await?;
     Ok(())
 }
 #[tokio::test]
 async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        verified_peer_state_loss_bootstrap_supersedes_a_settled_pair_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair_body() -> Result<(), SdkError>
+{
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
@@ -101,14 +119,27 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair() -> Resul
         .session_id;
     assert_ne!(active, old);
     assert_eq!(active, decode(&entry.envelope)?.ciphertext.session_id);
-    let reply = seal(&alice, &bob, outgoing(&alice, &bob, "after-recovery"), b"recovered")?;
-    assert_eq!(bob.client.open_routed(&reply, "bob")?.body.as_slice(), b"recovered");
+    let reply = seal(&alice, &bob, native_outgoing(&alice, &bob, "after-recovery")?, b"recovered")?;
+    let opened = bob.client.open_routed(&reply, "bob")?;
+    let (_, content) = RamfluxClient::decode_generated_inner(&opened.body)?;
+    let Some(ramflux_protocol::message::content::Value::Message(message)) = content.value else {
+        return Err(invalid("test: recovered Message missing"));
+    };
+    assert_eq!(message.text, "recovered");
     Ok(())
 }
 #[tokio::test]
 async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair() -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        unverified_fresh_bootstrap_cannot_displace_a_settled_pair_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair_body() -> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
@@ -203,8 +234,17 @@ impl ramflux_transport::GatewaySessionFrameSource for ResetWire {
 #[tokio::test]
 async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let (mut session, bundle) = alice
         .client
@@ -222,7 +262,7 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
         &bundle,
         &session,
     )?;
-    let gap = seal(&alice, &bob, outgoing(&alice, &bob, "gap"), b"past-gap")?;
+    let gap = seal(&alice, &bob, native_outgoing(&alice, &bob, "gap")?, b"past-gap")?;
     assert!(matches!(
         bob.client.open_routed(&gap, "bob"),
         Err(SdkError::Crypto(ramflux_crypto::CryptoError::MaxSkipExceeded))
@@ -248,7 +288,7 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     assert!(outer.get("conversation_id").is_none());
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     alice.client.apply_routed_entry(&mut ae, &pool()?, &reset, false).await?;
-    let next = seal(&alice, &bob, outgoing(&alice, &bob, "recovered"), b"works-after-gap")?;
+    let next = seal(&alice, &bob, native_outgoing(&alice, &bob, "recovered")?, b"works-after-gap")?;
     bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
     assert!(
         alice
@@ -267,10 +307,18 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     );
     Ok(())
 }
-#[test]
-fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 41)?;
-    let bob = Fixture::new("bob", 61)?;
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(
+        a_failed_attachment_slot_leaves_the_live_ratchet_unchanged_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged_body() -> Result<(), SdkError> {
+    let alice = Fixture::native("alice", 41).await?;
+    let bob = Fixture::native("bob", 61).await?;
     let entry = fresh(&alice, &bob, "slot-bootstrap")?;
     let mut opened = bob.client.open_routed(&entry, "bob")?;
     let before = opened.session.clone();
@@ -308,8 +356,17 @@ fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), Sd
 
 #[tokio::test]
 async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        verified_rebootstrap_also_replaces_a_passively_confirmed_pair_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair_body() -> Result<(), SdkError>
+{
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let old = alice
         .client
@@ -358,19 +415,38 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair() -> Resu
 #[tokio::test]
 async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     trust(&alice, &bob)?;
     trust(&bob, &alice)?;
     let pending = fresh(&bob, &alice, "unconfirmed-bob")?;
     let old = decode(&pending.envelope)?.ciphertext.session_id;
-    let reset = seal_as(
+    let (mut message, sealed) = seal_native_fixture(
         &alice,
         &bob,
-        outgoing(&alice, &bob, "reset"),
-        br#"{"type":"pair.session.reset.v1"}"#,
+        native_outgoing(&alice, &bob, "reset")?,
+        &candidate_report::reset_inner(&alice, &bob)?,
         Route::control(),
     )?;
+    let reset = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: bob.config()?.target_delivery_id,
+        envelope: crate::dm::gateway_generated_envelope_from_sealed(
+            &alice.config()?,
+            &mut message,
+            sealed,
+        )?,
+    };
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
     let incoming = decode(&reset.envelope)?.ciphertext.session_id;
@@ -413,4 +489,43 @@ fn an_address_shaped_device_name_is_rejected_at_live_enrollment() -> Result<(), 
         Some(("actual-root".into(), literal))
     );
     Ok(())
+}
+
+pub(super) fn native_outgoing(
+    sender: &Fixture,
+    receiver: &Fixture,
+    id: &str,
+) -> Result<GatewayDirectMessage, SdkError> {
+    let mut message = outgoing(sender, receiver, id);
+    message.conversation_id = ramflux_protocol::message::dm_scope::derive(
+        &sender.client.own_account_anchor()?,
+        &receiver.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    message.source_principal_id = sender.config()?.principal_id;
+    message.recipient_principal_commitment = Some(receiver.client.own_account_anchor()?);
+    message.target_delivery_id = receiver.config()?.target_delivery_id;
+    Ok(message)
+}
+
+pub(super) fn seal(
+    sender: &Fixture,
+    receiver: &Fixture,
+    message: GatewayDirectMessage,
+    text: &[u8],
+) -> Result<GatewayInboxEntry, SdkError> {
+    let exact = candidate_report::text_inner(sender, &message.conversation_id, text)?;
+    let mut message = message;
+    message.message_id =
+        ramflux_protocol::encode_base64url(RamfluxClient::decode_generated_inner(&exact)?.0.id);
+    let (mut message, sealed) =
+        seal_native_fixture(sender, receiver, message, &exact, Route::direct())?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut message, sealed)?;
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: receiver.config()?.target_delivery_id,
+        envelope,
+    })
 }

@@ -245,6 +245,7 @@ pub(crate) fn with_omit_locator<T>(f: impl FnOnce() -> T) -> T {
 
 impl RamfluxClient {
     /// Decrypts an own-copy packet and commits through the dormant W1 adapter.
+    #[cfg(test)]
     pub(crate) fn apply_own_copy_w1(
         &self,
         entry: &crate::GatewayInboxEntry,
@@ -262,6 +263,7 @@ impl RamfluxClient {
 
     /// Same cut as [`Self::apply_own_copy_w1`], joining an already-open receive transaction.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn apply_own_copy_w1_in(
         &self,
         tx: &ReceiveTransaction<'_>,

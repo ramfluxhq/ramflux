@@ -56,7 +56,7 @@ impl AgentBus for RfdBus {
                 | "conversation.directory"
                 | "group.members"
                 | "group.list"
-                | "message.read"
+                | "message.list"
                 | "message.receive"
                 | "bus.subscribe"
                 | "message.submit"

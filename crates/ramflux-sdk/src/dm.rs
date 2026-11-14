@@ -29,6 +29,7 @@ pub(crate) struct SdkDmFrankingMetadata {
 
 impl SdkDmFrankingMetadata {
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn from_ciphertext(ciphertext: &ramflux_crypto::DmCiphertext) -> Self {
         Self {
             sender_device_id_hash: ramflux_protocol::encode_base64url(
@@ -83,6 +84,7 @@ pub struct SdkSelectedFrankingEvidence {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkDmAttachmentEnvelope {
     pub(crate) schema: String,
     pub(crate) version: u32,
@@ -360,6 +362,7 @@ pub(crate) fn dm_session_event_id(
 /// T21-A2a / CTRL-028: the authoritative "this entry is committed" signal is the recv session
 /// checkpoint, never the plaintext projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum ReceiveTerminalDecision {
     /// The recv session snapshot already covers this envelope, so the ratchet advanced and every
     /// side effect ran; a cursor that lagged (crash between session commit and cursor commit) is
@@ -376,6 +379,7 @@ pub(crate) enum ReceiveTerminalDecision {
 /// receipt/rejection entries commit a session with no projection, and a projection written before a
 /// crashed session commit must be re-decrypted — not treated as complete — so the ratchet actually
 /// advances. Treating projection presence as "done" was the CTRL-028 torn-state window this fixes.
+#[cfg(test)]
 pub(crate) fn receive_terminal_recovery(
     projection_present: bool,
     session_checkpoint_current: bool,
@@ -386,14 +390,6 @@ pub(crate) fn receive_terminal_recovery(
     } else {
         ReceiveTerminalDecision::Decrypt
     }
-}
-
-pub(crate) fn dm_attachment_slot_conversation_id(
-    conversation_id: &str,
-    object_id: &str,
-    recipient_device_id: &str,
-) -> String {
-    format!("dm.attachment.slot:{conversation_id}:{object_id}:{recipient_device_id}")
 }
 
 pub(crate) fn dm_device_id_hash(device_id: &str) -> [u8; 32] {
@@ -416,9 +412,6 @@ pub(crate) fn apply_candidate_named_fields_with(
     collapse_tag: Option<&str>,
     report_commitment: Option<&str>,
 ) {
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        return;
-    }
     envelope.delivery_mode = Some(CANDIDATE_DELIVERY_MODE_DURABLE.to_owned());
     if let (Some(tag), Some(commitment)) = (collapse_tag, report_commitment) {
         envelope.collapse_tag = Some(tag.to_owned());
@@ -520,7 +513,7 @@ pub(crate) fn gateway_envelope_from_sealed(
     Ok(envelope)
 }
 
-/// Dedicated generated durable constructor; the generation-zero constructor stays dormant.
+/// Durable constructor retaining the exact A0 and signed metadata committed by raw-I sealing.
 pub(crate) fn gateway_generated_envelope_from_sealed(
     config: &GatewaySessionConfig,
     message: &mut GatewayDirectMessage,
@@ -528,7 +521,7 @@ pub(crate) fn gateway_generated_envelope_from_sealed(
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let (packet, committed, metadata) = sealed.into_parts();
     message.encrypted_body = serde_json::to_vec(&packet)?;
-    let mut envelope = gateway_envelope_with_policy(
+    let mut envelope = candidate_direct_message_envelope(
         config,
         message,
         None,
@@ -552,17 +545,12 @@ pub(crate) fn gateway_ephemeral_envelope_from_sealed(
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Err(SdkError::InboundRejected(
-            "generated ephemeral delivery requires schema v1".into(),
-        ));
-    }
     let (packet, committed, metadata_commitment) = sealed.into_parts();
     if metadata_commitment.is_some() {
         return Err(SdkError::InboundRejected("Message metadata on ephemeral delivery".into()));
     }
     message.encrypted_body = serde_json::to_vec(&packet)?;
-    gateway_envelope_with_policy(
+    candidate_direct_message_envelope(
         config,
         message,
         None,
@@ -581,7 +569,7 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
-    gateway_envelope_with_policy(
+    candidate_direct_message_envelope(
         config,
         message,
         franking,
@@ -595,13 +583,9 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
 }
 
 /// One profile choice for the candidate producer and its exact C/A0 construction.
-/// Ordinary legacy carriers remain dormant until the final activation change.
-pub(crate) fn candidate_outer_profile(mode: &str) -> (&'static str, u32) {
-    if mode == "ephemeral" && crate::client::target_selection::schema_v1_selected() {
-        (ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)
-    } else {
-        (ramflux_protocol::domain::ENVELOPE, 1)
-    }
+/// Every active delivery mode uses generation 1.
+pub(crate) fn candidate_outer_profile(_mode: &str) -> (&'static str, u32) {
+    (ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)
 }
 
 struct GatewayEnvelopePolicy {
@@ -610,7 +594,7 @@ struct GatewayEnvelopePolicy {
     outer_profile: Option<(&'static str, u32)>,
 }
 
-fn gateway_envelope_with_policy(
+fn candidate_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
@@ -629,11 +613,7 @@ fn gateway_envelope_with_policy(
         version: profile.1,
         domain: profile.0.to_owned(),
         ext: ramflux_protocol::Ext::default(),
-        signed: if ramflux_protocol::schema_profile::schema_v1_live() {
-            crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "")
-        } else {
-            sdk_signed_fields("")
-        },
+        signed: { crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "") },
         envelope_id: message.envelope_id.clone(),
         // Attribution belongs to the authenticated signing device, not caller aliases.
         source_principal_id: config.device_branch.as_ref().map_or_else(
@@ -643,12 +623,7 @@ fn gateway_envelope_with_policy(
         source_device_id: config.device_id.clone(),
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
-        delivery_class: if profile.0 == ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
-        {
-            ramflux_protocol::DeliveryClass::Message
-        } else {
-            ramflux_protocol::DeliveryClass::OpaqueEvent
-        },
+        delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: policy.priority,
         ttl: message.ttl,
         created_at: message.created_at,
@@ -664,9 +639,9 @@ fn gateway_envelope_with_policy(
         nested_tag.as_deref(),
         nested_commitment.as_deref(),
     );
-    if crate::client::target_selection::schema_v1_selected() {
-        envelope.delivery_mode = Some(mode.to_owned());
-    }
+
+    envelope.delivery_mode = Some(mode.to_owned());
+
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
             return Err(SdkError::GatewaySessionRejected(
@@ -715,65 +690,10 @@ fn require_direct_sidecar_commitment(
     collapse_tag: Option<String>,
     report_commitment: Option<String>,
 ) -> Result<(Option<String>, Option<String>), SdkError> {
-    if ramflux_protocol::schema_profile::schema_v1_live()
-        && collapse_tag.is_some()
-        && report_commitment.is_none()
-    {
+    if collapse_tag.is_some() && report_commitment.is_none() {
         return Err(SdkError::InboundRejected("direct envelope sidecar is required".into()));
     }
     Ok((collapse_tag, report_commitment))
-}
-
-/// Candidate v1 outer envelope. Live [`gateway_direct_message_envelope`] is unchanged.
-#[expect(dead_code, reason = "S10a P06 dormant until P24")]
-pub(crate) fn candidate_direct_message_envelope(
-    config: &GatewaySessionConfig,
-    message: &GatewayDirectMessage,
-    collapse_tag: [u8; 32],
-    report_commitment: [u8; 32],
-    mode: ramflux_protocol::message::outer::NamedDeliveryMode,
-) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
-    let encrypted_payload = wire_payload(&message.encrypted_body)?;
-    let payload_hash = ramflux_crypto::blake3_256_base64url(
-        ramflux_protocol::domain::ENVELOPE,
-        encrypted_payload.as_bytes(),
-    );
-    let source_principal_id = config
-        .device_branch
-        .as_ref()
-        .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
-    let outer = ramflux_protocol::message::outer::CandidateOuterEnvelope {
-        ext: ramflux_protocol::Ext::default(),
-        routing_set_id: None,
-        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
-        version: 2,
-        domain: "ramflux.envelope.v2".to_owned(),
-        envelope_id: message.envelope_id.clone(),
-        source_principal_id,
-        source_device_id: config.device_id.clone(),
-        target_delivery_id: message.target_delivery_id.clone(),
-        delivery_class: ramflux_protocol::message::outer::CandidateDeliveryClass::Message,
-        priority: match mode {
-            ramflux_protocol::message::outer::NamedDeliveryMode::Durable => {
-                ramflux_protocol::Priority::Normal
-            }
-            ramflux_protocol::message::outer::NamedDeliveryMode::Ephemeral => {
-                ramflux_protocol::Priority::Low
-            }
-        },
-        ttl_seconds: message.ttl,
-        created_at: message.created_at,
-        encrypted_payload,
-        payload_hash,
-        collapse_tag: ramflux_protocol::encode_base64url(collapse_tag),
-        report_commitment: ramflux_protocol::encode_base64url(report_commitment),
-        delivery_mode: mode,
-        node_report_receipt: None,
-        signed: sdk_signed_fields(""),
-    };
-    ramflux_protocol::message::outer::validate_candidate_outer(&outer)
-        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-    Ok(outer)
 }
 
 pub(crate) fn dedup_gateway_entries(entries: Vec<GatewayInboxEntry>) -> Vec<GatewayInboxEntry> {
@@ -787,6 +707,7 @@ pub(crate) fn dedup_gateway_entries(entries: Vec<GatewayInboxEntry>) -> Vec<Gate
     deduped
 }
 
+#[cfg(test)]
 pub(crate) fn a2i_control_conversation_id(
     source_device_id: &str,
     target_device_id: &str,

@@ -4,6 +4,8 @@
 //! Redacted executor certificates: private grant records and form values never enter group traffic.
 use super::{carrier::Carrier, decision::same_decision, invalid, key};
 use crate::{RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use ramflux_protocol::{Task, TaskResolve};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,17 +31,12 @@ pub(crate) struct Certificate {
 }
 impl Certificate {
     pub(super) fn signing_bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut value = serde_json::to_value(self)?;
-        if let Some(object) = value.as_object_mut() {
-            object.remove("signature");
-        }
-        Ok(ramflux_protocol::canonical_json_bytes(&(
-            "ramflux.task.decision_certificate.v1",
-            value,
-        ))?)
+        let mut unsigned = g::TaskCertificate::try_from(self)?;
+        unsigned.signature.clear();
+        super::generated::typed_transcript("TaskCertificate", &unsigned.encode_to_vec())
     }
     pub(crate) fn encoded(&self) -> Result<String, SdkError> {
-        Ok(ramflux_protocol::encode_base64url(serde_json::to_vec(self)?))
+        Ok(ramflux_protocol::encode_base64url(g::TaskCertificate::try_from(self)?.encode_to_vec()))
     }
     pub(crate) fn decode(encoded: &str) -> Result<Self, SdkError> {
         if encoded.len() > 16 * 1024 {
@@ -47,11 +44,18 @@ impl Certificate {
         }
         let bytes = ramflux_protocol::decode_base64url(encoded)
             .map_err(|_| invalid("invalid task certificate encoding"))?;
-        Ok(ramflux_protocol::parse_i_json(&bytes)?)
+        g::validation::scan_message("TaskCertificate", &bytes, g::registry::COMPILED_LAYER)
+            .map_err(|_| invalid("invalid typed certificate"))?;
+        let value = g::TaskCertificate::decode(bytes.as_slice())
+            .map_err(|_| invalid("invalid typed certificate"))?;
+        super::generated::certificate::native_certificate(&value)
     }
 }
 pub(crate) fn carrier_hash(c: &Carrier) -> Result<String, SdkError> {
-    Ok(ramflux_protocol::hash_base64url("ramflux.task.committed_intent.v1", &c.bytes()?))
+    Ok(ramflux_protocol::hash_base64url(
+        "ramflux.message.typed.TaskCarrier.v1",
+        &c.to_generated()?.encode_to_vec(),
+    ))
 }
 pub(super) fn committed_key(c: &Carrier, assignee: &str, issuer: &str) -> Result<String, SdkError> {
     Ok(key("committed_decision", &serde_json::to_string(&(assignee, issuer, carrier_hash(c)?))?))

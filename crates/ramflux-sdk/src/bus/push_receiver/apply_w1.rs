@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant `ApplyPage` → W1 adapters. Inactive accounts stay on the live path.
+//! Authenticated `ApplyPage` → W1 adapters for durable receive admission.
 #![allow(dead_code)]
 
 use super::apply::{self, ApplyOutcome, ApplyPoint, cover_held_in, cover_terminal_in};
@@ -173,10 +173,17 @@ async fn apply_once(
     if !cover && !open_already_covered(account, turn, handle_generation, prepared, backpressure)? {
         return Ok(None);
     }
-    let local_device = account.gateway_config.device_id.clone();
-    let own_copy = source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take());
-    let (kind, classified_pending) =
-        classified_kind(account, entry, own_copy, prepared.retry_key.as_deref()).await?;
+    let own_copy = None;
+    #[cfg(test)]
+    let classification = if take_manifest_wait() {
+        manifest_await().await;
+        Ok((Kind::LegacyHold, None))
+    } else {
+        classified_kind(account, entry, own_copy, prepared.retry_key.as_deref())
+    };
+    #[cfg(not(test))]
+    let classification = classified_kind(account, entry, own_copy, prepared.retry_key.as_deref());
+    let (kind, classified_pending) = classification?;
     #[cfg(test)]
     after_classify(account.client.account_db()?);
     match kind {
@@ -193,6 +200,7 @@ async fn apply_once(
             ))
             .await
         }
+        #[cfg(test)]
         Kind::OwnCopy(manifest) => {
             let message = entry.envelope.envelope_id.clone();
             let client = &account.client;
@@ -203,44 +211,6 @@ async fn apply_once(
                 ReplyOutbox::prune_marker_in(tx, &key)?;
                 cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)
-            })?;
-            Ok(None)
-        }
-        Kind::LegacyDm { conversation } => {
-            let client = &account.client;
-            let key = client.inbox_admission_key(entry)?;
-            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
-                client.apply_legacy_success_w1_in(
-                    tx,
-                    entry,
-                    &local_device,
-                    &conversation,
-                    expected,
-                    handle_generation(),
-                )?;
-                project_if_committed(tx, client, entry, sequence, expected)?;
-                ReplyOutbox::prune_marker_in(tx, &key)?;
-                cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
-                Ok(false)
-            })?;
-            Ok(None)
-        }
-        Kind::LegacyA2i => {
-            let client = &account.client;
-            let key = client.inbox_admission_key(entry)?;
-            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
-                let held = client.apply_legacy_a2i_w1_in(
-                    tx,
-                    entry,
-                    &local_device,
-                    expected,
-                    handle_generation(),
-                )?;
-                cover_w1_outcome(tx, sequence, held, &[], turn.compat)?;
-                if !held {
-                    ReplyOutbox::prune_marker_in(tx, &key)?;
-                }
-                Ok(held)
             })?;
             Ok(None)
         }
@@ -264,13 +234,13 @@ async fn apply_once(
     }
 }
 
-async fn classified_kind(
+fn classified_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
     own_copy: Option<crate::SdkDeviceManifestResponse>,
     retry_key: Option<&str>,
 ) -> Result<(Kind, Option<SdkError>), SdkError> {
-    match classify(account, entry, own_copy, retry_key).await {
+    match classify(account, entry, own_copy, retry_key) {
         Ok(kind) => Ok((kind, None)),
         Err(error) => {
             if crate::client::routed::decode(&entry.envelope).is_ok() && directory_pending(&error) {
@@ -312,9 +282,7 @@ async fn apply_routed_or_defer(
             SdkError::InboundRejected("deferred contact root capacity exhausted".into()),
         );
     }
-    if crate::client::routed::decode(&prepared.entry.envelope)
-        .is_ok_and(|packet| packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
-    {
+    if account.client.contact_bootstrap_required(&prepared.entry)? {
         // W0 `source::request` quarantines `contact_candidate_manifest_request`
         // errors (sender rate-limit, closed root, malformed) before any fetch.
         // Global/account pressure still identifies the requester (one fetch) so
@@ -710,12 +678,7 @@ fn hold_unrouted(
     entry: &GatewayInboxEntry,
     sequence: u64,
 ) -> Result<(), SdkError> {
-    let legacy_group = matches!(group_entry_is_sender_key_message(entry), Ok(true));
-    let computed = if legacy_group {
-        crate::client::group_quarantine::legacy_key(entry)?
-    } else {
-        account.client.inbox_admission_key(entry)?
-    };
+    let computed = account.client.inbox_admission_key(entry)?;
     let at = now_unix_timestamp();
     run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
         let generation = handle_generation();
@@ -725,13 +688,8 @@ fn hold_unrouted(
         };
         let gate = LegacyW1 { expected, generation };
         let hold = SourceHold { expected, generation };
-        match gate
-            .effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at, legacy_group))?
-        {
+        match gate.effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at, false))? {
             HoldDisposition::HeldLocal { .. } => {
-                if legacy_group {
-                    tx.account().retain_legacy_inbox(&key)?;
-                }
                 // SourceHold.admit_hold settle(Held) already covers C+1 in this
                 // transaction (P07). A second Held cover refuses "outside page"
                 // and rolls the hold, journal and cover back together.
@@ -744,47 +702,22 @@ fn hold_unrouted(
 }
 
 enum Kind {
+    #[cfg(test)]
     OwnCopy(Box<crate::SdkDeviceManifestResponse>),
     Routed,
-    LegacyDm { conversation: String },
-    LegacyA2i,
     LegacyHold,
     PolicyFailure(ReceiveFailureKind, &'static str),
     Projection,
     TerminalReply,
 }
 
-async fn classify(
+fn classify(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
     own_copy: Option<crate::SdkDeviceManifestResponse>,
     retry_key: Option<&str>,
 ) -> Result<Kind, SdkError> {
-    if let Some(manifest) = own_copy {
-        return Ok(Kind::OwnCopy(Box::new(manifest)));
-    }
-    if let Some(root) = account.client.own_device_receive_manifest_request(entry)? {
-        #[cfg(test)]
-        manifest_await().await;
-        #[cfg(test)]
-        if skip_manifest_fetch() {
-            return Ok(Kind::LegacyHold);
-        }
-        let manifest = account
-            .client
-            .cache_verified_device_manifest(
-                &account.gateway_config,
-                &root,
-                "own_device_message_receive",
-            )
-            .await?;
-        return Ok(Kind::OwnCopy(Box::new(manifest)));
-    }
-    #[cfg(test)]
-    if take_manifest_wait() {
-        manifest_await().await;
-        return Ok(Kind::LegacyHold);
-    }
+    drop(own_copy);
     #[cfg(test)]
     if let Some(error) = take_classify_error() {
         return Err(error);
@@ -807,31 +740,14 @@ async fn classify(
     if crate::client::routed::decode(&entry.envelope).is_ok() {
         return Ok(Kind::Routed);
     }
-    if matches!(group_entry_is_sender_key_message(entry), Ok(true)) {
-        return Ok(Kind::LegacyHold);
-    }
-    let reference = account.client.inbound_device_reference(entry)?;
-    if account.client.v2_blocks_legacy(&reference)? {
-        return Ok(Kind::LegacyHold);
-    }
     #[cfg(test)]
     if take_legacy_hold() {
         return Ok(Kind::LegacyHold);
     }
-    if let Some(conversation) =
-        account.client.legacy_routing_binding(&account.gateway_config.device_id, entry)?
-    {
-        return Ok(Kind::LegacyDm { conversation });
-    }
-    if account.client.legacy_a2i_is_unbound(&account.gateway_config.device_id, entry)? {
-        return Ok(Kind::LegacyA2i);
-    }
-    match account.client.load_legacy_a2i_receipt(entry) {
-        Ok(Some(_)) => return Ok(Kind::LegacyA2i),
-        Ok(None) => {}
-        Err(error) => return Err(error),
-    }
-    Ok(Kind::LegacyHold)
+    Err(SdkError::GeneratedRefused {
+        code: crate::GeneratedRefusalCode::Content,
+        reason: "retired or malformed application carrier".into(),
+    })
 }
 
 /// An authenticated entry that an earlier routed commit already settled. A transferred
@@ -845,7 +761,7 @@ fn settled_routed_kind(
     entry: &GatewayInboxEntry,
     retry_key: Option<&str>,
 ) -> Result<Option<Kind>, SdkError> {
-    crate::client::routed::validate_routed_ciphertext(entry)?;
+    account.client.validate_routed_receipt_or_ciphertext(entry)?;
     let auth_key = match account.client.retained_committed_receipt_key(entry) {
         Ok(Some(key)) => key,
         Err(SdkError::InboundRejected(reason))
@@ -1116,7 +1032,7 @@ pub(super) fn project_if_committed(
     // Own-copy and legacy-DM success: a missing authenticated identity means
     // nothing is owed. Every other derivation error (including storage) still
     // propagates. `project_application` keeps failing on the same derivation error.
-    let auth_key = match projection_key(client, entry) {
+    let auth_key = match projection_auth_key(client, entry) {
         Ok(key) => key,
         Err(error) if identity_absence(&error) => return Ok(()),
         Err(error) => return Err(error),

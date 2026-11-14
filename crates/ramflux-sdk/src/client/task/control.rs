@@ -5,9 +5,10 @@
 use super::{Delivery, carrier::Carrier, certificate::Certificate, invalid, key};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-pub(crate) const PREFIX: &[u8] = b"ramflux.task.control.v1\n";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ack {
@@ -32,9 +33,22 @@ pub(crate) struct AckJob {
     pub created_at: i64,
 }
 impl Control {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(invalid("task control byte budget exceeded"));
+        }
+        if g::validation::scan_message("Task", bytes, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let value = g::Task::decode(bytes).map_err(|_| invalid("invalid typed Task control"))?;
+        let Some(g::task::Payload::Control(control)) = value.payload else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_generated(&control)?))
+    }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
+        let bytes = g::Task { payload: Some(g::task::Payload::Control(self.to_generated()?)) }
+            .encode_to_vec();
         if bytes.len() > 2 * 1024 * 1024 {
             return Err(invalid("task control byte budget exceeded"));
         }
@@ -43,14 +57,9 @@ impl Control {
 }
 impl Ack {
     fn signing_bytes(&self) -> Result<Vec<u8>, SdkError> {
-        Ok(ramflux_protocol::canonical_json_bytes(&(
-            "ramflux.task.decision_ack.v1",
-            &self.carrier_base64,
-            &self.certificate,
-            &self.manifests,
-            &self.signer_principal,
-            &self.signer_device,
-        ))?)
+        let mut unsigned = self.to_generated()?;
+        unsigned.signature.clear();
+        super::generated::typed_transcript("TaskAck", &unsigned.encode_to_vec())
     }
     pub(crate) fn original(&self) -> Result<Carrier, SdkError> {
         let bytes = ramflux_protocol::decode_base64url(&self.carrier_base64)
@@ -127,7 +136,7 @@ impl RamfluxClient {
         group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Some(raw) = body.strip_prefix(PREFIX) else { return Ok(false) };
+        let Some(control) = Control::decode(body)? else { return Ok(false) };
         if body.len() > 2 * 1024 * 1024 {
             return Err(invalid("task control byte budget exceeded"));
         }
@@ -143,7 +152,6 @@ impl RamfluxClient {
         if thread["group_id"].as_str() != group {
             return Err(invalid("task control group context mismatch"));
         }
-        let control: Control = ramflux_protocol::parse_i_json(raw)?;
         self.account_db()?.write_transaction(|| {
             match control {
                 Control::Intent { carrier_base64 } => {

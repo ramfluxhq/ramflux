@@ -42,7 +42,7 @@ fn assert_detail_and_missing_ids(
 async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> Result<(), SdkError>
 {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(211, 213)?;
+    let (a, mut b) = pair(211, 213).await?;
     commit_content(&a, &mut b, "target", text("first body zq")).await?;
     let target = g::MessageRef {
         id: generated_identity(&a, "target")?.id,
@@ -147,7 +147,7 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> R
 #[tokio::test(flavor = "current_thread")]
 async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(215, 217)?;
+    let (a, mut b) = pair(215, 217).await?;
     let total = 70_usize;
     for index in 0..total {
         commit_content(&a, &mut b, &format!("bulk-{index}"), text(&format!("body {index}")))
@@ -189,7 +189,7 @@ async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Resu
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_committed_binding_is_refused_and_never_served() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(219, 221)?;
+    let (a, mut b) = pair(219, 221).await?;
     commit_content(&a, &mut b, "calibration", text("calibration body")).await?;
     assert_eq!(b.client.generated_message_changes("c", 0, 100)?.changes.len(), 1);
 

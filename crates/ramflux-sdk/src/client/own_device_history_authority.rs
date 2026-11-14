@@ -2,12 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified group-member authority and accepted contacts inside authenticated encrypted own history.
+#[cfg(test)]
 use crate::own_device_sync::{SdkOwnDeviceGroupMemberPin, SdkOwnDeviceHistoryBundle};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(super) fn own_history_device_manifests(
         &self,
         pins: &[SdkOwnDeviceGroupMemberPin],
@@ -26,6 +29,7 @@ impl RamfluxClient {
         }
         Ok(manifests)
     }
+    #[cfg(test)]
     pub(super) fn check_own_history_authority_budget(
         manifests: &[SdkDeviceManifestResponse],
         contacts: &[String],
@@ -56,6 +60,7 @@ impl RamfluxClient {
     }
 
     /// Only called after the same-root envelope and encrypted history object authenticate.
+    #[cfg(test)]
     pub(super) fn restore_own_history_authority(
         &self,
         bundle: &SdkOwnDeviceHistoryBundle,

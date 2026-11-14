@@ -31,6 +31,7 @@ impl RamfluxClient {
         message: &str,
         entry: &crate::GatewayInboxEntry,
         group_epoch: Option<u64>,
+        expires_at: i64,
     ) -> Result<(), SdkError> {
         self.account_db()?.persist_message_actor_state(
             message,
@@ -40,7 +41,7 @@ impl RamfluxClient {
                 principal: entry.envelope.source_principal_id.clone(),
                 device: entry.envelope.source_device_id.clone(),
                 envelope_id: entry.envelope.envelope_id.clone(),
-                expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
+                expires_at,
             },
         )?;
         Ok(())

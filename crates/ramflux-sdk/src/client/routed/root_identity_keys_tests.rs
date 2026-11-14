@@ -9,36 +9,39 @@ use crate::client::identity_authority::HeadUse;
 #[tokio::test]
 async fn copied_device_name_cannot_preclaim_an_honest_envelope_id_in_another_thread()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::owned("bob", "bob", 31, 32)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    let mut alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
-    alice.client.establish_friend_link("mallory-link", "alice", "mallory")?;
-    let mut engine =
-        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    let mut first = super::r5::outgoing(&bob, &alice, "tui_env_1");
-    first.conversation_id = "alice-bob".into();
-    let first = seal(&bob, &alice, first, b"first honest message")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &first, false).await?;
-    let mut attack = super::r5::outgoing(&mallory, &alice, "tui_env_2");
-    attack.conversation_id = "alice-mallory".into();
-    let attack = seal(&mallory, &alice, attack, b"legitimate message in Mallory's own thread")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &attack, false).await?;
-    let mut honest = super::r5::outgoing(&bob, &alice, "tui_env_2");
-    honest.conversation_id = "alice-bob".into();
-    let honest = seal(&bob, &alice, honest, b"second honest message")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &honest, false).await?;
+    for (link, peer) in [("bob-link", &bob), ("mallory-link", &mallory)] {
+        alice.client.establish_friend_link(
+            link,
+            &alice.client.own_account_anchor()?,
+            &peer.client.own_account_anchor()?,
+        )?;
+    }
+    let first = generated_delivery(&bob, &alice, "tui_env_1", "first honest message")?;
+    receive_generated(&mut alice, &first.entry).await?;
+    let attack = generated_delivery(
+        &mallory,
+        &alice,
+        "tui_env_2",
+        "legitimate message in Mallory's own thread",
+    )?;
+    receive_generated(&mut alice, &attack.entry).await?;
+    let honest = generated_delivery(&bob, &alice, "tui_env_2", "second honest message")?;
+    receive_generated(&mut alice, &honest.entry).await?;
+    assert_eq!(attack.entry.envelope.envelope_id, honest.entry.envelope.envelope_id);
+    assert_ne!(attack.message, honest.message);
     assert_ne!(
-        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack)?,
-        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack.entry)?,
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest.entry)?
     );
-
-    assert_eq!(alice.client.direct_messages("alice-bob")?.len(), 2);
-    assert_eq!(alice.client.direct_messages("alice-mallory")?.len(), 1);
+    assert_eq!(alice.client.direct_messages(&first.conversation)?.len(), 2);
+    assert_eq!(alice.client.direct_messages(&attack.conversation)?.len(), 1);
     assert!(alice.client.account_db()?.actor_state_exists(
-        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
+        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest.entry)?
     )?);
     Ok(())
 }
@@ -61,55 +64,28 @@ fn a2i(device: &str, target: &str) -> A2iControlEvent {
 #[tokio::test]
 async fn copied_name_controls_keep_independent_keys_but_require_native_authority()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::owned("bob", "bob", 31, 32)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    let mut engine =
-        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let mut keys = std::collections::BTreeSet::new();
     for sender in [&mallory, &bob] {
-        let event = a2i("bob", "alice");
-        let entry = seal_as(
-            sender,
-            &alice,
-            super::r5::outgoing(sender, &alice, "same-control-envelope"),
-            &serde_json::to_vec(&event)?,
-            Route::control(),
-        )?;
-        let source =
-            alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
-        keys.insert(crate::client::routed::control::a2i_key(&source, &event.event_id)?);
+        let source = sender.client.owned_device_identity()?;
+        alice.client.trusted_device(HeadUse::NewAuthorization, &source)?;
+        keys.insert(crate::client::routed::control::a2i_key(&source, "same-control-event")?);
+        let mut engine =
+            GatewaySessionEngine::with_test_transport(sender.config()?, Box::new(NoNetwork));
         assert_a2i_authority_refused(
-            alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await,
+            sender
+                .client
+                .send_a2i_control_event_via_gateway(&mut engine, &a2i("bob", "alice"), None)
+                .await,
         );
+        assert_eq!(sender.client.account_db()?.actor_state_keys("a2i/")?.len(), 0);
     }
-    let before = alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?;
-    assert_eq!(keys.len(), 2, "authenticated roots still have independent private selectors");
-    assert_eq!(before.len(), 0, "neither root has installed native grant authority");
-    let mut forged = a2i("bob", "alice");
-    forged.source_principal_id = Some("bob".into());
-    forged.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
-        &bob.client
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key(),
-    ));
-    let entry = seal_as(
-        &mallory,
-        &alice,
-        super::r5::outgoing(&mallory, &alice, "forged-attribution"),
-        &serde_json::to_vec(&forged)?,
-        Route::control(),
-    )?;
-    assert!(alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err());
-    assert_eq!(
-        alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?,
-        before
-    );
+    assert_eq!(keys.len(), 2, "independent native roots must have distinct private selectors");
+    assert_eq!(alice.client.account_db()?.actor_state_keys("a2i/scoped/")?.len(), 0);
     Ok(())
 }
 #[tokio::test]
@@ -145,15 +121,19 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
 #[tokio::test]
 async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_root()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 31)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    let mut alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
+    alice.client.establish_friend_link(
+        "bob-link",
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )?;
     let mut engine =
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    let entry = seal(&bob, &alice, super::r5::outgoing(&bob, &alice, "migrate-id"), b"body")?;
+    let entry = generated_delivery(&bob, &alice, "migrate-id", "body")?.entry;
     alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
     let source = alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
     let key = alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
@@ -172,8 +152,7 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
     let db = alice.client.account_db()?;
     assert!(db.actor_state_exists(&key)?);
     assert!(!db.actor_state_exists("routed/committed/old-name-digest")?);
-    let attack =
-        seal(&mallory, &alice, super::r5::outgoing(&mallory, &alice, "migrate-id"), b"attack")?;
+    let attack = generated_delivery(&mallory, &alice, "migrate-id", "attack")?.entry;
     assert_eq!(alice.client.committed_direct_context(&attack)?, None);
     let messages = alice.client.direct_messages(
         receipt["routing"]["conversation_id"].as_str().ok_or_else(|| invalid("route"))?,

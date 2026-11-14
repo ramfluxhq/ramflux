@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Unified message read model consumed by `rf` and `rf-tui`.
+//! Unified message read model consumed by `rf`, `rf-tui`, and agent-host.
 //!
 //! Every view is rebuilt from the durable account store. No RAM-only delivery page is consulted,
 //! so a restart or a long unread backlog cannot hide a committed message from a reader.

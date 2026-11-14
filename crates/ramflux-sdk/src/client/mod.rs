@@ -19,6 +19,8 @@ pub mod conversation;
 mod deferred_attachment;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod application_outbox;
+mod authored_delete;
+mod authored_send;
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
@@ -29,10 +31,12 @@ pub(crate) mod generated_content;
 pub(crate) mod generated_control;
 mod generated_delete_fence;
 mod generated_edit_retirement;
+mod generated_fields;
 pub(crate) mod generated_group;
 mod generated_history;
 mod generated_identity;
 mod generated_pending_edit;
+mod generated_receipts;
 mod generated_restore;
 pub(crate) mod generated_surface;
 pub mod group;
@@ -41,7 +45,9 @@ pub mod group_delivery;
 mod group_distribution_auth;
 mod group_identity;
 mod group_key_safety;
+#[cfg(test)]
 mod group_pending;
+#[cfg(test)]
 pub(crate) mod group_quarantine;
 pub mod group_session;
 pub mod home_migration;
@@ -61,8 +67,10 @@ pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;
 mod own_device_group_pins;
+#[cfg(test)]
 mod own_device_group_restore;
 pub mod own_device_sync;
+#[cfg(test)]
 mod own_device_sync_receipts;
 mod own_group_lazy_authority;
 mod own_sent_delivery;
@@ -169,4 +177,5 @@ impl RamfluxClient {
 }
 
 mod own_device_history_authority;
+#[cfg(test)]
 mod own_device_history_pages;

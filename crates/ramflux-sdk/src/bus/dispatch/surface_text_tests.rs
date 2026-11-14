@@ -59,6 +59,7 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     });
     let request = crate::SurfaceSendRequest::event("thread", 1, &command)?;
     let mut carrier = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -469,6 +470,7 @@ fn maximal_carrier_in(
         &A2uiConversationCommand::CreateSurface(content),
     )?;
     let mut carrier = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,

@@ -15,10 +15,9 @@ pub(crate) type InboundManifest =
 pub(crate) struct PreparedInbound {
     pub manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
     pub native_prepared: bool,
-    pub history: Option<crate::client::own_device_sync::receive_job::HistoryCompletion>,
+
     pub group_directory: Option<super::ReceiveGroupDirectory>,
     pub candidate: Option<crate::prekey::SdkDeviceManifestResponse>,
-    pub own_copy_manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +52,7 @@ impl RamfluxClient {
         self.apply_inbound_device_manifest(entry, manifest.as_ref())
     }
 
+    #[cfg(test)]
     pub(crate) async fn ensure_inbound_device(
         &self,
         gateway: &GatewaySessionConfig,

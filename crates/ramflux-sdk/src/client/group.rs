@@ -40,6 +40,7 @@ impl RamfluxClient {
     ) -> Result<GroupState, SdkError> {
         self.add_group_member_address(group_id, member_id, role, None)
     }
+    #[cfg(test)]
     pub(crate) fn add_group_member_with_root(
         &self,
         group: &str,
@@ -443,47 +444,6 @@ impl RamfluxClient {
         })
     }
 
-    pub(crate) async fn prepare_group_join_identity(
-        &self,
-        gateway: &GatewaySessionConfig,
-        event: &ramflux_protocol::GroupEvent,
-    ) -> Result<(), SdkError> {
-        if let Some((root, raw)) = self.group_join_identity_request(event)? {
-            self.resolve_target_principal_commitment(gateway, Some(&root), &raw).await?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn group_join_identity_request(
-        &self,
-        event: &ramflux_protocol::GroupEvent,
-    ) -> Result<Option<(String, String)>, SdkError> {
-        if let ramflux_protocol::GroupEventBody::MemberJoined {
-            group_id, joined_identity, ..
-        } = &event.body
-        {
-            self.verify_group_control_event(event)?;
-            if !matches!(
-                self.account_db()?
-                    .group_member_role_metadata(group_id, &event.actor_device_id)?
-                    .as_deref(),
-                Some("owner" | "admin")
-            ) {
-                return Err(StorageError::GroupPermissionDenied.into());
-            }
-            let reference = self.group_event_member_reference(event)?.ok_or_else(|| {
-                SdkError::InboundPending("joined member root context absent".into())
-            })?;
-            let (root, raw) = ramflux_protocol::parse_qualified_device_id(&reference)?
-                .ok_or_else(|| SdkError::InboundPending("joined member root absent".into()))?;
-            if self.account_db()?.client_record("device", &reference)?.is_none()
-                && self.device_branch.as_ref().is_none_or(|own| own.device_id != *joined_identity)
-            {
-                return Ok(Some((root, raw)));
-            }
-        }
-        Ok(None)
-    }
     #[allow(clippy::too_many_arguments)]
     fn apply_verified_group_role_change(
         &self,
@@ -948,6 +908,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when the local owner/admin cannot sign a direct-add onboard event.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn create_signed_group_member_join_event(
         &self,
         group_id: &str,

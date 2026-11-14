@@ -15,9 +15,9 @@ async fn card(s: &mut LocalBusDaemonState) -> Result<String, SdkError> {
 }
 async fn lying_lookup()
 -> Result<(Fixture, Fixture, Fixture, Directory, Origin, LocalBusDaemonState, String), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let fake = Fixture::new("bob", 71)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
+    let fake = Fixture::native_named("bob", 71).await?;
     let d = Directory::new(&a, &b).await?;
     let real = super::super::r9::manifest(&b)?;
     d.records.lock().map_err(|_| invalid("mutex"))?[1] = super::super::r9::manifest(&fake)?;
@@ -33,64 +33,34 @@ async fn lying_lookup()
     Ok((a, b, fake, d, origin, s, old))
 }
 #[tokio::test]
-async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retires_the_old_session()
--> Result<(), SdkError> {
-    let (mut a, mut b, fake, _d, _origin, mut s, old) = lying_lookup().await?;
+async fn native_card_cannot_override_an_existing_anchor_or_retire_its_pair() -> Result<(), SdkError>
+{
+    let (mut a, _b, fake, _d, _origin, mut s, old) = lying_lookup().await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client);
     let local = a.client.owned_device_identity()?;
-    let fake_identity = fake.client.owned_device_identity()?;
-    seal(&a, &fake, message("old-session", "thread"), b"old")?;
-    assert!(a.client.active_pair(&local, &fake_identity)?.is_some());
+    let remote = fake.client.owned_device_identity()?;
+    generated_delivery(&a, &fake, "pinned-session", "pinned native content")?;
+    let before = a.client.persisted_pair_snapshot(&local, &remote)?;
     s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client =
         std::mem::take(&mut a.client);
     let signed = card(&mut s).await?;
-    let proposed = call(&mut s, "alice", "contact.add", json!({"card":signed}))
-        .await
-        .err()
-        .ok_or_else(|| invalid("missing confirmation"))?;
-    let error = crate::bus::io::local_bus_error_body(&proposed);
-    assert_eq!(error.reason_code.as_deref(), Some("root_replacement_confirmation_required"));
-    let details = error.details.ok_or_else(|| invalid("missing comparison"))?;
-    assert_eq!(details["previous_root_commitment"], old);
-    let real = s.accounts.get("bob").ok_or_else(|| invalid("bob"))?.principal_commitment.clone();
-    assert_eq!(details["proposed_root_commitment"], real);
-    assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
-    assert!(client(&s)?.active_pair(&local, &fake_identity)?.is_some());
-    let stale = call(
-        &mut s,
-        "alice",
-        "contact.add",
-        json!({"card":signed,"replace_provisional_root":"different-old-root"}),
-    )
-    .await
-    .err()
-    .ok_or_else(|| invalid("stale confirmation accepted"))?;
-    assert!(matches!(stale, SdkError::ContactInput(crate::ContactReason::RootConflict)));
-    let fixed =
-        call(&mut s, "alice", "contact.add", json!({"card":signed,"replace_provisional_root":old}))
-            .await?;
-    assert_eq!(fixed["contact"]["root_commitment"], real);
-    assert_eq!(fixed["contact"]["root_source"], "card");
-    assert_eq!(fixed["contact"]["reachable"], true);
-    assert_eq!(fixed["contact"]["verified"], false);
-    assert!(client(&s)?.active_pair(&local, &fake_identity)?.is_none());
-    let db = client(&s)?.account_db()?;
-    assert!(db.client_record("commitment", &old)?.is_none());
-    assert_eq!(
-        db.device_directory_entry("bob")?.ok_or_else(|| invalid("directory"))?.principal_commitment,
-        real
-    );
-    assert!(db.journal_after(0,256)?.iter().any(|e|e.topic=="safety.changed" && e.body["reason"]=="provisional_root_replaced"));
-    a.client =
-        std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("alice"))?.client);
-    b.client = std::mem::take(&mut s.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?.client);
-    let first = seal(&a, &b, message("genuine-first", "thread"), b"to the real bob")?;
-    assert_eq!(b.client.open_routed(&first, "bob")?.body.as_slice(), b"to the real bob");
-    a.client.active_account_db.take();
-    a.client.unlock_account("alice", b"routed-test")?;
-    assert_eq!(a.client.contact_entry("bob")?["root_source"], "card");
-    assert_eq!(a.client.contact_entry("bob")?["root_commitment"], real);
+    for confirmation in [None, Some(old.as_str())] {
+        let mut body = json!({"card":signed});
+        if let Some(root) = confirmation {
+            body["replace_provisional_root"] = json!(root);
+        }
+        let error = call(&mut s, "alice", "contact.add", body)
+            .await
+            .err()
+            .ok_or_else(|| invalid("native anchor replaced"))?;
+        assert!(
+            matches!(error, SdkError::ContactInput(crate::ContactReason::AnchorMismatch)),
+            "{error:?}"
+        );
+        assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
+        assert_eq!(client(&s)?.persisted_pair_snapshot(&local, &remote)?, before);
+    }
     Ok(())
 }
 #[tokio::test]
@@ -108,13 +78,11 @@ async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_th
     ));
     let verified=call(&mut s,"alice","contact.verify",json!({"principal_id":"bob","contact_identity_commitment":root,"replace_provisional_root":old})).await?;
     assert_eq!(verified["safety_number"], preview["safety_number"]);
-    let set = client(&s)?.observed_device_set(&root)?.ok_or_else(|| invalid("verified set"))?;
+    let current = client(&s)?.native_safety_number(&root)?;
+    assert_eq!(current.algorithm_version, 2);
     assert_eq!(
-        client(&s)?
-            .account_db()?
-            .load_actor_state::<String>(&format!("identity/safety_verified_set/{root}"))?,
-        Some(crate::client::identity_authority::set_fingerprint(&set)?),
-        "confirmed contact resolution persists the authority stamp"
+        current.verification_state, "verified",
+        "native safety confirmation must retain its current authority stamp"
     );
     assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "verified");
     assert_eq!(
@@ -168,16 +136,16 @@ async fn card_and_manually_verified_roots_refuse_replacement_even_with_confirmat
         .await
         .err()
         .ok_or_else(|| invalid("strong pin replaced"))?;
-        assert!(matches!(err, SdkError::ContactInput(crate::ContactReason::RootConflict)));
+        assert!(matches!(err, SdkError::ContactInput(crate::ContactReason::AnchorMismatch)));
         assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
     }
     Ok(())
 }
 #[tokio::test]
-async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_fields_are_null()
+async fn a_native_card_refreshes_certified_profile_and_preserves_local_metadata()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let d = Directory::new(&a, &b).await?;
     let origin = Origin::new(&d).await?;
     let mut s = state(&mut a, &mut b, &d)?;
@@ -186,61 +154,82 @@ async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_field
     client(&s)?.account_db()?.persist_client_record(
         "identity",
         "bob",
-        &json!({"display_name":"My own label","kind_asserted":"human"}),
+        &json!({"display_name":"Old unsigned cache","kind_asserted":"human","local_note":"My own label"}),
     )?;
     let signed = card(&mut s).await?;
     let body = crate::parse_contact_card(&signed, now_unix_timestamp())?;
-    assert!(body.display_name.is_none());
-    assert!(body.kind_asserted.is_none());
+    assert_eq!(body.version, 3);
+    assert_eq!(body.kind_asserted.as_deref(), Some("human"));
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
-    assert_eq!(added["contact"]["display_name"], "My own label");
+    assert_eq!(
+        added["contact"]["display_name"],
+        body.display_name.as_deref().ok_or_else(|| invalid("certified display name"))?
+    );
     assert_eq!(added["contact"]["kind_asserted"], "human");
+    assert_eq!(added["contact"]["kind_verified"], true);
+    assert_eq!(
+        client(&s)?
+            .account_db()?
+            .client_record("identity", "bob")?
+            .ok_or_else(|| invalid("cached identity"))?["local_note"],
+        "My own label"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn a_rejected_contact_resolution_keeps_the_group_key_change_observation()
+async fn a_rejected_native_card_preserves_signed_group_authority_and_contact_pin()
 -> Result<(), SdkError> {
-    let (_a, _b, fake, _d, _origin, mut s, _old) = lying_lookup().await?;
-    let original = super::super::r9::manifest(&fake)?;
-    client(&s)?.create_group("pinned", "alice")?;
-    client(&s)?.add_group_member(
+    let (a, _b, fake, _d, _origin, mut s, old) = lying_lookup().await?;
+    let owner = client(&s)?;
+    let native = a.native.as_ref().ok_or_else(|| invalid("native vault"))?;
+    let primary = owner
+        .born_v3_account
+        .as_ref()
+        .ok_or(SdkError::CustodySetupInvalid)?
+        .group_primary(native.vault.as_ref())?;
+    let target = owner.owned_device_identity()?.storage_key().to_owned();
+    owner.shared_group_create_with_primary(
         "pinned",
-        fake.client.owned_device_identity()?.storage_key(),
-        "member",
+        "pinned-thread",
+        None,
+        &target,
+        Some(&primary),
     )?;
-    let db = client(&s)?.account_db()?;
-    db.persist_group_member_device_key(
+    let state = owner.shared_group_change_with_primary(
         "pinned",
-        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
-        &original.devices[0].branch_public_key,
+        &target,
+        ramflux_protocol::GroupStateChange::Add {
+            member: fake.client.owned_group_actor(&fake.config()?.target_delivery_id)?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some(&primary),
     )?;
-    db.bind_group_member_key_identity(
-        "pinned",
-        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
-        "bob",
-        &original.principal_commitment,
-        &original.devices[0].branch_public_key,
-    )?;
-    let link = client(&s)?.friend_links()?[0].link_id.clone();
-    client(&s)?.remove_friend_link(&link, "both")?;
     let signed = card(&mut s).await?;
-    assert!(call(&mut s, "alice", "contact.add", json!({"card":signed})).await.is_err());
-    let db = client(&s)?.account_db()?;
-    let group = db.client_record("group", "pinned")?.ok_or_else(|| invalid("group"))?;
-    assert_eq!(group["safety_change"]["reason"], "pinned_group_member_key_changed");
-    assert!(db.journal_after(0, 128)?.iter().any(|e| e.topic == "safety.changed"));
-    assert!(client(&s)?.friend_links()?.iter().all(|link| link.state != "accepted"));
-    assert_eq!(
-        db.client_record("device", "bob")?.ok_or_else(|| invalid("device"))?["signing_public_key"],
-        original.devices[0].branch_public_key
+    let error = call(&mut s, "alice", "contact.add", json!({"card":signed}))
+        .await
+        .err()
+        .ok_or_else(|| invalid("pinned root replaced"))?;
+    assert!(
+        matches!(error, SdkError::ContactInput(crate::ContactReason::AnchorMismatch)),
+        "{error:?}"
     );
+    assert_eq!(
+        client(&s)?
+            .account_db()?
+            .shared_group_state("pinned")?
+            .ok_or_else(|| invalid("pinned group"))?
+            .snapshot(),
+        state.snapshot()
+    );
+    assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
+    assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "lookup");
     Ok(())
 }
 #[tokio::test]
 async fn principal_add_and_accept_use_the_same_link_id_for_both_sides() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let d = Directory::new(&a, &b).await?;
     let mut s = state(&mut a, &mut b, &d)?;
     call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
@@ -254,80 +243,24 @@ async fn principal_add_and_accept_use_the_same_link_id_for_both_sides() -> Resul
     assert_eq!(alice[0].target_id, bob[0].target_id);
     Ok(())
 }
-#[tokio::test]
-async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_before_accept()
--> Result<(), SdkError> {
-    for forged in [true, false] {
-        let a = Fixture::new("alice", 21)?;
-        let mut b = Fixture::new("bob", 31)?;
-        super::super::review::trust(&b, &a)?;
-        b.client.establish_friend_link("prior-friend", "alice", "bob")?;
-        let mut message = message("legacy-control", "history");
-        let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
-        let (mut session, header) =
-            a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
-        let body = serde_json::to_vec(
-            &json!({"type":"friend.requested","link_id":"incoming-request","requester":if forged{"carol"}else{"alice"},"target":"bob"}),
-        )?;
-        let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
-        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-            source_principal_commitment: Some(
-                a.client.owned_device_identity()?.root_commitment().into(),
-            ),
-            schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-            version: 1,
-            x3dh: header.clone(),
-            ciphertext,
-            collapse_tag: None,
-            report_commitment: None,
-        })?;
-        let entry = GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 1,
-            target_delivery_id: "bob".into(),
-            envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-        };
-        let receiving = b.client.load_or_create_recv_dm_session("history", header.as_ref())?;
-        b.client.send_direct_message("history", "old-history", "alice", b"prior bound thread")?;
-        b.client.persist_dm_session("history", "old-history", "recv", &receiving)?;
-        let mut engine =
-            GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-        let result = b
-            .client
-            .receive_legacy_entry(
-                &mut engine,
-                &super::super::review::pool()?,
-                entry,
-                crate::client::dm::LegacyReceive {
-                    conversation_id: "history",
-                    auto_fetch_attachments: false,
-                    relay_service_key_base64: None,
-                },
-            )
-            .await;
-        if forged {
-            assert!(result?.is_none());
-            assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
-            valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
-            assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
-        } else {
-            result?;
-            let link = b.client.account_db()?.friend_link("incoming-request")?;
-            assert_eq!(link.requester_id, "alice");
-            assert_eq!(link.state, "pending");
-        }
-    }
-    Ok(())
-}
 
 #[tokio::test]
 async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_contact()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let d = Directory::new(&a, &b).await?;
-    d.records.lock().map_err(|_| invalid("mutex"))?[1].devices[0].legacy_proof_mut()?.signature =
-        ramflux_protocol::encode_base64url([0; 64]);
+    d.records
+        .lock()
+        .map_err(|_| invalid("mutex"))?
+        .get_mut(1)
+        .ok_or_else(|| invalid("peer publication"))?
+        .custody
+        .as_mut()
+        .ok_or_else(|| invalid("native authority"))?
+        .publication
+        .record
+        .signature = ramflux_protocol::encode_base64url([0; 64]);
     let mut s = state(&mut a, &mut b, &d)?;
     let error = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"}))
         .await
@@ -341,117 +274,11 @@ async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_co
     Ok(())
 }
 
-async fn valid_delivery_after_rejected_control(
-    a: &Fixture,
-    b: &mut Fixture,
-    engine: &mut impl crate::GatewaySessionAccess,
-    session: &mut ramflux_crypto::DmSession,
-) -> Result<(), SdkError> {
-    let mut next = super::super::message("legacy-next", "history");
-    next.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(
-            a.client.owned_device_identity()?.root_commitment().into(),
-        ),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        x3dh: None,
-        ciphertext: session.encrypt(b"after rejected control", dm_associated_data("history"))?,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let next = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 2,
-        target_delivery_id: "bob".into(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &next, None)?,
-    };
-    let delivered = b
-        .client
-        .receive_legacy_entry(
-            engine,
-            &super::super::review::pool()?,
-            next,
-            crate::client::dm::LegacyReceive {
-                conversation_id: "history",
-                auto_fetch_attachments: false,
-                relay_service_key_base64: None,
-            },
-        )
-        .await?;
-    assert!(delivered.is_some());
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 2);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arrives()
--> Result<(), SdkError> {
-    let a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    super::super::review::trust(&b, &a)?;
-    b.client.establish_friend_link("prior-friend", "alice", "bob")?;
-    let mut message = message("legacy-control", "history");
-    let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
-    let (mut session, header) =
-        a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
-    let body = serde_json::to_vec(
-        &json!({"type":"friend.removed","link_id":"incoming-request","requester":"alice","target":"bob"}),
-    )?;
-    let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
-    message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(
-            a.client.owned_device_identity()?.root_commitment().into(),
-        ),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        x3dh: header.clone(),
-        ciphertext,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: "bob".into(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-    };
-    let receiving = b.client.load_or_create_recv_dm_session("history", header.as_ref())?;
-    b.client.send_direct_message("history", "old-history", "alice", b"prior bound thread")?;
-    b.client.persist_dm_session("history", "old-history", "recv", &receiving)?;
-    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let result = b
-        .client
-        .receive_legacy_entry(
-            &mut engine,
-            &super::super::review::pool()?,
-            entry,
-            crate::client::dm::LegacyReceive {
-                conversation_id: "history",
-                auto_fetch_attachments: false,
-                relay_service_key_base64: None,
-            },
-        )
-        .await;
-    assert!(result?.is_none());
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
-    assert!(
-        b.client
-            .account_db()?
-            .journal_after(0, 128)?
-            .iter()
-            .any(|event| event.body["error_code"] == "legacy_control_rejected")
-    );
-    valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
-    assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
-    Ok(())
-}
-
 #[tokio::test]
 async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let d = Directory::new(&a, &b).await?;
     let origin = Origin::new(&d).await?;
     let mut s = state(&mut a, &mut b, &d)?;
@@ -490,30 +317,17 @@ async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> R
 }
 
 #[tokio::test]
-async fn directory_refresh_without_profile_preserves_card_asserted_kind() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+async fn directory_refresh_preserves_native_certified_kind_and_card_locator() -> Result<(), SdkError>
+{
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let d = Directory::new(&a, &b).await?;
     let origin = Origin::new(&d).await?;
     let mut s = state(&mut a, &mut b, &d)?;
     origin.configure(&mut s, "alice")?;
     origin.configure(&mut s, "bob")?;
-    let mut body = crate::parse_contact_card(&card(&mut s).await?, now_unix_timestamp())?;
-    body.kind_asserted = Some("bot".into());
-    let seed = s
-        .accounts
-        .get("bob")
-        .ok_or_else(|| invalid("bob"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (signed, _) = crate::contact_card::encode_contact_card(body, seed, now_unix_timestamp())?;
+    let signed = card(&mut s).await?;
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
-    assert_eq!(added["contact"]["kind_asserted"], "bot");
-    assert_eq!(added["contact"]["kind_verified"], false);
     let manifest = d
         .records
         .lock()
@@ -522,11 +336,21 @@ async fn directory_refresh_without_profile_preserves_card_asserted_kind() -> Res
         .find(|record| record.principal_id == "bob")
         .cloned()
         .ok_or_else(|| invalid("bob manifest"))?;
-    assert!(manifest.signed_device_set.as_ref().is_some_and(|record| record.profile.is_none()));
+    assert!(manifest.custody.is_some(), "kind must come from actual certified native authority");
     client(&s)?.persist_root_verified_directory(&manifest)?;
     let contact = client(&s)?.contact_entry("bob")?;
-    assert_eq!(contact["kind_asserted"], "bot");
-    assert_eq!(contact["kind_verified"], false);
+    assert_eq!(contact["kind_asserted"], "human");
+    assert_eq!(contact["kind_asserted"], added["contact"]["kind_asserted"]);
+    assert_eq!(contact["node"], added["contact"]["node"]);
     assert_eq!(contact["root_source"], "card");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retired_json_friend_controls_remain_message_text_without_side_effects()
+-> Result<(), SdkError> {
+    for text in [br#"{"type":"friend.requested","link_id":"incoming-request","requester":"mallory","target":"bob"}"#.as_slice(), br#"{"type":"friend.removed","link_id":"unknown-link"}"#.as_slice()] {
+        super::super::review::native_text::roundtrip(text, false).await?;
+    }
     Ok(())
 }

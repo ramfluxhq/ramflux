@@ -43,8 +43,8 @@ fn seed_large_assignee_history(f: &Fixture) -> TestResult {
     for task in 0..7 {
         let id = format!("task-{task}");
         let mut history = f.human.task_history("thread", &id)?;
-        // One oversized event per task keeps the signer just under the lowered budget, so the
-        // oversized updates sent through normal ingress are the ones that exhaust it.
+        // One large event per task keeps the signer just under the lowered budget, so the
+        // bounded updates sent through normal ingress are the ones that exhaust it.
         for offset in 0..1 {
             let c = sign(
                 &f.agent,
@@ -58,7 +58,7 @@ fn seed_large_assignee_history(f: &Fixture) -> TestResult {
                     steps: (0..64)
                         .map(|step| TaskStep {
                             id: format!("step-{step}"),
-                            title: "\u{7532}".repeat(256),
+                            title: "\u{7532}".repeat(128),
                             state: TaskStatus::Running,
                             needs_me: None,
                         })
@@ -131,9 +131,9 @@ fn verify_independent_requester_capacity(
 fn an_assignees_updates_beyond_the_signer_byte_budget_cannot_spend_the_requesters_quota_or_prevent_cancellation()
 -> TestResult {
     // The invariant does not depend on the exact production budget, only on the assignee
-    // exceeding it; 512 KiB keeps the signed payload volume small. Production stays 8 MiB.
+    // exceeding it; 288 KiB keeps the signed payload volume small. Production stays 8 MiB.
     assert_eq!(super::super::quota::SIGNER_HISTORY_BYTES, 8 * 1024 * 1024);
-    let _budget = super::super::quota::small_signer_budget(512 * 1024);
+    let _budget = super::super::quota::small_signer_budget(288 * 1024);
     let f = Fixture::new()?;
     seed_large_assignee_history(&f)?;
     let mut rejected = 0;
@@ -145,7 +145,7 @@ fn an_assignees_updates_beyond_the_signer_byte_budget_cannot_spend_the_requester
             (0..64)
                 .map(|step| TaskStep {
                     id: format!("step-{step}"),
-                    title: "\u{7532}".repeat(256),
+                    title: "\u{7532}".repeat(128),
                     state: TaskStatus::Running,
                     needs_me: None,
                 })

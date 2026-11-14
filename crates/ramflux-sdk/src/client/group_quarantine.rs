@@ -2,13 +2,16 @@
 // Copyright (c) 2026 Span Brain
 
 //! Legacy retries preserve ciphertext; only immutable failures authorize rejection ACKs.
+#[cfg(test)]
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
+#[cfg(test)]
 pub(crate) enum LegacyGroupDelivery {
-    Applied(GroupGatewayDeliveryResult),
+    Applied,
     Held,
     Rejected,
 }
+
 pub(crate) fn legacy_key(entry: &GatewayInboxEntry) -> Result<String, SdkError> {
     // Match sender authentication: gateway-added receipt fields do not identify a new message.
     let mut envelope = entry.envelope.clone();
@@ -28,6 +31,7 @@ pub(crate) fn legacy_key(entry: &GatewayInboxEntry) -> Result<String, SdkError> 
     ))
 }
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn retain_legacy_group_entry(
         &self,
         entry: &GatewayInboxEntry,
@@ -42,6 +46,7 @@ impl RamfluxClient {
             Ok::<_,SdkError>(())
         })
     }
+    #[cfg(test)]
     pub(crate) fn legacy_group_retry_ready(
         &self,
         entry: &GatewayInboxEntry,
@@ -74,6 +79,7 @@ impl RamfluxClient {
         }
         Ok(db.legacy_inbox_lookup_recoverable(&key)? && self.cached_legacy_group_ready(entry)?)
     }
+    #[cfg(test)]
     fn cached_legacy_group_ready(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
         let parsed = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
             .ok()
@@ -94,6 +100,7 @@ impl RamfluxClient {
         Ok(self.require_group_payload_sender(&group.group_id, &group.sender_id, entry).is_ok())
     }
 
+    #[cfg(test)]
     pub(crate) fn isolate_legacy_group_delivery(
         &self,
         entry: &GatewayInboxEntry,
@@ -103,9 +110,9 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let key = legacy_key(entry)?;
         match result {
-            Ok(delivery) => {
+            Ok(_) => {
                 db.remove_inbox_retry(&key)?;
-                Ok(LegacyGroupDelivery::Applied(delivery))
+                Ok(LegacyGroupDelivery::Applied)
             }
             Err(SdkError::Storage(error))
                 if !matches!(error, StorageError::GroupPermissionDenied) =>

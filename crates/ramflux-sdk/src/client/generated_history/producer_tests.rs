@@ -80,11 +80,10 @@ async fn history_producer_skips_rows_without_first_hand_evidence() -> TestResult
 }
 
 #[tokio::test]
-async fn history_courier_stays_dormant_before_schema_activation() -> TestResult {
+async fn history_courier_has_no_work_without_retained_history() -> TestResult {
     let own = Fixture::new("history-producer-dormant").await?;
-    if !crate::client::target_selection::schema_v1_selected() {
-        assert!(own.client.prepare_generated_history_delivery(&own.config)?.is_none());
-    }
+    assert!(ramflux_protocol::schema_profile::schema_v1_live());
+    assert!(own.client.prepare_generated_history_delivery(&own.config)?.is_none());
     Ok(())
 }
 

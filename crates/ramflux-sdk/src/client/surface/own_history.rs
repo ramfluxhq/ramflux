@@ -3,8 +3,11 @@
 
 //! Bounded surface proofs in the existing authenticated own-device history snapshot.
 use super::{Carrier, ControlKind, OwnedSurfaceCheckpoint, SurfaceControl, invalid, key};
+#[cfg(test)]
+use crate::GatewayInboxEntry;
+#[cfg(test)]
 use crate::own_device_sync::SdkOwnDeviceSyncEnvelope;
-use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -25,6 +28,7 @@ impl SurfaceExportMetadata {
     }
 }
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn surface_message_group_epoch(
         &self,
         message: &str,
@@ -201,6 +205,7 @@ impl RamfluxClient {
         controls.reverse();
         Ok(controls)
     }
+    #[cfg(test)]
     pub(crate) fn import_own_surface_history(
         &self,
         envelope: &SdkOwnDeviceSyncEnvelope,
@@ -332,6 +337,7 @@ fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkE
 }
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn skip_owned_surface_message(
         &self,
         bundle: &crate::own_device_sync::SdkOwnDeviceHistoryBundle,

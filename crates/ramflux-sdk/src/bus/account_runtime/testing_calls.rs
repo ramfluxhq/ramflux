@@ -31,6 +31,17 @@ impl PrimaryVault for Vault {
     fn preflight(&self) -> Result<(), SdkError> {
         Ok(())
     }
+    fn store_provisioning_secret(&self, reference: &str, secret: &[u8]) -> Result<(), SdkError> {
+        self.put(reference, secret)
+    }
+    fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        self.0
+            .lock()
+            .map_err(|_| SdkError::CustodyVaultUnavailable)?
+            .get(reference)
+            .cloned()
+            .ok_or(SdkError::CustodyVaultUnavailable)
+    }
     fn store_new(&self, reference: &str, key: &SelfSigningKey) -> Result<(), SdkError> {
         self.put(reference, &*key.vault_seed())
     }
@@ -70,7 +81,7 @@ impl PrimaryVault for Vault {
 
 /// Phrase-created account with real native authority and private prekeys.
 pub struct NativeCallAccount {
-    client: RamfluxClient,
+    pub(super) client: RamfluxClient,
     pub config: GatewaySessionConfig,
     pub manifest: serde_json::Value,
     pub publication: Publication,
@@ -80,43 +91,24 @@ impl NativeCallAccount {
     /// # Errors
     /// Refuses invalid account setup, vault state, or native prekey construction.
     pub async fn new(root: &Path, id: &str) -> Result<Self, SdkError> {
+        Self::create(root, id, None).await
+    }
+
+    /// Create a genuinely custodian-authorized headless account for consumer tests.
+    /// # Errors
+    /// Returns custody, vault, or account-store failures.
+    pub async fn headless(root: &Path, id: &str, custodian: &Self) -> Result<Self, SdkError> {
+        Self::create(root, id, Some(custodian)).await
+    }
+
+    async fn create(root: &Path, id: &str, custodian: Option<&Self>) -> Result<Self, SdkError> {
         std::fs::create_dir_all(root)?;
-        let now = crate::custody::network_now()?;
         let vault = Arc::new(Vault::default());
-        let mut ceremony = CreationCeremony::begin(
-            root,
-            CreateInput {
-                local_account_id: id.into(),
-                principal_id: format!("{id}.example"),
-                device_id: "primary".into(),
-                display_name: "Call Fixture".into(),
-                principal_kind: ramflux_protocol::PrincipalKind::Human,
-                custodian_account_id: None,
-            },
-            now,
-        )?;
-        let phrase = ceremony.show_once()?;
-        let positions = ceremony.hidden_challenge()?;
-        let mut words = [
-            Zeroizing::new(String::new()),
-            Zeroizing::new(String::new()),
-            Zeroizing::new(String::new()),
-        ];
-        for (word, position) in words.iter_mut().zip(positions) {
-            *word = Zeroizing::new(
-                phrase
-                    .split_whitespace()
-                    .nth(usize::from(position).saturating_sub(1))
-                    .ok_or(SdkError::CustodyConfirmationFailed)?
-                    .to_owned(),
-            );
-        }
-        let account = ceremony.confirm(&words, vault.as_ref(), now)?;
+        let account = Self::create_authority(root, id, custodian, vault.as_ref())?;
         let publication = Publication { record: account.record().clone(), compacted_ids: None };
         let anchor = account.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
-        client.seal_new_account_data(id, &anchor, b"native call fixture passphrase")?;
         client.unlock_account(id, b"native call fixture passphrase")?;
         client
             .initialize_born_v3_branch("primary", Arc::clone(&vault) as Arc<dyn PrimaryVault>)
@@ -125,7 +117,7 @@ impl NativeCallAccount {
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
         let manifest = crate::SdkDeviceManifestResponse::from_native(CustodyManifest {
             publication: publication.clone(),
-            custodian_publication: None,
+            custodian_publication: custodian.map(|account| account.publication.clone()),
             devices: vec![CustodyManifestDevice {
                 device_ref: DeviceRef {
                     account_anchor: anchor,
@@ -168,6 +160,65 @@ impl NativeCallAccount {
             publication,
             identity,
         })
+    }
+
+    fn create_authority(
+        root: &Path,
+        id: &str,
+        custodian: Option<&Self>,
+        vault: &dyn PrimaryVault,
+    ) -> Result<crate::custody::BornAccount, SdkError> {
+        let now = crate::custody::network_now()?;
+        if let Some(custodian) = custodian {
+            let id = &custodian.client.account_db()?.local_account_id;
+            crate::custody::load_account(root, id, now)?.mark_live_for_test(root)?;
+        }
+        let mut ceremony = CreationCeremony::begin(
+            root,
+            CreateInput {
+                local_account_id: id.into(),
+                principal_id: format!("{id}.example"),
+                device_id: "primary".into(),
+                display_name: "Call Fixture".into(),
+                principal_kind: if custodian.is_some() {
+                    ramflux_protocol::PrincipalKind::HeadlessAi
+                } else {
+                    ramflux_protocol::PrincipalKind::Human
+                },
+                custodian_account_id: custodian
+                    .map(|account| {
+                        account.client.account_db().map(|db| db.local_account_id.clone())
+                    })
+                    .transpose()?,
+            },
+            now,
+        )?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        let mut words = [
+            Zeroizing::new(String::new()),
+            Zeroizing::new(String::new()),
+            Zeroizing::new(String::new()),
+        ];
+        for (word, position) in words.iter_mut().zip(positions) {
+            *word = Zeroizing::new(
+                phrase
+                    .split_whitespace()
+                    .nth(usize::from(position).saturating_sub(1))
+                    .ok_or(SdkError::CustodyConfirmationFailed)?
+                    .to_owned(),
+            );
+        }
+        let mut account = ceremony.confirm_with_passphrase(
+            &words,
+            vault,
+            now,
+            b"native call fixture passphrase",
+        )?;
+        if custodian.is_some() {
+            account.mark_live_for_test(root)?;
+        }
+        Ok(account)
     }
 
     /// Install explicit friend consent for a native call peer before receiving ciphertext.

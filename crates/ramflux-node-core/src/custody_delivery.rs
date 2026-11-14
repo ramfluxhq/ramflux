@@ -12,9 +12,6 @@ fn invalid(_: impl std::fmt::Display) -> CustodyRefusal {
 }
 
 fn candidate_size_preflight(envelope: &ramflux_protocol::Envelope) -> Result<(), CustodyRefusal> {
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        return Ok(());
-    }
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
     let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(envelope, 0, &[], &[])
         .map_err(map_outer_profile)?;

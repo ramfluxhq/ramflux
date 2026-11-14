@@ -128,6 +128,7 @@ impl AccountDb {
         let account = index.account(local_account_id)?;
         crate::account_erase::refuse_removed(&account)?;
         let path = index.root().join(account.db_relative_path);
+        crate::schema_generation::creation::initialize_if_absent(&path, Some(key))?;
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
         crate::schema_generation::validate_worker(&connection)?;

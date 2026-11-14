@@ -14,13 +14,22 @@ pub(crate) struct ConversationEvent<'a> {
     pub recipients: &'a [String],
 }
 
+#[derive(Clone, Copy)]
+struct AuthoredProjection<'a> {
+    message: &'a GatewayDirectMessage,
+    entry: &'a GatewayInboxEntry,
+    identity: &'a g::EventIdentity,
+    content: &'a g::Content,
+    exact: &'a [u8],
+    wire: &'a [u8],
+}
+
 impl RamfluxClient {
     pub(crate) async fn submit_conversation_event(
         &self,
         engine: &mut impl GatewaySessionAccess,
         event: ConversationEvent<'_>,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let ConversationEvent { mut message, exact, wire, reconcile, recipients } = event;
         let (identity, content) = Self::decode_generated_inner(exact)?;
         let (wire_identity, _) = Self::decode_generated_inner(wire)?;
@@ -87,48 +96,57 @@ impl RamfluxClient {
         })?;
         let accepted = engine.submit_envelope(envelope).await?;
         self.account_db()?.write_transaction(|| {
-            self.project_authored_conversation_event(&accepted, &identity, &content, exact, wire)?;
+            self.project_authored_conversation_event(AuthoredProjection {
+                message: &message,
+                entry: &accepted,
+                identity: &identity,
+                content: &content,
+                exact,
+                wire,
+            })?;
             // Edit retirement erases old payload graphs. Capture/queue the accepted revision after it.
             if let Some(group) = identity.group_id.as_deref() {
                 self.capture_own_authored_group(group, &message.sender_id, exact)?;
             } else {
                 self.capture_own_authored_direct(&message, exact)?;
             }
-            let peer = if identity.group_id.is_none() {
-                Some(self.own_sent_peer(&message)?)
-            } else {
-                None
-            };
-            let ticket = self.queue_own_sent_copy(&message.message_id, || {
-                self.stage_own_sent_message(crate::client::own_sent_message::OwnSentInput {
-                    envelope: &message.envelope_id,
-                    conversation: &message.conversation_id,
-                    message: &message.message_id,
-                    sender: &message.sender_id,
-                    original_recipients: recipients,
-                    group: identity.group_id.as_deref(),
-                    peer: peer.as_deref(),
-                    body: exact,
-                    ciphertext: &message.encrypted_body,
-                    at: message.created_at,
-                })?;
-                Ok(message.envelope_id.clone())
-            });
-            self.finish_own_sent_copy(&message.message_id, ticket.as_deref(), true);
+            if matches!(content.value, Some(g::content::Value::Reaction(_))) {
+                self.stage_authored_conversation_reaction(&message, &identity, exact, recipients)?;
+            }
             reconcile.map_or(Ok(()), |commit| commit())?;
             Ok::<_, SdkError>(())
         })?;
         Ok(accepted)
     }
 
+    fn stage_authored_conversation_reaction(
+        &self,
+        message: &GatewayDirectMessage,
+        identity: &g::EventIdentity,
+        exact: &[u8],
+        recipients: &[String],
+    ) -> Result<(), SdkError> {
+        let peer = identity.group_id.is_none().then(|| self.own_sent_peer(message)).transpose()?;
+        self.stage_authored_mutation_copy(crate::client::own_sent_message::OwnSentInput {
+            envelope: &format!("conversation-mutation-copy-{}", message.message_id),
+            conversation: &message.conversation_id,
+            message: &message.message_id,
+            sender: &message.sender_id,
+            original_recipients: recipients,
+            group: identity.group_id.as_deref(),
+            peer: peer.as_deref(),
+            body: exact,
+            ciphertext: &[],
+            at: message.created_at,
+        })?;
+        Ok(())
+    }
+
     fn project_authored_conversation_event(
         &self,
-        entry: &GatewayInboxEntry,
-        identity: &g::EventIdentity,
-        content: &g::Content,
-        exact: &[u8],
-        wire: &[u8],
+        projection: AuthoredProjection<'_>,
     ) -> Result<(), SdkError> {
+        let AuthoredProjection { message, entry, identity, content, exact, wire } = projection;
         let local = self.owned_device_identity()?;
         let conversation = &identity.conversation_id;
         match content.value.as_ref() {
@@ -146,12 +164,12 @@ impl RamfluxClient {
                 )?;
             }
             Some(g::content::Value::Delete(delete)) => {
-                self.apply_generated_delete_authorized(&local, identity, conversation, delete)?;
+                self.project_authored_delete(message, identity, delete, exact)?;
             }
             Some(g::content::Value::Reaction(reaction)) => {
                 self.apply_generated_reaction_authorized(&local, identity, conversation, reaction)?;
             }
-            Some(g::content::Value::Message(message)) => {
+            Some(g::content::Value::Message(body)) => {
                 let id = ramflux_protocol::encode_base64url(&identity.id);
                 self.account_db()?.write_transaction(|| {
                     if self.direct_message_by_id(&id)?.is_none() {
@@ -159,8 +177,7 @@ impl RamfluxClient {
                             conversation,
                             &id,
                             local.device_id(),
-                            &ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-                                .map_err(|_| invalid("invalid submitted ciphertext"))?,
+                            &message.encrypted_body,
                         )?;
                         self.account_db()?.store_message_content(conversation, &id, wire)?;
                         self.record_authored_conversation_origin(identity)?;
@@ -174,12 +191,12 @@ impl RamfluxClient {
                             self.account_db()?.persist_message_actor_state(
                                 &id,
                                 &format!("routed/group-projection/{id}"),
-                                message,
+                                body,
                             )?;
                             self.account_db()?.persist_message_actor_state(
                                 &id,
                                 &format!("routed/group-content/{id}"),
-                                &message.encode_to_vec(),
+                                &body.encode_to_vec(),
                             )?;
                         }
                     }
@@ -195,7 +212,6 @@ impl RamfluxClient {
         &self,
         identity: &g::EventIdentity,
     ) -> Result<(), SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         g::identity::verify(identity).map_err(|_| invalid("invalid authored identity"))?;
         let own = self.owned_device_identity()?;
         if identity.author.as_ref().is_none_or(|author| {

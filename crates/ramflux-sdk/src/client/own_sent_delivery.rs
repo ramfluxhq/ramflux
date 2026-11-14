@@ -102,6 +102,7 @@ impl RamfluxClient {
                 && d.device_id != local.device_id()
         }))
     }
+    #[cfg(test)]
     pub(crate) fn queue_own_sent_copy(
         &self,
         message: &str,
@@ -121,6 +122,7 @@ impl RamfluxClient {
             }
         }
     }
+    #[cfg(test)]
     fn own_sent_copy_failure(&self, message: &str, error: &SdkError) {
         tracing::warn!(%error,"sent message own-device copy failed");
         let record = (|| -> Result<(), SdkError> {
@@ -141,6 +143,7 @@ impl RamfluxClient {
             tracing::warn!(%error,"own-device failure bookkeeping unavailable");
         }
     }
+    #[cfg(test)]
     pub(crate) fn finish_own_sent_copy(
         &self,
         message: &str,
@@ -152,31 +155,6 @@ impl RamfluxClient {
         {
             self.own_sent_copy_failure(message, &error);
         }
-    }
-    pub(crate) fn queue_own_sent_dm(
-        &self,
-        message: &GatewayDirectMessage,
-        content: &[u8],
-        kind: ramflux_protocol::message::KindId,
-    ) -> Option<String> {
-        self.queue_own_sent_copy(&message.message_id, || {
-            let _ = Self::candidate_target_plan(|| self.dm_selection_request(message, kind))?;
-            let peer = self.own_sent_peer(message)?;
-            let recipients = self.own_original_recipient(message)?;
-            self.stage_own_sent_message(super::own_sent_message::OwnSentInput {
-                envelope: &message.envelope_id,
-                conversation: &message.conversation_id,
-                message: &message.message_id,
-                sender: &message.sender_id,
-                original_recipients: &recipients,
-                group: None,
-                peer: Some(&peer),
-                body: content,
-                ciphertext: &message.encrypted_body,
-                at: message.created_at,
-            })?;
-            Ok(message.envelope_id.clone())
-        })
     }
 }
 

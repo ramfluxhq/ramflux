@@ -58,7 +58,7 @@ pub(crate) async fn request_entry(
             &target.principal_commitment,
         )?,
         message_id: super::generated::message_id(&body, "autonomous-contact")?,
-        envelope_id: "autonomous-contact".into(),
+        envelope_id: format!("native-contact-{}", intent.request_id),
         source_principal_id: sender.config.principal_id.clone(),
         sender_id: sender.config.device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
@@ -68,7 +68,7 @@ pub(crate) async fn request_entry(
         created_at: crate::time::now_unix_timestamp(),
         ttl: 3600,
     };
-    let mut packet = sender.client.seal_routed_prepared(
+    let packet = sender.client.seal_generated_routed_prepared(
         &sender.config,
         &message,
         &body,
@@ -78,15 +78,27 @@ pub(crate) async fn request_entry(
             bundle: Some(device.prekey_bundle.clone()),
         },
     )?;
-    packet.packet.schema = super::ENVELOPE_SCHEMA.into();
     let envelope =
-        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, packet, None)?;
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config, &mut message, packet)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
         envelope,
     })
+}
+
+pub(crate) fn decoded_consent(
+    bytes: &[u8],
+) -> TestResult<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2>> {
+    Ok(super::generated::decode(bytes)?.ok_or("native contact consent")?)
+}
+
+pub(crate) fn encoded_consent(
+    sender: &Fixture,
+    consent: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2>,
+) -> TestResult<Vec<u8>> {
+    Ok(sender.client.generated_contact_inner(consent, None)?.to_vec())
 }
 
 pub(crate) async fn approve_request(sender: &Fixture, target: &Fixture) -> TestResult<Vec<u8>> {
@@ -100,37 +112,29 @@ pub(crate) async fn approve_request(sender: &Fixture, target: &Fixture) -> TestR
     .to_vec())
 }
 
-fn transport(sender: &Fixture, target: &Fixture) -> TestResult<(GatewayInboxEntry, Routing)> {
+fn transport(
+    sender: &Fixture,
+    target: &Fixture,
+    exact: &[u8],
+) -> TestResult<(GatewayInboxEntry, Routing)> {
     let conversation = super::conversation(
         &sender.manifest.principal_commitment,
         &target.manifest.principal_commitment,
     )?;
-    let message = GatewayDirectMessage {
-        conversation_id: conversation.clone(),
-        message_id: "native-consent".into(),
-        envelope_id: "native-consent".into(),
-        source_principal_id: sender.manifest.principal_id.clone(),
-        sender_id: "primary".into(),
-        recipient_device_id: Some("primary".into()),
-        recipient_principal_commitment: Some(target.manifest.principal_commitment.clone()),
-        target_delivery_id: target.client.owned_device_identity()?.storage_key().into(),
-        encrypted_body: b"authenticated carrier validation fixture".to_vec(),
-        created_at: crate::time::now_unix_timestamp(),
-        ttl: 3600,
-    };
+    let message_id = super::generated::message_id(exact, "native-consent")?;
     Ok((
         GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: message.target_delivery_id.clone(),
-            envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+            target_delivery_id: target.config.target_delivery_id.clone(),
+            envelope: sender.seal_inner_to(target, exact)?,
         },
         Routing {
             group_message_id: None,
             kind: Kind::Control,
             conversation_id: conversation,
             group_id: None,
-            message_id: message.message_id,
+            message_id,
             attachments: false,
         },
     ))
@@ -143,7 +147,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let target = Fixture::new("native-consent-target").await?;
     target.client.persist_fetched_identity_directory(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let original = sender.manifest.custody.as_ref().ok_or("native")?.publication.clone();
     target.client.verify_contact_control(&entry, &route, &bytes)?;
     let primary = sender.vault.primary_for_public_key(
@@ -237,7 +241,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
     let bytes = approve_request(&sender, &target).await?;
     let mut expired: ramflux_protocol::custody::Envelope<
         ramflux_protocol::custody::ContactConsentV2,
-    > = serde_json::from_slice(&bytes)?;
+    > = super::generated::decode(&bytes)?.ok_or("native contact consent")?;
     let now = crate::custody::network_now()?;
     expired.body.issued_at = now - 604_801;
     expired.body.expires_at = now - 1;
@@ -264,7 +268,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
         )?,
         *primary.vault_seed(),
     );
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     assert!(matches!(
         target
             .client
@@ -272,7 +276,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
                 &target.config,
                 &entry,
                 &route,
-                &serde_json::to_vec(&expired)?,
+                &sender.client.generated_contact_inner(&expired, None)?,
                 Some(&sender.manifest)
             )
             .await,
@@ -292,7 +296,7 @@ async fn native_inbound_accept_persists_safety_before_the_first_directory_read()
     let target = Fixture::new("native-safety-target").await?;
     target.client.persist_fetched_identity_directory(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
     target.client.apply_contact_control(&control)?;
     let db = target.client.account_db()?;
@@ -335,7 +339,7 @@ async fn native_received_request_keeps_lookup_provenance_and_preserves_card_pins
     let sender = Fixture::new("native-provenance-sender").await?;
     let target = Fixture::new("native-provenance-target").await?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let db = target.client.account_db()?;
     let principal = &sender.manifest.principal_id;
     assert!(db.client_record("identity", principal)?.is_none());
@@ -384,7 +388,7 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
         let target = Fixture::new("native-preview-target").await?;
         target.client.persist_fetched_identity_directory(&sender.manifest)?;
         let bytes = approve_request(&sender, &target).await?;
-        let (entry, route) = transport(&sender, &target)?;
+        let (entry, route) = transport(&sender, &target, &bytes)?;
         let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
         target.client.apply_contact_control(&control)?;
         let root = &sender.manifest.principal_commitment;

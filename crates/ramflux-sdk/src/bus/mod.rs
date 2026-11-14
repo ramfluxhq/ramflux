@@ -42,7 +42,6 @@ pub mod io;
 mod journal;
 mod lifecycle;
 mod lifecycle_registry;
-mod message_projection;
 mod metadata;
 mod method_table;
 mod mutation_intent;

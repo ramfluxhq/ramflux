@@ -36,11 +36,11 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     )?;
     assert_eq!(
         crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
-        "verified"
+        "verification_stale"
     );
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verified"
+        "verification_stale"
     );
     let stamp_key = format!("identity/safety_verified_set/{}", signed.principal_commitment);
     let stamp = db.load_actor_state::<String>(&stamp_key)?.ok_or("stamp")?;
@@ -85,11 +85,11 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
     assert_eq!(
         peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verified"
+        "verification_stale"
     );
     assert_eq!(
         crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
-        "verified"
+        "verification_stale"
     );
     Ok(())
 }

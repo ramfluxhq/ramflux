@@ -5,9 +5,10 @@
 use super::invalid;
 use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use ramflux_protocol::{TaskEvent, TaskSigner};
 use serde::{Deserialize, Serialize};
-pub(crate) const PREFIX: &[u8] = b"ramflux.task.v1\n";
 const MAX_CARRIER: usize = 512 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,17 +24,55 @@ pub(crate) struct Carrier {
     pub decision_proof_base64: Option<String>,
 }
 impl Carrier {
+    pub(crate) fn to_generated(&self) -> Result<g::TaskCarrier, SdkError> {
+        let event = RamfluxClient::encode_generated_task_event(&self.event()?)?;
+        Ok(g::TaskCarrier {
+            content_type: self.content_type.clone(),
+            conversation_id: self.conversation_id.clone(),
+            message_id: self.message_id.clone(),
+            principal_id: self.principal_id.clone(),
+            device_id: self.device_id.clone(),
+            event: Some(
+                g::TaskEvent::decode(event.as_slice())
+                    .map_err(|_| invalid("Task event encoding"))?,
+            ),
+            signature: self.signature.clone(),
+            decision_proof: self
+                .decision_proof_base64
+                .as_ref()
+                .map(|value| {
+                    g::TaskCertificate::try_from(&super::certificate::Certificate::decode(value)?)
+                })
+                .transpose()?,
+        })
+    }
+    pub(crate) fn from_generated(value: &g::TaskCarrier) -> Result<Self, SdkError> {
+        let event = super::generated::native_task_event(
+            value.event.as_ref().ok_or_else(|| invalid("Task event missing"))?,
+        )?;
+        let carrier = Self {
+            content_type: value.content_type.clone(),
+            conversation_id: value.conversation_id.clone(),
+            message_id: value.message_id.clone(),
+            principal_id: value.principal_id.clone(),
+            device_id: value.device_id.clone(),
+            wire_base64: ramflux_protocol::encode_base64url(
+                ramflux_protocol::canonical_json_bytes(&event)?,
+            ),
+            signature: value.signature.clone(),
+            decision_proof_base64: value
+                .decision_proof
+                .as_ref()
+                .map(|value| super::generated::certificate::native_certificate(value)?.encoded())
+                .transpose()?,
+        };
+        carrier.event()?;
+        Ok(carrier)
+    }
     fn signing_bytes(&self) -> Result<Vec<u8>, SdkError> {
-        Ok(ramflux_protocol::canonical_json_bytes(&(
-            "ramflux.task.carrier.v1",
-            &self.content_type,
-            &self.conversation_id,
-            &self.message_id,
-            &self.principal_id,
-            &self.device_id,
-            &self.wire_base64,
-            &self.decision_proof_base64,
-        ))?)
+        let mut unsigned = self.to_generated()?;
+        unsigned.signature.clear();
+        super::generated::typed_transcript("TaskCarrier", &unsigned.encode_to_vec())
     }
     pub(crate) fn event(&self) -> Result<TaskEvent, SdkError> {
         let wire = ramflux_protocol::decode_base64url(&self.wire_base64)
@@ -65,19 +104,25 @@ impl Carrier {
         Ok(event)
     }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
+        let bytes = g::Task { payload: Some(g::task::Payload::Carrier(self.to_generated()?)) }
+            .encode_to_vec();
         if bytes.len() > MAX_CARRIER {
             return Err(invalid("task carrier too large"));
         }
         Ok(bytes)
     }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
-        let Some(json) = bytes.strip_prefix(PREFIX) else { return Ok(None) };
         if bytes.len() > MAX_CARRIER {
             return Err(invalid("task carrier too large"));
         }
-        Ok(Some(ramflux_protocol::parse_i_json(json)?))
+        if g::validation::scan_message("Task", bytes, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let value = g::Task::decode(bytes).map_err(|_| invalid("invalid typed Task carrier"))?;
+        let Some(g::task::Payload::Carrier(carrier)) = value.payload else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_generated(&carrier)?))
     }
     pub(crate) fn signer<'a>(&'a self, public: &'a str, event: &'a TaskEvent) -> TaskSigner<'a> {
         TaskSigner {

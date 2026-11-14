@@ -4,33 +4,6 @@
 //! Accepted inbound contacts expose symmetric authenticated safety digits without another lookup.
 use super::*;
 
-fn signed_profiles(directory: &Directory, alice: &Fixture, bob: &Fixture) -> Result<(), SdkError> {
-    for (manifest, owner) in
-        directory.records.lock().map_err(|_| invalid("records"))?.iter_mut().zip([alice, bob])
-    {
-        let root = owner.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        for device in &mut manifest.devices {
-            device
-                .branch_proof
-                .as_mut()
-                .ok_or_else(|| invalid("proof"))?
-                .key_binding
-                .as_mut()
-                .ok_or_else(|| invalid("binding"))?
-                .principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
-        }
-        manifest.signed_device_set.as_mut().ok_or_else(|| invalid("set"))?.profile =
-            Some(Box::new(ramflux_crypto::sign_identity_profile(
-                root,
-                ramflux_protocol::PrincipalKind::HeadlessAi,
-                &owner.id,
-                1,
-            )?));
-        crate::client::identity_authority::test_support::sign_manifest(root, manifest, 1)?;
-    }
-    Ok(())
-}
-
 fn peer_row(client: &RamfluxClient, peer: &str) -> Result<Value, SdkError> {
     let mut reader = RamfluxClient::new();
     reader.active_account_db = Some(client.account_db()?.open_reader()?);
@@ -47,11 +20,16 @@ fn peer_row(client: &RamfluxClient, peer: &str) -> Result<Value, SdkError> {
 #[tokio::test]
 async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_digits_after_refresh()
 -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_digits_after_refresh_body())
+        .await.map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_digits_after_refresh_body()
+-> Result<(), SdkError> {
     for automatic in [false, true] {
-        let mut alice = Fixture::new("alice", 91)?;
-        let mut bob = Fixture::new("bob", 101)?;
+        let mut alice = Box::pin(Fixture::native_named("alice", 91)).await?;
+        let mut bob = Box::pin(Fixture::native_named("bob", 101)).await?;
         let directory = Directory::new(&alice, &bob).await?;
-        signed_profiles(&directory, &alice, &bob)?;
         let mut state = state(&mut alice, &mut bob, &directory)?;
         if automatic {
             account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
@@ -78,7 +56,7 @@ async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_di
             let a = peer_row(account(&state, "alice")?, "bob")?;
             let b = peer_row(account(&state, "bob")?, "alice")?;
             for row in [&a, &b] {
-                assert_eq!(row["kind"], "headless_ai");
+                assert_eq!(row["kind"], "human");
                 assert_eq!(row["kind_verified"], true);
                 assert_eq!(row["reachable"], true);
                 assert_eq!(row["verified"], false);
@@ -94,55 +72,85 @@ async fn inbound_acceptance_exposes_verified_kind_routes_and_symmetric_safety_di
 #[tokio::test]
 async fn missing_forged_or_stale_cached_authority_cannot_synthesize_uncached_safety_digits()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 111)?;
-    let mut bob = Fixture::new("bob", 121)?;
+    crate::client::native_test_support::watchdog::within(
+        missing_forged_or_stale_cached_authority_cannot_synthesize_uncached_safety_digits_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn missing_forged_or_stale_cached_authority_cannot_synthesize_uncached_safety_digits_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 111)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 121)).await?;
     let directory = Directory::new(&alice, &bob).await?;
-    signed_profiles(&directory, &alice, &bob)?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     pending(&mut state, &directory).await?;
     contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
     let receiver = account(&state, "bob")?;
     let root = account(&state, "alice")?.owned_device_identity()?.root_commitment().to_owned();
-    let key = format!("identity/manifest-root/{root}");
+    let key = format!("identity/custody/{root}");
     let db = receiver.account_db()?;
-    let original = db
-        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&key)?
-        .ok_or_else(|| invalid("manifest"))?;
+    let original: Value = db.load_actor_state(&key)?.ok_or_else(|| invalid("native authority"))?;
+    let native = alice.native.as_ref().ok_or_else(|| invalid("native source"))?;
+    let record = native
+        .manifest
+        .custody
+        .as_ref()
+        .ok_or_else(|| invalid("native record"))?
+        .publication
+        .record
+        .clone();
+    let primary = native
+        .vault
+        .primary_for_public_key(&record.body.master_certificate.body.self_signing_public_key)?;
     for case in ["missing", "forged", "stale"] {
-        let mut manifest = original.clone();
+        let mut damaged = original.clone();
         if case == "missing" {
-            db.remove_actor_state(&key)?;
+            damaged["publication"] = Value::Null;
         } else if case == "forged" {
-            manifest.signed_device_set.as_mut().ok_or_else(|| invalid("set"))?.signature =
-                ramflux_protocol::encode_base64url([0; 64]);
-            db.persist_actor_state(&key, &manifest)?;
+            damaged["publication"]["record"]["signature"] =
+                json!(ramflux_protocol::encode_base64url([0; 64]));
         } else {
-            let root = account(&state, "alice")?
-                .identity_root
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?;
-            crate::client::identity_authority::test_support::sign_manifest(root, &mut manifest, 2)?;
-            receiver.persist_identity_directory(&manifest)?;
-            // The old signed cache remains valid cryptographically, but is no longer current.
             db.persist_actor_state(&key, &original)?;
+            let mut newer = native.manifest.clone();
+            let mut next = record.body.clone();
+            next.device_set_epoch += 1;
+            next.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&record)?);
+            next.profile.display_name = "newer native profile".into();
+            newer
+                .custody
+                .as_mut()
+                .ok_or_else(|| invalid("native publication"))?
+                .publication
+                .record = primary.sign_record(next)?;
+            receiver.persist_fetched_identity_directory(&newer)?;
+            assert_eq!(
+                receiver
+                    .current_custody_authority(&root, crate::custody::network_now()?)?
+                    .ok_or_else(|| invalid("new current authority"))?
+                    .envelope()
+                    .body
+                    .device_set_epoch,
+                record.body.device_set_epoch + 1,
+                "the newer native head must calibrate successfully before rollback"
+            );
+            damaged =
+                db.load_actor_state::<Value>(&key)?.ok_or_else(|| invalid("new native pins"))?;
+            damaged["publication"] = original["publication"].clone();
         }
-        // Explicit acceptance caches digits on current accounts. Directory polling must not
-        // synthesize an absent cache from any of these incomplete authority snapshots.
+        db.persist_actor_state(&key, &damaged)?;
+        // The real native authority is now absent, forged, or below retained pins.
+        // A public directory read may neither repair absent safety nor verify a kind.
         let mut identity =
             db.client_record("identity", "alice")?.ok_or_else(|| invalid("identity"))?;
-        identity.as_object_mut().ok_or_else(|| invalid("identity object"))?.remove("safety_number");
-        identity
-            .as_object_mut()
-            .ok_or_else(|| invalid("identity object"))?
-            .remove("safety_number_algorithm_version");
+        let fields = identity.as_object_mut().ok_or_else(|| invalid("identity object"))?;
+        fields.remove("safety_number");
+        fields.remove("safety_number_algorithm_version");
         db.persist_client_record("identity", "alice", &identity)?;
         let row = peer_row(receiver, "alice")?;
-        assert_eq!(
-            row["kind_verified"],
-            case != "missing",
-            "{case}: verification requires the cached root key"
-        );
-        assert_eq!(row["reachable"], true);
+        assert_eq!(row["kind_verified"], false, "{case}: current native evidence is required");
+        assert_eq!(row["reachable"], true, "the accepted local relationship is retained");
         assert_eq!(row["verified"], false);
         assert_eq!(row["safety_number_available"], false, "{case}");
         assert!(row["safety_number"].is_null(), "{case}");

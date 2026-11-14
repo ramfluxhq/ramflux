@@ -236,7 +236,17 @@ async fn retry_after_restart(
 }
 
 pub(super) fn authored_contact(source: &Fixture, peer: &Fixture) -> TestResult<g::OwnContactSync> {
-    let link = source.client.account_db()?.friend_link("authored-link")?;
+    let own = source.client.own_account_anchor()?;
+    let remote = peer.client.own_account_anchor()?;
+    let link = source
+        .client
+        .friend_links()?
+        .into_iter()
+        .find(|link| {
+            (link.requester_id == own && link.target_id == remote)
+                || (link.requester_id == remote && link.target_id == own)
+        })
+        .ok_or("test: exact native root-pair friend link")?;
     Ok(g::OwnContactSync {
         manifest: Some(g::NativeDeviceManifest::decode(
             source.client.encode_generated_task_manifest(&peer.manifest)?.as_slice(),

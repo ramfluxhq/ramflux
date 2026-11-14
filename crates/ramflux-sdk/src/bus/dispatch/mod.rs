@@ -26,6 +26,7 @@ mod itest_legacy;
 ))]
 pub(crate) mod itest_migration;
 pub mod message;
+mod message_delete;
 pub mod node;
 pub mod object;
 pub(in crate::bus) mod object_status;

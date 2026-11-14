@@ -127,12 +127,17 @@ fn proposal() -> TaskEventBody {
     })
 }
 #[test]
-fn task_carriers_preserve_exact_event_bytes_and_reject_duplicate_json_members() -> TestResult {
+fn task_carriers_preserve_typed_event_bytes_and_reject_duplicate_json_members() -> TestResult {
     let f = Fixture::new()?;
     let c = sign(&f.human, "thread", "start", start("task", "thread"))?;
     let original = ramflux_protocol::decode_base64url(&c.wire_base64)?;
     let decoded = carrier::Carrier::decode(&c.bytes()?)?.ok_or("carrier missing")?;
-    assert_eq!(ramflux_protocol::decode_base64url(&decoded.wire_base64)?, original);
+    assert_eq!(
+        decoded.to_generated()?,
+        c.to_generated()?,
+        "typed event and signature survive conversion"
+    );
+    assert_eq!(decoded.bytes()?, c.bytes()?, "exact typed carrier survives conversion");
     decoded.verify(&f.agent.task_signer_key("human", "human-device")?)?;
     let mut duplicate = c;
     let raw = String::from_utf8(original)?.replacen('{', "{\"conversation_id\":\"other\",", 1);

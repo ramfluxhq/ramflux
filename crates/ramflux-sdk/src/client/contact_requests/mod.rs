@@ -29,7 +29,7 @@ pub(crate) use delivery::background::{
 #[cfg(test)]
 pub(crate) use delivery::flush;
 pub(crate) use delivery::status as delivery_status;
-pub(crate) use wire::{Control, Decision, ENVELOPE_SCHEMA, conversation};
+pub(crate) use wire::{Control, Decision, conversation};
 use wire::{TTL, invalid};
 pub(super) const DECLINE_COOLDOWN_SECONDS: i64 = 24 * 3600;
 
@@ -136,32 +136,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    pub(crate) fn receive_contact_control(
-        &self,
-        entry: &GatewayInboxEntry,
-        route: &crate::client::routed::Routing,
-        bytes: &[u8],
-    ) -> Result<bool, SdkError> {
-        #[derive(serde::Deserialize)]
-        struct Header {
-            body: HeaderBody,
-        }
-        #[derive(serde::Deserialize)]
-        struct HeaderBody {
-            schema: String,
-        }
-        if !serde_json::from_slice::<Header>(bytes).is_ok_and(|header| {
-            matches!(
-                header.body.schema.as_str(),
-                wire::DOMAIN | ramflux_protocol::domain::CONTACT_REQUEST_V2
-            )
-        }) {
-            return Ok(false);
-        }
-        let control = self.verify_contact_control(entry, route, bytes)?;
-        self.apply_contact_control(&control)?;
-        Ok(true)
-    }
+
     pub(crate) fn apply_contact_control(&self, control: &Control) -> Result<(), SdkError> {
         let body = &control.body;
         let db = self.account_db()?;
@@ -450,12 +425,5 @@ impl RamfluxClient {
             "preview":Self::contact_message_preview(held.first().map(Vec::as_slice))?,
             "safety_number":safety}),
         )
-    }
-}
-
-#[cfg(test)]
-impl RamfluxClient {
-    pub(crate) fn test_release_contact_messages(&self, root: &str) -> Result<(), SdkError> {
-        self.release_contact_messages(root, true)
     }
 }

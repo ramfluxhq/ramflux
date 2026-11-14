@@ -81,12 +81,12 @@ impl RamfluxClient {
         revoke: &g::ObjectRevokeAccess,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        self.authorize_received_object_revoke(opened, entry, revoke)?;
+        let source = self.authorize_received_object_revoke(opened, entry, revoke)?;
         let db = self.account_db()?;
         self.apply_generated_peer_control_once(entry, identity, exact_inner, 12, |_| {
             db.set_object_tombstoned_with_revocation(
                 &revoke.object_id,
-                Some(&entry.envelope.source_principal_id),
+                Some(source.root_commitment()),
                 Some(&entry.envelope.envelope_id),
                 crate::time::now_unix_timestamp(),
             )

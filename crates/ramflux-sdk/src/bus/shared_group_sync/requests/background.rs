@@ -422,20 +422,23 @@ fn seal(
     {
         return Ok(None);
     }
+    let bytes = account.client.generated_group_control_inner(&plan.packet)?;
+    message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
     let sealed = account.client.seal_routed_prepared(
         &plan.config,
         &message,
-        &serde_json::to_vec(&plan.packet)?,
+        &bytes,
         crate::client::routed::Route::group_control(plan.packet.group()),
         material?,
     )?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&plan.config, &mut message, sealed)?;
     let attempt = Attempt {
         id: plan.id.clone(),
         packet: plan.packet.clone(),
         root,
         device: device.device_id,
-        envelope: crate::dm::gateway_direct_message_envelope(&plan.config, &message, None)?,
+        envelope,
         federation: route,
         expires_at,
     };

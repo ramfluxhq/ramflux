@@ -78,9 +78,9 @@ pub fn envelope(
     delivery_class: DeliveryClass,
 ) -> Envelope {
     Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.envelope.v1".to_owned(),
+        schema: "ramflux.envelope.v2".to_owned(),
+        version: 2,
+        domain: "ramflux.envelope.v2".to_owned(),
         ext: Ext::default(),
         signed: signed_fields(),
         envelope_id: envelope_id.to_owned(),
@@ -92,11 +92,14 @@ pub fn envelope(
         priority: Priority::Normal,
         ttl: 3_600,
         created_at: 1_760_000_000,
-        encrypted_payload: "ciphertext".to_owned(),
-        payload_hash: "payload_hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".to_owned(),
+        payload_hash: ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::ENVELOPE,
+            b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+        ),
+        delivery_mode: Some("durable".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     }
 }
 

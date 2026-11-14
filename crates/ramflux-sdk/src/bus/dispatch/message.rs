@@ -22,14 +22,14 @@ pub(crate) async fn dispatch_message_bus_request(
         | "conversation.delete" => {
             Box::pin(super::conversation_mutation::dispatch(request, state)).await
         }
-        "conversation.send" => super::conversation_send::send(request, state).await,
+        "conversation.send" => Box::pin(super::conversation_send::send(request, state)).await,
         "message.submit" => Box::pin(dispatch_message_submit_request(request, state)).await,
         "message.receive" => dispatch_message_receive_request(request, state, connection).await,
         "message.ack" => dispatch_message_ack_request(request, state).await,
         "message.delete" => {
             let account_id = request_account_id(request)?;
-            let account = local_bus_account(state, account_id)?;
-            dispatch_message_delete(request, account)
+            let account = local_bus_account_mut(state, account_id)?;
+            Box::pin(super::message_delete::dispatch(request, account)).await
         }
         "message.receipt.delivered" => {
             let account_id = request_account_id(request)?;
@@ -43,26 +43,9 @@ pub(crate) async fn dispatch_message_bus_request(
         }
         "message.list" | "message.read" => {
             let account_id = request_account_id(request)?;
-            if crate::client::target_selection::schema_v1_selected() {
-                let account = local_bus_account(state, account_id)?;
-                return Ok(local_bus_ok(super::super::readers::generated_page(
-                    &account.client,
-                    &request.body,
-                )?));
-            }
-            let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
+
             let account = local_bus_account(state, account_id)?;
-            let messages = account
-                .client
-                .direct_messages(&body.conversation_id)?
-                .iter()
-                .map(super::super::message_projection::row)
-                .collect::<Result<Vec<_>, _>>()?;
-            let rejected = account.client.rejected_inbox(&body.conversation_id)?;
-            Ok(local_bus_ok(serde_json::json!({
-                "messages": messages,
-                "rejected": rejected,
-            })))
+            Ok(local_bus_ok(super::super::readers::generated_page(&account.client, &request.body)?))
         }
         "message.franking_evidence" => {
             let account_id = request_account_id(request)?;
@@ -110,120 +93,87 @@ async fn dispatch_message_submit_request(
     submit_message(account, body).await
 }
 
-pub(super) async fn submit_message(
-    account: &mut LocalBusAccountState,
-    body: LocalBusMessageSubmitRequest,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    submit_message_mode(account, body, false).await
-}
-
 pub(super) async fn submit_conversation_message(
     account: &mut LocalBusAccountState,
     body: LocalBusMessageSubmitRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    submit_message_mode(account, body, true).await
+    submit_message(account, body).await
 }
 
-async fn submit_message_mode(
+pub(super) async fn submit_message(
     account: &mut LocalBusAccountState,
     mut body: LocalBusMessageSubmitRequest,
-    fanout: bool,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    if let Some(plaintext) = body.plaintext_body()?
-        && crate::client::surface::Carrier::decode(&plaintext)?.is_some()
-    {
-        crate::client::surface::check_delivery_size(plaintext.len())?;
+    if !body.attachments.is_empty() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired attachment input; use Content.Message.media with r4 large_manifest"
+                .into(),
+        });
     }
     body.ttl = account.client.content_ttl()?;
     normalize_message_recipient(&account.client, &mut body)?;
-    let entry = if let Some(plaintext) = body.plaintext_body()? {
-        if !body.attachments.is_empty() {
-            if body.federation.is_some() {
-                return Err(SdkError::LocalBus(
-                    "DM attachments over federation are not supported in this release".to_owned(),
-                ));
-            }
-            let mut engine = account.session_client().await?;
-            let recipient = resolve_local_message_recipient_principal_commitment(
-                account,
-                &engine.config,
-                body.recipient_principal_commitment.as_deref(),
-                body.recipient_device_id.as_deref(),
-            )
-            .await?;
-            require_message_submit_friend_link_accepted(account, &recipient)?;
-            // Acquire the pool clone only after the (pool-independent) recipient/friend pre-checks
-            // pass; the account keeps its own Arc regardless of how this request ends.
-            let pool = account.relay_quic_pool()?;
-            let message = body.clone().into_gateway_message_with_body(Vec::new());
-            let result = if fanout {
-                account
-                    .client
-                    .send_conversation_attachments_via_gateway(
-                        &mut engine,
-                        &pool,
-                        message,
-                        (&plaintext, &body.attachments),
-                    )
-                    .await
-            } else {
-                account
-                    .client
-                    .send_plaintext_direct_message_with_attachments_via_gateway(
-                        &mut engine,
-                        &pool,
-                        message,
-                        &plaintext,
-                        &body.attachments,
-                    )
-                    .await
-            };
-            account.apply_session_metadata(engine);
-            result?
-        } else if let Some(federation) = body.federation.clone() {
-            return submit_federated(account, body, &plaintext, &federation).await;
-        } else {
-            let mut engine = account.session_client().await?;
-            let recipient = resolve_local_message_recipient_principal_commitment(
-                account,
-                &engine.config,
-                body.recipient_principal_commitment.as_deref(),
-                body.recipient_device_id.as_deref(),
-            )
-            .await?;
-            require_message_submit_friend_link_accepted(account, &recipient)?;
-            let message = body.into_gateway_message_with_body(Vec::new());
-            let result = if fanout {
-                account
-                    .client
-                    .send_conversation_direct_message_via_gateway(&mut engine, message, &plaintext)
-                    .await
-            } else {
-                account
-                    .client
-                    .send_plaintext_direct_message_via_gateway(&mut engine, message, &plaintext)
-                    .await
-            };
-            account.apply_session_metadata(engine);
-            result?
+    let content = if let Some(content) = body.content.clone() {
+        if body.plaintext_body_base64.is_some() || !body.encrypted_body_base64.is_empty() {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                reason: "typed content excludes opaque or parallel plaintext inputs".into(),
+            });
+        }
+        content
+    } else if let Some(plaintext) = body.plaintext_body()? {
+        let text = String::from_utf8(plaintext).map_err(|_| SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "Message text must be UTF-8".into(),
+        })?;
+        ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Message(
+                ramflux_protocol::message::Message { text, ..Default::default() },
+            )),
         }
     } else {
-        let recipient_principal_commitment = body.recipient_principal_commitment.clone();
-        let message = body.into_gateway_message()?;
-        let mut engine = account.session_client().await?;
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "already encrypted submission is retired; use generated content".into(),
+        });
+    };
+    account.client.validate_user_authored_content(&content, &body.conversation_id)?;
+    if let Some(federation) = body.federation.clone() {
+        return submit_federated(account, body, &[], Some(&content), &federation).await;
+    }
+    submit_content(account, body, &content).await
+}
+
+async fn submit_content(
+    account: &mut LocalBusAccountState,
+    body: LocalBusMessageSubmitRequest,
+    content: &ramflux_protocol::message::Content,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let mut engine = account.session_client().await?;
+    let result = async {
         let recipient = resolve_local_message_recipient_principal_commitment(
             account,
             &engine.config,
-            recipient_principal_commitment.as_deref(),
-            message.recipient_device_id.as_deref(),
+            body.recipient_principal_commitment.as_deref(),
+            body.recipient_device_id.as_deref(),
         )
         .await?;
         require_message_submit_friend_link_accepted(account, &recipient)?;
-        let result = account.client.send_direct_message_via_gateway(&mut engine, message).await;
-        account.apply_session_metadata(engine);
-        result?
-    };
-    Ok(local_bus_ok(serde_json::to_value(entry)?))
+        let (id, entry) = account
+            .client
+            .send_generated_content_via_gateway(
+                &mut engine,
+                body.into_gateway_message_with_body(Vec::new()),
+                content,
+            )
+            .await?;
+        let mut response = serde_json::to_value(entry)?;
+        response["message_id"] = serde_json::json!(id);
+        Ok(local_bus_ok(response))
+    }
+    .await;
+    account.apply_session_metadata(engine);
+    result
 }
 
 fn normalize_message_recipient(
@@ -291,6 +241,7 @@ async fn submit_federated(
     account: &mut LocalBusAccountState,
     body: LocalBusMessageSubmitRequest,
     plaintext: &[u8],
+    content: Option<&ramflux_protocol::message::Content>,
     federation: &LocalBusFederationRoute,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let recipient_principal_commitment = body.recipient_principal_commitment.clone();
@@ -310,6 +261,7 @@ async fn submit_federated(
         .send_plaintext_federated_message_async(
             &engine,
             crate::client::federation::PlaintextForward {
+                content,
                 message,
                 plaintext,
                 federation,
@@ -485,28 +437,6 @@ async fn dispatch_message_ack_request(
     let cursor = result?;
     account.mark_acked(&body.envelope_id)?;
     Ok(local_bus_ok(serde_json::to_value(cursor)?))
-}
-
-fn dispatch_message_delete(
-    request: &LocalBusFrame,
-    account: &LocalBusAccountState,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    let body: LocalBusMessageDeleteRequest = serde_json::from_value(request.body.clone())?;
-    let tombstone_id = body
-        .tombstone_id
-        .unwrap_or_else(|| format!("tombstone:{}:{}", body.conversation_id, body.message_id));
-    let tombstone = account.client.delete_direct_message(
-        &body.conversation_id,
-        &body.message_id,
-        &body.delete_scope,
-        &tombstone_id,
-    )?;
-    Ok(local_bus_ok(serde_json::json!({
-        "tombstone_id": tombstone.tombstone_id,
-        "conversation_id": tombstone.conversation_id,
-        "message_id": tombstone.message_id,
-        "delete_scope": tombstone.delete_scope,
-    })))
 }
 
 async fn dispatch_message_receipt_delivered(
@@ -839,7 +769,6 @@ pub(crate) async fn dispatch_message_receive_request(
     if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
         super::super::sync_driver::run(account).await?;
     }
-    receive_bound_legacy(account, &body).await?;
     if body.auto_fetch_attachments {
         super::super::attachment_scheduler::fetch_for_page(
             account,
@@ -848,31 +777,6 @@ pub(crate) async fn dispatch_message_receive_request(
         )
         .await?;
     }
-    let mut plaintext = Vec::new();
-    let mut rejected = BTreeSet::new();
-    for entry in &account.pending_deliveries {
-        if plaintext.len() >= body.limit.min(64) {
-            break;
-        }
-        match project_received_entry(&account.client, entry, &body) {
-            Ok(Some(delivery)) => plaintext.push(delivery),
-            Ok(None) => {}
-            Err(error) => {
-                if quarantine_projection_failure(
-                    &account.client,
-                    &account.gateway_config.device_id,
-                    entry,
-                    &error,
-                ) {
-                    rejected.insert((entry.target_delivery_id.clone(), entry.inbox_seq));
-                }
-            }
-        }
-    }
-    account
-        .pending_deliveries
-        .retain(|entry| !rejected.contains(&(entry.target_delivery_id.clone(), entry.inbox_seq)));
-
     let fresh = account
         .pending_deliveries
         .iter()
@@ -888,17 +792,14 @@ pub(crate) async fn dispatch_message_receive_request(
             serde_json::json!({"entries":fresh}),
         )
     });
-    let mut response_body = serde_json::json!({"entries":account.pending_page(body.limit),"decrypted_messages":plaintext});
-    if crate::client::target_selection::schema_v1_selected() {
-        // The page above is a volatile delivery hint that a restart or a long backlog truncates.
-        // Unified consumers read committed messages from the durable reader named here.
-        response_body["durable_reader"] = serde_json::json!("message.read");
-        response_body["snapshot_sequence"] =
-            serde_json::json!(account.client.account_db()?.journal_bounds()?.head_seq);
-    }
+    let response_body = serde_json::json!({
+        "durable_reader": "message.read",
+        "snapshot_sequence": account.client.account_db()?.journal_bounds()?.head_seq,
+    });
     Ok(LocalBusDispatchResult { response_body, event })
 }
 
+#[cfg(test)]
 fn quarantine_projection_failure(
     client: &RamfluxClient,
     device: &str,
@@ -922,104 +823,6 @@ fn quarantine_projection_failure(
             false
         }
     }
-}
-
-fn project_received_entry(
-    client: &RamfluxClient,
-    entry: &GatewayInboxEntry,
-    request: &LocalBusMessageReceiveRequest,
-) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-    let Some((conversation, _)) = client.committed_direct_context(entry)? else { return Ok(None) };
-    if request.conversation_id.as_deref().is_some_and(|id| id != conversation) {
-        return Ok(None);
-    }
-    let Some(mut delivery) = client.plaintext_projection_delivery(&conversation, entry)? else {
-        return Ok(None);
-    };
-    if request.auto_fetch_attachments {
-        delivery.attachments = compat_attachments(client, &delivery.message_id)?;
-    }
-    if let Some((_, fallback)) = client.surface_message_fallback(&delivery.message_id)? {
-        delivery.plaintext_body_base64 = ramflux_protocol::encode_base64url(fallback.as_bytes());
-    }
-    Ok(Some(delivery))
-}
-
-async fn receive_bound_legacy(
-    account: &mut LocalBusAccountState,
-    body: &LocalBusMessageReceiveRequest,
-) -> Result<(), SdkError> {
-    let held = account
-        .client
-        .account_db()?
-        .unrouted_entries()?
-        .into_iter()
-        .map(|bytes| serde_json::from_slice::<GatewayInboxEntry>(&bytes))
-        .collect::<Result<Vec<_>, _>>()?;
-    let Some(conversation) = body.conversation_id.as_deref() else {
-        account.merge_deliveries(held)?;
-        return Ok(());
-    };
-    if held.is_empty() {
-        return Ok(());
-    }
-    let pool = account.relay_quic_pool()?;
-    let mut engine = account.session_client().await?;
-    let result = async {
-        for entry in held {
-            if account.client.legacy_routing_binding(&engine.config.device_id, &entry)?.as_deref()
-                != Some(conversation)
-            {
-                continue;
-            }
-            account
-                .client
-                .receive_legacy_entry(
-                    &mut engine,
-                    &pool,
-                    entry.clone(),
-                    crate::client::dm::LegacyReceive {
-                        conversation_id: conversation,
-                        auto_fetch_attachments: body.auto_fetch_attachments,
-                        relay_service_key_base64: body.relay_service_key_base64.clone(),
-                    },
-                )
-                .await?;
-            account.client.ack_gateway_entry(&mut engine, &entry, now_unix_timestamp()).await?;
-            account
-                .client
-                .account_db()?
-                .remove_unrouted(&account.client.inbox_admission_key(&entry)?)?;
-            account.client.account_db()?.remove_unrouted(&entry.envelope.envelope_id)?;
-            account.merge_deliveries(vec![entry])?;
-        }
-        Ok::<(), SdkError>(())
-    }
-    .await;
-    account.apply_session_metadata(engine);
-    result
-}
-
-fn compat_attachments(
-    client: &RamfluxClient,
-    message: &str,
-) -> Result<Vec<SdkDmAttachmentImportResult>, SdkError> {
-    let mut attachments = Vec::new();
-    for id in client.account_db()?.client_message_object_ids(message)? {
-        let Some(object) = client.object_store_object(&id)?.filter(|object| !object.tombstoned)
-        else {
-            continue;
-        };
-        let plaintext = client.decrypt_object(&id)?;
-        attachments.push(SdkDmAttachmentImportResult {
-            object_id: id,
-            manifest_hash: object.manifest_hash,
-            plaintext_hash: object.plaintext_hash,
-            plaintext_base64: ramflux_protocol::encode_base64url(&plaintext),
-            imported: true,
-        });
-    }
-    Ok(attachments)
 }
 
 #[cfg(test)]

@@ -25,14 +25,124 @@ fn omit_direct_report() -> OmitDirectReport {
     OmitDirectReport
 }
 
-fn pair(alice: u8, bob: u8) -> Result<(Fixture, Fixture), SdkError> {
-    let a = Fixture::new("alice", alice)?;
-    let mut b = Fixture::new("bob", bob)?;
-    friend(&mut b, &a)?;
-    Ok((a, b))
+fn pair(alice: u8, bob: u8) -> generated::PairFuture {
+    generated::pair(alice, bob)
+}
+
+pub(super) fn text_inner(
+    sender: &Fixture,
+    conversation: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, SdkError> {
+    let identity = sender.client.account_db()?.write_transaction(|| {
+        sender.client.allocate_generated_identity(
+            conversation,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )
+    })?;
+    RamfluxClient::encode_generated_inner(
+        identity,
+        &ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Message(
+                ramflux_protocol::message::Message {
+                    text: std::str::from_utf8(body).map_err(|_| invalid("text fixture"))?.into(),
+                    ..Default::default()
+                },
+            )),
+        },
+    )
+}
+fn seal(
+    sender: &Fixture,
+    receiver: &Fixture,
+    mut message: GatewayDirectMessage,
+    text: &[u8],
+) -> Result<GatewayInboxEntry, SdkError> {
+    let exact = text_inner(sender, &message.conversation_id, text)?;
+    message.message_id =
+        ramflux_protocol::encode_base64url(RamfluxClient::decode_generated_inner(&exact)?.0.id);
+    generated::seal(sender, receiver, message, &exact)
+}
+fn nested_text(
+    sender: &Fixture,
+    receiver: &Fixture,
+    mut message: GatewayDirectMessage,
+    text: &[u8],
+    route: Route,
+) -> Result<(GatewayDirectMessage, SealedRouted), SdkError> {
+    let exact = text_inner(sender, &message.conversation_id, text)?;
+    message.message_id =
+        ramflux_protocol::encode_base64url(RamfluxClient::decode_generated_inner(&exact)?.0.id);
+    super::seal_nested(sender, receiver, message, &exact, route)
+}
+
+pub(super) fn reset_inner(sender: &Fixture, recipient: &Fixture) -> Result<Vec<u8>, SdkError> {
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &sender.client.own_account_anchor()?,
+        &recipient.client.own_account_anchor()?,
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    let identity = sender.client.allocate_generated_identity(
+        &conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let control = crate::client::generated_control::control_from_payload(
+        ramflux_protocol::message::control::Payload::Reset(ramflux_protocol::message::PairReset {
+            rejected_bootstrap_floor: 0,
+        }),
+    )?;
+    RamfluxClient::encode_generated_inner(
+        identity,
+        &ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Control(control)),
+        },
+    )
+}
+
+fn seal_as(
+    sender: &Fixture,
+    receiver: &Fixture,
+    mut message: GatewayDirectMessage,
+    exact: &[u8],
+    route: Route,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let identity = RamfluxClient::decode_generated_inner(exact)?.0;
+    message.message_id = ramflux_protocol::encode_base64url(identity.id);
+    message.conversation_id = identity.conversation_id;
+    super::seal_as(sender, receiver, message, exact, route)
+}
+fn group_inner(a: &Fixture, b: &Fixture, group: &str) -> Result<Vec<u8>, SdkError> {
+    a.create_shared_group(group, "c")?;
+    let state = a.change_shared_group(
+        group,
+        ramflux_protocol::GroupStateChange::Add {
+            member: b.client.owned_group_actor(&b.config()?.target_delivery_id)?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    b.client.accept_shared_group_state(&state, &b.config()?.target_delivery_id)?;
+    b.client.import_group_sender_key_distribution(
+        &a.client.export_group_sender_key_distribution(group, &a.id)?,
+    )?;
+    let identity = a.client.allocate_generated_identity(
+        "c",
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    a.client.encrypt_generated_group_inner(
+        group,
+        &a.id,
+        identity,
+        &ramflux_protocol::message::Message { text: "group-body".into(), ..Default::default() },
+    )
 }
 
 fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
+    if receiver.client.account_db()?.friend_link("link").is_ok() {
+        return Ok(());
+    }
     receiver.client.establish_friend_link(
         "link",
         sender.client.owned_device_identity()?.root_commitment(),
@@ -145,7 +255,7 @@ fn reply_to(alice: &str) -> GatewayDirectMessage {
 #[tokio::test(flavor = "current_thread")]
 async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(141, 142)?;
+    let (a, mut b) = pair(141, 142).await?;
     let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
     let tag = ramflux_protocol::decode_base64url(
         entry.envelope.collapse_tag.as_deref().ok_or_else(|| invalid("collapse_tag"))?,
@@ -167,7 +277,7 @@ async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkErro
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(143, 144)?;
+    let (a, mut b) = pair(143, 144).await?;
     let first = seal(&a, &b, message("report-bootstrap", "c"), b"first-body")?;
     apply(&mut b, &first).await?;
     let second = seal(&a, &b, message("report-tamper", "c"), b"tamper-body")?;
@@ -181,7 +291,7 @@ async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkErro
     next.inbox_seq = 3;
     Box::pin(settle_through(&mut b, vec![tampered, next])).await?;
     assert_eq!(projected(&b, "c")?, 2);
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 3);
+    assert_eq!(b.client.gateway_receive_cursor(&b.config()?.target_delivery_id)?, 3);
     assert!(
         b.client
             .account_db()?
@@ -195,7 +305,7 @@ async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkErro
 #[tokio::test(flavor = "current_thread")]
 async fn redelivery_after_uncommitted_open_still_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(149, 150)?;
+    let (a, mut b) = pair(149, 150).await?;
     let entry = seal(&a, &b, message("report-redeliver", "c"), b"once")?;
     super::super::receive::commit_fault::fail_before(
         super::super::receive::commit_fault::Kind::Content,
@@ -215,7 +325,7 @@ async fn redelivery_after_uncommitted_open_still_opens() -> Result<(), SdkError>
 #[tokio::test(flavor = "current_thread")]
 async fn collapse_tag_stable_across_dh_step() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (mut a, mut b) = pair(151, 152)?;
+    let (mut a, mut b) = pair(151, 152).await?;
     friend(&mut a, &b)?;
     let first = seal(&a, &b, message("report-dh-1", "c"), b"one")?;
     let tag = first.envelope.collapse_tag.clone();
@@ -233,22 +343,23 @@ async fn collapse_tag_stable_across_dh_step() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn missing_direct_commitment_refused_under_gate() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(153, 154)?;
+    let (a, b) = pair(153, 154).await?;
     let _omit = omit_direct_report();
-    let entry = seal(&a, &b, message("report-omit", "c"), b"evade")?;
-    assert!(entry.envelope.report_commitment.is_none());
-    rejected(apply(&mut b, &entry).await, "report_commitment must be 32 bytes")?;
-    assert_eq!(projected(&b, "c")?, 0);
+    assert!(
+        seal(&a, &b, message("report-omit", "c"), b"evade").is_err(),
+        "generation 1 must refuse missing commitments before producing an envelope"
+    );
+    assert_eq!(projected(&b, "c")?, 0, "invalid commitment cannot reach projection");
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a0_from_signed_envelope_uses_device_key_id_and_delivery_class() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(155, 156)?;
+    let (a, mut b) = pair(155, 156).await?;
     let entry = seal(&a, &b, message("report-a0", "c"), b"a0-body")?;
     assert_eq!(entry.envelope.signed.signing_key_id, "device:alice");
-    assert_eq!(entry.envelope.delivery_class, ramflux_protocol::DeliveryClass::OpaqueEvent);
+    assert_eq!(entry.envelope.delivery_class, ramflux_protocol::DeliveryClass::Message);
     let a0 = candidate_report_a0_from_envelope(&entry.envelope)
         .map_err(|error| invalid(&error.to_string()))?;
     assert_eq!(a0.signing_key_id, "device:alice");
@@ -261,7 +372,7 @@ async fn a0_from_signed_envelope_uses_device_key_id_and_delivery_class() -> Resu
 #[tokio::test(flavor = "current_thread")]
 async fn payload_outer_commitment_mismatch_is_refused() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(157, 158)?;
+    let (a, mut b) = pair(157, 158).await?;
     let entry = seal(&a, &b, message("report-l5", "c"), b"l5")?;
     let mut tampered = entry.clone();
     tampered.envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
@@ -274,7 +385,7 @@ async fn payload_outer_commitment_mismatch_is_refused() -> Result<(), SdkError> 
 #[tokio::test(flavor = "current_thread")]
 async fn ad_binds_report_commitment_so_matched_c_tamper_fails_aead() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(159, 160)?;
+    let (a, mut b) = pair(159, 160).await?;
     let entry = seal(&a, &b, message("report-ad", "c"), b"ad")?;
     let forged = ramflux_protocol::encode_base64url([0x00_u8; 32]);
     let mut tampered = entry.clone();
@@ -289,7 +400,7 @@ async fn ad_binds_report_commitment_so_matched_c_tamper_fails_aead() -> Result<(
 #[tokio::test(flavor = "current_thread")]
 async fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(145, 146)?;
+    let (a, mut b) = pair(145, 146).await?;
     let first = seal(&a, &b, message("report-fresh-1", "c"), b"one")?;
     let mut second = seal(&a, &b, message("report-fresh-2", "c"), b"two")?;
     second.inbox_seq = 2;
@@ -304,32 +415,39 @@ async fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn gate_off_omits_report_fields_and_legacy_bytes_open() -> Result<(), SdkError> {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
-    let (a, mut b) = pair(147, 148)?;
-    let entry = seal(&a, &b, message("report-legacy", "c"), b"legacy-body")?;
-    assert_eq!(entry.envelope.collapse_tag, None);
-    assert_eq!(entry.envelope.report_commitment, None);
-    let json = serde_json::to_vec(&entry.envelope)?;
-    assert!(!json.windows(b"report_commitment".len()).any(|w| w == b"report_commitment"));
-    assert!(!json.windows(b"collapse_tag".len()).any(|w| w == b"collapse_tag"));
-    let opened = apply(&mut b, &entry).await?;
-    assert!(opened.plaintext.is_some());
-    assert_eq!(projected(&b, "c")?, 1);
+async fn active_sender_refuses_legacy_bytes_before_projection() -> Result<(), SdkError> {
+    assert!(ramflux_protocol::schema_profile::schema_v1_live());
+    let (a, b) = pair(147, 148).await?;
+    let mut draft = message("report-legacy", "c");
+    draft.source_principal_id = a.config()?.principal_id;
+    draft.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
+    draft.target_delivery_id = b.config()?.target_delivery_id;
+    let identity = b.client.owned_device_identity()?;
+    assert!(
+        a.client
+            .seal_generated_routed_prepared(
+                &a.config()?,
+                &draft,
+                b"legacy-body",
+                Route::direct(),
+                SendMaterial {
+                    manifest: Some((identity.root_commitment().into(), b.manifest()?)),
+                    bundle: Some(b.client.load_x3dh_private_state(&identity)?.bundle),
+                }
+            )
+            .is_err(),
+        "the production sealer must refuse raw legacy bytes"
+    );
+    assert_eq!(projected(&b, "c")?, 0);
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_control_route_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(161, 162)?;
-    let entry = seal_as(
-        &a,
-        &b,
-        message("report-control", "c"),
-        br#"{"type":"pair.session.reset.v1"}"#,
-        Route::control(),
-    )?;
+    let (a, mut b) = pair(161, 162).await?;
+    let entry =
+        seal_as(&a, &b, message("report-control", "c"), &reset_inner(&a, &b)?, Route::control())?;
     ramflux_node_core::check_entry_bound(&entry.envelope)
         .map_err(|error| invalid(&error.to_string()))?;
     opened_kind(&apply(&mut b, &entry).await?, &Kind::Control)
@@ -338,22 +456,9 @@ async fn gate_on_control_route_opens() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (mut a, mut b) = pair(163, 164)?;
+    let (mut a, b) = pair(163, 164).await?;
     friend(&mut a, &b)?;
-    a.client.send_direct_message("c", "outgoing", "alice", b"hello")?;
-    a.client.account_db()?.persist_client_record(
-        "conversation",
-        "c",
-        &serde_json::json!({"kind":"direct","participants":["alice","bob"]}),
-    )?;
-    let outgoing = seal(&a, &b, message("outgoing", "c"), b"hello")?;
-    apply(&mut b, &outgoing).await?;
-    let body = serde_json::to_vec(&serde_json::json!({
-        "schema":"ramflux.sdk.receipt_event.v1","version":1,"receipt_id":"report-receipt",
-        "event_seq":1,"nonce":"nonce","reader_device_id":"bob",
-        "event":{"type":"ReceiptDelivered","conversation_id":"c","message_id":"outgoing",
-            "delivered_at":1,"receiver_device_id":"bob","scope":"device","ttl_seconds":3600}
-    }))?;
+    let body = receipt_body(&b, &a, "report-receipt", "outgoing")?;
     let mut receipt = reply_to("alice");
     receipt.envelope_id = "report-receipt".into();
     receipt.message_id = "report-receipt".into();
@@ -361,21 +466,15 @@ async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
     let entry = seal_as(&b, &a, receipt, &body, Route::receipt())?;
     ramflux_node_core::check_entry_bound(&entry.envelope)
         .map_err(|error| invalid(&error.to_string()))?;
-    opened_kind(&apply(&mut a, &entry).await?, &Kind::Receipt)
+    assert_eq!(a.client.open_routed(&entry, &a.id)?.routing.kind, Kind::Receipt);
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_group_message_route_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(165, 166)?;
-    super::fixture_group(&a.client, "report-group", &a)?;
-    super::fixture_group(&b.client, "report-group", &a)?;
-    super::fixture_member(&a.client, "report-group", &b)?;
-    super::fixture_member(&b.client, "report-group", &b)?;
-    b.client.import_group_sender_key_distribution(
-        &a.client.export_group_sender_key_distribution("report-group", "alice")?,
-    )?;
-    let body = a.client.encrypt_group_message("report-group", "alice", b"group-body")?;
+    let (a, mut b) = pair(165, 166).await?;
+    let body = group_inner(&a, &b, "report-group")?;
     let entry = seal_as(
         &a,
         &b,
@@ -389,24 +488,24 @@ async fn gate_on_group_message_route_opens() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn gate_on_opaque_own_device_body_builds_envelope() -> Result<(), SdkError> {
+async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, _) = pair(167, 168)?;
+    let (a, _) = pair(167, 168).await?;
     let mut packet = crate::client::own_device_copy::PREFIX.to_vec();
     packet.extend(br#"{"schema":"ramflux.sdk.own_device_message.v2","id":"opaque"}"#);
     let mut message = message("report-opaque", "c");
     message.encrypted_body = packet.clone();
-    let envelope = gateway_direct_message_envelope(&a.config()?, &message, None)?;
-    let payload = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
-        .map_err(|_| invalid("payload"))?;
-    assert!(payload.starts_with(crate::client::own_device_copy::PREFIX));
+    assert!(
+        gateway_direct_message_envelope(&a.config()?, &message, None).is_err(),
+        "retired opaque own-copy is refused before envelope construction"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(169, 170)?;
+    let (a, mut b) = pair(169, 170).await?;
     let entry = seal(&a, &b, message("report-compact", "c"), b"compact-body")?;
     let compact = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|_| invalid("payload"))?;
@@ -417,6 +516,7 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
     message.source_principal_id.clone_from(&entry.envelope.source_principal_id);
     message.sender_id.clone_from(&entry.envelope.source_device_id);
     message.target_delivery_id.clone_from(&entry.envelope.target_delivery_id);
+    message.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
     message.encrypted_body = compact;
     message.created_at = entry.envelope.created_at;
     message.ttl = entry.envelope.ttl;
@@ -425,8 +525,10 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
             .map_err(|error| invalid(&error.to_string()))?,
     )
     .map_err(|error| invalid(&error.to_string()))?;
-    let envelope =
+    let mut envelope =
         gateway_direct_message_envelope_sealed(&a.config()?, &message, None, Some(&committed))?;
+    envelope.ext = entry.envelope.ext.clone();
+    resign(&a, &mut envelope)?;
     let nested = decode(&envelope)?;
     assert!(nested.collapse_tag.is_some());
     assert!(nested.report_commitment.is_some());
@@ -441,20 +543,15 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
 #[tokio::test(flavor = "current_thread")]
 async fn abandoned_direct_seal_does_not_fail_later_control_send() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(171, 172)?;
-    let _abandoned = super::seal_nested(
-        &a,
-        &b,
-        message("report-abandoned", "c"),
-        b"abandoned-body",
-        Route::direct(),
-    )?;
-    let (c, mut d) = pair(175, 176)?;
+    let (a, b) = pair(171, 172).await?;
+    let _abandoned =
+        nested_text(&a, &b, message("report-abandoned", "c"), b"abandoned-body", Route::direct())?;
+    let (c, mut d) = pair(175, 176).await?;
     let entry = seal_as(
         &c,
         &d,
         message("report-control-after-abandon", "c"),
-        br#"{"type":"pair.session.reset.v1"}"#,
+        &reset_inner(&c, &d)?,
         Route::control(),
     )?;
     opened_kind(&apply(&mut d, &entry).await?, &Kind::Control)
@@ -463,9 +560,9 @@ async fn abandoned_direct_seal_does_not_fail_later_control_send() -> Result<(), 
 #[tokio::test(flavor = "current_thread")]
 async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(173, 174)?;
+    let (a, b) = pair(173, 174).await?;
     let (mut message, sealed) =
-        super::seal_nested(&a, &b, message("report-a0-drift", "c"), b"drift", Route::direct())?;
+        nested_text(&a, &b, message("report-a0-drift", "c"), b"drift", Route::direct())?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     message.ttl = message.ttl.saturating_add(1);
     match gateway_direct_message_envelope_sealed(
@@ -480,11 +577,10 @@ async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
     }
 }
 
-fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
+async fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(alice, bob)?;
-    let (mut message, sealed) =
-        super::seal_nested(&a, &b, message(id, "c"), b"drift", Route::direct())?;
+    let (a, b) = pair(alice, bob).await?;
+    let (mut message, sealed) = nested_text(&a, &b, message(id, "c"), b"drift", Route::direct())?;
     message.ttl = message.ttl.saturating_add(1);
     match gateway_envelope_from_sealed(&a.config()?, &mut message, sealed, None) {
         Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
@@ -495,30 +591,25 @@ fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn helper_a0_drift_task_transport() -> Result<(), SdkError> {
-    helper_a0_drift(181, 182, "report-task-a0-drift")
+    helper_a0_drift(181, 182, "report-task-a0-drift").await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn helper_a0_drift_group() -> Result<(), SdkError> {
-    helper_a0_drift(183, 184, "report-group-a0-drift")
+    helper_a0_drift(183, 184, "report-group-a0-drift").await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn helper_a0_drift_outbox() -> Result<(), SdkError> {
-    helper_a0_drift(185, 186, "report-outbox-a0-drift")
+    helper_a0_drift(185, 186, "report-outbox-a0-drift").await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(187, 188)?;
-    let (mut message, sealed) = super::seal_nested(
-        &a,
-        &b,
-        message("report-wrapper-direct", "c"),
-        b"direct",
-        Route::direct(),
-    )?;
+    let (a, b) = pair(187, 188).await?;
+    let (mut message, sealed) =
+        nested_text(&a, &b, message("report-wrapper-direct", "c"), b"direct", Route::direct())?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     match gateway_direct_message_envelope(&a.config()?, &message, None) {
         Err(SdkError::InboundRejected(text))
@@ -534,7 +625,7 @@ async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn task_transport_prepared_a0_drift_is_a_send_error() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (mut a, b) = pair(189, 190)?;
+    let (mut a, b) = pair(189, 190).await?;
     if a.client
         .account_db()?
         .client_record("device", &b.client.local_device_reference(&b.id)?)?
@@ -545,19 +636,35 @@ async fn task_transport_prepared_a0_drift_is_a_send_error() -> Result<(), SdkErr
     let identity = b.client.owned_device_identity()?;
     let bundle = b.client.load_x3dh_private_state(&b.client.local_device_identity(&b.id)?)?.bundle;
     let engine = GatewaySessionEngine::with_test_transport(a.config()?, Box::new(NoNetwork));
-    let account = LocalBusAccountState::new(std::mem::take(&mut a.client), engine, a.id.clone());
+    let conversation = a.client.generated_direct_conversation_id(&identity)?;
+    let event = ramflux_protocol::TaskEvent::new(
+        conversation.clone(),
+        ramflux_protocol::TaskEventBody::Start(ramflux_protocol::TaskStart {
+            task_id: "drift-task".into(),
+            conversation_id: conversation.clone(),
+            requester: a.config()?.principal_id,
+            assignee: b.config()?.principal_id,
+            text: "prepared drift".into(),
+            constraints: None,
+        }),
+        crate::prelude::sdk_device_signed_fields(&a.id, ""),
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    let exact = a.client.sign_task_event(event, "prepared-drift".into(), None)?.bytes()?;
+    let anchor = a.client.own_account_anchor()?;
+    let account = LocalBusAccountState::new(std::mem::take(&mut a.client), engine, anchor);
     let target = crate::bus::dispatch::task_transport::Target {
         device: b.id.clone(),
         identity,
-        delivery: b.id.clone(),
+        delivery: b.config()?.target_delivery_id,
         federation: None,
         own: false,
     };
     let mut draft = crate::bus::dispatch::task_transport::prepared::Draft::new(
         &account,
         target,
-        "c",
-        b"prepared-drift",
+        &conversation,
+        &exact,
         Route::direct(),
     )?;
     draft.drift_ttl = true;
@@ -624,14 +731,35 @@ fn own_message_copy_inner(sender: &Fixture, receiver: &Fixture) -> Result<Vec<u8
     RamfluxClient::encode_generated_control(&mut stream, b"own-copy".to_vec(), control)
 }
 
-fn receipt_body(id: &str, message_id: &str) -> Result<Vec<u8>, SdkError> {
-    serde_json::to_vec(&serde_json::json!({
-        "schema":"ramflux.sdk.receipt_event.v1","version":1,"receipt_id":id,
-        "event_seq":1,"nonce":"nonce","reader_device_id":"bob",
-        "event":{"type":"ReceiptDelivered","conversation_id":"c","message_id":message_id,
-            "delivered_at":1,"receiver_device_id":"bob","scope":"device","ttl_seconds":3600}
-    }))
-    .map_err(SdkError::from)
+fn receipt_body(
+    sender: &Fixture,
+    recipient: &Fixture,
+    _id: &str,
+    message_id: &str,
+) -> Result<Vec<u8>, SdkError> {
+    let identity = sender.client.allocate_generated_identity(
+        "c",
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let receiver = identity.author.clone();
+    RamfluxClient::encode_generated_inner(
+        identity,
+        &ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Receipt(
+                ramflux_protocol::message::Receipt {
+                    targets: vec![ramflux_protocol::message::MessageRef {
+                        id: blake3::hash(message_id.as_bytes()).as_bytes().to_vec(),
+                        conversation_id: "c".into(),
+                        author_anchor: recipient.client.own_account_anchor()?,
+                    }],
+                    state: ramflux_protocol::message::ReceiptState::ReceiptDelivered as i32,
+                    at: 1,
+                    receiver,
+                },
+            )),
+        },
+    )
 }
 
 fn receipt_message(id: &str) -> GatewayDirectMessage {
@@ -645,28 +773,15 @@ fn receipt_message(id: &str) -> GatewayDirectMessage {
 #[tokio::test(flavor = "current_thread")]
 async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(189, 190)?;
+    let (a, b) = pair(189, 190).await?;
     uniform_tag_and_commitment(&seal(&a, &b, message("t07-direct", "c"), b"direct")?.envelope)?;
-    let (a, b) = pair(191, 192)?;
+    let (a, b) = pair(191, 192).await?;
     uniform_tag_and_commitment(
-        &seal_as(
-            &a,
-            &b,
-            message("t07-control", "c"),
-            br#"{"type":"pair.session.reset.v1"}"#,
-            Route::control(),
-        )?
-        .envelope,
+        &seal_as(&a, &b, message("t07-control", "c"), &reset_inner(&a, &b)?, Route::control())?
+            .envelope,
     )?;
-    let (a, b) = pair(193, 194)?;
-    super::fixture_group(&a.client, "t07-group", &a)?;
-    super::fixture_group(&b.client, "t07-group", &a)?;
-    super::fixture_member(&a.client, "t07-group", &b)?;
-    super::fixture_member(&b.client, "t07-group", &b)?;
-    b.client.import_group_sender_key_distribution(
-        &a.client.export_group_sender_key_distribution("t07-group", "alice")?,
-    )?;
-    let group_body = a.client.encrypt_group_message("t07-group", "alice", b"group-body")?;
+    let (a, b) = pair(193, 194).await?;
+    let group_body = group_inner(&a, &b, "t07-group")?;
     uniform_tag_and_commitment(
         &seal_as(
             &a,
@@ -677,18 +792,18 @@ async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError>
         )?
         .envelope,
     )?;
-    let (a, b) = pair(195, 196)?;
+    let (a, b) = pair(195, 196).await?;
     uniform_tag_and_commitment(
         &seal_as(
             &b,
             &a,
             receipt_message("t07-receipt"),
-            &receipt_body("t07-receipt", "t07-outgoing")?,
+            &receipt_body(&b, &a, "t07-receipt", "t07-outgoing")?,
             Route::receipt(),
         )?
         .envelope,
     )?;
-    let (a, b) = pair(197, 198)?;
+    let (a, b) = pair(197, 198).await?;
     uniform_tag_and_commitment(
         &seal_as(
             &a,
@@ -700,18 +815,19 @@ async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError>
         .envelope,
     )?;
     let _omit = omit_direct_report();
-    let (a, b) = pair(199, 200)?;
-    let omitted = seal_as(
-        &b,
-        &a,
-        receipt_message("t07-omit"),
-        &receipt_body("t07-omit", "t07-outgoing")?,
-        Route::receipt(),
-    )?;
-    match uniform_tag_and_commitment(&omitted.envelope) {
-        Err(_) => Ok(()),
-        Ok(()) => Err(invalid("omit Receipt commitment must fail the T07 assertion")),
-    }
+    let (a, b) = pair(199, 200).await?;
+    assert!(
+        seal_as(
+            &b,
+            &a,
+            receipt_message("t07-omit"),
+            &receipt_body(&b, &a, "t07-omit", "t07-outgoing")?,
+            Route::receipt()
+        )
+        .is_err(),
+        "an omitted mandatory receipt commitment must be refused by the producer"
+    );
+    Ok(())
 }
 
 #[test]
@@ -733,7 +849,7 @@ fn report_mismatch_maps_to_authentication_failed() {
 #[tokio::test(flavor = "current_thread")]
 async fn refused_first_c_does_not_strand_pair_successor() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(187, 189)?;
+    let (a, mut b) = pair(187, 189).await?;
     let mut bad = seal(&a, &b, message("bad-first-c", "c"), b"must not project")?;
     // Signed issue time is in C's A0, while the pair AEAD still authenticates this exact ciphertext.
     bad.envelope.created_at = bad.envelope.created_at.saturating_add(1);
@@ -741,10 +857,18 @@ async fn refused_first_c_does_not_strand_pair_successor() -> Result<(), SdkError
     let mut next = seal(&a, &b, message("after-first-c-refusal", "c"), b"next message")?;
     next.inbox_seq = 2;
     Box::pin(settle_through(&mut b, vec![bad, next])).await?;
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 2);
+    assert_eq!(b.client.gateway_receive_cursor(&b.config()?.target_delivery_id)?, 2);
     assert_eq!(projected(&b, "c")?, 1);
-    assert!(b.client.direct_message_by_id("bad-first-c")?.is_none());
-    assert!(b.client.direct_message_by_id("after-first-c-refusal")?.is_some());
+    let page = b.client.generated_message_page("c", None, 10)?;
+    let Some(ramflux_protocol::message::message_update::State::Content(content)) =
+        page.messages.first().and_then(|row| row.state.as_ref())
+    else {
+        return Err(invalid("successor projection missing"));
+    };
+    assert!(
+        matches!(content.value.as_ref(), Some(ramflux_protocol::message::content::Value::Message(value)) if value.text == "next message"),
+        "only the valid successor may reach the generated reader"
+    );
     Ok(())
 }
 

@@ -13,6 +13,7 @@ const MAX_PENDING: u32 = 256;
 const MAX_PENDING_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 struct Intent {
+    payload_kind: crate::client::own_device_copy::OwnPayloadKind,
     copy_id: String,
     #[serde(default)]
     sequence: u64,
@@ -34,7 +35,9 @@ impl Intent {
 #[derive(Clone, Serialize, Deserialize)]
 struct Work {
     intent: Intent,
-    packet: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audience: Option<ramflux_protocol::message::QualifiedDevice>,
+
     attempts: u32,
     next_at: i64,
     #[serde(default)]
@@ -76,20 +79,54 @@ pub(crate) fn stage(
     input: OwnMessageInput<'_>,
     owner_record: Option<(&str, &str)>,
 ) -> Result<(), SdkError> {
-    stage_inner(client, input, owner_record, false)
+    stage_inner(client, input, owner_record, false, None)
 }
+pub(crate) fn stage_to(
+    client: &RamfluxClient,
+    input: OwnMessageInput<'_>,
+    target: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<(), SdkError> {
+    if target.root_commitment() != client.own_account_anchor()? {
+        return Err(SdkError::InboundRejected("own history target root differs".into()));
+    }
+    client.require_native_operation(
+        target,
+        crate::client::identity_authority::NativeOperation::Sync,
+    )?;
+    let epoch = client
+        .account_db()?
+        .client_device_record(target)?
+        .and_then(|record| record["device_epoch"].as_u64())
+        .filter(|epoch| *epoch != 0)
+        .ok_or_else(|| {
+            SdkError::InboundRejected("own history target incarnation missing".into())
+        })?;
+    stage_inner(
+        client,
+        input,
+        None,
+        false,
+        Some(ramflux_protocol::message::QualifiedDevice {
+            account_anchor: target.root_commitment().into(),
+            device_id: target.device_id().into(),
+            device_epoch: epoch,
+        }),
+    )
+}
+#[cfg(test)]
 pub(crate) fn stage_held(
     client: &RamfluxClient,
     input: OwnMessageInput<'_>,
     message: &str,
 ) -> Result<(), SdkError> {
-    stage_inner(client, input, Some(("message", message)), true)
+    stage_inner(client, input, Some(("message", message)), true, None)
 }
 fn stage_inner(
     client: &RamfluxClient,
     input: OwnMessageInput<'_>,
     owner_record: Option<(&str, &str)>,
     held: bool,
+    audience: Option<ramflux_protocol::message::QualifiedDevice>,
 ) -> Result<(), SdkError> {
     let id = copy_id(client, input.id)?;
     let key = format!("{PREFIX}{id}");
@@ -100,7 +137,9 @@ fn stage_inner(
         return Ok(());
     }
     let mut work = Work {
+        audience,
         intent: Intent {
+            payload_kind: input.payload_kind,
             copy_id: id.clone(),
             sequence: 0,
             id: input.id.into(),
@@ -111,7 +150,7 @@ fn stage_inner(
             expires_at: Some(input.created_at.saturating_add(i64::from(client.content_ttl()?))),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
         },
-        packet: None,
+
         attempts: 0,
         next_at: input.created_at,
         held,
@@ -250,7 +289,7 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
 }
 
 fn sealed(work: &Work) -> bool {
-    work.packet.is_some() || work.generated.is_some()
+    work.generated.is_some()
 }
 
 fn message_owner(work: &Work) -> Option<&str> {
@@ -266,6 +305,7 @@ fn work_bytes(work: &Work) -> Result<u64, SdkError> {
 }
 
 /// Release only a held plain-message copy; legacy/surface retries keep their existing lifecycle.
+#[cfg(test)]
 pub(crate) fn finish_held(
     client: &RamfluxClient,
     envelope: &str,

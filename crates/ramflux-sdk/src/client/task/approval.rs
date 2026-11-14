@@ -7,10 +7,11 @@ use crate::{
     GatewayInboxEntry, LocalMcpApprovalRecord, LocalMcpGrantSigningBody, RamfluxClient, SdkError,
     TaskApprovalBinding,
 };
+use prost::Message as _;
 use ramflux_protocol::NeedsMe;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-pub(crate) const PREFIX: &[u8] = b"ramflux.task.approval.v1\n";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
@@ -41,24 +42,49 @@ pub(crate) struct Job {
     pub next_at: i64,
 }
 impl Packet {
+    pub(crate) fn to_generated(&self) -> Result<g::TaskApprovalPacket, SdkError> {
+        let mut native = serde_json::to_value(self)?;
+        native
+            .as_object_mut()
+            .ok_or_else(|| invalid("approval fields missing"))?
+            .remove("local_expires_at");
+        Ok(serde_json::from_value(crate::client::generated_fields::convert(
+            "TaskApprovalPacket",
+            &native,
+            true,
+        )?)?)
+    }
+    pub(crate) fn from_generated(value: &g::TaskApprovalPacket) -> Result<Self, SdkError> {
+        Ok(serde_json::from_value(crate::client::generated_fields::convert(
+            "TaskApprovalPacket",
+            &serde_json::to_value(value)?,
+            false,
+        )?)?)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
+        super::check_delivery_size(bytes.len())?;
+        if g::validation::scan_message("Task", bytes, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let value = g::Task::decode(bytes).map_err(|_| invalid("typed Task approval malformed"))?;
+        let Some(g::task::Payload::Approval(packet)) = value.payload else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_generated(&packet)?))
+    }
     pub(crate) fn request(&self) -> &Request {
         match &self.payload {
             Payload::Request { request } | Payload::Decision { request, .. } => request,
         }
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, SdkError> {
-        Ok(ramflux_protocol::canonical_json_bytes(&(
-            "ramflux.task.approval.v1",
-            &self.principal,
-            &self.device,
-            &self.payload,
-        ))?)
+        let mut unsigned = self.to_generated()?;
+        unsigned.signature.clear();
+        super::generated::typed_transcript("TaskApprovalPacket", &unsigned.encode_to_vec())
     }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = PREFIX.to_vec();
-        let mut wire = self.clone();
-        wire.local_expires_at = None;
-        bytes.extend(serde_json::to_vec(&wire)?);
+        let bytes = g::Task { payload: Some(g::task::Payload::Approval(self.to_generated()?)) }
+            .encode_to_vec();
         super::check_delivery_size(bytes.len())?;
         Ok(bytes)
     }
@@ -157,9 +183,10 @@ impl RamfluxClient {
         conversation: &str,
         bytes: &[u8],
     ) -> Result<bool, SdkError> {
-        let Some(body) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
         super::check_delivery_size(bytes.len())?;
-        let packet: Packet = ramflux_protocol::parse_i_json(body)?;
+        let Some(packet) = Packet::decode(bytes)? else {
+            return Ok(false);
+        };
         if packet.principal != entry.envelope.source_principal_id
             || packet.device != entry.envelope.source_device_id
             || packet.request().binding.conversation_id != conversation

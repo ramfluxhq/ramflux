@@ -3,9 +3,9 @@
 
 //! Signed, short-lived creator-head probes and transferee acknowledgements.
 use crate::prelude::*;
+use prost::Message as _;
 use ramflux_protocol::{GroupStateActor, GroupStateSnapshot, GroupTransferAcceptance};
 use serde::{Deserialize, Serialize};
-const DOMAIN: &str = "ramflux.group.transfer_sync.v1";
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TransferDevice {
@@ -87,15 +87,20 @@ impl TransferControl {
                 .collect(),
         }
     }
-    pub(crate) fn signing(&self) -> serde_json::Value {
-        serde_json::json!({"domain":DOMAIN,"body":self.body})
+    fn signing(&self) -> Result<Vec<u8>, SdkError> {
+        let mut unsigned = super::generated_send::transfer(self)?;
+        unsigned.signature.clear();
+        crate::client::task::generated::typed_transcript(
+            "TransferControl",
+            &unsigned.encode_to_vec(),
+        )
     }
     pub(crate) fn sign(client: &RamfluxClient, body: TransferBody) -> Result<Self, SdkError> {
         let mut wire = Self { body, signature: String::new() };
-        wire.signature = ramflux_crypto::sign_with_device_branch(
+        wire.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &wire.signing()?,
             client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &wire.signing(),
-        )?;
+        );
         Ok(wire)
     }
     pub(crate) fn verify(&self, now: i64) -> Result<(), SdkError> {
@@ -123,10 +128,10 @@ impl TransferControl {
             return Err(super::transfer::requires_sync_reason("clock_skew_or_expired_control"));
         }
         ramflux_crypto::verify_group_state_actor(self.actor())?;
-        ramflux_crypto::verify_device_branch_signature(
-            &self.actor().identity.signing_public_key,
-            &self.signing(),
+        ramflux_crypto::verify_canonical_signature(
+            &self.signing()?,
             &self.signature,
+            &self.actor().identity.signing_public_key,
         )?;
         let snapshot = match &self.body {
             TransferBody::Probe { probe } => &probe.base,

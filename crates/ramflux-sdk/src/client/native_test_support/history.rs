@@ -12,10 +12,22 @@ use prost::Message as _;
 use ramflux_protocol::message as g;
 
 impl Fixture {
-    pub(super) fn seal_inner_to(
+    pub(crate) fn seal_inner_to(
         &self,
         target: &Self,
         exact: &[u8],
+    ) -> TestResult<ramflux_protocol::Envelope> {
+        self.seal_inner_to_with_id(
+            target,
+            exact,
+            &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        )
+    }
+    pub(crate) fn seal_inner_to_with_id(
+        &self,
+        target: &Self,
+        exact: &[u8],
+        envelope_id: &str,
     ) -> TestResult<ramflux_protocol::Envelope> {
         let inner = g::Inner::decode(exact)?;
         let kind = inner.kind;
@@ -30,7 +42,7 @@ impl Fixture {
         let mut message = GatewayDirectMessage {
             conversation_id: identity.conversation_id,
             message_id: ramflux_protocol::encode_base64url(identity.id),
-            envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            envelope_id: envelope_id.into(),
             source_principal_id: self.config.principal_id.clone(),
             sender_id: self.config.device_id.clone(),
             recipient_device_id: Some(target.config.device_id.clone()),

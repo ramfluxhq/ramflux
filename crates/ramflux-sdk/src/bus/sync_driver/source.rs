@@ -9,7 +9,7 @@ use crate::bus::{
 use crate::client::routed::PreparedInbound;
 pub(crate) mod failure;
 mod group;
-mod history;
+
 pub(crate) mod hold;
 mod native;
 pub(crate) mod reset;
@@ -27,7 +27,6 @@ enum Request {
 enum Lookup {
     Sender(Option<String>),
     Contact(String),
-    OwnCopy(String),
 }
 
 pub(crate) async fn prepare(
@@ -35,6 +34,14 @@ pub(crate) async fn prepare(
     entry: ReceiveEntry,
     mut backpressure: Box<Backpressure>,
 ) -> Result<(ReceiveEntry, Box<Backpressure>, PreparedSource), SdkError> {
+    #[cfg(feature = "itest-rfd-fault")]
+    let entry = {
+        let mut entry = entry;
+        if let Some(changed) = crate::itest_rfd_fault::tamper_received_binding(&entry.entry)? {
+            entry.entry = *changed;
+        }
+        entry
+    };
     #[cfg(test)]
     let source_writer = writer.source_reads();
     #[cfg(test)]
@@ -61,16 +68,6 @@ pub(crate) async fn prepare(
         Request::Prepared(request) => {
             let result = match request {
                 Err(error) => Err(error),
-                Ok(Lookup::OwnCopy(root)) => {
-                    fetch_inbound_manifest(&config, &root).await.map(|manifest| PreparedInbound {
-                        manifest: None,
-                        native_prepared: false,
-                        candidate: None,
-                        own_copy_manifest: Some(manifest),
-                        group_directory: None,
-                        history: None,
-                    })
-                }
                 Ok(Lookup::Contact(root)) => match fetch_inbound_manifest(&config, &root).await {
                     Ok(manifest) => native::contact(writer, &config, &entry.entry, manifest).await,
                     Err(error) => Err(error),
@@ -118,11 +115,10 @@ fn request(
         {
             return Ok(None);
         }
-        if let Some(root) = account.client.own_device_receive_manifest_request(entry)? {
-            return Ok(Some(Ok(Lookup::OwnCopy(root))));
+        if crate::client::routed::decode(&entry.envelope).is_err() {
+            return Ok(None);
         }
-        let Ok(packet) = crate::client::routed::decode(&entry.envelope) else { return Ok(None) };
-        if packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
+        if account.client.contact_bootstrap_required(entry)? {
             return Ok(Some(
                 account.client.contact_candidate_manifest_request(entry).map(Lookup::Contact),
             ));

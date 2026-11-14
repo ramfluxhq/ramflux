@@ -94,7 +94,6 @@ impl RamfluxClient {
                             conversation_id: held.route.conversation_id.clone(),
                             commit_label: "contact-request-accepted".into(),
                             pair_slot: None,
-                            legacy_slot: None,
                         }
                     });
                     let registration = self.persist_sender_attachment_reference(

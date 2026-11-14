@@ -50,9 +50,9 @@ pub(super) fn broadcast(
     }
 }
 
-/// Unified message events never drop a slow subscriber silently. Dormant with the generation.
+/// Unified message events never drop a slow subscriber silently.
 fn signals_lag() -> bool {
-    crate::client::target_selection::schema_v1_selected()
+    true
 }
 
 /// Final frame of an overflowing subscription. Committed events stay in the durable journal;

@@ -13,7 +13,7 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(), SdkError> {
-        self.send_pair_control(engine, remote, "pair.session.reset.v1").await
+        self.send_pair_control(engine, remote, PairControlKind::Reset).await
     }
     pub(super) fn pair_delivery_id(
         &self,
@@ -124,21 +124,15 @@ impl RamfluxClient {
         &self,
         engine: &mut impl GatewaySessionAccess,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
-        kind: &str,
+        kind: PairControlKind,
     ) -> Result<(), SdkError> {
-        let kind = match kind {
-            "pair.session.reset.v1" => PairControlKind::Reset,
-            "pair.session.reset.ack.v1" => PairControlKind::Ack,
-            _ => return Err(super::invalid("unknown pair control")),
-        };
         let draft = self.prepare_pair_control_draft(engine.config(), remote, kind)?;
         let local = self.local_device_identity(&engine.config().device_id)?;
         let submitted = self.pair_reset_fingerprint(&local, remote)?;
         let sealed =
             self.seal_routed_as(engine, &draft.message, &draft.body, Route::control()).await?;
         if self.pair_control_draft_current(&draft)? {
-            let envelope =
-                self.finish_pair_control_draft(engine.config(), draft, &sealed.packet)?;
+            let envelope = self.finish_pair_control_draft(engine.config(), draft, sealed)?;
             if let Err(refusal) = engine.submit_classified(envelope).await? {
                 return Err(self.pair_control_refused(
                     &local,
@@ -228,13 +222,13 @@ impl RamfluxClient {
         body: &[u8],
     ) {
         if opened.routing.kind == Kind::Control
-            && serde_json::from_slice::<serde_json::Value>(body)
-                .is_ok_and(|value| value["type"] == "pair.session.reset.v1")
+            && Self::decode_generated_inner(body).is_ok_and(|(_, content)| matches!(content.value,
+                Some(ramflux_protocol::message::content::Value::Control(control)) if control.operation == 1))
             && self
                 .pair_recovery_allowed(&opened.local_device, &opened.remote_device)
                 .is_ok_and(|allowed| allowed)
             && let Err(error) = self
-                .send_pair_control(engine, &opened.remote_device, "pair.session.reset.ack.v1")
+                .send_pair_control(engine, &opened.remote_device, PairControlKind::Ack)
                 .await
         {
             tracing::debug!(%error,"encrypted reset acknowledgement will be retried on the next request");

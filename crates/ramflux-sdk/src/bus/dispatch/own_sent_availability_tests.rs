@@ -75,6 +75,7 @@ async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResu
             crate::bus::own_device_copy::stage(
                 &f.source.client,
                 crate::client::own_device_copy::OwnMessageInput {
+                    payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
                     id: &format!("blocked-{n}"),
                     created_at: now_unix_timestamp(),
                     conversation: "blocked",

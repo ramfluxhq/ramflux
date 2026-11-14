@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, VecDeque};
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Fault {
+    RetiredMessageShape,
     MissingRoot,
     MissingReference,
     RejectPoll,
@@ -41,13 +42,22 @@ impl AgentBus for RowBus {
                 return Err(Error::Bus);
             }
         }
-        let mut value = if method == "message.read" && body["conversation_id"] == "dm" {
+        let mut value = if method == "message.list" && body["conversation_id"] == "dm" {
             let mut value = self.inner.inner.request(method, body, op).await?;
-            value["messages"][0]["sender_id"] = json!("human-principal");
+            value["message"]["sender_id"] = json!("human-principal");
             value
         } else {
             self.inner.request(method, body, op).await?
         };
+        if method == "message.list" && self.faults.contains(&Fault::RetiredMessageShape) {
+            return Ok(json!({"messages":[{
+                "conversation_id":"dm", "message_id":"m11", "sender_id":"human-device",
+                "body_utf8":"@agent ping"
+            }]}));
+        }
+        if method == "message.list" && self.faults.contains(&Fault::MissingRoot) {
+            value["message"]["author"]["account_anchor"] = Value::Null;
+        }
         if method == "identity.directory" && self.faults.contains(&Fault::MissingRoot) {
             value["identities"][1]["contact_identity_commitment"] = Value::Null;
         }
@@ -182,4 +192,18 @@ fn r4_rule_patterns_and_choice_ids_must_pass_text_safety_before_startup() -> Tes
     f.config.rules[0].surface.as_mut().ok_or("surface")?.choices[0].id = "spoof\u{202e}id".into();
     assert!(matches!(f.config.validate(), Err(Error::Config)));
     Ok(())
+}
+
+#[tokio::test]
+async fn retired_message_shape_is_refused_without_serving_a_prompt_or_falling_back() -> TestResult {
+    let f = config()?;
+    let mut bus = RowBus::default();
+    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
+    host.start(&mut bus).await?;
+    bus.faults.insert(Fault::RetiredMessageShape);
+    host.apply(&mut bus, incoming(11, false), 2000).await?;
+    assert_refused(&host, 11)?;
+    assert_eq!(bus.inner.inner.replies, Vec::<serde_json::Value>::new());
+    bus.faults.remove(&Fault::RetiredMessageShape);
+    serve_next(&mut host, &mut bus, 12).await
 }

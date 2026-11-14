@@ -19,6 +19,7 @@ fn group_record(group: &str) -> String {
     )
 }
 impl RamfluxClient {
+    #[cfg(test)]
     pub(super) fn park_own_group_pin(
         &self,
         pin: &SdkOwnDeviceGroupMemberPin,

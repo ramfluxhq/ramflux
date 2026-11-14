@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Immutable group-member pins carried by authenticated same-root history snapshots.
-use crate::own_device_sync::{
-    SdkOwnDeviceGroupMemberPin, SdkOwnDeviceGroupSnapshot, SdkOwnDeviceHistoryBundle,
-};
+#[cfg(test)]
+use crate::own_device_sync::SdkOwnDeviceHistoryBundle;
+use crate::own_device_sync::{SdkOwnDeviceGroupMemberPin, SdkOwnDeviceGroupSnapshot};
 use crate::prelude::*;
 impl RamfluxClient {
     pub(super) fn own_device_group_member_pins(
@@ -34,6 +34,7 @@ impl RamfluxClient {
         Ok(pins)
     }
     /// Called after authenticated same-root context admission. Rejected pins remain inactive.
+    #[cfg(test)]
     pub(super) fn restore_own_device_group_member_pins(
         &self,
         bundle: &SdkOwnDeviceHistoryBundle,

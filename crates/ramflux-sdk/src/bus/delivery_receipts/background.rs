@@ -6,7 +6,7 @@
 use super::{
     ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, GatewaySessionConfig, LIFETIME,
     LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with,
-    gateway_direct_message_envelope, mpsc, now_unix_timestamp, postpone, receipt_message,
+    mpsc, now_unix_timestamp, postpone, receipt_message,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
@@ -288,8 +288,11 @@ fn seal(
             crate::client::routed::Route::receipt(),
             material,
         )?;
-        plan.message.encrypted_body = serde_json::to_vec(&sealed)?;
-        gateway_direct_message_envelope(&account.gateway_config, &plan.message, None)
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &account.gateway_config,
+            &mut plan.message,
+            sealed,
+        )
     });
     let packet = match prepared {
         Ok(packet) => packet,
@@ -392,7 +395,8 @@ mod tests {
             created_at: now_unix_timestamp(),
             ttl: crate::offline_retention::RECEIPT_TTL_SECS,
         };
-        let packet = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
+        let packet =
+            crate::dm::gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
         let work = Work {
             status_id: String::new(),
             conversation: "thread".into(),

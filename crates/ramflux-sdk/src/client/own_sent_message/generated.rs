@@ -345,6 +345,7 @@ impl RamfluxClient {
             &MessageMetadata::default(),
         )?;
         db.persist_message_actor_state(&id, &format!("routed/generated-identity/{id}"), identity)?;
+        db.mark_generated_message_owned(&id, source)?;
         db.persist_message_actor_state(
             &id,
             &format!("routed/generated-order/{id}"),

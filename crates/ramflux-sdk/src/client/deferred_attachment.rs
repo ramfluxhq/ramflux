@@ -149,6 +149,7 @@ impl RamfluxClient {
     }
 
     /// Persist before the message's receive checkpoint, without contacting any relay.
+    #[cfg(test)]
     pub(crate) fn persist_received_attachment_reference(
         &self,
         reference: &SdkDmAttachmentRef,
@@ -160,6 +161,7 @@ impl RamfluxClient {
         let prepared = self.decrypt_object_key_slot(&reference.key_slot).ok();
         self.persist_received_reference_prepared(reference, owner, conversation, message, prepared)
     }
+    #[cfg(test)]
     pub(crate) fn persist_received_reference_prepared(
         &self,
         reference: &SdkDmAttachmentRef,
@@ -537,11 +539,6 @@ impl RamfluxClient {
                 Ok(DeferredObjectKeySlot {
                     object_key: slot.object_key,
                     session: None,
-                    legacy_slot: if slot.pair_slot.is_none() {
-                        Some(reference.key_slot.clone())
-                    } else {
-                        None
-                    },
                     conversation_id: std::mem::take(&mut slot.conversation_id),
                     commit_label: std::mem::take(&mut slot.commit_label),
                     pair_slot: slot.pair_slot.take(),

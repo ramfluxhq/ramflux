@@ -6,8 +6,17 @@ use super::*;
 #[tokio::test]
 async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_lifting_blocks()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
+    crate::client::native_test_support::watchdog::within(
+        floor_capacity_is_typed_visible_and_explicitly_clearable_without_lifting_blocks_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_lifting_blocks_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 111)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 121)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
@@ -29,7 +38,7 @@ async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_liftin
     db.fence_contact_request("floor-0", "blocked", 0)?;
     let fence = db.retained_contact_request_fence("floor-0")?;
     assert!(
-        matches!(client.contact_request_candidate(&state.accounts["bob"].gateway_config,&entry).await,
+        matches!(client.contact_request_candidate(&state.accounts.get("bob").ok_or_else(|| invalid("bob"))?.gateway_config,&entry).await,
         Err(SdkError::ContactRequestCapacity(reason)) if reason == "contact_authority_floors_exhausted")
     );
     let status = contact(&mut state, "bob", "contact.requests.policy.get", json!({})).await?;
@@ -63,8 +72,17 @@ async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_liftin
 #[tokio::test]
 async fn committed_redelivery_after_request_retirement_cannot_resurrect_identity_cache()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
+    crate::client::native_test_support::watchdog::within(
+        committed_redelivery_after_request_retirement_cannot_resurrect_identity_cache_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn committed_redelivery_after_request_retirement_cannot_resurrect_identity_cache_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 131)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 141)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = pending(&mut state, &directory).await?;
@@ -89,8 +107,17 @@ async fn committed_redelivery_after_request_retirement_cannot_resurrect_identity
 #[tokio::test]
 async fn overflow_roots_are_deduplicated_within_a_drain_without_changing_saved_format()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
+    crate::client::native_test_support::watchdog::within(
+        overflow_roots_are_deduplicated_within_a_drain_without_changing_saved_format_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn overflow_roots_are_deduplicated_within_a_drain_without_changing_saved_format_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 151)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 161)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let mut entries = Vec::new();

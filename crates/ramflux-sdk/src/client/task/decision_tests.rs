@@ -282,10 +282,13 @@ fn requester_keeps_resolution_pending_until_executor_commits_the_exact_intent() 
         .last()
         .and_then(|e| e.decision_certificate.as_ref())
         .ok_or("certificate missing")?;
-    let wire = String::from_utf8(ramflux_protocol::decode_base64url(&certificate.encoded()?)?)?;
-    assert!(!wire.contains("arguments-hash"));
-    assert!(!wire.contains("signing_body"));
-    assert!(!wire.contains("confirmation_mode"));
+    let wire = ramflux_protocol::decode_base64url(&certificate.encoded()?)?;
+    for secret in ["arguments-hash", "signing_body", "confirmation_mode"] {
+        assert!(
+            !wire.windows(secret.len()).any(|window| window == secret.as_bytes()),
+            "typed decision certificate leaked private approval data: {secret}"
+        );
+    }
     f.human.save_task_commit_certificate(&intent, certificate)?;
     assert_eq!(f.human.retry_pending_tasks(crate::time::now_unix_timestamp())?, 1);
     assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);

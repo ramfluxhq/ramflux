@@ -315,13 +315,7 @@ pub(super) fn read(
         "conversation.list" => {
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
-        "message.list" | "message.read" => {
-            if crate::client::target_selection::schema_v1_selected() {
-                return generated_page(client, &request.body);
-            }
-            let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
-            message_page(client, &body.conversation_id)
-        }
+        "message.list" | "message.read" => generated_page(client, &request.body),
         _ => Err(SdkError::LocalBus("unsupported reader request".to_owned())),
     }
 }
@@ -401,94 +395,6 @@ fn default_generated_page_limit() -> u32 {
     100
 }
 
-fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json::Value, SdkError> {
-    if crate::client::target_selection::schema_v1_selected() {
-        return Ok(serde_json::to_value(client.generated_message_page(
-            conversation,
-            None,
-            100,
-        )?)?);
-    }
-    let db = client.account_db()?;
-    let mut messages = Vec::new();
-    for message in client.direct_messages(conversation)? {
-        let mut value = super::message_projection::row(&message)?;
-        if message.deleted {
-            messages.push(value);
-            continue;
-        }
-        let origin = client
-            .message_origin(conversation, &message.message_id)?
-            .unwrap_or(serde_json::Value::Null);
-        for field in [
-            "sender_device_id",
-            "sender_root_commitment",
-            "sender_device_display",
-            "direction",
-            "original_message_id",
-            "envelope_id",
-        ] {
-            value[field] = origin[field].clone();
-        }
-        if let Some(content) = db.message_content(&message.message_id)? {
-            value["body_utf8"] = if content.starts_with(crate::client::surface::carrier::PREFIX) {
-                serde_json::json!("[Surface pending validation]")
-            } else {
-                serde_json::json!(String::from_utf8_lossy(&content))
-            };
-            let mut attachments = Vec::new();
-            for object in db.client_message_object_ids(&message.message_id)? {
-                let metadata = super::read_model::row(client, "object", &object)?;
-                let mut reference = serde_json::json!({"object_id":object,"status":"referenced"});
-                for field in [
-                    "name",
-                    "size",
-                    "mime",
-                    "owner",
-                    "conversation_id",
-                    "message_id",
-                    "manifest_hash",
-                ] {
-                    if let Some(value) = metadata.get(field) {
-                        reference[field] = value.clone();
-                    }
-                }
-                attachments.push(reference);
-            }
-            value["attachments"] = serde_json::json!(attachments);
-        }
-        if let Some((surface, text)) = client.surface_message_fallback(&message.message_id)? {
-            value["content_type"] = serde_json::json!("surface");
-            value["surface_id"] = serde_json::json!(surface);
-            value["body_utf8"] = serde_json::json!(text);
-        }
-        if let Some(task) = client.task_message_metadata(conversation, &message.message_id)? {
-            value["content_type"] = serde_json::json!("task");
-            value["task_id"] = task["task_id"].clone();
-            value["actor_kind_verified"] = task["actor_kind_verified"].clone();
-            value["actor_kind"] = task["actor_kind"].clone();
-            value["body_utf8"] = task["fallback_text"].clone();
-        }
-        messages.push(value);
-    }
-    for row in
-        db.voice_call_rows(false)?.into_iter().filter(|row| row.conversation_id == conversation)
-    {
-        let duration = match (row.answered_at, row.ended_at) {
-            (Some(start), Some(end)) => Some(end.saturating_sub(start)),
-            _ => None,
-        };
-        messages.push(serde_json::json!({"id":row.call_id,"message_id":row.call_id,"conversation_id":row.conversation_id,"kind":"call","created_at":row.created_at,"call":row,"duration_seconds":duration,"missed":row.end_reason.as_deref()==Some("missed")}));
-    }
-    messages.sort_by_key(|row| {
-        (
-            row["created_at"].as_i64().unwrap_or(0),
-            row["message_id"].as_str().unwrap_or("").to_owned(),
-        )
-    });
-    Ok(serde_json::json!({"messages":messages,"rejected":client.rejected_inbox(conversation)?}))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,7 +424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_rows_preserve_actor_kind_and_leave_legacy_metadata_unknown()
+    async fn retired_actor_metadata_cannot_masquerade_as_generated_message_content()
     -> Result<(), SdkError> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos());
         let path = ramflux_test_support::TestPath::new()
@@ -551,25 +457,17 @@ mod tests {
                 Some("reader".into()),
                 "client",
                 "message.list",
-                serde_json::json!({"conversation_id":"thread"}),
+                serde_json::json!({"conversation_id":"thread", "read_model":true}),
             ))
-            .await?;
+            .await;
         readers.stop().await;
-        let rows = result["messages"].as_array().ok_or_else(closed)?;
-        for id in ["headless", "unknown", "legacy"] {
-            let row = rows.iter().find(|row| row["message_id"] == id).ok_or_else(closed)?;
-            assert_eq!(row["actor_kind_verified"], false);
-            assert_eq!(
-                row["actor_kind"],
-                if id == "headless" {
-                    serde_json::json!("headless_ai")
-                } else {
-                    serde_json::Value::Null
-                }
-            );
-            assert_eq!(row["task_id"], id);
-            assert_eq!(row["body_utf8"], "[Task]");
-        }
+        let result = result?;
+        assert_eq!(result["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+        assert_eq!(
+            result["messages"],
+            serde_json::json!([]),
+            "retired actor labels and opaque projections must not become generated Task content"
+        );
         drop(client);
         Ok(())
     }
@@ -589,9 +487,18 @@ mod tests {
         db.store_message_content("thread", "message", b"approved content")?;
         db.persist_actor_state("attachment/reference/remote", &serde_json::json!({}))?;
         db.persist_client_record("object","remote",&serde_json::json!({"owner":"peer","size":42,"message_id":"message","conversation_id":"thread"}))?;
-        let before = message_page(&client, "thread")?;
+        let before = (
+            db.message_content("message")?,
+            serde_json::to_value(client.direct_messages("thread")?)?,
+        );
         db.persist_actor_state("attachment/fetch/remote",&serde_json::json!({"object_id":"remote","operation_id":"fetch","transfer_state":"failed","last_error":"attachment unavailable","attempts":1}))?;
-        assert_eq!(message_page(&client, "thread")?, before);
+        assert_eq!(
+            (
+                db.message_content("message")?,
+                serde_json::to_value(client.direct_messages("thread")?)?
+            ),
+            before
+        );
         assert_eq!(
             super::super::read_model::row(&client, "object", "remote")?["transfer_state"],
             "failed"

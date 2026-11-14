@@ -29,7 +29,7 @@ impl Draft {
     ) -> Result<Self, SdkError> {
         let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let id = crate::new_surface_message_id()?;
-        let message = GatewayDirectMessage {
+        let mut message = GatewayDirectMessage {
             conversation_id: conversation.into(),
             message_id: id.clone(),
             envelope_id: id,
@@ -42,6 +42,7 @@ impl Draft {
             created_at: now_unix_timestamp(),
             ttl: account.client.content_ttl()?,
         };
+        let exact = super::prepare_task_inner(&account.client, &mut message, body, &route)?;
         let config = account.gateway_config.clone();
         let request = account.client.routed_send_material_request(&config, &message)?;
         Ok(Self {
@@ -50,7 +51,7 @@ impl Draft {
             config,
             message,
             route,
-            body: zeroize::Zeroizing::new(body.to_vec()),
+            body: exact,
             #[cfg(test)]
             drift_ttl: false,
         })

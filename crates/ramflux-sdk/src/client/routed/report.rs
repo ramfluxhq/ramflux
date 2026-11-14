@@ -88,6 +88,20 @@ pub(crate) fn refuse_a0_mismatch(
     Ok(())
 }
 
+pub(super) fn maybe_assemble_report(
+    client: &RamfluxClient,
+    message: &GatewayDirectMessage,
+    session: &ramflux_crypto::DmSession,
+    inner: &[u8],
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    policy: &ReportPolicy<'_>,
+) -> Result<Option<DirectReport>, SdkError> {
+    if omit_direct_report() {
+        return Ok(None);
+    }
+    assemble_report_with_policy(client, message, session, inner, recipient, policy).map(Some)
+}
+
 pub(super) fn assemble_report_with_policy(
     client: &RamfluxClient,
     message: &GatewayDirectMessage,
@@ -141,9 +155,6 @@ pub(super) fn refuse_direct_candidate_opening(
     session: &ramflux_crypto::DmSession,
     _kind: &super::Kind,
 ) -> Result<(), SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Ok(());
-    }
     if envelope.report_commitment.is_none() {
         return Err(SdkError::Crypto(ramflux_crypto::CryptoError::ReportCommitmentMissing));
     }
@@ -229,10 +240,7 @@ pub(super) fn message_metadata_commitment(
     created_at: i64,
     ttl_seconds: u32,
 ) -> Result<Option<String>, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected()
-        || !ramflux_protocol::message::Inner::decode(body)
-            .is_ok_and(|inner| inner.identity.is_some())
-    {
+    if !ramflux_protocol::message::Inner::decode(body).is_ok_and(|inner| inner.identity.is_some()) {
         return Ok(None);
     }
     let issued_at =

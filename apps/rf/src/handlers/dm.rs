@@ -11,12 +11,23 @@ pub(crate) mod unified;
 mod wait;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
+    if let DmAction::Send(send) = &command.action
+        && (!send.attach.is_empty() || send.relay_url.is_some())
+    {
+        return Err(ramflux_sdk::SdkError::GeneratedRefused {
+            code: ramflux_sdk::GeneratedRefusalCode::Content,
+            reason: "--attach/--relay-url are retired; use --media-ref with an r4 large_manifest"
+                .into(),
+        }
+        .into());
+    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         DmAction::Send(send) => {
             let federation = rf_federation_route(&send)?;
-            let attachments = rf_dm_attachments(&send)?;
+            let content = crate::utils::media_content(&send.body, &send.media_ref)?;
             let request = LocalBusMessageSubmitRequest {
+                content: Some(content),
                 conversation_id: send.conversation,
                 message_id: send.message,
                 envelope_id: send.envelope,
@@ -26,14 +37,12 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 recipient_principal_commitment: send.recipient_principal_commitment,
                 target_delivery_id: send.target,
                 encrypted_body_base64: String::new(),
-                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
-                    send.body.as_bytes(),
-                )),
+                plaintext_body_base64: None,
                 created_at: rf_now_unix_timestamp(),
                 ttl: send
                     .ttl
                     .min(u32::try_from(ramflux_protocol::REPLAY_WINDOW_SECONDS).unwrap_or(300)),
-                attachments,
+                attachments: Vec::new(),
                 federation,
             };
             print_json(
@@ -61,22 +70,12 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
             )
         }
         DmAction::Delete(delete) => {
-            let everyone = matches!(delete.scope.as_str(), "everyone" | "all");
-            let generated = bindings::cli::delete_message(
-                delete.tombstone.as_deref().unwrap_or(&delete.message),
-                &delete.account,
-                &delete.conversation,
-                delete.message.as_bytes(),
-                everyone,
-                delete.tombstone.as_deref().map(str::as_bytes),
-            )?;
-            let (conversation_id, message_id) = bindings::cli::delete_payload(&generated)?;
             let request = LocalBusMessageDeleteRequest {
-                conversation_id,
-                message_id: String::from_utf8(message_id)
-                    .map_err(|err| RfError::Message(err.to_string()))?,
+                conversation_id: delete.conversation,
+                message_id: delete.message,
                 delete_scope: delete.scope,
                 tombstone_id: delete.tombstone,
+                operation_id: delete.operation_id,
             };
             print_json(
                 &bus.request(
@@ -99,108 +98,30 @@ async fn handle_dm_list(
     selector: ConversationSelector,
 ) -> Result<(), RfError> {
     let query = unified::Query {
-        account: selector.account.clone(),
-        conversation: selector.conversation.clone(),
+        account: selector.account,
+        conversation: selector.conversation,
         limit: selector.limit,
-        before: selector.before.clone(),
+        before: selector.before,
         after_seq: selector.after_seq,
-        message: selector.message.clone(),
+        message: selector.message,
     };
-    if unified::selected(&query)? {
-        return unified::print(bus, &query, false).await;
-    }
-    let request = LocalBusConversationRequest { conversation_id: selector.conversation };
-    let received = bus
-        .request(
-            Some(selector.account.clone()),
-            "message",
-            "message.receive",
-            serde_json::json!({
-                "limit": 100,
-                "conversation_id": request.conversation_id,
-                "auto_fetch_attachments": false,
-            }),
-        )
-        .await?;
-    let mut value = bus
-        .request(Some(selector.account), "message", "message.read", serde_json::to_value(request)?)
-        .await?;
-    value["gateway_entries"] =
-        received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    value["decrypted_messages"] = received
-        .get("decrypted_messages")
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    print_json(&with_message_plaintext(value))
+    unified::print(bus, &query, false).await
 }
 
 async fn handle_dm_read(bus: &mut LocalBusClient, read: DmRead) -> Result<(), RfError> {
     let query = unified::Query {
-        account: read.account.clone(),
-        conversation: read.conversation.clone(),
+        account: read.account,
+        conversation: read.conversation,
         limit: read.limit,
-        before: read.before.clone(),
+        before: read.before,
         after_seq: read.after_seq,
-        message: read.message.clone(),
+        message: read.message,
     };
-    if unified::selected(&query)? {
-        return unified::print(bus, &query, true).await;
-    }
-    let request = LocalBusConversationRequest { conversation_id: read.conversation };
-    let received = wait::receive(std::time::Duration::from_secs(read.wait), async || {
-        Ok(bus
-            .request(
-                Some(read.account.clone()),
-                "message",
-                "message.receive",
-                serde_json::json!({
-                    "limit": 100,
-                    "conversation_id": request.conversation_id,
-                    "auto_fetch_attachments": true,
-                    "relay_service_key_base64": null,
-                }),
-            )
-            .await?)
+    let value = wait::receive(std::time::Duration::from_secs(read.wait), async || {
+        unified::read(bus, &query, true).await
     })
     .await?;
-    let mut value = bus
-        .request(Some(read.account), "message", "message.read", serde_json::to_value(request)?)
-        .await?;
-    value["gateway_entries"] =
-        received.get("entries").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    value["decrypted_messages"] = received
-        .get("decrypted_messages")
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    print_json(&with_message_plaintext(value))
-}
-
-fn rf_dm_attachments(send: &DmSend) -> Result<Vec<LocalBusMessageAttachmentInput>, RfError> {
-    if send.attach.is_empty() {
-        return Ok(Vec::new());
-    }
-    let relay_endpoint = send
-        .relay_url
-        .clone()
-        .ok_or_else(|| RfError::Message("dm send --attach requires --relay-url".to_owned()))?;
-    send.attach
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let bytes = std::fs::read(path)?;
-            Ok(LocalBusMessageAttachmentInput {
-                name: None,
-                mime: None,
-                object_id: format!("attachment:{}:{index}", send.message),
-                plaintext_base64: ramflux_protocol::encode_base64url(&bytes),
-                chunk_size: send.attachment_chunk_size,
-                relay_endpoint: relay_endpoint.clone(),
-                owner_home_node_id: None,
-                relay_audience_node_id: None,
-                relay_service_key_base64: None,
-            })
-        })
-        .collect()
+    print_json(&value)
 }
 
 async fn handle_dm_receipt(
@@ -357,41 +278,55 @@ pub(crate) fn rf_federation_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
-    #[test]
-    fn rf_dm_attachment_uses_current_relay_options() -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::TempDir::new()?;
-        let path = directory.path().join("attachment.bin");
-        std::fs::write(&path, b"attachment")?;
-        let send = DmSend {
-            account: "alice".to_owned(),
-            conversation: "conv".to_owned(),
-            message: "msg".to_owned(),
-            envelope: "env".to_owned(),
-            source_principal: "principal_alice".to_owned(),
-            sender: "alice_device".to_owned(),
-            recipient_device: Some("bob_device".to_owned()),
-            recipient_principal_commitment: Some("principal_bob".to_owned()),
-            target: "target_bob".to_owned(),
-            body: "body".to_owned(),
-            attach: vec![path.clone()],
-            relay_url: Some("http://127.0.0.1:18084".to_owned()),
-            attachment_chunk_size: 1024,
-            federation_url: None,
-            source_node: None,
-            target_node: None,
-            federation_admin_token: None,
-            recipient_prekey_url: None,
-            federation_capability: "opaque_delivery".to_owned(),
-            ttl: 300,
-        };
-
-        let attachments = rf_dm_attachments(&send)?;
-        assert_eq!(attachments.len(), 1, "attachment fixture must yield one current request");
-        assert!(
-            attachments.first().ok_or("attachment")?.relay_service_key_base64.is_none(),
-            "current attachment requests must have no retired service key"
-        );
+    #[tokio::test]
+    async fn retired_attachment_flags_refuse_content_before_socket_or_file_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let socket = root.path().join("absent.sock");
+        let path = socket.to_str().ok_or("test: socket path")?;
+        for retired in [["--attach", "absent-attachment"], ["--relay-url", "invalid-relay"]] {
+            let mut args = vec![
+                "rf",
+                "--socket",
+                path,
+                "dm",
+                "send",
+                "--account",
+                "account",
+                "--conversation",
+                "conversation",
+                "--message",
+                "operation",
+                "--envelope",
+                "envelope",
+                "--source-principal",
+                "source",
+                "--sender",
+                "device",
+                "--target",
+                "target",
+                "--body",
+                "caption",
+            ];
+            args.extend(retired);
+            let cli = crate::cli::Cli::try_parse_from(args)?;
+            let crate::cli::Command::Dm(command) = cli.command else {
+                return Err("test: expected DM command".into());
+            };
+            let result = handle_dm(cli.socket, command).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(RfError::Sdk(ramflux_sdk::SdkError::GeneratedRefused {
+                        code: ramflux_sdk::GeneratedRefusalCode::Content,
+                        ..
+                    }))
+                ),
+                "the retired CLI input must refuse Content before accessing an absent socket or file"
+            );
+        }
         Ok(())
     }
 }

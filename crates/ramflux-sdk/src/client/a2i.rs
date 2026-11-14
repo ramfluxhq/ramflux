@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+#[cfg(test)]
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 
@@ -26,6 +27,7 @@ impl RamfluxClient {
         std::future::ready(Self::refuse_a2i_binding_authority())
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_a2i_receipt_key(
         &self,
         entry: &GatewayInboxEntry,
@@ -36,8 +38,8 @@ impl RamfluxClient {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_a2i_is_unbound(
-        &self,
         local_device: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
@@ -46,16 +48,18 @@ impl RamfluxClient {
             return Ok(forced);
         }
         let expected = a2i_control_conversation_id(&entry.envelope.source_device_id, local_device);
-        Ok(self.legacy_routing_binding(local_device, entry)?.as_deref() != Some(expected.as_str()))
+        Ok(crate::RamfluxClient::legacy_routing_binding(local_device, entry)?.as_deref()
+            != Some(expected.as_str()))
     }
 
     /// True when the entry has no exact A2I device-pair binding and was held unrouted.
+    #[cfg(test)]
     pub(crate) fn hold_unbound_legacy_a2i(
         &self,
         local_device: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
-        if !self.legacy_a2i_is_unbound(local_device, entry)? {
+        if !crate::RamfluxClient::legacy_a2i_is_unbound(local_device, entry)? {
             return Ok(false);
         }
         self.account_db()?.hold_unrouted(
@@ -68,6 +72,7 @@ impl RamfluxClient {
     }
 
     /// Existing receipt, or `InboundRejected` when the envelope id is reused with a new payload.
+    #[cfg(test)]
     pub(crate) fn load_legacy_a2i_receipt(
         &self,
         entry: &GatewayInboxEntry,
@@ -82,6 +87,7 @@ impl RamfluxClient {
         Ok(Some(receipt))
     }
 
+    #[cfg(test)]
     pub(crate) fn decrypt_bound_legacy_a2i(
         local_device: &str,
         entry: &GatewayInboxEntry,
@@ -91,6 +97,7 @@ impl RamfluxClient {
         Ok(LegacyA2iOpened)
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_legacy_a2i_effect(
         entry: &GatewayInboxEntry,
         opened: &LegacyA2iOpened,
@@ -101,14 +108,17 @@ impl RamfluxClient {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[cfg(test)]
 pub(crate) struct LegacyControlReceipt {
     pub event: A2iControlEvent,
     pub payload_hash: String,
 }
 
+#[cfg(test)]
 pub(crate) struct LegacyA2iOpened;
 
 /// Shared payload-hash check used by live receive and dormant W1.
+#[cfg(test)]
 pub(crate) fn reject_legacy_a2i_payload_reuse(
     receipt: &LegacyControlReceipt,
     entry: &GatewayInboxEntry,

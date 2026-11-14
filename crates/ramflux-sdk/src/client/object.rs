@@ -13,6 +13,7 @@ use ramflux_storage::ObjectRetention;
 mod cache_tests;
 #[path = "object_cached_download.rs"]
 mod cached_download;
+#[cfg(test)]
 #[path = "object_history_ownership.rs"]
 mod history_ownership;
 #[cfg(test)]
@@ -28,7 +29,6 @@ pub(crate) struct DeferredObjectKeySlot {
     pub(super) conversation_id: String,
     pub(super) commit_label: String,
     pub(super) pair_slot: Option<SdkObjectKeySlot>,
-    pub(super) legacy_slot: Option<SdkObjectKeySlot>,
 }
 
 impl Drop for DeferredObjectKeySlot {
@@ -156,116 +156,6 @@ impl RamfluxClient {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
-    pub(crate) async fn dm_attachment_ref_for_recipient(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        message: &GatewayDirectMessage,
-        attachment: &LocalBusMessageAttachmentInput,
-        plaintext: &[u8],
-    ) -> Result<(SdkDmAttachmentRef, ramflux_storage::PreSendObjectHold), SdkError> {
-        let mut message = message.clone();
-        self.resolve_message_recipient(engine.config(), &mut message).await?;
-        let message = &message;
-        let relay_options = self
-            .relay_transfer_options(
-                Some(attachment.relay_endpoint.clone()),
-                attachment.relay_service_key_base64.as_deref(),
-                None,
-            )?
-            .ok_or_else(|| {
-                SdkError::LocalBus("DM attachment requires relay endpoint".to_owned())
-            })?;
-        let prepared =
-            self.object_store.prepare_encrypted_object(&attachment.object_id, plaintext)?;
-        let hold = self
-            .account_db()?
-            .pre_send_object_hold(&prepared.object().object_id, &prepared.object().manifest_hash)?;
-        let object_key = zeroize::Zeroizing::new(*prepared.object_key());
-        self.persist_object_if_unlocked(
-            prepared.object(),
-            Some(&object_key),
-            ObjectRetention::PreSend { expires_at: now_unix_timestamp().saturating_add(600) },
-        )?;
-        let object = self.object_store.install_prepared_object(prepared);
-        self.upload_object_to_relay_inner_via_gateway(
-            engine,
-            pool,
-            &object,
-            attachment.chunk_size,
-            &relay_options,
-        )
-        .await?;
-        let recipient_device_id = message.recipient_device_id.clone().ok_or_else(|| {
-            SdkError::LocalBus("DM attachment requires recipient_device_id".to_owned())
-        })?;
-        let slot_conversation_id = dm_attachment_slot_conversation_id(
-            &message.conversation_id,
-            &object.object_id,
-            &recipient_device_id,
-        );
-        let key_slot = self
-            .make_pair_object_slot(
-                engine,
-                message,
-                &object.object_id,
-                &object_key,
-                &slot_conversation_id,
-            )
-            .await?;
-        let manifest = chunk_manifest_for_object(
-            &object.object_id,
-            &object.ciphertext,
-            attachment.chunk_size,
-            None,
-        );
-        let owner_branch = self.device_branch.as_ref().ok_or_else(|| {
-            SdkError::LocalBus("object relay requires an owner device branch".to_owned())
-        })?;
-        let access_grant = build_signed_object_access_grant(
-            owner_branch,
-            object.object_id.clone(),
-            object.manifest_hash.clone(),
-            recipient_device_hash(&self.device_identity(&Self::qualified_recipient(message)?)?),
-            vec![
-                ramflux_protocol::ObjectRelayCapability::Get,
-                ramflux_protocol::ObjectRelayCapability::Ack,
-            ],
-            u64::try_from(now_unix_timestamp()).unwrap_or(0),
-            relay_expires_at(),
-        )?;
-        Ok((
-            SdkDmAttachmentRef {
-                schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
-                version: 1,
-                object_id: object.object_id.clone(),
-                manifest_hash: object.manifest_hash.clone(),
-                plaintext_hash: object.plaintext_hash.clone(),
-                cipher_size: u64::try_from(object.ciphertext.len()).unwrap_or(u64::MAX),
-                chunk_size: manifest.chunk_size,
-                total_chunks: manifest.total_chunks,
-                relay_endpoint: attachment.relay_endpoint.clone(),
-                // T21-A2: explicit per-message override wins; a None input is fixed to the lineage this
-                // upload actually used (effective relay options); an explicit empty string is preserved
-                // and fails closed downstream. See `effective_attachment_lineage`.
-                owner_home_node_id: effective_attachment_lineage(
-                    attachment.owner_home_node_id.clone(),
-                    relay_options.relay_owner_home_node_id.clone(),
-                ),
-                relay_audience_node_id: effective_attachment_lineage(
-                    attachment.relay_audience_node_id.clone(),
-                    relay_options.relay_audience_node_id.clone(),
-                ),
-                owner_principal_id: owner_branch.principal_id.clone(),
-                owner_device_epoch: owner_branch.device_epoch,
-                access_grant: Some(access_grant),
-                key_slot,
-            },
-            hold,
-        ))
-    }
-
     /// # Errors
     /// Returns an error when the key slot cannot be decrypted or the object cannot be imported.
     pub fn import_shared_object(
@@ -361,36 +251,13 @@ impl RamfluxClient {
         &self,
         key_slot: &SdkObjectKeySlot,
     ) -> Result<DeferredObjectKeySlot, SdkError> {
-        if key_slot.version == 2 {
-            return self.decrypt_pair_object_slot(key_slot, None);
+        if key_slot.version != 2 {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                reason: "retired object key slot requires MediaKeySlot".into(),
+            });
         }
-        if key_slot.schema != "ramflux.sdk.object_key_slot.dm.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported object key slot schema: {}",
-                key_slot.schema
-            )));
-        }
-        let mut session =
-            self.load_or_create_recv_dm_session(&key_slot.conversation_id, key_slot.x3dh.as_ref())?;
-        let associated_data = object_key_slot_associated_data(
-            &key_slot.object_id,
-            &key_slot.conversation_id,
-            &key_slot.recipient_device_id,
-        );
-        let plaintext_key =
-            zeroize::Zeroizing::new(session.decrypt(&key_slot.ciphertext, &associated_data)?);
-        let object_key: [u8; 32] = plaintext_key
-            .as_slice()
-            .try_into()
-            .map_err(|_err| SdkError::LocalBus("invalid object key length".to_owned()))?;
-        Ok(DeferredObjectKeySlot {
-            object_key,
-            session: Some(session),
-            conversation_id: key_slot.conversation_id.clone(),
-            commit_label: format!("object-slot:{}", key_slot.object_id),
-            pair_slot: None,
-            legacy_slot: Some(key_slot.clone()),
-        })
+        self.decrypt_pair_object_slot(key_slot, None)
     }
 
     /// Commits the advanced attachment key-slot recv session. T21-A2a: only called once the whole
@@ -399,49 +266,24 @@ impl RamfluxClient {
         &self,
         deferred: &DeferredObjectKeySlot,
     ) -> Result<(), SdkError> {
-        if let Some(slot) = deferred.pair_slot.as_ref() {
-            return self.commit_pair_object_slot(slot, &deferred.object_key);
-        }
-        let expected =
-            dm_session_event_id(&deferred.conversation_id, "recv", &deferred.commit_label);
-        if self
-            .projection_checkpoint(&dm_session_checkpoint_name(&deferred.conversation_id, "recv"))?
-            .as_deref()
-            == Some(expected.as_str())
-        {
-            return Ok(());
-        }
-        let rebuilt;
-        let session = if let Some(session) = deferred.session.as_ref() {
-            session
-        } else {
-            rebuilt =
-                self.decrypt_object_key_slot(deferred.legacy_slot.as_ref().ok_or_else(|| {
-                    SdkError::LocalBus("legacy slot reference missing".to_owned())
-                })?)?;
-            if rebuilt.object_key != deferred.object_key {
-                return Err(SdkError::LocalBus("prepared legacy key mismatch".to_owned()));
-            }
-            rebuilt
-                .session
-                .as_ref()
-                .ok_or_else(|| SdkError::LocalBus("legacy slot session missing".to_owned()))?
-        };
-        self.persist_dm_session(&deferred.conversation_id, &deferred.commit_label, "recv", session)
+        let slot = deferred.pair_slot.as_ref().ok_or_else(|| SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired object key slot has no native pair binding".into(),
+        })?;
+        self.commit_pair_object_slot(slot, &deferred.object_key)
     }
 
     pub(super) fn object_key_slot_committed(
         &self,
         slot: &SdkObjectKeySlot,
     ) -> Result<bool, SdkError> {
-        if slot.version == 2 {
-            self.pair_object_slot_committed(slot)
-        } else {
-            self.recv_session_checkpoint_at(
-                &slot.conversation_id,
-                &format!("object-slot:{}", slot.object_id),
-            )
+        if slot.version != 2 {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                reason: "retired object key slot requires MediaKeySlot".into(),
+            });
         }
+        self.pair_object_slot_committed(slot)
     }
 
     pub(crate) async fn import_dm_attachment_from_relay_via_gateway(
@@ -826,6 +668,7 @@ impl RamfluxClient {
         Ok(self.object_store.install_prepared_object(prepared))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_history_transport(
         &mut self,
         object_id: &str,
@@ -852,6 +695,7 @@ impl RamfluxClient {
         Ok(self.object_store.install_prepared_object(prepared))
     }
 
+    #[cfg(test)]
     pub(super) fn bind_history_transport_owners<const CONSUME_ERASED: bool>(
         &self,
         object_id: &str,
@@ -2162,8 +2006,8 @@ mod t21a1_tests {
     // caller explicitly commits after the whole import succeeds, so a failed import leaves the
     // persisted slot ratchet unchanged and the slot ciphertext can be re-decrypted on retry.
     #[test]
-    fn decrypt_object_key_slot_defers_slot_session_commit_until_committed() -> Result<(), SdkError>
-    {
+    fn retired_object_key_slot_is_refused_without_changing_the_receive_checkpoint()
+    -> Result<(), SdkError> {
         let (_root, client) = slot_test_client("defer-commit")?;
         let object_id = "object_slot_defer";
         let slot_conversation_id = "conv_slot_defer";
@@ -2207,21 +2051,18 @@ mod t21a1_tests {
             ciphertext,
         };
 
-        // Decrypt advances the in-memory ratchet but must leave the persisted slot checkpoint alone.
-        let deferred = client.decrypt_object_key_slot(&slot)?;
-        // Compare without formatting the key material (DeferredObjectKeySlot has no Debug by design).
-        assert!(deferred.object_key == object_key, "deferred slot must decrypt to the object key");
         assert!(
-            client.projection_checkpoint(&checkpoint_name)? == before,
-            "decrypt must not move the slot recv checkpoint before commit",
+            matches!(
+                client.decrypt_object_key_slot(&slot),
+                Err(SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Content, .. })
+            ),
+            "generation one must refuse the retired key-slot codec"
         );
-
-        // Commit moves the checkpoint to the object-slot event id, and only then.
-        client.commit_object_key_slot_session(&deferred)?;
-        let expected =
-            dm_session_event_id(slot_conversation_id, "recv", &format!("object-slot:{object_id}"));
-        assert_eq!(client.projection_checkpoint(&checkpoint_name)?, Some(expected));
-
+        assert_eq!(
+            client.projection_checkpoint(&checkpoint_name)?,
+            before,
+            "refusing the retired key slot must preserve its receive checkpoint"
+        );
         Ok(())
     }
 }

@@ -9,4 +9,4 @@ pub(crate) mod state;
 pub(crate) use control::{bytes, is_call_body, resolution_terminal, signing_bytes};
 
 #[cfg(test)]
-pub(crate) use control::{PREFIX, transition_key};
+pub(crate) use control::transition_key;

@@ -5,7 +5,6 @@
 
 use super::OuterProfileError;
 use super::sidecar::decode_sidecar_value;
-use crate::schema_profile::schema_v1_live;
 use serde_json::Value;
 
 /// Magic prefix of a candidate compact `CryptoBox` (`RF1C`).
@@ -65,19 +64,16 @@ pub fn decode_compact_cryptobox(bytes: &[u8]) -> Result<CompactCryptobox<'_>, Ou
     Ok(CompactCryptobox { ciphertext: &bytes[9..ct_end], sidecar: &bytes[side_hdr..side_end] })
 }
 
-/// Candidate wire payload: compact `CryptoBox` base64url, or the legacy body when the gate is off.
+/// Active wire payload: compact `CryptoBox` base64url.
 ///
 /// # Errors
 /// Profile refusals from compact encoding of a nested SDK envelope.
 pub fn wire_encrypted_payload(encrypted_body: &[u8]) -> Result<String, OuterProfileError> {
-    if !schema_v1_live() {
-        return Ok(crate::encode_base64url(encrypted_body));
-    }
     Ok(crate::encode_base64url(&compact_cryptobox_bytes(encrypted_body)?))
 }
 
 /// Convert nested SDK JSON (number-array ciphertext) into a compact `CryptoBox`.
-/// Already-compact or opaque bodies are returned unchanged.
+/// Already-compact bodies are retained; every other input must be the fixed native crypto DTO.
 ///
 /// # Errors
 /// Unknown nested fields, malformed JSON objects, or length overflow.
@@ -85,11 +81,10 @@ pub fn compact_cryptobox_bytes(encrypted_body: &[u8]) -> Result<Vec<u8>, OuterPr
     if decode_compact_cryptobox(encrypted_body).is_ok() {
         return Ok(encrypted_body.to_vec());
     }
-    let Ok(value) = crate::parse_i_json::<Value>(encrypted_body) else {
-        return Ok(encrypted_body.to_vec());
-    };
+    let value =
+        crate::parse_i_json::<Value>(encrypted_body).map_err(|_| OuterProfileError::Malformed)?;
     if !value.is_object() || value.get("ciphertext").and_then(|c| c.get("ciphertext")).is_none() {
-        return Ok(encrypted_body.to_vec());
+        return Err(OuterProfileError::Malformed);
     }
     decode_sidecar_value(&value, false)?;
     compact_from_nested_value(&value)

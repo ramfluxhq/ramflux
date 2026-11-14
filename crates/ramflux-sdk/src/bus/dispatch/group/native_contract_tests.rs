@@ -67,6 +67,13 @@ fn install_lease(
 #[tokio::test]
 async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears_it() -> TestResult
 {
+    crate::client::native_test_support::watchdog::within(
+        native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears_it_body(),
+    )
+    .await?
+}
+async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears_it_body()
+-> TestResult {
     let fixture = Fixture::with_device("lease-owner", "owner-device").await?;
     let primary = fixture.vault.primary_for_public_key(
         &fixture
@@ -127,6 +134,13 @@ async fn native_group_lease_refusal_is_typed_over_bus_and_fresh_authority_clears
 
 #[tokio::test]
 async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_accounts()
+-> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_accounts_body(),
+    )
+    .await?
+}
+async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_accounts_body()
 -> TestResult {
     let fixture = Fixture::new("native-refusal").await?;
     let root = fixture.root.0.clone();
@@ -195,7 +209,19 @@ async fn read_group(
     );
     let (outbound, _receiver) = mpsc::channel(8);
     let mut connection = LocalBusConnectionState::new(1, outbound);
-    Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection)).await
+    let mut result =
+        Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection))
+            .await?;
+    if matches!(method, "group.read" | "group.receive") {
+        assert_eq!(
+            result.response_body["durable_reader"], "message.read",
+            "receive must direct callers to the durable generated reader"
+        );
+        let account =
+            state.accounts.get("owner").ok_or_else(|| SdkError::LocalBus("test owner".into()))?;
+        result.response_body = super::history::read(&account.client, &frame)?;
+    }
+    Ok(result)
 }
 
 pub(crate) async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEntry)> {
@@ -269,11 +295,21 @@ fn routed_entry(
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    let body = bob.client.encrypt_group_message("group", "bob-device", b"after rename")?;
-    let sealed = bob.client.seal_routed_prepared(
+    if route.group_id.is_none() {
+        message.conversation_id = ramflux_protocol::message::dm_scope::derive(
+            &bob.client.own_account_anchor()?,
+            &alice.client.own_account_anchor()?,
+        )?;
+    }
+    let prepared = bob.client.prepare_authored_message(
+        &mut message,
+        route.group_id.as_deref(),
+        &ramflux_protocol::message::Message { text: "after rename".into(), ..Default::default() },
+    )?;
+    let sealed = bob.client.seal_generated_routed_prepared(
         &bob.config,
         &message,
-        &body,
+        &prepared.wire,
         route,
         crate::client::routed::SendMaterial {
             manifest: None,
@@ -285,12 +321,15 @@ fn routed_entry(
             ),
         },
     )?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
     let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: alice.config.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&bob.config, &message, None)?,
+        envelope: crate::dm::gateway_generated_envelope_from_sealed(
+            &bob.config,
+            &mut message,
+            sealed,
+        )?,
     };
     Ok(entry)
 }
@@ -317,6 +356,9 @@ fn install_gateway(account: &mut LocalBusAccountState, entries: Vec<GatewayInbox
 
 #[tokio::test]
 async fn owner_failure_chain_is_characterised() -> TestResult {
+    crate::client::native_test_support::watchdog::within(owner_failure_chain_is_characterised_body()).await?
+}
+async fn owner_failure_chain_is_characterised_body() -> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
     let mut account = LocalBusAccountState::disconnected(
         alice.client,
@@ -326,15 +368,27 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
     install_gateway(&mut account, vec![entry.clone()]);
     let mut state = daemon(account, &alice.root.0);
     let received = read_group(&mut state, "group.receive").await?;
-    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     let messages = account.client.direct_messages("thread")?;
     assert_eq!(messages.len(), 1);
     assert_eq!(
-        account.client.account_db()?.message_content(&messages[0].message_id)?,
-        Some(b"after rename".to_vec())
+        account
+            .client
+            .generated_message_detail(
+                "thread",
+                &messages.first().ok_or("received group message")?.message_id
+            )?
+            .message
+            .text
+            .as_deref(),
+        Some("after rename")
     );
-    assert_eq!(account.pending_deliveries.len(), 1);
+    assert_eq!(
+        account.pending_deliveries.len(),
+        1,
+        "one admitted entry remains in bounded ACK work"
+    );
     assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
     let key = account.client.inbox_admission_key(&entry)?;
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
@@ -349,7 +403,7 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
     );
     for method in ["group.read", "group.receive"] {
         assert_eq!(
-            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+            read_group(&mut state, method).await?.response_body["messages"][0]["text"],
             "after rename"
         );
     }
@@ -366,7 +420,7 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
         );
         for method in ["group.read", "group.receive"] {
             assert_eq!(
-                read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+                read_group(&mut state, method).await?.response_body["messages"][0]["text"],
                 "after rename"
             );
         }
@@ -374,8 +428,16 @@ async fn owner_failure_chain_is_characterised() -> TestResult {
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     assert_eq!(account.client.direct_messages("thread")?.len(), 1);
     assert_eq!(
-        account.client.account_db()?.message_content(&messages[0].message_id)?,
-        Some(b"after rename".to_vec())
+        account
+            .client
+            .generated_message_detail(
+                "thread",
+                &messages.first().ok_or("received group message")?.message_id
+            )?
+            .message
+            .text
+            .as_deref(),
+        Some("after rename")
     );
     Ok(())
 }
@@ -397,8 +459,16 @@ async fn assert_first_pass_admitted(
     let messages = account.client.direct_messages("thread")?;
     assert_eq!(messages.len(), 1, "served peer manifest must admit on the first pass");
     assert_eq!(
-        account.client.account_db()?.message_content(&messages[0].message_id)?,
-        Some(b"after rename".to_vec())
+        account
+            .client
+            .generated_message_detail(
+                "thread",
+                &messages.first().ok_or("received group message")?.message_id
+            )?
+            .message
+            .text
+            .as_deref(),
+        Some("after rename")
     );
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
@@ -521,7 +591,8 @@ async fn verify_refresh_redrive(
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(
         account.pending_deliveries.iter().map(|entry| entry.inbox_seq).collect::<Vec<_>>(),
-        (1..=count as u64).collect::<Vec<_>>()
+        (1..=u64::try_from(count)?).collect::<Vec<_>>(),
+        "redrive keeps one ACK-work entry per admitted sequence"
     );
     assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
     Ok(())
@@ -533,7 +604,7 @@ async fn assert_wait_scope(state: &mut LocalBusDaemonState, opaque: bool) -> Tes
         if opaque {
             // A directory failure precedes private-route decoding. Opaque retries
             // remain background work and cannot hold an assumed group RPC.
-            assert_eq!(result?.response_body["decrypted_messages"], json!([]));
+            assert_eq!(result?.response_body["messages"], json!([]));
         } else {
             let error = result.err().ok_or("known group dependency must remain pending")?;
             let wire = crate::bus::io::local_bus_error_body(&error);
@@ -637,7 +708,7 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
     )
     .await?;
     let received = read_group(&mut state, "group.receive").await?;
-    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     assert_eq!(
         state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
         count
@@ -652,32 +723,69 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
 
 #[tokio::test]
 async fn stale_local_head_gateway_admission_is_deferred_until_retry_due() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        stale_local_head_gateway_admission_is_deferred_until_retry_due_body(),
+    )
+    .await?
+}
+async fn stale_local_head_gateway_admission_is_deferred_until_retry_due_body() -> TestResult {
     Box::pin(characterise_gateway_admission(false, true, false)).await
 }
 
 #[tokio::test]
 async fn stale_peer_head_after_rename_gateway_admission_is_deferred_until_retry_due() -> TestResult
 {
+    crate::client::native_test_support::watchdog::within(
+        stale_peer_head_after_rename_gateway_admission_is_deferred_until_retry_due_body(),
+    )
+    .await?
+}
+async fn stale_peer_head_after_rename_gateway_admission_is_deferred_until_retry_due_body()
+-> TestResult {
     Box::pin(characterise_gateway_admission(true, false, false)).await
 }
 
 #[tokio::test]
 async fn both_stale_heads_gateway_admission_is_deferred_until_retry_due() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        both_stale_heads_gateway_admission_is_deferred_until_retry_due_body(),
+    )
+    .await?
+}
+async fn both_stale_heads_gateway_admission_is_deferred_until_retry_due_body() -> TestResult {
     Box::pin(characterise_gateway_admission(false, false, false)).await
 }
 
 #[tokio::test]
 async fn stale_peer_head_with_served_manifest_is_admitted_on_first_pass() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        stale_peer_head_with_served_manifest_is_admitted_on_first_pass_body(),
+    )
+    .await?
+}
+async fn stale_peer_head_with_served_manifest_is_admitted_on_first_pass_body() -> TestResult {
     Box::pin(characterise_gateway_admission(true, false, true)).await
 }
 
 #[tokio::test]
 async fn both_stale_heads_with_served_peer_manifest_defer_on_local_head() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        both_stale_heads_with_served_peer_manifest_defer_on_local_head_body(),
+    )
+    .await?
+}
+async fn both_stale_heads_with_served_peer_manifest_defer_on_local_head_body() -> TestResult {
     Box::pin(characterise_gateway_admission(false, false, true)).await
 }
 
 #[tokio::test]
 async fn stale_head_new_inbound_stays_pending_until_verified_refresh() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        stale_head_new_inbound_stays_pending_until_verified_refresh_body(),
+    )
+    .await?
+}
+async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
     let (address, directory) =
         crate::bus::dispatch::surface_transport::fixture::directory(&alice.root.0, BTreeMap::new())
@@ -728,6 +836,12 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh() -> TestRe
 
 #[tokio::test]
 async fn stored_group_history_after_rename_with_expired_head_succeeds() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        stored_group_history_after_rename_with_expired_head_succeeds_body(),
+    )
+    .await?
+}
+async fn stored_group_history_after_rename_with_expired_head_succeeds_body() -> TestResult {
     let (alice, _bob, entry) = renamed_group_fixture().await?;
     let mut account = LocalBusAccountState::disconnected(
         alice.client,
@@ -745,7 +859,7 @@ async fn stored_group_history_after_rename_with_expired_head_succeeds() -> TestR
     let result = read_group(&mut state, "group.history").await?.response_body;
     assert_eq!(result["metadata"]["name"], "After");
     assert_eq!(result["metadata"]["member_roster"].as_array().ok_or("roster")?.len(), 2);
-    assert_eq!(result["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(result["messages"][0]["text"], "after rename");
     let frame = LocalBusFrame::request(
         "offline-reader",
         Some("owner".into()),
@@ -759,57 +873,95 @@ async fn stored_group_history_after_rename_with_expired_head_succeeds() -> TestR
 }
 
 #[tokio::test]
-async fn historical_read_ignores_clock_but_not_revocation() -> TestResult {
+async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sender() -> TestResult
+{
+    crate::client::native_test_support::watchdog::within(
+        historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sender_body(),
+    )
+    .await?
+}
+async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sender_body()
+-> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
     let mut account = LocalBusAccountState::disconnected(
         alice.client,
         alice.config,
         alice.manifest.principal_commitment,
     );
-    install_gateway(&mut account, vec![entry]);
+    install_gateway(&mut account, vec![entry.clone()]);
     let mut state = daemon(account, &alice.root.0);
     read_group(&mut state, "group.receive").await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
+    let source = bob.client.owned_device_identity()?;
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&RamfluxClient::device_revocation_key(&source), &true)?;
+    assert!(
+        account.client.committed_routing(HeadUse::NewAuthorization, &entry).is_err(),
+        "revocation must refuse new sender authority even when retained historical content remains readable"
+    );
     for method in ["group.history", "group.read", "group.receive"] {
+        let history = read_group(&mut state, method).await?.response_body;
+        let rows = history["messages"].as_array().ok_or("history rows")?;
+        let [row] = rows.as_slice() else {
+            return Err("one admitted native history row".into());
+        };
         assert_eq!(
-            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
-            "after rename"
+            row["text"], "after rename",
+            "historical display must retain admitted content across source revocation"
         );
-    }
-    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    let identity = bob.client.owned_device_identity()?;
-    account
-        .client
-        .account_db()?
-        .persist_actor_state(&RamfluxClient::device_revocation_key(&identity), &true)?;
-    let history = read_group(&mut state, "group.history").await?.response_body;
-    assert_eq!(history["decrypted_messages"][0]["sender_verification"], "unverified");
-    assert_eq!(history["messages"][0]["sender_verification"], "unverified");
-    for method in ["group.read", "group.receive"] {
+        assert_eq!(
+            row["author"]["account_anchor"],
+            source.root_commitment(),
+            "historical author remains the immutable admitted root, without current authorization"
+        );
         assert!(
-            matches!(read_group(&mut state, method).await,
-            Err(SdkError::InboundRejected(reason)) if reason == "revoked device"),
-            "unexpected revoked-sender outcome via {method}"
+            row.get("sender_verification").is_none(),
+            "the generated reader must not manufacture a current authority label"
         );
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    account
-        .client
-        .account_db()?
-        .persist_actor_state(&RamfluxClient::device_revocation_key(&identity), &false)?;
-    let id = account.client.direct_messages("thread")?[0].message_id.clone();
-    account.client.delete_direct_message("thread", &id, "local", "erase-proof")?;
+    let messages = account.client.direct_messages("thread")?;
+    let [message] = messages.as_slice() else {
+        return Err("admitted message".into());
+    };
+    account.client.delete_direct_message(
+        "thread",
+        &message.message_id,
+        "local",
+        &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+    )?;
     for method in ["group.history", "group.read", "group.receive"] {
         let body = read_group(&mut state, method).await?.response_body;
-        assert_eq!(body["decrypted_messages"], json!([]), "erased content via {method}");
+        let rows = body["messages"].as_array().ok_or("erased history rows")?;
+        let [row] = rows.as_slice() else {
+            return Err("one content-free tombstone".into());
+        };
+        assert_eq!(
+            row["state"], "tombstone",
+            "erased group history must retain only the typed tombstone"
+        );
+        assert!(
+            row["text"].is_null() && row["content"].is_null(),
+            "erased group history must not expose retained body bytes"
+        );
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message() -> TestResult {
+async fn unidentified_group_rows_never_gain_native_origin_or_displace_admitted_history()
+-> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        unidentified_group_rows_never_gain_native_origin_or_displace_admitted_history_body(),
+    )
+    .await?
+}
+async fn unidentified_group_rows_never_gain_native_origin_or_displace_admitted_history_body()
+-> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
     let mut account = LocalBusAccountState::disconnected(
         alice.client,
@@ -821,19 +973,18 @@ async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message()
     read_group(&mut state, "group.receive").await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     account.engine = None;
-    // Own-sent projections have no routed/message-owner row. A second device's
-    // raw sender ID cannot prove its root locally and must not become trusted.
     for (id, sender, content) in [
         ("own-primary", "alice-device", "healthy primary"),
         ("own-sibling", "alice-sibling-device", "second device"),
     ] {
-        account.client.send_direct_message("thread", id, sender, b"stored ciphertext")?;
+        account.client.send_direct_message("thread", id, sender, b"unbound stored bytes")?;
         account.client.account_db()?.store_message_content("thread", id, content.as_bytes())?;
     }
-    account.client.account_db()?.persist_actor_state(
-        &RamfluxClient::device_revocation_key(&bob.client.owned_device_identity()?),
-        &true,
-    )?;
+    let source = bob.client.owned_device_identity()?;
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&RamfluxClient::device_revocation_key(&source), &true)?;
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
     let frame = LocalBusFrame::request(
@@ -844,41 +995,55 @@ async fn stored_group_history_degrades_sibling_and_revoked_senders_per_message()
         json!({"group_id":"group","conversation_id":"thread","limit":32}),
     );
     let body = read_group(&mut state, "group.history").await?.response_body;
-    assert_eq!(crate::bus::readers::read_account(&state, "owner", &frame)?, body);
-    for field in ["messages", "decrypted_messages"] {
-        let rows = body[field].as_array().ok_or("message rows")?;
-        assert_eq!(rows.len(), 3, "one sender must not hide any stored message");
-        for (id, marker) in [("own-primary", "verified"), ("own-sibling", "unknown")] {
-            let row = rows.iter().find(|row| row["message_id"] == id).ok_or("own message")?;
-            assert_eq!(row["sender_verification"], marker);
-        }
-        let revoked = rows
-            .iter()
-            .find(|row| row["sender_verification"] == "unverified")
-            .ok_or("revoked message")?;
-        assert_ne!(revoked["message_id"], "own-primary");
-        assert_ne!(revoked["message_id"], "own-sibling");
-    }
-    let rows = body["decrypted_messages"].as_array().ok_or("plaintext rows")?;
-    assert!(rows.iter().any(
-        |row| row["body_utf8"] == "after rename" && row["sender_verification"] == "unverified"
-    ));
-    assert!(
-        rows.iter()
-            .any(|row| row["body_utf8"] == "second device"
-                && row["sender_verification"] == "unknown")
+    assert_eq!(
+        crate::bus::readers::read_account(&state, "owner", &frame)?,
+        body,
+        "account reader and bus dispatch must use one generated history contract"
     );
-    assert!(state.accounts.get("owner").ok_or("Alice")?.engine.is_none());
+    let rows = body["messages"].as_array().ok_or("generated message rows")?;
+    let [row] = rows.as_slice() else {
+        return Err("only the admitted generated row may be projected".into());
+    };
+    assert_eq!(
+        row["text"], "after rename",
+        "unidentified raw rows must not hide admitted native content"
+    );
+    assert_eq!(
+        row["author"]["account_anchor"],
+        source.root_commitment(),
+        "the historical author comes from authenticated identity, never a bare device label"
+    );
+    assert_ne!(
+        row["id"], "own-primary",
+        "an unbound local-looking row cannot invent native origin"
+    );
+    assert_ne!(row["id"], "own-sibling", "a raw sibling label cannot invent native origin");
+    assert!(
+        state.accounts.get("owner").ok_or("Alice")?.engine.is_none(),
+        "stored group history must remain offline"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn opaque_inbound_after_rename_refreshes_in_background_then_applies() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        opaque_inbound_after_rename_refreshes_in_background_then_applies_body(),
+    )
+    .await?
+}
+async fn opaque_inbound_after_rename_refreshes_in_background_then_applies_body() -> TestResult {
     Box::pin(characterise_gateway_admission(true, false, false)).await
 }
 
 #[tokio::test]
 async fn parked_inbound_is_applied_after_refresh_once() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        parked_inbound_is_applied_after_refresh_once_body(),
+    )
+    .await?
+}
+async fn parked_inbound_is_applied_after_refresh_once_body() -> TestResult {
     Box::pin(admission_case((false, false, false), true)).await
 }
 

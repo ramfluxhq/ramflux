@@ -47,7 +47,7 @@ impl Origin {
             relay_server_name: "relay.test".into(),
             prekey_http_url: url.clone(),
             signaling_turn_addr: "127.0.0.1:3478".into(),
-            protocol_versions: vec!["v1".into()],
+            protocol_versions: vec!["message-schema.v1".into()],
             client_capabilities: vec!["prekey".into()],
             updated_at: now,
             expires_at: now + 3600,
@@ -87,6 +87,13 @@ impl Origin {
         profile.discovery_url = self.url.clone();
         s.nodes.profiles.insert(profile.node_id.clone(), profile);
         let account = s.accounts.get(id).ok_or_else(|| invalid("account"))?;
+        if account.client.born_v3_account.is_some() {
+            account
+                .client
+                .account_db()?
+                .persist_actor_state("account/node-id", &self.record.node_id)?;
+            return Ok(());
+        }
         let root = account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         // The directory fixture starts with an already enrolled, authenticated account.
         account.client.record_owned_proof_published(now_unix_timestamp())?;
@@ -110,8 +117,8 @@ impl Origin {
 #[tokio::test]
 async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_safety_verifying_it()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin = Origin::new(&directory).await?;
     let mut s = state(&mut a, &mut b, &directory)?;
@@ -131,18 +138,7 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
     );
     let mut wrong_node = parsed.clone();
     wrong_node.node.key_fingerprint = "0".repeat(64);
-    let seed = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("account"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (wrong, _) =
-        crate::contact_card::encode_contact_card(wrong_node, seed, now_unix_timestamp())?;
+    let (wrong, _) = resign(&s, "alice", wrong_node)?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":wrong}))
         .await
         .err()
@@ -181,8 +177,8 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
 #[tokio::test]
 async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_publication()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let home = Origin::new(&directory).await?;
     let foreign = Origin::named(&directory, "foreign.test").await?;
@@ -195,19 +191,7 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
         now_unix_timestamp(),
     )?;
     body.node.url = foreign.url.clone();
-    let root = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("account"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?;
-    let (card, _) = crate::contact_card::encode_contact_card(
-        body,
-        root.signing_key.to_bytes(),
-        now_unix_timestamp(),
-    )?;
+    let (card, _) = resign(&s, "alice", body)?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":card}))
         .await
         .err()
@@ -230,8 +214,8 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
 #[tokio::test]
 async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_paths()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin = Origin::new(&directory).await?;
     let mut s = state(&mut a, &mut b, &directory)?;
@@ -278,10 +262,10 @@ async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_p
 mod locator;
 
 #[tokio::test]
-async fn legacy_card_origin_case_and_trailing_slash_still_resolve_the_pinned_home()
--> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+async fn native_card_origin_case_and_trailing_slash_resolve_the_pinned_home() -> Result<(), SdkError>
+{
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin =
         Origin::bound(&directory, "contact.test", "127.0.0.1:0", Some("localhost")).await?;
@@ -294,16 +278,45 @@ async fn legacy_card_origin_case_and_trailing_slash_still_resolve_the_pinned_hom
         now_unix_timestamp(),
     )?;
     card.node.url = format!("{}/", origin.url.to_uppercase());
-    let seed = state.accounts["alice"]
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (legacy, _) = crate::contact_card::encode_contact_card(card, seed, now_unix_timestamp())?;
+    let (legacy, _) = resign(&state, "alice", card)?;
     let added = call(&mut state, "bob", "contact.add", json!({"card":legacy})).await?;
     assert_eq!(added["contact"]["principal_id"], "alice");
     assert_eq!(added["contact"]["reachable"], true);
     Ok(())
+}
+
+fn resign(
+    state: &LocalBusDaemonState,
+    id: &str,
+    body: crate::ContactCardBody,
+) -> Result<(String, String), SdkError> {
+    let client = &state.accounts.get(id).ok_or_else(|| invalid("account"))?.client;
+    let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let record = account.record();
+    let now = crate::custody::network_now()?;
+    let vault = state.config.custody_vault.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
+    let signed = account.sign_contact_card(
+        vault.as_ref(),
+        ramflux_protocol::custody::ContactCardV3 {
+            version: 3,
+            principal_id: record.body.principal_id.clone(),
+            account_anchor: record.body.account_anchor.clone(),
+            master_public_key: record.body.master_certificate.body.master_public_key.clone(),
+            master_certificate: record.body.master_certificate.clone(),
+            authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            devices: record.body.devices.clone(),
+            node_url: body.node.url,
+            node_key_fingerprint: body.node.key_fingerprint,
+            display_name: body
+                .display_name
+                .unwrap_or_else(|| record.body.profile.display_name.clone()),
+            issued_at: now,
+            expires_at: now + 3600,
+        },
+        now,
+    )?;
+    // Adversarial locators are signed with real current authority and enter the public parser.
+    let encoded =
+        ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&signed)?);
+    Ok((format!("ramflux-card:v3:{encoded}"), format!("ramflux://contact/v3/{encoded}")))
 }

@@ -7,7 +7,7 @@ use super::*;
 #[tokio::test(start_paused = true)]
 async fn scheduler_deadline_resumes_durable_ack_progress_instead_of_restarting_the_ack_pass()
 -> Result<(), SdkError> {
-    let mut fixture = Fixture::new()?;
+    let mut fixture = Fixture::new().await?;
     let mut seen = Vec::new();
     let result = tokio::time::timeout(
         Duration::from_secs(20),
@@ -28,7 +28,7 @@ async fn scheduler_deadline_resumes_durable_ack_progress_instead_of_restarting_t
         .message_copy_actor_states("object:remote-object", "attachment/ack/")?;
     assert_eq!(indexed.len(), 1, "ACK progress must participate in message erasure");
     drop(std::mem::replace(&mut fixture.client, RamfluxClient::new()));
-    fixture.client = open(&fixture.root, false)?;
+    fixture.client = fixture.reopen().await?;
     seen.clear();
     fixture
         .client

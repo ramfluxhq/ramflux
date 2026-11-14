@@ -8,9 +8,7 @@ use ramflux_node_core::{
     EphemeralRouteResponse, EphemeralRouteResult, HomeNodeMigrationRecord, SessionDescriptor,
     SessionLifecycle, SessionPushSessionRequest,
 };
-use ramflux_protocol::{
-    DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
-};
+use ramflux_protocol::{DeliveryClass, Envelope, Priority};
 use serde_json::{Value, json};
 
 type TestResult = anyhow::Result<()>;
@@ -86,32 +84,17 @@ fn sign_seed() -> [u8; 32] {
 
 fn signed_ephemeral(id: &str, target: &str) -> anyhow::Result<Envelope> {
     let created_at = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let mut envelope = Envelope {
-        schema: "ramflux.envelope.v1".into(),
-        version: 1,
-        domain: "ramflux.envelope.v1".into(),
-        ext: Ext::default(),
-        signed: SignedFields {
-            signing_key_id: "test_key".into(),
-            signature_alg: SignatureAlg::Ed25519,
-            signature: String::new(),
-        },
-        envelope_id: id.into(),
-        source_principal_id: "alice".into(),
-        source_device_id: "alice_phone".into(),
-        target_delivery_id: target.into(),
-        routing_set_id: None,
-        delivery_class: DeliveryClass::OpaqueEvent,
-        priority: Priority::Low,
-        ttl: 5,
-        created_at,
-        encrypted_payload: "ciphertext".into(),
-        payload_hash: "payload_hash".into(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
-    };
-    envelope.ext.ext.insert(proto::DELIVERY_MODE_EXTENSION.into(), json!("ephemeral"));
+    let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+        id,
+        target,
+        DeliveryClass::Message,
+    );
+    envelope.source_principal_id = "alice".into();
+    envelope.source_device_id = "alice_phone".into();
+    envelope.created_at = created_at;
+    envelope.priority = Priority::Low;
+    envelope.ttl = 5;
+    envelope.delivery_mode = Some("ephemeral".into());
     let root = ramflux_crypto::create_identity_root(
         "alice",
         ramflux_crypto::blake3_256("ramflux.test.registration_root.v1", b"alice"),
@@ -399,8 +382,8 @@ fn row_not_local() -> TestResult {
     Ok(())
 }
 
-fn row_gate_off_named_candidate_field_is_refused() -> TestResult {
-    anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn row_malformed_named_candidate_fields_are_refused() -> TestResult {
+    anyhow::ensure!(ramflux_protocol::schema_profile::schema_v1_live());
     let (path, router) = fresh("p06b-gate-off-named")?;
     establish_capable(&router, TARGET)?;
     let mut envelope = signed_ephemeral("named", TARGET)?;
@@ -471,7 +454,7 @@ fn ephemeral_route_read_only() -> TestResult {
     row_no_map_entry()?;
     row_map_ne_descriptor()?;
     row_not_local()?;
-    row_gate_off_named_candidate_field_is_refused()?;
+    row_malformed_named_candidate_fields_are_refused()?;
     row_decode_invalid()?;
     Ok(())
 }

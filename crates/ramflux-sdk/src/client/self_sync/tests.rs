@@ -12,9 +12,29 @@ fn value(operation: u32, revision: u64) -> g::SelfSync {
     g::SelfSync { operation, revision, ..Default::default() }
 }
 
+fn fixture_identity(id: &str, hlc: u64) -> g::EventIdentity {
+    let author = g::QualifiedDevice {
+        account_anchor: "peer".into(),
+        device_id: "peer-device".into(),
+        device_epoch: 1,
+    };
+    let sequence = id
+        .bytes()
+        .fold(1_u64, |value, byte| value.saturating_mul(31).saturating_add(u64::from(byte)));
+    g::EventIdentity {
+        id: g::identity::derive(&author, "c", sequence)
+            .expect("test: complete self-sync identity transcript")
+            .to_vec(),
+        conversation_id: "c".into(),
+        author: Some(author),
+        hlc,
+        device_sequence: sequence,
+        ..Default::default()
+    }
+}
 fn reference(id: &str) -> g::MessageRef {
     g::MessageRef {
-        id: blake3::hash(id.as_bytes()).as_bytes().to_vec(),
+        id: fixture_identity(id, 0).id,
         conversation_id: "c".into(),
         author_anchor: "peer".into(),
     }
@@ -47,18 +67,7 @@ fn install_read_messages(client: &RamfluxClient) -> TestResult {
                 "routed/generated-identity/{}",
                 ramflux_protocol::encode_base64url(reference(id).id)
             ),
-            &g::EventIdentity {
-                id: reference(id).id,
-                conversation_id: "c".into(),
-                author: Some(g::QualifiedDevice {
-                    account_anchor: "peer".into(),
-                    device_id: "peer-device".into(),
-                    device_epoch: 1,
-                }),
-                hlc: u64::try_from(at)?,
-                device_sequence: u64::try_from(at)?,
-                ..Default::default()
-            },
+            &fixture_identity(id, u64::try_from(at)?),
         )?;
     }
     Ok(())
@@ -139,7 +148,7 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
         "c",
         &ramflux_protocol::encode_base64url(reference("m1").id),
         "local",
-        "self-sync-delete",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"self-sync-delete"),
     )?;
     assert!(!apply(&client, &g::SelfSync { revision: 10, ..draft.clone() })?);
     assert!(apply(&client, &value(3, 11))?);

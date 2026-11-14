@@ -158,13 +158,7 @@ impl RamfluxClient {
         SdkError,
     > {
         use ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Err(AdapterError::new(
-                GeneratedErrorCode::PeerUpgradeRequired,
-                "typing requires schema generation 1",
-            )
-            .into());
-        }
+
         if !engine.ephemeral_negotiated()
             || !engine
                 .config()

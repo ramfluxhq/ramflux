@@ -5,8 +5,9 @@
 use super::{
     OwnContactReceiveMode, OwnContactReceiveOutcome, RamfluxClient, SdkError, contact_peer,
 };
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
-const PREFIX: &[u8] = b"ramflux.own_contact_tombstone.v1\n";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Tombstone {
@@ -15,7 +16,7 @@ struct Tombstone {
     decided_at: Option<i64>,
 }
 pub(super) fn is_packet(body: &[u8]) -> bool {
-    body.starts_with(PREFIX)
+    decode(body).is_ok_and(|value| value.is_some())
 }
 pub(super) fn is_restricted(link: &ramflux_storage::FriendLinkRecord) -> bool {
     link.state == "removed" || link.blocked || link.capability_revoked_at.is_some()
@@ -35,12 +36,28 @@ pub(super) fn encode(
             || db.friend_link_updated_at_millis(&link.link_id),
             |decision| Ok(decision.decided_at),
         )?;
-    let mut bytes = PREFIX.to_vec();
-    bytes.extend(serde_json::to_vec(&Tombstone {
-        link: link.clone(),
-        decided_at: Some(decided_at),
-    })?);
-    Ok(bytes)
+    Ok(crate::client::generated_control::control_from_payload(
+        g::control::Payload::OwnContactTombstone(g::OwnContactTombstone {
+            link: Some(super::generated::generated_link(link)),
+            decided_at: Some(decided_at),
+        }),
+    )?
+    .encode_to_vec())
+}
+fn decode(body: &[u8]) -> Result<Option<Tombstone>, SdkError> {
+    if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
+        return Ok(None);
+    }
+    let control = g::Control::decode(body)
+        .map_err(|_| SdkError::InboundRejected("invalid own Control".into()))?;
+    crate::client::generated_control::validate_control_operation(&control)?;
+    let Some(g::control::Payload::OwnContactTombstone(value)) = control.payload else {
+        return Ok(None);
+    };
+    Ok(Some(Tombstone {
+        link: super::generated::link(value.link.as_ref())?,
+        decided_at: value.decided_at,
+    }))
 }
 impl RamfluxClient {
     pub(super) fn receive_own_contact_tombstone(
@@ -48,10 +65,9 @@ impl RamfluxClient {
         body: &[u8],
         mode: OwnContactReceiveMode,
     ) -> Result<Option<OwnContactReceiveOutcome>, SdkError> {
-        let Some(raw) = body.strip_prefix(PREFIX) else {
+        let Some(Tombstone { link, decided_at }) = decode(body)? else {
             return Ok(None);
         };
-        let Tombstone { link, decided_at } = ramflux_protocol::parse_i_json(raw)?;
         self.apply_own_contact_tombstone(&link, decided_at, mode).map(Some)
     }
 

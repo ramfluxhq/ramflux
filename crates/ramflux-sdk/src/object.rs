@@ -161,6 +161,7 @@ pub(crate) const OBJECT_OPERATION_FAILED: &str = "failed";
 pub(crate) const OBJECT_OPERATION_UNKNOWN: &str = "unknown";
 pub(crate) const OBJECT_PUT_REQUEST_HASH_DOMAIN: &str = "ramflux.object_put.request.v1";
 pub const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
+#[cfg(test)]
 pub(crate) fn object_key_slot_associated_data(
     object_id: &str,
     conversation_id: &str,
@@ -520,6 +521,7 @@ pub(crate) fn verify_recipient_object_access_grant(
 /// a caller that intentionally clears the field still fails closed in the v3 grantee token builder
 /// instead of silently inheriting the environment default. Lineage is never derived from other
 /// fields such as the gateway host or recipient node.
+#[cfg(test)]
 pub(crate) fn effective_attachment_lineage(
     explicit: Option<String>,
     effective: Option<String>,

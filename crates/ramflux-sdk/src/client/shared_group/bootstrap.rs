@@ -37,22 +37,9 @@ fn packet(state: &VerifiedGroupState) -> Result<SharedGroupPacket, SdkError> {
         distribution_base64: None,
     })
 }
-pub(crate) fn packet_bytes(state: &VerifiedGroupState) -> Result<Vec<u8>, SdkError> {
-    Ok(serde_json::to_vec(&packet(state)?)?)
-}
-#[derive(Deserialize)]
-struct PacketHeader<'a> {
-    #[serde(borrow)]
-    schema: Option<&'a str>,
-}
 pub(crate) fn is_packet(bytes: &[u8]) -> bool {
-    if super::snapshot_generated::decode(bytes).is_ok_and(|packet| packet.is_some()) {
-        return true;
-    }
-    serde_json::from_slice::<PacketHeader<'_>>(bytes).is_ok_and(|header| {
-        header.schema == Some(PACKET_SCHEMA)
-            || header.schema == Some(super::controls::CONTROL_SCHEMA)
-    })
+    super::snapshot_generated::decode(bytes).is_ok_and(|packet| packet.is_some())
+        || super::generated::decode(bytes).is_ok_and(|packet| packet.is_some())
 }
 pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, SdkError> {
     if bytes.len() > ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES * 2 {
@@ -65,15 +52,7 @@ pub(crate) fn decode_packet(bytes: &[u8]) -> Result<Option<VerifiedGroupState>, 
             &canonical,
         )?)?));
     }
-    if !serde_json::from_slice::<PacketHeader<'_>>(bytes)
-        .is_ok_and(|header| header.schema == Some(PACKET_SCHEMA))
-    {
-        return Ok(None);
-    }
-    let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(bytes)?;
-    let bytes = ramflux_protocol::decode_base64url(&packet.snapshot_base64)
-        .map_err(|_| invalid("invalid group state encoding"))?;
-    Ok(Some(verify_group_state_snapshot(GroupStateSnapshot::from_wire_bytes(&bytes)?)?))
+    Ok(None)
 }
 impl RamfluxClient {
     pub(crate) fn shared_group_packet(
@@ -81,11 +60,18 @@ impl RamfluxClient {
         state: &VerifiedGroupState,
         recipient_is_member: bool,
     ) -> Result<Vec<u8>, SdkError> {
+        self.generated_snapshot_packet(state, recipient_is_member)
+    }
+    pub(super) fn snapshot_material(
+        &self,
+        state: &VerifiedGroupState,
+        recipient_is_member: bool,
+    ) -> Result<SharedGroupPacket, SdkError> {
         let own = self.owned_device_identity()?;
         if !recipient_is_member
             || state.view().effective_role(own.root_commitment(), own.device_id()).is_none()
         {
-            return packet_bytes(state);
+            return packet(state);
         }
         if self.group_state(&state.view().group_id)?.group_epoch != state.view().epoch {
             return Err(SdkError::InboundPending(
@@ -97,7 +83,7 @@ impl RamfluxClient {
             Some(Zeroizing::new(ramflux_protocol::encode_base64url(Zeroizing::new(
                 self.export_group_sender_key_distribution(&state.view().group_id, own.device_id())?,
             ))));
-        Ok(serde_json::to_vec(&packet)?)
+        Ok(packet)
     }
     pub(crate) async fn prepare_shared_group_receive(
         &self,
@@ -174,11 +160,9 @@ impl RamfluxClient {
         }
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         let prepared = self.prepare_shared_group_payload(state.clone(), body)?;
-        if crate::client::target_selection::schema_v1_selected()
-            && ramflux_protocol::message::validation::scan_inner(body).is_ok_and(|scanned| {
-                scanned.outcome == ramflux_protocol::message::validation::ScanOutcome::Unsupported
-            })
-        {
+        if ramflux_protocol::message::validation::scan_inner(body).is_ok_and(|scanned| {
+            scanned.outcome == ramflux_protocol::message::validation::ScanOutcome::Unsupported
+        }) {
             return Ok(None);
         }
         if needs_consent {
@@ -196,10 +180,8 @@ impl RamfluxClient {
     ) -> Result<PreparedSharedGroup, SdkError> {
         ramflux_protocol::message::dm_scope::validate_group(&state.view().conversation_id)
             .map_err(|_| invalid("reserved DM conversation namespace"))?;
-        let packet = match super::snapshot_generated::decode(body)? {
-            Some(packet) => packet,
-            None => ramflux_protocol::parse_i_json::<SharedGroupPacket>(body)?,
-        };
+        let packet = super::snapshot_generated::decode(body)?
+            .ok_or_else(|| invalid("typed group snapshot required"))?;
         let distribution = packet
             .distribution_base64
             .map(|encoded| {
@@ -219,8 +201,7 @@ impl RamfluxClient {
                 let trusted = self.trusted_device(HeadUse::NewAuthorization, &source)?;
                 if !matches!(
                     (parsed.schema.as_str(), parsed.version),
-                    ("ramflux.sdk.group_sender_key.distribution.v3", 3)
-                        | ("ramflux.sdk.group_sender_key.distribution.v4", 4)
+                    ("ramflux.sdk.group_sender_key.distribution.v4", 4)
                 ) || parsed.group_state_hash.as_deref()
                     != Some(state.snapshot().state_hash.as_str())
                     || parsed.group_id != state.view().group_id

@@ -212,7 +212,7 @@ impl crate::EphemeralRouterView<'_> {
         now_ms: u64,
     ) -> EphemeralRouteResult {
         self.record_route_call();
-        if ramflux_protocol::message::outer::refuse_named_fields_while_gate_off(envelope).is_err() {
+        if ramflux_protocol::message::outer::refuse_live_bridge(envelope).is_err() {
             return EphemeralRouteResult::Dropped(EphemeralDropReason::Invalid);
         }
         match deadline(envelope, now_ms) {

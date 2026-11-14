@@ -36,16 +36,10 @@ pub(crate) fn to_native(
     if value.content_commitment != value.commitment {
         return Err(refused("content commitment mismatch"));
     }
-    let head =
-        if value.group_state_hash.is_empty() { None } else { Some(hash(&value.group_state_hash)?) };
+    let head = Some(hash(&value.group_state_hash)?);
     Ok(SdkGroupEncryptedEnvelope {
-        schema: if head.is_some() {
-            "ramflux.sdk.group_sender_key.message.v2"
-        } else {
-            "ramflux.sdk.group_sender_key.message.v1"
-        }
-        .into(),
-        version: if head.is_some() { 2 } else { 1 },
+        schema: "ramflux.sdk.group_sender_key.message.v2".into(),
+        version: 2,
         group_id: value.group_id.clone(),
         sender_id: author.device_id.clone(),
         group_key_epoch: value.key_epoch,
@@ -201,18 +195,7 @@ impl RamfluxClient {
                 return Err(refused("source was not a moderator at named epoch"));
             }
         } else {
-            let role = db
-                .group_member_role(group, source)?
-                .ok_or_else(|| refused("source has no current group role"))?;
-            if moderator && !matches!(role.as_str(), "owner" | "admin") {
-                return Err(refused("source is not a current moderator"));
-            }
-            if moderator && db.group_state(group)?.group_epoch != epoch {
-                return Err(refused("legacy group lacks verified historical moderator roles"));
-            }
-            if db.group_member_joined_epoch(group, source)?.is_none_or(|joined| joined > epoch) {
-                return Err(refused("source was not a member at named epoch"));
-            }
+            return Err(refused("verified native group state required"));
         }
         Ok(())
     }
@@ -226,7 +209,6 @@ impl RamfluxClient {
         sender: &str,
         message: &g::Message,
     ) -> Result<g::Message, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         g::validation::validate_message(message).map_err(|_| refused("invalid group Message"))?;
         if message.sealed_group.is_some() {
             return Err(refused("recursive sealed group"));
@@ -236,10 +218,10 @@ impl RamfluxClient {
         // Refuse an unprepared value rather than minting per-recipient entropy here.
         g::validation::scan_message("Message", &exact, g::registry::COMPILED_LAYER)
             .map_err(|_| refused("group Message requires a prepared private revision"))?;
-        let native = self.encrypt_group_message(group, sender, &exact)?;
+        let native = self.encrypt_prepared_group_message(group, sender, &exact)?;
         let source = self.local_device_identity(sender)?;
         from_native(
-            serde_json::from_slice(&native)?,
+            native,
             g::QualifiedDevice {
                 account_anchor: source.root_commitment().into(),
                 device_id: source.device_id().into(),
@@ -267,9 +249,6 @@ impl RamfluxClient {
         mut identity: g::EventIdentity,
         message: &g::Message,
     ) -> Result<Vec<u8>, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Err(refused("generated group profile is not selected"));
-        }
         if !message.erasure_nonce.is_empty() || message.sealed_group.is_some() {
             return Err(refused("generated group input must be an unprepared plaintext revision"));
         }
@@ -287,6 +266,19 @@ impl RamfluxClient {
         };
         if sender != own.device_id() || identity.author.as_ref() != Some(&author) {
             return Err(refused("generated group author mismatch"));
+        }
+        let content = g::Content { value: Some(g::content::Value::Message(message.clone())) };
+        let layer = Self::required_content_layer(&content)?;
+        if layer > g::registry::PROFILE_FLOOR {
+            super::target_selection::require_layer(
+                self.candidate_group_target_plan(
+                    group,
+                    sender,
+                    &ramflux_protocol::encode_base64url(&identity.id),
+                    g::KindId::KindMessage,
+                )?,
+                layer,
+            )?;
         }
         self.account_db()?.write_transaction(|| {
             let state = self
@@ -308,9 +300,10 @@ impl RamfluxClient {
             let plaintext = g::Message::decode(inner.body.as_slice())
                 .map_err(|_| refused("prepared group Message"))?;
             let sealed = self.encrypt_generated_group_message(group, sender, &plaintext)?;
-            Self::encode_generated_inner(
+            Self::encode_generated_inner_at_layer(
                 identity,
                 &g::Content { value: Some(g::content::Value::Message(sealed)) },
+                inner.layer,
             )
         })
     }

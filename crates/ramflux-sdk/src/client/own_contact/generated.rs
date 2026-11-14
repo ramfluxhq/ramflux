@@ -10,7 +10,7 @@ fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(message.into())
 }
 
-fn link(
+pub(super) fn link(
     value: Option<&g::FriendLinkRecord>,
 ) -> Result<ramflux_storage::FriendLinkRecord, SdkError> {
     let value = value.ok_or_else(|| invalid("own contact link missing"))?;
@@ -33,6 +33,45 @@ fn link(
         blocked: value.blocked,
         capability_revoked_at: value.capability_revoked_at,
     })
+}
+
+pub(super) fn generated_link(value: &ramflux_storage::FriendLinkRecord) -> g::FriendLinkRecord {
+    g::FriendLinkRecord {
+        link_id: value.link_id.clone(),
+        requester_id: value.requester_id.clone(),
+        target_id: value.target_id.clone(),
+        state: value.state.clone(),
+        remove_scope: value.remove_scope.clone(),
+        blocked: value.blocked,
+        capability_revoked_at: value.capability_revoked_at,
+    }
+}
+impl Contact {
+    pub(super) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
+        use prost::Message as _;
+        Ok(crate::client::generated_control::control_from_payload(
+            g::control::Payload::OwnContactSync(g::OwnContactSync {
+                manifest: Some(g::NativeDeviceManifest::try_from(&self.manifest)?),
+                link: Some(generated_link(&self.link)),
+            }),
+        )?
+        .encode_to_vec())
+    }
+    pub(super) fn decode(body: &[u8]) -> Result<Option<Self>, SdkError> {
+        use prost::Message as _;
+        if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let control = g::Control::decode(body).map_err(|_| invalid("invalid own Control"))?;
+        crate::client::generated_control::validate_control_operation(&control)?;
+        let Some(g::control::Payload::OwnContactSync(value)) = control.payload else {
+            return Ok(None);
+        };
+        let manifest = crate::client::task::generated::manifest::generated_manifest_fields(
+            value.manifest.as_ref().ok_or_else(|| invalid("own contact manifest missing"))?,
+        )?;
+        Ok(Some(Self { manifest, link: link(value.link.as_ref())? }))
+    }
 }
 
 impl RamfluxClient {

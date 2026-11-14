@@ -1008,7 +1008,7 @@ impl BornAccount {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mark_live_for_test(&mut self, root: &Path) -> Result<(), SdkError> {
         self.mark_live(root)
     }

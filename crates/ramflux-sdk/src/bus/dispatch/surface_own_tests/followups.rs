@@ -5,7 +5,7 @@
 use super::*;
 #[path = "retry.rs"]
 mod retry;
-use crate::client::surface::{CONTROL_PREFIX, ControlKind, SurfaceControl};
+use crate::client::surface::{ControlKind, SurfaceControl};
 
 fn due(client: &RamfluxClient) -> Result<(), SdkError> {
     let db = client.account_db()?;
@@ -25,11 +25,7 @@ fn due(client: &RamfluxClient) -> Result<(), SdkError> {
 }
 
 fn context(bytes: &[u8]) -> Result<SurfaceControl, SdkError> {
-    Ok(ramflux_protocol::parse_i_json(
-        bytes
-            .strip_prefix(CONTROL_PREFIX)
-            .ok_or_else(|| SdkError::LocalBus("surface control prefix".into()))?,
-    )?)
+    SurfaceControl::decode(bytes)?.ok_or_else(|| SdkError::LocalBus("typed Surface missing".into()))
 }
 
 #[tokio::test]

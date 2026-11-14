@@ -14,7 +14,7 @@ mod generated;
 mod replay;
 mod unsupported;
 
-const PREFIX: &[u8] = b"ramflux.own_sent_message.v1\n";
+use prost::Message as _;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SentMessage {
@@ -120,16 +120,6 @@ impl SentMessage {
     }
 }
 
-pub(super) fn generated_own_sent_from_prefix(
-    bytes: &[u8],
-) -> Result<Option<g::OwnSentMessage>, SdkError> {
-    let Some(json) = bytes.strip_prefix(PREFIX) else {
-        return Ok(None);
-    };
-    let packet: SentMessage = ramflux_protocol::parse_i_json(json)?;
-    Ok(Some(packet.to_generated()?))
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct OwnSentInput<'a> {
     pub envelope: &'a str,
@@ -144,6 +134,48 @@ pub(crate) struct OwnSentInput<'a> {
     pub at: i64,
 }
 impl RamfluxClient {
+    pub(crate) fn stage_authored_mutation_copy(
+        &self,
+        input: OwnSentInput<'_>,
+    ) -> Result<(), SdkError> {
+        let (identity, content) = Self::decode_generated_inner(input.body)?;
+        let owner = match content.value.as_ref() {
+            Some(g::content::Value::Delete(_)) => input.message.to_owned(),
+            Some(g::content::Value::Reaction(reaction)) => ramflux_protocol::encode_base64url(
+                &reaction
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| invalid("authored reaction target missing"))?
+                    .id,
+            ),
+            _ => return Err(invalid("authored mutation copy requires Delete or Reaction")),
+        };
+        if ramflux_protocol::encode_base64url(&identity.id) != input.message {
+            return Err(invalid("authored mutation copy requires its exact generated event"));
+        }
+        let packet = self.own_sent_packet(input)?;
+        let bytes = zeroize::Zeroizing::new(packet.to_generated()?.encode_to_vec());
+        // The local mutation and its copy commit together. Siblings must learn the
+        // committed erasure even when the peer gateway acknowledgement is lost.
+        crate::bus::own_device_copy::stage(
+            self,
+            super::own_device_copy::OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::Sent,
+                id: input.envelope,
+                created_at: now_unix_timestamp(),
+                conversation: input.conversation,
+                group: input.group,
+                body: &bytes,
+            },
+            Some(("message", owner.as_str())),
+        )?;
+        // A mutation has no timeline row and cannot own a message replay alias.
+        // Its qualified event, source marker and own-copy logical replay guard
+        // provide idempotency without inventing a second displayed message.
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn stage_own_sent_message(&self, input: OwnSentInput<'_>) -> Result<(), SdkError> {
         // Structured controls have their own signed projection and causal replay rules.
         if super::surface::Carrier::decode(input.body)?.is_some()
@@ -152,11 +184,11 @@ impl RamfluxClient {
             return Ok(());
         }
         let packet = self.own_sent_packet(input)?;
-        let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
-        bytes.extend(serde_json::to_vec(&packet)?);
+        let bytes = zeroize::Zeroizing::new(packet.to_generated()?.encode_to_vec());
         crate::bus::own_device_copy::stage_held(
             self,
             super::own_device_copy::OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::Sent,
                 id: input.envelope,
                 created_at: now_unix_timestamp(),
                 conversation: input.conversation,
@@ -300,6 +332,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn index_own_sent_original(
         &self,
         conversation: &str,
@@ -328,6 +361,7 @@ impl RamfluxClient {
             .and_then(|reference| reference.message_id().map(str::to_owned)))
     }
 
+    #[cfg(test)]
     pub(super) fn erase_own_sent_copies_of_original(
         &self,
         original: &DirectMessageRecord,
@@ -360,6 +394,7 @@ impl RamfluxClient {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn index_imported_own_sent_ciphertext(
         &self,
         message: &DirectMessageRecord,
@@ -383,6 +418,7 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn already_projected_own_sent_message(
         &self,
         message: &DirectMessageRecord,
@@ -435,6 +471,7 @@ impl RamfluxClient {
             .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
             .ok_or_else(|| invalid("own-device direct peer unavailable"))
     }
+    #[cfg(test)]
     pub(super) fn receive_own_sent_message(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -446,13 +483,21 @@ impl RamfluxClient {
             group,
             created_at: at,
             body: bytes,
+            ..
         } = input;
-        let Some(json) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
-        let packet: SentMessage = ramflux_protocol::parse_i_json(json)?;
+        if g::validation::scan_message("OwnSentMessage", bytes, g::registry::COMPILED_LAYER)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let generated =
+            g::OwnSentMessage::decode(bytes).map_err(|_| invalid("invalid own sent message"))?;
+        let packet = SentMessage::from_generated(&generated)?;
         self.apply_own_sent_packet(source, envelope, conversation, group, at, &packet)
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn apply_own_sent_packet(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -548,6 +593,7 @@ impl RamfluxClient {
         )?;
         Ok(true)
     }
+    #[cfg(test)]
     fn own_sent_history_row(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -655,6 +701,7 @@ fn alias_key(
     Ok(format!("own-device/sent-alias/{}", db.own_sent_index_digest("alias", message)?))
 }
 
+#[cfg(test)]
 fn imported_ciphertext_key(
     db: &ramflux_storage::AccountDb,
     hash: &str,
@@ -662,6 +709,7 @@ fn imported_ciphertext_key(
     Ok(format!("own-device/imported-ciphertext/{}", db.own_sent_index_digest("imported", hash)?))
 }
 
+#[cfg(test)]
 fn original_index_prefix(
     db: &ramflux_storage::AccountDb,
     conversation: &str,

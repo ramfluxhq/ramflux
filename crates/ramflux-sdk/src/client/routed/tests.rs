@@ -21,6 +21,7 @@ struct Fixture {
     client: RamfluxClient,
     id: String,
     root: ramflux_test_support::TestPath,
+    native: Option<Box<crate::client::native_test_support::Fixture>>,
 }
 impl Fixture {
     fn new(id: &str, seed: u8) -> Result<Self, SdkError> {
@@ -49,12 +50,129 @@ impl Fixture {
         client.create_account(id, id)?;
         client.unlock_account(id, b"routed-test")?;
         client.initialize_and_publish_prekey_bundle(principal, id, id, [device_seed; 32], None)?;
-        Ok(Self { root, client, id: id.to_owned() })
+        Ok(Self { root, client, id: id.to_owned(), native: None })
+    }
+    async fn native(id: &str, _seed: u8) -> Result<Self, SdkError> {
+        let mut fixture =
+            Box::pin(crate::client::native_test_support::Fixture::with_device(id, id))
+                .await
+                .map_err(|error| invalid(&format!("native routed fixture: {error}")))?;
+        let client = std::mem::take(&mut fixture.client);
+        Ok(Self {
+            root: fixture.root.0.clone(),
+            client,
+            id: id.into(),
+            native: Some(Box::new(fixture)),
+        })
+    }
+    async fn native_named(id: &str, _seed: u8) -> Result<Self, SdkError> {
+        let mut fixture =
+            Box::pin(crate::client::native_test_support::Fixture::with_principal(id, id, id))
+                .await
+                .map_err(|error| invalid(&format!("native named fixture: {error}")))?;
+        let client = std::mem::take(&mut fixture.client);
+        Ok(Self {
+            root: fixture.root.0.clone(),
+            client,
+            id: id.into(),
+            native: Some(Box::new(fixture)),
+        })
+    }
+    async fn native_principal(id: &str, principal: &str) -> Result<Self, SdkError> {
+        let mut fixture = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+            id, id, principal,
+        ))
+        .await
+        .map_err(|error| invalid(&format!("native principal fixture: {error}")))?;
+        let client = std::mem::take(&mut fixture.client);
+        Ok(Self {
+            root: fixture.root.0.clone(),
+            client,
+            id: id.into(),
+            native: Some(Box::new(fixture)),
+        })
+    }
+    async fn native_same_home(source: &Self, id: &str) -> Result<Self, SdkError> {
+        let mut fixture = source
+            .native
+            .as_ref()
+            .ok_or_else(|| invalid("native source"))?
+            .peer_at_same_home(id, id, id)
+            .await
+            .map_err(|error| invalid(&format!("native shared home: {error}")))?;
+        let client = std::mem::take(&mut fixture.client);
+        Ok(Self {
+            root: fixture.root.0.clone(),
+            client,
+            id: id.into(),
+            native: Some(Box::new(fixture)),
+        })
+    }
+    async fn reopen_native(&mut self) -> Result<(), SdkError> {
+        let vault = self.native.as_ref().ok_or_else(|| invalid("native fixture"))?.vault.clone();
+        self.client.active_account_db = None;
+        self.client.unlock_account(&self.id, b"native fixture data passphrase")?;
+        self.client.initialize_born_v3_branch(&self.id, vault).await?;
+        self.client.persist_fetched_identity_directory(&self.manifest()?)?;
+        Ok(())
+    }
+    fn create_shared_group(
+        &self,
+        group: &str,
+        conversation: &str,
+    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
+        let native = self.native.as_ref().ok_or_else(|| invalid("native group fixture"))?;
+        let primary = self
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .group_primary(native.vault.as_ref())?;
+        self.client.shared_group_create_with_primary(
+            group,
+            conversation,
+            None,
+            &self.config()?.target_delivery_id,
+            Some(&primary),
+        )
+    }
+    fn change_shared_group(
+        &self,
+        group: &str,
+        change: ramflux_protocol::GroupStateChange,
+    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
+        let native = self.native.as_ref().ok_or_else(|| invalid("native group fixture"))?;
+        let primary = self
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .group_primary(native.vault.as_ref())?;
+        self.client.shared_group_change_with_primary(
+            group,
+            &self.config()?.target_delivery_id,
+            change,
+            Some(&primary),
+        )
+    }
+    fn manifest(&self) -> Result<SdkDeviceManifestResponse, SdkError> {
+        if let Some(native) = &self.native {
+            return Ok(native.manifest.clone());
+        }
+        crate::client::identity_authority::test_support::manifest(&self.client)
     }
     fn reference(&self) -> Result<String, SdkError> {
         self.client.local_device_reference(&self.id)
     }
     fn config(&self) -> Result<GatewaySessionConfig, SdkError> {
+        if let Some(native) = &self.native {
+            let mut config = native.config.clone().with_account_identity(&self.client)?;
+            config.device_branch = Some(std::sync::Arc::new(
+                self.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+            ));
+            config.source_identity = Some(self.client.owned_device_identity()?);
+            return Ok(config);
+        }
         GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
@@ -74,12 +192,17 @@ impl Fixture {
         .with_account_identity(&self.client)
     }
 }
-// These fixtures name the expected principal and its device identically. Resolve the
-// pinned principal relationship, never a directory's by-device-name candidate.
+// Resolve the explicit principal convention of each fixture, never a by-name candidate.
+// Native fixture accounts publish principal-<device>; primitive fixtures share both names.
 fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {
+    let principal_id = if client.born_v3_account.is_some() {
+        format!("principal-{principal}")
+    } else {
+        principal.into()
+    };
     let owner = client
         .account_db()?
-        .client_record("identity", principal)?
+        .client_record("identity", &principal_id)?
         .ok_or_else(|| invalid("fixture peer identity"))?;
     let root = owner["contact_identity_commitment"]
         .as_str()
@@ -88,7 +211,7 @@ fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<Str
 }
 // Fixture callers name the intended member explicitly; no directory name lookup grants authority.
 fn fixture_member(client: &RamfluxClient, group: &str, member: &Fixture) -> Result<(), SdkError> {
-    let manifest = crate::client::identity_authority::test_support::manifest(&member.client)?;
+    let manifest = member.manifest()?;
     client.observe_device_manifest_json(
         serde_json::to_value(&manifest)?,
         &manifest.principal_commitment,
@@ -97,7 +220,7 @@ fn fixture_member(client: &RamfluxClient, group: &str, member: &Fixture) -> Resu
     Ok(())
 }
 fn fixture_group(client: &RamfluxClient, group: &str, owner: &Fixture) -> Result<(), SdkError> {
-    let manifest = crate::client::identity_authority::test_support::manifest(&owner.client)?;
+    let manifest = owner.manifest()?;
     client.observe_device_manifest_json(
         serde_json::to_value(&manifest)?,
         &manifest.principal_commitment,
@@ -120,6 +243,69 @@ fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
         ttl: 3600,
     }
 }
+struct GeneratedDelivery {
+    conversation: String,
+    message: String,
+    entry: GatewayInboxEntry,
+}
+fn generated_delivery(
+    sender: &Fixture,
+    receiver: &Fixture,
+    operation: &str,
+    text: &str,
+) -> Result<GeneratedDelivery, SdkError> {
+    review::trust(sender, receiver)?;
+    review::trust(receiver, sender)?;
+    let own = sender.config()?;
+    let target = receiver.config()?;
+    let conversation = sender
+        .client
+        .generated_direct_conversation_id(&receiver.client.owned_device_identity()?)?;
+    let mut request = GatewayDirectMessage {
+        conversation_id: conversation.clone(),
+        message_id: operation.into(),
+        envelope_id: format!("wire-{operation}"),
+        source_principal_id: own.principal_id.clone(),
+        sender_id: own.device_id.clone(),
+        recipient_device_id: Some(target.device_id.clone()),
+        recipient_principal_commitment: Some(receiver.client.own_account_anchor()?),
+        target_delivery_id: target.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: sender.client.content_ttl()?,
+    };
+    let prepared = sender.client.prepare_authored_message(
+        &mut request,
+        None,
+        &ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
+    )?;
+    let message = request.message_id.clone();
+    let (mut request, sealed) =
+        seal_native_fixture(sender, receiver, request, &prepared.wire, Route::direct())?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(&own, &mut request, sealed)?;
+    sender.client.project_authored_message(&request, &prepared.exact, &[])?;
+    Ok(GeneratedDelivery {
+        conversation,
+        message,
+        entry: GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: target.target_delivery_id,
+            envelope,
+        },
+    })
+}
+
+async fn receive_generated(
+    receiver: &mut Fixture,
+    entry: &GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    let mut engine =
+        GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
+    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry, false).await?;
+    Ok(())
+}
+
 fn seal(
     sender: &Fixture,
     receiver: &Fixture,
@@ -151,15 +337,13 @@ fn seal_nested(
     {
         review::trust(sender, receiver)?;
     }
-    message.recipient_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
-        &receiver
-            .client
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key(),
-    ));
+    message.recipient_principal_commitment = Some(receiver.client.own_account_anchor()?);
+    if let Some(native) = &receiver.native {
+        message.target_delivery_id = native.config.target_delivery_id.clone();
+    }
+    if sender.native.is_some() {
+        return seal_native_fixture(sender, receiver, message, body, route);
+    }
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
@@ -197,6 +381,53 @@ fn seal_nested(
     )?;
     Ok((message, sealed))
 }
+fn seal_native_fixture(
+    sender: &Fixture,
+    receiver: &Fixture,
+    mut message: GatewayDirectMessage,
+    body: &[u8],
+    route: Route,
+) -> Result<(GatewayDirectMessage, SealedRouted), SdkError> {
+    let config = sender.config()?;
+    if message.source_principal_id == sender.id {
+        message.source_principal_id.clone_from(&config.principal_id);
+    }
+    let recipient = receiver.client.owned_device_identity()?;
+    let request = sender.client.routed_send_material_request(&config, &message)?;
+    let material = SendMaterial {
+        manifest: if request.root.is_some() {
+            Some((recipient.root_commitment().into(), receiver.manifest()?))
+        } else {
+            None
+        },
+        bundle: if request.prekey.is_some() {
+            Some(receiver.client.load_x3dh_private_state(&recipient)?.bundle)
+        } else {
+            None
+        },
+    };
+    sender.client.account_db()?.write_transaction(|| {
+        let (mut session, header, bundle) = sender.client.prepared_send_pair(
+            &config,
+            &message,
+            material,
+            crate::client::target_selection::kind_id_for_route(&route.kind),
+        )?;
+        let sealed = sender.client.seal_routed_with_route(
+            &message,
+            body,
+            route,
+            SealPair {
+                local: &sender.id,
+                remote: recipient.storage_key(),
+                session: &mut session,
+                header,
+                bundle,
+            },
+        )?;
+        Ok((message, sealed))
+    })
+}
 fn seal_as(
     sender: &Fixture,
     receiver: &Fixture,
@@ -228,62 +459,59 @@ fn seal_as(
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: receiver.id.clone(),
+        target_delivery_id: receiver.config()?.target_delivery_id,
         envelope,
     })
 }
 
-#[test]
-fn first_unknown_conversation_decrypts_and_outer_frame_has_no_route() -> Result<(), SdkError> {
-    let a = Fixture::new("alice", 21)?;
-    let b = Fixture::new("bob", 31)?;
-    let conversation = "private-first-conversation-never-known-to-the-receiver";
-    let entry = seal(&a, &b, message("envelope", conversation), b"hello first message")?;
-    let opened = b.client.open_routed(&entry, "bob")?;
-    assert_eq!(opened.routing.conversation_id, conversation);
-    assert_eq!(opened.body.as_slice(), b"hello first message");
-    let outer = serde_json::to_string(&entry.envelope)?;
-    assert!(!outer.contains(conversation));
-    let wrapper = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        .map_err(|_| invalid("payload"))?;
-    assert!(!String::from_utf8_lossy(&wrapper).contains(conversation));
-    assert!(!String::from_utf8_lossy(&wrapper).contains("hello first message"));
-    Ok(())
-}
-
-const MAX_LEGITIMATE_BODY: usize = 392_000;
-
-fn inner_len(message: &GatewayDirectMessage, body: &[u8]) -> Result<usize, SdkError> {
-    Ok(serde_json::to_vec(&Plaintext {
-        routing: routing(message, Route::direct()),
-        body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
-    })?
-    .len())
-}
-
-fn smallest_body_over_inner(message: &GatewayDirectMessage) -> Result<Vec<u8>, SdkError> {
-    let mut lo = MAX_LEGITIMATE_BODY;
-    let mut hi = MAX_LEGITIMATE_BODY + 8_192;
-    if inner_len(message, &vec![0x5a; hi])? <= ramflux_protocol::message::outer::MAX_INNER_BYTES {
-        return Err(invalid("over-inner probe must exceed the Inner cap"));
-    }
-    while lo + 1 < hi {
-        let mid = usize::midpoint(lo, hi);
-        if inner_len(message, &vec![0x5a; mid])? > ramflux_protocol::message::outer::MAX_INNER_BYTES
-        {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    Ok(vec![0x5a; hi])
-}
-
-fn assert_payload_too_large(result: Result<GatewayInboxEntry, SdkError>) -> Result<(), SdkError> {
-    match result {
-        Err(SdkError::PayloadTooLarge) => Ok(()),
-        other => Err(invalid(&format!("exact PayloadTooLarge, got {other:?}"))),
-    }
+#[tokio::test(flavor = "current_thread")]
+async fn first_unknown_conversation_decrypts_and_outer_frame_has_no_route()
+-> crate::client::native_test_support::TestResult {
+    use crate::client::native_test_support::{Fixture as Native, watchdog};
+    watchdog::within(async {
+        let source = Native::new("unknown-conversation-source").await?;
+        let target = Native::new("unknown-conversation-target").await?;
+        source.accept_peer(&target)?;
+        target.accept_peer(&source)?;
+        let conversation = ramflux_protocol::message::dm_scope::derive(
+            &source.client.own_account_anchor()?,
+            &target.client.own_account_anchor()?,
+        )?;
+        let identity = source.client.allocate_generated_identity(
+            &conversation,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )?;
+        let exact = RamfluxClient::encode_generated_inner(
+            identity,
+            &ramflux_protocol::message::Content {
+                value: Some(ramflux_protocol::message::content::Value::Message(
+                    ramflux_protocol::message::Message {
+                        text: "hello first generated message".into(),
+                        erasure_nonce: ramflux_crypto::random_32()?.to_vec(),
+                        ..Default::default()
+                    },
+                )),
+            },
+        )?;
+        let envelope = source.seal_inner_to(&target, &exact)?;
+        let entry = GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: target.config.target_delivery_id.clone(),
+            envelope,
+        };
+        let opened = target.client.open_routed(&entry, &target.config.device_id)?;
+        assert_eq!(opened.routing.conversation_id, conversation);
+        assert_eq!(opened.body.as_slice(), exact);
+        let outer = serde_json::to_string(&entry.envelope)?;
+        assert!(!outer.contains(&conversation));
+        let wrapper = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)?;
+        assert!(!String::from_utf8_lossy(&wrapper).contains(&conversation));
+        assert!(!String::from_utf8_lossy(&wrapper).contains("hello first generated message"));
+        Ok(())
+    })
+    .await?
 }
 
 fn assert_compact_frame_admitted(entry: &GatewayInboxEntry) -> Result<(), SdkError> {
@@ -311,130 +539,61 @@ fn assert_compact_frame_admitted(entry: &GatewayInboxEntry) -> Result<(), SdkErr
     Ok(())
 }
 
-#[test]
-fn real_wire_size_preflight_accepts_392kb_body() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let a = Fixture::new("alice", 71)?;
-    let b = Fixture::new("bob", 72)?;
-    let body = vec![0x5a; MAX_LEGITIMATE_BODY];
-    let msg = message("max-inner", "c");
-    let inner = inner_len(&msg, &body)?;
-    assert!(inner <= ramflux_protocol::message::outer::MAX_INNER_BYTES);
-    assert!(inner >= 522_000);
-    let entry = seal(&a, &b, msg, &body)?;
-    let opened = b.client.open_routed(&entry, "bob")?;
-    assert_eq!(opened.body.as_slice(), body.as_slice());
-    assert_eq!(
-        opened.decrypted.plaintext.len(),
-        inner
-            + ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
-            + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
-    );
-    assert_compact_frame_admitted(&entry)
-}
-
-#[test]
-fn over_cap_seal_leaves_pair_session_byte_identical() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let a = Fixture::new("alice", 81)?;
-    let b = Fixture::new("bob", 91)?;
-    let established = message("pair", "c");
-    let _entry = seal(&a, &b, established, &vec![0x5a; MAX_LEGITIMATE_BODY])?;
-    let local = a.client.local_device_identity("alice")?;
-    let remote = a.client.device_identity(&fixture_peer_reference(&a.client, "bob")?)?;
-    let before = a.client.persisted_pair_snapshot(&local, &remote)?;
-    let over_msg = message("over-inner", "c");
-    let over = smallest_body_over_inner(&over_msg)?;
-    assert!(
-        inner_len(&over_msg, &over[0..over.len() - 1])?
-            <= ramflux_protocol::message::outer::MAX_INNER_BYTES
-    );
-    assert!(inner_len(&over_msg, &over)? > ramflux_protocol::message::outer::MAX_INNER_BYTES);
-    assert_payload_too_large(seal(&a, &b, over_msg, &over))?;
-    assert_eq!(before, a.client.persisted_pair_snapshot(&local, &remote)?);
-    Ok(())
-}
-
-#[test]
-fn device_pair_session_spans_conversations_and_rejects_replay_and_tampering() -> Result<(), SdkError>
-{
-    let a = Fixture::new("alice", 41)?;
-    let b = Fixture::new("bob", 51)?;
-    let first = seal(&a, &b, message("first", "conversation-one"), b"one")?;
-    let opened = b.client.open_routed(&first, "bob")?;
-    let session_id = opened.session.session_id.clone();
-    b.client.persist_pair(
-        &b.client.local_device_identity("bob")?,
-        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
-    assert!(b.client.open_routed(&first, "bob").is_err());
-    let second = seal(&a, &b, message("second", "different-conversation"), b"two")?;
-    let opened = b.client.open_routed(&second, "bob")?;
-    assert_eq!(opened.session.session_id, session_id);
-    assert_eq!(opened.body.as_slice(), b"two");
-    let mut tampered = second.clone();
-    tampered.envelope.envelope_id = "different-envelope".to_owned();
-    assert!(b.client.open_routed(&tampered, "bob").is_err());
-    let mut tampered = second;
-    let mut wrapper = decode(&tampered.envelope)?;
-    wrapper.ciphertext.ciphertext[0] ^= 1;
-    tampered.envelope.encrypted_payload =
-        ramflux_protocol::encode_base64url(serde_json::to_vec(&wrapper)?);
-    assert!(b.client.open_routed(&tampered, "bob").is_err());
-    Ok(())
-}
-
-#[test]
-fn device_pair_session_supports_reply_direction() -> Result<(), SdkError> {
-    let a = Fixture::new("alice", 61)?;
-    let b = Fixture::new("bob", 71)?;
-    let first = seal(&a, &b, message("first", "c"), b"hello")?;
-    let opened = b.client.open_routed(&first, "bob")?;
-    b.client.persist_pair(
-        &b.client.local_device_identity("bob")?,
-        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
-    let mut reply = message("reply", "another-private-conversation");
-    reply.source_principal_id = "bob".to_owned();
-    reply.sender_id = "bob".to_owned();
-    reply.recipient_device_id = Some("alice".to_owned());
-    reply.target_delivery_id = "alice".to_owned();
-    let entry = seal(&b, &a, reply, b"reply body")?;
-    let received = a.client.open_routed(&entry, "alice")?;
-    assert_eq!(received.body.as_slice(), b"reply body");
-    assert_eq!(received.session.session_id, opened.session.session_id);
-    Ok(())
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn fresh_receiver_commits_first_dm_and_replays_without_ratchet_advance()
--> Result<(), SdkError> {
-    let a = Fixture::new("alice", 81)?;
-    let mut b = Fixture::new("bob", 91)?;
-    b.client.establish_friend_link(
-        "link",
-        a.client.owned_device_identity()?.root_commitment(),
-        b.client.owned_device_identity()?.root_commitment(),
-    )?;
-    let entry =
-        seal(&a, &b, message("first-committed", "unseen-conversation"), b"private message body")?;
-    assert_eq!(b.client.conversation_list()?.len(), 0);
-    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let pool = ramflux_transport::RelayQuicPool::new(
-        ramflux_transport::RelayQuicPoolConfig::functional_default()
-            .map_err(|e| invalid(&e.to_string()))?,
-    );
-    let first = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert!(first.plaintext.is_some());
-    assert_eq!(b.client.direct_messages("unseen-conversation")?.len(), 1);
-    let duplicate = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert!(duplicate.plaintext.is_none());
-    assert_eq!(b.client.direct_messages("unseen-conversation")?.len(), 1);
-    Ok(())
+-> crate::client::native_test_support::TestResult {
+    use crate::client::native_test_support::{Fixture as Native, watchdog};
+    watchdog::within(async {
+        let source = Native::new("first-commit-source").await?;
+        let mut target = Native::new("first-commit-target").await?;
+        source.accept_peer(&target)?;
+        target.accept_peer(&source)?;
+        let conversation = ramflux_protocol::message::dm_scope::derive(
+            &source.client.own_account_anchor()?,
+            &target.client.own_account_anchor()?,
+        )?;
+        assert_eq!(target.client.direct_messages(&conversation)?.len(), 0);
+        let identity = source.client.allocate_generated_identity(
+            &conversation,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )?;
+        let id = ramflux_protocol::encode_base64url(&identity.id);
+        let exact = RamfluxClient::encode_generated_inner(
+            identity,
+            &ramflux_protocol::message::Content {
+                value: Some(ramflux_protocol::message::content::Value::Message(
+                    ramflux_protocol::message::Message {
+                        text: "first committed generated message".into(),
+                        erasure_nonce: ramflux_crypto::random_32()?.to_vec(),
+                        ..Default::default()
+                    },
+                )),
+            },
+        )?;
+        let envelope = source.seal_inner_to(&target, &exact)?;
+        target.receive(envelope.clone(), 1).await?;
+        assert_eq!(
+            target.client.generated_message_detail(&conversation, &id)?.message.text.as_deref(),
+            Some("first committed generated message")
+        );
+        let checkpoint = target.client.persisted_pair_snapshot(
+            &target.client.owned_device_identity()?,
+            &source.client.owned_device_identity()?,
+        )?;
+        target.receive(envelope, 1).await?;
+        assert_eq!(target.client.direct_messages(&conversation)?.len(), 1);
+        assert_eq!(
+            target.client.persisted_pair_snapshot(
+                &target.client.owned_device_identity()?,
+                &source.client.owned_device_identity()?
+            )?,
+            checkpoint,
+            "replaying the exact first envelope advanced the native receive ratchet"
+        );
+        Ok(())
+    })
+    .await?
 }
 struct NoNetwork;
 impl ramflux_transport::GatewaySessionFrameSink for NoNetwork {
@@ -467,203 +626,68 @@ impl ramflux_transport::GatewaySessionFrameSource for NoNetwork {
 #[tokio::test(flavor = "current_thread")]
 async fn group_control_and_message_route_without_conversation_hint_and_reject_conflicting_link()
 -> Result<(), SdkError> {
-    let a = Fixture::new("alice", 101)?;
-    let mut b = Fixture::new("bob", 111)?;
+    use ramflux_protocol::message as g;
+    let a = Fixture::native_named("alice", 101).await?;
+    let mut b = Fixture::native_named("bob", 111).await?;
     let group = "private-group";
     let conversation = "private-group-conversation";
-    for client in [&a.client, &b.client] {
-        fixture_group(client, group, &a)?;
-        fixture_member(client, group, &b)?;
-        let key = ramflux_protocol::encode_base64url(
-            a.client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .verifying_key()
-                .to_bytes(),
-        );
-        client.account_db()?.persist_group_member_device_key(
-            group,
-            &crate::client::identity_authority::test_support::group_device(client, group, "alice")?,
-            &key,
-        )?;
-    }
-    let distribution = a.client.export_group_sender_key_distribution(group, "alice")?;
-    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
-        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
-        version: 1,
-        membership_event_base64: None,
-        actor_manifest_url: None,
-        distribution_base64: ramflux_protocol::encode_base64url(distribution),
-    };
-    let entry =
-        seal_group(&a, &b, message("group-control", conversation), &serde_json::to_vec(&wrapper)?)?;
-    let outer = serde_json::to_string(&entry)?;
+    effect_marker_tests::group_ready(&a, &mut b, group)?;
+    let control = effect_marker_tests::group_control_entry(&a, &b, group, conversation)?;
+    let outer = serde_json::to_string(&control)?;
     assert!(!outer.contains(conversation));
     assert!(!outer.contains(group));
     let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let pool = ramflux_transport::RelayQuicPool::new(
-        ramflux_transport::RelayQuicPoolConfig::functional_default()
-            .map_err(|e| invalid(&e.to_string()))?,
-    );
-    let delivered = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert_eq!(delivered.routing.as_ref().map(|route| &route.kind), Some(&Kind::GroupControl));
-    assert!(b.client.group_state(group)?.members.contains("bob"));
-    assert!(
-        b.client.account_db()?.client_record("conversation", conversation)?.is_none(),
-        "a roster/control wait does not establish the group text conversation"
-    );
-    let inner = a.client.encrypt_group_message(group, "alice", b"private group text")?;
-    let message = seal_group(&a, &b, message("group-message", conversation), &inner)?;
-    let delivered = b.client.apply_routed_entry(&mut engine, &pool, &message, false).await?;
-    assert_eq!(delivered.routing.as_ref().map(|route| &route.kind), Some(&Kind::GroupMessage));
-    assert_eq!(
-        b.client
-            .account_db()?
-            .client_record("conversation", conversation)?
-            .ok_or_else(|| invalid("seed did not establish conversation"))?["group_id"],
-        group
-    );
-    let plaintext = delivered.plaintext.ok_or_else(|| invalid("missing group plaintext"))?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(&plaintext.plaintext_body_base64)
-            .map_err(|_| invalid("body"))?,
-        b"private group text"
-    );
-    b.client.account_db()?.persist_client_record(
-        "group",
+    let delivery =
+        b.client.apply_routed_entry(&mut engine, &review::pool()?, &control, false).await?;
+    assert_eq!(delivery.routing.ok_or_else(|| invalid("control route"))?.kind, Kind::GroupControl);
+    let identity = a.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let exact = a.client.encrypt_generated_group_inner(
         group,
-        &serde_json::json!({"conversation_id":"conflicting-conversation"}),
+        &a.id,
+        identity,
+        &g::Message { text: "private group text".into(), ..Default::default() },
     )?;
-    let inner = a.client.encrypt_group_message(group, "alice", b"second group message")?;
-    let next = seal_group(&a, &b, super::tests::message("group-next", conversation), &inner)?;
-    assert!(b.client.apply_routed_entry(&mut engine, &pool, &next, false).await.is_err());
-    let direct = seal(
-        &a,
-        &b,
-        super::tests::message("direct-kind-conflict", conversation),
-        b"not a group ciphertext",
-    )?;
-    assert!(b.client.apply_routed_entry(&mut engine, &pool, &direct, false).await.is_err());
-    Ok(())
-}
-
-#[test]
-fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(), SdkError> {
-    let a = Fixture::new("alice", 121)?;
-    let b = Fixture::new("bob", 131)?;
-    review::trust(&b, &a)?;
-    let mut message = message("legacy-envelope", "legacy-conversation");
-    let bundle = b.client.load_x3dh_private_state(&b.client.local_device_identity("bob")?)?.bundle;
-    let (mut sending, header) =
-        a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
-    let ciphertext = sending.encrypt(b"legacy body", dm_associated_data("legacy-conversation"))?;
-    message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: None,
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
-        version: 1,
-        x3dh: header.clone(),
-        ciphertext,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: "bob".to_owned(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-    };
-    assert_eq!(b.client.legacy_routing_binding("bob", &entry)?, None);
-    b.client.account_db()?.hold_unrouted("legacy-envelope", 1, &serde_json::to_vec(&entry)?, 1)?;
-    assert_eq!(b.client.account_db()?.unrouted_count()?, 1);
-    assert!(!b.client.account_db()?.has_gateway_ack(
-        &b.client.owned_device_identity()?,
-        "bob",
-        1
-    )?);
-    // Explicit prior session state, rather than a caller/driver guessing from local conversations.
-    let receiving =
-        b.client.load_or_create_recv_dm_session("legacy-conversation", header.as_ref())?;
-    b.client.send_direct_message(
-        "legacy-conversation",
-        "bound-history",
-        "alice",
-        b"prior history",
-    )?;
-    b.client.persist_dm_session("legacy-conversation", "bound-history", "recv", &receiving)?;
+    let mut entry =
+        effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
+    entry.inbox_seq = 2;
+    let delivery =
+        b.client.apply_routed_entry(&mut engine, &review::pool()?, &entry, false).await?;
+    assert_eq!(delivery.routing.ok_or_else(|| invalid("message route"))?.kind, Kind::GroupMessage);
     assert_eq!(
-        b.client.legacy_routing_binding("bob", &entry)?,
-        Some("legacy-conversation".to_owned())
+        b.client.generated_message_detail(conversation, &id)?.message.text.as_deref(),
+        Some("private group text")
     );
-    assert_eq!(b.client.legacy_routing_binding("different-device", &entry)?, None);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn group_message_before_distribution_keeps_content_retryable() -> Result<(), SdkError> {
-    let a = Fixture::new("alice", 141)?;
-    let mut b = Fixture::new("bob", 151)?;
-    for client in [&a.client, &b.client] {
-        fixture_group(client, "pending-group", &a)?;
-        fixture_member(client, "pending-group", &b)?;
-        let key = ramflux_protocol::encode_base64url(
-            a.client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .verifying_key()
-                .to_bytes(),
-        );
-        client.account_db()?.persist_group_member_device_key(
-            "pending-group",
-            &crate::client::identity_authority::test_support::group_device(
-                client,
-                "pending-group",
-                "alice",
-            )?,
-            &key,
-        )?;
-    }
-    let distribution = a.client.export_group_sender_key_distribution("pending-group", "alice")?;
-    let inner =
-        a.client.encrypt_group_message("pending-group", "alice", b"delayed-key plaintext")?;
-    let entry = seal_group(&a, &b, message("pending-message", "pending-conversation"), &inner)?;
-    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let pool = ramflux_transport::RelayQuicPool::new(
-        ramflux_transport::RelayQuicPoolConfig::functional_default()
-            .map_err(|e| invalid(&e.to_string()))?,
-    );
-    let sender = a.client.owned_device_identity()?;
-    let logical = ramflux_protocol::group_message_id(
-        "pending-group",
-        sender.root_commitment(),
-        sender.device_id(),
-        "pending-message",
+    let mut metadata = b
+        .client
+        .account_db()?
+        .client_record("group", group)?
+        .ok_or_else(|| invalid("group record"))?;
+    metadata["conversation_id"] = serde_json::json!("conflicting-conversation");
+    metadata["conversation_ids"] = serde_json::json!(["conflicting-conversation"]);
+    b.client.account_db()?.persist_client_record("group", group, &metadata)?;
+    let identity = a.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
     )?;
-    let pending = b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert!(pending.plaintext.is_none());
-    assert_eq!(b.client.account_db()?.message_content(&logical)?, None);
-    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
-        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
-        version: 1,
-        membership_event_base64: None,
-        actor_manifest_url: None,
-        distribution_base64: ramflux_protocol::encode_base64url(distribution),
-    };
-    let control = seal_group(
-        &a,
-        &b,
-        message("pending-control", "pending-conversation"),
-        &serde_json::to_vec(&wrapper)?,
+    let exact = a.client.encrypt_generated_group_inner(
+        group,
+        &a.id,
+        identity,
+        &g::Message { text: "second group text".into(), ..Default::default() },
     )?;
-    b.client.apply_routed_entry(&mut engine, &pool, &control, false).await?;
-    assert_eq!(
-        b.client.account_db()?.message_content(&logical)?,
-        Some(b"delayed-key plaintext".to_vec())
+    let mut next =
+        effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
+    next.inbox_seq = 3;
+    assert!(
+        b.client.apply_routed_entry(&mut engine, &review::pool()?, &next, false).await.is_err()
     );
-    assert_eq!(b.client.account_db()?.group_pending_undecrypted_count("pending-group")?, 0);
+    assert_eq!(b.client.direct_messages(conversation)?.len(), 1);
     Ok(())
 }
 
@@ -674,6 +698,7 @@ struct ReceivingGateway {
     reader: AccountDb,
     receipt_key: String,
     acks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    mailbox: String,
 }
 impl ramflux_transport::GatewaySessionFrameSink for ReceivingGateway {
     fn send_frame<'a>(
@@ -730,7 +755,7 @@ impl ramflux_transport::GatewaySessionFrameSource for ReceivingGateway {
                     self.queued.push_back(GatewayServerFrame::Cursor { cursor: None });
                     GatewayServerFrame::Ack {
                         cursor: GatewayCursor {
-                            target_delivery_id: "bob".to_owned(),
+                            target_delivery_id: self.mailbox.clone(),
                             inbox_seq: 1,
                             last_envelope_id: Some(ack.envelope_id.clone()),
                             acked_envelope_ids: vec![ack.envelope_id],
@@ -746,89 +771,106 @@ impl ramflux_transport::GatewaySessionFrameSource for ReceivingGateway {
     }
 }
 #[tokio::test(flavor = "current_thread")]
-async fn compatibility_receive_acks_after_commit_and_returns_cached_plaintext()
--> Result<(), SdkError> {
-    let a = Fixture::new("alice", 161)?;
-    let mut b = Fixture::new("bob", 171)?;
-    b.client.establish_friend_link(
-        "link",
-        a.client.owned_device_identity()?.root_commitment(),
-        b.client.owned_device_identity()?.root_commitment(),
-    )?;
-    let entry =
-        seal(&a, &b, message("compat-first", "compat-conversation"), b"compatibility plaintext")?;
-    let acks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let engine = GatewaySessionEngine::with_test_transport(
-        b.config()?,
-        Box::new(ReceivingGateway {
-            queued: VecDeque::new(),
-            receipt_key: b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?,
-            entry: Some(entry),
-            last: None,
-            reader: b.client.account_db()?.open_reader()?,
-            acks: std::sync::Arc::clone(&acks),
-        }),
-    );
-    let client = std::mem::replace(&mut b.client, RamfluxClient::new());
-    let mut state = LocalBusDaemonState {
-        config: LocalBusConfig::new(b.root.join("bus.sock"), &b.root),
-        nodes: crate::node::NodeStore::default(),
-        account_index: None,
-        accounts: BTreeMap::from([(
-            "bob".to_owned(),
-            LocalBusAccountState::new(client, engine, "commitment".to_owned()),
-        )]),
-        active_account_id: Some("bob".to_owned()),
-        attended_accounts: BTreeSet::new(),
-        subscribers: BTreeMap::new(),
-    };
-    let (tx, _rx) = mpsc::channel(8);
-    let connection = LocalBusConnectionState::new(1, tx);
-    let request = LocalBusFrame::request(
-        "receive",
-        Some("bob".to_owned()),
-        "message",
-        "message.receive",
-        serde_json::json!({"conversation_id":"compat-conversation","limit":10}),
-    );
-    for _ in 0..2 {
-        let reply = crate::bus::dispatch::message::dispatch_message_receive_request(
-            &request,
-            &mut state,
-            &connection,
-        )
-        .await?;
-        assert_eq!(
-            reply.response_body["decrypted_messages"][0]["plaintext_body_base64"],
-            ramflux_protocol::encode_base64url(b"compatibility plaintext")
+async fn generated_receive_acks_after_commit_and_serves_durable_reader()
+-> crate::client::native_test_support::TestResult {
+    use crate::client::native_test_support::{Fixture as Native, watchdog};
+    use ramflux_protocol::message as g;
+    watchdog::within(async {
+        let a = Native::with_principal("alice", "alice", "alice").await?;
+        let b = Native::with_principal("bob", "bob", "bob").await?;
+        a.accept_peer(&b)?;
+        b.accept_peer(&a)?;
+        let conversation =
+            g::dm_scope::derive(&a.client.own_account_anchor()?, &b.client.own_account_anchor()?)?;
+        let mut message = GatewayDirectMessage {
+            conversation_id: conversation.clone(),
+            message_id: "ack-operation".into(),
+            envelope_id: "ack-wire".into(),
+            source_principal_id: a.config.principal_id.clone(),
+            sender_id: a.config.device_id.clone(),
+            recipient_device_id: Some(b.config.device_id.clone()),
+            recipient_principal_commitment: Some(b.client.own_account_anchor()?),
+            target_delivery_id: b.config.target_delivery_id.clone(),
+            encrypted_body: Vec::new(),
+            created_at: now_unix_timestamp(),
+            ttl: a.client.content_ttl()?,
+        };
+        let prepared = a.client.prepare_authored_message(
+            &mut message,
+            None,
+            &g::Message { text: "committed before native ACK".into(), ..Default::default() },
+        )?;
+        let envelope = a.seal_inner_to_with_id(&b, &prepared.wire, &message.envelope_id)?;
+        let entry = GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: b.config.target_delivery_id.clone(),
+            envelope,
+        };
+        let acks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let engine = GatewaySessionEngine::with_test_transport(
+            b.config.clone(),
+            Box::new(ReceivingGateway {
+                queued: VecDeque::new(),
+                receipt_key: b
+                    .client
+                    .authenticated_committed_key(HeadUse::NewAuthorization, &entry)?,
+                entry: Some(entry),
+                last: None,
+                reader: b.client.account_db()?.open_reader()?,
+                acks: std::sync::Arc::clone(&acks),
+                mailbox: b.config.target_delivery_id.clone(),
+            }),
         );
-        assert_eq!(acks.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-    Ok(())
+        let commitment = b.client.own_account_anchor()?;
+        let mut state = LocalBusDaemonState {
+            config: LocalBusConfig::new(b.root.0.join("bus.sock"), &b.root.0),
+            nodes: crate::node::NodeStore::default(),
+            account_index: None,
+            accounts: BTreeMap::from([(
+                "bob".to_owned(),
+                LocalBusAccountState::new(b.client, engine, commitment),
+            )]),
+            active_account_id: Some("bob".into()),
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let (tx, _rx) = mpsc::channel(8);
+        let connection = LocalBusConnectionState::new(1, tx);
+        let request = LocalBusFrame::request(
+            "receive",
+            Some("bob".into()),
+            "message",
+            "message.receive",
+            serde_json::json!({"conversation_id":conversation,"limit":10}),
+        );
+        for _ in 0..2 {
+            let reply = crate::bus::dispatch::message::dispatch_message_receive_request(
+                &request,
+                &mut state,
+                &connection,
+            )
+            .await?;
+            assert_eq!(reply.response_body["durable_reader"], "message.read");
+            let client = &state.accounts.get("bob").ok_or("account")?.client;
+            assert_eq!(
+                client
+                    .generated_message_detail(&conversation, &message.message_id)?
+                    .message
+                    .text
+                    .as_deref(),
+                Some("committed before native ACK")
+            );
+            assert_eq!(client.direct_messages(&conversation)?.len(), 1);
+            assert_eq!(acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+        Ok(())
+    })
+    .await?
 }
 
 #[path = "review_tests.rs"]
 mod review;
-
-fn seal_group(
-    sender: &Fixture,
-    receiver: &Fixture,
-    message: GatewayDirectMessage,
-    body: &[u8],
-) -> Result<GatewayInboxEntry, SdkError> {
-    let value: serde_json::Value = serde_json::from_slice(body)?;
-    let route = if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
-        Route::group_message(value["group_id"].as_str().ok_or_else(|| invalid("group id"))?)
-    } else {
-        let decoded = ramflux_protocol::decode_base64url(
-            value["distribution_base64"].as_str().ok_or_else(|| invalid("distribution"))?,
-        )
-        .map_err(|_| invalid("distribution"))?;
-        let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&decoded)?;
-        Route::group_control(&distribution.group_id)
-    };
-    seal_as(sender, receiver, message, body, route)
-}
 
 #[path = "r4_tests.rs"]
 mod r4;
@@ -880,54 +922,6 @@ mod recipient_context;
 
 #[path = "backup_tests.rs"]
 mod backup;
-
-#[test]
-fn a_stranger_cannot_use_legacy_bootstrap_to_bypass_group_invitation_consent()
--> Result<(), SdkError> {
-    let sender = Fixture::new("alice", 142)?;
-    let recipient = Fixture::new("bob", 152)?;
-    let group = "legacy-stranger-invite";
-    fixture_group(&sender.client, group, &sender)?;
-    fixture_member(&sender.client, group, &recipient)?;
-    let source = sender.client.owned_device_identity()?;
-    let event = sender.client.create_signed_group_member_join_event(
-        group,
-        "alice",
-        "bob",
-        "member",
-        source.root_commitment(),
-    )?;
-    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
-        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".into(),
-        version: 1,
-        membership_event_base64: Some(ramflux_protocol::encode_base64url(serde_json::to_vec(
-            &event,
-        )?)),
-        actor_manifest_url: None,
-        distribution_base64: ramflux_protocol::encode_base64url(
-            sender.client.export_group_sender_key_distribution(group, "alice")?,
-        ),
-    };
-    let entry = seal_group(
-        &sender,
-        &recipient,
-        message("stranger-bootstrap", "thread"),
-        &serde_json::to_vec(&wrapper)?,
-    )?;
-    let opened = recipient.client.open_routed(&entry, "bob")?;
-    assert!(
-        matches!(recipient.client.contact_route_gate(&entry,&opened.routing,&opened.body),Err(SdkError::InboundRejected(reason)) if reason=="legacy stranger group bootstrap requires a v2 invitation")
-    );
-    assert!(recipient.client.account_db()?.group_snapshot_epoch(group)?.is_none());
-    assert!(recipient.client.account_db()?.client_record("conversation", "thread")?.is_none());
-    recipient.client.establish_friend_link(
-        "known-inviter",
-        recipient.client.owned_device_identity()?.root_commitment(),
-        source.root_commitment(),
-    )?;
-    assert!(recipient.client.contact_route_gate(&entry, &opened.routing, &opened.body).is_err());
-    Ok(())
-}
 
 #[test]
 fn r5_direct_messages_cannot_preclaim_group_ids() -> Result<(), SdkError> {
@@ -1026,28 +1020,11 @@ mod candidate_report;
 #[path = "native_group_conversation_tests.rs"]
 mod native_group_conversation;
 
-#[path = "selector_reopen.rs"]
-pub(super) mod selector_reopen;
-
-#[path = "legacy_selector_tests.rs"]
-pub(super) mod legacy_selector;
-
-#[path = "pending_selector_tests.rs"]
-pub(super) mod pending_selector;
-
-#[path = "post_send_tests.rs"]
-pub(super) mod post_send;
-
-#[path = "p310_tests.rs"]
-mod p310;
-
 #[path = "revocation_receive_tests.rs"]
 mod revocation_receive_tests;
 
 #[path = "effect_marker_tests.rs"]
 mod effect_marker_tests;
-#[path = "legacy_effect_marker_tests.rs"]
-mod legacy_effect_marker;
 
 #[test]
 fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError> {
@@ -1073,3 +1050,9 @@ fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError>
 }
 #[path = "candidate_ephemeral_tests.rs"]
 pub(super) mod candidate_ephemeral;
+
+#[path = "native_pair_tests.rs"]
+mod native_pair_tests;
+
+#[path = "retired_receive_tests.rs"]
+mod retired_receive;

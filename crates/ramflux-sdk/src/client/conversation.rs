@@ -272,12 +272,40 @@ impl RamfluxClient {
         delete_scope: &str,
         tombstone_id: &str,
     ) -> Result<MessageTombstoneRecord, SdkError> {
-        Ok(self.account_db()?.delete_direct_message(
-            conversation_id,
-            message_id,
-            delete_scope,
-            tombstone_id,
-        )?)
+        let valid_tombstone = ramflux_protocol::decode_base64url(tombstone_id).is_ok_and(|bytes| {
+            bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == tombstone_id
+        });
+        if delete_scope != "local" || !valid_tombstone {
+            return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "local erasure requires local scope and a canonical 32-byte tombstone; use generated Delete for peer effects".into(),
+        });
+        }
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if let Some(old) = db.message_tombstone_for_message(conversation_id, message_id)? {
+                return if old.tombstone_id == tombstone_id {
+                    Ok(old)
+                } else {
+                    Err(SdkError::ReplayMismatch)
+                };
+            }
+            let tombstone =
+                db.delete_direct_message(conversation_id, message_id, "local", tombstone_id)?;
+            if db.actor_state_exists(&format!("routed/generated-identity/{message_id}"))? {
+                let row = db.direct_message_by_id(message_id)?.ok_or_else(|| {
+                    SdkError::InboundRejected("local erase target missing".into())
+                })?;
+                let update = self.generated_message_update(&row, conversation_id, 0)?;
+                db.append_message_update(
+                    &format!("generated/local-delete/{tombstone_id}/{message_id}"),
+                    "message.updated",
+                    &update,
+                    crate::time::now_unix_timestamp(),
+                )?;
+            }
+            Ok(tombstone)
+        })
     }
 
     /// # Errors

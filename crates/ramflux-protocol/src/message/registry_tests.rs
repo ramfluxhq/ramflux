@@ -176,13 +176,21 @@ fn all_kind_binding_round_trip() -> TestResult {
     let reference =
         MessageRef { id: vec![1; 32], conversation_id: "c".into(), author_anchor: "a".into() };
     let mut values = vec![
-        content::Value::Message(Message { text: "hello 😀".into(), ..Default::default() }),
+        content::Value::Message(Message {
+            text: "hello 😀".into(),
+            erasure_nonce: vec![0x71; 32],
+            ..Default::default()
+        }),
         content::Value::Service(Service { action: 1, ..Default::default() }),
         content::Value::Edit(Edit {
             target: Some(reference.clone()),
             revision: 1,
             previous_content_digest: vec![0x31; 32],
-            replacement: Some(Message { text: "edit".into(), ..Default::default() }),
+            replacement: Some(Message {
+                text: "edit".into(),
+                erasure_nonce: vec![0x71; 32],
+                ..Default::default()
+            }),
         }),
         content::Value::Delete(Delete {
             targets: vec![reference.clone()],
@@ -226,14 +234,20 @@ fn all_kind_binding_round_trip() -> TestResult {
     for value in values.drain(..) {
         let content = Content { value: Some(value) };
         let (kind, bytes) = encode_body(&content)?;
-        assert_eq!(decode_body(kind, &bytes, 2)?, content);
-        let inner =
-            Inner { layer: 2, kind, body: bytes.clone(), ..Default::default() }.encode_to_vec();
+        assert_eq!(decode_body(kind, &bytes, super::registry::PROFILE_FLOOR)?, content);
+        let inner = Inner {
+            layer: super::registry::PROFILE_FLOOR,
+            kind,
+            body: bytes.clone(),
+            ..Default::default()
+        }
+        .encode_to_vec();
         let scanned = scan_inner(&inner)?;
         assert_eq!(scanned.outcome, ScanOutcome::Supported);
         assert_eq!(scanned.body, bytes);
         assert_eq!(scanned.exact_inner, inner);
-        let (_, encoded) = encode_body(&decode_body(kind, &bytes, 2)?)?;
+        let (_, encoded) =
+            encode_body(&decode_body(kind, &bytes, super::registry::PROFILE_FLOOR)?)?;
         assert_eq!(encoded, bytes, "canonical decode/encode identity");
     }
     verify_every_operation()?;

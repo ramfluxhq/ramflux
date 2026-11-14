@@ -110,7 +110,7 @@ impl Fixture {
     }
 }
 
-struct NoNetwork;
+pub(super) struct NoNetwork;
 impl ramflux_transport::GatewaySessionFrameSink for NoNetwork {
     fn send_frame<'a>(
         &'a mut self,

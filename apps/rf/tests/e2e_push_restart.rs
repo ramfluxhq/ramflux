@@ -29,7 +29,7 @@ fn e2e_push_restart() -> e2e::Result<()> {
     let bob = create_account(&bob_d, "Bob")?;
     eprintln!("push/restart: exchange contacts");
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("push-restart");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let bodies = ["push-one", "push-two", "push-three", "resume-one", "resume-two", "resume-three"];
     let ids: Vec<String> =
         (0..bodies.len()).map(|i| unique(&format!("push-restart-{i}"))).collect();

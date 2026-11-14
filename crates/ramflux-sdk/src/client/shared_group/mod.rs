@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 mod bootstrap;
 mod controls;
 mod generated;
+mod generated_send;
 mod receive_directory;
 mod snapshot_generated;
 pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
@@ -32,8 +33,6 @@ mod transfer;
 mod transfer_outcome;
 mod transfer_wire;
 pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
-#[cfg(test)]
-use bootstrap::{decode_packet, packet_bytes};
 pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
 pub(crate) use requests::request_key as request_record_key;
 pub(crate) use transfer::{SEND_PREFIX as TRANSFER_SEND_PREFIX, TransferDelivery};
@@ -351,6 +350,7 @@ impl RamfluxClient {
         let state = verified.view();
         let display = self.shared_group_display(group)?.ok_or_else(|| invalid("group absent"))?;
         let mut value = serde_json::to_value(display)?;
+        value["conversation_id"] = json!(state.conversation_id);
         value["member_roster"] = json!(state.members);
         value["excluded_devices"] = json!(state.excluded);
         value["name"] = json!(state.name);

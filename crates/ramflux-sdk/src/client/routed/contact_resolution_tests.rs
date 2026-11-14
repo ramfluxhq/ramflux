@@ -318,10 +318,14 @@ fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaem
             LocalBusAccountState::new(std::mem::take(&mut f.client), engine, commitment),
         );
     }
+    let mut config = LocalBusConfig::new(a.root.join("bus.sock"), &a.root);
+    if let Some(native) = &a.native {
+        config.custody_vault = Some(native.vault.clone());
+    }
     Ok(LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(a.root.join("bus.sock"), &a.root),
+        config,
         accounts,
         active_account_id: None,
         attended_accounts: BTreeSet::new(),
@@ -364,8 +368,8 @@ async fn call(
 #[tokio::test]
 async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_named("bob", 31).await?;
     let d = Directory::new(&a, &b).await?;
     let mut s = state(&mut a, &mut b, &d)?;
     for (own, peer) in [("alice", "bob"), ("bob", "alice")] {
@@ -406,22 +410,32 @@ async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("alice"))?.client);
     b.client = std::mem::take(&mut s.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?.client);
     assert!(b.client.account_db()?.client_record("device", "alice")?.is_some());
-    let first = seal(&a, &b, message("contact-first", "contact-conversation"), b"hello after add")?;
-    let opened = b.client.open_routed(&first, "bob")?;
-    assert_eq!(opened.body.as_slice(), b"hello after add");
-    b.client.persist_pair(
-        &opened.local_device,
-        &opened.remote_device,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
-    let mut reply = message("contact-reply", "contact-conversation");
-    reply.source_principal_id = "bob".into();
-    reply.sender_id = "bob".into();
-    reply.recipient_device_id = Some("alice".into());
-    reply.target_delivery_id = "alice".into();
-    let entry = seal(&b, &a, reply, b"reply after accept")?;
-    assert_eq!(a.client.open_routed(&entry, "alice")?.body.as_slice(), b"reply after accept");
+    let first = generated_delivery(&a, &b, "contact-first", "hello after add")?;
+    receive_generated(&mut b, &first.entry).await?;
+    assert_eq!(
+        b.client
+            .generated_message_detail(&first.conversation, &first.message)?
+            .message
+            .text
+            .as_deref(),
+        Some("hello after add"),
+        "the first native message must use the newly resolved contact"
+    );
+    let reply = generated_delivery(&b, &a, "contact-reply", "reply after accept")?;
+    assert_eq!(
+        reply.conversation, first.conversation,
+        "both native roots must derive one ordinary DM scope"
+    );
+    receive_generated(&mut a, &reply.entry).await?;
+    assert_eq!(
+        a.client
+            .generated_message_detail(&reply.conversation, &reply.message)?
+            .message
+            .text
+            .as_deref(),
+        Some("reply after accept"),
+        "the accepted peer must reply over the real generated pair"
+    );
     Ok(())
 }
 

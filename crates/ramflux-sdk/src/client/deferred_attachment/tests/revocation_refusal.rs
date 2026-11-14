@@ -10,7 +10,10 @@ pub(super) fn connection(f: &Fixture) -> Result<rusqlite::Connection, Box<dyn st
     let vault = FileVaultSecretSource::new(&f.root).vault_secret("account")?;
     let wrapped = f.client.account_index()?.load_wrapped_db_key("account")?.ok_or("key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
-        &crate::client::account::account_db_key_encryption_key(&vault, b"test-secret"),
+        &crate::client::account::account_db_key_encryption_key(
+            &vault,
+            b"native fixture data passphrase",
+        ),
         &wrapped,
     )?;
     let db = rusqlite::Connection::open(&f.client.account_db()?.path)?;
@@ -22,10 +25,10 @@ pub(super) fn connection(f: &Fixture) -> Result<rusqlite::Connection, Box<dyn st
     Ok(db)
 }
 
-#[test]
-fn c1_revoke_with_owner_only_record_is_inbound_rejected() -> Result<(), Box<dyn std::error::Error>>
-{
-    let f = Fixture::without_owner()?;
+#[tokio::test]
+async fn c1_revoke_with_owner_only_record_is_inbound_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::without_owner().await?;
     let entry = cached_commit::revocation_entry(&f)?;
     let db = f.client.account_db()?;
     db.persist_client_record("object", "remote-object", &json!({"owner":"owner"}))?;
@@ -58,9 +61,9 @@ fn c1_revoke_with_owner_only_record_is_inbound_rejected() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn c1_storage_io_error_still_propagates() -> Result<(), Box<dyn std::error::Error>> {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn c1_storage_io_error_still_propagates() -> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::new().await?;
     let entry = cached_commit::revocation_entry(&f)?;
     let sql = connection(&f)?;
     // Fail the actual writer after identity resolution, without storage test hooks.

@@ -20,7 +20,7 @@ fn source(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prefix_bytes(
+fn typed_bytes(
     envelope: &str,
     message: &str,
     sender: &str,
@@ -30,8 +30,7 @@ fn prefix_bytes(
     authored_at: i64,
     body: &[u8],
 ) -> Result<Vec<u8>, SdkError> {
-    let mut bytes = PREFIX.to_vec();
-    bytes.extend(serde_json::to_vec(&json!({
+    let packet: SentMessage = serde_json::from_value(json!({
         "envelope_id": envelope,
         "message_id": message,
         "sender_id": sender,
@@ -45,13 +44,12 @@ fn prefix_bytes(
         },
         "authored_at": authored_at,
         "body_base64": ramflux_protocol::encode_base64url(body)
-    }))?);
-    Ok(bytes)
+    }))?;
+    Ok(packet.to_generated()?.encode_to_vec())
 }
 
-fn generated_from_prefix(bytes: &[u8]) -> Result<g::OwnSentMessage, SdkError> {
-    generated_own_sent_from_prefix(bytes)?
-        .ok_or_else(|| invalid("expected generated own sent message"))
+fn generated_from_bytes(bytes: &[u8]) -> Result<g::OwnSentMessage, SdkError> {
+    g::OwnSentMessage::decode(bytes).map_err(|_| invalid("typed sent message missing"))
 }
 
 fn receive_generated(
@@ -119,7 +117,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         client_with_account("t18-fields", "principal_sync", "target_device_sync")?;
     let body = b"original inner body";
     let ciphertext = [1_u8, 2, 3];
-    let bytes = prefix_bytes(
+    let bytes = typed_bytes(
         "copy-envelope",
         "original-message",
         "display-label",
@@ -129,8 +127,8 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         42,
         body,
     )?;
-    assert!(generated_own_sent_from_prefix(b"not-a-prefix")?.is_none());
-    let sent = generated_from_prefix(&bytes)?;
+    assert!(generated_from_bytes(b"malformed protobuf").is_err());
+    let sent = generated_from_bytes(&bytes)?;
     assert_eq!(sent.envelope_id, "copy-envelope");
     assert_eq!(sent.message_id, "original-message");
     assert_eq!(sent.sender_id, "display-label");
@@ -142,7 +140,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
     assert_eq!(sent.ciphertext_digest.as_ref().map(Vec::len), Some(32));
     assert_eq!(sent.authored_at, Some(42));
     assert_eq!(sent.exact_inner, body);
-    assert!(!sent.exact_inner.starts_with(PREFIX));
+    assert_ne!(sent.exact_inner, bytes);
     let context = sent.context.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     assert_eq!(context.conversation_id, "direct");
     assert_eq!(context.participants, ["principal_sync", "peer"]);
@@ -162,7 +160,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         Some(MessageReplayReference::Target { deleted: false, .. })
     ));
 
-    let suppressed = generated_from_prefix(&prefix_bytes(
+    let suppressed = generated_from_bytes(&typed_bytes(
         "original-envelope",
         "original-message",
         "display-label",
@@ -176,7 +174,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
     assert!(receive_generated(&client, "source_device_sync", "direct", 99, &suppressed)?);
     assert_eq!(client.direct_messages("direct")?.len(), 1);
 
-    let other = generated_from_prefix(&prefix_bytes(
+    let other = generated_from_bytes(&typed_bytes(
         "other-envelope",
         "other-original",
         "display-label",
@@ -193,7 +191,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         Some(MessageReplayReference::Ambiguous)
     ));
 
-    let mut surface = crate::client::surface::carrier::PREFIX.to_vec();
+    let mut surface = b"ramflux.surface.carrier.v2\n".to_vec();
     surface.extend(serde_json::to_vec(&json!({
         "schema": "ramflux.surface.carrier.v2",
         "content_type": "surface",
@@ -207,7 +205,7 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         "wire_base64": "",
         "signature": "sig"
     }))?);
-    let structured = generated_from_prefix(&prefix_bytes(
+    let structured = generated_from_bytes(&typed_bytes(
         "surface-envelope",
         "surface-original",
         "display-label",
@@ -217,9 +215,17 @@ fn own_sent_fields_and_source_bound_reconciliation_round_trip() -> Result<(), Sd
         42,
         &surface,
     )?)?;
-    let err = receive_generated(&client, "source_device_sync", "direct", 99, &structured)
-        .expect_err("structured carrier must be refused");
-    assert!(format!("{err}").contains("structured own message requires signed control projection"));
+    assert!(
+        receive_generated(&client, "source_device_sync", "direct", 99, &structured)?,
+        "schema-looking opaque bytes must not select a structured control parser",
+    );
+    let row_id = own_row_id(&source(&client, "source_device_sync")?, "surface-envelope")?;
+    assert_eq!(client.account_db()?.message_content(&row_id)?, Some(surface));
+    assert_eq!(
+        client.account_db()?.actor_state_usage("surface/")?.0,
+        0,
+        "a retired schema prefix must not create native Surface state",
+    );
 
     drop(client);
     Ok(())
@@ -232,7 +238,7 @@ fn own_sent_raw_erasure_and_replay_reference_survive_restore_without_resurrectio
         client_with_account("t18-restore", "principal_sync", "target_device_sync")?;
     let body = b"erasure canary body";
     let ciphertext = [9_u8, 8, 7];
-    let sent = generated_from_prefix(&prefix_bytes(
+    let sent = generated_from_bytes(&typed_bytes(
         "live-envelope",
         "live-message",
         "display-label",
@@ -298,7 +304,7 @@ fn own_import_race(history_first: bool) -> Result<(), SdkError> {
     let (root, client) = client_with_account(label, "principal_sync", "target_device_sync")?;
     let body = b"race canary body";
     let ciphertext = [4_u8, 5, 6];
-    let sent = generated_from_prefix(&prefix_bytes(
+    let sent = generated_from_bytes(&typed_bytes(
         "race-envelope",
         "live-message",
         "display-label",

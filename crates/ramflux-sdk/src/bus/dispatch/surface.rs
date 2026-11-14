@@ -191,6 +191,7 @@ fn prepare_carrier(
         );
     }
     let mut carrier = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -243,7 +244,7 @@ pub(super) async fn request_resync(
     let result=async {
         let manifest=account.client.cache_verified_device_manifest(&engine.config,&root,"surface_resync_author").await?;
         if manifest.principal_id!=request.author || manifest.devices.is_empty() {return Err(invalid("surface resync author manifest mismatch"));}
-        let body=serde_json::to_vec(&request)?;
+        let body=request.bytes();
         let mut failure=None;
         let mut submitted=0;
         for device in manifest.devices {

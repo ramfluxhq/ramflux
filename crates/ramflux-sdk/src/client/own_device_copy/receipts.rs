@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded, identity-free commit evidence survives disposable receipt eviction.
-use super::{DOMAIN, MAX_PACKET_BYTES, OwnDeviceMessage, PREFIX, RECEIPTS, Receipt, invalid};
+#[cfg(test)]
+use super::OwnDeviceMessage;
+use super::{DOMAIN, RECEIPTS, Receipt, invalid};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_storage::AccountDb;
 use serde::{Deserialize, Serialize};
@@ -100,6 +102,7 @@ pub(crate) fn remember(
     })
 }
 
+#[cfg(test)]
 pub(crate) struct Replay {
     pub key: String,
     pub fingerprint: String,
@@ -107,6 +110,7 @@ pub(crate) struct Replay {
 }
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(super) fn own_copy_replay(
         &self,
         entry: &GatewayInboxEntry,
@@ -175,27 +179,7 @@ impl RamfluxClient {
             }
             return Ok(Some(OwnCopyAckBinding { committed_key: key, receipt_key, fingerprint }));
         }
-        if entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl {
-            return Ok(None);
-        }
-        let Ok(bytes) = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        else {
-            return Ok(None);
-        };
-        let Some(raw) = bytes.strip_prefix(PREFIX).filter(|_| bytes.len() <= MAX_PACKET_BYTES)
-        else {
-            return Ok(None);
-        };
-        let Ok(packet) = ramflux_protocol::parse_i_json::<OwnDeviceMessage>(raw) else {
-            return Ok(None);
-        };
-        let db = self.account_db()?;
-        let target = self.owned_device_identity()?;
-        Ok(Some(OwnCopyAckBinding {
-            committed_key: replay_key(db, &target, entry, &packet.id)?,
-            receipt_key: format!("{RECEIPTS}{}", packet.id),
-            fingerprint: packet_fingerprint(db, &ramflux_protocol::hash_base64url(DOMAIN, &bytes))?,
-        }))
+        Ok(None)
     }
 }
 

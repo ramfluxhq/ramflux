@@ -54,24 +54,6 @@ impl RamfluxClient {
         }
     }
 
-    pub(crate) fn receive_prepared_own_device_message(
-        &self,
-        entry: &GatewayInboxEntry,
-        manifest: SdkDeviceManifestResponse,
-    ) -> Result<bool, SdkError> {
-        match self.prepare_own_receive(entry)? {
-            Check::Other => Ok(false),
-            Check::Pending(pending) => {
-                let manifest = self.accept_fetched_device_manifest(
-                    manifest,
-                    &pending.root,
-                    "own_device_message_receive",
-                )?;
-                self.apply_own_receive(entry, *pending, &manifest)
-            }
-        }
-    }
-
     fn prepare_own_receive(&self, entry: &GatewayInboxEntry) -> Result<Check, SdkError> {
         if entry.envelope.schema == "ramflux.envelope.v2" {
             ramflux_protocol::sender_signed_transcript(

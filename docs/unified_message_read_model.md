@@ -1,12 +1,15 @@
 # Unified message read model
 
-This is the contract between the SDK and the clients that render messages: the
-`rf` command line client and `rf-tui`. It defines the JSON a client reads for a
+This is the contract between the SDK and message consumers: the `rf` command
+line client, `rf-tui`, and agent-host. It defines the JSON a consumer reads for a
 conversation and the events it follows to stay current.
 
-Status: implemented in the SDK and in `rf` behind the message schema v1 storage
-generation. While the generation is zero, `rf` prints its existing output and
-refuses the flags defined here. `rf-tui` adopts this contract at activation.
+The SDK and `rf` use this contract at storage generation 1. Opening generation-0
+stores requires an explicit profile reset; old output and codec paths are retired.
+The activation candidate requires exact-head validation before release.
+`group.history` resolves the group conversation and returns the same rendered
+page. Group receive and sender-key import point callers to the durable reader;
+they do not return a second plaintext page.
 
 Contract name: `ramflux.message.read_model.v1`. Every response carries it in
 `schema`. Fields are only added within this name; a removal or a change of
@@ -42,6 +45,14 @@ All three shapes use the local bus reader `message.read` (alias
 
 `limit` is 1..=100 and defaults to 100. A response is at most 768 KiB encoded;
 a batch that would exceed it is shortened and reports that more remains.
+
+Agent-host uses the single-message shape through `message.list` for incoming
+prompts and again before sending an output. It requires this schema, the exact
+conversation and message identifiers, `state = content`, `kind = message`, and
+`is_own = false`. It resolves the sender by `author.account_anchor`; device
+labels alone do not identify an author. Generated mention entities identify the
+agent's own account anchor. Committed `message.received` and
+`group.message.received` events supply only the lookup identifiers.
 
 `rf` exposes the same shapes:
 

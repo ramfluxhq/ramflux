@@ -48,9 +48,6 @@ impl RamfluxClient {
         &self,
         config: &GatewaySessionConfig,
     ) -> Result<Option<Plan>, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(None);
-        }
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         for key in db.actor_state_keys(TRANSFER)? {

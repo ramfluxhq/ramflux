@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Group authorization and additive conversation-link projection after authentication.
-use super::{GatewayInboxEntry, RamfluxClient, SdkError, SdkGroupEncryptedEnvelope, invalid};
+#[cfg(test)]
+use super::SdkGroupEncryptedEnvelope;
+use super::{GatewayInboxEntry, RamfluxClient, SdkError, invalid};
 use crate::client::identity_authority::HeadUse;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -68,6 +70,7 @@ impl RamfluxClient {
         db.persist_client_record("conversation", conversation, &thread)?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn legacy_group_binding(
         &self,
         conversation: &str,
@@ -88,14 +91,14 @@ impl RamfluxClient {
         if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&bytes) {
             return Ok(envelope.group_id == group);
         }
-        Ok(self
-            .legacy_routing_binding(
-                &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id,
-                entry,
-            )?
-            .as_deref()
+        Ok(crate::RamfluxClient::legacy_routing_binding(
+            &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id,
+            entry,
+        )?
+        .as_deref()
             == Some(conversation))
     }
+    #[cfg(test)]
     pub(crate) fn v2_blocks_legacy(&self, remote: &str) -> Result<bool, SdkError> {
         let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
         Ok(self

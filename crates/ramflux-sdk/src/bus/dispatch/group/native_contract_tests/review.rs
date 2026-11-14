@@ -79,7 +79,10 @@ async fn unrelated_case(direct: bool, peer_fresh: bool) -> TestResult {
         )
         .await??;
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        assert_eq!(response.response_body["decrypted_messages"], json!([]));
+        assert_eq!(response.response_body["durable_reader"], "message.read");
+        let page = super::super::history::read(&account.client, &frame)?;
+        assert_eq!(page["messages"], json!([]), "unrelated history must remain empty");
+        assert!(response.response_body.get("decrypted_messages").is_none());
         assert!(account.client.account_db()?.has_inbox_retry(&key)?);
         assert!(!account.client.account_db()?.inbox_retry_ready(&key, at + 1)?);
     }
@@ -107,7 +110,7 @@ pub(super) async fn assert_duplicate_after_refresh(
 ) -> TestResult {
     account.connection.take().ok_or("connection")?.stop().await;
     let mut duplicate = entry;
-    duplicate.inbox_seq = count as u64 + 1;
+    duplicate.inbox_seq = u64::try_from(count)? + 1;
     install_gateway(account, vec![duplicate]);
     crate::bus::sync_driver::run_at(account, at + 1).await?;
     assert_eq!(

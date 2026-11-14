@@ -39,20 +39,6 @@ impl RamfluxClient {
         )
     }
 
-    pub(crate) fn make_prepared_pair_object_slot(
-        &self,
-        request: PairObjectSlotRequest<'_>,
-        material: super::SendMaterial,
-    ) -> Result<SdkObjectKeySlot, SdkError> {
-        let pair = self.prepared_send_pair(
-            request.config,
-            request.message,
-            material,
-            ramflux_protocol::message::KindId::KindMessage,
-        )?;
-        self.seal_pair_object_slot(request, pair)
-    }
-
     fn seal_pair_object_slot(
         &self,
         request: PairObjectSlotRequest<'_>,
@@ -199,7 +185,6 @@ impl RamfluxClient {
             conversation_id: slot.conversation_id.clone(),
             commit_label: format!("object-slot:{}", slot.object_id),
             pair_slot: Some(slot.clone()),
-            legacy_slot: None,
         })
     }
     pub(crate) fn persist_pair_slot_receipt(
@@ -246,6 +231,7 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         Ok(self.account_db()?.load_actor_state::<bool>(&slot_receipt(slot)?)?.unwrap_or(false))
     }
+    #[cfg(test)]
     pub(crate) fn commit_inline_pair_key_slot(
         &self,
         slot: &SdkObjectKeySlot,
@@ -332,4 +318,52 @@ fn slot_receipt(slot: &SdkObjectKeySlot) -> Result<String, SdkError> {
         "dm-pair/object-slot/{}",
         ramflux_crypto::blake3_256_base64url("ramflux.sdk.object.slot.receipt.v2", &bytes)
     ))
+}
+
+#[cfg(test)]
+#[path = "object_slot_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+impl crate::client::native_test_support::Fixture {
+    pub(crate) fn object_key_slot_for(
+        &self,
+        target: &Self,
+        object_id: &str,
+        key: &[u8; 32],
+    ) -> crate::client::native_test_support::TestResult<SdkObjectKeySlot> {
+        let conversation = ramflux_protocol::message::dm_scope::derive(
+            &self.client.own_account_anchor()?,
+            &target.client.own_account_anchor()?,
+        )?;
+        let message = GatewayDirectMessage {
+            conversation_id: conversation.clone(),
+            message_id: "object-slot-operation".into(),
+            envelope_id: "object-slot-envelope".into(),
+            source_principal_id: self.config.principal_id.clone(),
+            sender_id: self.config.device_id.clone(),
+            recipient_device_id: Some(target.config.device_id.clone()),
+            recipient_principal_commitment: Some(target.client.own_account_anchor()?),
+            target_delivery_id: target.config.target_delivery_id.clone(),
+            encrypted_body: Vec::new(),
+            created_at: crate::time::now_unix_timestamp(),
+            ttl: self.client.content_ttl()?,
+        };
+        let pair = self.client.prepared_send_pair(
+            &self.config,
+            &message,
+            self.material_for(target)?,
+            ramflux_protocol::message::KindId::KindMessage,
+        )?;
+        Ok(self.client.seal_pair_object_slot(
+            PairObjectSlotRequest {
+                config: &self.config,
+                message: &message,
+                object_id,
+                key,
+                conversation: &conversation,
+            },
+            pair,
+        )?)
+    }
 }

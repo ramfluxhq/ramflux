@@ -1,67 +1,68 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Logical conversation fan-out preserves storage collision fences and the first ciphertext.
+//! Generated fan-out preserves its first ciphertext and refuses changed content or scope.
 use super::*;
-use std::sync::{Arc, atomic::AtomicBool};
+use crate::client::native_test_support::{Fixture, TestResult, watchdog};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 
-#[test]
-fn fanout_preserves_one_row_and_refuses_changed_content_or_scope()
--> Result<(), Box<dyn std::error::Error>> {
-    let root = tempfile::tempdir()?;
-    let source = crate::bus::runtime_tests::account(
-        root.path(),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let client = &source.client;
-    let mut message = GatewayDirectMessage {
-        conversation_id: "thread".into(),
-        message_id: "logical".into(),
-        envelope_id: "device-one".into(),
-        source_principal_id: "sender".into(),
-        sender_id: "device-sender".into(),
-        recipient_device_id: Some("peer-one".into()),
-        recipient_principal_commitment: None,
-        target_delivery_id: "peer-one".into(),
-        encrypted_body: b"cipher-one".to_vec(),
-        created_at: 1,
-        ttl: 300,
-    };
-    client.project_conversation_fanout(&message, b"same text", true)?;
-    client.account_db()?.store_message_content("thread", "logical", b"same text")?;
-    message.encrypted_body = b"cipher-two".to_vec();
-    message.recipient_device_id = Some("peer-two".into());
-    assert!(
-        client.project_conversation_fanout(&message, b"same text", false).is_err(),
-        "raw send must retain its ciphertext collision fence"
-    );
-    client.project_conversation_fanout(&message, b"same text", true)?;
-    let row = client.direct_message_by_id("logical")?.ok_or("local logical row absent")?;
-    assert_eq!(
-        row.encrypted_body, b"cipher-one",
-        "fan-out must preserve the first physical ciphertext"
-    );
-    assert_eq!(
-        client.direct_messages("thread")?.len(),
-        1,
-        "device fan-out must not duplicate timeline rows"
-    );
-    assert!(
-        client.project_conversation_fanout(&message, b"changed", true).is_err(),
-        "a logical id cannot claim different plaintext"
-    );
-    message.conversation_id = "another-thread".into();
-    assert!(
-        client.project_conversation_fanout(&message, b"same text", true).is_err(),
-        "a logical id cannot cross conversation scope"
-    );
-    message.conversation_id = "thread".into();
-    message.sender_id = "another-sender".into();
-    assert!(
-        client.project_conversation_fanout(&message, b"same text", true).is_err(),
-        "a logical id cannot cross authenticated sender scope"
-    );
-    Ok(())
+#[tokio::test(flavor = "current_thread")]
+async fn fanout_preserves_one_row_and_refuses_changed_content_or_scope() -> TestResult {
+    watchdog::within(async {
+        let source = Fixture::new("fanout-sender").await?;
+        let peer = Fixture::new("fanout-peer").await?;
+        source.accept_peer(&peer)?;
+        let scope = g::dm_scope::derive(
+            &source.client.own_account_anchor()?,
+            &peer.client.own_account_anchor()?,
+        )?;
+        let mut message = GatewayDirectMessage {
+            conversation_id: scope.clone(),
+            message_id: "logical-operation".into(),
+            envelope_id: "device-one".into(),
+            source_principal_id: source.config.principal_id.clone(),
+            sender_id: source.config.device_id.clone(),
+            recipient_device_id: Some(peer.config.device_id.clone()),
+            recipient_principal_commitment: Some(peer.client.own_account_anchor()?),
+            target_delivery_id: peer.config.target_delivery_id.clone(),
+            encrypted_body: Vec::new(),
+            created_at: 1,
+            ttl: 300,
+        };
+        let prepared = source.client.prepare_authored_message(
+            &mut message,
+            None,
+            &g::Message { text: "same text".into(), ..Default::default() },
+        )?;
+        source.client.project_authored_message(&message, &prepared.exact, b"cipher-one")?;
+        source.client.project_authored_message(&message, &prepared.exact, b"cipher-two")?;
+        let row = source.client.direct_message_by_id(&message.message_id)?.ok_or("logical row")?;
+        assert_eq!(row.encrypted_body, b"cipher-one", "fan-out must keep its first ciphertext");
+        assert_eq!(source.client.direct_messages(&scope)?.len(), 1);
+        let mut changed = g::Inner::decode(prepared.exact.as_slice())?;
+        let mut body = g::Message::decode(changed.body.as_slice())?;
+        body.text = "changed".into();
+        changed.body = body.encode_to_vec();
+        assert!(matches!(
+            source.client.project_authored_message(&message, &changed.encode_to_vec(), b"changed"),
+            Err(SdkError::ReplayMismatch)
+        ));
+        message.conversation_id = "another-thread".into();
+        assert!(
+            source.client.project_authored_message(&message, &prepared.exact, b"changed").is_err()
+        );
+        message.conversation_id = scope.clone();
+        message.sender_id = "another-sender".into();
+        assert!(
+            source.client.project_authored_message(&message, &prepared.exact, b"changed").is_err()
+        );
+        assert_eq!(
+            source.client.account_db()?.message_content(&message.message_id)?,
+            Some(prepared.exact.clone())
+        );
+        assert_eq!(source.client.direct_messages(&scope)?.len(), 1);
+        Ok(())
+    })
+    .await?
 }

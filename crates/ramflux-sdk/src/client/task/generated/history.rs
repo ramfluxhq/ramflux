@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant history authentication. Same-root provenance, membership admission,
+//! Generated history authentication. Same-root provenance, membership admission,
 //! replay and persistence remain the import owner's responsibility.
 use super::{carrier, g, invalid};
 use crate::{RamfluxClient, SdkError};

@@ -2,10 +2,61 @@
 // Copyright (c) 2026 Span Brain
 
 //! Limited stranger authentication for the request-only encrypted envelope.
-use super::{ENVELOPE_SCHEMA, invalid};
+use super::invalid;
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 impl RamfluxClient {
+    /// The fixed outer frame exposes no contact discriminator. Only an untrusted,
+    /// unrelated root or closed request enters bounded bootstrap. Decrypted
+    /// Control/Contact authority is checked before requester cache or effects commit.
+    pub(crate) fn contact_bootstrap_required(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        let reference = self.inbound_device_reference(entry)?;
+        let (root, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
+            .ok_or_else(|| invalid("sender root address required"))?;
+        let cached = self.device_identity(&reference).and_then(|identity| {
+            self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+        });
+        match cached {
+            Ok(()) => {
+                let db = self.account_db()?;
+                let closed = db.contact_request(&root, "inbound")?.is_some_and(|row| {
+                    matches!(row.state.as_str(), "declined" | "blocked" | "expired")
+                });
+                let outbound = db.contact_request(&root, "outbound")?.is_some_and(|row| {
+                    matches!(row.state.as_str(), "pending" | "accepted")
+                        && row.expires_at > now_unix_timestamp()
+                });
+                if !closed || outbound || self.friend_link_peer_is_accepted(&root)? {
+                    return Ok(false);
+                }
+                // A closed direct relationship must not steal independently
+                // authorized group traffic. Inspect the authenticated typed body
+                // in the existing rollback-only decrypt preview.
+                let local = self.owned_device_identity()?;
+                let Some((route, body)) = self.preview_inbound_route(entry, local.device_id())?
+                else {
+                    return Ok(false);
+                };
+                if route.kind != crate::client::routed::Kind::Control {
+                    return Ok(false);
+                }
+                return Ok(super::generated::decode(&body)?.is_some_and(|consent| {
+                    consent.body.kind == ramflux_protocol::custody::ContactDecision::Request
+                }));
+            }
+            Err(error @ SdkError::Storage(_)) => return Err(error),
+            Err(_) => {}
+        }
+        Ok(!self.inbound_relationship_names_root(
+            &entry.envelope.source_principal_id,
+            &root,
+            &entry.envelope.source_device_id,
+        )?)
+    }
+
     pub(crate) async fn contact_request_candidate(
         &self,
         gateway: &GatewaySessionConfig,
@@ -40,9 +91,6 @@ impl RamfluxClient {
             return Err(invalid("contact envelope exceeds its byte budget"));
         }
         let packet = crate::client::routed::decode(&entry.envelope)?;
-        if packet.schema != ENVELOPE_SCHEMA {
-            return Err(invalid("contact request envelope required"));
-        }
         let root = packet
             .source_principal_commitment
             .ok_or_else(|| invalid("contact requester root is missing"))?;

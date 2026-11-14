@@ -659,6 +659,13 @@ fn contact_list_has_peer(value: &Value, peer: &Account) -> bool {
     })
 }
 
+pub fn dm_conversation(first: &Account, second: &Account) -> Result<String> {
+    Ok(ramflux_protocol::message::dm_scope::derive(
+        &first.principal_commitment,
+        &second.principal_commitment,
+    )?)
+}
+
 pub fn dm_send(
     daemon: &Daemon,
     sender: &Account,
@@ -746,25 +753,20 @@ pub fn wait_dm_receipt(
 }
 
 pub fn message_has_peer_receipt(value: &Value, message_id: &str, peer: &Account) -> bool {
-    for key in ["decrypted_messages", "messages"] {
-        let Some(rows) = value.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            if row.get("message_id").and_then(Value::as_str) != Some(message_id)
-                && row.get("id").and_then(Value::as_str) != Some(message_id)
-            {
-                continue;
-            }
-            let Some(receipts) = row.get("receipts").and_then(Value::as_array) else {
-                continue;
-            };
-            if receipts.iter().any(|receipt| receipt_matches_peer(receipt, peer)) {
-                return true;
-            }
-        }
-    }
-    false
+    let rows = ["changes", "messages"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_array))
+        .flatten()
+        .chain(value.get("message"));
+    rows.filter(|row| {
+        row.get("id").and_then(Value::as_str) == Some(message_id)
+            || row.get("message_id").and_then(Value::as_str) == Some(message_id)
+    })
+    .any(|row| {
+        row.get("receipts").and_then(Value::as_array).is_some_and(|receipts| {
+            receipts.iter().any(|receipt| receipt_matches_peer(receipt, peer))
+        })
+    })
 }
 
 fn receipt_matches_peer(receipt: &Value, peer: &Account) -> bool {
@@ -1186,18 +1188,26 @@ pub fn unique(prefix: &str) -> String {
 }
 
 pub fn message_texts(value: &Value) -> Vec<String> {
-    let mut texts = Vec::new();
-    for key in ["decrypted_messages", "messages"] {
-        let Some(rows) = value.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            if let Some(text) = row.get("body_utf8").and_then(Value::as_str) {
-                texts.push(text.to_owned());
-            }
-        }
+    if value.get("schema").and_then(Value::as_str) != Some("ramflux.message.read_model.v1") {
+        return Vec::new();
     }
-    texts
+    if let Some(rows) = value.get("changes").and_then(Value::as_array) {
+        return rows.iter().filter_map(|row| row["text"].as_str().map(str::to_owned)).collect();
+    }
+    if let Some(rows) = value.get("messages").and_then(Value::as_array) {
+        // Message pages are newest first; the causal batch assertions compare authored order.
+        return rows
+            .iter()
+            .rev()
+            .filter_map(|row| row["text"].as_str().map(str::to_owned))
+            .collect();
+    }
+    value
+        .get("message")
+        .and_then(|row| row["text"].as_str())
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
 }
 
 pub fn contains_all_texts(value: &Value, expected: &[&str]) -> bool {
@@ -1227,6 +1237,7 @@ fn poll_json(
     ready: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
     let deadline = Instant::now() + timeout;
+    let mut reported_failure = false;
     loop {
         match rf_json(&daemon.socket, args) {
             Ok(value) if ready(&value) => return Ok(value),
@@ -1235,6 +1246,14 @@ fn poll_json(
             }
             Err(error) if Instant::now() >= deadline => {
                 return Err(format!("timed out waiting for CLI JSON; last={error}").into());
+            }
+            Err(error) if !reported_failure => {
+                let reason = error.to_string().chars().take(768).collect::<String>();
+                eprintln!(
+                    "CLI poll {} first refusal: {reason}",
+                    args.first().copied().unwrap_or("unknown command"),
+                );
+                reported_failure = true;
             }
             _ => {}
         }

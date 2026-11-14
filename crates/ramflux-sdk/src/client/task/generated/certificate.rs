@@ -96,7 +96,7 @@ impl RamfluxClient {
     }
 }
 
-pub(super) fn native_certificate(value: &g::TaskCertificate) -> Result<Certificate, SdkError> {
+pub(crate) fn native_certificate(value: &g::TaskCertificate) -> Result<Certificate, SdkError> {
     let resolution =
         value.resolution.as_ref().ok_or_else(|| invalid("task certificate resolution missing"))?;
     let target = match resolution.target.as_ref().and_then(|target| target.value.as_ref()) {

@@ -4,8 +4,8 @@
 //! Local reset preparation and sealing; directory, prekey and submit waits belong to the caller.
 
 use super::{
-    GatewayDirectMessage, GatewayInboxEntry, GatewaySessionConfig, RamfluxClient, Route,
-    SdkDmEncryptedEnvelope, SdkError, SendMaterial, SendMaterialRequest,
+    GatewayDirectMessage, GatewayInboxEntry, GatewaySessionConfig, RamfluxClient, Route, SdkError,
+    SendMaterial, SendMaterialRequest,
 };
 use crate::client::identity_authority::HeadUse;
 use ramflux_crypto::RootQualifiedDeviceRef;
@@ -16,14 +16,7 @@ pub(crate) enum PairControlKind {
     Reset,
     Ack,
 }
-impl PairControlKind {
-    pub(super) fn wire(self) -> &'static str {
-        match self {
-            Self::Reset => "pair.session.reset.v1",
-            Self::Ack => "pair.session.reset.ack.v1",
-        }
-    }
-}
+impl PairControlKind {}
 impl PairControlDraft {
     pub(crate) fn remote(&self) -> &RootQualifiedDeviceRef {
         &self.remote
@@ -48,8 +41,8 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<Option<Envelope>, SdkError> {
         if opened.routing.kind != super::Kind::Control
-            || !serde_json::from_slice::<serde_json::Value>(body)
-                .is_ok_and(|value| value["type"] == "pair.session.reset.v1")
+            || !Self::decode_generated_inner(body).is_ok_and(|(_, content)| matches!(content.value,
+                Some(ramflux_protocol::message::content::Value::Control(control)) if control.operation == 1))
             || !self.pair_recovery_allowed(&opened.local_device, &opened.remote_device)?
         {
             return Ok(None);
@@ -125,14 +118,19 @@ impl RamfluxClient {
         remote: &RootQualifiedDeviceRef,
         kind: PairControlKind,
     ) -> Result<PairControlDraft, SdkError> {
+        use ramflux_protocol::message as g;
         let local = self.local_device_identity(&config.device_id)?;
         let id = pair_control_message_id()?;
-        let message = GatewayDirectMessage {
-            conversation_id: id.clone(),
+        let mut message = GatewayDirectMessage {
+            conversation_id: ramflux_protocol::message::dm_scope::derive(
+                local.root_commitment(),
+                remote.root_commitment(),
+            )
+            .map_err(|_| super::invalid("reset direct scope invalid"))?,
             message_id: id.clone(),
             envelope_id: id,
             source_principal_id: config.principal_id.clone(),
-            sender_id: config.principal_id.clone(),
+            sender_id: config.device_id.clone(),
             recipient_device_id: Some(remote.device_id().to_owned()),
             recipient_principal_commitment: Some(remote.root_commitment().to_owned()),
             target_delivery_id: self.pair_delivery_id(remote)?,
@@ -140,11 +138,23 @@ impl RamfluxClient {
             created_at: super::now_unix_timestamp(),
             ttl: crate::offline_retention::RESET_TTL_SECS,
         };
-        let body = serde_json::to_vec(&serde_json::json!({
-            "type":kind.wire(), "rejected_bootstrap_floor": if kind == PairControlKind::Reset {
-                self.bootstrap_high_water(&local, remote)?
-            } else { 0 },
-        }))?;
+
+        let floor = self.bootstrap_high_water(&local, remote)?;
+        let payload = match kind {
+            PairControlKind::Reset => {
+                g::control::Payload::Reset(g::PairReset { rejected_bootstrap_floor: floor })
+            }
+            PairControlKind::Ack => {
+                g::control::Payload::ResetAck(g::PairResetAck { rejected_bootstrap_floor: 0 })
+            }
+        };
+        let control = crate::client::generated_control::control_from_payload(payload)?;
+        let prepared = self.prepare_authored_content(
+            &mut message,
+            None,
+            &g::Content { value: Some(g::content::Value::Control(control)) },
+        )?;
+        let body = prepared.wire.clone();
         let fingerprint = if kind == PairControlKind::Reset {
             self.account_db()?.load_actor_state(&Self::reset_work_key(&local, remote)?)?
         } else {
@@ -175,7 +185,7 @@ impl RamfluxClient {
             Route::control(),
             material,
         )?;
-        self.finish_pair_control_draft(config, draft, &sealed.packet).map(Some)
+        self.finish_pair_control_draft(config, draft, sealed).map(Some)
     }
     pub(super) fn pair_control_draft_current(
         &self,
@@ -194,17 +204,15 @@ impl RamfluxClient {
         &self,
         config: &GatewaySessionConfig,
         mut draft: PairControlDraft,
-        sealed: &SdkDmEncryptedEnvelope,
+        sealed: super::SealedRouted,
     ) -> Result<Envelope, SdkError> {
         if draft.kind == PairControlKind::Reset {
             self.account_db()?.persist_actor_state(
-                &format!("dm-pair/reset/{}", sealed.ciphertext.session_id),
+                &format!("dm-pair/reset/{}", sealed.packet.ciphertext.session_id),
                 &true,
             )?;
         }
-        draft.message.encrypted_body = serde_json::to_vec(sealed)?;
-        // Pair control has no Direct report payload.
-        super::gateway_direct_message_envelope(config, &draft.message, None)
+        crate::dm::gateway_generated_envelope_from_sealed(config, &mut draft.message, sealed)
     }
 }
 

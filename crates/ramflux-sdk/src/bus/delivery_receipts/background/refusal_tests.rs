@@ -121,7 +121,8 @@ fn seeded(
         created_at: START,
         ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
-    let packet = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
+    let packet =
+        crate::dm::gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
     let work = Work {
         status_id: String::new(),
         conversation: "thread".into(),

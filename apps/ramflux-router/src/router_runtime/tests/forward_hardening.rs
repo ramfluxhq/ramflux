@@ -25,13 +25,13 @@ fn reservation(
 }
 
 #[test]
-fn committed_forward_named_field_gate_off_is_terminal_rejected_security() -> anyhow::Result<()> {
-    anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn committed_forward_missing_binding_is_terminal_rejected_security() -> anyhow::Result<()> {
+    anyhow::ensure!(ramflux_protocol::schema_profile::schema_v1_live());
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let (_fixture_directory_0, handle) =
         migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
     let mut envelope = current_envelope("named-gate-off", "target_alice")?;
-    envelope.delivery_mode = Some("durable".into());
+    envelope.collapse_tag = None;
     envelope.ext.ext.remove("source_device_authority");
     envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
         &envelope,

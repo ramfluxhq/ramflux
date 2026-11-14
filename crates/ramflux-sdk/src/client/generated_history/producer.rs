@@ -135,9 +135,6 @@ impl RamfluxClient {
     /// its directory material is available. A completed transfer is not restarted
     /// by every background backfill pass.
     pub(crate) fn stage_native_history_bootstrap(&self) -> Result<(), SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(());
-        }
         let local = self.owned_device_identity()?;
         let now = crate::custody::network_now()?;
         let Some(authority) = self.current_custody_authority(local.root_commitment(), now)? else {
@@ -244,7 +241,6 @@ impl RamfluxClient {
         &self,
         target: &RootQualifiedDeviceRef,
     ) -> Result<bool, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let epoch = self
             .history_target_epoch(target)?
@@ -258,6 +254,7 @@ impl RamfluxClient {
             }
             db.remove_actor_state(&page_key(target.storage_key()))?;
             db.persist_actor_state(&key, &Outgoing::new(target, epoch)?)?;
+            self.stage_native_application_history(target)?;
             Ok(true)
         })
     }
@@ -270,7 +267,6 @@ impl RamfluxClient {
         &self,
         target_device_id: &str,
     ) -> Result<bool, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let root = self.own_account_anchor()?;
         let target = self.device_identity_for_root(&root, target_device_id)?;
         self.stage_generated_history_transfer(&target)
@@ -280,7 +276,6 @@ impl RamfluxClient {
     /// # Errors
     /// Returns authority and storage errors; an account without siblings starts nothing.
     pub fn start_generated_history_transfers(&self) -> Result<usize, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let local = self.owned_device_identity()?;
         let now = crate::custody::network_now()?;
         let Some(authority) = self.current_custody_authority(local.root_commitment(), now)? else {

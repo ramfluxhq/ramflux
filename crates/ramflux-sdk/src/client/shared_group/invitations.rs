@@ -256,7 +256,7 @@ mod tests {
             },
         )?;
         assert!(peer.group_snapshot_requires_consent(&state)?);
-        let body = super::super::bootstrap::packet_bytes(&state)?;
+        let body = owner.shared_group_packet(&state, false)?;
         peer.hold_group_invitation(&state, &body)?;
         assert!(peer.account_db()?.shared_group_state("group")?.is_none());
         assert!(peer.account_db()?.client_record("conversation", "thread")?.is_none());
@@ -300,7 +300,7 @@ mod tests {
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        peer.hold_group_invitation(&state, &super::super::bootstrap::packet_bytes(&state)?)?;
+        peer.hold_group_invitation(&state, &owner.shared_group_packet(&state, false)?)?;
         peer.decide_group_invitation("group", true, "target-phone")?;
         assert_eq!(
             peer.account_db()?

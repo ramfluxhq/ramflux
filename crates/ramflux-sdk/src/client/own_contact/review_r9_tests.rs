@@ -88,12 +88,11 @@ fn removed_and_blocked_contacts_arrive_before_acceptances_and_cannot_be_resurrec
     assert_eq!(sibling.account_db()?.friend_link("z-removed")?.state, "removed");
     assert!(sibling.account_db()?.friend_link("zz-blocked")?.blocked);
     // A delayed old acceptance for the removed relationship cannot undo a learned restriction.
-    let mut delayed = PREFIX.to_vec();
     let mut link = own.account_db()?.friend_link("z-removed")?;
     link.state = "accepted".into();
     link.capability_revoked_at = None;
     link.remove_scope = None;
-    delayed.extend(serde_json::to_vec(&Contact { manifest, link })?);
+    let delayed = Contact { manifest, link }.bytes()?;
     sibling.receive_own_contact(&delayed)?;
     assert_eq!(sibling.account_db()?.friend_link("z-removed")?.state, "removed");
     drop((own, sibling, peer));

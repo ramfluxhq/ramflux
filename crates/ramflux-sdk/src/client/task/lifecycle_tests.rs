@@ -312,7 +312,12 @@ fn attachment_erasure_removes_task_fallback_metadata_and_refuses_replay_residue(
     let client = &fixture.human;
     client.send_direct_message("thread", "proposal", "peer", b"task body")?;
     assert!(client.task_message_metadata("thread", "proposal")?.is_some());
-    client.delete_direct_message("thread", "proposal", "local", "erase-task-message")?;
+    client.delete_direct_message(
+        "thread",
+        "proposal",
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase-task-message"),
+    )?;
     assert!(client.task_message_metadata("thread", "proposal")?.is_none());
     client.store_task_message_metadata(
         &super::Delivery {

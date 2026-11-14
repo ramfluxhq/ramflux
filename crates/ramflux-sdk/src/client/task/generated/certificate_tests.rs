@@ -66,7 +66,10 @@ fn generated_certificates_preserve_fields_and_use_typed_executor_signature() -> 
         let public = client.task_signer_key("human", "device")?;
         ramflux_crypto::verify_canonical_signature(&transcript, &decoded.signature, &public)?;
         let mut round_trip = native_certificate(&decoded)?;
-        assert_ne!(native.signature, decoded.signature);
+        assert_eq!(
+            native.signature, decoded.signature,
+            "both active producers use the same typed transcript"
+        );
         round_trip.signature.clone_from(&native.signature);
         assert_eq!(serde_json::to_value(&native)?, serde_json::to_value(&round_trip)?);
         assert_eq!(native.signing_bytes()?, round_trip.signing_bytes()?);

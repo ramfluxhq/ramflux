@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct OwnedSurfaceCheckpoint {
     pub(super) record: StoredSurface,
-    snapshot_wire_base64: String,
+    pub(super) snapshot_wire_base64: String,
     pub(super) version: u64,
-    surface_hash: String,
+    pub(super) surface_hash: String,
     pub(super) conversation: Value,
     pub(super) group_epoch: Option<u64>,
 }
@@ -87,6 +87,21 @@ impl RamfluxClient {
                 .account_db()?
                 .surface_transaction(|| self.import_owned_surface_checkpoint(owned))
             {
+                if !matches!(
+                    &error,
+                    SdkError::GeneratedRefused { .. }
+                        | SdkError::InboundRejected(_)
+                        | SdkError::ReplayMismatch
+                        | SdkError::SurfaceRefused { .. }
+                        | SdkError::SurfaceCheckpointMismatch
+                        | SdkError::SurfaceDeliveryTooLarge { .. }
+                        | SdkError::Json(_)
+                        | SdkError::Protocol(_)
+                        | SdkError::Crypto(_)
+                        | SdkError::LocalBus(_)
+                ) {
+                    return Err(error);
+                }
                 let reference = super::scope::surface_reference(
                     &owned.record.conversation_id,
                     &owned.record.author_principal_id,

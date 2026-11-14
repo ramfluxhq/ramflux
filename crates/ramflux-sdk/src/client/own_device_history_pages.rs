@@ -122,9 +122,3 @@ pub(super) fn pages(
     output.push(bundle);
     Ok(output)
 }
-
-pub(super) struct UploadOptions<'a> {
-    pub endpoint: &'a str,
-    pub service_key: Option<String>,
-    pub chunk_size: usize,
-}

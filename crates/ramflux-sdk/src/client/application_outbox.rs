@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT W1 adapter for application projection (S6b P16). No production caller reaches
-//! `admit_in`: live `project_committed_message` still swallows a claim failure, then shares
-//! `publish_application_entry` for the RAM page. `claim_inbox_projection` still commits the
-//! projected flag in its own transaction. The expectation values come from the caller; P20
-//! supplies them and calls `admit_in` on the W1 transaction.
+//! Durable application projection joined to the active W1 receive transaction.
+//! The projected flag and outbox row commit together before RAM publication and ACK.
+//! The caller supplies the generation, incarnation, cursor and erasure fences.
 //!
 //! Contract: W0 (`stage`) precedes admission. The authenticated projected marker (shared
 //! `write_inbox_projection_claim_at`) and a DURABLE application outbox row commit on the
@@ -171,12 +169,12 @@ fn transfer(
             );
         }
         // Unfinished projection: the marker may already be set; drain by keeping the row.
-        request.client.write_inbox_projection_claim_at(db, auth_key, request.entry)?;
+        RamfluxClient::write_inbox_projection_claim_at(db, auth_key)?;
         before_commit_fault()?;
         return Ok(Admit::Duplicate);
     }
     if db.actor_state_exists(&published)? {
-        request.client.write_inbox_projection_claim_at(db, auth_key, request.entry)?;
+        RamfluxClient::write_inbox_projection_claim_at(db, auth_key)?;
         before_commit_fault()?;
         return Ok(Admit::Duplicate);
     }
@@ -189,7 +187,7 @@ fn transfer(
     if receipt.routing.message_id.is_empty() {
         return Err(StorageError::Integrity("application projection message missing").into());
     }
-    let newly = request.client.write_inbox_projection_claim_at(db, auth_key, request.entry)?;
+    let newly = RamfluxClient::write_inbox_projection_claim_at(db, auth_key)?;
     outbox_fault()?;
     let event = ApplicationEvent {
         envelope_id: request.entry.envelope.envelope_id.clone(),

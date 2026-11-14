@@ -55,11 +55,6 @@ impl RamfluxClient {
         &self,
         peer: &str,
     ) -> Result<Option<String>, SdkError> {
-        let Some(authority) =
-            self.current_custody_authority(peer, crate::custody::network_now()?)?
-        else {
-            return Ok(None);
-        };
         let db = self.account_db()?;
         let Some(verification) = db.contact_verification(peer)? else {
             return Ok(Some("unverified".into()));
@@ -67,6 +62,13 @@ impl RamfluxClient {
         if verification.verification_state != "verified" {
             return Ok(Some(verification.verification_state));
         }
+        // Unverified display needs no current public proof. Only a positive
+        // verification claim must compare its saved fingerprint with live authority.
+        let Some(authority) =
+            self.current_custody_authority(peer, crate::custody::network_now()?)?
+        else {
+            return Ok(Some("verification_stale".into()));
+        };
         let current = super::identity_authority::native_authority_fingerprint(&authority)?;
         let saved =
             db.load_actor_state::<String>(&format!("identity/safety_verified_set/{peer}"))?;

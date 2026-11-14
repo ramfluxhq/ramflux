@@ -5,6 +5,7 @@
 use super::*;
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
+use prost::Message as _;
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Actor {
@@ -401,7 +402,11 @@ fn signed_kind_is_asserted_until_user_verification_and_complete_set_changes_inva
         &original.principal_commitment,
     )?;
     peer.client.mark_contact_safety_verified(&original.principal_commitment, "bob")?;
-    assert_eq!(peer.client.verified_principal_kind("agent")?, Some(PrincipalKind::HeadlessAi));
+    assert_eq!(
+        peer.client.verified_principal_kind("agent")?,
+        None,
+        "a retired root stamp cannot replace native custody authority"
+    );
     let mut changed = original.clone();
     changed.devices.extend(second.manifest()?.devices);
     sign_set(&owner, &mut changed, 2)?;
@@ -482,7 +487,7 @@ fn dormant_sibling_readiness_does_not_change_safety_number_or_directory_hash() -
     observe(&peer.client, &served)?;
     let after = peer.client.contact_safety_number(&full.principal_commitment)?;
     assert_eq!(before.safety_number, after.safety_number);
-    assert_eq!(after.verification_state, "verified");
+    assert_eq!(after.verification_state, "verification_stale");
     assert_eq!(before.contact_device_set_hash, after.contact_device_set_hash);
     assert_eq!(after.contact_device_count, 2);
     assert_eq!(
@@ -539,9 +544,8 @@ fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions(
 }
 
 #[test]
-fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_is_safe()
+fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_missing_time_is_safe()
 -> TestResult {
-    const TOMBSTONE_PREFIX: &[u8] = b"ramflux.own_contact_tombstone.v1\n";
     let owner = Actor::new("owner", "original", 178, 179, 1)?;
     let restored = Actor::new("owner", "restored", 178, 180, 1)?;
     let live = Actor::new("owner", "live", 178, 183, 1)?;
@@ -579,13 +583,18 @@ fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_
         assert_eq!(owner.client.account_db()?.friend_link("ordered-link")?.state, "accepted");
     }
 
-    let mut legacy_bytes = ramflux_protocol::decode_base64url(&blocked[0])?;
-    let raw = legacy_bytes.strip_prefix(TOMBSTONE_PREFIX).ok_or("tombstone prefix")?;
-    let mut legacy: serde_json::Value = serde_json::from_slice(raw)?;
-    legacy.as_object_mut().ok_or("tombstone object")?.remove("decided_at");
-    legacy_bytes = TOMBSTONE_PREFIX.to_vec();
-    legacy_bytes.extend(serde_json::to_vec(&legacy)?);
-    let legacy_packet = legacy_bytes;
+    let packet = blocked.first().ok_or("blocked contact snapshot")?;
+    let bytes = ramflux_protocol::decode_base64url(packet)?;
+    let mut control = ramflux_protocol::message::Control::decode(bytes.as_slice())?;
+    let Some(ramflux_protocol::message::control::Payload::OwnContactTombstone(value)) =
+        control.payload.as_mut()
+    else {
+        return Err("expected typed own contact tombstone".into());
+    };
+    // A backup without an optional decision timestamp cannot override a later
+    // local decision; the native wire executor separately requires its timestamp.
+    value.decided_at = None;
+    let legacy_packet = control.encode_to_vec();
     let legacy = vec![ramflux_protocol::encode_base64url(&legacy_packet)];
 
     let with_local_decision = owner.client.restore_backup_contacts(&legacy)?;
@@ -607,7 +616,7 @@ fn restored_contact_tombstones_do_not_override_newer_local_decisions_and_legacy_
     assert!(live.client.receive_own_contact(&legacy_packet)?);
     assert!(
         live.client.account_db()?.friend_link("ordered-link")?.blocked,
-        "an authenticated legacy sibling restriction remains sticky"
+        "an authenticated typed sibling restriction remains sticky"
     );
     Ok(())
 }

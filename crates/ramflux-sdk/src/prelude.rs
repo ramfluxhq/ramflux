@@ -82,17 +82,19 @@ pub(crate) use crate::object::{
     SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
     build_signed_owner_authorization_proof, build_signed_requester_pop,
     build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
-    build_v3_owner_session_token_issue_body, effective_attachment_lineage,
-    object_key_slot_associated_data, object_relay_chunk_cipher_hash, object_relay_chunk_id,
+    build_v3_owner_session_token_issue_body, object_relay_chunk_cipher_hash, object_relay_chunk_id,
     object_transfer_id, object_transfer_status, parse_relay_transfer_options,
     recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
 };
 
+#[cfg(test)]
 pub(crate) use crate::own_device_sync::{
-    SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
-    SdkOwnDeviceHistoryBundle, SdkOwnDeviceSyncEnvelope, SdkOwnDeviceSyncExportResponse,
+    SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceHistoryBundle, SdkOwnDeviceSyncEnvelope,
     SdkOwnDeviceSyncImportResponse, group_message_epoch, own_device_sync_signing_body,
     own_device_sync_slot_conversation_id,
+};
+pub(crate) use crate::own_device_sync::{
+    SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
 };
 pub(crate) use crate::prekey::{
     SdkDeviceManifestResponse, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
@@ -100,3 +102,9 @@ pub(crate) use crate::prekey::{
     sdk_http_json_request, sdk_http_post_json, sdk_publish_prekey_bundle,
 };
 pub(crate) use crate::time::now_unix_timestamp;
+
+#[cfg(test)]
+pub(crate) use crate::object::effective_attachment_lineage;
+
+#[cfg(test)]
+pub(crate) use crate::object::object_key_slot_associated_data;

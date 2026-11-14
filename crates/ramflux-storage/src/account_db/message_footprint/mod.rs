@@ -109,6 +109,33 @@ impl AccountDb {
             .map_err(StorageError::from)?
     }
 
+    /// Link an opaque container to the indexed owners of an existing actor copy.
+    /// Hashed actor keys are locators, never logical message identifiers.
+    /// # Errors
+    /// Requires a writer transaction and one to 4096 live, registered owners.
+    pub fn bind_actor_container_reference(
+        &self,
+        owner_actor: &str,
+        container: &str,
+    ) -> Result<(), StorageError> {
+        if self.connection.is_autocommit()? {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let mut query = self
+            .connection
+            .prepare("SELECT message_id FROM message_copy_binding WHERE copy_id=?1 LIMIT 4097")?;
+        let owners = query
+            .query_map(params![format!("actor:{owner_actor}")], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if owners.is_empty() || owners.len() > 4096 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        for owner in owners {
+            self.bind_message_container_reference(&owner, container)?;
+        }
+        Ok(())
+    }
+
     /// Link a received event's exact stored copy to a verified mutation target.
     /// # Errors
     /// Requires the caller's receive transaction, a live target and an existing event.
@@ -163,7 +190,16 @@ impl AccountDb {
             return Ok(());
         }
         replay_reference::register(self, key, value)?;
-        let registration = actor_registration(key, value);
+        let mut registration = actor_registration(key, value);
+        if self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_copy_binding WHERE copy_id=?1)",
+            params![format!("actor:{key}")],
+            |row| row.get::<_, bool>(0),
+        )? {
+            // An explicit opaque-copy owner is authoritative. A nested courier's
+            // routing id must not turn its private proof into a shared live copy.
+            registration.message_ids.clear();
+        }
         self.connection.execute(
             STAGE_ACTOR,
             params![

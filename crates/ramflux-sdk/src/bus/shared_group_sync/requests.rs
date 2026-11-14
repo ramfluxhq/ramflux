@@ -116,7 +116,8 @@ async fn seal_and_send(
     let mut engine = account.session_client().await?;
     let result = async {
         let route = crate::client::routed::Route::group_control(packet.group());
-        let bytes = serde_json::to_vec(&packet)?;
+        let bytes = account.client.generated_group_control_inner(&packet)?;
+        message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
         let sealed = if let Some(federation) = &federation {
             account.client.seal_routed_federated_as(
                 &engine,

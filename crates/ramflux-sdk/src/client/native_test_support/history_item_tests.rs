@@ -8,7 +8,7 @@ use ramflux_protocol::message as g;
 
 fn page_inner(identity: g::EventIdentity, page: g::HistoryPage) -> Vec<u8> {
     g::Inner {
-        layer: g::registry::COMPILED_LAYER,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 8,
         identity: Some(identity),
         body: g::Control { operation: 7, payload: Some(g::control::Payload::OwnHistory(page)) }

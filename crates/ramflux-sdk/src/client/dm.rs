@@ -5,25 +5,17 @@
 #![allow(clippy::wildcard_imports)]
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
-mod legacy_receive;
-pub(crate) use legacy_receive::{LegacyDmDecrypt, LegacyDmPrepared};
 #[cfg(test)]
 mod fanout_tests;
-mod post_send;
+#[cfg(test)]
+mod legacy_receive;
+#[cfg(test)]
+pub(crate) use legacy_receive::{LegacyDmDecrypt, LegacyDmPrepared};
+#[cfg(test)]
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
     pub auto_fetch_attachments: bool,
     pub relay_service_key_base64: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct SendMode {
-    franking: bool,
-    fanout: bool,
-}
-struct AttachmentSendMode {
-    send: SendMode,
-    consume_erased: bool,
 }
 
 impl RamfluxClient {
@@ -63,34 +55,30 @@ impl RamfluxClient {
 
     /// # Errors
     /// Returns an error when local projection write or gateway submit fails.
-    pub async fn send_direct_message_via_gateway(
+    pub fn send_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        mut message: GatewayDirectMessage,
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        message.ttl = self.content_ttl()?;
-        self.send_direct_message(
-            &message.conversation_id,
-            &message.message_id,
-            &message.sender_id,
-            &message.encrypted_body,
-        )?;
-        // Already-encrypted body; this path does not seal a Direct report.
-        let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
-        engine.submit_envelope(envelope).await
+        message: GatewayDirectMessage,
+    ) -> std::future::Ready<Result<GatewayInboxEntry, SdkError>> {
+        let _ = (engine, message);
+        std::future::ready(Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired unbound encrypted send; use generated Message content".into(),
+        }))
     }
 
     /// # Errors
     /// Returns an error when the gateway rejects or cannot deliver the envelope.
-    pub async fn submit_direct_message_via_gateway(
+    pub fn submit_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        mut message: GatewayDirectMessage,
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        message.ttl = self.content_ttl()?;
-        // Already-encrypted body; this path does not seal a Direct report.
-        let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
-        engine.submit_envelope(envelope).await
+        message: GatewayDirectMessage,
+    ) -> std::future::Ready<Result<GatewayInboxEntry, SdkError>> {
+        let _ = (engine, message);
+        std::future::ready(Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired unbound encrypted send; use generated Message content".into(),
+        }))
     }
 
     /// # Errors
@@ -99,60 +87,102 @@ impl RamfluxClient {
     pub async fn send_plaintext_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        mut message: GatewayDirectMessage,
+        message: GatewayDirectMessage,
         plaintext: &[u8],
     ) -> Result<GatewayInboxEntry, SdkError> {
-        message.ttl = self.content_ttl()?;
-        self.send_plaintext_direct_message_via_gateway_inner(
-            engine,
-            message,
-            plaintext,
-            SendMode { franking: true, fanout: false },
-            crate::client::routed::Route::direct(),
-        )
-        .await
+        let text = std::str::from_utf8(plaintext)
+            .map_err(|_| SdkError::InboundRejected("Message text must be UTF-8".into()))?;
+        let (_, entry) = self
+            .send_generated_content_via_gateway(
+                engine,
+                message,
+                &ramflux_protocol::message::Content {
+                    value: Some(ramflux_protocol::message::content::Value::Message(
+                        ramflux_protocol::message::Message {
+                            text: text.into(),
+                            ..Default::default()
+                        },
+                    )),
+                },
+            )
+            .await?;
+        Ok(entry)
     }
 
-    pub(crate) async fn send_conversation_direct_message_via_gateway(
+    /// Build generation-1 attachment content from prepared r4 references.
+    /// # Errors
+    /// Refuses absent or inconsistent large manifests before identity/ratchet allocation.
+    pub fn attachment_message_content(
+        text: &str,
+        media: &[ramflux_protocol::message::MediaRef],
+    ) -> Result<ramflux_protocol::message::Content, SdkError> {
+        use prost::Message as _;
+        if media.len() > 16 {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                reason: "attachment reference count exceeds 16".into(),
+            });
+        }
+        for reference in media {
+            if reference.encoded_len() > ramflux_protocol::large_attachment::MAX_MANIFEST_BYTES {
+                return Err(SdkError::GeneratedRefused {
+                    code: crate::GeneratedRefusalCode::Content,
+                    reason: "attachment reference exceeds byte cap".into(),
+                });
+            }
+            ramflux_protocol::large_attachment::MediaRef::decode(&reference.encode_to_vec())
+                .map_err(|error| SdkError::GeneratedRefused {
+                    code: crate::error::GeneratedRefusalCode::Content,
+                    reason: format!("invalid r4 media reference: {error}"),
+                })?;
+        }
+        Ok(ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Message(
+                ramflux_protocol::message::Message {
+                    text: text.into(),
+                    media: media.to_vec(),
+                    ..Default::default()
+                },
+            )),
+        })
+    }
+
+    /// Send prepared r4 attachment references as an ordinary generated Message.
+    /// # Errors
+    /// Returns typed content refusal, persistence, encryption or gateway errors.
+    pub async fn send_media_direct_message_via_gateway(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: GatewayDirectMessage,
+        caption: &str,
+        media: &[ramflux_protocol::message::MediaRef],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        let content = Self::attachment_message_content(caption, media)?;
+        self.send_generated_content_via_gateway(engine, message, &content)
+            .await
+            .map(|(_, entry)| entry)
+    }
+
+    pub(crate) async fn send_generated_content_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
-        plaintext: &[u8],
-    ) -> Result<GatewayInboxEntry, SdkError> {
+        content: &ramflux_protocol::message::Content,
+    ) -> Result<(String, GatewayInboxEntry), SdkError> {
         message.ttl = self.content_ttl()?;
-        self.send_plaintext_direct_message_via_gateway_inner(
-            engine,
-            message,
-            plaintext,
-            SendMode { franking: true, fanout: true },
-            crate::client::routed::Route::direct(),
-        )
-        .await
-    }
-
-    fn project_conversation_fanout(
-        &self,
-        message: &GatewayDirectMessage,
-        content: &[u8],
-        fanout: bool,
-    ) -> Result<(), SdkError> {
-        if fanout && let Some(previous) = self.direct_message_by_id(&message.message_id)? {
-            if previous.deleted
-                || previous.conversation_id != message.conversation_id
-                || previous.sender_id != message.sender_id
-                || self.account_db()?.message_content(&message.message_id)?.as_deref()
-                    != Some(content)
-            {
-                return Err(StorageError::MessageIdConflict(message.message_id.clone()).into());
-            }
-            return Ok(());
-        }
-        self.send_direct_message(
-            &message.conversation_id,
-            &message.message_id,
-            &message.sender_id,
-            &message.encrypted_body,
-        )
+        self.resolve_message_recipient(engine.config(), &mut message).await?;
+        let prepared = self.prepare_authored_content(&mut message, None, content)?;
+        let id = message.message_id.clone();
+        let entry = self
+            .send_plaintext_direct_message_via_gateway_inner(
+                engine,
+                message,
+                &prepared.wire,
+                false,
+                crate::client::routed::Route::direct(),
+            )
+            .await?;
+        Ok((id, entry))
     }
 
     pub(crate) async fn send_plaintext_direct_message_without_franking(
@@ -163,11 +193,7 @@ impl RamfluxClient {
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.send_plaintext_direct_message_via_gateway_inner(
-            engine,
-            message,
-            plaintext,
-            SendMode { franking: false, fanout: false },
-            route,
+            engine, message, plaintext, false, route,
         )
         .await
     }
@@ -177,182 +203,47 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
-        mode: SendMode,
+        _include_franking_ext: bool,
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        use prost::Message as _;
+        use ramflux_protocol::message as g;
         self.resolve_message_recipient(engine.config(), &mut message).await?;
         let kind = crate::client::target_selection::kind_id_for_route(&route.kind);
         let _ = Self::candidate_target_plan(|| self.dm_selection_request(&message, kind))?;
-        let copy_plain = route.kind == crate::client::routed::Kind::Direct;
-        let attachments = route.attachments;
-        let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
-            && serde_json::from_slice::<serde_json::Value>(plaintext)
-                .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
+        let inner = g::Inner::decode(plaintext)
+            .map_err(|_| SdkError::InboundRejected("generated Inner required".into()))?;
+        let identity = inner
+            .identity
+            .as_ref()
+            .ok_or_else(|| SdkError::InboundRejected("generated identity required".into()))?;
+        message.message_id = ramflux_protocol::encode_base64url(&identity.id);
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
-        let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
-        let franking =
-            mode.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
-        message.encrypted_body = serde_json::to_vec(&packet)?;
-        let mut own_copy = None;
-        // History replication controls must not become history messages themselves.
-        if !own_history_control {
-            if let Some(carrier) = crate::client::surface::Carrier::decode(plaintext)? {
-                self.journal_surface_frame(&message, &carrier, &message.encrypted_body)?;
-            } else {
-                self.account_db()?.write_transaction(|| {
-                    let content = zeroize::Zeroizing::new(if attachments {
-                        crate::client::dm::decode_dm_attachment_body(plaintext)?.0
-                    } else {
-                        plaintext.to_vec()
-                    });
-                    self.project_conversation_fanout(&message, &content, mode.fanout)?;
-                    self.account_db()?.store_message_content(
-                        &message.conversation_id,
-                        &message.message_id,
-                        &content,
-                    )?;
-                    if copy_plain {
-                        own_copy = self.queue_own_sent_dm(&message, &content, kind);
-                        if crate::client::target_selection::schema_v1_selected() {
-                            self.clear_self_sync_draft_after_send(&message.conversation_id)?;
-                        }
-                    }
-                    Ok::<_, SdkError>(())
-                })?;
-            }
+        let envelope = gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
+        if matches!(inner.kind, 1 | 4 | 9 | 10) {
+            self.project_authored_message(&message, plaintext, &message.encrypted_body)?;
         }
-        let result = async {
-            let mut envelope = gateway_direct_message_envelope_sealed(
-                engine.config(),
-                &message,
-                franking.as_ref(),
-                committed_a0.as_deref(),
-            )?;
-            crate::dm::add_message_metadata_commitment(
-                engine.config(),
-                &mut envelope,
-                metadata_commitment,
-            )?;
-            // Persist the advanced send ratchet before the remote submit. A process death after the
-            // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
-            // same message key for a later message. If submit fails, skipping one send key is safe;
-            // reusing it is not.
-
-            #[cfg(feature = "itest-rfd-fault")]
-            crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
-            engine.submit_envelope(envelope).await
-        }
-        .await;
-        self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), result.is_ok());
-        result
+        #[cfg(feature = "itest-rfd-fault")]
+        crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
+        engine.submit_envelope(envelope).await
     }
 
     /// # Errors
-    /// Returns an error when attachment encryption/upload, DM encryption, or gateway submit fails.
-    pub async fn send_plaintext_direct_message_with_attachments_via_gateway(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        mut message: GatewayDirectMessage,
-        plaintext: &[u8],
-        attachments: &[LocalBusMessageAttachmentInput],
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        message.ttl = self.content_ttl()?;
-        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
-            engine,
-            pool,
-            message,
-            plaintext,
-            attachments,
-            AttachmentSendMode {
-                send: SendMode { franking: true, fanout: false },
-                consume_erased: true,
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn send_conversation_attachments_via_gateway(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        message: GatewayDirectMessage,
-        input: (&[u8], &[LocalBusMessageAttachmentInput]),
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
-            engine,
-            pool,
-            message,
-            input.0,
-            input.1,
-            AttachmentSendMode {
-                send: SendMode { franking: true, fanout: true },
-                consume_erased: true,
-            },
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn send_plaintext_direct_message_with_attachments_via_gateway_inner(
+    /// Always returns typed Content refusal: the old attachment carrier is retired.
+    /// Use `send_media_direct_message_via_gateway` with prepared r4 references.
+    pub fn send_plaintext_direct_message_with_attachments_via_gateway(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
-        mode: AttachmentSendMode,
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        let mut refs = Vec::with_capacity(attachments.len());
-        let mut holds = Vec::with_capacity(attachments.len());
-        for attachment in attachments {
-            let attachment_plaintext = zeroize::Zeroizing::new(
-                ramflux_protocol::decode_base64url(&attachment.plaintext_base64).map_err(
-                    |error| SdkError::LocalBus(format!("invalid attachment body: {error}")),
-                )?,
-            );
-            let (reference, hold) = self
-                .dm_attachment_ref_for_recipient(
-                    engine,
-                    pool,
-                    &message,
-                    attachment,
-                    &attachment_plaintext,
-                )
-                .await?;
-            refs.push(reference);
-            holds.push(hold);
-        }
-        let envelope = SdkDmAttachmentEnvelope {
-            schema: "ramflux.sdk.dm_attachment_envelope.v1".to_owned(),
-            version: 1,
-            body_base64: ramflux_protocol::encode_base64url(plaintext),
-            attachments: refs,
-        };
-        let envelope_plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
-        let conversation = message.conversation_id.clone();
-        let message_id = message.message_id.clone();
-        let owner = message.sender_id.clone();
-        let result = self
-            .send_plaintext_direct_message_via_gateway_inner(
-                engine,
-                message,
-                &envelope_plaintext,
-                mode.send,
-                crate::client::routed::Route::attachments(),
-            )
-            .await;
-        self.finish_attachment_send(
-            result,
-            &envelope.attachments,
-            crate::client::deferred_attachment::ReferenceContext {
-                owner: &owner,
-                conversation: &conversation,
-                message: &message_id,
-            },
-            holds,
-            mode.consume_erased,
-        )
+    ) -> std::future::Ready<Result<GatewayInboxEntry, SdkError>> {
+        let _ = (engine, pool, message, plaintext, attachments);
+        std::future::ready(Err(SdkError::GeneratedRefused {
+            code: crate::error::GeneratedRefusalCode::Content,
+            reason: "retired attachment API; send Message.media with large_manifest".into(),
+        }))
     }
 
     /// # Errors
@@ -364,14 +255,21 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
         envelope: SdkReceiptEventEnvelope,
     ) -> Result<GatewayInboxEntry, SdkError> {
-        let plaintext = serde_json::to_vec(&envelope)?;
+        let prepared = self.prepare_generated_receipt(&mut message, &envelope)?;
         let sealed = self
-            .seal_routed_as(engine, &message, &plaintext, crate::client::routed::Route::receipt())
+            .seal_routed_as(
+                engine,
+                &message,
+                &prepared.wire,
+                crate::client::routed::Route::receipt(),
+            )
             .await?;
-        let gateway_envelope =
-            gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
-        let entry = engine.submit_envelope(gateway_envelope).await?;
-        Ok(entry)
+        let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+            engine.config(),
+            &mut message,
+            sealed,
+        )?;
+        engine.submit_envelope(envelope).await
     }
 
     /// # Errors
@@ -402,7 +300,7 @@ impl RamfluxClient {
         limit: usize,
         conversation_id: &str,
         auto_fetch_attachments: bool,
-        relay_service_key_base64: Option<String>,
+        _relay_service_key_base64: Option<String>,
     ) -> Result<Vec<GatewayPlaintextDelivery>, SdkError> {
         self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
@@ -433,29 +331,15 @@ impl RamfluxClient {
                 }
                 continue;
             }
-            let legacy_key = self.inbox_admission_key(&entry)?;
-            let legacy_id = entry.envelope.envelope_id.clone();
-            if let Some(delivery) = self
-                .receive_legacy_entry(
-                    engine,
-                    pool,
-                    entry,
-                    LegacyReceive {
-                        conversation_id,
-                        auto_fetch_attachments,
-                        relay_service_key_base64: relay_service_key_base64.clone(),
-                    },
-                )
-                .await?
-            {
-                plaintext.push(delivery);
-            }
-            self.account_db()?.remove_unrouted(&legacy_key)?;
-            self.account_db()?.remove_unrouted(&legacy_id)?;
+            return Err(SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                reason: "retired or malformed application carrier".into(),
+            });
         }
         Ok(plaintext)
     }
 
+    #[cfg(test)]
     fn catch_up_legacy_cursor(
         &self,
         conversation_id: &str,
@@ -470,6 +354,7 @@ impl RamfluxClient {
         Ok(false)
     }
 
+    #[cfg(test)]
     pub(crate) fn decrypt_legacy_entry(
         &self,
         conversation_id: &str,
@@ -492,6 +377,7 @@ impl RamfluxClient {
         Ok((envelope, session, decrypted))
     }
 
+    #[cfg(test)]
     fn legacy_receive_checkpoint_current(
         &self,
         conversation: &str,
@@ -506,6 +392,7 @@ impl RamfluxClient {
             ReceiveTerminalDecision::CursorCatchUp
         ))
     }
+    #[cfg(test)]
     fn reject_legacy_peer(
         &self,
         conversation: &str,
@@ -527,6 +414,7 @@ impl RamfluxClient {
         }
         Ok(false)
     }
+    #[cfg(test)]
     fn quarantine_legacy_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -545,6 +433,7 @@ impl RamfluxClient {
             Ok::<_,SdkError>(())
         })
     }
+    #[cfg(test)]
     fn commit_legacy_terminal(
         &self,
         conversation: &str,
@@ -559,6 +448,7 @@ impl RamfluxClient {
             self.commit_legacy_effect(conversation, entry, session)
         }
     }
+    #[cfg(test)]
     fn commit_legacy_receive(
         &self,
         conversation: &str,
@@ -573,6 +463,7 @@ impl RamfluxClient {
     }
 
     /// Ratchet + terminal marker only. Cursor/ACK stay off this cut (ledger WA).
+    #[cfg(test)]
     pub(crate) fn commit_legacy_effect(
         &self,
         conversation: &str,
@@ -759,6 +650,7 @@ impl RamfluxClient {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_receipt_event_plaintext(
         &self,
         body: &[u8],
@@ -929,6 +821,7 @@ pub(crate) fn franking_report_metadata_for_delivery(
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn decode_dm_attachment_body(
     body: &[u8],
 ) -> Result<(Vec<u8>, Vec<SdkDmAttachmentRef>), SdkError> {

@@ -5,7 +5,6 @@
 
 use crate::{Envelope, Priority};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Name of the signed extension that selects an envelope's delivery mode.
 pub const DELIVERY_MODE_EXTENSION: &str = "delivery_mode";
@@ -143,21 +142,13 @@ impl EphemeralSubmitResult {
 /// unrecognized value is invalid rather than silently falling back to durable.
 #[must_use]
 pub fn classify_delivery_mode(envelope: &Envelope) -> DeliveryMode {
-    if crate::schema_profile::schema_v1_live() {
-        if crate::message::outer::refuse_live_bridge(envelope).is_err() {
-            return DeliveryMode::Invalid;
-        }
-        return match crate::message::outer::parse_live_named_delivery_mode(envelope) {
-            Ok(crate::message::outer::NamedDeliveryMode::Durable) => DeliveryMode::Durable,
-            Ok(crate::message::outer::NamedDeliveryMode::Ephemeral) => DeliveryMode::Ephemeral,
-            Err(_) => DeliveryMode::Invalid,
-        };
+    if crate::message::outer::refuse_live_bridge(envelope).is_err() {
+        return DeliveryMode::Invalid;
     }
-    match envelope.ext.ext.get(DELIVERY_MODE_EXTENSION) {
-        None => DeliveryMode::Durable,
-        Some(Value::String(mode)) if mode == "durable" => DeliveryMode::Durable,
-        Some(Value::String(mode)) if mode == "ephemeral" => DeliveryMode::Ephemeral,
-        Some(_) => DeliveryMode::Invalid,
+    match crate::message::outer::parse_live_named_delivery_mode(envelope) {
+        Ok(crate::message::outer::NamedDeliveryMode::Durable) => DeliveryMode::Durable,
+        Ok(crate::message::outer::NamedDeliveryMode::Ephemeral) => DeliveryMode::Ephemeral,
+        Err(_) => DeliveryMode::Invalid,
     }
 }
 
@@ -224,6 +215,7 @@ pub fn deadline(envelope: &Envelope, now_ms: u64) -> Result<u64, EphemeralModeEr
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
     use std::collections::BTreeMap;
 
     use super::{
@@ -233,7 +225,6 @@ mod tests {
     };
     use crate::canonical_json_bytes;
     use crate::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
-    use serde_json::Value;
 
     /// Reference "now" for every otherwise-valid vector.
     const NOW_MS: u64 = 1_000_000;

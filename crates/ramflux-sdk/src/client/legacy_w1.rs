@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT W1 adapter for legacy DM/A2I (S6b P15). No production caller reaches it: the live
-//! `receive_legacy_entry` / `receive_bound_legacy_a2i` paths are unchanged. The expectation
-//! values come from the caller; P20 supplies them.
+//! Receive transaction fence shared by the live source-hold path and historical unit adapters.
+//! The generic gate stages and joins storage effects without interpreting application bytes.
+//! Retired DM/A2I adapters below are test-only and cannot select a production codec.
 //!
 //! Contract: W0 (`stage`) precedes the irreversible effect; ratchet, content/rejection/receipt
 //! and the authenticated dedup marker run inside one generation, incarnation, cursor and
@@ -12,7 +12,9 @@
 //! plaintext to make a step resumable.
 #![allow(dead_code)]
 
+#[cfg(test)]
 use crate::client::a2i::{self, LegacyA2iOpened};
+#[cfg(test)]
 use crate::client::dm::{LegacyDmDecrypt, LegacyDmPrepared};
 use crate::prelude::*;
 use ramflux_storage::{
@@ -159,6 +161,7 @@ impl RamfluxClient {
     /// Precondition: the caller has already run `ensure_inbound_device` for `entry` (it is async
     /// and cannot run inside this sync W1 path). This function runs the same sync routing-binding
     /// check the live DM path runs (`authorize_bound_legacy`), including the v2-blocks-legacy guard.
+    #[cfg(test)]
     pub(crate) fn apply_legacy_success_w1(
         &self,
         entry: &GatewayInboxEntry,
@@ -167,7 +170,7 @@ impl RamfluxClient {
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
-        self.require_legacy_routing_binding(local_device, entry, conversation)?;
+        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
         if self.legacy_w1_committed(entry)? {
             return Ok(());
         }
@@ -192,6 +195,7 @@ impl RamfluxClient {
 
     /// Same cut as [`Self::apply_legacy_success_w1`], joining an already-open receive transaction.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn apply_legacy_success_w1_in(
         &self,
         tx: &ReceiveTransaction<'_>,
@@ -201,7 +205,7 @@ impl RamfluxClient {
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
-        self.require_legacy_routing_binding(local_device, entry, conversation)?;
+        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
         if self.legacy_w1_committed(entry)? {
             return Ok(());
         }
@@ -224,6 +228,7 @@ impl RamfluxClient {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn commit_legacy_success_effect(
         &self,
         entry: &GatewayInboxEntry,
@@ -264,6 +269,7 @@ impl RamfluxClient {
     ///
     /// Same precondition as `apply_legacy_success_w1`: the caller has run `ensure_inbound_device`,
     /// and the sync routing-binding check (incl. v2-blocks-legacy) runs here.
+    #[cfg(test)]
     pub(crate) fn apply_legacy_reject_w1(
         &self,
         entry: &GatewayInboxEntry,
@@ -272,7 +278,7 @@ impl RamfluxClient {
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
-        self.require_legacy_routing_binding(local_device, entry, conversation)?;
+        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
         if self.legacy_w1_committed(entry)? {
             return Ok(());
         }
@@ -308,6 +314,7 @@ impl RamfluxClient {
     /// path). It must NOT be derived from `entry.target_delivery_id`, which is the delivery id.
     /// Precondition: the caller has run `ensure_inbound_device` for `entry`. Routing is checked
     /// first and the receipt second, matching `receive_bound_legacy_a2i`.
+    #[cfg(test)]
     pub(crate) fn apply_legacy_a2i_w1(
         &self,
         entry: &GatewayInboxEntry,
@@ -319,7 +326,7 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
-        if self.legacy_a2i_is_unbound(local_device, entry)? {
+        if crate::RamfluxClient::legacy_a2i_is_unbound(local_device, entry)? {
             return gate.effect(db, sequence, None, || {
                 self.commit_unbound_legacy_a2i(local_device, entry)
             });
@@ -335,6 +342,7 @@ impl RamfluxClient {
     ///
     /// Returns `true` when the in-transaction binding check held the entry, `false` when it
     /// applied. Callers cover from this value so held vs applied is one decision.
+    #[cfg(test)]
     pub(crate) fn apply_legacy_a2i_w1_in(
         &self,
         tx: &ReceiveTransaction<'_>,
@@ -346,7 +354,7 @@ impl RamfluxClient {
         Self::require_a2i_binding_authority()?;
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
-        if self.legacy_a2i_is_unbound(local_device, entry)? {
+        if crate::RamfluxClient::legacy_a2i_is_unbound(local_device, entry)? {
             gate.effect_in(tx, sequence, None, || {
                 self.commit_unbound_legacy_a2i(local_device, entry)
             })?;
@@ -360,6 +368,7 @@ impl RamfluxClient {
         Ok(false)
     }
 
+    #[cfg(test)]
     fn commit_unbound_legacy_a2i(
         &self,
         local_device: &str,
@@ -375,6 +384,7 @@ impl RamfluxClient {
         }
     }
 
+    #[cfg(test)]
     fn commit_legacy_a2i_w1(
         &self,
         entry: &GatewayInboxEntry,
@@ -427,11 +437,17 @@ impl RamfluxClient {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_w1_committed(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
         Ok(self.account_db()?.actor_state_exists(&self.legacy_committed_key(entry)?)?)
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_a2i_committed(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
         Ok(self.account_db()?.actor_state_exists(&self.legacy_a2i_receipt_key(entry)?)?)
     }
 }
+
+#[cfg(test)]
+#[path = "legacy_w1_tests.rs"]
+mod tests;

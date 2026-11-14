@@ -23,17 +23,41 @@ impl Fixture {
         Self::with_device(id, "primary").await
     }
     pub(crate) async fn with_device(id: &str, device: &str) -> TestResult<Self> {
+        Box::pin(Self::with_device_at(id, device, crate::custody::network_now()?)).await
+    }
+    pub(super) async fn with_device_at(id: &str, device: &str, now: u64) -> TestResult<Self> {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
-        let now = crate::custody::network_now()?;
         let account = create_with_device(&root.0, id, device, vault.as_ref(), now)?;
-        let anchor = account.record().body.account_anchor.clone();
+        Self::finish_creation(root, vault, id, device, account.record().clone()).await
+    }
+    async fn finish_creation(
+        root: Root,
+        vault: Arc<TestVault>,
+        id: &str,
+        device: &str,
+        record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    ) -> TestResult<Self> {
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
-        client.seal_new_account_data(id, &anchor, b"native fixture data passphrase")?;
+        client.seal_new_account_data(
+            id,
+            &record.body.account_anchor,
+            b"native fixture data passphrase",
+        )?;
         client.unlock_account(id, b"native fixture data passphrase")?;
         client.initialize_born_v3_branch(device, vault.clone()).await?;
-        Self::ready(client, root, vault, id, device, account.record().clone())
+        Self::ready(client, root, vault, id, device, record)
+    }
+    pub(crate) fn accept_peer(&self, peer: &Self) -> TestResult {
+        self.client.persist_fetched_identity_directory(&peer.manifest)?;
+        self.client.establish_friend_link(
+            &format!("authored-link:{}", peer.client.own_account_anchor()?),
+            &self.client.own_account_anchor()?,
+            &peer.client.own_account_anchor()?,
+        )?;
+        self.client.receive_generated_own_contact(&authored::authored_contact(self, peer)?)?;
+        Ok(())
     }
     fn ready(
         client: RamfluxClient,
@@ -95,6 +119,7 @@ mod sibling;
 
 #[path = "native_test_support/authored.rs"]
 mod authored;
+mod authored_delete;
 
 mod authored_edit;
 
@@ -104,11 +129,11 @@ mod authored_group;
 
 mod authored_edit_erasure;
 
-mod live_own_copy;
+pub(crate) mod live_own_copy;
 
 mod generated_routes;
 
-mod peer_control_send;
+pub(crate) mod peer_control_send;
 
 mod generation_zero_tests;
 
@@ -118,5 +143,14 @@ mod reaction_restore_tests;
 
 pub(crate) mod watchdog;
 
+pub(crate) mod activation_send;
 #[cfg(all(ramflux_itest, not(ramflux_release_profile), not(ramflux_production)))]
 mod local_search;
+
+pub(crate) mod directory;
+
+mod named;
+
+pub(crate) mod sibling_erasure;
+
+mod group_history;

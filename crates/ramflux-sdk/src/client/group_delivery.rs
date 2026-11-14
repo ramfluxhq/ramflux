@@ -3,8 +3,8 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::client::identity_authority::HeadUse;
-use crate::client::identity_authority::NativeOperation;
+#[cfg(test)]
+use crate::client::identity_authority::{HeadUse, NativeOperation};
 use crate::prelude::*;
 
 impl RamfluxClient {
@@ -42,18 +42,14 @@ impl RamfluxClient {
         message_id: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<Vec<u8>, SdkError> {
-        match self.append_group_gateway_delivery_for_recipient(
-            conversation_id,
-            "",
-            message_id,
-            entry,
-            "",
-        )? {
-            GroupGatewayDeliveryResult::Message(plaintext) => Ok(plaintext),
-            GroupGatewayDeliveryResult::SenderKeyDistribution(_) => Ok(Vec::new()),
-        }
+        let _ = (conversation_id, message_id, entry);
+        Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired group carrier; use authenticated generated receive".into(),
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn append_group_gateway_delivery_for_recipient(
         &self,
         conversation_id: &str,
@@ -86,7 +82,7 @@ impl RamfluxClient {
                     &encrypted_body,
                     &envelope,
                 )
-                .map(GroupGatewayDeliveryResult::Message);
+                .map(|_| GroupGatewayDeliveryResult::Message);
         }
         let conversation_id = group_sender_key_distribution_conversation_id(
             group_id,
@@ -101,7 +97,7 @@ impl RamfluxClient {
         validate_legacy_group_payload(&plaintext, group_id)?;
         self.persist_dm_session(&conversation_id, &entry.envelope.envelope_id, "recv", &session)?;
         if self.apply_group_control_plaintext(&plaintext)?.is_some() {
-            return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
+            return Ok(GroupGatewayDeliveryResult::Message);
         }
         let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&plaintext)?;
         if wrapper.schema != "ramflux.sdk.group_sender_key.distribution_envelope.v1" {
@@ -122,198 +118,10 @@ impl RamfluxClient {
         let parsed: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
         self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
         self.import_group_sender_key_distribution_inner(&distribution, false)
-            .map(|(distribution, _pending)| distribution)
-            .map(GroupGatewayDeliveryResult::SenderKeyDistribution)
+            .map(|_| GroupGatewayDeliveryResult::SenderKeyDistribution)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn append_group_gateway_delivery_for_recipient_with_gateway(
-        &self,
-        gateway: &GatewaySessionConfig,
-        conversation_id: &str,
-        group_id: &str,
-        message_id: &str,
-        entry: &GatewayInboxEntry,
-        recipient_device_id: &str,
-    ) -> Result<GroupGatewayDeliveryResult, SdkError> {
-        self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
-        self.append_gateway_delivery(entry)?;
-        let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-            .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
-        if let Ok(envelope) = serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
-            && crate::group::group_message_schema(&envelope.schema)
-        {
-            if envelope.group_id != group_id {
-                return Err(SdkError::InboundRejected(
-                    "legacy group envelope differs from requested group".to_owned(),
-                ));
-            }
-            return self
-                .append_or_pending_group_message(
-                    conversation_id,
-                    message_id,
-                    entry,
-                    &encrypted_body,
-                    &envelope,
-                )
-                .map(GroupGatewayDeliveryResult::Message);
-        }
-        let conversation_id = group_sender_key_distribution_conversation_id(
-            group_id,
-            &entry.envelope.source_device_id,
-            recipient_device_id,
-        );
-        let envelope: SdkDmEncryptedEnvelope = serde_json::from_slice(&encrypted_body)?;
-        let mut session =
-            self.load_or_create_recv_dm_session(&conversation_id, envelope.x3dh.as_ref())?;
-        let plaintext =
-            session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
-        validate_legacy_group_payload(&plaintext, group_id)?;
-        let control = self.account_db()?.write_transaction(|| {
-            if self.apply_group_control_plaintext(&plaintext)?.is_some() {
-                self.persist_dm_session(
-                    &conversation_id,
-                    &entry.envelope.envelope_id,
-                    "recv",
-                    &session,
-                )?;
-                return Ok::<_, SdkError>(true);
-            }
-            Ok(false)
-        })?;
-        if control {
-            return Ok(GroupGatewayDeliveryResult::Message(Vec::new()));
-        }
-        let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&plaintext)?;
-        if wrapper.schema != "ramflux.sdk.group_sender_key.distribution_envelope.v1" {
-            return Err(SdkError::LocalBus(format!(
-                "unsupported group sender-key distribution wrapper schema: {}",
-                wrapper.schema
-            )));
-        }
-        let bootstrap = self
-            .verify_sender_key_membership_bootstrap(gateway, recipient_device_id, &wrapper)
-            .await?;
-        let distribution = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
-            .map_err(|error| {
-                SdkError::LocalBus(format!("invalid sender key distribution payload: {error}"))
-            })?;
-        let parsed: SdkGroupSenderKeyDistribution = serde_json::from_slice(&distribution)?;
-        self.account_db()?.write_transaction(|| {
-            if let Some((event, key)) = bootstrap {
-                self.apply_bootstrap_group_member_join_event(
-                    &event,
-                    &entry.envelope.source_device_id,
-                    &key,
-                )?;
-            }
-            self.require_group_payload_sender(&parsed.group_id, &parsed.sender_id, entry)?;
-            let (distribution, _) =
-                self.import_group_sender_key_distribution_inner(&distribution, false)?;
-            self.persist_dm_session(
-                &conversation_id,
-                &entry.envelope.envelope_id,
-                "recv",
-                &session,
-            )?;
-            Ok(GroupGatewayDeliveryResult::SenderKeyDistribution(distribution))
-        })
-    }
-
-    pub(crate) async fn verify_sender_key_membership_bootstrap(
-        &self,
-        gateway: &GatewaySessionConfig,
-        recipient_device_id: &str,
-        wrapper: &SdkGroupSenderKeyDistributionEnvelope,
-    ) -> Result<Option<(ramflux_protocol::GroupEvent, String)>, SdkError> {
-        let Some(event) = Self::sender_key_membership_event(recipient_device_id, wrapper)? else {
-            return Ok(None);
-        };
-        let ramflux_protocol::GroupEventBody::MemberJoined { actor_principal_commitment, .. } =
-            &event.body
-        else {
-            return Err(SdkError::InboundRejected(
-                "group membership requires member_joined".into(),
-            ));
-        };
-        let actor_device = if let Some(manifest_url) =
-            wrapper.actor_manifest_url.as_deref().filter(|url| !url.is_empty())
-        {
-            self.assert_manifest_active_device_from_url_async(
-                super::contact::RemoteManifest {
-                    url: manifest_url,
-                    timeout: crate::prekey::SDK_HTTP_TIMEOUT,
-                },
-                actor_principal_commitment,
-                &event.actor_device_id,
-                "group.member_joined.bootstrap.federation",
-            )
-            .await
-        } else {
-            self.assert_manifest_active_device_cached(
-                gateway,
-                actor_principal_commitment,
-                &event.actor_device_id,
-                "group.member_joined.bootstrap",
-            )
-            .await
-        }
-        .map_err(|error| {
-            super::inbox_failure::lookup_error(
-                error,
-                "group bootstrap manifest verification is incomplete",
-            )
-        })?;
-        Self::verify_sender_key_membership_actor(event, &actor_device).map(Some)
-    }
-
-    pub(crate) fn sender_key_membership_event(
-        recipient_device_id: &str,
-        wrapper: &SdkGroupSenderKeyDistributionEnvelope,
-    ) -> Result<Option<ramflux_protocol::GroupEvent>, SdkError> {
-        let Some(event_base64) = wrapper.membership_event_base64.as_deref() else {
-            return Ok(None);
-        };
-        let event_bytes = ramflux_protocol::decode_base64url(event_base64).map_err(|error| {
-            SdkError::LocalBus(format!("invalid group membership event: {error}"))
-        })?;
-        let event: ramflux_protocol::GroupEvent = serde_json::from_slice(&event_bytes)?;
-        let ramflux_protocol::GroupEventBody::MemberJoined { joined_identity, .. } = &event.body
-        else {
-            return Err(SdkError::LocalBus(
-                "group sender-key membership event must be member_joined".to_owned(),
-            ));
-        };
-        if joined_identity != recipient_device_id {
-            return Err(SdkError::LocalBus(format!(
-                "group membership event joined identity {joined_identity} does not match local device {recipient_device_id}"
-            )));
-        }
-        Ok(Some(event))
-    }
-
-    pub(crate) fn verify_sender_key_membership_actor(
-        event: ramflux_protocol::GroupEvent,
-        actor_device: &crate::prekey::SdkDeviceManifestEntry,
-    ) -> Result<(ramflux_protocol::GroupEvent, String), SdkError> {
-        let ramflux_protocol::GroupEventBody::MemberJoined {
-            actor_device_signing_public_key, ..
-        } = &event.body
-        else {
-            return Err(SdkError::InboundRejected(
-                "group membership requires member_joined".into(),
-            ));
-        };
-        if actor_device.principal_id != event.actor_principal_id
-            || actor_device.branch_public_key != *actor_device_signing_public_key
-        {
-            return Err(SdkError::LocalBus(
-                "group membership event actor key does not match verified manifest".to_owned(),
-            ));
-        }
-        Ok((event, actor_device.branch_public_key.clone()))
-    }
-
+    #[cfg(test)]
     pub(crate) fn append_or_pending_group_message(
         &self,
         conversation_id: &str,
@@ -388,6 +196,7 @@ impl RamfluxClient {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_group_control_plaintext(
         &self,
         plaintext: &[u8],
@@ -404,6 +213,7 @@ impl RamfluxClient {
         Ok(Some(self.apply_group_control_event(&envelope.event)?))
     }
 
+    #[cfg(test)]
     pub(crate) fn group_sender_key_counter_seen(
         &self,
         envelope: &SdkGroupEncryptedEnvelope,
@@ -443,6 +253,7 @@ impl RamfluxClient {
     }
 }
 
+#[cfg(test)]
 fn validate_legacy_group_payload(body: &[u8], expected: &str) -> Result<(), SdkError> {
     let actual = if let Ok(control) = serde_json::from_slice::<SdkGroupControlEnvelope>(body) {
         serde_json::to_value(control.event.body)?
@@ -469,15 +280,64 @@ mod tests {
     use crate::client::native_test_support::{Fixture, TestResult};
 
     #[tokio::test]
-    async fn candidate_group_plan_stays_dormant_behind_schema_gate() -> TestResult {
+    async fn active_group_plan_uses_verified_members_and_refuses_absent_authority() -> TestResult {
         let owner = Fixture::with_device("p05-gd-owner", "owner").await?;
-        let plan = owner.client.candidate_group_target_plan(
+        let peer = Fixture::with_device("p05-gd-peer", "peer").await?;
+        owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+        let primary = owner
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("native account")?
+            .group_primary(owner.vault.as_ref())?;
+        owner.client.shared_group_create_with_primary(
             "g1",
-            "owner",
-            "event-1",
-            ramflux_protocol::message::KindId::KindControl,
+            "g1-thread",
+            None,
+            &owner.config.target_delivery_id,
+            Some(&primary),
         )?;
-        assert!(plan.is_none(), "generation 0 must skip the candidate group plan");
+        let member = peer.client.owned_group_actor(&peer.config.target_delivery_id)?;
+        owner.client.shared_group_change_with_primary(
+            "g1",
+            &owner.config.target_delivery_id,
+            ramflux_protocol::GroupStateChange::Add {
+                member: member.identity,
+                role: ramflux_protocol::SharedGroupRole::Member,
+            },
+            Some(&primary),
+        )?;
+        let plan = owner
+            .client
+            .candidate_group_target_plan(
+                "g1",
+                "owner",
+                "event-1",
+                ramflux_protocol::message::KindId::KindControl,
+            )?
+            .ok_or("active group plan")?;
+        assert!(
+            plan.representations.iter().any(|row| row
+                .targets
+                .iter()
+                .any(|target| target.device_id == peer.config.device_id)),
+            "generation 1 must plan the verified group peer",
+        );
+        assert!(
+            matches!(
+                owner.client.candidate_group_target_plan(
+                    "missing-group",
+                    "owner",
+                    "event-2",
+                    ramflux_protocol::message::KindId::KindControl,
+                ),
+                Err(crate::SdkError::GeneratedRefused {
+                    code: crate::GeneratedRefusalCode::Authority,
+                    ..
+                })
+            ),
+            "generation 1 must propagate missing group authority instead of skipping selection"
+        );
         Ok(())
     }
 }

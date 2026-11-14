@@ -17,9 +17,6 @@ impl RamfluxClient {
     }
 
     fn stage_native_self_sync_registers(&self, enrollment_only: bool) -> Result<(), SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(());
-        }
         let db = self.account_db()?;
         if db.actor_state_keys("self-sync/state/")?.is_empty() {
             return Ok(());
@@ -118,32 +115,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn generation_zero_backfill_preserves_existing_self_sync_registers_and_queues()
+    async fn active_backfill_refuses_unavailable_floor_bootstrap_without_revising_registers()
     -> TestResult {
         crate::client::native_test_support::watchdog::within(
-            generation_zero_backfill_preserves_existing_self_sync_registers_and_queues_body(),
+            active_backfill_refuses_unavailable_floor_bootstrap_without_revising_registers_body(),
         )
         .await?
     }
 
-    async fn generation_zero_backfill_preserves_existing_self_sync_registers_and_queues_body()
+    async fn active_backfill_refuses_unavailable_floor_bootstrap_without_revising_registers_body()
     -> TestResult {
         let mut own = Fixture::new("dormant-sync-backfill").await?;
         let sibling = own.enroll_sibling("dormant-sync-sibling", "sibling").await?;
-        {
-            let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-            own.client.change_self_sync(
-                "thread",
-                ramflux_protocol::message::SelfSync {
-                    operation: 6,
-                    mute: true,
-                    ..Default::default()
-                },
-            )?;
-        }
+
+        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        own.client.change_self_sync(
+            "thread",
+            ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
+        )?;
+
         assert!(
-            !crate::client::target_selection::schema_v1_selected(),
-            "backfill must be tested at generation zero"
+            ramflux_protocol::schema_profile::schema_v1_live(),
+            "backfill must be tested with the active profile"
         );
         let before = registers(&own.client)?;
         assert!(!before.is_empty(), "fixture must retain an actual previously written register");
@@ -151,12 +144,12 @@ mod tests {
         own.client.stage_native_self_sync_publications()?;
         assert!(
             registers(&own.client)? == before,
-            "directory backfill must not allocate revisions or enqueue dormant values"
+            "unavailable authenticated bootstrap must not allocate new revisions"
         );
         assert_eq!(
             sibling.client.account_db()?.actor_state_usage("self-sync/repair/")?.0,
             0,
-            "a dormant source must not deliver values to its admitted sibling"
+            "unavailable authenticated bootstrap must not publish values to the sibling"
         );
         Ok(())
     }

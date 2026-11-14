@@ -579,6 +579,8 @@ fn seal_control(
     mut control: Control,
     material: SendMaterial,
 ) -> Result<Option<ramflux_protocol::Envelope>, SdkError> {
+    use prost::Message as _;
+    use ramflux_protocol::message as g;
     if !current(account, &control.plan)? {
         return Ok(None);
     }
@@ -587,16 +589,27 @@ fn seal_control(
         NativeOperation::Call,
     )?;
     task_transport::direct_target_input(account, &control.plan.thread)?;
+
+    let call =
+        g::Call::decode(control.bytes.as_slice()).map_err(|_| invalid("invalid typed Call"))?;
+    let prepared = account.client.prepare_authored_content(
+        &mut control.message,
+        None,
+        &g::Content { value: Some(g::content::Value::Call(call)) },
+    )?;
     let sealed = account.client.seal_routed_prepared(
         &control.plan.config,
         &control.message,
-        &control.bytes,
+        &prepared.wire,
         crate::client::routed::Route::control(),
         material,
     )?;
-    control.message.encrypted_body = serde_json::to_vec(&sealed)?;
-    crate::dm::gateway_direct_message_envelope(&control.plan.config, &control.message, None)
-        .map(Some)
+    crate::dm::gateway_generated_envelope_from_sealed(
+        &control.plan.config,
+        &mut control.message,
+        sealed,
+    )
+    .map(Some)
 }
 async fn release(context: &SessionContext, writer: &Writer, id: &str) -> Result<(), SdkError> {
     let owned_id = id.to_owned();

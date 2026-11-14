@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded contact-control delivery through the ordinary authenticated device-pair transport.
-use super::{ContactRequestRecord, Decision, ENVELOPE_SCHEMA, TTL, conversation, invalid};
+use super::{ContactRequestRecord, Decision, TTL, conversation, invalid};
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -462,27 +462,14 @@ pub(in crate::client) async fn deliver(
             .await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
-    let bytes = if own_manifest.custody.is_some() {
-        super::native_delivery::approve(client, engine.config(), intent, &own_manifest).await?
-    } else {
-        let control = super::wire::sign(
-            client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            super::wire::Body {
-                schema: super::wire::DOMAIN.into(),
-                kind: intent.kind,
-                request_id: intent.request_id.clone(),
-                requester_root: intent.requester_root.clone(),
-                target_root: intent.target_root.clone(),
-                actor_root: own.root_commitment().into(),
-                issued_at: intent.issued_at,
-                expires_at: intent.expires_at,
-                nonce: intent.nonce.clone(),
-                note: intent.note.clone(),
-                manifest: own_manifest,
-            },
-        )?;
-        zeroize::Zeroizing::new(serde_json::to_vec(&control)?)
-    };
+    if own_manifest.custody.is_none() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Authority,
+            reason: "native custody consent authority required".into(),
+        });
+    }
+    let bytes =
+        super::native_delivery::approve(client, engine.config(), intent, &own_manifest).await?;
     if peer.devices.len() > 64 {
         return Err(invalid("contact request device fanout exceeds budget"));
     }
@@ -551,19 +538,15 @@ async fn send_one(
                 .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
         ),
     };
-    let mut sealed = client
+    let sealed = client
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())
         .await?;
-    if intent.kind == Decision::Request {
-        sealed.packet.schema = ENVELOPE_SCHEMA.into();
-    }
     // Control carrier; no Direct report payload.
     engine
-        .submit_envelope(crate::dm::gateway_envelope_from_sealed(
+        .submit_envelope(crate::dm::gateway_generated_envelope_from_sealed(
             engine.config(),
             &mut message,
             sealed,
-            None,
         )?)
         .await?;
     Ok(())

@@ -568,18 +568,18 @@ async fn offline_over_24h_still_receives_floor_in_dm_group_and_own_copy() -> Tes
 }
 
 #[test]
-fn schema_gate_off_skips_candidate_plan() -> TestResult {
-    assert!(!schema_v1_selected());
-    assert_eq!(ACTIVE_STORAGE_GENERATION, 0);
-    assert_eq!(MESSAGE_SCHEMA_V1_GENERATION, 1);
+fn active_schema_builds_candidate_plan() {
+    assert_eq!(ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, "schema v1 must be active");
     let built = Cell::new(false);
     let plan = RamfluxClient::candidate_target_plan(|| {
         built.set(true);
         Err(SdkError::CustodySetupInvalid)
-    })?;
-    assert!(plan.is_none());
-    assert!(!built.get(), "gate-off adapters must not construct a selection request");
-    Ok(())
+    });
+    assert!(
+        matches!(plan, Err(SdkError::CustodySetupInvalid)),
+        "selection must propagate authority refusal"
+    );
+    assert!(built.get(), "active adapters must construct the real selection request");
 }
 
 #[test]

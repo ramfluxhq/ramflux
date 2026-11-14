@@ -29,16 +29,6 @@ pub(super) async fn execute(
     account_id: &str,
     command: &AccountCommand,
 ) -> Result<Option<ActorResponse>, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        if is_transient(&command.request.method, &command.request.body) {
-            return Err(AdapterError::new(
-                GeneratedErrorCode::PeerUpgradeRequired,
-                "Typing requires schema generation 1",
-            )
-            .into());
-        }
-        return Ok(None);
-    }
     if command.request.method == "message.focus" {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -73,7 +63,7 @@ pub(super) async fn execute(
             nodes: None,
         }));
     }
-    if command.request.method != "message.submit" {
+    if !is_request(&command.request.method, &command.request.body) {
         return Ok(None);
     }
     let request = crate::bindings::decode_message_request(&command.request.body)?;

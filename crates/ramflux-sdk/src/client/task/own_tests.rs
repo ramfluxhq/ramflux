@@ -46,7 +46,10 @@ fn own_device_task_history_replays_verified_carriers_and_committed_decisions_ide
             sibling.task_message_metadata("thread", &message)?.ok_or("task row metadata")?;
         assert_eq!(metadata["content_type"], "task");
         assert_eq!(metadata["task_id"], "task");
-        assert!(sibling.direct_message_by_id(&message)?.is_some());
+        assert!(
+            sibling.direct_message_by_id(&message)?.is_none(),
+            "native history must not manufacture a fallback timeline row; raw Inner history owns canonical messages"
+        );
     }
 
     sibling.import_own_task_packets(&packets, "agent-device")?;

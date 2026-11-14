@@ -369,7 +369,8 @@ async fn r10_stalled_couriers_rotate_while_healthy_confirmations_finish() -> Cas
         Duration::from_secs(180),
         Box::pin(async {
             let mut fixture = courier_starvation_fixture()?;
-            exercise_courier_starvation(&mut fixture.human, &fixture.healthy_forward).await?;
+            Box::pin(exercise_courier_starvation(&mut fixture.human, &fixture.healthy_forward))
+                .await?;
             drop(fixture.human);
             drop(fixture.agent);
             std::fs::remove_dir_all(fixture.root)?;

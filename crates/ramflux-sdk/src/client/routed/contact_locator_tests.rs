@@ -24,8 +24,8 @@ async fn cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reje
     crate::node::DISCOVERY_CLIENT.scope(client, lan_round_trip(&bind)).await
 }
 async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin = Origin::bound(&directory, "contact.test", bind, Some("192.168.42.7")).await?;
     let mut s = state(&mut a, &mut b, &directory)?;
@@ -41,19 +41,7 @@ async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
     );
     let mut wrong = card.clone();
     wrong.node.key_fingerprint = "0".repeat(64);
-    let root = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("alice"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?;
-    let (wrong, _) = crate::contact_card::encode_contact_card(
-        wrong,
-        root.signing_key.to_bytes(),
-        now_unix_timestamp(),
-    )?;
+    let (wrong, _) = resign(&s, "alice", wrong)?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":wrong}))
         .await
         .err()
@@ -74,8 +62,8 @@ async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
 #[tokio::test]
 async fn cf02_export_and_import_refuse_public_http_with_a_distinct_bus_reason()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin = Origin::new(&directory).await?;
     let mut s = state(&mut a, &mut b, &directory)?;
@@ -87,26 +75,7 @@ async fn cf02_export_and_import_refuse_public_http_with_a_distinct_bus_reason()
         now_unix_timestamp(),
     )?;
     card.node.url = "http://203.0.113.7".into();
-    let root = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("alice"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?;
-    let signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::canonical_json_bytes(
-            &json!({"domain":"ramflux.contact.card.v1","body":card}),
-        )?,
-        root.signing_key.to_bytes(),
-    );
-    let text = format!(
-        "ramflux-card:v1:{}",
-        ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(
-            &json!({"body":card,"signature":signature})
-        )?)
-    );
+    let (text, _) = resign(&s, "alice", card)?;
     s.nodes.profiles.get_mut("contact.test").ok_or_else(|| invalid("profile"))?.discovery_url =
         "http://203.0.113.7".into();
     for (account, method, body) in
@@ -127,8 +96,8 @@ async fn cf02_export_and_import_refuse_public_http_with_a_distinct_bus_reason()
 #[tokio::test]
 async fn cf02_missing_and_stale_home_profiles_have_distinct_export_and_import_bus_reasons()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_same_home(&a, "bob").await?;
     let directory = Directory::new(&a, &b).await?;
     let origin = Origin::new(&directory).await?;
     let mut s = state(&mut a, &mut b, &directory)?;

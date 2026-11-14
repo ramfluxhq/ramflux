@@ -6,6 +6,7 @@
 use crate::prelude::*;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkOwnDeviceSyncEnvelope {
     pub(crate) schema: String,
     pub(crate) version: u32,
@@ -22,6 +23,7 @@ pub(crate) struct SdkOwnDeviceSyncEnvelope {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkOwnDeviceSyncSigningBody<'a> {
     pub(crate) schema: &'a str,
     pub(crate) version: u32,
@@ -39,6 +41,7 @@ pub(crate) struct SdkOwnDeviceSyncSigningBody<'a> {
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkOwnDeviceHistoryBundle {
     #[serde(default)]
     pub(crate) authority_only: bool,
@@ -79,6 +82,7 @@ pub(crate) struct SdkOwnDeviceHistoryBundle {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkOwnDeviceDmSessionSnapshot {
     pub(crate) conversation_id: String,
     pub(crate) direction: String,
@@ -117,15 +121,8 @@ pub(crate) struct SdkOwnDeviceGroupMemberSnapshot {
     pub(crate) joined_epoch: u64,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct SdkOwnDeviceSyncExportResponse {
-    pub(crate) snapshot_id: String,
-    pub(crate) object_id: String,
-    pub(crate) transfer: SdkObjectTransferStatus,
-    pub(crate) envelope: SdkOwnDeviceSyncEnvelope,
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg(test)]
 pub(crate) struct SdkOwnDeviceSyncImportResponse {
     pub(crate) snapshot_id: String,
     pub(crate) imported_messages: usize,
@@ -134,6 +131,7 @@ pub(crate) struct SdkOwnDeviceSyncImportResponse {
     pub(crate) imported_sender_keys: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn own_device_sync_slot_conversation_id(
     snapshot_id: &str,
     object_id: &str,
@@ -142,6 +140,7 @@ pub(crate) fn own_device_sync_slot_conversation_id(
     format!("own_device.sync.slot:{snapshot_id}:{object_id}:{target_device_id}")
 }
 
+#[cfg(test)]
 pub(crate) fn own_device_sync_signing_body(
     envelope: &SdkOwnDeviceSyncEnvelope,
 ) -> SdkOwnDeviceSyncSigningBody<'_> {
@@ -162,12 +161,14 @@ pub(crate) fn own_device_sync_signing_body(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn group_message_epoch(message: &DirectMessageRecord) -> Option<(String, u64)> {
     serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&message.encrypted_body)
         .ok()
         .map(|envelope| (envelope.group_id, envelope.group_key_epoch))
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for SdkOwnDeviceHistoryBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SdkOwnDeviceHistoryBundle").field("content", &"<redacted>").finish()

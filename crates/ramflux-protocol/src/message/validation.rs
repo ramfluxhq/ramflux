@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant structural validation, not native signature/role/consent admission.
+//! Structural validation; native signatures, roles and consent are checked by their owners.
 //! Native field value sets and proof validation stay with the named §3.1 owners:
 //! Surface P15, Call P16, Task P17, own-history P18 and `SelfSync` P19. No result
 //! from this module authorizes side effects or ACK; authenticated retention is P10.
@@ -134,7 +134,7 @@ pub fn scan_inner(bytes: &[u8]) -> Result<ScannedInner<'_>, ValidationError> {
         }
     }
     // Activation resets incompatible rows; old signed bytes are refused, never repaired.
-    if crate::schema_profile::ACTIVE_STORAGE_GENERATION >= 1 && layer < registry::PROFILE_FLOOR {
+    if layer < registry::PROFILE_FLOOR {
         return Err(ValidationError::Content);
     }
     if let Some(binding) = registry::kind_binding(kind) {

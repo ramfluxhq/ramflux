@@ -39,12 +39,12 @@ async fn legacy_card_synthetic_verification_agrees_across_views_without_authenti
     );
     let stamp_key = format!("identity/safety_verified_set/{root}");
     assert!(peer.client.account_db()?.load_actor_state::<String>(&stamp_key)?.is_none());
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verified");
+    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verification_stale");
     assert!(peer.client.verified_principal_kind("owner")?.is_none());
-    assert_eq!(peer.client.contact_entry("owner")?["verified"], true);
+    assert_eq!(peer.client.contact_entry("owner")?["verified"], false);
     assert_eq!(peer.client.contact_entry("owner")?["kind_verified"], false);
     peer.reopen()?;
-    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verified");
+    assert_eq!(peer.client.contact_safety_number(&root)?.verification_state, "verification_stale");
     let db = peer.client.account_db()?;
     let result = crate::bus::test_account_reader_request(db, directory_request(&peer.id)).await?;
     let row = result["identities"]
@@ -53,8 +53,8 @@ async fn legacy_card_synthetic_verification_agrees_across_views_without_authenti
         .iter()
         .find(|r| r["principal_id"] == "owner")
         .ok_or("owner")?;
-    assert_eq!(row["safety_state"], "verified");
-    assert_eq!(row["verified"], true);
+    assert_eq!(row["safety_state"], "verification_stale");
+    assert_eq!(row["verified"], false);
     assert_eq!(row["kind_verified"], false);
     assert!(db.load_actor_state::<String>(&stamp_key)?.is_none());
     Ok(())
@@ -109,9 +109,10 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
             .iter()
             .find(|r| r["principal_id"] == "owner")
             .ok_or("owner")?;
-        let expected = if matches { "verified" } else { "verification_stale" };
+        // A migration stamp preserves provenance but cannot authorize native safety.
+        let expected = "verification_stale";
         assert_eq!(row["safety_state"], expected);
-        assert_eq!(row["verified"], matches);
+        assert_eq!(row["verified"], false);
         assert_eq!(row["kind_verified"], true);
         assert_eq!(
             peer.client.contact_safety_verification_state(
@@ -126,7 +127,7 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
                 stamp,
                 Some(set_fingerprint(manifest.signed_device_set.as_ref().ok_or("set")?)?)
             );
-            assert_eq!(peer.client.verified_principal_kind("owner")?, Some(PrincipalKind::Human));
+            assert_eq!(peer.client.verified_principal_kind("owner")?, None);
         } else {
             assert!(stamp.is_none(), "a device-hash mismatch must not acquire a migration stamp");
             assert!(peer.client.verified_principal_kind("owner")?.is_none());
@@ -313,16 +314,23 @@ fn legacy_unlock_skips_corrupt_contact_warns_once_and_migrates_healthy_contact()
             &a.principal_commitment,
             healthy["device_set_hash"].as_str()
         )?,
-        "verified"
+        "verification_stale"
     );
-    assert!(matches!(
-        peer.client.contact_safety_verification_state(&b.principal_commitment, Some("hash")),
-        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
-    ));
-    assert!(matches!(
-        peer.client.verified_principal_kind("beta"),
-        Err(SdkError::Storage(ramflux_storage::StorageError::Serde(_)))
-    ));
+    assert_eq!(
+        peer.client.contact_safety_verification_state(&b.principal_commitment, Some("hash"))?,
+        "verification_stale",
+        "an old corrupt stamp cannot supply native custody authority"
+    );
+    assert!(peer.client.verified_principal_kind("beta")?.is_none());
+    assert!(
+        matches!(
+            db.load_actor_state::<ramflux_protocol::SignedDeviceSetRecord>(&record_key(
+                &b.principal_commitment
+            )),
+            Err(ramflux_storage::StorageError::Serde(_))
+        ),
+        "the malformed old proof must remain unreadable"
+    );
     tracing::subscriber::with_default(logs.clone(), || peer.reopen())?;
     let entries = logs.0.lock().map_err(|_| "log lock")?;
     let warnings = entries
@@ -459,7 +467,7 @@ fn markerless_backup_merge_baselines_only_winning_imported_verified_rows() -> Te
                     &incoming.principal_commitment,
                     imported["device_set_hash"].as_str()
                 )?,
-                if mode == "legacy" { "verified" } else { "verification_stale" }
+                "verification_stale"
             );
         }
     }

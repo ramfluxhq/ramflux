@@ -122,8 +122,13 @@ fn seal_content(
     let message = draft(a, b, id, 5)?;
     let identity = next_identity(a, &message.conversation_id)?;
     let raw = if unknown {
-        g::Inner { layer: 2, kind: 900, identity: Some(identity), body: vec![0xff, 0, 0x80] }
-            .encode_to_vec()
+        g::Inner {
+            layer: g::registry::PROFILE_FLOOR,
+            kind: 900,
+            identity: Some(identity),
+            body: vec![0xff, 0, 0x80],
+        }
+        .encode_to_vec()
     } else {
         RamfluxClient::encode_generated_inner(
             identity,
@@ -375,7 +380,7 @@ async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() ->
         &message.conversation_id,
         &target.message_id,
         "local",
-        "erase-future-edit",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase-future-edit"),
     )?;
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
     assert!(

@@ -13,6 +13,7 @@ use crate::prelude::*;
 pub(crate) struct PlaintextForward<'a> {
     pub message: GatewayDirectMessage,
     pub plaintext: &'a [u8],
+    pub content: Option<&'a ramflux_protocol::message::Content>,
     pub federation: &'a LocalBusFederationRoute,
     pub route: Route,
     pub franking: bool,
@@ -24,9 +25,39 @@ impl RamfluxClient {
         engine: &impl GatewaySessionAccess,
         request: PlaintextForward<'_>,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let PlaintextForward { mut message, plaintext, federation, route, franking, timeout } =
-            request;
+        let PlaintextForward {
+            mut message,
+            plaintext,
+            content,
+            federation,
+            route,
+            franking,
+            timeout,
+        } = request;
         Self::normalize_recipient(&mut message)?;
+        let authored;
+        let plaintext = if route.kind == crate::client::routed::Kind::Direct {
+            use ramflux_protocol::message as g;
+            let text_content;
+            let content = if let Some(content) = content {
+                self.validate_user_authored_content(content, &message.conversation_id)?;
+                content
+            } else {
+                let text = std::str::from_utf8(plaintext)
+                    .map_err(|_| SdkError::LocalBus("Message text must be UTF-8".into()))?;
+                text_content = g::Content {
+                    value: Some(g::content::Value::Message(g::Message {
+                        text: text.into(),
+                        ..Default::default()
+                    })),
+                };
+                &text_content
+            };
+            authored = self.prepare_authored_content(&mut message, None, content)?;
+            authored.wire.as_slice()
+        } else {
+            plaintext
+        };
         let sealed = self
             .seal_federated_message_async(
                 engine,
@@ -43,13 +74,11 @@ impl RamfluxClient {
             engine,
             &mut message,
             plaintext,
-            &sealed,
+            sealed,
             &FederatedSendOptions { franking, route },
         )?;
         trace_forward(federation, &pending.envelope);
-        let result = post(federation, pending.envelope, timeout).await;
-        self.finish_own_sent_copy(&pending.message, pending.own_copy.as_deref(), result.is_ok());
-        result
+        post(federation, pending.envelope, timeout).await
     }
 
     pub(crate) async fn send_plaintext_federated_contact_event_async(
@@ -63,6 +92,7 @@ impl RamfluxClient {
         self.send_plaintext_federated_message_async(
             engine,
             PlaintextForward {
+                content: None,
                 message,
                 plaintext: &body,
                 federation: &request.federation,

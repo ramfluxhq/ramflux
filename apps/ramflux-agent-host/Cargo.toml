@@ -31,7 +31,7 @@ workspace = true
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
-ramflux-sdk = { workspace = true, features = ["itest-restore-state"] }
+ramflux-sdk = { workspace = true, features = ["itest-restore-state", "test-support"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 ed25519-dalek.workspace = true
 bytes.workspace = true

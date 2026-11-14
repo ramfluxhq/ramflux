@@ -116,15 +116,15 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         GroupAction::Rename(rename) => handle_group_rename(&mut bus, rename).await,
         GroupAction::Send(send) => {
             let federation = rf_group_send_federation_route(&send)?;
+            let content = crate::utils::media_content(&send.body, &send.media_ref)?;
             let request = LocalBusGroupSendRequest {
+                content: Some(content),
                 group_id: send.group,
                 conversation_id: send.conversation,
                 message_id: send.message,
                 sender_id: send.sender,
                 encrypted_body_base64: String::new(),
-                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
-                    send.body.as_bytes(),
-                )),
+                plaintext_body_base64: None,
                 envelope_id: send.envelope,
                 source_principal_id: send.source_principal,
                 target_delivery_id: send.target,
@@ -157,19 +157,7 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
 }
 
 async fn handle_group_read(bus: &mut LocalBusClient, read: GroupRead) -> Result<(), RfError> {
-    if super::dm::unified::print_group_read(bus, &read.account, &read.group, &read.conversation)
-        .await?
-    {
-        return Ok(());
-    }
-    let request = LocalBusGroupReceiveRequest {
-        group_id: read.group,
-        conversation_id: read.conversation,
-        limit: 100,
-    };
-    print_json(&with_message_plaintext(
-        request_body(bus, Some(read.account), "group", "group.read", request).await?,
-    ))
+    super::dm::unified::print_group_read(bus, &read.account, &read.group, &read.conversation).await
 }
 
 async fn handle_group_rename(bus: &mut LocalBusClient, rename: GroupRename) -> Result<(), RfError> {
@@ -251,26 +239,33 @@ async fn handle_group_message(
 ) -> Result<(), RfError> {
     match message.action {
         GroupMessageAction::Delete(delete) => {
-            let everyone = matches!(delete.delete_scope.as_str(), "everyone" | "all");
-            let generated = bindings::cli::delete_message(
-                &delete.message,
-                &delete.account,
-                &delete.group,
-                delete.message.as_bytes(),
-                everyone,
-                None,
-            )?;
-            let (group_id, message_id) = bindings::cli::delete_payload(&generated)?;
-            let request = LocalBusGroupMessageDeleteRequest {
-                group_id,
-                actor_id: delete.actor,
-                message_id: String::from_utf8(message_id)
-                    .map_err(|err| RfError::Message(err.to_string()))?,
+            if delete.actor.is_some() || delete.reason.is_some() {
+                return Err(ramflux_sdk::SdkError::GeneratedRefused {
+                    code: ramflux_sdk::GeneratedRefusalCode::Content,
+                    reason: "caller-selected group delete actors/reasons are retired; authenticated generated Delete determines authority".into(),
+                }.into());
+            }
+            let metadata = request_body(
+                bus,
+                Some(delete.account.clone()),
+                "group",
+                "group.members",
+                LocalBusGroupRequest { group_id: delete.group },
+            )
+            .await?;
+            let conversation = metadata["conversation_id"]
+                .as_str()
+                .ok_or_else(|| RfError::Message("verified group conversation is missing".into()))?
+                .to_owned();
+            let request = LocalBusMessageDeleteRequest {
+                conversation_id: conversation,
+                message_id: delete.message,
                 delete_scope: delete.delete_scope,
-                reason: delete.reason,
+                tombstone_id: None,
+                operation_id: delete.operation_id,
             };
             print_json(
-                &request_body(bus, Some(delete.account), "group", "group.message.delete", request)
+                &request_body(bus, Some(delete.account), "message", "message.delete", request)
                     .await?,
             )
         }

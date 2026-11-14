@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant generated Control Inner conversion and native payload checks (S10a P15).
+//! Generated Control Inner conversion and native payload checks.
 //! Native adapters retain their authority checks; all receive effects join W1.
 mod receive;
 use super::generated_content::GeneratedEventStream;

@@ -75,7 +75,7 @@ fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
         &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"s","version":1,"surfaceHash":view["surface_hash"],"actionId":"approve","values":values,"argsHash":surface_args_hash(&values)?}),
     )?;
     let mut padded = b" ".repeat(160_000);
-    padded.extend(raw);
+    padded.extend(&raw);
     let signed = carrier(&f.human, PayloadKind::Action, "large", &padded)?;
     assert!(project(&f.author, &signed, "large")?.accepted);
     let result = f.author.surface_get("s", 0, None)?;
@@ -86,7 +86,9 @@ fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
         ramflux_protocol::decode_base64url(
             selected["actions"][0]["wire_base64"].as_str().ok_or("wire")?
         )?,
-        padded
+        ramflux_protocol::canonical_json_bytes(&serde_json::from_slice::<serde_json::Value>(
+            &raw
+        )?)?
     );
     assert!(serde_json::to_vec(&selected)?.len() < 512 * 1024);
     assert!(selected["actions"][0].get("carrier").is_none(), "wire must be present only once");

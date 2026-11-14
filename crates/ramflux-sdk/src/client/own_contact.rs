@@ -14,7 +14,7 @@ mod native_tests;
 #[path = "own_contact/retry_tests.rs"]
 mod retry_tests;
 mod tombstone;
-const PREFIX: &[u8] = b"ramflux.own_contact.v1\n";
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Contact {
@@ -70,10 +70,9 @@ impl RamfluxClient {
         if tombstone::is_packet(body) {
             return Ok(None);
         }
-        let Some(raw) = body.strip_prefix(PREFIX) else {
+        let Some(contact) = Contact::decode(body)? else {
             return Ok(None);
         };
-        let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
         let own = self.owned_device_identity()?;
         let peer = &contact.manifest.principal_commitment;
         let link = &contact.link;
@@ -154,8 +153,7 @@ impl RamfluxClient {
             return Ok(());
         }
         let link = self.account_db()?.friend_link(link)?;
-        let mut body = PREFIX.to_vec();
-        body.extend(serde_json::to_vec(&Contact { manifest: manifest.clone(), link })?);
+        let body = Contact { manifest: manifest.clone(), link }.bytes()?;
         self.stage_own_contact_body(&body)
     }
     fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
@@ -169,6 +167,7 @@ impl RamfluxClient {
         crate::bus::own_device_copy::stage(
             self,
             crate::client::own_device_copy::OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::Control,
                 id: &id,
                 created_at: crate::prelude::now_unix_timestamp(),
                 conversation: "own-contact",
@@ -245,9 +244,7 @@ impl RamfluxClient {
                         else {
                             continue;
                         };
-                        let mut body = PREFIX.to_vec();
-                        body.extend(serde_json::to_vec(&Contact { manifest, link: link.clone() })?);
-                        body
+                        Contact { manifest, link: link.clone() }.bytes()?
                     } else {
                         continue;
                     };
@@ -404,6 +401,7 @@ impl RamfluxClient {
     }
     /// The caller must authenticate the containing owned-root payload first: either an active
     /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
+    #[cfg(test)]
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
         Ok(self.receive_own_contact_outcome(body, OwnContactReceiveMode::Sibling)?
             != OwnContactReceiveOutcome::NotPacket)
@@ -416,10 +414,9 @@ impl RamfluxClient {
         if let Some(outcome) = self.receive_own_contact_tombstone(body, mode)? {
             return Ok(outcome);
         }
-        let Some(raw) = body.strip_prefix(PREFIX) else {
+        let Some(contact) = Contact::decode(body)? else {
             return Ok(OwnContactReceiveOutcome::NotPacket);
         };
-        let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
         self.apply_own_contact(&contact)
     }
 
@@ -487,6 +484,7 @@ impl RamfluxClient {
     }
 }
 
+#[cfg(test)]
 pub(super) fn is_tombstone_packet(body: &[u8]) -> bool {
     tombstone::is_packet(body)
 }
@@ -537,11 +535,7 @@ mod tests {
         let link = own.account_db()?.friend_link("accepted")?;
         let packet = |manifest: SdkDeviceManifestResponse,
                       link: ramflux_storage::FriendLinkRecord|
-         -> Result<Vec<u8>, SdkError> {
-            let mut bytes = PREFIX.to_vec();
-            bytes.extend(serde_json::to_vec(&Contact { manifest, link })?);
-            Ok(bytes)
-        };
+         -> Result<Vec<u8>, SdkError> { Contact { manifest, link }.bytes() };
         assert!(own.account_db()?.client_record("identity", "alice")?.is_none());
         assert!(own.receive_own_contact(&packet(manifest.clone(), link.clone())?)?);
         assert_eq!(own.trusted_recipient_root("shared")?, manifest.principal_commitment);
@@ -585,8 +579,7 @@ mod tests {
         link.blocked = false;
         link.state = "accepted".into();
         link.capability_revoked_at = None;
-        let mut packet = PREFIX.to_vec();
-        packet.extend(serde_json::to_vec(&Contact { manifest, link })?);
+        let packet = Contact { manifest, link }.bytes()?;
         assert!(own.receive_own_contact(&packet).is_err());
         assert_eq!(own.account_db()?.friend_link("collision")?, before);
         drop((own, peer, other));

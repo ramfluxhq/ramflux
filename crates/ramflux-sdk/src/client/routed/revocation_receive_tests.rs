@@ -111,7 +111,7 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                     } else {
                         state.accepted += 1;
                         let cursor = GatewayCursor {
-                            target_delivery_id: "bob".into(),
+                            target_delivery_id: self.entry.target_delivery_id.clone(),
                             inbox_seq: self.entry.inbox_seq,
                             last_envelope_id: Some(self.entry.envelope.envelope_id.clone()),
                             acked_envelope_ids: vec![self.entry.envelope.envelope_id.clone()],
@@ -157,37 +157,58 @@ struct Case {
     state: Arc<Mutex<WireState>>,
 }
 impl Case {
-    fn new(legacy: bool, failures: usize) -> Result<Self, Box<dyn std::error::Error>> {
-        let a = Fixture::new("alice", 21)?;
-        let b = Fixture::new("bob", 31)?;
-        b.client.establish_friend_link("friend", "bob", "alice")?;
+    async fn new(legacy: bool, failures: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let a = Fixture::native_named("alice", 21).await?;
+        let mut b = Fixture::native_named("bob", 31).await?;
+        review::trust(&a, &b)?;
+        review::trust(&b, &a)?;
+        b.client.establish_friend_link(
+            "revocation-friend",
+            &a.client.own_account_anchor()?,
+            &b.client.own_account_anchor()?,
+        )?;
+        let original = generated_delivery(&a, &b, "revoke-original", "original")?;
+        receive_generated(&mut b, &original.entry).await?;
         let db = b.client.account_db()?;
+        let owner = a.client.own_account_anchor()?;
         db.persist_client_record(
-            "object",
-            "missing-object",
+            "object", "missing-object",
             &if legacy {
-                json!({"owner":"alice","message_id":"original-message","manifest_hash":"manifest"})
-            } else {
-                json!({"owner":"alice"})
-            },
+                json!({"owner":owner,"message_id":original.message,"conversation_id":original.conversation,"manifest_hash":"manifest"})
+            } else { json!({"owner":owner}) },
         )?;
         if legacy {
-            db.send_direct_message("thread", "original-message", "alice", b"original")?;
             db.persist_actor_state("attachment/reference/missing-object", &json!({"reference":{"object_id":"missing-object","manifest_hash":"manifest","plaintext_hash":"plaintext"}}))?;
         }
-        let entry = seal_as(
-            &a,
-            &b,
-            message("signed-revoke", "thread"),
-            &serde_json::to_vec(
-                &json!({"type":"object.revoke_access","object_id":"missing-object"}),
-            )?,
-            Route::control(),
+        let root = b.client.own_account_anchor()?;
+        let exact = a.client.generated_object_revoke_inner(
+            ramflux_protocol::message::ObjectRevokeAccess {
+                object_id: "missing-object".into(),
+                recipient_principal_id: root.clone(),
+                link_id: "revoke-link".into(),
+                reason: "withdraw access".into(),
+                effective_at: now_unix_timestamp(),
+            },
+            &root,
         )?;
+        let (identity, _) = RamfluxClient::decode_generated_inner(&exact)?;
+        let mut request = message("signed-revoke", &identity.conversation_id);
+        request.message_id = ramflux_protocol::encode_base64url(identity.id);
+        request.recipient_principal_commitment = Some(root);
+        request.target_delivery_id = b.config()?.target_delivery_id;
+        let (mut request, sealed) = seal_native_fixture(&a, &b, request, &exact, Route::control())?;
+        let envelope =
+            crate::dm::gateway_generated_envelope_from_sealed(&a.config()?, &mut request, sealed)?;
+        let entry = GatewayInboxEntry {
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            envelope,
+            forwarded: false,
+            inbox_seq: 2,
+        };
         let sql = connection(&b)?;
         let retained: usize =
             sql.query_row("SELECT count(*) FROM object_retention_reference", [], |r| r.get(0))?;
-        assert_eq!(retained, 0, "legacy actor must not rely on a retention edge");
+        assert_eq!(retained, 0, "cached record must not rely on a retention edge");
         let state = Arc::new(Mutex::new(WireState { failures, ..WireState::default() }));
         Ok(Self { _a: a, b, sql, entry, state })
     }
@@ -203,7 +224,8 @@ impl Case {
             ),
         };
         let engine = GatewaySessionEngine::with_test_transport(self.b.config()?, Box::new(wire));
-        Ok(LocalBusAccountState::new(std::mem::take(&mut self.b.client), engine, "bob".into()))
+        let root = self.b.client.own_account_anchor()?;
+        Ok(LocalBusAccountState::new(std::mem::take(&mut self.b.client), engine, root))
     }
     fn snapshot(&self) -> Result<Snapshot, rusqlite::Error> {
         [
@@ -216,7 +238,12 @@ impl Case {
         ]
         .into_iter()
         .map(|table| {
-            let mut query = self.sql.prepare(&format!("SELECT * FROM {table} ORDER BY 1"))?;
+            // Native refusal commits its authenticated pair checkpoint; unrelated networking,
+            // receipts and maintenance also advance. Compare only object admission/ownership.
+            let sql = if table == "runtime_actor_state" {
+                "SELECT * FROM runtime_actor_state WHERE state_kind LIKE 'directory/object/%' OR state_kind LIKE 'attachment/%' OR state_kind LIKE 'routed/generated-identity/%' ORDER BY 1".to_owned()
+            } else { format!("SELECT * FROM {table} ORDER BY 1") };
+            let mut query = self.sql.prepare(&sql)?;
             let count = query.column_count();
             query.query_map([], |row| (0..count).map(|n| row.get(n)).collect())?.collect()
         })
@@ -228,11 +255,11 @@ impl Case {
             self.sql.query_row("SELECT error_code FROM runtime_inbox_dead_letter", [], |row| {
                 row.get(0)
             })?;
-        assert_eq!(code, "routing_rejected");
+        assert_eq!(code, "generated_authority");
         assert_eq!(client.account_db()?.unrouted_count()?, 0);
         assert_eq!(
             self.state.lock().map_err(|_| "wire mutex")?.codes.last().map(String::as_str),
-            Some("routing_rejected"),
+            Some("generated_authority"),
             "dead letter must commit before transport ACK"
         );
         Ok(())
@@ -255,7 +282,10 @@ fn connection(b: &Fixture) -> Result<rusqlite::Connection, Box<dyn std::error::E
     let vault = FileVaultSecretSource::new(&b.root).vault_secret("bob")?;
     let wrapped = b.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
-        &crate::client::account::account_db_key_encryption_key(&vault, b"routed-test"),
+        &crate::client::account::account_db_key_encryption_key(
+            &vault,
+            b"native fixture data passphrase",
+        ),
         &wrapped,
     )?;
     let sql = rusqlite::Connection::open(&b.client.account_db()?.path)?;
@@ -268,13 +298,13 @@ fn connection(b: &Fixture) -> Result<rusqlite::Connection, Box<dyn std::error::E
 }
 fn assert_refusal(error: &SdkError) {
     assert!(
-        matches!(error, SdkError::InboundRejected(reason) if reason == "object revocation has no admissible manifest source"),
+        matches!(error, SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Authority, reason } if reason == "object revoke names no received reference"),
         "{error:?}"
     );
-    assert_eq!(crate::client::inbox_failure::deterministic(error), Some("routing_rejected"));
+    assert_eq!(crate::client::inbox_failure::deterministic(error), Some("generated_authority"));
 }
 async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
-    let mut c = Case::new(false, failures)?;
+    let mut c = Case::new(false, failures).await?;
     assert_refusal(&c.raw_error().await?);
     // Include the driver's unrelated contact-maintenance markers in the baseline.
     c.b.client.maintain_contact_requests()?;
@@ -304,7 +334,10 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
         if n == 0 {
             assert!(applied >= 1, "first pass must cover the rejected entry, got {applied}");
         }
-        assert_eq!(account.client.gateway_receive_cursor("bob")?, c.entry.inbox_seq);
+        assert_eq!(
+            account.client.gateway_receive_cursor(&c.entry.target_delivery_id)?,
+            c.entry.inbox_seq
+        );
         c.rejected(&account.client)?;
         let codes: Vec<String> = c
             .sql
@@ -313,13 +346,12 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
             .collect::<Result<_, _>>()?;
         assert_eq!(
             codes,
-            vec!["routing_rejected"],
+            vec!["generated_authority"],
             "W1 terminal cover quarantines once; redelivery is AlreadyCovered"
         );
-        assert_eq!(
-            c.snapshot()?,
-            before,
-            "rejection must not change objects, references or actors"
+        assert!(
+            c.snapshot()? == before,
+            "rejection changed objects, references or authenticated owners"
         );
         let retries = account.client.account_db()?.due_inbox_retries(i64::MAX)?;
         assert_eq!(retries.len(), 0, "deterministic reject retires the inbox retry at cover");
@@ -365,9 +397,9 @@ async fn e11_ack_driven_replay_is_deterministic_and_idempotent() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(replay(2, 3, false))).await
 }
 #[tokio::test]
-async fn e11_legacy_actor_with_owner_and_message_id_succeeds() -> TestResult {
+async fn e11_authenticated_original_with_cached_manifest_succeeds() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(async {
-        let mut c = Case::new(true, 0)?;
+        let mut c = Case::new(true, 0).await?;
         let mut account = c.account()?;
         let applied = sync_driver::run_at(&mut account, now_unix_timestamp()).await?;
         assert!(applied >= 1, "legacy actor must cover, got {applied}");
@@ -391,7 +423,7 @@ async fn e11_legacy_actor_with_owner_and_message_id_succeeds() -> TestResult {
 #[tokio::test]
 async fn e11_storage_io_failure_still_propagates() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(async {
-        let mut c = Case::new(true, 0)?;
+        let mut c = Case::new(true, 0).await?;
         c.sql.execute_batch("CREATE TRIGGER fail_revocation BEFORE INSERT ON object_index BEGIN SELECT RAISE(ABORT,'revocation writer failed'); END;")?;
         let error = c.raw_error().await?;
         assert!(matches!(error, SdkError::Storage(ramflux_storage::StorageError::Sqlite(_))), "{error:?}");
@@ -412,7 +444,7 @@ async fn e11_storage_io_failure_still_propagates() -> TestResult {
     })).await
 }
 async fn refused_forged_ack(tamper: &'static str, reason: &'static str) -> TestResult {
-    let mut c = Case::new(false, 0)?;
+    let mut c = Case::new(false, 0).await?;
     c.state.lock().map_err(|_| "wire mutex")?.tamper = Some(tamper);
     let mut account = c.account()?;
     let key = account.client.inbox_admission_key(&c.entry)?;

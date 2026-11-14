@@ -53,10 +53,7 @@ pub fn sign_canonical_bytes_with_device_branch(bytes: &[u8], branch: &DeviceBran
 fn protocol_signing_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CryptoError> {
     let object = serde_json::to_value(value).map_err(ramflux_protocol::ProtocolError::from)?;
     let schema = object.get("schema").and_then(serde_json::Value::as_str);
-    if schema == Some("ramflux.envelope.v2")
-        || (ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION == 1
-            && schema == Some("ramflux.envelope.v1"))
-    {
+    if matches!(schema, Some("ramflux.envelope.v1" | "ramflux.envelope.v2")) {
         return Ok(ramflux_protocol::sender_signed_transcript(
             value,
             ramflux_protocol::SenderTranscriptMode::WithCiphertext,

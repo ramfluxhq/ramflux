@@ -128,8 +128,7 @@ pub(super) struct Decoded {
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Option<Decoded>, SdkError> {
-    if crate::client::target_selection::schema_v1_selected()
-        && let Ok(inner) = g::Inner::decode(bytes)
+    if let Ok(inner) = g::Inner::decode(bytes)
         && inner.kind == 8
     {
         let body = zeroize::Zeroizing::new(inner.body);
@@ -154,12 +153,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Option<Decoded>, SdkError> {
         }
         return Ok(None);
     }
-    // Dormant pre-activation callers still provide this one concrete native packet.
-    // LAST removes the legacy live wire admission; no schema string selects another codec.
-    Ok(ramflux_protocol::parse_i_json::<GroupControlPacket>(bytes)
-        .ok()
-        .filter(|packet| packet.schema == super::controls::CONTROL_SCHEMA)
-        .map(|packet| Decoded { packet, supported: true }))
+    Ok(None)
 }
 
 impl crate::RamfluxClient {

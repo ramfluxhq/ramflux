@@ -660,11 +660,11 @@ mod tests {
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
 
     #[test]
-    fn candidate_profile_token_is_not_advertised_while_gate_off() {
-        assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    fn active_profile_token_is_advertised() {
+        assert!(ramflux_protocol::schema_profile::schema_v1_live());
         let versions = super::advertised_client_protocol_versions(&["v1".to_owned()]);
-        assert_eq!(versions, vec!["v1".to_owned()]);
-        assert!(!versions.iter().any(|version| {
+        assert!(versions.iter().any(|version| version == "v1"));
+        assert!(versions.iter().any(|version| {
             version == ramflux_protocol::message::outer::MESSAGE_SCHEMA_V1_PROFILE
         }));
     }

@@ -1,163 +1,116 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! A malformed directory response must not consume a legacy distribution's ratchet.
-use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-async fn manifest_gateway(
-    root: &std::path::Path,
-    valid: serde_json::Value,
-) -> Result<
-    (
-        std::net::SocketAddr,
-        PathBuf,
-        Arc<AtomicUsize>,
-        tokio::task::JoinHandle<Result<(), SdkError>>,
-    ),
-    SdkError,
-> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let cert = rcgen::generate_simple_self_signed(vec!["lookup.test".into()])
-        .map_err(|e| invalid(&e.to_string()))?;
-    let ca = root.join("lookup.pem");
-    std::fs::write(&ca, cert.cert.pem())?;
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert.cert.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
-        )
-        .map_err(|e| invalid(&e.to_string()))?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
-    let server = tokio::spawn(async move {
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-        while let Ok((socket, _)) = listener.accept().await {
-            let stream = tokio_rustls::TlsStream::Server(acceptor.accept(socket).await?);
-            let (mut receive, mut send) = tokio::io::split(stream);
-            let request: ramflux_transport::GatewayQuicRequest =
-                ramflux_transport::read_gateway_session_json(&mut receive).await?;
-            assert_eq!(request.method, "GET");
-            assert!(request.path.starts_with("/mvp1/device-manifest/"));
-            let first = observed.fetch_add(1, Ordering::SeqCst) == 0;
-            ramflux_transport::write_gateway_session_json(
-                &mut send,
-                &ramflux_transport::GatewayQuicResponse {
-                    status: 200,
-                    body: if first { serde_json::json!({"malformed":true}) } else { valid.clone() },
-                },
-            )
-            .await?;
-        }
-        Ok(())
-    });
-    Ok((address, ca, calls, server))
-}
-#[tokio::test]
+//! A malformed directory reply must not consume the generated snapshot's pair ratchet.
+use crate::SdkError;
+use crate::client::native_test_support::{Fixture, TestResult, directory::Directory, watchdog};
+use ramflux_protocol::{GroupStateChange, SharedGroupRole, message as g};
+
+#[tokio::test(flavor = "current_thread")]
 async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distribution_retries()
--> Result<(), SdkError> {
-    let (alice, bob) = setup()?;
-    alice.client.create_group("bootstrap", "alice")?;
-    alice.client.add_group_member(
-        "bootstrap",
-        bob.client.owned_device_identity()?.storage_key(),
-        "member",
-    )?;
-    let manifest = super::super::r9::manifest(&alice)?;
-    let event = alice.client.create_signed_group_member_join_event(
-        "bootstrap",
-        "alice",
-        "bob",
-        "member",
-        &manifest.principal_commitment,
-    )?;
-    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
-        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".into(),
-        version: 1,
-        membership_event_base64: Some(ramflux_protocol::encode_base64url(serde_json::to_vec(
-            &event,
-        )?)),
-        actor_manifest_url: None,
-        distribution_base64: ramflux_protocol::encode_base64url(
-            alice.client.export_group_sender_key_distribution("bootstrap", "alice")?,
-        ),
-    };
-    let conversation = group_sender_key_distribution_conversation_id("bootstrap", "alice", "bob");
-    let msg = message("bootstrap-distribution", &conversation);
-    let bundle = bob.client.load_x3dh_private_state(&bob.client.owned_device_identity()?)?.bundle;
-    let (mut session, x3dh) =
-        alice.client.create_send_dm_session_from_bundle(&msg, "bob", bundle, "alice")?;
-    let encrypted = SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(
-            alice.client.owned_device_identity()?.root_commitment().into(),
-        ),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        x3dh,
-        ciphertext: session
-            .encrypt(&serde_json::to_vec(&wrapper)?, dm_associated_data(&conversation))?,
-        collapse_tag: None,
-        report_commitment: None,
-    };
-    let entry = packet(&alice, serde_json::to_vec(&encrypted)?, "bootstrap-distribution")?;
-    let (address, ca, calls, server) =
-        manifest_gateway(&bob.root, serde_json::to_value(manifest)?).await?;
-    let mut config = bob.config()?;
-    config.transport_kind = GatewaySessionTransportKind::TcpTls;
-    config.tcp_gateway_addr = Some(address);
-    config.server_name = "lookup.test".into();
-    config.ca_cert = ca;
-    let result = bob
+-> TestResult {
+    watchdog::within(exercise()).await?
+}
+
+async fn exercise() -> TestResult {
+    let source = Fixture::new("bootstrap-retry-source").await?;
+    let mut target = Fixture::new("bootstrap-retry-target").await?;
+    source.client.persist_fetched_identity_directory(&target.manifest)?;
+    let primary = source
         .client
-        .append_group_gateway_delivery_for_recipient_with_gateway(
-            &config,
-            "bootstrap-thread",
-            "bootstrap",
-            "bootstrap-distribution",
-            &entry,
-            "bob",
-        )
-        .await;
-    assert!(matches!(
-        &result,
-        Err(SdkError::InboundPending(_)
-            | SdkError::SenderManifestRequired { .. }
-            | SdkError::FreshHeadRequired { .. })
-    ));
-    assert!(matches!(
-        bob.client.isolate_legacy_group_delivery(&entry, result)?,
-        crate::client::group_quarantine::LegacyGroupDelivery::Held
-    ));
-    assert!(bob.client.load_dm_session(&conversation, "recv").is_err());
-    assert!(bob.client.group_state("bootstrap").is_err());
+        .born_v3_account
+        .as_ref()
+        .ok_or("native owner")?
+        .group_primary(source.vault.as_ref())?;
+    source.client.shared_group_create_with_primary(
+        "bootstrap",
+        "bootstrap-thread",
+        None,
+        &source.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let state = source.client.shared_group_change_with_primary(
+        "bootstrap",
+        &source.config.target_delivery_id,
+        GroupStateChange::Add {
+            member: target.client.owned_group_actor(&target.config.target_delivery_id)?.identity,
+            role: SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    // Explicit local acceptance precedes the network snapshot. The remote sender
+    // still needs its current native directory proof before the pair can open.
+    target.client.accept_shared_group_state(&state, &target.config.target_delivery_id)?;
+    let exact = source
+        .client
+        .shared_group_packet_for_recipient(&state, &target.client.owned_device_identity()?)?;
+    let envelope = source.seal_inner_to(&target, &exact)?;
+    let directory =
+        Directory::malformed_once(vec![source.manifest.clone(), target.manifest.clone()]).await?;
+    directory.configure(&mut target);
+    let before = target.client.account_db()?.actor_state_keys("dm-pair/")?;
+    let first = target.receive(envelope.clone(), 1).await;
     assert!(
-        !bob.client
-            .account_db()?
-            .journal_after(0, 100)?
-            .iter()
-            .any(|e| e.topic == "message.undeliverable")
+        matches!(
+            first.as_ref().err().and_then(|error| error.downcast_ref::<SdkError>()),
+            Some(
+                SdkError::InboundPending(_)
+                    | SdkError::DirectoryAuthorityUnavailable { .. }
+                    | SdkError::SenderManifestRequired { .. }
+                    | SdkError::FreshHeadRequired { .. }
+            )
+        ),
+        "malformed directory success must hold the original envelope: {first:?}"
     );
-    let result = bob
-        .client
-        .append_group_gateway_delivery_for_recipient_with_gateway(
-            &config,
-            "bootstrap-thread",
-            "bootstrap",
-            "bootstrap-distribution",
-            &entry,
-            "bob",
-        )
-        .await?;
-    assert!(matches!(result, GroupGatewayDeliveryResult::SenderKeyDistribution(_)));
-    assert!(bob.client.load_dm_session(&conversation, "recv").is_ok());
-    assert_eq!(bob.client.group_state("bootstrap")?.group_epoch, 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    server.abort();
-    let _ = server.await;
+    let failed_fetches = directory.requests_for(&source.client.own_account_anchor()?)?;
+    assert_eq!(failed_fetches, 1, "the first malformed response must stop the first attempt");
+    assert_eq!(
+        target.client.account_db()?.actor_state_keys("dm-pair/")?,
+        before,
+        "failed authorization consumed the pair ratchet"
+    );
+    assert_eq!(
+        target
+            .client
+            .account_db()?
+            .shared_group_state("bootstrap")?
+            .ok_or("accepted state")?
+            .snapshot()
+            .state_hash,
+        state.snapshot().state_hash,
+        "failed authorization changed the independently accepted state"
+    );
+    target.receive(envelope, 1).await?;
+    assert_eq!(
+        target
+            .client
+            .account_db()?
+            .shared_group_state("bootstrap")?
+            .ok_or("group")?
+            .snapshot()
+            .state_hash,
+        state.snapshot().state_hash
+    );
+    assert!(
+        directory.requests_for(&source.client.own_account_anchor()?)? > failed_fetches,
+        "the identical snapshot must refetch current native authority before retrying"
+    );
+    let identity = source.client.allocate_generated_identity(
+        "bootstrap-thread",
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let message = source.client.encrypt_generated_group_inner(
+        "bootstrap",
+        &source.config.device_id,
+        identity,
+        &g::Message { text: "after authentic bootstrap retry".into(), ..Default::default() },
+    )?;
+    target.receive(source.seal_inner_to(&target, &message)?, 2).await?;
+    assert_eq!(
+        target.client.generated_message_detail("bootstrap-thread", &id)?.message.text.as_deref(),
+        Some("after authentic bootstrap retry")
+    );
     Ok(())
 }

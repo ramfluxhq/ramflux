@@ -78,11 +78,12 @@ async fn routes(
             sender_id: account.gateway_config.device_id.clone(),
             encrypted_body_base64: String::new(),
             plaintext_body_base64: None,
+            content: None,
             envelope_id: None,
             source_principal_id: None,
             target_delivery_id: None,
             federation: None,
-            ttl: Some(account.client.content_ttl()?),
+            ttl: Some(prepared.ttl),
         };
         return super::super::group_delivery::resolve_current(account, &body).await;
     }
@@ -143,7 +144,10 @@ async fn submit(
     let message = GatewayDirectMessage {
         conversation_id: prepared.identity.conversation_id.clone(),
         message_id: event.into(),
-        envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        envelope_id: ramflux_crypto::blake3_256_base64url(
+            "ramflux.conversation.mutation.envelope.v1",
+            &ramflux_protocol::canonical_json_bytes(&(event, &target_key))?,
+        ),
         source_principal_id: source.principal_id.clone(),
         sender_id: source.device_id.clone(),
         recipient_device_id: Some(route.member_id),
@@ -152,8 +156,8 @@ async fn submit(
             AdapterError::new(Code::NotConnected, "recipient delivery route absent")
         })?,
         encrypted_body: Vec::new(),
-        created_at: now_unix_timestamp(),
-        ttl: account.client.content_ttl()?,
+        created_at: prepared.created_at,
+        ttl: prepared.ttl,
     };
     let mut engine = account.session_client().await?;
     let reconcile = || reconcile_accepted(&account.client, prepared, &target_key);

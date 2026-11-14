@@ -17,9 +17,6 @@ impl RamfluxClient {
         principal: &str,
         require_contact: bool,
     ) -> Result<String, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Err(content("generated durable profile is not selected"));
-        }
         let root = message
             .recipient_principal_commitment
             .as_deref()

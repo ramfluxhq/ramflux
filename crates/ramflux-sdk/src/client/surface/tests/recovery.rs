@@ -41,10 +41,14 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
     assert_eq!(after["out_of_sync"], true);
     Ok(())
 }
-#[test]
-fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
+#[tokio::test(flavor = "current_thread")]
+async fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
 -> TestResult {
-    let terminals = devices::Terminals::new()?;
+    crate::client::native_test_support::watchdog::within(only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges_body()).await?
+}
+async fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges_body()
+-> TestResult {
+    let terminals = Box::pin(devices::Terminals::new()).await?;
     let [author, sibling, human, human_two] = terminals.clients.as_slice() else {
         return Err("terminals".into());
     };
@@ -73,9 +77,9 @@ fn only_original_author_answers_each_device_once_in_one_surface_window_and_recov
     assert!(human_two.prepare_surface_resync_request(&reference).is_err());
     let request = human.prepare_surface_resync_request(&reference)?.ok_or("request")?;
     assert!(human.prepare_surface_resync_request(&reference)?.is_none());
-    let bytes = serde_json::to_vec(&request)?;
+    let bytes = request.bytes();
     for (i, receiver) in [author, sibling].into_iter().enumerate() {
-        let entry = devices::entry(human, &format!("request-{i}"))?;
+        let entry = devices::entry(human, receiver, &format!("request-{i}"))?;
         assert!(receiver.receive_surface_resync_request(&entry, "thread", &bytes)?);
         let answer = receiver.take_surface_resync_answer(&entry)?;
         if i == 0 {
@@ -91,23 +95,23 @@ fn only_original_author_answers_each_device_once_in_one_surface_window_and_recov
     }
     // Only the requesting device receives a reply; siblings share the surface window but each
     // can recover once. A second envelope from that same device cannot elicit another reply.
-    let again = devices::entry(human_two, "request-again")?;
+    let again = devices::entry(human_two, author, "request-again")?;
     assert!(author.receive_surface_resync_request(&again, "thread", &bytes)?);
     let second = author.take_surface_resync_answer(&again)?.ok_or("second device response")?;
     assert_eq!(second.destination.device, "human-two");
     assert!(project(human_two, &second.carrier, "second-resync")?.accepted);
-    let duplicate = devices::entry(human_two, "request-again-duplicate")?;
+    let duplicate = devices::entry(human_two, author, "request-again-duplicate")?;
     author.receive_surface_resync_request(&duplicate, "thread", &bytes)?;
     assert!(author.take_surface_resync_answer(&duplicate)?.is_none());
     assert_eq!(author.account_db()?.actor_state_usage("surface/resync_answered/")?.0, 1);
     sibling.mark_surface_out_of_sync(&create, 2)?;
     let own = sibling.prepare_surface_resync_request(&reference)?.ok_or("sibling request")?;
-    let entry = devices::entry(sibling, "sibling-needs-resync")?;
-    author.receive_surface_resync_request(&entry, "thread", &serde_json::to_vec(&own)?)?;
+    let entry = devices::entry(sibling, author, "sibling-needs-resync")?;
+    author.receive_surface_resync_request(&entry, "thread", &own.bytes())?;
     let own_reply = author.take_surface_resync_answer(&entry)?.ok_or("own resync response")?;
     assert!(project(sibling, &own_reply.carrier, "own-resync")?.accepted);
     assert_eq!(sibling.surface_get("s", 0, None)?["out_of_sync"], false);
-    let mut foreign = devices::entry(human, "wrong-principal")?;
+    let mut foreign = devices::entry(human, author, "wrong-principal")?;
     foreign.envelope.source_principal_id = "unrelated".into();
     assert!(author.receive_surface_resync_request(&foreign, "thread", &bytes).is_err());
     Ok(())

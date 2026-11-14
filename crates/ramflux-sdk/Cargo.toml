@@ -52,6 +52,7 @@ ramflux-client-model = { version = "0.1.0", path = "../ramflux-client-model", op
 ramflux-card = { version = "0.1.0", path = "../ramflux-card", optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
+prost-reflect = "=0.16.5"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -110,6 +111,7 @@ rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"]
 
 [dev-dependencies]
 ramflux-test-support.workspace = true
+syn = { version = "2.0", features = ["full", "visit"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }

@@ -3,7 +3,7 @@
 
 //! One bounded account worker. Decoder attempts and projection share the writer commit.
 use crate::client::identity_authority::HeadUse;
-use crate::client::routed::{Committed, Kind, Routing, generated_receive::Provenance};
+use crate::client::routed::{Kind, Routing, generated_receive::Provenance};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message::{
     self as g,
@@ -341,78 +341,14 @@ impl RamfluxClient {
             }
             (verified.author.device, Some((copy, origin)))
         } else {
-            if ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION >= 1
-                || identity.group_id.is_some()
-                || identity.group_epoch.is_some()
-            {
-                return Ok(None);
-            }
-            let Some(source) = self.legacy_raw_reparse_source(snapshot, &identity, &provenance)?
-            else {
-                return Ok(None);
-            };
-            (source, None)
+            return Ok(None);
         };
         if !self.raw_reparse_origin_scope_allowed(&source, &identity)? {
             return Ok(None);
         }
         Ok(Some(Prepared { identity, content, provenance, source, origin }))
     }
-    fn legacy_raw_reparse_source(
-        &self,
-        snapshot: &RawInnerReparseRow,
-        identity: &g::EventIdentity,
-        provenance: &Provenance,
-    ) -> Result<Option<ramflux_crypto::RootQualifiedDeviceRef>, SdkError> {
-        let receipt =
-            match self.account_db()?.load_actor_state::<Committed>(&provenance.outer_receipt_key) {
-                Ok(Some(receipt)) => receipt,
-                Ok(None) | Err(ramflux_storage::StorageError::Serde(_)) => return Ok(None),
-                Err(error) => return Err(error.into()),
-            };
-        let Ok(route) = serde_json::from_str::<Routing>(&provenance.original_route) else {
-            return Ok(None);
-        };
-        let envelope = &receipt.entry.envelope;
-        if !receipt.projected
-            || route != receipt.routing
-            || route.kind != Kind::Direct
-            || route.conversation_id != provenance.conversation
-            || route.message_id != provenance.message
-            || envelope.envelope_id != provenance.envelope_id
-            || envelope.payload_hash != provenance.payload_hash
-            || envelope.delivery_mode.as_deref().unwrap_or("durable") != provenance.original_mode
-            || envelope.created_at.checked_add(i64::from(envelope.ttl))
-                != Some(provenance.expires_at)
-        {
-            return Ok(None);
-        }
-        let source =
-            match self.authenticated_device_identity(HeadUse::HistoricalRead, &receipt.entry) {
-                Ok(source) => source,
-                Err(SdkError::Storage(error)) => return Err(error.into()),
-                Err(_) => return Ok(None),
-            };
-        let epoch = self
-            .account_db()?
-            .client_device_record(&source)?
-            .and_then(|record| record["device_epoch"].as_u64());
-        if source.storage_key() != provenance.source
-            || source.root_commitment() != snapshot.source_anchor
-            || epoch != Some(provenance.source_epoch)
-            || identity.author.as_ref().is_none_or(|author| {
-                author.account_anchor != source.root_commitment()
-                    || author.device_id != source.device_id()
-                    || author.device_epoch != provenance.source_epoch
-            })
-        {
-            return Ok(None);
-        }
-        if Self::verify_generated_message_header(&receipt.entry, &snapshot.copy.bytes).is_err() {
-            return Ok(None);
-        }
-        Ok(Some(source))
-    }
+
     fn raw_reparse_origin_scope_allowed(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -467,9 +403,6 @@ impl RamfluxClient {
         Ok(true)
     }
     pub(crate) fn maintain_raw_inner_reparse(&mut self) -> Result<usize, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(0);
-        }
         self.review_parked_generated_edits_after_restore()?;
         let decoder = decoder_marker();
         let key = "message/reparse/decoder";
