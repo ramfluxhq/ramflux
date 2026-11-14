@@ -49,10 +49,8 @@ fn surface_project(
         )?
         .ok_or_else(|| invalid("surface absent"))
 }
-async fn exercise(input: bool, read_only: bool) -> TestResult {
-    exercise_with_restart(input, read_only, false).await
-}
-async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
+async fn native_fixture()
+-> Result<(Fixture, std::sync::Arc<crate::custody::tests::TestVault>), Box<dyn std::error::Error>> {
     let mut f = Fixture::new()?;
     let (human, agent, vault) = crate::client::surface::test_support::owned_pair_with_vault(
         &f.root.join("surface-native"),
@@ -70,6 +68,13 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
         )?;
     }
     create_form(&f)?;
+    Ok((f, vault))
+}
+async fn exercise(input: bool, read_only: bool) -> TestResult {
+    exercise_with_restart(input, read_only, false).await
+}
+async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
+    let (mut f, vault) = native_fixture().await?;
     let start = sign(&f.human, "thread", "start", start("task", "thread"))?;
     let target = if input {
         NeedsMe::Input { surface_id: "form".into() }
