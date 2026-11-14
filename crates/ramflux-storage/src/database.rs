@@ -418,6 +418,11 @@ impl Connection {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        let watch =
+            self.search_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(watch) = watch {
+            watch.close();
+        }
         self.sender.take();
         if let Some(worker) = self.handle.take() {
             let _ = worker.join();

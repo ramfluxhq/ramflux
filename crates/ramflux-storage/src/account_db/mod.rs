@@ -105,6 +105,7 @@ pub struct AccountDb {
     clock: AccountClock,
     object_retirement: object_retention::RetirementObserver,
     search_restore_admitted: bool,
+    search_incarnation: local_search::SearchAccountIncarnation,
     pub(crate) connection: Connection,
     erasure_authority: Option<Connection>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
@@ -153,6 +154,7 @@ impl AccountDb {
             device_signer: None,
             clock: AccountClock::real(),
             object_retirement: object_retention::RetirementObserver::default(),
+            search_incarnation: local_search::SearchAccountIncarnation::default(),
             search_restore_admitted: !local_search::LOCAL_SEARCH_V1
                 || index.search_owner_admitted(local_account_id)?,
             connection,

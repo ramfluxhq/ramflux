@@ -170,10 +170,22 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
         std::time::Duration::from_secs(30),
         Box::pin(async {
             let directory = tempfile::TempDir::new()?;
-            let fixture = Fixture::search_fixture(directory.path(), "epoch-owner").await?;
+            let mut fixture = Fixture::search_fixture(directory.path(), "epoch-owner").await?;
             let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             let runtime =
                 LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
+            let peer = LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
+            let held = runtime.admit(7, "shared-executor").await?;
+            let mut queued = Box::pin(peer.admit(7, "shared-queue"));
+            std::future::poll_fn(|cx| {
+                use std::future::Future as _;
+                assert!(queued.as_mut().poll(cx).is_pending(), "another handle for the same open account must share its one executor");
+                std::task::Poll::Ready(())
+            }).await;
+            runtime.cancel(7, runtime.unlock_epoch(), "shared-queue")?;
+            assert!(matches!(queued.await, Err(crate::SdkError::Search(SearchError::Cancelled))), "shared-account queue must retain out-of-queue cancellation");
+            drop(held);
+            drop(peer);
             let ticket = runtime.start_rebuild(7, "paused-job")?;
             drop(ticket);
             assert_eq!(
@@ -235,11 +247,16 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
             let completion = runtime
                 .query(&fixture.client, 7, &SearchQuery::new("lock-query", "canary"))
                 .await?;
-            runtime.invalidate();
+            drop(fixture.client.active_account_db.take());
             assert!(
                 matches!(completion.take(), Err(SearchError::CursorStale)),
-                "lock/publication invalidation must clear pending plaintext"
+                "closing the real account writer must revoke pending plaintext without an explicit service callback"
             );
+            drop(completion);
+            fixture.client.unlock_account("epoch-owner", b"native fixture data passphrase")?;
+            assert!(matches!(runtime.index_status(&fixture.client), Err(crate::SdkError::Search(SearchError::AccountLocked))), "a runtime from the old open must not bind to a new unlock of the same path and schema epoch");
+            let reopened=LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
+            reopened.index_status(&fixture.client)?;
             let revision = fixture
                 .client
                 .account_db()?

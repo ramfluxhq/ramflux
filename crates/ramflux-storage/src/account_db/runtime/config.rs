@@ -91,6 +91,7 @@ impl AccountDb {
             device_signer: self.device_signer.clone(),
             clock: self.clock.clone(),
             search_restore_admitted: self.search_restore_admitted,
+            search_incarnation: self.search_incarnation.clone(),
             object_retirement: super::super::object_retention::RetirementObserver {
                 generations: std::sync::Arc::clone(&self.object_retirement.generations),
                 ..Default::default()

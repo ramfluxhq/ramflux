@@ -26,6 +26,11 @@ Queries contain at most 1,024 UTF-8 bytes, 16 clauses and 128 derived terms; wor
 contain at most 256 bytes. Source normalization processes at most 32 KiB at a
 grapheme boundary, 4,096 terms and bounded normalized/token buffers.
 
+Opening a service returns the shared runtime for one open account, so multiple
+handles share query, queue, cursor and maintenance limits. Readers inherit a
+volatile account incarnation; reopening the same database creates a new one.
+Closing its writer revokes pending completions.
+
 `LocalSearch::query` returns a revocable `SearchCompletion`. Call `take` to consume
 its typed page and `check_current` immediately before publishing encoded bytes.
 A completion retains admission until dropped. Search text redacts Debug and

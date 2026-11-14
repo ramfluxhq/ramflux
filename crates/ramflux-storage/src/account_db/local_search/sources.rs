@@ -19,6 +19,11 @@ pub struct SearchMessageInput {
 }
 
 impl AccountDb {
+    /// Volatile account-open identity, shared by its query readers and changed on reopen.
+    #[must_use]
+    pub fn search_incarnation(&self, _activation: &SearchActivation) -> SearchAccountIncarnation {
+        self.search_incarnation.clone()
+    }
     /// Clock used to recheck time-based visibility at the final publication boundary.
     #[must_use]
     pub fn search_clock(&self, _activation: &SearchActivation) -> crate::AccountClock {

@@ -5,6 +5,27 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+/// Volatile identity of one open account writer; query readers share it.
+/// It is never serialized into an account archive or reused on unlock/reopen.
+#[derive(Clone, Default)]
+pub struct SearchAccountIncarnation(std::sync::Arc<()>);
+impl PartialEq for SearchAccountIncarnation {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for SearchAccountIncarnation {}
+impl PartialOrd for SearchAccountIncarnation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SearchAccountIncarnation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        std::sync::Arc::as_ptr(&self.0).cmp(&std::sync::Arc::as_ptr(&other.0))
+    }
+}
+
 /// Deliberately independent of the message protocol generation and default-off.
 pub const LOCAL_SEARCH_V1: bool = false;
 /// Qualification is a separate controller decision backed by pinned-engine corpus measurements.

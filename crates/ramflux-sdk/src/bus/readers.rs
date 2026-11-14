@@ -85,8 +85,7 @@ impl AccountReaders {
         let view = Arc::new(RwLock::new(Arc::new(local::AccountView::default())));
         let search = ramflux_storage::local_search::SearchActivation::configured()
             .ok()
-            .and_then(|activation| crate::search::LocalSearch::for_db(db, activation).ok())
-            .map(Arc::new);
+            .and_then(|activation| crate::search::LocalSearch::for_db(db, activation).ok());
         let mut senders = Vec::new();
         for _ in 0..2 {
             let reader = db.open_reader()?;

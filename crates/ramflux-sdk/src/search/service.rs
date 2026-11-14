@@ -5,11 +5,12 @@
 use super::{admission::Admission, cursor::Cursors, hydration};
 use crate::{RamfluxClient, SdkError};
 use ramflux_storage::local_search::{
-    MAX_REBUILD_BYTES, SearchActivation, SearchControl, SearchError, SearchPage, SearchQuery,
-    SearchRegistration, SearchResult, SearchText, SearchViewEpoch, SearchWatch,
+    MAX_REBUILD_BYTES, SearchAccountIncarnation, SearchActivation, SearchControl, SearchError,
+    SearchPage, SearchQuery, SearchRegistration, SearchResult, SearchText, SearchViewEpoch,
+    SearchWatch,
 };
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 #[path = "execution.rs"]
 mod execution;
@@ -17,10 +18,12 @@ mod execution;
 mod pending;
 #[path = "rebuild_job.rs"]
 pub(crate) mod rebuild_job;
+type Runtimes = BTreeMap<SearchAccountIncarnation, Weak<LocalSearch>>;
 type Pending = Arc<Mutex<BTreeMap<SearchText, (u64, SearchCompletion, Instant)>>>;
 
 pub struct LocalSearch {
     activation: SearchActivation,
+    incarnation: SearchAccountIncarnation,
     account: String,
     path: std::path::PathBuf,
     publication_epoch: i64,
@@ -51,7 +54,8 @@ impl SearchCompletion {
     /// # Errors
     /// Refuses a queued reply invalidated during encoding.
     pub fn check_current(&self) -> SearchResult<()> {
-        if self.watch.stamp() != self.stamp
+        if self.watch.is_closed()
+            || self.watch.stamp() != self.stamp
             || self.expires_at.is_some_and(|expiry| self.clock.now_unix() >= expiry)
         {
             return Err(SearchError::CursorStale);
@@ -62,7 +66,8 @@ impl SearchCompletion {
     /// Invalidated or already consumed pages are never returned from a pending completion.
     pub fn take(&self) -> SearchResult<SearchPage> {
         let mut page = self.page.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.watch.stamp() != self.stamp
+        if self.watch.is_closed()
+            || self.watch.stamp() != self.stamp
             || self.expires_at.is_some_and(|expiry| self.clock.now_unix() >= expiry)
         {
             page.take();
@@ -79,17 +84,38 @@ impl LocalSearch {
     /// Refuses dormant capability before acquiring an account database.
     /// # Errors
     /// Returns the configured capability refusal or encrypted-engine initialization errors.
-    pub fn open(client: &RamfluxClient) -> Result<Self, SdkError> {
+    pub fn open(client: &RamfluxClient) -> Result<Arc<Self>, SdkError> {
         let activation = SearchActivation::configured()?;
         Self::initialize(client, activation)
     }
-    fn initialize(client: &RamfluxClient, activation: SearchActivation) -> Result<Self, SdkError> {
+    fn initialize(
+        client: &RamfluxClient,
+        activation: SearchActivation,
+    ) -> Result<Arc<Self>, SdkError> {
         Self::for_db(client.account_db()?, activation)
     }
     pub(crate) fn for_db(
         db: &ramflux_storage::AccountDb,
         activation: SearchActivation,
-    ) -> Result<Self, SdkError> {
+    ) -> Result<Arc<Self>, SdkError> {
+        static RUNTIMES: OnceLock<Mutex<Runtimes>> = OnceLock::new();
+        let mut runtimes = RUNTIMES
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtimes.retain(|_, runtime| runtime.strong_count() > 0);
+        let incarnation = db.search_incarnation(&activation);
+        if let Some(runtime) = runtimes.get(&incarnation).and_then(Weak::upgrade) {
+            if runtime.watch.is_closed()
+                || runtime.closed.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(SearchError::AccountLocked.into());
+            }
+            return Ok(runtime);
+        }
+        if runtimes.len() >= 128 {
+            return Err(SearchError::Capacity.into());
+        }
         let watch = db.search_prepare(&activation)?;
         let random = ramflux_crypto::random_32()?;
         let unlock = u64::from_le_bytes(
@@ -102,6 +128,7 @@ impl LocalSearch {
         let publication_epoch = db.search_revision(&activation, &SearchControl::new())?.epoch;
         let mut service = Self {
             activation,
+            incarnation: incarnation.clone(),
             account: db.local_account_id.clone(),
             path: db.path.clone(),
             publication_epoch,
@@ -118,10 +145,12 @@ impl LocalSearch {
             quota_paused: std::sync::atomic::AtomicBool::new(false),
         };
         service.install_observer()?;
+        let service = Arc::new(service);
+        runtimes.insert(incarnation, Arc::downgrade(&service));
         Ok(service)
     }
     pub(crate) async fn admit(&self, owner: u64, id: &str) -> Result<Admission, SdkError> {
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.watch.is_closed() || self.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(SearchError::AccountLocked.into());
         }
         Ok(Admission::acquire(Arc::clone(&self.active), &self.account_permit, owner, id).await?)
@@ -202,11 +231,14 @@ impl LocalSearch {
         client: &RamfluxClient,
         control: &SearchControl,
     ) -> Result<SearchViewEpoch, SdkError> {
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.watch.is_closed() || self.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(SearchError::AccountLocked.into());
         }
         let db = client.account_db()?;
-        if db.local_account_id != self.account || db.path != self.path {
+        if db.search_incarnation(&self.activation) != self.incarnation
+            || db.local_account_id != self.account
+            || db.path != self.path
+        {
             return Err(SearchError::AccountLocked.into());
         }
         let revision = db.search_revision(&self.activation, control)?;
@@ -240,6 +272,7 @@ impl LocalSearch {
             return Err(SearchError::PermissionDenied.into());
         }
         let control = &admission.control;
+        self.epoch(client, control)?;
         let db = client.account_db()?;
         if reset {
             db.search_rebuild_reset(&self.activation, control)?;

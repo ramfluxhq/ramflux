@@ -7,7 +7,7 @@ use rusqlite::OptionalExtension as _;
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 type Callback = Arc<dyn Fn() + Send + Sync>;
@@ -19,6 +19,7 @@ struct State {
 pub struct SearchWatch {
     state: Mutex<State>,
     stamp: AtomicU64,
+    closed: AtomicBool,
 }
 impl Default for SearchWatch {
     fn default() -> Self {
@@ -29,6 +30,7 @@ impl Default for SearchWatch {
                 observers: BTreeMap::new(),
             }),
             stamp: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -52,6 +54,14 @@ impl SearchWatch {
     pub fn stamp(&self) -> u64 {
         self.stamp.load(Ordering::Acquire)
     }
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.invalidate();
+    }
     /// # Errors
     /// Refuses stale epochs, duplicate resource IDs and bounded-registry saturation.
     pub fn register(
@@ -61,7 +71,7 @@ impl SearchWatch {
         callback: Callback,
     ) -> SearchResult<SearchRegistration> {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if expected == u64::MAX {
+        if self.is_closed() || expected == u64::MAX {
             return Err(SearchError::IndexUnavailable);
         }
         if expected != self.stamp() {
@@ -82,7 +92,8 @@ impl SearchWatch {
         callback: Callback,
     ) -> SearchResult<SearchRegistration> {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.stamp() == u64::MAX
+        if self.is_closed()
+            || self.stamp() == u64::MAX
             || id.len() > 256
             || state.observers.len() >= 128
             || state.observers.contains_key(&id)
@@ -93,7 +104,7 @@ impl SearchWatch {
         Ok(SearchRegistration { watch: Arc::clone(self), id, persistent: true })
     }
     pub(crate) fn refresh(&self, db: &rusqlite::Connection) {
-        if !db.is_autocommit() {
+        if self.is_closed() || !db.is_autocommit() {
             return;
         }
         let identity = db

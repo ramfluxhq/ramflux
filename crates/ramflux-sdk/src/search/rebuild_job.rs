@@ -83,7 +83,7 @@ impl LocalSearch {
         if id.is_empty() || id.len() > 128 {
             return Err(SearchError::InvalidQuery.into());
         }
-        if self.closed.load(Ordering::Acquire) {
+        if self.watch.is_closed() || self.closed.load(Ordering::Acquire) {
             return Err(SearchError::AccountLocked.into());
         }
         let mut jobs = self.rebuild.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
