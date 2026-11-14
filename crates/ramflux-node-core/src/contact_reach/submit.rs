@@ -49,11 +49,10 @@ impl ReachService {
         if submission.envelope.delivery_class == ramflux_protocol::DeliveryClass::CallWake {
             return Err(refuse(Reason::ForeignCapabilityMissing));
         }
-        let deadline = Instant::now()
+        let received = Instant::now();
+        let deadline = received
             .checked_add(Duration::from_millis(request.remaining_ms))
             .ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
-        let submitter =
-            self.source_submitter.as_ref().ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
         let mut call = SourceSubmitRequest {
             kind: SourceSubmitKind::Submit,
             request_id: request.request_id.clone(),
@@ -94,6 +93,11 @@ impl ReachService {
             require_return_grant(&state, &submission.route.body, &authority, target_node_id, now)?;
             tx.commit()?;
         }
+        if target_node_id == self.node.node_id() {
+            return Ok(self.receive_local_submission(store, submission, now, deadline));
+        }
+        let submitter =
+            self.source_submitter.as_ref().ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
         call.remaining_ms = deadline
             .checked_duration_since(Instant::now())
             .and_then(|left| u64::try_from(left.as_millis()).ok())

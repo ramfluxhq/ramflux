@@ -235,3 +235,17 @@ fn cr_public_snapshot_builder_hashes_original_evidence_without_card_possession()
     );
     Ok(())
 }
+
+/// Full currently signed snapshot for sibling component controls; no pre-verified test wrapper.
+pub(in crate::contact_reach) fn verified_source()
+-> TestResult<ramflux_crypto::contact_reach::VerifiedPeer> {
+    let fixture = fixture()?;
+    let reply = fixture.service.assemble_public_snapshot(fixture.context(), &fixture.query)?;
+    Ok(ramflux_crypto::contact_reach::verify_peer_reply(
+        &reply,
+        &fixture.query,
+        fixture.service.node.public_key(),
+        None,
+        NOW,
+    )?)
+}

@@ -10,7 +10,9 @@ use ramflux_protocol::contact_reach::{
 fn allowed(method: &str, path: &str, own_node: &str, peer: &MeshPeerIdentity) -> Option<bool> {
     let role = match path {
         RECIPIENT_PATH => peer.service_id == "ramflux-gateway",
-        SNAPSHOT_PATH | ISSUER_COST_PATH => peer.service_id == "ramflux-federation",
+        SNAPSHOT_PATH | ISSUER_COST_PATH | "/internal/contact/forward/v1" => {
+            peer.service_id == "ramflux-federation"
+        }
         FOREIGN_PATH => matches!(peer.service_id.as_str(), "ramflux-gateway" | "ramflux-router"),
         _ => return None,
     };
@@ -36,6 +38,21 @@ pub(super) fn route(
     router: &crate::router_runtime::RouterHandle,
     received: std::time::Instant,
 ) -> anyhow::Result<Option<MeshResponse>> {
+    if method == "POST" && path == "/internal/contact/forward/v1" {
+        let Ok(forward) = ramflux_node_core::contact_reach::ReachForward::decode(body) else {
+            return Ok(Some(MeshResponse::json(
+                "400 Bad Request",
+                br#"{"frame_type":"contact_foreign_error","reason":"foreign_invalid_frame"}"#
+                    .to_vec(),
+            )));
+        };
+        let result = router.contact_forward(&forward, received);
+        ramflux_protocol::contact_reach::validate_receiving_result(&result)?;
+        return Ok(Some(MeshResponse::json(
+            "200 OK",
+            ramflux_protocol::canonical_json_bytes(&result)?,
+        )));
+    }
     if method == "POST" && path == ISSUER_COST_PATH {
         use ramflux_protocol::contact_reach::{self as wire, OperationResult, Reason};
         let mut request: wire::CostRequest =
@@ -126,6 +143,7 @@ mod tests {
             (RECIPIENT_PATH, "ramflux-gateway"),
             (SNAPSHOT_PATH, "ramflux-federation"),
             (ISSUER_COST_PATH, "ramflux-federation"),
+            ("/internal/contact/forward/v1", "ramflux-federation"),
             (FOREIGN_PATH, "ramflux-router"),
         ] {
             let own =

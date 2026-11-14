@@ -256,4 +256,4 @@ fn history(
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::contact_reach) mod tests;

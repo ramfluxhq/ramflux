@@ -315,6 +315,33 @@ impl RouterRedbStore {
         table.get(root).map_err(storage)?.map(|v| row(v.value())).transpose()
     }
 
+    /// Obtain an ingress source checkpoint without allocating trust for an unsolicited sender.
+    /// # Errors
+    /// Refuses an account not currently owned by this home and malformed retained evidence.
+    pub(super) fn ingress_peer_checkpoint(
+        &self,
+        node: &crate::MigrationNode,
+        recipient: &str,
+        source: &str,
+        now: u64,
+    ) -> Result<Option<ramflux_protocol::home_migration::RecordEvidence>> {
+        let (tx, now) = self.begin_reach_write(now)?;
+        authority(&tx, recipient, now)?;
+        if home(&tx, recipient)?.record.home() != (node.node_id(), node.public_key()) {
+            return Err(refuse(Reason::HomeRollback));
+        }
+        let trust_key = key(recipient, source)?;
+        let previous = tx
+            .open_table(TRUST)
+            .map_err(storage)?
+            .get(trust_key.as_str())
+            .map_err(storage)?
+            .map(|value| row::<AdoptedPeer>(value.value()))
+            .transpose()?;
+        tx.commit()?;
+        Ok(previous.map(|state| state.home))
+    }
+
     /// Read an authenticated owner's retained checkpoint without installing a peer key.
     /// # Errors
     /// Refuses unavailable owner authority or malformed retained storage.
@@ -696,6 +723,36 @@ fn check_home_base(
     }
     Ok(())
 }
+/// Check retained source floors even when this delivery must not allocate permanent trust.
+/// The writer repeats this before dedup, so identical retries cannot bypass a newer fence.
+pub(super) fn require_ingress_peer(
+    tx: &redb::WriteTransaction,
+    recipient: &str,
+    peer: &ramflux_crypto::contact_reach::VerifiedPeer,
+) -> Result<()> {
+    let trust_key = key(recipient, peer.root())?;
+    let previous = tx
+        .open_table(TRUST)
+        .map_err(storage)?
+        .get(trust_key.as_str())
+        .map_err(storage)?
+        .map(|value| row::<AdoptedPeer>(value.value()))
+        .transpose()?;
+    if let Some(mut previous) = previous {
+        check_home_base(peer, &previous)?;
+        previous.authority_pins.observe(peer.authority())?;
+        previous.authority_pins.require_current(peer.authority())?;
+        let certificate = &peer.authority().envelope().body.master_certificate.body;
+        if certificate.custody_kind == custody::CustodyKind::ExternalHuman {
+            let human =
+                peer.authority().management_actor_authority(&certificate.primary_device_ref)?;
+            previous.custodian_pins.observe(human)?;
+            previous.custodian_pins.require_current(human)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn adopt_ingress_peer(
     tx: &redb::WriteTransaction,
     recipient: &str,

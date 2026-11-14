@@ -36,6 +36,7 @@ pub struct ReachPending {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReachIngress {
+    pub placement: Placement,
     pub seq: u64,
     pub class: ReachClass,
     pub duplicate: bool,
@@ -351,6 +352,7 @@ impl RouterRedbStore {
         maintenance::clean(&tx, now)?;
         // The writer's durable clock may have advanced beyond the pre-writer proof check.
         verify_source(peer, submission, now)?;
+        store::require_ingress_peer(&tx, &root, peer)?;
         let target = verify_target(&tx, &root, device, now)?;
         let local_home = store::home(&tx, &root)?;
         if local_home.record.home() != (node.node_id(), node.public_key()) {
@@ -384,7 +386,7 @@ impl RouterRedbStore {
             if old.hash != hash || old.route_hash != custody::object_hash(&submission.route)? {
                 return Err(refuse(Reason::IdempotencyConflict));
             }
-            return Ok(ReachIngress { seq: old.seq, class: old.class, duplicate: true });
+            return Ok(ReachIngress { seq: old.seq, class: old.class, placement, duplicate: true });
         }
         drop(dedup);
         if class == ReachClass::Unsolicited {
@@ -425,7 +427,7 @@ impl RouterRedbStore {
             store::adopt_ingress_peer(&tx, &root, peer)?;
         }
         tx.commit()?;
-        Ok(ReachIngress { seq, class, duplicate: false })
+        Ok(ReachIngress { seq, class, placement, duplicate: false })
     }
 
     /// Atomically ACK transferred bounded payloads, then return an owner-scoped page.

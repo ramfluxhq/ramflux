@@ -574,6 +574,22 @@ impl RouterHandle {
         )
     }
 
+    pub(crate) fn contact_forward(
+        &self,
+        forward: &ramflux_node_core::contact_reach::ReachForward,
+        received: std::time::Instant,
+    ) -> ramflux_protocol::contact_reach::OperationResult {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map_or_else(ramflux_protocol::contact_reach::unavailable, |service| {
+            service.contact_forward(
+                self.store(),
+                forward,
+                ramflux_node_core::now_unix_seconds(),
+                received,
+            )
+        })
+    }
+
     pub(crate) fn contact_snapshot(
         &self,
         request: &ramflux_protocol::contact_reach::PeerQueryRequest,

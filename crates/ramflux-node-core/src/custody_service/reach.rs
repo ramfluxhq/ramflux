@@ -70,6 +70,22 @@ impl CustodyService {
         Ok(self)
     }
 
+    /// Enter only from the listener's authenticated own-federation forward hop.
+    #[must_use]
+    pub fn contact_forward(
+        &self,
+        store: &RouterRedbStore,
+        forward: &crate::contact_reach::ReachForward,
+        now: u64,
+        received: std::time::Instant,
+    ) -> wire::OperationResult {
+        self.reach.as_ref().map_or_else(wire::unavailable, |service| {
+            service
+                .forward_from_proxy(store, forward, now, received)
+                .unwrap_or_else(|error| crate::contact_reach::proxy_error(forward, &error))
+        })
+    }
+
     /// Issue after the listener verifies the own-federation role and its peer budget admission.
     /// # Errors
     /// Refuses malformed input; executor failures retain the pinned uncertain/definite error arms.
