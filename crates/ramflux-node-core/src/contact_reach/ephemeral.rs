@@ -118,7 +118,7 @@ impl ReachEphemeralAdmission {
             .map(|v| serde_json::from_slice(v.value()).map_err(storage))
             .transpose()?
             .ok_or_else(|| refuse(Reason::ReachPolicyRequired))?;
-        state.classify(b, peer_node, now_ms / 1000)?;
+        state.classify_current(b, peer_node, &recipient, now_ms / 1000)?;
         let mut rates = self.rates.lock().map_err(storage)?;
         let window = now_ms / 60_000;
         rates.retain(|_, (old, _)| *old >= window);

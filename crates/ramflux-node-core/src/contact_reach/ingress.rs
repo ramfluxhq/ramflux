@@ -344,7 +344,9 @@ impl RouterRedbStore {
             return Err(refuse(Reason::HomeRollback));
         }
         let state = store::load(&tx, &root)?;
-        let (class, placement) = state.classify(route, source_home, now)?;
+        let recipient_authority = store::authority(&tx, &root, now)?;
+        let (class, placement) =
+            state.classify_current(route, source_home, &recipient_authority, now)?;
         let key = dedup_key(
             &root,
             &route.source.account_anchor,
@@ -454,19 +456,34 @@ impl RouterRedbStore {
             if seq.value() <= after {
                 continue;
             }
-            let p: ReachPending = row(raw.value())?;
+            let mut p: ReachPending = row(raw.value())?;
             if p.recipient_root != owner.recipient_root || &p.target != owner.actor {
                 continue;
             }
             if p.entry.retain_until <= now
                 || state.check_denials(&p.entry.source_root, &p.entry.peer_node, now).is_err()
-                || p.entry.reach.route.body.traffic
-                    == ramflux_protocol::contact_reach::Traffic::Group
-                    && state.classify(&p.entry.reach.route.body, &p.entry.peer_node, now).is_err()
             {
                 expired.push(seq.value());
                 continue;
             }
+            let (class, placement) = match state.classify_current(
+                &p.entry.reach.route.body,
+                &p.entry.peer_node,
+                &authority,
+                now,
+            ) {
+                Ok(decision) => decision,
+                Err(error @ super::ReachError::Storage(_)) => return Err(error),
+                // Stale positive authority must wait for primary reconciliation. It is not
+                // proof that the sealed payload should be erased or transferred.
+                Err(_) => continue,
+            };
+            if class != p.class {
+                // An old accepted reservation cannot become unpaid unsolicited admission.
+                continue;
+            }
+            p.entry.placement = placement;
+            p.entry.policy_revision = state.policy_revision();
             let length = encoded(&p.entry)?.len();
             if entries.len() >= usize::try_from(limit).map_err(storage)?
                 || bytes + length > 2 * 1024 * 1024

@@ -156,6 +156,94 @@ fn cr_group_home_roster_and_retirement_survive_reopen() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_group_receiving_barrier_rechecks_original_recipient_signatures() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("recipient-signatures.redb");
+    let (store, f) = initialize(&path)?;
+    install_live_group(&store, &f)?;
+    drop(store);
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let tx = store.begin_write()?;
+    let state = load(&tx, &f.root)?;
+    drop(tx);
+    let route = route(&f);
+    assert_eq!(
+        state.classify_current(&route, "peer.example", &f.authority, NOW)?.0,
+        crate::contact_reach::ReachClass::Accepted,
+        "the receiving barrier must accept the original persisted phone signatures"
+    );
+    for alteration in 0..4 {
+        let mut changed = state.clone();
+        let invalid_signature = ramflux_protocol::encode_base64url([99; 64]);
+        match alteration {
+            0 => changed.policy.as_mut().ok_or("policy")?.signature = invalid_signature,
+            1 => {
+                let StateRecord::Grant { update, .. } =
+                    changed.grants.get_mut(&subject(100).key()?).ok_or("group grant")?
+                else {
+                    return Err("group grant record".into());
+                };
+                update.signature = invalid_signature;
+            }
+            2 => {
+                changed.rosters.get_mut(&subject(100).key()?).ok_or("roster")?.header.signature =
+                    invalid_signature;
+            }
+            _ => {
+                changed.policy.as_mut().ok_or("policy")?.body.master_certificate_hash = digest(98);
+            }
+        }
+        assert!(
+            changed.classify_current(&route, "peer.example", &f.authority, NOW).is_err(),
+            "a saved policy, grant, roster or certificate substitution cannot authorize ingress: {alteration}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cr_dm_receiving_barrier_requires_the_original_grant_signature() -> TestResult {
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("dm-recipient-signature.redb"))?;
+    store.reach_owner_commit(owner(&f), &policy(&f, 10, 0, ReachMode::ContactsOnly)?, NOW)?;
+    let tx = store.begin_write()?;
+    let mut state = load(&tx, &f.root)?;
+    drop(tx);
+    let subject = Subject::Friendship { root: digest(41) };
+    let Operation::Admission { update, .. } =
+        decision(&f, 51, subject.clone(), 0, Decision::Allow, NOW)?
+    else {
+        return Err("friendship admission".into());
+    };
+    // The reducer boundary receives an original primary signature; peer/Notice admission
+    // is tested by the home-writer controls, independently of this use-time signature gate.
+    state.admission(update, None, NOW)?;
+    let mut route = route(&f);
+    route.traffic = Traffic::Dm;
+    route.group = None;
+    route.conversation_id = ramflux_protocol::message::dm_scope::derive(
+        &route.source.account_anchor,
+        &route.recipient_root,
+    )?;
+    state.classify_current(&route, "peer.example", &f.authority, NOW)?;
+    let StateRecord::Grant { update, .. } =
+        state.grants.get_mut(&subject.key()?).ok_or("friendship grant")?
+    else {
+        return Err("grant row".into());
+    };
+    update.signature = ramflux_protocol::encode_base64url([99; 64]);
+    assert!(
+        state.classify(&route, "peer.example", NOW).is_ok(),
+        "saved reducer presence alone cannot authenticate the original phone grant"
+    );
+    assert!(
+        state.classify_current(&route, "peer.example", &f.authority, NOW).is_err(),
+        "the actual receiving signature gate must refuse a home-substituted grant"
+    );
+    Ok(())
+}
 #[test]
 fn cr_group_home_retained_unblock_outlives_dedup_and_last_update() -> TestResult {
     let dir = tempfile::TempDir::new()?;

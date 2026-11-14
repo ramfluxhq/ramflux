@@ -3,6 +3,7 @@
 
 //! Recipient-owned authorization and canonical state transitions; no network or trust writes.
 use super::{ReachError, Result, refuse, storage};
+mod authority;
 mod groups;
 use ramflux_protocol::{
     contact_reach::{

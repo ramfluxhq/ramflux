@@ -10,7 +10,7 @@ use crate::client::{
 
 #[tokio::test(flavor = "current_thread")]
 async fn cr_group_invitation_cannot_reuse_previous_join_consent() -> TestResult {
-    tokio::time::timeout(std::time::Duration::from_secs(60), previous_consent()).await?
+    tokio::time::timeout(std::time::Duration::from_secs(60), Box::pin(previous_consent())).await?
 }
 
 async fn previous_consent() -> TestResult {
