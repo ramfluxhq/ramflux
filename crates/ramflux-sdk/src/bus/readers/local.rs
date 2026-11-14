@@ -30,7 +30,7 @@ pub(super) struct AccountView {
     pub connection: Option<super::super::connection_manager::ConnectionHandle>,
     pub account_has_relay: bool,
     pub upload_relays: BTreeMap<String, bool>,
-    pub(super) principal: String,
+    principal: String,
     anchor: String,
     status: Value,
     views: BTreeMap<&'static str, Value>,
@@ -39,6 +39,12 @@ pub(super) struct AccountView {
 }
 
 impl AccountView {
+    pub(super) fn install_reader_authority(&self, client: &mut RamfluxClient) {
+        client.reader_principal_id = (!self.principal.is_empty()).then(|| self.principal.clone());
+        client.born_v3_account.clone_from(&self.native);
+        client.reader_account_root.clone_from(&self.account_root);
+    }
+
     pub(super) fn capture(state: &LocalBusDaemonState, id: &str) -> Result<Self, SdkError> {
         let account = local_bus_account(state, id)?;
         let client = &account.client;
