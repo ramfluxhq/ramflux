@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_untagged_bytes_cannot_produce_a_generation_one_envelope() -> Result<(), SdkError> {
+    fn opaque_untagged_bytes_cannot_produce_a_generation_one_envelope() {
         let result = gateway_direct_message_envelope(
             &test_gateway_config(),
             &test_message(b"already-encrypted".to_vec()),
@@ -269,7 +269,6 @@ mod tests {
             ),
             "an opaque unbound body cannot select the current sender transcript"
         );
-        Ok(())
     }
 
     fn test_gateway_config() -> GatewaySessionConfig {
