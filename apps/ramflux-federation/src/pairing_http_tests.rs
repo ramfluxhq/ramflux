@@ -20,6 +20,9 @@ use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "pairing_http_tests/raw_mesh.rs"]
+mod raw_mesh;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 pub(crate) struct PairingEnv {
@@ -201,35 +204,14 @@ pub(crate) fn spawn_node_mesh_at(
                 .as_deref()
                 .and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok());
             let mut stream = accepted.stream;
-            while let Ok(Some(request)) = ramflux_transport::read_mesh_http_request(&mut stream) {
-                if request.path == ramflux_node_core::pairing_relay::FULL_MESH_ADMIT_PATH {
-                    let native = ramflux_node_core::pairing_relay::FullNativeRelay::new(
-                        &native_node,
-                        &native_router,
-                        Arc::clone(&dispatch),
-                    );
-                    let _ = serve_full_admit(
-                        &mut stream,
-                        peer.as_ref(),
-                        &native,
-                        &request.body,
-                        &calls,
-                    );
-                    break;
-                }
-                let reply = match serde_json::from_slice::<PairingMeshForward>(&request.body) {
-                    Ok(forward) => handle_pairing_mesh(&dispatch, &request.path, &forward),
-                    Err(_) => ramflux_node_core::pairing_relay::PairingMeshReply {
-                        status: "400 Bad Request".into(),
-                        body: ramflux_node_core::pairing_relay::encode_pairing_mesh_body(
-                            b"request rejected",
-                        ),
-                    },
-                };
-                if ramflux_transport::write_mesh_json_response(&mut stream, "200 OK", &reply)
-                    .is_err()
-                {
-                    break;
+            if let Some(peer) = peer.as_ref() {
+                let native = ramflux_node_core::pairing_relay::FullNativeRelay::new(
+                    &native_node,
+                    &native_router,
+                    Arc::clone(&dispatch),
+                );
+                if let Err(error) = raw_mesh::serve(&mut stream, peer, &native, &dispatch, &calls) {
+                    eprintln!("test: node mesh dispatch refused: {error}");
                 }
             }
             let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
@@ -247,45 +229,6 @@ pub(crate) fn spawn_node_mesh_at(
         proxy_branch,
         _root: root,
     })
-}
-
-fn serve_full_admit(
-    stream: &mut ramflux_transport::MeshTlsServerStream,
-    peer: Option<&ramflux_node_core::MeshPeerIdentity>,
-    native: &ramflux_node_core::pairing_relay::FullNativeRelay<'_>,
-    body: &[u8],
-    calls: &std::sync::atomic::AtomicUsize,
-) -> TestResult {
-    use ramflux_node_core::pairing_relay::{FullMeshAdmit, PairingRelayError};
-    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let reply = (|| {
-        let request =
-            FullMeshAdmit::from_wire_bytes(body).map_err(|_| PairingRelayError::WrongContext)?;
-        native
-            .admit(peer.ok_or(PairingRelayError::WrongContext)?, &request)?
-            .encode_secret()
-            .map_err(|_| PairingRelayError::WrongContext)
-    })();
-    let bytes = match reply {
-        Ok(bytes) => bytes,
-        Err(error) => zeroize::Zeroizing::new(
-            Failure {
-                schema: "ramflux.pairing.Failure.v2".into(),
-                version: 2,
-                code: error.code().into(),
-                retry_after_ms: None,
-            }
-            .to_wire_bytes()?,
-        ),
-    };
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        bytes.len()
-    )?;
-    stream.write_all(&bytes)?;
-    stream.flush()?;
-    Ok(())
 }
 
 fn public_context(
