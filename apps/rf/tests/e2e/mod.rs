@@ -152,9 +152,8 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
 }
 
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = ramflux_test_support::TestPath::new()?
-        .child(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
+    // The owning directory is already unique. Keep socket paths short under CI TMPDIR.
+    let root = ramflux_test_support::TestPath::new()?.child("s");
     let mut guard = RootGuard { path: root.clone(), keep: false };
     std::fs::create_dir_all(root.join("secrets"))?;
     std::fs::create_dir_all(root.join("state"))?;

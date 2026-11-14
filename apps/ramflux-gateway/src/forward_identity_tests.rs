@@ -516,11 +516,16 @@ fn forward_deliver_refuses_legacy_gateway_without_instance()
 }
 
 /// Real authenticated receiving gateway for the originating-submit regression.
-pub(crate) fn ephemeral_pair()
--> Result<(GatewayPeerDirectory, Arc<GatewaySessionHub>), Box<dyn std::error::Error>> {
-    let (server, ca, _gw_b) = start_gw_b_listener()?;
+pub(crate) fn ephemeral_pair() -> Result<EphemeralPair, Box<dyn std::error::Error>> {
+    let (server, ca, gw_b) = start_gw_b_listener()?;
     let gw_a = issue_test_service_cert(&ca, NODE, "ramflux-gateway", Some("gw-a"))?;
-    Ok((GatewayPeerDirectory::test_peer(gw_a.tls, ca.pem, "gw-b", server.endpoint), server.hub))
+    Ok(EphemeralPair {
+        peers: GatewayPeerDirectory::test_peer(gw_a.tls, ca.pem.clone(), "gw-b", server.endpoint),
+        hub: server.hub,
+        receiver_tls: gw_b.tls,
+        ca_pem: ca.pem,
+        _root: server._root,
+    })
 }
 
 pub(crate) struct EphemeralPair {
@@ -528,6 +533,7 @@ pub(crate) struct EphemeralPair {
     pub hub: Arc<GatewaySessionHub>,
     pub receiver_tls: MeshTlsConfig,
     pub ca_pem: String,
+    pub(crate) _root: ramflux_test_support::TestPath,
 }
 
 /// Two instance-bound gateways under a CA trusted by the same real test node.
@@ -545,5 +551,6 @@ pub(crate) fn ephemeral_pair_for_node(
         hub,
         receiver_tls: gw_b.tls,
         ca_pem: ca.pem,
+        _root: root,
     })
 }

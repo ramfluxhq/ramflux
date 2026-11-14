@@ -2746,6 +2746,7 @@ mod tests {
         ca_pem: String,
         endpoint: quinn::Endpoint,
         addr: SocketAddr,
+        _root: ramflux_test_support::TestPath,
     }
 
     fn limited_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
@@ -2764,7 +2765,7 @@ mod tests {
             &client.tls,
             std::slice::from_ref(&ca_pem),
         )?);
-        Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr })
+        Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr, _root: root })
     }
 
     fn mesh_ijson_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
@@ -2807,7 +2808,7 @@ mod tests {
             &client_tls,
             std::slice::from_ref(&ca_pem),
         )?);
-        Ok(LimitedRig { server, client_tls, ca_pem, endpoint, addr })
+        Ok(LimitedRig { server, client_tls, ca_pem, endpoint, addr, _root: root })
     }
 
     fn frame_of(body: &str) -> Vec<u8> {

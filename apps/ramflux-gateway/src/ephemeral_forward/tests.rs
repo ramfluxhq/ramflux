@@ -192,11 +192,12 @@ async fn row_durable_wake_positive_control(context: &crate::GatewayQuicContext) 
 }
 
 async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext) -> TestResult {
-    let (peers, hub) = crate::serve::forward_identity_tests::ephemeral_pair()
+    let pair = crate::serve::forward_identity_tests::ephemeral_pair()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut caller = context.clone();
     caller.gateway_id = "gw-a".into();
-    caller.peers = peers;
+    caller.peers = pair.peers.clone();
+    let hub = &pair.hub;
     let forward = request(TARGET, TARGET, "env-nowake");
     let (recipient, received) = sink();
     hub.register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32).await?;
