@@ -48,8 +48,8 @@ object-ipc-crash-seam = []
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
-ramflux-client-model = { path = "../ramflux-client-model", optional = true }
-ramflux-card = { path = "../ramflux-card", optional = true }
+ramflux-client-model = { version = "0.1.0", path = "../ramflux-client-model", optional = true }
+ramflux-card = { version = "0.1.0", path = "../ramflux-card", optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
