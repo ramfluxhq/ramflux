@@ -54,6 +54,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Isolate test temporary files
+        shell: pwsh
+        run: python -B scripts/ci/test-tmp.py init
+
       - name: Install pinned Rust toolchain
         shell: pwsh
         run: |
@@ -185,3 +189,8 @@ jobs:
         if: always()
         shell: pwsh
         run: Remove-LocalUser -Name 'rf-ci-second' -ErrorAction SilentlyContinue
+
+      - name: Reject leaked test temporary files
+        if: always()
+        shell: pwsh
+        run: python -B scripts/ci/test-tmp.py check
