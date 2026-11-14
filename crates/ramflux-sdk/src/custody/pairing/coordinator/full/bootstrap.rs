@@ -72,6 +72,15 @@ impl Drop for BootstrapState {
 fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
+fn note_bootstrap_failure(phase: &'static str, error: &SdkError) {
+    #[cfg(test)]
+    eprintln!("test: full bootstrap {phase}: {error}");
+    tracing::debug!(
+        phase,
+        error_code = PairingActor::background_error_code(error),
+        "full data bootstrap refused"
+    );
+}
 async fn local<T: std::marker::Send + 'static>(
     runtime: Arc<super::cancel::FullRuntimeCancel>,
     work: impl FnOnce() -> Result<T, SdkError> + std::marker::Send + 'static,
@@ -116,16 +125,18 @@ impl PairingActor {
         let writer = self.local_writer.clone();
         let (state, prepared, frames) = local(self.full_runtime.clone(), move || {
             let node_id = node.envelope().body.node_id.clone();
-            let mut owner = FullBootstrap::new(role, channel, context.clone(), node, now)?;
+            let mut owner = FullBootstrap::new(role, channel, context.clone(), node, now)
+                .inspect_err(|error| note_bootstrap_failure("confirmed channel", error))?;
             let mut frames = Vec::new();
             let mut source_manifest = None;
             if role == PairingRole::Initiator {
                 let prepared = prepared.as_ref().ok_or_else(wrong)?;
-                let (manifest, start) =
-                    owner.prepare_source_start(prepared, now, |request| match &writer {
+                let (manifest, start) = owner
+                    .prepare_source_start(prepared, now, |request| match &writer {
                         Some(writer) => writer.sign_manifest(&participant, request),
                         None => participant.sign_full_source_manifest(request),
-                    })?;
+                    })
+                    .inspect_err(|error| note_bootstrap_failure("source manifest", error))?;
                 let grant = DataGrant {
                     schema: "ramflux.pairing.full_transfer.data_grant.v1".into(),
                     version: 1,
@@ -140,10 +151,14 @@ impl PairingActor {
                     opaque_commitment: start.opaque_commitment.clone(),
                     expires_at: now.checked_add(604_800).ok_or_else(wrong)?,
                 };
-                frames.extend(owner.begin_source(start, &grant, now, |request| match &writer {
-                    Some(writer) => writer.sign_grant(&participant, request),
-                    None => participant.sign_full_grant(request),
-                })?);
+                frames.extend(
+                    owner
+                        .begin_source(start, &grant, now, |request| match &writer {
+                            Some(writer) => writer.sign_grant(&participant, request),
+                            None => participant.sign_full_grant(request),
+                        })
+                        .inspect_err(|error| note_bootstrap_failure("source grant", error))?,
+                );
                 source_manifest = Some(manifest);
             }
             Ok((

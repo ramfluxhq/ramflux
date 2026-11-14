@@ -223,10 +223,24 @@ async fn merge(
             merged = true;
             break;
         }
+        if rig.primary.has_pending_full_local_work() || rig.secondary.has_pending_full_local_work()
+        {
+            let a = rig.primary.local_work_signal();
+            let b = rig.secondary.local_work_signal();
+            let source_work = source.work_signal();
+            let target_work = target.work_signal();
+            tokio::select! {
+                () = a.notified() => {}, () = b.notified() => {},
+                () = source_work.notified() => { source.try_apply_client(&rig.source.client)?; },
+                () = target_work.notified() => { target.try_apply_client(client)?; },
+            }
+        }
     }
     assert!(
         merged,
-        "test: bounded full production driver never committed both tail acknowledgements"
+        "test: bounded full production driver never committed both tail acknowledgements: A={:?} B={:?}",
+        rig.primary.transfer_status(request).await?,
+        rig.secondary.transfer_status(request).await?
     );
     Ok(())
 }

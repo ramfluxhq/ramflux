@@ -376,10 +376,10 @@ mod tests {
                 }
             }
             assert!(delivered,"test: encrypted candidate controls did not reach original source");
-            let status=rig.primary.status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            let status=Box::pin(rig.primary.status(&ramflux_protocol::custody::pairing::local_dto::StatusRequest {
                 schema:"ramflux.pairing.StatusRequest.v2".into(),version:2,
                 operation_id:operation,generation:expected.generation,
-            }).await?;
+            })).await?;
             assert!(matches!(status.outcome,Outcome::Update {value} if value.phase=="proposal_pending"
                 && value.proposal_hash.as_deref()==Some(expected.new_record_hash.as_str())
                 && value.peer_ref.as_ref()==Some(&recipient.install.recipient_ref)
