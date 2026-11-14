@@ -212,18 +212,23 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
 
 #[test]
 fn failed_recovery_sync_refuses_open() -> TestResult {
-    if std::env::var_os("RAMFLUX_FAILED_RECOVERY_CHILD").is_none() {
+    let Some(child_root) = std::env::var_os("RAMFLUX_FAILED_RECOVERY_CHILD") else {
+        let root = fixture("failed");
+        let directory = root.parent().ok_or("test: crash fixture has no directory")?.to_path_buf();
         let child = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 "router_wal::durability_tests::failed_recovery_sync_refuses_open",
                 "--nocapture",
             ])
-            .env("RAMFLUX_FAILED_RECOVERY_CHILD", "1")
+            .env("RAMFLUX_FAILED_RECOVERY_CHILD", &root)
             .spawn()?;
-        return wait_for_abort(child);
-    }
-    let root = fixture("failed");
+        wait_for_abort(child)?;
+        drop(root);
+        assert!(!directory.exists(), "parent must clean the fixture after the child aborts");
+        return Ok(());
+    };
+    let root = PathBuf::from(child_root);
     fs::create_dir_all(&root)?;
     let segment = router_wal_segment_path(&root, 0);
     fs::write(&segment, ROUTER_WAL_MAGIC)?;

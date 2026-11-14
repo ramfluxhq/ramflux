@@ -911,7 +911,39 @@ pub(crate) mod tests {
 
     use super::*;
 
-    type QuicServerDone = mpsc::Receiver<Result<(), String>>;
+    struct QuicServerDone {
+        stop: Option<tokio::sync::oneshot::Sender<()>>,
+        done: mpsc::Receiver<Result<(), String>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        store_path: ramflux_test_support::TestPath,
+    }
+
+    impl QuicServerDone {
+        fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            let Some(worker) = self.worker.as_ref() else { return Ok(()) };
+            if let Some(stop) = self.stop.take() {
+                let _sent = stop.send(());
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let result = self.done.recv_timeout(std::time::Duration::from_secs(10))?;
+            while !worker.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(test_error("QUIC fixture worker did not stop within its deadline"));
+                }
+                std::thread::yield_now();
+            }
+            if let Some(worker) = self.worker.take() {
+                worker.join().map_err(|_| test_error("QUIC fixture worker panicked"))?;
+            }
+            result.map_err(test_error)
+        }
+    }
+
+    impl Drop for QuicServerDone {
+        fn drop(&mut self) {
+            let _stopped = self.finish();
+        }
+    }
 
     #[test]
     fn federation_quic_dispatcher_authorizes_retention_gc_sweep()
@@ -1530,7 +1562,7 @@ pub(crate) mod tests {
         let ca = issue_test_ca(&root)?;
         let retention = issue_test_service_cert(&ca, "node-a", "ramflux-retention")?;
         let federation = issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
-        let (endpoint, _server_done) =
+        let (endpoint, mut server_done) =
             spawn_federation_gc_quic_server(federation.tls.clone(), retention.ca_pem.clone())?;
         let request = ramflux_node_core::RetentionGcSweepRequest {
             owner_service: "federation".to_owned(),
@@ -1550,6 +1582,29 @@ pub(crate) mod tests {
             )?;
 
         assert_eq!(response.owner_service, "federation");
+        let directory =
+            server_done.store_path.parent().ok_or("test: no store directory")?.to_path_buf();
+        server_done.finish()?;
+        drop(server_done);
+        assert!(!directory.exists(), "joined QUIC fixture must release its store directory");
+        Ok(())
+    }
+
+    #[test]
+    fn federation_quic_fixture_drop_stops_idle_listener_and_cleans_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("quic-fixture-drop")?;
+        let ca = issue_test_ca(&root)?;
+        let retention = issue_test_service_cert(&ca, "node-a", "ramflux-retention")?;
+        let federation = issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
+        let (_, server_done) = spawn_federation_gc_quic_server(federation.tls, retention.ca_pem)?;
+        let directory =
+            server_done.store_path.parent().ok_or("test: no store directory")?.to_path_buf();
+        drop(server_done);
+        assert!(
+            !directory.exists(),
+            "Drop must cancel an idle QUIC listener before removing its store"
+        );
         Ok(())
     }
 
@@ -1716,49 +1771,42 @@ pub(crate) mod tests {
         server_tls: ramflux_transport::MeshTlsConfig,
         trusted_retention_ca: String,
     ) -> Result<(String, QuicServerDone), Box<dyn std::error::Error>> {
-        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
-        let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
-        std::thread::spawn(move || {
+        let (endpoint_tx, endpoint_rx) = mpsc::sync_channel::<Result<String, String>>(1);
+        let (done_tx, done_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (store_path, context) = test_mesh_server_context("federation_tokio_quic_server")?;
+        let worker_root = store_path.clone();
+        let worker = std::thread::Builder::new().name("federation-test-quic".into()).spawn(move || {
             let result: Result<(), String> = (|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|source| source.to_string())?;
-                let (store_path, context) =
-                    test_mesh_server_context("federation_tokio_quic_server")
-                        .map_err(|source| source.to_string())?;
-                let result = runtime.block_on(async move {
+                runtime.block_on(async move {
                     let roots = Arc::new(move || Ok(vec![trusted_retention_ca.clone()]));
                     let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
-                        "127.0.0.1:0",
-                        &server_tls,
-                        roots,
-                    )
-                    .map_err(|source| source.to_string())?;
-                    endpoint_tx
-                        .send(
-                            server
-                                .local_addr()
-                                .map(|addr| addr.to_string())
-                                .map_err(|source| source.to_string()),
-                        )
+                        "127.0.0.1:0", &server_tls, roots,
+                    ).map_err(|source| source.to_string())?;
+                    endpoint_tx.send(server.local_addr().map(|addr| addr.to_string()).map_err(|source| source.to_string()))
                         .map_err(|source| source.to_string())?;
-                    let connection =
-                        server.accept_connection().await.map_err(|source| source.to_string())?;
-                    handle_mesh_quic_connection(connection, context)
-                        .await
-                        .map_err(|source| source.to_string())
-                });
-                cleanup_store(&store_path);
-                result
+                    tokio::select! {
+                        result = async {
+                            let connection = server.accept_connection().await.map_err(|source| source.to_string())?;
+                            handle_mesh_quic_connection(connection, context).await.map_err(|source| source.to_string())
+                        } => result,
+                        _ = stopped => Ok(()),
+                    }
+                })
             })();
+            // The runtime and all request tasks have stopped before the last worker owner drops.
+            drop(worker_root);
             let _sent = done_tx.send(result);
-        });
-        let endpoint = endpoint_rx
-            .recv()
-            .map_err(|source| test_error(source.to_string()))?
-            .map_err(test_error)?;
-        Ok((endpoint, done_rx))
+        })?;
+        let server_done =
+            QuicServerDone { stop: Some(stop), done: done_rx, worker: Some(worker), store_path };
+        let endpoint =
+            endpoint_rx.recv_timeout(std::time::Duration::from_secs(10))?.map_err(test_error)?;
+        Ok((endpoint, server_done))
     }
 
     fn test_mesh_server_context(

@@ -57,7 +57,9 @@ impl TestPath {
 // before sudo tests so later unprivileged allocations can still append diagnostics.
 fn record_owner(path: &Path, location: &std::panic::Location<'_>) -> io::Result<()> {
     const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
-    let Some(base) = std::env::var_os("RF_TEST_TMPDIR") else { return Ok(()) };
+    let Some(base) = std::env::var_os("RF_TEST_TMPDIR").filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
     let base = PathBuf::from(base).canonicalize()?;
     if path.parent() != Some(base.as_path()) {
         return Ok(());
