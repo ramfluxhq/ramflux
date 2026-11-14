@@ -25,6 +25,11 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
         owned_db(&initial.grant.destination_ref.account_anchor, b"incremental-original-b")?;
     seed(&a, 11, 8)?;
     seed(&b, 21, 9)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&b.path, std::fs::Permissions::from_mode(0o640))?;
+    }
     let (record, manifest, bytes) =
         input(&a).map_err(|error| format!("test: incremental source input: {error}"))?;
     let hash = record.base_manifest_hash.clone();
@@ -92,6 +97,15 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
         2,
         "test: private rebase mutated actual B"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&b.path)?.permissions().mode() & 0o777,
+            0o640,
+            "test: private rebase changed original B permissions"
+        );
+    }
     copy.verify_materialization(&stage)?;
     Ok(())
 }

@@ -28,7 +28,7 @@ async fn run() -> TestResult {
         rig.node.persist_calls.load(std::sync::atomic::Ordering::Acquire) >= 2,
         "test: privacy fixture never persisted the native handoff"
     );
-    rig.wire_evidence.check_persistence(&rig._node_root.path().join("authority.redb"))?;
+    rig.wire_evidence.check_persistence(&rig.node_root.path().join("authority.redb"))?;
     rig.wire_evidence.assert_private();
     rig.primary.lock().await?;
     rig.secondary.lock().await?;

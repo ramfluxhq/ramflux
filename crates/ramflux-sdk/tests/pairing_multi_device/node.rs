@@ -19,6 +19,7 @@ use std::{
 };
 
 pub struct Node {
+    pub identity: ramflux_crypto::custody::VerifiedNodeRecord,
     pub router: RouterCore,
     pub store: RouterRedbStore,
     pub service: CustodyService,
@@ -75,9 +76,9 @@ impl Node {
             node_seed: seed,
             public_origin: "https://relay.example:443".into(),
         })?));
-        let service =
-            CustodyService::new(node, false, &store, time)?.with_pairing_relay(relay.clone());
-        Ok(Arc::new(Self { router, store, service, clock, relay, _root: root }))
+        let service = CustodyService::new(node.clone(), false, &store, time)?
+            .with_pairing_relay(relay.clone());
+        Ok(Arc::new(Self { identity: node, router, store, service, clock, relay, _root: root }))
     }
     pub fn frame(
         &self,

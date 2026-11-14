@@ -34,7 +34,7 @@ pub async fn enroll(source: &mut Device, target: &mut Device, node: &Node) -> Re
             version: 2,
             capabilities: vec!["group".into(), "message".into(), "register".into(), "sync".into()],
             lease_not_before: now()?,
-            lease_expires_at: now()? + 86_400,
+            lease_expires_at: now()? + 604_800,
             display_name: "Phone".into(),
         })
         .await?;

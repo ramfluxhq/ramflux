@@ -165,7 +165,7 @@ impl PairingActor {
     /// The original password/vault provider and device branch remain frontend-owned.
     /// # Errors
     /// Refuses foreign/replaced frontends, incomplete G3, wrong local keys or cancellation.
-    pub(crate) fn service_linked_installation(
+    pub fn service_linked_installation(
         &mut self,
         client: &mut crate::RamfluxClient,
         service: &mut crate::custody::pairing::PairingLocalWriterService,

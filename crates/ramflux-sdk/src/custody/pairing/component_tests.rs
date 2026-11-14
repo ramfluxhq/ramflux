@@ -89,7 +89,7 @@ struct Rig {
     original_devices: Vec<ramflux_protocol::custody::Device>,
     now: u64,
     source: ComponentSource,
-    _node_root: tempfile::TempDir,
+    node_root: tempfile::TempDir,
     _clock: crate::time::FixedClock,
 }
 
@@ -283,7 +283,7 @@ impl Rig {
             original_devices,
             now,
             source,
-            _node_root: node_root,
+            node_root,
             _clock: fixed_clock,
         })
     }
@@ -304,7 +304,7 @@ async fn enrollment_admission() -> TestResult {
         original_devices,
         now,
         source: _source,
-        _node_root,
+        node_root: _node_root,
         _clock,
         ..
     } = Rig::open().await?;
@@ -391,8 +391,7 @@ async fn enrollment_admission() -> TestResult {
     assert_retained_roster(&admitted, original_devices, participant_b.vault.as_ref());
     assert_adoption_refs(&target, participant_b.vault.as_ref())?;
     assert_enrollment_own_sync(&participant_a, &target, &operation_id)?;
-    assert_missing_marker_refuses(recipient_root.path(), now)?;
-    Ok(())
+    assert_missing_marker_refuses(recipient_root.path(), now)
 }
 
 fn assert_enrollment_own_sync(
@@ -1199,7 +1198,7 @@ async fn pairing_full_account_lock_drains_epoch_and_keeps_data_only_resume() -> 
             participant_a,
             now,
             _clock,
-            _node_root,
+            node_root: _node_root,
             recipient_root: _recipient_root,
             secondary: _secondary,
             ..
@@ -1456,7 +1455,7 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
             participant_b,
             now,
             _clock,
-            _node_root,
+            node_root: _node_root,
             recipient_root: _recipient_root,
             ..
         },

@@ -156,7 +156,7 @@ pub(super) async fn verify(
 }
 
 #[tokio::test(start_paused = true)]
-async fn pairing_receiver_concurrency_and_transfer_acceptance() -> TestResult {
+async fn pairing_full_three_native_owners_survive_concurrent_linked_installation() -> TestResult {
     let hold = ClockHold::new();
     let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
         let fixture = Box::pin(super::open_devices(true)).await?;

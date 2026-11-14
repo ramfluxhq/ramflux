@@ -24,6 +24,29 @@ pub(super) fn attach(
     key: &AccountDbKey,
 ) -> Result<(), StorageError> {
     drop(super::super::stage::open_regular(source, false)?);
+    attach_owned(target, source, key)
+}
+
+pub(super) fn attach_selected(
+    target: &mut Connection,
+    source: &crate::AccountDb,
+) -> Result<(), StorageError> {
+    source.require_full_stage_unlock()?;
+    // Ordinary selected account files retain their existing permissions. Only private
+    // generation inputs require stage-file mode; never chmod or normalize the live DB.
+    let metadata = std::fs::symlink_metadata(&source.path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(StorageError::AuthorizationRejected);
+    }
+    attach_owned(target, &source.path, &source.current_key)?;
+    source.require_full_stage_unlock()
+}
+
+fn attach_owned(
+    target: &mut Connection,
+    source: &Path,
+    key: &AccountDbKey,
+) -> Result<(), StorageError> {
     let hex = Zeroizing::new(key.sqlcipher_hex());
     let encoded = Zeroizing::new(format!("x'{}'", hex.as_str()));
     target.execute(

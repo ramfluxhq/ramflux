@@ -7,6 +7,9 @@ use ramflux_protocol::custody::pairing::{PairingWire, relay::*};
 use ramflux_sdk::{SdkError, custody::pairing::PairingTransport};
 use std::{future::Future, pin::Pin, sync::Arc};
 type Reply<T> = Pin<Box<dyn Future<Output = Result<T, SdkError>> + std::marker::Send>>;
+#[path = "relay/full.rs"]
+mod full;
+#[derive(Clone)]
 pub struct Relay(pub Arc<Node>);
 fn error(value: ramflux_node_core::pairing_relay::PairingRelayError) -> SdkError {
     SdkError::PairingCode(value.code())
@@ -16,6 +19,11 @@ fn wire<T: PairingWire>(value: &T) -> Result<T, SdkError> {
     T::from_wire_bytes(&bytes).map_err(|_| SdkError::PairingCode("InvalidInput"))
 }
 impl PairingTransport for Relay {
+    fn full_transport(
+        &self,
+    ) -> Option<Arc<dyn ramflux_sdk::custody::pairing::FullPairingTransport>> {
+        Some(Arc::new(self.clone()))
+    }
     fn claim(&self, _origin: String, value: Claim) -> Reply<Claimed> {
         let node = self.0.clone();
         Box::pin(async move {
