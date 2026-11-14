@@ -11,6 +11,7 @@ use ramflux_protocol::{
     encode_base64url,
 };
 use tokio::time::Duration;
+mod application;
 mod catchup;
 mod idle;
 mod rebind;
@@ -87,31 +88,53 @@ impl FullStreamWork {
         // even for a new empty target. A receipt cannot replace that position.
         let reverse = self.receive_manifest().await?;
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
-        self.io.retain_reverse_manifest(&reverse).await?;
+        self.io
+            .retain_reverse_manifest(&reverse)
+            .await
+            .inspect_err(|error| Self::note_failure("retain reverse manifest", error))?;
         if self.prepared_resume() {
             return self.finish_prepared_source(manifest, reverse).await;
         }
         self.receive_and_apply_reverse(&reverse)
             .await
             .inspect_err(|error| Self::note_failure("apply reverse", error))?;
-        let draft = self.io.prepare_reverse_data_verified().await?;
+        let draft = self.io.prepare_reverse_data_verified().await.inspect_err(|error| {
+            Self::note_failure("prepare reverse application receipt", error)
+        })?;
         let participant = self.participant.clone();
-        let (draft, verified) = self
-            .runtime
-            .clone()
-            .run_blocking(move || {
-                let verified = participant.sign_application_data_verified(&draft)?;
-                Ok((draft, verified))
-            })
-            .await?;
+        let (draft, verified) =
+            self.runtime
+                .clone()
+                .run_blocking(move || {
+                    let verified = participant.sign_application_data_verified(&draft).inspect_err(
+                        |error| Self::note_failure("original branch application signer", error),
+                    )?;
+                    Ok((draft, verified))
+                })
+                .await?;
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
-        self.io.record_reverse_data_verified(draft, &verified).await?;
-        let encrypted = self.packet.seal_packet(&verified)?;
-        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+        self.io
+            .record_reverse_data_verified(draft, &verified)
+            .await
+            .inspect_err(|error| Self::note_failure("record reverse application receipt", error))?;
+        let encrypted = self
+            .packet
+            .seal_packet(&verified)
+            .inspect_err(|error| Self::note_failure("seal application receipt", error))?;
+        self.packet
+            .send(self.relay.as_ref(), &self.origin, encrypted)
+            .await
+            .inspect_err(|error| Self::note_failure("send application receipt", error))?;
         if self.source_idle {
             if manifest.manifest.is_last_prepublication_delta() {
-                let (proof, _) = self.io.verify_duplex(None).await?;
-                self.packet.allow_verified_duplex(&proof)?;
+                let (proof, _) = self
+                    .io
+                    .verify_duplex(None)
+                    .await
+                    .inspect_err(|error| Self::note_failure("source durable duplex", error))?;
+                self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
+                    Self::note_failure("authenticate durable duplex control gate", error)
+                })?;
                 return Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None });
             }
             manifest = self
@@ -134,8 +157,14 @@ impl FullStreamWork {
             self.send_manifest(&manifest).await?;
         }
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
-        let (proof, _) = self.io.verify_duplex(None).await?;
-        self.packet.allow_verified_duplex(&proof)?;
+        let (proof, _) = self
+            .io
+            .verify_duplex(None)
+            .await
+            .inspect_err(|error| Self::note_failure("source durable duplex", error))?;
+        self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
+            Self::note_failure("authenticate durable duplex control gate", error)
+        })?;
         // A signed DV still grants neither publication nor immutable-cut deletion.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
@@ -154,10 +183,15 @@ impl FullStreamWork {
             .prepare_own_reverse()
             .await
             .inspect_err(|error| Self::note_failure("prepare reverse", error))?;
-        self.io.retain_reverse_manifest(&reverse).await?;
+        self.io
+            .retain_reverse_manifest(&reverse)
+            .await
+            .inspect_err(|error| Self::note_failure("retain reverse manifest", error))?;
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
         self.send_manifest(&reverse).await?;
-        self.send_reverse_input(&reverse).await?;
+        self.send_reverse_input(&reverse)
+            .await
+            .inspect_err(|error| Self::note_failure("send reverse input and receipt", error))?;
         if idle {
             if manifest.manifest.is_last_prepublication_delta() {
                 return self.finish_idle_destination(manifest).await;
@@ -174,42 +208,7 @@ impl FullStreamWork {
         }
         let mut receiver = None;
         loop {
-            self.receive_forward_input(&manifest, prefix).await?;
-            let hash = hash(&manifest)?;
-            self.runtime.require_live()?;
-            self.fresh()
-                .await
-                .inspect_err(|error| Self::note_failure("native freshness", error))?;
-            let copy = if let Some(copy) = receiver.take() {
-                copy
-            } else {
-                let pinned = self.io.pin_original_receiver_base().await?;
-                self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?
-            };
-            self.fresh()
-                .await
-                .inspect_err(|error| Self::note_failure("native freshness", error))?;
-            let work = self.io.receiver_replay_work(copy, &hash).await?;
-            let prepared =
-                self.runtime.clone().run_blocking(move || Ok(Box::new(work.replay()?))).await?;
-            let (copy, draft) = self.io.prepare_data_verified(prepared).await?;
-            let participant = self.participant.clone();
-            let (draft, verified) = self
-                .runtime
-                .clone()
-                .run_blocking(move || {
-                    let verified = participant.sign_application_data_verified(&draft)?;
-                    Ok((draft, verified))
-                })
-                .await?;
-            self.fresh()
-                .await
-                .inspect_err(|error| Self::note_failure("native freshness", error))?;
-            let copy = self.io.record_data_verified(copy, draft, &verified).await?;
-            let encrypted = self.packet.seal_packet(&verified)?;
-            self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
-            self.runtime.require_live()?;
-            receiver = Some(copy);
+            receiver = Some(self.apply_forward_input(&manifest, prefix, receiver.take()).await?);
             if manifest.manifest.is_last_prepublication_delta() {
                 break;
             }
@@ -224,8 +223,14 @@ impl FullStreamWork {
                 .inspect_err(|error| Self::note_failure("retain forward manifest", error))?;
         }
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
-        let (proof, receiver) = self.io.verify_duplex(receiver).await?;
-        self.packet.allow_verified_duplex(&proof)?;
+        let (proof, receiver) = self
+            .io
+            .verify_duplex(receiver)
+            .await
+            .inspect_err(|error| Self::note_failure("recipient durable duplex", error))?;
+        self.packet.allow_verified_duplex(&proof).inspect_err(|error| {
+            Self::note_failure("authenticate durable duplex control gate", error)
+        })?;
         // Final signed input and reverse application precede user preparation/publication.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver })
     }
