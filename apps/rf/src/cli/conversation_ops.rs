@@ -125,6 +125,9 @@ pub(crate) struct TypingWatch {
     /// How long to collect `message.transient` typing rows, from 1 to 30 seconds.
     #[arg(long, default_value_t = 6, value_parser = for_secs_in_range)]
     pub(crate) for_secs: u64,
+    /// Created after `bus.subscribe` succeeds, before the observation window.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) ready_file: Option<String>,
 }
 
 fn for_secs_in_range(raw: &str) -> Result<u64, String> {
@@ -247,6 +250,7 @@ mod tests {
             panic!("expected watch");
         };
         assert_eq!(watch.for_secs, 6);
+        assert!(watch.ready_file.is_none());
         assert!(for_secs_in_range("0").is_err());
         assert!(for_secs_in_range("31").is_err());
         assert_eq!(for_secs_in_range("30").expect("upper bound"), 30);

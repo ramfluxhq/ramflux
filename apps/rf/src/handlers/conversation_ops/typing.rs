@@ -106,6 +106,11 @@ async fn watch_indicators(bus: &mut LocalBusClient, watch: &TypingWatch) -> Resu
     if !accepted(&subscribed) {
         return Ok(subscribed);
     }
+    if let Some(path) = &watch.ready_file {
+        // The file is the condition a caller waits on. It appears only after the
+        // transient subscriber is installed, and before any typing event can be missed.
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    }
     let started_at_ms = unix_ms();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(watch.for_secs);
     let mut indicators = Vec::new();

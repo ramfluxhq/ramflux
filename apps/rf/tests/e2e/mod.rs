@@ -1280,8 +1280,20 @@ pub fn rf_json(socket: &Path, args: &[&str]) -> Result<Value> {
     rf_json_env(socket, args, &[])
 }
 
+/// Same JSON CLI call as [`rf_json`], with the caller's deadline.
+/// The wait lives in the shared process-group runner.
+pub fn rf_json_timeout(socket: &Path, args: &[&str], timeout: Duration) -> Result<Value> {
+    let output = rf_output_env_timeout(socket, args, &[], timeout)
+        .map_err(|error| format!("rf {args:?} failed to spawn: {error}"))?;
+    finish_rf_json(args, output)
+}
+
 fn rf_json_env(socket: &Path, args: &[&str], extra: &[(&str, &str)]) -> Result<Value> {
     let output = rf_output_env(socket, args, extra)?;
+    finish_rf_json(args, output)
+}
+
+fn finish_rf_json(args: &[&str], output: std::process::Output) -> Result<Value> {
     if !output.status.success() {
         return Err(format!(
             "rf {args:?} failed ({}): stdout={} stderr={}",

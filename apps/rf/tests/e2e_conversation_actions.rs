@@ -11,14 +11,13 @@ mod e2e;
 
 use e2e::{
     Account, Daemon, Stack, boot_stack, configure_node, crash_daemon, create_account, dm_send,
-    dump_logs, exchange_contacts, message_texts, rf_json, start_daemon, start_daemon_at, unique,
-    unlock_account, wait_dm_texts,
+    dump_logs, exchange_contacts, message_texts, rf_json, rf_json_timeout, start_daemon,
+    start_daemon_at, unique, unlock_account, wait_dm_texts, wait_json,
 };
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const REFUSAL: &str = "peer_upgrade_required";
-const SEND_BUDGET: Duration = Duration::from_secs(40);
 
 struct World<'a> {
     stack: &'a Stack,
@@ -187,10 +186,16 @@ fn observe_typing(world: &World<'_>) -> e2e::Result<()> {
     let socket = world.bob_daemon()?.socket.clone();
     let account = world.bob.id.clone();
     let conversation = world.conversation.to_owned();
+    let ready = world.stack.root.join(unique("typing-ready"));
+    let ready_for_child = ready.clone();
+    let watched_account = account.clone();
     let worker = std::thread::spawn(move || {
-        watch_at(&socket, &account, &conversation, 12).map_err(|error| error.to_string())
+        watch_at(&socket, &watched_account, &conversation, 12, Some(ready_for_child.as_path()))
+            .map_err(|error| error.to_string())
     });
-    std::thread::sleep(Duration::from_secs(1));
+    wait_json(world.bob_daemon()?, &["account", "status", "--account", &account], |_| {
+        ready.exists()
+    })?;
     let op = unique("live-typing-op");
     let started = rf_json(
         &world.alice_d.socket,
@@ -243,46 +248,31 @@ fn assert_typing_cleared(watched: &Value) -> e2e::Result<()> {
 
 fn drive_send(world: &World<'_>, text: &str) -> e2e::Result<Value> {
     let op = unique("send-op");
-    let deadline = Instant::now() + SEND_BUDGET;
-    let mut last = String::from("conversation.send was not attempted");
-    while Instant::now() < deadline {
-        match rf_json(
-            &world.alice_d.socket,
-            &[
-                "conversation",
-                "send",
-                "--account",
-                &world.alice.id,
-                "--conversation",
-                world.conversation,
-                "--text",
-                text,
-                "--operation-id",
-                &op,
-            ],
-        ) {
-            Ok(value) => {
-                if value.pointer("/body/delivery_state").and_then(Value::as_str)
-                    == Some("submitted")
-                {
-                    return Ok(value);
-                }
-                let code = value.pointer("/error/code").and_then(Value::as_str).unwrap_or("");
-                let terminal = value.get("ok").and_then(Value::as_bool) == Some(false)
-                    && !matches!(
-                        code,
-                        "not_connected" | "NetworkingPending" | "ephemeral_unavailable"
-                    );
-                last = value.to_string();
-                if terminal {
-                    return Ok(value);
-                }
-            }
-            Err(error) => last = error.to_string(),
-        }
-        std::thread::sleep(Duration::from_millis(250));
+    wait_json(
+        world.alice_d,
+        &[
+            "conversation",
+            "send",
+            "--account",
+            &world.alice.id,
+            "--conversation",
+            world.conversation,
+            "--text",
+            text,
+            "--operation-id",
+            &op,
+        ],
+        send_settled,
+    )
+}
+
+fn send_settled(value: &Value) -> bool {
+    if value.pointer("/body/delivery_state").and_then(Value::as_str) == Some("submitted") {
+        return true;
     }
-    Err(format!("conversation.send did not finish: {last}").into())
+    let code = value.pointer("/error/code").and_then(Value::as_str).unwrap_or("");
+    value.get("ok").and_then(Value::as_bool) == Some(false)
+        && !matches!(code, "not_connected" | "NetworkingPending" | "ephemeral_unavailable")
 }
 
 fn require_submitted(world: &World<'_>, text: &str) -> e2e::Result<Value> {
@@ -370,7 +360,7 @@ fn texts(world: &World<'_>) -> e2e::Result<Vec<String>> {
 }
 
 fn watch(world: &World<'_>, secs: u64) -> e2e::Result<Value> {
-    watch_at(&world.bob_daemon()?.socket, &world.bob.id, world.conversation, secs)
+    watch_at(&world.bob_daemon()?.socket, &world.bob.id, world.conversation, secs, None)
 }
 
 fn watch_at(
@@ -378,66 +368,25 @@ fn watch_at(
     account: &str,
     conversation: &str,
     secs: u64,
+    ready: Option<&std::path::Path>,
 ) -> e2e::Result<Value> {
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_rf"))
-        .arg("--socket")
-        .arg(socket)
-        .args([
-            "conversation",
-            "typing",
-            "watch",
-            "--account",
-            account,
-            "--conversation",
-            conversation,
-            "--for-secs",
-        ])
-        .arg(secs.to_string())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(secs.saturating_add(8));
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("typing watch exceeded its budget".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let stdout = match child.stdout.as_mut() {
-        Some(pipe) => read_limited(pipe, 1_048_576)?,
-        None => Vec::new(),
-    };
-    let stderr = match child.stderr.as_mut() {
-        Some(pipe) => read_limited(pipe, 65_536)?,
-        None => Vec::new(),
-    };
-    if !status.success() {
-        return Err(format!("typing watch failed: {}", String::from_utf8_lossy(&stderr)).into());
+    let mut args = vec![
+        "conversation".to_owned(),
+        "typing".to_owned(),
+        "watch".to_owned(),
+        "--account".to_owned(),
+        account.to_owned(),
+        "--conversation".to_owned(),
+        conversation.to_owned(),
+        "--for-secs".to_owned(),
+        secs.to_string(),
+    ];
+    if let Some(path) = ready {
+        args.push("--ready-file".to_owned());
+        args.push(path.display().to_string());
     }
-    serde_json::from_str(std::str::from_utf8(&stdout)?.trim()).map_err(Into::into)
-}
-
-fn read_limited(pipe: &mut impl std::io::Read, cap: usize) -> e2e::Result<Vec<u8>> {
-    let mut into = Vec::new();
-    let mut buf = [0_u8; 4096];
-    loop {
-        if into.len() >= cap {
-            return Err("subprocess output exceeded its cap".into());
-        }
-        let room = cap - into.len();
-        let size = room.min(buf.len());
-        let read = pipe.read(&mut buf[..size])?;
-        if read == 0 {
-            break;
-        }
-        into.extend_from_slice(&buf[..read]);
-    }
-    Ok(into)
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    rf_json_timeout(socket, &refs, Duration::from_secs(secs.saturating_add(8)))
 }
 
 fn join_watch(worker: std::thread::JoinHandle<Result<Value, String>>) -> e2e::Result<Value> {
