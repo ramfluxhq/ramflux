@@ -35,7 +35,7 @@ async fn run() -> TestResult {
     rig.secondary.lock().await?;
     rig.source.client = crate::RamfluxClient::new();
     let mut old = crate::RamfluxClient::new();
-    rig.participant_b.return_data_client(&mut old)?;
+    rig.participant_b.return_client(&mut old)?;
     drop(old);
     rig.now = original.body.expires_at;
     rig.clock.set_wall(rig.now);
