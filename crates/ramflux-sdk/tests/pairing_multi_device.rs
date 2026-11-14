@@ -232,6 +232,7 @@ fn assert_retained_devices(
 }
 
 async fn merge_full_tail(fixture: &mut full::Fixture) -> ResultOf<()> {
+    fixture.complete_controls().await?;
     for _ in 0..1024 {
         fixture.step().await?;
         let a = fixture.status(true).await?;

@@ -193,6 +193,7 @@ impl Fixture {
         Ok(())
     }
     pub(super) async fn merge(&mut self) -> TestResult {
+        self.complete_controls().await?;
         for _ in 0..512 {
             self.step().await?;
             if self
@@ -208,5 +209,43 @@ impl Fixture {
             }
         }
         Err("test: TLS full tail lacks both semantic acknowledgements".into())
+    }
+    pub(super) async fn complete_controls(&mut self) -> TestResult {
+        for _ in 0..16 {
+            let request = |generation| StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: self.operation.clone(),
+                generation,
+            };
+            let a_request = request(self.wire.primary.actor_generation());
+            let b_request = request(self.wire.recipient.actor_generation());
+            let completed = |reply: LocalResult| {
+                matches!(reply.outcome,
+                Outcome::Update { value } if value.phase == "completed")
+            };
+            let a_done = completed(self.wire.primary.status(&a_request).await?);
+            let b_done = completed(self.wire.recipient.status(&b_request).await?);
+            if a_done && b_done {
+                return Ok(());
+            }
+            for (actor, done) in
+                [(&mut self.wire.recipient, b_done), (&mut self.wire.primary, a_done && b_done)]
+            {
+                if done {
+                    continue;
+                }
+                self.wire.clock.advance_ms(1001);
+                drive(
+                    Box::pin(actor.poll_full_management_control()),
+                    &mut self.source,
+                    &self.a.client,
+                    &mut self.target,
+                    &self.b.client,
+                )
+                .await?;
+            }
+        }
+        Err("test: Installed/Completed controls did not finish".into())
     }
 }

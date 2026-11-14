@@ -22,6 +22,12 @@ impl FullStreamWork {
             .await
     }
     pub(super) async fn fresh(&mut self) -> Result<(), SdkError> {
+        self.fresh_inner(false).await
+    }
+    pub(super) async fn fresh_for_first_position(&mut self) -> Result<(), SdkError> {
+        self.fresh_inner(true).await
+    }
+    async fn fresh_inner(&mut self, replay_existing: bool) -> Result<(), SdkError> {
         tracing::debug!(role = self.role.as_str(), "full data native observation started");
         let current = self
             .own_native_head()
@@ -54,6 +60,9 @@ impl FullStreamWork {
                 .await
                 .inspect_err(|error| Self::note_failure("retain native rebind", error))?;
             self.pending_rebind = Some(packet);
+        } else if replay_existing && self.role == PairingRole::Initiator {
+            // A local commit does not prove B received the prior epoch's frame.
+            self.pending_rebind = self.io.retained_rebind(current).await?;
         }
         self.flush_rebind()
             .await

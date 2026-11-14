@@ -278,7 +278,7 @@ impl Fixture {
         .await
         .map_err(|error| format!("test: prepare target candidate: {error}"))?;
         let mut attended = false;
-        for _ in 0..1024 {
+        for turn in 0..1024 {
             self.a
                 .service_data()
                 .map_err(|error| format!("test: publication source service: {error}"))?;
@@ -301,9 +301,11 @@ impl Fixture {
             // Finish that local request before deciding whether fresh attendance is needed.
             self.a.service_data()?;
             self.b.service_data()?;
+            eprintln!("test: external publication turn={turn} attendance");
             self.affirm_source_if_displayed(&mut attended)
                 .await
                 .map_err(|error| format!("test: source affirmation: {error}"))?;
+            eprintln!("test: external publication turn={turn} native publication");
             drive(
                 Box::pin(self.a.actor.advance_full_source_publication()),
                 &mut self.source,
@@ -325,5 +327,43 @@ impl Fixture {
             }
         }
         Err("test: actual node publication did not install B's own generation".into())
+    }
+    pub(super) async fn complete_controls(&mut self) -> ResultOf<()> {
+        for _ in 0..16 {
+            let request = |generation| StatusRequest {
+                schema: "ramflux.pairing.StatusRequest.v2".into(),
+                version: 2,
+                operation_id: self.operation.clone(),
+                generation,
+            };
+            let a_request = request(self.a.actor.actor_generation());
+            let b_request = request(self.b.actor.actor_generation());
+            let completed = |reply: LocalResult| {
+                matches!(reply.outcome,
+                Outcome::Update { value } if value.phase == "completed")
+            };
+            let a_done = completed(self.a.actor.status(&a_request).await?);
+            let b_done = completed(self.b.actor.status(&b_request).await?);
+            if a_done && b_done {
+                return Ok(());
+            }
+            for (actor, done) in
+                [(&mut self.b.actor, b_done), (&mut self.a.actor, a_done && b_done)]
+            {
+                if done {
+                    continue;
+                }
+                self.node.clock.advance_ms(1001);
+                drive(
+                    Box::pin(actor.poll_full_management_control()),
+                    &mut self.source,
+                    &self.a.client,
+                    &mut self.target,
+                    &self.b.client,
+                )
+                .await?;
+            }
+        }
+        Err("test: Installed/Completed controls did not finish".into())
     }
 }

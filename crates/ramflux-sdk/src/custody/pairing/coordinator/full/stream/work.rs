@@ -90,7 +90,9 @@ impl FullStreamWork {
         mut self,
         mut manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
-        self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;
+        self.fresh_for_first_position().await.inspect_err(|error| {
+            Self::note_failure("first-position native rebind", error);
+        })?;
         if self.source_idle {
             self.send_idle(&manifest).await?;
         } else {

@@ -9,11 +9,13 @@ use ramflux_crypto::custody::{VerifiedRecord, pairing::PairingRole};
 use ramflux_protocol::custody::{DeviceRef, pairing::full_transfer::DataPacket};
 pub(super) enum Action {
     Prepare(Box<VerifiedRecord>),
+    ReadRetained(Box<VerifiedRecord>),
     Retain { current: Box<VerifiedRecord>, packet: Box<DataPacket> },
 }
 pub(super) enum Applied {
     Prepared(Box<Draft>),
     Retained,
+    Replay(Option<Box<DataPacket>>),
 }
 pub(crate) struct Draft {
     scope: FullLocalIoScope,
@@ -59,6 +61,12 @@ pub(super) fn apply(
 ) -> Result<Applied, SdkError> {
     let now = crate::custody::network_now()?;
     match action {
+        Action::ReadRetained(current) => {
+            if scope.role != PairingRole::Initiator {
+                return Err(wrong());
+            }
+            Ok(Applied::Replay(stage.retained_source_rebind(&current, now)?.map(Box::new)))
+        }
         Action::Prepare(current) => {
             if scope.role != PairingRole::Initiator {
                 return Err(wrong());
@@ -94,6 +102,17 @@ impl FullLocalIoPort {
             &self.scope.source_key,
         )?;
         Ok(new_base_record_hash.clone())
+    }
+    pub(crate) async fn retained_rebind(
+        &mut self,
+        current: VerifiedRecord,
+    ) -> Result<Option<DataPacket>, SdkError> {
+        let FullLocalResult::Rebind(Applied::Replay(packet)) =
+            self.request(FullLocalAction::Rebind(Action::ReadRetained(Box::new(current)))).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(packet.map(|packet| *packet))
     }
     pub(crate) async fn prepare_rebind(
         &mut self,

@@ -8,6 +8,7 @@ mod tests {
     mod cooperative;
     mod head_change;
     mod races;
+    mod rebind_resume;
     mod third;
     use crate::custody::pairing::{PairingIdentity, PairingLocalWriterService};
     use ramflux_protocol::custody::{DeviceRef, object_hash};
@@ -486,6 +487,7 @@ mod tests {
                 break;
             }
         }
+        complete_linked_controls(&mut fixture).await?;
         assert_ne!(
             fixture.target.account_db()?.path,
             original,
@@ -567,6 +569,31 @@ mod tests {
         );
         Ok(())
     }
+    async fn complete_linked_controls(fixture: &mut Linked) -> TestResult {
+        let source = resume_request(&fixture.rig.source.client)?;
+        let target = resume_request(&fixture.target)?;
+        for _ in 0..16 {
+            let a = fixture.rig.primary.status(&source).await?;
+            let b = fixture.rig.secondary.status(&target).await?;
+            let completed = |reply: LocalResult| {
+                matches!(reply.outcome,
+                Outcome::Update { value } if value.phase == "completed")
+            };
+            let a_done = completed(a);
+            let b_done = completed(b);
+            if a_done && b_done {
+                return Ok(());
+            }
+            if !b_done {
+                poll_management(fixture, false).await?;
+            }
+            // A must flush its queued Completed even after its local phase changed.
+            if !a_done || !b_done {
+                poll_management(fixture, true).await?;
+            }
+        }
+        Err("test: linked Installed/Completed controls did not finish".into())
+    }
     async fn poll_management(fixture: &mut Linked, primary: bool) -> TestResult {
         let Linked { rig, target, source_service, target_service, .. } = fixture;
         rig.clock.advance_ms(1001);
@@ -598,6 +625,7 @@ mod tests {
             generation: rig.secondary.actor_generation(),
             transcript_hash: rig.secondary.displayed_transcript()?,
         };
+        eprintln!("test: linked entering attended B prepare");
         drive(
             Box::pin(rig.secondary.prepare_full_transfer(&prepare)),
             source_service,
@@ -607,21 +635,26 @@ mod tests {
         )
         .await
         .map_err(|error| format!("test: linked B attended prepare: {error}"))?;
+        eprintln!("test: linked B prepare complete");
         let mut attended = false;
-        for _ in 0..72 {
+        for turn in 0..72 {
+            eprintln!("test: linked publication turn={turn} management B");
             poll_management(fixture, false).await?;
+            eprintln!("test: linked publication turn={turn} management A");
             poll_management(fixture, true).await?;
             {
                 let Linked { rig, target, .. } = fixture;
                 rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
                 rig.secondary.service_full_transfer(target.account_db()?)?;
             }
+            eprintln!("test: linked publication turn={turn} attendance");
             affirm_displayed_candidate(fixture, &prepare.operation_id, &mut attended)
                 .await
                 .map_err(|error| format!("test: linked source affirmation: {error}"))?;
             let Linked { rig, target, source_service, target_service, .. } = fixture;
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
             rig.secondary.service_full_transfer(target.account_db()?)?;
+            eprintln!("test: linked publication turn={turn} native publication");
             if drive(
                 Box::pin(rig.primary.advance_full_source_publication()),
                 source_service,

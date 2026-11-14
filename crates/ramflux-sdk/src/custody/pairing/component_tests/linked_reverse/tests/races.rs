@@ -120,8 +120,23 @@ pub(super) async fn merge(fixture: &mut Linked) -> TestResult {
     let target = resume_request(&fixture.target)?;
     for _ in 0..96 {
         step(fixture).await?;
-        let a = fixture.rig.primary.transfer_status(&source).await?;
-        let b = fixture.rig.secondary.transfer_status(&target).await?;
+        let Linked { rig, target: client, source_service, target_service, .. } = fixture;
+        let a = drive(
+            Box::pin(rig.primary.transfer_status(&source)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            client,
+        )
+        .await?;
+        let b = drive(
+            Box::pin(rig.secondary.transfer_status(&target)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            client,
+        )
+        .await?;
         let done = |reply: LocalResult| matches!(reply.outcome, Outcome::FullStatus { value } if value.tail_status == FullTailStatus::Merged);
         if done(a) && done(b) {
             return Ok(());

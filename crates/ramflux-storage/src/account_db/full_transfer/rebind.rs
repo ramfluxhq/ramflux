@@ -103,6 +103,54 @@ impl FullTransferStage<'_> {
             source_signature: encode_base64url([0; 64]),
         })
     }
+    /// Recover only this original source's exact retained Rebind for its own current head.
+    /// This may replay a data frame after J3, but never changes a binding or signs approval.
+    /// # Errors
+    /// Refuses another role, expired lease, changed native base, missing/corrupt signed frame.
+    pub fn retained_source_rebind(
+        &mut self,
+        current: &VerifiedRecord,
+        now: u64,
+    ) -> Result<Option<DataPacket>, StorageError> {
+        self.require_io()?;
+        self.observe_full_native_head(current)?;
+        let record = self.resume_record()?;
+        if record.role != PairingRole::Initiator {
+            return Err(changed());
+        }
+        if now >= self.reference().lease_expires_at.0 {
+            return Err(StorageError::PairingField("LeaseExpired"));
+        }
+        verify_full_prepublication_authority(&record.grant, current, now).map_err(|_| changed())?;
+        let hash = object_hash(current.envelope())?;
+        if self.full_prepublication_record_hash()? != hash {
+            return Err(changed());
+        }
+        let bytes: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT CASE WHEN length(packet)<=4096 THEN packet ELSE NULL END FROM rebound_head WHERE hash=?1",
+            params![hash], |row| row.get(0),
+        ).optional()?;
+        let Some(bytes) = bytes else {
+            return if hash == record.base_record_hash { Ok(None) } else { Err(changed()) };
+        };
+        let bytes = zeroize::Zeroizing::new(bytes);
+        let packet = DataPacket::from_wire_bytes(&bytes).map_err(|_| changed())?;
+        let DataPacket::Rebind { manifest_hash, new_base_record_hash, source_signature } = &packet
+        else {
+            return Err(changed());
+        };
+        if manifest_hash != &record.base_manifest_hash || new_base_record_hash != &hash {
+            return Err(changed());
+        }
+        ramflux_crypto::verify_canonical_signature(
+            &packet.rebind_signing_bytes().map_err(|_| changed())?,
+            source_signature,
+            &record.grant.branch_keys.source,
+        )
+        .map_err(|_| changed())?;
+        self.require_io()?;
+        Ok(Some(packet))
+    }
     fn require_rebind_capacity(&self, hash: &str) -> Result<(), StorageError> {
         self.connection.execute_batch(SCHEMA)?;
         let exists: bool = self.connection.query_row(
@@ -120,7 +168,7 @@ impl FullTransferStage<'_> {
     /// Persist only an original-A signature over the exact independently fetched current head.
     /// A peer hint alone never advances the bound head; duplicate frames are idempotent.
     /// # Errors
-    /// Refuses J3, wrong manifest/hash/signature, lost original authority, rollback or overflow.
+    /// Refuses a new J3 binding, wrong manifest/hash/signature, lost original authority or rollback; exact retained retries are read-only.
     pub fn retain_full_rebind(
         &mut self,
         current: &VerifiedRecord,
@@ -129,7 +177,6 @@ impl FullTransferStage<'_> {
     ) -> Result<(), StorageError> {
         self.require_io()?;
         self.observe_full_native_head(current)?;
-        self.require_before_candidate()?;
         let record = self.resume_record()?;
         verify_full_prepublication_authority(&record.grant, current, now).map_err(|_| changed())?;
         let DataPacket::Rebind { manifest_hash, new_base_record_hash, source_signature } = packet
@@ -147,10 +194,22 @@ impl FullTransferStage<'_> {
             &record.grant.branch_keys.source,
         )
         .map_err(|_| changed())?;
+        let bound_hash = self.full_prepublication_record_hash()?;
+        let bytes = zeroize::Zeroizing::new(packet.encode_secret().map_err(|_| changed())?);
+        let identical: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rebound_head WHERE hash=?1 AND packet=?2)",
+            params![new_base_record_hash, bytes.as_slice()],
+            |row| row.get(0),
+        )?;
+        if identical && bound_hash == *new_base_record_hash {
+            // An authenticated byte-identical retry does not change J3's bound native head.
+            self.require_io()?;
+            return Ok(());
+        }
+        self.require_before_candidate()?;
         self.require_rebind_capacity(new_base_record_hash)?;
         let hash = new_base_record_hash.clone();
         let epoch = current.envelope().body.device_set_epoch;
-        let bytes = zeroize::Zeroizing::new(packet.encode_secret().map_err(|_| changed())?);
         self.connection.call_immediate(move |tx| {
             tx.execute("INSERT INTO rebound_head VALUES(?1,?2) ON CONFLICT(hash) DO NOTHING",params![hash,bytes.as_slice()])?;
             tx.execute("INSERT INTO prepublication_binding VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET hash=excluded.hash,epoch=excluded.epoch",params![hash,epoch])?;
