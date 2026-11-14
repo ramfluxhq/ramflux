@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Session push
 
+- Keep an offline catch-up in one pass while committed inbox coverage advances.
+  The 20-second receive timeout now bounds stalled progress, so slower durable
+  stores can drain a finite backlog without cancelling and restarting the pass.
 - SDK receive ledger first-activation is default-on for managed push, compatibility
   and standalone receive. Fresh accounts advertise `gateway.session_push.v1` so the
   first handshake can bind the verified node incarnation; already-activated accounts
