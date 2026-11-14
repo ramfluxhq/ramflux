@@ -399,7 +399,7 @@ async fn cold_status(
     actor.set_full_node(
         crate::custody::network_tests::node(
             crate::custody::network_now()?,
-            encode_base64url([29; 32]),
+            ramflux_protocol::encode_base64url([29; 32]),
         )
         .map_err(|error| error.to_string())?,
     );
