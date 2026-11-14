@@ -90,7 +90,13 @@ impl FullNativeFixture {
         };
         let peer = peer();
         let native = FullNativeRelay::new(&self.identity, &self.node.core, self.store.clone());
-        let permit = native.admit(&peer, &admit).map_err(error)?;
+        let permit = native.admit(&peer, &admit).map_err(|refusal| {
+            let active = self.store.lock().ok()
+                .and_then(|mut store| store.full_resume_stats().ok().flatten())
+                .map(|stats| stats.connections);
+            eprintln!("test: full native DATA admit role={role} arm={arm:?} active_epochs={active:?} code={}", refusal.code());
+            error(refusal)
+        })?;
         let id = permit.permit.decode(32).map_err(|error| wire(&error))?;
         let id = id.as_slice().try_into().map_err(|_| wrong())?;
         let claimed = native
