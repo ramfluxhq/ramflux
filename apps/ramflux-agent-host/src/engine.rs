@@ -9,6 +9,7 @@ use ramflux_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fmt::Write as _;
 use std::future::Future;
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -100,7 +101,7 @@ impl Intent {
             frame.fallback_text = Some(snapshot.fallback_text.clone());
             frame.final_ = Some(snapshot.final_.clone());
             frame.closed = Some(snapshot.closed);
-            frame.metadata = snapshot.metadata.clone();
+            frame.metadata.clone_from(&snapshot.metadata);
             frame.resync = Some(ramflux_protocol::Resync {
                 a2ui: MutationMessage::new(Mutation::CreateSurface(snapshot.create())),
             });
@@ -131,7 +132,7 @@ impl Intent {
             }
             Self::AppendText(a) => frame.append_text = Some(a.clone()),
             Self::CloseSurface(c) => {
-                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c.clone())))
+                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c.clone())));
             }
             Self::ReplyText(_) | Self::ReplaceSurface(_) => return Err(Error::State),
         }
@@ -275,7 +276,10 @@ impl EngineProvider for RuleEngine {
             return Ok(vec![Intent::ReplyText(rule.reply.clone())]);
         };
         let random = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
-        let suffix: String = random.bytes().map(|b| format!("{b:02x}")).collect();
+        let suffix = random.bytes().try_fold(String::new(), |mut suffix, byte| {
+            write!(suffix, "{byte:02x}").map_err(|_| Error::State)?;
+            Ok::<_, Error>(suffix)
+        })?;
         let id = format!("agent_{suffix}");
         let mut components = vec![
             json!({"id":"root","component":"Column","children":["reply","result"]}),

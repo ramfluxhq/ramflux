@@ -161,7 +161,10 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
     }
     Ok(())
 }
-fn answer_action(requester: &RamfluxClient, author: &RamfluxClient) -> TestResult<SurfaceCarrier> {
+fn answer_action(
+    requester: &RamfluxClient,
+    author: &RamfluxClient,
+) -> Result<SurfaceCarrier, Box<dyn std::error::Error>> {
     let view = author.surface_get("form", 0, None)?;
     let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
     let mut frame = ramflux_protocol::ActionFrame {
