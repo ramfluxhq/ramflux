@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 mod budget;
 mod cost;
 pub(crate) mod quic;
+mod receive;
 mod request;
 mod submit;
 pub(crate) struct Response {
@@ -37,7 +38,10 @@ pub(crate) struct Context<'a> {
     pub received: Instant,
 }
 pub(crate) fn recognizes(path: &str) -> bool {
-    matches!(path, wire::FOREIGN_PATH | wire::PEER_QUERY_PATH | wire::PEER_COST_PATH)
+    matches!(
+        path,
+        wire::FOREIGN_PATH | wire::PEER_QUERY_PATH | wire::PEER_COST_PATH | receive::PATH
+    )
 }
 fn failure(status: u16, reason: &str) -> Response {
     Response {
@@ -89,6 +93,9 @@ pub(crate) fn route(
     }
     if !recognizes(path) {
         return Ok(None);
+    }
+    if path == receive::PATH {
+        return receive::route(method, bytes, context);
     }
     let request =
         match request::decode(method, path, bytes, context.node.node_id.as_str(), context.peer.uri)
@@ -242,3 +249,6 @@ async fn discover(
         .map_err(|_| Reason::ForeignEndpointRefused)?;
     Ok((target, discovery))
 }
+
+#[cfg(test)]
+mod test_support;
