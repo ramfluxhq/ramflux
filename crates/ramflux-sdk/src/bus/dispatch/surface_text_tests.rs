@@ -147,6 +147,30 @@ pub(in crate::bus::dispatch) fn members(
     }
     Ok(peers)
 }
+fn install_receiver_group(client: &RamfluxClient, epoch: u64) -> Result<(), SdkError> {
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    client.account_db()?.upsert_group_local_membership_snapshot(
+        "group",
+        epoch,
+        128,
+        "none",
+        &local.device_id,
+        "member",
+        1,
+    )?;
+    client.account_db()?.upsert_group_member_snapshot("group", "device-sender", "owner", 1)?;
+    client.account_db()?.persist_client_record(
+        "conversation",
+        "thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    client.pin_local_group_member("group")?;
+    client.pin_joined_group_member(
+        "group",
+        client.peer_device_identity("sender", "device-sender")?.storage_key(),
+    )?;
+    Ok(())
+}
 pub(in crate::bus::dispatch) fn assert_receivers(
     peers: &[LocalBusAccountState],
     deliveries: &[Delivery],
@@ -165,31 +189,7 @@ pub(in crate::bus::dispatch) fn assert_receivers(
             })
             .ok_or_else(|| SdkError::LocalBus("recipient fixture absent".into()))?;
         let local = peer.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        peer.client.account_db()?.upsert_group_local_membership_snapshot(
-            "group",
-            epoch,
-            128,
-            "none",
-            &local.device_id,
-            "member",
-            1,
-        )?;
-        peer.client.account_db()?.upsert_group_member_snapshot(
-            "group",
-            "device-sender",
-            "owner",
-            1,
-        )?;
-        peer.client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"group","group_id":"group"}),
-        )?;
-        peer.client.pin_local_group_member("group")?;
-        peer.client.pin_joined_group_member(
-            "group",
-            peer.client.peer_device_identity("sender", "device-sender")?.storage_key(),
-        )?;
+        install_receiver_group(&peer.client, epoch)?;
         for (index, delivery) in pair.iter().enumerate() {
             let entry = GatewayInboxEntry {
                 forwarded: false,

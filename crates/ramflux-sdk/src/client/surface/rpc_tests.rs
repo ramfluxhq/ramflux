@@ -27,12 +27,12 @@ impl Fixture {
         }
         Ok(Self { human, agent, _root: root })
     }
-    fn call(&self, surface: Option<&str>, id: &str) -> RpcFrame {
+    fn call(surface: Option<&str>, id: &str) -> RpcFrame {
         let mut body = json!({"functionCallId":id,"callFunction":{"@call":"unsupportedFunction","catalogId":ramflux_protocol::CATALOG_ID,"args":{}}});
-        if let Some(surface) = surface {
-            if let Some(map) = body.as_object_mut() {
-                map.insert("surfaceId".into(), json!(surface));
-            }
+        if let Some(surface) = surface
+            && let Some(map) = body.as_object_mut()
+        {
+            map.insert("surfaceId".into(), json!(surface));
         }
         RpcFrame {
             schema: RPC_SCHEMA.into(),
@@ -93,7 +93,7 @@ async fn surfaceless_nonexistent_and_malformed_calls_reply_without_creating_surf
     let f = Fixture::new().await?;
     let before = f.human.surface_list("thread", "", 100)?;
     for (surface, id) in [(None, "surfaceless"), (Some("missing"), "nonexistent")] {
-        let call = f.carrier(&f.call(surface, id), id)?;
+        let call = f.carrier(&Fixture::call(surface, id), id)?;
         assert!(
             f.deliver(&call)?.accepted,
             "well-formed unsupported calls must get a refusal response"
@@ -119,7 +119,7 @@ async fn surfaceless_nonexistent_and_malformed_calls_reply_without_creating_surf
         );
         assert_eq!(response.frame().known_version, 0, "absent surfaces have no known state");
     }
-    let mut malformed = f.call(None, "malformed");
+    let mut malformed = Fixture::call(None, "malformed");
     malformed
         .a2ui
         .get_mut("callRendererFunction")
@@ -144,7 +144,7 @@ async fn surfaceless_nonexistent_and_malformed_calls_reply_without_creating_surf
 #[tokio::test]
 async fn bound_retry_keeps_response_bytes_and_conflicts_cannot_replace_the_ledger() -> TestResult {
     let f = Fixture::new().await?;
-    let frame = f.call(Some("s1"), "same-id");
+    let frame = Fixture::call(Some("s1"), "same-id");
     let original = f.carrier(&frame, "original")?;
     assert!(f.deliver(&original)?.accepted, "initial call must be answered");
     let first = f.replies()?.pop().ok_or("first response")?;
@@ -233,7 +233,7 @@ async fn rpc_rate_cap_and_expired_ledger_entries_bound_work_without_surface_muta
 {
     let f = Fixture::new().await?;
     let before = f.human.surface_list("thread", "", 100)?;
-    let first = f.carrier(&f.call(None, "first"), "first")?;
+    let first = f.carrier(&Fixture::call(None, "first"), "first")?;
     assert!(f.deliver(&first)?.accepted, "first call must be answered");
     let original_key = ledger_key(&first, "first")?;
     let db = f.human.account_db()?;
@@ -241,12 +241,12 @@ async fn rpc_rate_cap_and_expired_ledger_entries_bound_work_without_surface_muta
     for index in 1..8 {
         let id = format!("rate-{index}");
         assert!(
-            f.deliver(&f.carrier(&f.call(None, &id), &id)?)?.accepted,
+            f.deliver(&f.carrier(&Fixture::call(None, &id), &id)?)?.accepted,
             "eight calls per author per minute are permitted"
         );
     }
     assert!(
-        !f.deliver(&f.carrier(&f.call(None, "excess"), "excess")?)?.accepted,
+        !f.deliver(&f.carrier(&Fixture::call(None, "excess"), "excess")?)?.accepted,
         "the ninth call is silently dropped"
     );
     assert_eq!(f.replies()?.len(), 8, "excess calls cannot queue responses");
@@ -259,7 +259,7 @@ async fn rpc_rate_cap_and_expired_ledger_entries_bound_work_without_surface_muta
         db.persist_actor_state(&ledger_key(&first, &format!("retained-{index}"))?, &entry)?;
     }
     assert!(
-        !f.deliver(&f.carrier(&f.call(None, "at-cap"), "at-cap")?)?.accepted,
+        !f.deliver(&f.carrier(&Fixture::call(None, "at-cap"), "at-cap")?)?.accepted,
         "new calls cannot overwrite retained entries at the per-author cap"
     );
     assert_eq!(db.actor_state_key_page(&prefix, 257)?.len(), 256, "the cap must remain exact");
@@ -272,7 +272,7 @@ async fn rpc_rate_cap_and_expired_ledger_entries_bound_work_without_surface_muta
         db.persist_actor_state(&candidate, &expired)?;
     }
     assert!(
-        f.deliver(&f.carrier(&f.call(None, "after-expiry"), "after-expiry")?)?.accepted,
+        f.deliver(&f.carrier(&Fixture::call(None, "after-expiry"), "after-expiry")?)?.accepted,
         "expired entries free capacity without an overwrite"
     );
     assert_eq!(
@@ -296,7 +296,8 @@ async fn repeated_rejected_versions_queue_one_error_report_and_never_bootstrap_s
     let mut event = super::test_support::create_frame("thread", &snapshot)?;
     event.new_surface_hash = "incorrect".into();
     for attempt in 0..2 {
-        let mut carrier = f.carrier(&f.call(None, "template"), &format!("rejected-{attempt}"))?;
+        let mut carrier =
+            f.carrier(&Fixture::call(None, "template"), &format!("rejected-{attempt}"))?;
         carrier.payload_kind = PayloadKind::Event;
         carrier.surface_id = "s1".into();
         carrier.wire_base64 = ramflux_protocol::encode_base64url(event.wire_bytes()?);

@@ -24,8 +24,6 @@ impl Group {
         let source_client = clients.remove(0);
         clients.push(author_sibling);
         let source_identity = source_client.owned_device_identity()?;
-        let source_device =
-            source_client.device_branch.as_ref().ok_or("source branch")?.device_id.clone();
         source_client.create_group("group", source_identity.storage_key())?;
         let identities = clients
             .iter()
@@ -84,79 +82,7 @@ impl Group {
             "author create"
         );
         for (index, client) in clients.iter().enumerate() {
-            let local = client.device_branch.as_ref().ok_or("peer branch")?;
-            client.account_db()?.upsert_group_local_membership_snapshot(
-                "group",
-                epoch,
-                128,
-                "none",
-                &local.device_id,
-                "member",
-                1,
-            )?;
-            client.account_db()?.upsert_root_bound_group_member_snapshot(
-                "group",
-                &source_identity,
-                "owner",
-                1,
-            )?;
-            for identity in &identities {
-                client
-                    .account_db()?
-                    .upsert_root_bound_group_member_snapshot("group", identity, "member", 1)?;
-            }
-            client.pin_local_group_member("group")?;
-            client.pin_joined_group_member("group", source_identity.storage_key())?;
-            let session_secret = [u8::try_from(index + 1)?; 32];
-            let send = ramflux_crypto::DmSession::initiator(
-                session_secret,
-                dm_device_id_hash(&source_device),
-                dm_device_id_hash(&local.device_id),
-                [3; 32],
-            )?;
-            let recv = ramflux_crypto::DmSession::recipient(
-                session_secret,
-                dm_device_id_hash(&local.device_id),
-                dm_device_id_hash(&source_device),
-                [3; 32],
-            )?;
-            source_client.persist_pair(
-                &source_identity,
-                &client.owned_device_identity()?,
-                &[4; 32],
-                &send,
-            )?;
-            client.persist_pair(
-                &client.owned_device_identity()?,
-                &source_identity,
-                &[4; 32],
-                &recv,
-            )?;
-            assert!(
-                client
-                    .project_surface_message(
-                        "thread",
-                        &create.message_id,
-                        SurfaceSender {
-                            principal: &create.sender_principal_id,
-                            device: &source_device,
-                            envelope_id: "native-create",
-                            expires_at: None,
-                            group_epoch: Some(epoch),
-                        },
-                        &create.bytes()?,
-                        false
-                    )?
-                    .ok_or("create projection")?
-                    .accepted,
-                "native own-agent create"
-            );
-            client.send_direct_message(
-                "thread",
-                "initial-visible",
-                &source_device,
-                b"encrypted",
-            )?;
+            Self::prepare_peer(&source_client, client, &create, epoch, index, &identities)?;
         }
         let delta = super::own_tests::append(&source_client, &create, 2)?;
         assert!(
@@ -187,6 +113,81 @@ impl Group {
         );
         let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
         Ok(Self { source, peers, config, directory, create, _root: root })
+    }
+    fn prepare_peer(
+        source_client: &RamfluxClient,
+        client: &RamfluxClient,
+        create: &Carrier,
+        epoch: u64,
+        index: usize,
+        identities: &[ramflux_crypto::RootQualifiedDeviceRef],
+    ) -> TestResult {
+        let source_identity = source_client.owned_device_identity()?;
+        let source_device = source_identity.device_id().to_owned();
+        let local = client.device_branch.as_ref().ok_or("peer branch")?;
+        client.account_db()?.upsert_group_local_membership_snapshot(
+            "group",
+            epoch,
+            128,
+            "none",
+            &local.device_id,
+            "member",
+            1,
+        )?;
+        client.account_db()?.upsert_root_bound_group_member_snapshot(
+            "group",
+            &source_identity,
+            "owner",
+            1,
+        )?;
+        for identity in identities {
+            client
+                .account_db()?
+                .upsert_root_bound_group_member_snapshot("group", identity, "member", 1)?;
+        }
+        client.pin_local_group_member("group")?;
+        client.pin_joined_group_member("group", source_identity.storage_key())?;
+        let session_secret = [u8::try_from(index + 1)?; 32];
+        let send = ramflux_crypto::DmSession::initiator(
+            session_secret,
+            dm_device_id_hash(&source_device),
+            dm_device_id_hash(&local.device_id),
+            [3; 32],
+        )?;
+        let recv = ramflux_crypto::DmSession::recipient(
+            session_secret,
+            dm_device_id_hash(&local.device_id),
+            dm_device_id_hash(&source_device),
+            [3; 32],
+        )?;
+        source_client.persist_pair(
+            &source_identity,
+            &client.owned_device_identity()?,
+            &[4; 32],
+            &send,
+        )?;
+        client.persist_pair(&client.owned_device_identity()?, &source_identity, &[4; 32], &recv)?;
+        assert!(
+            client
+                .project_surface_message(
+                    "thread",
+                    &create.message_id,
+                    SurfaceSender {
+                        principal: &create.sender_principal_id,
+                        device: &source_device,
+                        envelope_id: "native-create",
+                        expires_at: None,
+                        group_epoch: Some(epoch),
+                    },
+                    &create.bytes()?,
+                    false
+                )?
+                .ok_or("create projection")?
+                .accepted,
+            "native own-agent create"
+        );
+        client.send_direct_message("thread", "initial-visible", &source_device, b"encrypted")?;
+        Ok(())
     }
     fn peer_config(&self, index: usize) -> TestResult<GatewaySessionConfig> {
         let branch =

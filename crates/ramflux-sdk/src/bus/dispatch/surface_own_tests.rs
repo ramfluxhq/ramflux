@@ -308,7 +308,7 @@ async fn first_peer_device_failure_does_not_hide_delivery_to_the_second_device()
 #[tokio::test]
 async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_replies() -> TestResult
 {
-    super::resync_tests::native_pair_resync().await
+    Box::pin(super::resync_tests::native_pair_resync()).await
 }
 
 #[tokio::test]

@@ -98,35 +98,7 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
         assert!(project(local, &start)?.accepted);
         assert!(project(local, &update)?.accepted);
     }
-    let view = f.agent.surface_get("form", 0, None)?;
-    let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
-    let mut frame = ramflux_protocol::ActionFrame {
-        schema: ramflux_protocol::ACTION_SCHEMA.into(),
-        conversation_id: "thread".into(),
-        surface_version: 1,
-        surface_hash: view["surface_hash"].as_str().ok_or("surface hash")?.into(),
-        source_instance: Vec::new(),
-        task_binding: Some(ramflux_protocol::TaskBinding {
-            task_id: "task".into(),
-            step_id: "step".into(),
-        }),
-        args_hash: String::new(),
-        a2ui: ramflux_protocol::ActionMessage {
-            version: "1.0".into(),
-            action: ramflux_protocol::Action {
-                name: "answer".into(),
-                surface_id: "form".into(),
-                source_component_id: "answer".into(),
-                timestamp: "2026-11-14T00:00:00Z".into(),
-                context: values.as_object().ok_or("context")?.clone(),
-                user_message: None,
-                metadata: None,
-            },
-        },
-    };
-    frame.args_hash = frame.arguments_hash()?;
-    let action = frame.wire_bytes()?;
-    let action = surface_carrier(&f.human, PayloadKind::Action, "answer-form", &action)?;
+    let action = answer_action(&f.human, &f.agent)?;
     if restart {
         assert!(f.human.stage_surface_outgoing(&action, None)?.accepted);
     }
@@ -188,6 +160,37 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
         assert_eq!(f.agent.surface_get("form", 0, None)?["actions"][0]["actionable"], false);
     }
     Ok(())
+}
+fn answer_action(requester: &RamfluxClient, author: &RamfluxClient) -> TestResult<SurfaceCarrier> {
+    let view = author.surface_get("form", 0, None)?;
+    let values = json!({"decision":"resume","private_input":"PRIVATE_TASK_FORM_VALUE"});
+    let mut frame = ramflux_protocol::ActionFrame {
+        schema: ramflux_protocol::ACTION_SCHEMA.into(),
+        conversation_id: "thread".into(),
+        surface_version: 1,
+        surface_hash: view["surface_hash"].as_str().ok_or("surface hash")?.into(),
+        source_instance: Vec::new(),
+        task_binding: Some(ramflux_protocol::TaskBinding {
+            task_id: "task".into(),
+            step_id: "step".into(),
+        }),
+        args_hash: String::new(),
+        a2ui: ramflux_protocol::ActionMessage {
+            version: "1.0".into(),
+            action: ramflux_protocol::Action {
+                name: "answer".into(),
+                surface_id: "form".into(),
+                source_component_id: "answer".into(),
+                timestamp: "2026-11-14T00:00:00Z".into(),
+                context: values.as_object().ok_or("context")?.clone(),
+                user_message: None,
+                metadata: None,
+            },
+        },
+    };
+    frame.args_hash = frame.arguments_hash()?;
+    let action = frame.wire_bytes()?;
+    surface_carrier(requester, PayloadKind::Action, "answer-form", &action).map_err(Into::into)
 }
 #[tokio::test]
 async fn choice_resolution_uses_a_creator_validated_surface_action_without_exporting_values()

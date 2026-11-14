@@ -283,7 +283,7 @@ fn configure_receiver(
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
     let request = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        &text_snapshot("surface", "Safe fallback", &("")),
+        &text_snapshot("surface", "Safe fallback", ""),
     )?)?;
     let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),

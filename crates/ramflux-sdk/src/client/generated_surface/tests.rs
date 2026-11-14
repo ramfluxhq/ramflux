@@ -4,6 +4,7 @@
 use super::*;
 use ramflux_protocol::message::{self as g, content, surface, surface_carrier};
 use serde_json::Value;
+use std::io::Read as _;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn stream() -> GeneratedEventStream {
     GeneratedEventStream::new(
@@ -44,7 +45,6 @@ fn fixture(name: &str) -> TestResult<Value> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ramflux-protocol/fixtures/protocol/v1/a2ui_surface")
         .join(name);
-    use std::io::Read as _;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
     assert!(bytes.len() <= 16 * 1024, "surface fixture must remain bounded");

@@ -25,7 +25,7 @@ fn non_author_send_is_typed_before_delta_hash_construction()
     )?;
     let create = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        &text_snapshot("surface", "safe", &("")),
+        &text_snapshot("surface", "safe", ""),
     )?)?;
     let body: Send = serde_json::from_value(serde_json::to_value(&create)?)?;
     let raw = ramflux_protocol::decode_base64url(&create.wire_base64)?;
@@ -141,7 +141,7 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
     };
     let event = crate::SurfaceSendRequest::event(&create_frame(
         "group_thread_k2b",
-        &text_snapshot("surface_group", "Working", &("")),
+        &text_snapshot("surface_group", "Working", ""),
     )?)?;
     let request = LocalBusFrame::request(
         "surface-create",

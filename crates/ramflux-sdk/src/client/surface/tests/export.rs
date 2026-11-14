@@ -190,11 +190,11 @@ async fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idem
     let mut content = snapshot();
     content.surface_id = "honest".into();
     let mut honest =
-        carrier(&author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
+        carrier(author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
     honest.wire_base64 = ramflux_protocol::encode_base64url(event(1, C::CreateSurface(content))?);
     honest.surface_id = "honest".into();
     honest = author.sign_surface_carrier(honest)?;
-    assert!(project(&human, &honest, "honest")?.accepted);
+    assert!(project(human, &honest, "honest")?.accepted);
     let exported = human.own_surface_history_export(None)?;
     replica.import_owned_surface_checkpoints(std::slice::from_ref(&original))?;
     let mut corrupt = serde_json::to_value(&original)?;

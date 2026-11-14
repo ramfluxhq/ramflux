@@ -38,8 +38,8 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
 }
 impl Fixture {
     async fn new() -> TestResult<Self> {
-        AUTHOR_STATES.with(|states| states.borrow_mut().clear());
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        AUTHOR_STATES.with(|states| states.borrow_mut().clear());
         let root = ramflux_test_support::TestPath::new()
             .expect("test: allocate fixture directory")
             .child(format!(
@@ -110,15 +110,17 @@ fn event(version: u64, intent: C) -> Result<Vec<u8>, SdkError> {
                         .find(|((id, _), _)| *id == surface)
                         .map(|(_, state)| state.clone())
                 })
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    let mut content = snapshot();
-                    content.surface_id = surface.clone();
-                    let frame = super::test_support::create_frame("thread", &content)?;
-                    Ok::<_, SdkError>(SurfaceState::validate_proof(
-                        &ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?,
-                    )?)
-                })?
+                .map_or_else(
+                    || {
+                        let mut content = snapshot();
+                        content.surface_id = surface.clone();
+                        let frame = super::test_support::create_frame("thread", &content)?;
+                        Ok::<_, SdkError>(SurfaceState::validate_proof(
+                            &ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?,
+                        )?)
+                    },
+                    Ok,
+                )?
         };
         let expected = previous.version() + 1;
         let mut frame = EventFrame {
@@ -144,7 +146,7 @@ fn event(version: u64, intent: C) -> Result<Vec<u8>, SdkError> {
             }
             C::AppendText(a) => frame.append_text = Some(a),
             C::DeleteSurface(c) => {
-                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c)))
+                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c)));
             }
             C::Resync(s) => {
                 frame.base_surface_hash = None;
