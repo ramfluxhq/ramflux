@@ -71,6 +71,7 @@ pub(super) fn finish_after_g2_restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod stage_union;
     #[tokio::test(start_paused = true)]
     async fn pairing_full_selected_g2_reopens_from_encrypted_union_before_g3() -> TestResult {
         let hold = ClockHold::new();
