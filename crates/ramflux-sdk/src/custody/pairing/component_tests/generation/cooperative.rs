@@ -9,15 +9,11 @@ use std::sync::{Arc, Mutex, atomic::Ordering};
 #[tokio::test(start_paused = true)]
 async fn cooperative_transfer_publication_crash_and_lock() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
-        for durable in [false, true] {
-            Box::pin(run(durable)).await?;
-        }
-        Ok(())
-    }))
-    .await;
+    for durable in [false, true] {
+        crate::bus::credentials::contract_tests::deadline(Box::pin(run(durable))).await?;
+    }
     hold.finish().await?;
-    result
+    Ok(())
 }
 async fn run(durable: bool) -> TestResult {
     let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;

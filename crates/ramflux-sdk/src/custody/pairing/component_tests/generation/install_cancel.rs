@@ -31,12 +31,7 @@ mod tests {
         cancel.cancel();
         let outcome = rig.participant_b.install_new_full_generation(&published.install, &cancel);
         assert!(
-            matches!(
-                outcome,
-                Err(crate::SdkError::Storage(ramflux_storage::StorageError::PairingField(
-                    "Cancelled"
-                )))
-            ),
+            matches!(outcome, Err(crate::SdkError::PairingField("Cancelled"))),
             "test: installation did not bind the original cancelled root before bulk work"
         );
         {

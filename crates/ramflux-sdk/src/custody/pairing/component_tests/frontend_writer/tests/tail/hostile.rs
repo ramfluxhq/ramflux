@@ -48,9 +48,8 @@ async fn run() -> TestResult {
         b"component-recipient-passphrase",
     )
     .await?;
-    drive(Box::pin(rig.primary.resume_full_data(&request)), &mut source, &rig.source.client)
-        .await?;
-    drive(Box::pin(rig.secondary.resume_full_data(&request)), &mut target, &client).await?;
+    drive(Box::pin(rig.primary.transfer_status(&request)), &mut source, &rig.source.client).await?;
+    drive(Box::pin(rig.secondary.transfer_status(&request)), &mut target, &client).await?;
     Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;
     assert!(
         matches!(

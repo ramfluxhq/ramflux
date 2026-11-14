@@ -11,18 +11,15 @@ enum Change {
 #[tokio::test(start_paused = true)]
 async fn pairing_full_stage_link_and_union_install_crash_cuts() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
-        for cut in [0, 1, 2] {
-            Box::pin(run_actor(cut)).await?;
-        }
-        for change in [Change::Writer, Change::File] {
-            Box::pin(reject_changed_union(change)).await?;
-        }
-        Ok(())
-    }))
-    .await;
+    for cut in [0, 1, 2] {
+        crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(cut))).await?;
+    }
+    for change in [Change::Writer, Change::File] {
+        crate::bus::credentials::contract_tests::deadline(Box::pin(reject_changed_union(change)))
+            .await?;
+    }
     hold.finish().await?;
-    result
+    Ok(())
 }
 async fn reject_changed_union(change: Change) -> TestResult {
     let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;

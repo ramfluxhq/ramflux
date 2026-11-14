@@ -38,7 +38,7 @@ mod tests {
                     "sync".into(),
                 ],
                 lease_not_before: rig.now,
-                lease_expires_at: rig.now + 86_400,
+                lease_expires_at: rig.now + 604_800,
                 display_name: "Source phone".into(),
             })
             .await?;

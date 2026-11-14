@@ -239,8 +239,11 @@ mod tests {
             actor.recover_full_installation(&wrong).await.is_err(),
             "test: stale generation recovered G3"
         );
-        let result =
-            actor.recover_full_installation(&request).await?.ok_or("test: recovered status")?;
+        let result = actor
+            .recover_full_installation(&request)
+            .await
+            .map_err(|error| format!("test: first cold installation recovery: {error}"))?
+            .ok_or("test: recovered status")?;
         assert!(
             matches!(result.outcome, Outcome::FullStatus { value } if value.stage == FullStatusStage::Installed),
             "test: exact recovered G3 was not reported installed"
@@ -251,12 +254,13 @@ mod tests {
         );
         assert!(actor.displayed_proposal().is_err(), "test: recovery restored human approval");
         rig.participant_b.return_client(&mut frontend)?;
+        let mut service = actor.bind_frontend_writer(frontend.account_db()?)?;
         assert!(
             crate::custody::pairing::ordinary_session_admitted(&frontend, &install.account_id)?,
             "test: recovered G3 kept exact ordinary owner fenced"
         );
         assert_eq!(
-            actor.transfer_status(&request).await?.version,
+            drive_frontend(actor.transfer_status(&request), &mut service, &frontend).await?.version,
             2,
             "test: repeated status lost recovered installation"
         );
@@ -275,6 +279,20 @@ mod tests {
         assert!(reopened.displayed_proposal().is_err(), "test: installed status restored approval");
         reopened.lock().await?;
         Ok(())
+    }
+    async fn drive_frontend<T>(
+        work: impl std::future::Future<Output = Result<T, crate::SdkError>>,
+        service: &mut crate::custody::pairing::PairingLocalWriterService,
+        client: &crate::RamfluxClient,
+    ) -> Result<T, crate::SdkError> {
+        let signal = service.work_signal();
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                result = &mut work => return result,
+                () = signal.notified() => { service.try_apply_client(client)?; },
+            }
+        }
     }
     fn cold_installed_actor(
         rig: &Rig,
