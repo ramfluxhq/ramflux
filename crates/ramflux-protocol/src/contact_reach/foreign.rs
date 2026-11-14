@@ -274,6 +274,10 @@ pub enum Operation {
         expected_epoch: u64,
         update: Signed<directory::Profile>,
     },
+    GroupRoster {
+        operation_id: String,
+        roster: Box<super::GroupRoster>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -387,6 +391,7 @@ pub enum Reason {
     CentreKeyChanged,
     UsernameHomeMismatch,
     UsernameSignerRevoked,
+    GroupEpochStale,
 }
 
 mod validation;

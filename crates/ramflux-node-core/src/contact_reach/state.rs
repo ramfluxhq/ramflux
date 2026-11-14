@@ -3,6 +3,7 @@
 
 //! Recipient-owned authorization and canonical state transitions; no network or trust writes.
 use super::{ReachError, Result, refuse, storage};
+mod groups;
 use ramflux_protocol::{
     contact_reach::{
         Admission, DECLINE_COOLDOWN, Decision, MAX_STATE_BYTES, MAX_SUBJECTS,
@@ -28,6 +29,8 @@ pub struct AccountReach {
     pub placements: BTreeMap<String, StateRecord>,
     pub floors: BTreeMap<String, StateRecord>,
     pub conflicts: BTreeMap<String, StateRecord>,
+    #[serde(skip)]
+    pub(super) rosters: BTreeMap<String, ramflux_protocol::contact_reach::GroupRoster>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +69,7 @@ impl AccountReach {
         {
             return Err(refuse(Reason::ForeignCapacity));
         }
+        self.check_group_reservations(false)?;
         Ok(())
     }
 
@@ -104,8 +108,10 @@ impl AccountReach {
                 }
             }
         }
+        let positive = update.body.mode == ReachMode::Open;
         self.policy = Some(update);
-        self.advance()
+        self.advance()?;
+        self.check_group_reservations(positive)
     }
 
     pub(super) fn admission(
@@ -114,6 +120,9 @@ impl AccountReach {
         conversation: Option<&str>,
         now: u64,
     ) -> Result<()> {
+        if matches!(update.body.subject, Subject::Group { .. }) {
+            return self.group_admission(&update);
+        }
         let b = &update.body;
         if b.expected_revision != self.admission_revision {
             return Err(ReachError::Revision(self.admission_revision));
@@ -184,6 +193,7 @@ impl AccountReach {
             self.retirements.insert(
                 key,
                 StateRecord::Retirement {
+                    group_floor: None,
                     subject: b.subject.clone(),
                     revision: next,
                     update: update.clone(),
@@ -192,8 +202,10 @@ impl AccountReach {
         }
         self.reconcile_placement(&update, conversation)?;
         self.admission_revision = next;
+        let positive = b.decision == Decision::Allow;
         self.last_update = Some(update);
-        self.advance()
+        self.advance()?;
+        self.check_group_reservations(positive)
     }
 
     fn reconcile_placement(
@@ -327,6 +339,7 @@ impl AccountReach {
     /// # Errors
     /// Refuses denied, missing-policy or unauthorized group/receipt/typing traffic.
     pub fn classify(&self, route: &Route, peer: &str, now: u64) -> Result<(ReachClass, Placement)> {
+        route.validate()?;
         self.check_denials(&route.source.account_anchor, peer, now)?;
         let policy = self.policy.as_ref().ok_or_else(|| refuse(Reason::ReachPolicyRequired))?;
         if matches!(route.traffic, Traffic::SelfSync | Traffic::OwnCopy) {
@@ -336,9 +349,7 @@ impl AccountReach {
             return Ok((ReachClass::Accepted, Placement::Direct));
         }
         if route.traffic == Traffic::Group {
-            // TODO(r4a): receiving homes need the audited group/conversation/epoch binding carrier.
-            // A W label or group_sender hash cannot substitute for that missing proof.
-            return Err(refuse(Reason::ReachRouteInvalid));
+            return self.classify_group(route);
         }
         let friendship = Subject::Friendship { root: route.source.account_anchor.clone() }.key()?;
         let conversation = Subject::Conversation {
@@ -357,7 +368,8 @@ impl AccountReach {
         {
             let allowed = match route.traffic {
                 Traffic::Dm | Traffic::GroupInvite => true,
-                Traffic::Receipt => permissions.user_delivered || permissions.read,
+                Traffic::ReceiptDelivered => permissions.user_delivered,
+                Traffic::ReceiptRead => permissions.read,
                 Traffic::Typing => permissions.typing,
                 _ => false,
             };
@@ -369,7 +381,10 @@ impl AccountReach {
                 });
             }
         }
-        if matches!(route.traffic, Traffic::Receipt | Traffic::Typing) {
+        if matches!(
+            route.traffic,
+            Traffic::ReceiptDelivered | Traffic::ReceiptRead | Traffic::Typing
+        ) {
             return Err(refuse(Reason::ForeignReadRefused));
         }
         Ok((

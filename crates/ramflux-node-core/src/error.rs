@@ -11,6 +11,8 @@ pub enum NodeCoreError {
     NotifyWakeStateResetRequired,
     #[error(transparent)]
     SendAuthority(crate::send_authority::SendAuthorityError),
+    #[error("contact reach refused: {0:?}")]
+    ContactReachRefused(ramflux_protocol::contact_reach::Reason),
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(

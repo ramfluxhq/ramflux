@@ -11,10 +11,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Subject {
-    Friendship { root: String },
-    Conversation { root: String, conversation_id: String },
-    Node { node_id: String },
-    GroupSender { group_id: String, root: String, membership_hash: String },
+    Friendship {
+        root: String,
+    },
+    Conversation {
+        root: String,
+        conversation_id: String,
+    },
+    Node {
+        node_id: String,
+    },
+    Group {
+        group_id: String,
+        conversation_id: String,
+        genesis_hash: String,
+        group_epoch: u64,
+        membership_hash: String,
+    },
 }
 impl Subject {
     /// Validate a subject without granting the claimed membership.
@@ -28,20 +41,31 @@ impl Subject {
                 text(conversation_id)
             }
             Self::Node { node_id } => node(node_id),
-            Self::GroupSender { root, group_id, membership_hash } => {
-                digest(root)?;
-                text(group_id)?;
-                digest(membership_hash)
+            Self::Group {
+                group_id,
+                conversation_id,
+                genesis_hash,
+                group_epoch,
+                membership_hash,
+            } => {
+                super::group_profile::validate_group_id(group_id)?;
+                crate::message::dm_scope::validate_group(conversation_id)
+                    .map_err(|_| invalid("invalid group conversation"))?;
+                digest(genesis_hash)?;
+                digest(membership_hash)?;
+                safe(*group_epoch)?;
+                if *group_epoch == 0 {
+                    return Err(invalid("zero group epoch"));
+                }
+                Ok(())
             }
         }
     }
     #[must_use]
     pub fn root(&self) -> Option<&str> {
         match self {
-            Self::Friendship { root }
-            | Self::Conversation { root, .. }
-            | Self::GroupSender { root, .. } => Some(root),
-            Self::Node { .. } => None,
+            Self::Friendship { root } | Self::Conversation { root, .. } => Some(root),
+            Self::Node { .. } | Self::Group { .. } => None,
         }
     }
     /// Stable subject identity, deliberately excluding mutable group membership hashes.
@@ -54,9 +78,7 @@ impl Subject {
                 serde_json::json!(["conversation", root, conversation_id])
             }
             Self::Node { node_id } => serde_json::json!(["node", node_id]),
-            Self::GroupSender { root, group_id, .. } => {
-                serde_json::json!(["group_sender", root, group_id])
-            }
+            Self::Group { group_id, .. } => serde_json::json!(["group", group_id]),
         };
         String::from_utf8(crate::canonical_json_bytes(&key)?)
             .map_err(|_| invalid("subject key encoding"))
@@ -139,14 +161,17 @@ impl Admission {
             && !matches!(self.decision, Decision::Block | Decision::Unblock)
             || self.decision == Decision::Decline
                 && !matches!(self.subject, Subject::Friendship { .. })
-            || matches!(self.subject, Subject::GroupSender { .. })
-                && !matches!(self.decision, Decision::Allow | Decision::Revoke)
         {
             return Err(invalid("admission decision not valid for subject"));
         }
         if self.decision == Decision::Allow {
             digest(self.notice_hash.as_deref().ok_or_else(|| invalid("allow needs notice"))?)?;
             digest(self.evidence_hash.as_deref().ok_or_else(|| invalid("allow needs evidence"))?)?;
+            if let Subject::Group { membership_hash, .. } = &self.subject
+                && self.evidence_hash.as_deref() != Some(membership_hash.as_str())
+            {
+                return Err(invalid("group allow evidence must equal its adopted membership hash"));
+            }
             let until = self.grant_until.ok_or_else(|| invalid("allow needs deadline"))?;
             safe(until)?;
             let expected = if matches!(self.subject, Subject::Conversation { .. }) {
@@ -156,7 +181,11 @@ impl Admission {
             } else {
                 0
             };
-            if self.permissions.is_none() || until != expected {
+            if self.permissions.is_none()
+                || until != expected
+                || matches!(self.subject, Subject::Group { .. })
+                    && self.permissions != Some(Permissions::UNACCEPTED)
+            {
                 return Err(invalid("allow permissions or deadline"));
             }
         } else if self.permissions.is_some()

@@ -105,11 +105,20 @@ pub fn verify_peer_reply(
         &p.custodian_history,
         now,
     )?;
-    if home.home() != (b.source_node.as_str(), authenticated_node_key)
-        || home.evidence().record.account_anchor() != b.account_anchor
+    if home.home().0 != b.source_node || home.evidence().record.account_anchor() != b.account_anchor
     {
         return Err(reject("peer current home mismatch"));
     }
+    super::verify_node_continuity(
+        &p.node_continuity,
+        super::NodeContinuityContext {
+            node: &b.source_node,
+            old_key: home.home().1,
+            current_key: authenticated_node_key,
+            minimum_rotated_at: 0,
+            now,
+        },
+    )?;
     let policy = &p.reach.body;
     policy.validate()?;
     if policy.account_anchor != b.account_anchor

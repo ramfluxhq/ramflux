@@ -42,7 +42,13 @@ fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
                 && !matches!(inner.kind, 6 | 7 | 12)
                 && operation != Some(15)
         }
-        Traffic::Receipt => !own && identity.group_id.is_none() && inner.kind == 6,
+        Traffic::ReceiptDelivered | Traffic::ReceiptRead => {
+            let expected = if route.traffic == Traffic::ReceiptDelivered { 1 } else { 2 };
+            !own && identity.group_id.is_none()
+                && inner.kind == 6
+                && g::Receipt::decode(inner.body.as_slice())
+                    .is_ok_and(|receipt| receipt.state == expected)
+        }
         Traffic::Group => {
             !own && identity.group_id.is_some()
                 && identity.group_epoch.is_some()
@@ -66,6 +72,7 @@ fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
 }
 impl RamfluxClient {
     pub(crate) fn require_reach_decrypted_route(
+        &self,
         entry: &GatewayInboxEntry,
         opened: &Opened,
         body: &[u8],
@@ -75,10 +82,6 @@ impl RamfluxClient {
         }
         let route =
             &entry.reach.as_deref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?.route.body;
-        if route.traffic == Traffic::Group {
-            // TODO(r4a): require the audited receiving-home group-route binding, with local parity.
-            return Err(refused(Reason::ReachRouteInvalid));
-        }
         if opened.remote_device.root_commitment() != route.source.account_anchor
             || opened.remote_device.device_id() != route.source.device_id
             || opened.routing.conversation_id != route.conversation_id
@@ -87,6 +90,9 @@ impl RamfluxClient {
         }
         g::validation::scan_inner(body).map_err(|_| refused(Reason::ReachRouteInvalid))?;
         let inner = g::Inner::decode(body).map_err(|_| refused(Reason::ReachRouteInvalid))?;
+        if route.traffic == Traffic::Group {
+            self.require_reach_group_binding(route, &inner, body)?;
+        }
         bind_inner(route, &inner)
     }
 }

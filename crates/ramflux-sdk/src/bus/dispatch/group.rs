@@ -627,17 +627,35 @@ struct GroupControlDelivery<'a> {
     payload_bytes: &'a [u8],
 }
 
+fn group_transport_conversation(
+    client: &RamfluxClient,
+    group: &str,
+    sender: &str,
+    recipient: &str,
+) -> Result<String, SdkError> {
+    if let Some(state) = client.account_db()?.shared_group_state(group)? {
+        return Ok(state.view().conversation_id.clone());
+    }
+    if ramflux_protocol::contact_reach::enabled() {
+        return Err(SdkError::ReachRefused(
+            ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+        ));
+    }
+    Ok(group_sender_key_distribution_conversation_id(group, sender, recipient))
+}
+
 async fn dispatch_group_control_delivery(
     account: &mut LocalBusAccountState,
     delivery: GroupControlDelivery<'_>,
 ) -> Result<serde_json::Value, SdkError> {
     let mut engine = account.session_client().await?;
     let result = async {
-        let conversation_id = group_sender_key_distribution_conversation_id(
+        let conversation_id = group_transport_conversation(
+            &account.client,
             delivery.group_id,
             delivery.actor_id,
             &delivery.route.member_id,
-        );
+        )?;
         let delivery_id_hash = ramflux_crypto::blake3_256_base64url(
             "ramflux.sdk.group_control.delivery_id.v1",
             format!("{}:{}", delivery.event_id, delivery.route.member_id).as_bytes(),
@@ -1246,11 +1264,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                     "missing target delivery id for group sender-key recipient {recipient_device_id}"
                 ))
             })?;
-        let conversation_id = group_sender_key_distribution_conversation_id(
-            group_id,
-            &sender_id,
-            recipient_device_id,
-        );
+        let conversation_id = group_transport_conversation(&account.client,group_id,&sender_id,recipient_device_id)?;
         let payload = SdkGroupSenderKeyDistributionEnvelope {
             schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
             version: 1,
@@ -1341,6 +1355,11 @@ fn group_distribution_payload(
         )?;
         client.shared_group_packet_for_recipient(&state, recipient)
     } else {
+        if ramflux_protocol::contact_reach::enabled() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+            ));
+        }
         Ok(serde_json::to_vec(legacy)?)
     }
 }

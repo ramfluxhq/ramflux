@@ -396,6 +396,9 @@ fn public_response(
         ("GET", "/.well-known/ramflux/server") => {
             HttpResponse::json(&discovery.well_known_record()?)?
         }
+        ("GET", "/.well-known/ramflux/continuity") => {
+            HttpResponse::json(&crate::contact_discovery::continuity(discovery)?)?
+        }
         ("GET", path)
             if path.starts_with("/mvp1/prekey/") || path.starts_with("/mvp1/device-manifest/") =>
         {

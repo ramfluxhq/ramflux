@@ -15,6 +15,13 @@ impl Request {
         if self.session_generation == 0 || !(1..=10_000).contains(&self.remaining_ms) {
             return Err(invalid("reach session generation or budget"));
         }
+        if let Operation::GroupRoster { operation_id, roster } = &self.operation {
+            digest(operation_id)?;
+            roster.header.body.validate()?;
+            if crate::canonical_json_bytes(roster)?.len() > 16 * 1024 {
+                return Err(invalid("group roster operation byte budget"));
+            }
+        }
         if let Operation::Query { query } = &self.operation {
             query.validate()?;
             if query.nonce != self.request_id {
@@ -73,8 +80,15 @@ impl Operation {
             (Self::Policy { update }, OperationResult::Policy { revision, .. }) => {
                 *revision == update.body.revision
             }
-            (Self::Admission { update, .. }, OperationResult::Admission { revision, .. }) => {
-                update.body.expected_revision.checked_add(1) == Some(*revision)
+            (Self::Admission { update, .. }, OperationResult::Admission { revision, outcome }) => {
+                if *outcome == super::Applied::Duplicate {
+                    *revision >= update.body.expected_revision
+                } else {
+                    update.body.expected_revision.checked_add(1) == Some(*revision)
+                }
+            }
+            (Self::GroupRoster { .. }, OperationResult::Admission { revision, .. }) => {
+                *revision <= crate::MAX_SAFE_JSON_INTEGER
             }
             (
                 Self::Start { update, submission, .. },

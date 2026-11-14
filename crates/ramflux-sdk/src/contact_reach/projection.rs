@@ -43,7 +43,7 @@ impl SavedReachState {
             Subject::Conversation { root, conversation_id: id } => {
                 root == peer_root && id == conversation_id
             }
-            Subject::GroupSender { .. } => false,
+            Subject::Group { .. } => false,
         };
         for record in self.records.iter().chain(self.restrictions.values()) {
             let denied = match record {

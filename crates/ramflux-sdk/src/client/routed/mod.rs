@@ -542,7 +542,11 @@ impl RamfluxClient {
         let wire_remote =
             crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
         let route = self.prepare_seal_routing(message, body, route)?;
-        let inner = generated_transport::seal_plaintext(body, &route)?;
+        let inner = generated_transport::seal_plaintext(
+            body,
+            &route,
+            self.reach_signed_group_present(body)?,
+        )?;
         let report = if crate::client::target_selection::schema_v1_selected()
             && !report::omit_direct_report()
         {

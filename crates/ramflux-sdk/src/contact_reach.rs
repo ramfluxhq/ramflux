@@ -3,6 +3,9 @@
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
 mod delivery;
+mod group_binding;
+mod group_profile;
+mod group_restrictions;
 mod inner;
 mod projection;
 mod verification;
@@ -142,10 +145,19 @@ impl crate::RamfluxClient {
                     return Ok(());
                 }
             }
-            let restrictions = merge_restrictions(
-                previous.map_or_else(BTreeMap::new, |p| p.restrictions),
+            let restrictions = match merge_restrictions(
+                previous.as_ref().map_or_else(BTreeMap::new, |p| p.restrictions.clone()),
                 &verified.records,
-            )?;
+            ) {
+                Ok(restrictions) => restrictions,
+                Err(SdkError::ReachRefused(Reason::HomeFork)) => {
+                    let mut fenced = previous.ok_or_else(|| refused(Reason::HomeFork))?;
+                    fenced.conflict = true;
+                    db.persist_client_record("reach", "state", &serde_json::to_value(fenced)?)?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             let saved = SavedReachState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
@@ -204,10 +216,16 @@ fn merge_restrictions(
                 | StateRecord::Decline { .. }
                 | StateRecord::Floor { .. }
                 | StateRecord::Conflict { .. }
+                | StateRecord::Retirement { group_floor: Some(_), .. }
         ) {
             continue;
         }
         let key = serde_json::to_string(&record.order_key()?)?;
+        if matches!(record, StateRecord::Retirement { group_floor: Some(_), .. }) {
+            let merged = group_restrictions::merge(retained.get(&key), record)?;
+            retained.insert(key, merged);
+            continue;
+        }
         let merged = match (retained.get(&key), record) {
             (
                 Some(StateRecord::Floor { subject, revision, denied, erase_generation, erased }),
@@ -245,7 +263,7 @@ fn merge_restrictions(
         retained.insert(key, merged);
     }
     for record in records {
-        let StateRecord::Retirement { subject, revision, update } = record else {
+        let StateRecord::Retirement { subject, revision, update, .. } = record else {
             continue;
         };
         if update.body.decision != Decision::Unblock

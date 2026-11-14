@@ -62,6 +62,7 @@ pub enum StateRecord {
         subject: Subject,
         revision: u64,
         update: Signed<Admission>,
+        group_floor: Option<Box<super::GroupFloor>>,
     },
     Placement {
         conversation_id: String,
@@ -87,6 +88,24 @@ pub enum StateRecord {
 }
 impl StateRecord {
     fn validate_shape(&self, manifest: &StateManifest) -> Result<(), ProtocolError> {
+        if matches!(
+            self,
+            Self::Block { subject: Subject::Group { .. }, .. }
+                | Self::Floor { subject: Subject::Group { .. }, .. }
+        ) {
+            return Err(invalid("group denials require the canonical retirement record"));
+        }
+        if let Self::Retirement { subject, update, group_floor, .. } = self {
+            if matches!(subject, Subject::Group { .. }) != group_floor.is_some() {
+                return Err(invalid("group retirement floor null rule"));
+            }
+            if let Some(floor) = group_floor {
+                floor.validate(update)?;
+                if crate::canonical_json_bytes(self)?.len() > super::GROUP_DENIAL_RESERVATION {
+                    return Err(invalid("group retirement reservation overflow"));
+                }
+            }
+        }
         match self {
             Self::Grant { subject, update, .. }
             | Self::Block { subject, update }

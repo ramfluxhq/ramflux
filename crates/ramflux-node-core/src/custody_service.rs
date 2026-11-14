@@ -126,6 +126,7 @@ impl CustodyService {
         );
         let result = if let (Some(service), Ok(session)) = (&self.reach, session) {
             let derived = match &request.operation {
+                Operation::GroupRoster { roster, .. } => roster.header.body.recipient_root.as_str(),
                 Operation::Policy { update } => update.body.account_anchor.as_str(),
                 Operation::ProfilePublish { update, .. } => update.body.account_anchor.as_str(),
                 Operation::Admission { update, .. }

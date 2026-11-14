@@ -878,9 +878,6 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
-        SdkError::ReachRefused(_) | SdkError::ReachRemote { .. } => {
-            RamfluxErrorCode::PermissionDenied
-        }
         SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
@@ -893,7 +890,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        SdkError::ReachRefused(_)
+        | SdkError::ReachRemote { .. }
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
         | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
             RamfluxErrorCode::PermissionDenied
         }

@@ -43,6 +43,7 @@ pub(crate) async fn handle(
         "contact reach source binding changed"
     );
     let root = match &request.operation {
+        Operation::GroupRoster { roster, .. } => roster.header.body.recipient_root.as_str(),
         Operation::Policy { update } => update.body.account_anchor.as_str(),
         Operation::ProfilePublish { update, .. } => update.body.account_anchor.as_str(),
         Operation::Admission { update, .. }

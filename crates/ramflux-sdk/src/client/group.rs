@@ -11,6 +11,11 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn create_group(&self, group_id: &str, creator_id: &str) -> Result<GroupState, SdkError> {
+        if ramflux_protocol::contact_reach::enabled() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+            ));
+        }
         if self.born_v3_account.is_some() {
             self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Group)?;
         }

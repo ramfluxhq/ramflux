@@ -65,12 +65,20 @@ pub(super) fn verify_records<'a>(
                     return Err(refused(Reason::ForeignSnapshotInvalid));
                 }
             }
-            StateRecord::Retirement { subject, revision, update } => {
+            StateRecord::Retirement { subject, revision, update, group_floor } => {
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
-                crypto::verify_retained_admission(update, context.authority, context.now)?;
+                let expected = if let Some(floor) = group_floor {
+                    crypto::verify_group_retirement(update, floor, context.authority, context.now)?;
+                    floor.block_control.as_ref().map_or(update.body.expected_revision, |control| {
+                        control.body.expected_revision.max(update.body.expected_revision)
+                    })
+                } else {
+                    crypto::verify_retained_admission(update, context.authority, context.now)?;
+                    update.body.expected_revision
+                };
                 if &update.body.subject != subject
                     || update.body.decision == Decision::Allow
-                    || update.body.expected_revision.checked_add(1) != Some(*revision)
+                    || expected.checked_add(1) != Some(*revision)
                     || *revision > manifest.admission_revision
                 {
                     return Err(refused(Reason::ForeignSnapshotInvalid));

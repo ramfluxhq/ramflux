@@ -19,12 +19,20 @@ pub enum Traffic {
     Dm,
     Group,
     GroupInvite,
-    Receipt,
+    ReceiptDelivered,
+    ReceiptRead,
     Typing,
     OwnCopy,
     SelfSync,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupRoute {
+    pub group_id: String,
+    pub group_epoch: u64,
+    pub membership_hash: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
@@ -33,6 +41,7 @@ pub struct Route {
     pub recipient_root: String,
     pub conversation_id: String,
     pub traffic: Traffic,
+    pub group: Option<GroupRoute>,
     pub envelope_hash: String,
     pub authority_head_hash: String,
     pub issued_at: u64,
@@ -48,12 +57,28 @@ impl Route {
         digest(&self.envelope_hash)?;
         digest(&self.authority_head_hash)?;
         text(&self.conversation_id)?;
-        if matches!(self.traffic, Traffic::Dm | Traffic::Receipt | Traffic::Typing) {
+        if matches!(
+            self.traffic,
+            Traffic::Dm | Traffic::ReceiptDelivered | Traffic::ReceiptRead | Traffic::Typing
+        ) {
             let expected =
                 crate::message::dm_scope::derive(&self.source.account_anchor, &self.recipient_root)
                     .map_err(|_| invalid("invalid route DM root pair"))?;
             if self.conversation_id != expected {
                 return Err(invalid("route conversation/root binding mismatch"));
+            }
+        }
+        if (self.traffic == Traffic::Group) != self.group.is_some() {
+            return Err(invalid("group route null rule"));
+        }
+        if let Some(group) = &self.group {
+            super::group_profile::validate_group_id(&group.group_id)?;
+            crate::message::dm_scope::validate_group(&self.conversation_id)
+                .map_err(|_| invalid("invalid group conversation"))?;
+            digest(&group.membership_hash)?;
+            safe(group.group_epoch)?;
+            if group.group_epoch == 0 {
+                return Err(invalid("zero route group epoch"));
             }
         }
         safe(self.issued_at)?;

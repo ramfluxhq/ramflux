@@ -125,3 +125,126 @@ fn cr_agent_management_requires_its_current_independently_verified_human_primary
     );
     Ok(())
 }
+
+fn group_grant(account: &Account) -> TestResult<Signed<wire::Admission>> {
+    let record = account.record.envelope();
+    let body = wire::Admission {
+        version: 2,
+        operation_id: d(71),
+        recipient_root: record.body.account_anchor.clone(),
+        home_head_hash: d(72),
+        expected_revision: 0,
+        subject: wire::Subject::Group {
+            group_id: "group".into(),
+            conversation_id: "signed-thread".into(),
+            genesis_hash: d(73),
+            group_epoch: 10,
+            membership_hash: d(74),
+        },
+        decision: wire::Decision::Allow,
+        permissions: Some(wire::Permissions::UNACCEPTED),
+        grant_until: Some(0),
+        authority_head_hash: custody::object_hash(record)?,
+        master_certificate_hash: custody::object_hash(&record.body.master_certificate)?,
+        actor: record.body.master_certificate.body.primary_device_ref.clone(),
+        notice_hash: Some(d(75)),
+        evidence_hash: Some(d(74)),
+        issued_at: NOW,
+        expires_at: NOW + 300,
+    };
+    Ok(account.key.sign_reach_admission(body, &account.record, NOW)?)
+}
+#[test]
+fn cr_group_roster_binds_primary_grant_and_nul_framed_members() -> TestResult {
+    let owner = account(10, None)?;
+    let grant = group_grant(&owner)?;
+    let members = vec![wire::GroupRosterMember { root: d(40), since_epoch: 10 }];
+    let header = wire::GroupRosterHeader {
+        version: 1,
+        recipient_root: grant.body.recipient_root.clone(),
+        group_id: "group".into(),
+        conversation_id: "signed-thread".into(),
+        grant_hash: custody::framed_hash(wire::OPERATION_HASH_DOMAIN, &grant)?,
+        group_epoch: 10,
+        membership_hash: d(74),
+        members_hash: custody::framed_hash(wire::GROUP_ROSTER_MEMBERS_DOMAIN, &members)?,
+        member_count: 1,
+        issued_at: NOW,
+    };
+    let roster = wire::GroupRoster {
+        header: owner.key.sign_group_roster_header(header, &owner.record, NOW)?,
+        members,
+    };
+    verify_group_roster(&roster, &grant, &owner.record, NOW)?;
+    let mut forged = roster.clone();
+    forged.header.signature = crate::sign_canonical_bytes_with_seed(
+        &custody::signing_bytes(wire::GROUP_ROSTER_DOMAIN, &forged.header.body)?,
+        [12; 32],
+    );
+    assert!(
+        verify_group_roster(&forged, &grant, &owner.record, NOW).is_err(),
+        "a valid device branch cannot sign the primary roster header"
+    );
+    let mut altered = roster.clone();
+    altered.members.first_mut().ok_or("first roster member")?.since_epoch = 9;
+    assert!(
+        verify_group_roster(&altered, &grant, &owner.record, NOW).is_err(),
+        "a changed admission floor cannot borrow a signed members commitment"
+    );
+    let mut wrong_domain = roster.clone();
+    wrong_domain.header.body.members_hash = ramflux_protocol::hash_base64url(
+        wire::GROUP_ROSTER_MEMBERS_DOMAIN,
+        &ramflux_protocol::canonical_json_bytes(&wrong_domain.members)?,
+    )?;
+    wrong_domain.header =
+        owner.key.sign_group_roster_header(wrong_domain.header.body, &owner.record, NOW)?;
+    assert!(
+        verify_group_roster(&wrong_domain, &grant, &owner.record, NOW).is_err(),
+        "even a primary signature cannot replace the required NUL-framed member hash"
+    );
+    let mut replacement = grant.body.clone();
+    replacement.operation_id = d(76);
+    let replacement = owner.key.sign_reach_admission(replacement, &owner.record, NOW)?;
+    assert!(
+        verify_group_roster(&roster, &replacement, &owner.record, NOW).is_err(),
+        "the complete signed allow, including its operation identity, is the live-grant binding"
+    );
+    Ok(())
+}
+#[test]
+fn cr_group_retirement_verifies_every_original_witness() -> TestResult {
+    let owner = account(10, None)?;
+    let grant = group_grant(&owner)?;
+    let mut negative = grant.body.clone();
+    negative.operation_id = d(77);
+    negative.expected_revision = 1;
+    negative.decision = wire::Decision::Revoke;
+    negative.permissions = None;
+    negative.grant_until = None;
+    negative.notice_hash = None;
+    negative.evidence_hash = None;
+    if let wire::Subject::Group { group_epoch, .. } = &mut negative.subject {
+        *group_epoch = 101;
+    }
+    let update = owner.key.sign_reach_admission(negative, &owner.record, NOW)?;
+    let mut floor = wire::GroupFloor {
+        floor_epoch: 101,
+        grant: Some(Box::new(grant)),
+        roster_header: None,
+        block_control: None,
+    };
+    verify_group_retirement(&update, &floor, &owner.record, NOW + 301)?;
+    floor.floor_epoch = 100;
+    assert!(
+        verify_group_retirement(&update, &floor, &owner.record, NOW + 301).is_err(),
+        "the signed kick epoch participates in the one reproducible floor formula"
+    );
+    floor.floor_epoch = 101;
+    floor.grant.as_mut().ok_or("grant witness")?.signature =
+        ramflux_protocol::encode_base64url([1; 64]);
+    assert!(
+        verify_group_retirement(&update, &floor, &owner.record, NOW + 301).is_err(),
+        "a historical-looking witness is not trusted without its original certified signature"
+    );
+    Ok(())
+}

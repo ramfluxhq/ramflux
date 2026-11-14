@@ -201,6 +201,11 @@ impl RamfluxClient {
                 return Err(refused("source was not a moderator at named epoch"));
             }
         } else {
+            if ramflux_protocol::contact_reach::enabled() {
+                return Err(SdkError::ReachRefused(
+                    ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+                ));
+            }
             let role = db
                 .group_member_role(group, source)?
                 .ok_or_else(|| refused("source has no current group role"))?;

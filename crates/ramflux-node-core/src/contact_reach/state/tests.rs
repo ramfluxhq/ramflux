@@ -5,11 +5,11 @@
 use super::*;
 use ramflux_protocol::{contact_reach::Permissions, custody::DeviceRef};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-const NOW: u64 = 1_760_000_000;
-fn digest(n: u8) -> String {
+pub(super) const NOW: u64 = 1_760_000_000;
+pub(super) fn digest(n: u8) -> String {
     ramflux_protocol::encode_base64url([n; 32])
 }
-fn command(subject: Subject, decision: Decision, revision: u64) -> Signed<Admission> {
+pub(super) fn command(subject: Subject, decision: Decision, revision: u64) -> Signed<Admission> {
     let allow = decision == Decision::Allow;
     let conversation = matches!(subject, Subject::Conversation { .. });
     Signed {
@@ -81,6 +81,7 @@ fn cr_reply_renews_without_friendship_and_expiry_preserves_strangers() -> TestRe
         recipient_root: digest(1),
         conversation_id: id.clone(),
         traffic: Traffic::Dm,
+        group: None,
         envelope_hash: digest(21),
         authority_head_hash: digest(22),
         issued_at: NOW,
@@ -135,7 +136,7 @@ fn cr_root_block_removes_all_peer_grants_but_conversation_block_is_scoped() -> T
     Ok(())
 }
 
-fn closed_state() -> std::result::Result<AccountReach, Box<dyn std::error::Error>> {
+pub(super) fn closed_state() -> std::result::Result<AccountReach, Box<dyn std::error::Error>> {
     let mut state = AccountReach::default();
     state.policy(Signed {
         body: ReachPolicy {
@@ -162,7 +163,7 @@ fn closed_state() -> std::result::Result<AccountReach, Box<dyn std::error::Error
 }
 
 #[test]
-fn cr_group_route_refuses_until_r4a_supplies_authenticated_binding() -> TestResult {
+fn cr_group_route_requires_its_own_grant_even_with_friendship() -> TestResult {
     let mut state = closed_state()?;
     let (friendship, _, id) = subjects()?;
     state.admission(command(friendship, Decision::Allow, 0), Some(&id), NOW)?;
@@ -172,6 +173,11 @@ fn cr_group_route_refuses_until_r4a_supplies_authenticated_binding() -> TestResu
         recipient_root: digest(1),
         conversation_id: "signed-thread".into(),
         traffic: Traffic::Group,
+        group: Some(ramflux_protocol::contact_reach::GroupRoute {
+            group_id: "group".into(),
+            group_epoch: 1,
+            membership_hash: digest(15),
+        }),
         envelope_hash: digest(21),
         authority_head_hash: digest(22),
         issued_at: NOW,
@@ -180,9 +186,9 @@ fn cr_group_route_refuses_until_r4a_supplies_authenticated_binding() -> TestResu
     assert!(
         matches!(
             state.classify(&route, "peer.example", NOW),
-            Err(ReachError::Refused(Reason::ReachRouteInvalid))
+            Err(ReachError::Refused(Reason::ForeignReadRefused))
         ),
-        "friendship cannot bypass the missing audited group-state/conversation carrier"
+        "friendship cannot substitute for a group grant and its current roster"
     );
     Ok(())
 }

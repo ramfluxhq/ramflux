@@ -473,6 +473,9 @@ impl RouterRedbStore {
             }
             if p.entry.retain_until <= now
                 || state.check_denials(&p.entry.source_root, &p.entry.peer_node, now).is_err()
+                || p.entry.reach.route.body.traffic
+                    == ramflux_protocol::contact_reach::Traffic::Group
+                    && state.classify(&p.entry.reach.route.body, &p.entry.peer_node, now).is_err()
             {
                 expired.push(seq.value());
                 continue;
@@ -501,7 +504,10 @@ pub(super) fn erase_denied(
     recipient: &str,
     update: &custody::Envelope<Admission>,
 ) -> Result<()> {
-    if !matches!(update.body.decision, Decision::Block | Decision::Decline) {
+    if !matches!(update.body.decision, Decision::Block | Decision::Decline)
+        && !(matches!(update.body.subject, Subject::Group { .. })
+            && update.body.decision == Decision::Revoke)
+    {
         return Ok(());
     }
     let table = tx.open_table(PENDING).map_err(storage)?;
@@ -515,6 +521,21 @@ pub(super) fn erase_denied(
         let denied = match &update.body.subject {
             Subject::Friendship { root } => root == &pending.entry.source_root,
             Subject::Node { node_id } => node_id == &pending.entry.peer_node,
+            Subject::Conversation { root, conversation_id } => {
+                root == &pending.entry.source_root
+                    && conversation_id == &pending.entry.conversation_id
+            }
+            Subject::Group { group_id, conversation_id, .. } => {
+                conversation_id == &pending.entry.conversation_id
+                    && pending
+                        .entry
+                        .reach
+                        .route
+                        .body
+                        .group
+                        .as_ref()
+                        .is_some_and(|group| group.group_id == *group_id)
+            }
             _ => false,
         };
         if denied {

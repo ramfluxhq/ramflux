@@ -614,6 +614,12 @@ impl RamfluxClient {
         let identity = g::Inner::decode(scanned.exact_inner)
             .map_err(|_| invalid("generated identity missing"))?
             .identity;
+        self.check_reach_group_profile(
+            identity.as_ref(),
+            scanned.kind,
+            scanned.body,
+            scanned.exact_inner,
+        )?;
         if let Some(group_id) = identity.as_ref().and_then(|identity| identity.group_id.as_deref())
         {
             if Some(group_id) != opened.routing.group_id.as_deref() {

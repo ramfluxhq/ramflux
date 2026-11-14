@@ -2,7 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Unified recipient-owned reach policy, independent of friendship and discovery.
+mod groups;
+pub use groups::*;
 mod admission;
+mod continuity;
+pub mod group_profile;
+pub use continuity::{NodeContinuityDocument, NodeContinuityKind, NodeKeyRotation};
 pub mod directory;
 mod foreign;
 pub use foreign::*;

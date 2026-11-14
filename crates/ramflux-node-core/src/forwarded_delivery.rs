@@ -173,6 +173,7 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<ForwardedSubmission, NodeCoreError> {
+        crate::contact_reach::require_submission_carrier()?;
         ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let pin_admission =
             FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;

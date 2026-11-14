@@ -89,6 +89,7 @@ impl ReachService {
             return Err(refuse(Reason::ForeignInvalidFrame));
         }
         let root = match &request.operation {
+            Operation::GroupRoster { roster, .. } => roster.header.body.recipient_root.as_str(),
             Operation::Policy { update } => update.body.account_anchor.as_str(),
             Operation::ProfilePublish { update, .. } => update.body.account_anchor.as_str(),
             Operation::Admission { update, .. }
@@ -99,6 +100,9 @@ impl ReachService {
         let owner = ReachOwner { recipient_root: root, actor };
         match &request.operation {
             Operation::Query { .. } => self.resolve_owner_query(store, owner, request, now),
+            Operation::GroupRoster { operation_id, roster } => {
+                store.reach_group_roster(owner, operation_id, roster, now)
+            }
             Operation::ProfilePublish { operation_id, expected_epoch, update } => {
                 store.reach_publish_profile(owner, operation_id, *expected_epoch, update, now)
             }

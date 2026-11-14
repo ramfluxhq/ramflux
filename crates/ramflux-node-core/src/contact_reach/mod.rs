@@ -28,3 +28,6 @@ mod error;
 pub use error::{ReachError, Result};
 pub(super) use error::{refuse, storage};
 pub use ramflux_protocol::contact_reach::enabled;
+
+mod carrier;
+pub(crate) use carrier::{require_legacy_durable, require_submission_carrier};

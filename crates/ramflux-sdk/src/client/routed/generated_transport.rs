@@ -45,6 +45,7 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
 pub(super) fn seal_plaintext(
     body: &[u8],
     route: &Routing,
+    signed_state_present: bool,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     if crate::client::target_selection::schema_v1_selected()
         && let Some(mut inner) = identified_inner(body)
@@ -52,6 +53,26 @@ pub(super) fn seal_plaintext(
         #[cfg(test)]
         if super::report::allows_invalid_header_fixture() {
             return Ok(zeroize::Zeroizing::new(body.to_vec()));
+        }
+        if ramflux_protocol::contact_reach::enabled() {
+            let identity =
+                inner.identity.as_ref().ok_or_else(|| invalid("generated identity missing"))?;
+            let operation = if inner.kind == 8 {
+                Some(
+                    g::Control::decode(inner.body.as_slice())
+                        .map_err(|_| invalid("Control malformed"))?
+                        .operation,
+                )
+            } else {
+                None
+            };
+            ramflux_protocol::contact_reach::group_profile::check(
+                identity,
+                inner.kind,
+                operation,
+                signed_state_present,
+            )
+            .map_err(SdkError::ReachRefused)?;
         }
         let closed_a2i = inner.kind == 8
             && g::Control::decode(inner.body.as_slice())
@@ -66,6 +87,11 @@ pub(super) fn seal_plaintext(
         generated_plaintext(body)?;
         Ok(zeroize::Zeroizing::new(body.to_vec()))
     } else {
+        if ramflux_protocol::contact_reach::enabled() && route.group_id.is_some() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+            ));
+        }
         Ok(zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
             routing: route.clone(),
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
@@ -137,7 +163,7 @@ mod tests {
             "the refused input is a structurally valid signed control"
         );
         assert!(matches!(
-            seal_plaintext(&inner.encode_to_vec(), &route),
+            seal_plaintext(&inner.encode_to_vec(), &route, false),
             Err(SdkError::GeneratedRefused {
                 code: crate::error::GeneratedRefusalCode::Authority,
                 ..
@@ -146,7 +172,7 @@ mod tests {
         inner.kind = 12;
         inner.body.clear();
         assert!(matches!(
-            seal_plaintext(&inner.encode_to_vec(), &route),
+            seal_plaintext(&inner.encode_to_vec(), &route, false),
             Err(SdkError::InboundPending(_))
         ));
         Ok(())

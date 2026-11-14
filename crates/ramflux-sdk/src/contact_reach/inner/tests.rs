@@ -18,6 +18,7 @@ fn fixture() -> (Route, g::Inner) {
         recipient_root: target,
         conversation_id: "conversation".into(),
         traffic: Traffic::Dm,
+        group: None,
         envelope_hash: ramflux_protocol::encode_base64url([3; 32]),
         authority_head_hash: ramflux_protocol::encode_base64url([4; 32]),
         issued_at: 1_760_000_000,

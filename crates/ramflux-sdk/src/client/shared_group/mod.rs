@@ -31,9 +31,11 @@ mod routes;
 mod transfer;
 mod transfer_outcome;
 mod transfer_wire;
-pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
-use bootstrap::{decode_packet, packet_bytes};
+use bootstrap::packet_bytes;
+pub(crate) use bootstrap::{
+    PreparedSharedGroup, decode_packet, is_packet as is_shared_group_packet,
+};
 pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
 pub(crate) use requests::request_key as request_record_key;
 pub(crate) use transfer::{SEND_PREFIX as TRANSFER_SEND_PREFIX, TransferDelivery};
@@ -52,6 +54,11 @@ impl RamfluxClient {
                 .view()
                 .effective_role(local.root_commitment(), local.device_id())
                 .is_some());
+        }
+        if ramflux_protocol::contact_reach::enabled() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+            ));
         }
         // A pending invitation has no joined projection yet. Absence is a
         // negative membership answer; real storage failures still propagate.

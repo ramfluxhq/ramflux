@@ -12,6 +12,10 @@ use ramflux_protocol::{
     custody::{self, DeviceRef, Envelope as Signed},
 };
 
+mod groups;
+pub use groups::{verify_group_retirement, verify_group_roster};
+mod continuity;
+pub use continuity::{NodeContinuityContext, verify_node_continuity};
 pub mod directory;
 mod peer;
 #[cfg(test)]

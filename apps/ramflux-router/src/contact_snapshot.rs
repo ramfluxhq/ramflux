@@ -22,6 +22,7 @@ pub(crate) fn configure(
         .with_reach_peer_resolver(documents)?)
 }
 pub(crate) struct SourceDocuments {
+    node: String,
     endpoint: String,
     tls: BoundedHttpTls,
 }
@@ -43,7 +44,7 @@ impl SourceDocuments {
             None,
         )?
         .with_mesh_peer(&config.node_id, "ramflux-federation")?;
-        Ok(Self { endpoint, tls })
+        Ok(Self { node: config.node_id.clone(), endpoint, tls })
     }
     fn read_document(&self, path: &str, deadline: Instant) -> Result<Vec<u8>, ReachError> {
         ramflux_transport::bounded_http_get(BoundedHttpGet {
@@ -57,6 +58,20 @@ impl SourceDocuments {
     }
 }
 impl ReachSourceDocuments for SourceDocuments {
+    fn continuity(&self, deadline: Instant) -> Result<Vec<serde_json::Value>, ReachError> {
+        let bytes = self.read_document("/.well-known/ramflux/continuity", deadline)?;
+        let document: wire::NodeContinuityDocument = wire::decode(&bytes, 1024 * 1024)?;
+        document.validate()?;
+        if document.node_id != self.node {
+            return Err(ReachError::Refused(wire::Reason::ForeignSnapshotInvalid));
+        }
+        document
+            .rotations
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage)
+    }
     fn read(&self, deadline: Instant) -> Result<Discovery, ReachError> {
         let client = self.read_document("/.well-known/ramflux/client", deadline)?;
         let server = self.read_document("/.well-known/ramflux/server", deadline)?;

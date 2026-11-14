@@ -124,14 +124,7 @@ pub enum FederationPinState {
     Rejected,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FederationNodeKeyRotation {
-    pub node_id: String,
-    pub old_node_public_key: String,
-    pub new_node_public_key: String,
-    pub rotated_at: u64,
-    pub signature: String,
-}
+pub type FederationNodeKeyRotation = ramflux_protocol::contact_reach::NodeKeyRotation;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FederationNodePin {

@@ -86,20 +86,25 @@ pub(super) fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64> {
     Ok(fenced)
 }
 pub(super) fn load(tx: &redb::WriteTransaction, root: &str) -> Result<AccountReach> {
-    tx.open_table(ACCOUNTS)
+    let mut state = tx
+        .open_table(ACCOUNTS)
         .map_err(storage)?
         .get(root)
         .map_err(storage)?
         .map(|v| row(v.value()))
-        .transpose()
-        .map(Option::unwrap_or_default)
+        .transpose()?
+        .unwrap_or_default();
+    rosters::load(tx, root, &mut state)?;
+    Ok(state)
 }
+
 pub(super) fn save(tx: &redb::WriteTransaction, root: &str, state: &AccountReach) -> Result<()> {
     let bytes = encoded(state)?;
     if bytes.len() > MAX_STATE_BYTES {
         return Err(refuse(Reason::ForeignCapacity));
     }
     tx.open_table(ACCOUNTS).map_err(storage)?.insert(root, bytes.as_slice()).map_err(storage)?;
+    rosters::save(tx, root, state)?;
     Ok(())
 }
 
@@ -385,17 +390,45 @@ impl RouterRedbStore {
             return Err(refuse(Reason::ForeignUnavailable));
         }
         let mut state = load(&tx, owner.recipient_root)?;
+        if let Some(result) = group_duplicate_result(&state, owner, &current, operation, now)? {
+            return Ok(result);
+        }
         let result = apply_owner_command(
             &tx,
             &mut state,
             operation,
             OwnerCommand { owner, current: &current, home_hash: &home_hash, now },
         )?;
+        if matches!(result, OperationResult::Admission { outcome: Applied::Duplicate, .. }) {
+            return Ok(result);
+        }
         retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
         save(&tx, owner.recipient_root, &state)?;
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn group_duplicate_result(
+    state: &AccountReach,
+    owner: ReachOwner<'_>,
+    current: &ramflux_crypto::custody::VerifiedRecord,
+    operation: &Operation,
+    now: u64,
+) -> Result<Option<OperationResult>> {
+    if let Operation::Admission { update, peer_evidence, notice } = operation
+        && state.duplicate_group_allow(update)?
+    {
+        if peer_evidence.is_some() || notice.is_some() || &update.body.actor != owner.actor {
+            return Err(refuse(Reason::ForeignInvalidFrame));
+        }
+        ramflux_crypto::contact_reach::verify_retained_admission(update, current, now)?;
+        return Ok(Some(OperationResult::Admission {
+            revision: state.admission_revision,
+            outcome: Applied::Duplicate,
+        }));
+    }
+    Ok(None)
 }
 
 fn retain_operation(
@@ -495,11 +528,16 @@ fn apply_owner_command(
                 _ => None,
             };
             denials::retire_node_grants(tx, state, owner.recipient_root, update)?;
+            let previous_revision = state.admission_revision;
             state.admission(update.clone(), conversation.as_deref(), now)?;
             super::ingress::erase_denied(tx, owner.recipient_root, update)?;
             OperationResult::Admission {
                 revision: state.admission_revision,
-                outcome: Applied::Applied,
+                outcome: if state.admission_revision == previous_revision {
+                    Applied::Duplicate
+                } else {
+                    Applied::Applied
+                },
             }
         }
         Operation::Start { .. } | Operation::Reply { .. } => {
@@ -682,6 +720,9 @@ fn check_allow(
     if update.body.decision != Decision::Allow {
         return Ok(());
     }
+    if matches!(update.body.subject, Subject::Group { .. }) {
+        return Ok(());
+    }
     let root = update.body.subject.root().ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?;
     let reply = reply.ok_or_else(|| refuse(Reason::ForeignSnapshotInvalid))?;
     state.check_denials(root, &reply.snapshot.body.source_node, now)?;
@@ -699,6 +740,12 @@ fn check_peer(
     notice: Option<&Notice>,
     now: u64,
 ) -> Result<()> {
+    if matches!(update.body.subject, Subject::Group { .. }) {
+        if reply.is_some() || notice.is_some() {
+            return Err(refuse(Reason::ForeignInvalidFrame));
+        }
+        return Ok(());
+    }
     if update.body.decision != Decision::Allow {
         if reply.is_some() || notice.is_some() {
             return Err(refuse(Reason::ForeignInvalidFrame));
@@ -764,3 +811,5 @@ fn check_peer(
 mod tests;
 
 mod denials;
+
+mod rosters;

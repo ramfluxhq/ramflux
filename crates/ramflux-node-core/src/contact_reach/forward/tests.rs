@@ -23,6 +23,7 @@ fn forward() -> TestResult<ReachForward> {
         recipient_root: digest(2),
         conversation_id: ramflux_protocol::message::dm_scope::derive(&digest(1), &digest(2))?,
         traffic: Traffic::Dm,
+        group: None,
         envelope_hash: ramflux_protocol::custody::framed_hash(
             wire::ENVELOPE_HASH_DOMAIN,
             &envelope,

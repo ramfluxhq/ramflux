@@ -21,6 +21,10 @@ pub trait ReachSourceDocuments: Send + Sync {
     /// # Errors
     /// Refuses unavailable service identity, deadline expiry and invalid/oversized documents.
     fn read(&self, deadline: std::time::Instant) -> Result<Discovery>;
+    /// Read the node's original bounded rotation proofs from the same authenticated service.
+    /// # Errors
+    /// Refuses missing or invalid continuity documents and exhausted deadlines.
+    fn continuity(&self, deadline: std::time::Instant) -> Result<Vec<serde_json::Value>>;
 }
 
 #[derive(Clone, Copy)]
@@ -62,17 +66,16 @@ impl ReachService {
             }
             let deadline =
                 std::time::Instant::now() + std::time::Duration::from_millis(request.remaining_ms);
-            let discovery = self
-                .source_documents
-                .as_ref()
-                .ok_or_else(|| refuse(Reason::ForeignUnavailable))?
-                .read(deadline)?;
+            let documents =
+                self.source_documents.as_ref().ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
+            let discovery = documents.read(deadline)?;
+            let continuity = documents.continuity(deadline)?;
             self.public_query(
                 ReachSnapshotContext {
                     router,
                     store,
                     discovery: &discovery,
-                    continuity: &[],
+                    continuity: &continuity,
                     peer_node: &request.query.source_node,
                     now: now.max(crate::now_unix_seconds()),
                     deadline,
@@ -150,7 +153,7 @@ impl ReachService {
         let authority = store::authority(&tx, &query.account_anchor, now)?;
         let current = store::home(&tx, &query.account_anchor)?;
         let hash = ramflux_protocol::home_migration::record_hash(&current.record)?;
-        if current.record.home() != (self.node.node_id(), self.node.public_key())
+        if current.record.home().0 != self.node.node_id()
             || hash != ramflux_protocol::home_migration::record_hash(&home.home.record)?
             || manifest
                 .custody
@@ -159,6 +162,16 @@ impl ReachService {
         {
             return Err(refuse(Reason::HomeRollback));
         }
+        ramflux_crypto::contact_reach::verify_node_continuity(
+            context.continuity,
+            ramflux_crypto::contact_reach::NodeContinuityContext {
+                node: self.node.node_id(),
+                old_key: current.record.home().1,
+                current_key: self.node.public_key(),
+                minimum_rotated_at: 0,
+                now,
+            },
+        )?;
         let profile = super::profile::public_profile(&tx, &query.account_anchor)?;
         let state = store::load(&tx, &query.account_anchor)?;
         let reach = state.policy.ok_or_else(|| refuse(Reason::ReachPolicyRequired))?;

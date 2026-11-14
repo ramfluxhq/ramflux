@@ -999,6 +999,12 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = crate::contact_reach::require_submission_carrier() {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: error.to_string(),
+            };
+        }
         if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
@@ -1080,13 +1086,7 @@ impl RouterCore {
         origin: RouterEnvelopeOrigin,
         lease_seconds: u64,
     ) -> RouterForwardPreparation {
-        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
-            return complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
-                target_delivery_id: envelope.target_delivery_id,
-                reason: NodeCoreError::from(error).to_string(),
-            });
-        }
-        if let Err(error) = crate::check_entry_bound(&envelope) {
+        if let Err(error) = crate::contact_reach::require_legacy_durable(&envelope) {
             return complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
                 reason: error.to_string(),
@@ -1642,6 +1642,7 @@ impl RouterCore {
         store: Option<&crate::RouterRedbStore>,
         origin: RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        crate::contact_reach::require_submission_carrier()?;
         ramflux_protocol::ephemeral::require_durable(envelope)?;
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
