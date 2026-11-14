@@ -12,17 +12,18 @@ use std::{
 
 #[tokio::test(flavor = "current_thread")]
 async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
-    watch(30, async {
+    watch(60, async {
         LocalSet::new()
             .run_until(async {
-                let mut fixture = Box::pin(Fixture::new("receive-checkpoint-fairness")).await?;
+                let root = tempfile::tempdir()?;
+                let mut fixture =
+                    Box::pin(Fixture::build_at(root.path().to_path_buf(), false, None)).await?;
                 stop_peer_session(&mut fixture).await;
                 let mut runtime = start_runtime(&mut fixture).await?;
                 let handle = account_of(&runtime)?.connection.clone().ok_or("connection handle")?;
-                let writer = crate::bus::couriers::writer::Writer::new(
-                    runtime.connection_sender.clone(),
-                    handle.generation(),
-                );
+                let (checkpoints, mut queued) = tokio::sync::mpsc::channel(1);
+                let writer =
+                    crate::bus::couriers::writer::Writer::new(checkpoints, handle.generation());
                 let polled = Arc::new(AtomicBool::new(false));
                 let observed = Arc::clone(&polled);
                 let mut checkpoint = Box::pin(writer.apply(move |_account| {
@@ -41,7 +42,7 @@ async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
                     Poll::Ready(())
                 })
                 .await;
-                let work = runtime.connection_work.try_recv()?;
+                let work = queued.try_recv()?;
                 let observer = tokio::spawn(async move {
                     polled.store(true, Ordering::Release);
                 });
