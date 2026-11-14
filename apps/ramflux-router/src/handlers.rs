@@ -346,17 +346,14 @@ pub(crate) fn handle_mesh_request(
     } else {
         None
     };
-    let full_context = crate::pairing_full::ReadContext {
-        router,
-        peer,
-        socket: stream.sock.try_clone()?,
-        accepted: std::time::Instant::now(),
-    };
+    let accepted = std::time::Instant::now();
     let Some(admitted) = ramflux_transport::read_bounded_mesh_http_request_with_admission(
         stream,
         &crate::pairing_full::cap,
-        |method, path, raw, bytes| {
-            crate::pairing_full::admit(&full_context, method, path, raw, bytes)
+        |reader, method, path, raw, bytes| {
+            let context =
+                crate::pairing_full::ReadContext { router, peer, socket: &reader.sock, accepted };
+            crate::pairing_full::admit(&context, method, path, raw, bytes)
         },
     )?
     else {
@@ -372,7 +369,9 @@ pub(crate) fn handle_mesh_request(
     };
     let (mut request, full) = admitted.into_parts();
     if let Some(mut full) = full {
-        let reply = crate::pairing_full::handle(&full_context, &mut full, &mut request);
+        let context =
+            crate::pairing_full::ReadContext { router, peer, socket: &stream.sock, accepted };
+        let reply = crate::pairing_full::handle(&context, &mut full, &mut request);
         crate::pairing_full::write(stream, &reply)?;
         return Ok(false);
     }

@@ -35,7 +35,7 @@ use zeroize::Zeroizing;
 pub(crate) struct ReadContext<'a> {
     pub(crate) router: &'a RouterHandle,
     pub(crate) peer: &'a MeshPeerIdentity,
-    pub(crate) socket: TcpStream,
+    pub(crate) socket: &'a TcpStream,
     pub(crate) accepted: Instant,
 }
 pub(crate) struct Ingress {
@@ -108,7 +108,7 @@ pub(crate) fn admit(
         return Err(invalid());
     }
     let deadline = ramflux_transport::mesh_socket_request_deadline(
-        &ctx.socket,
+        ctx.socket,
         ctx.accepted + Duration::from_secs(5),
     )?;
     let kind = if raw_claim {

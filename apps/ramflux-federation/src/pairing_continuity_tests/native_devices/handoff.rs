@@ -25,6 +25,7 @@ async fn run() -> TestResult {
     let mut fixture = Box::pin(Fixture::open())
         .await
         .map_err(|error| format!("test: TLS full fixture: {error}"))?;
+    let admissions_before = fixture.wire.node.full_admit_calls.load(Ordering::SeqCst);
     let original = [fixture.branch(true)?, fixture.branch(false)?];
     let wrapping = ramflux_storage::AccountIndex::open(fixture.b.root.path())?
         .load_wrapped_db_key(&fixture.b.id)?;
@@ -34,6 +35,10 @@ async fn run() -> TestResult {
         .await
         .map_err(|error| format!("test: TLS full publish: {error}"))?;
     Box::pin(fixture.merge()).await.map_err(|error| format!("test: TLS full merge: {error}"))?;
+    assert!(
+        fixture.wire.node.full_admit_calls.load(Ordering::SeqCst) > admissions_before + 4,
+        "test: composed SDK handoff bypassed HTTP/federation/router full admission"
+    );
     for (primary, expected) in [true, false].into_iter().zip(original) {
         assert_eq!(
             fixture.branch(primary)?,

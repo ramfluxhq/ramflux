@@ -365,7 +365,7 @@ fn pairing_mesh_full_unknown_token_is_refused_before_bulk_read_and_redacted() ->
     let ctx = crate::pairing_full::ReadContext {
         router: &handle,
         peer: &peer,
-        socket,
+        socket: &socket,
         accepted: std::time::Instant::now(),
     };
     let token = id(73);
@@ -384,7 +384,7 @@ fn pairing_mesh_full_unknown_token_is_refused_before_bulk_read_and_redacted() ->
         let result = ramflux_transport::read_bounded_mesh_http_request_with_admission(
             &mut header_only,
             &crate::pairing_full::cap,
-            |method, path, headers, bytes| {
+            |_, method, path, headers, bytes| {
                 crate::pairing_full::admit(&ctx, method, path, headers, bytes)
             },
         );

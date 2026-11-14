@@ -7,20 +7,38 @@ use super::*;
 async fn pairing_full_tail_relay_admission_is_data_only_endpoints_enforce() -> TestResult {
     let hold = ClockHold::new();
     crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await?;
-    eprintln!("test: hostile tail cold positive merge complete; checking signed context attacks");
-    for fault in [
-        super::hostile_context::Fault::Parent,
-        super::hostile_context::Fault::Transfer,
-        super::hostile_context::Fault::DeltaAfterJ6,
-    ] {
-        eprintln!("test: hostile tail signed context case {fault:?}");
-        crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
-            fault,
-        )))
-        .await?;
-    }
     hold.finish().await?;
     Ok(())
+}
+#[tokio::test(start_paused = true)]
+async fn pairing_full_tail_signed_parent_is_refused() -> TestResult {
+    let hold = ClockHold::new();
+    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
+        super::hostile_context::run(super::hostile_context::Fault::Parent),
+    ))
+    .await;
+    hold.finish().await?;
+    result
+}
+#[tokio::test(start_paused = true)]
+async fn pairing_full_tail_signed_transfer_is_refused() -> TestResult {
+    let hold = ClockHold::new();
+    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
+        super::hostile_context::run(super::hostile_context::Fault::Transfer),
+    ))
+    .await;
+    hold.finish().await?;
+    result
+}
+#[tokio::test(start_paused = true)]
+async fn pairing_full_tail_signed_delta_after_j6_is_refused() -> TestResult {
+    let hold = ClockHold::new();
+    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
+        super::hostile_context::run(super::hostile_context::Fault::DeltaAfterJ6),
+    ))
+    .await;
+    hold.finish().await?;
+    result
 }
 async fn run() -> TestResult {
     let (mut rig, mut source, mut client, mut target, request) = Box::pin(setup()).await?;

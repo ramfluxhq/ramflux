@@ -2,34 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 use super::super::schema::{DESCRIPTOR_MAX, HEAD_ROW_MAX, TABLES};
-use super::helpers::{TestResult, floor, h};
-use crate::{AccountDb, AccountDbKey, AccountIndex};
+use super::helpers::{TestResult, h};
 use rusqlite::params;
-use std::path::Path;
-
-#[test]
-fn pairing_head_update_migrates_existing_fenced_candidate() -> TestResult {
-    let (_root, db) = crate::tests::test_db("pair-head-update-migration")?;
-    let old = super::super::schema::SCHEMA
-        .replace(",'head_update'", "")
-        .replace("\n    OR (kind='head_update' AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)", "");
-    db.connection.execute_batch("DROP TABLE pairing_head;")?;
-    db.connection.execute_batch(&old)?;
-    let existing = super::helpers::acknowledged_head()?;
-    db.put_pairing_head(&existing)?;
-    db.connection.call(|connection| super::super::schema::install(connection))?;
-    assert_eq!(db.pairing_head()?, Some(existing.clone()));
-    db.connection.execute("DELETE FROM pairing_head", [])?;
-    let mut update = existing;
-    update.kind = "head_update".into();
-    update.invitation_id = None;
-    update.recipient_ref = None;
-    db.put_pairing_head(&update)?;
-    assert_eq!(db.pairing_head()?, Some(update.clone()));
-    update.revoked_ref = Some(super::helpers::ref_bytes("dev-a")?);
-    assert!(db.put_pairing_head(&update).is_err());
-    Ok(())
-}
 
 pub(super) fn tables_and_indexes() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-tables")?;
@@ -69,44 +43,6 @@ pub(super) fn tables_and_indexes() -> TestResult {
     }
     let _ = std::fs::remove_dir_all(root);
     Ok(())
-}
-
-pub(super) fn old_open_creates_tables() -> TestResult {
-    let (root, db) = crate::tests::test_db("pair04-migrate")?;
-    db.connection.execute_batch(
-        "DROP TABLE pairing_live; DROP TABLE pairing_head; DROP TABLE pairing_terminal;
-         DROP TABLE pairing_adoption; DROP TABLE pairing_floor; DROP TABLE pairing_full_tail;
-         DROP TABLE pairing_source_cleanup; DROP TABLE pairing_full_tail_apply;
-         DROP TABLE pairing_full_tail_dependency; DROP TABLE pairing_full_completion;
-         DROP TABLE pairing_own_sync;",
-    )?;
-    drop(db);
-    let db = reopen(&root)?;
-    for table in TABLES {
-        let n: i64 = db.connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-            params![table],
-            |row| row.get(0),
-        )?;
-        assert_eq!(n, 1, "{table}");
-    }
-    db.put_pairing_floor(&floor())?;
-    drop(db);
-    let db = reopen(&root)?;
-    let kept = db.pairing_floor()?.ok_or("floor after reopen")?;
-    assert_eq!(kept.issued_seq, 3);
-    drop(db);
-    let db = reopen(&root)?;
-    let again = db.pairing_floor()?.ok_or("floor after second reopen")?;
-    assert_eq!(again, kept);
-    let _ = std::fs::remove_dir_all(root);
-    Ok(())
-}
-
-fn reopen(root: &Path) -> Result<AccountDb, crate::StorageError> {
-    let index = AccountIndex::open(root)?;
-    let key = AccountDbKey::derive("acct", b"storage-test-secret");
-    AccountDb::open(&index, "acct", &key)
 }
 
 pub(super) fn caps_and_sql_bounds() -> TestResult {

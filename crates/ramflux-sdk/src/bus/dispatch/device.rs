@@ -353,43 +353,11 @@ async fn dispatch_device_revoke(
     body: LocalBusDeviceRevokeRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?.to_owned();
-    let data_root = state.config.data_root.clone();
-    if local_bus_account_mut(state, &account_id)?.client.born_v3_account.is_some() {
-        return Box::pin(native_revoke::dispatch(
-            local_bus_account_mut(state, &account_id)?,
-            &body.device_id,
-        ))
-        .await;
-    }
-    let manifest_path = local_bus_account_manifest_path(&data_root, &account_id);
-    let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
-    let root = ramflux_crypto::create_identity_root(&manifest.principal_id, manifest.root_seed);
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
-    if derived_commitment != manifest.principal_commitment {
-        return Err(SdkError::LocalBus("account manifest root commitment mismatch".to_owned()));
+    if account.client.born_v3_account.is_none() {
+        return Err(SdkError::PairingCode("UpdateRequired"));
     }
-    let revoked_at = now_unix_timestamp();
-    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
-    if let Some(addr) = manifest.node_tcp_addr {
-        gateway = gateway.with_tcp_gateway_addr(addr);
-    }
-    let record = account.client.revoke_owned_device(&gateway, &body.device_id).await?;
-    manifest.devices.retain(|device| device.device_id != body.device_id);
-    write_local_bus_account_manifest(&data_root, &manifest)?;
-    account.client.append_event(
-        &format!("device.branch_revoked:{}", body.device_id),
-        "identity.device_branch.revoked",
-        &serde_json::to_vec(&serde_json::json!({
-            "device_id": body.device_id,
-            "revoked_at": revoked_at,
-        }))?,
-    )?;
-    Ok(local_bus_ok(
-        serde_json::json!({"device_id":body.device_id,"revoked":true,"publication_state":"submitted","device_set_epoch":record.device_set_epoch}),
-    ))
+    Box::pin(native_revoke::dispatch(account, &body.device_id)).await
 }
 
 async fn dispatch_device_sync_export(

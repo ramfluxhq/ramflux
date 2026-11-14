@@ -3,7 +3,7 @@
 
 //! Closed pairing table DDL. Installed on every account open; no schema-version collision.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 pub(crate) const TABLES: [&str; 11] = [
     "pairing_floor",
@@ -142,43 +142,9 @@ END;
 /// # Errors
 /// Returns SQLite errors.
 pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
-    let existing: Option<String> = db
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pairing_head'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if existing.is_some_and(|sql| !sql.contains("'head_update'")) {
-        let transaction = db.unchecked_transaction()?;
-        db.execute_batch("ALTER TABLE pairing_head RENAME TO pairing_head_before_head_update;")?;
-        db.execute_batch(SCHEMA)?;
-        db.execute_batch("INSERT INTO pairing_head SELECT * FROM pairing_head_before_head_update; DROP TABLE pairing_head_before_head_update;")?;
-        transaction.commit()?;
-    } else {
-        db.execute_batch(SCHEMA)?;
-    }
-    install_full_adoption_columns(db)?;
+    db.execute_batch(SCHEMA)?;
     db.execute_batch(super::tail::SCHEMA)?;
     db.execute_batch(super::own_sync::SCHEMA)?;
     let _ = PHASES;
     Ok(())
-}
-
-fn install_full_adoption_columns(db: &Connection) -> rusqlite::Result<()> {
-    let columns: (bool,bool) = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pairing_adoption') WHERE name='full_generation_nonce'),EXISTS(SELECT 1 FROM pragma_table_info('pairing_adoption') WHERE name='full_initial_union_root')",
-        [], |row|Ok((row.get(0)?,row.get(1)?)),
-    )?;
-    if columns == (true, true) {
-        return Ok(());
-    }
-    let tx = db.unchecked_transaction()?;
-    if !columns.0 {
-        tx.execute_batch("ALTER TABLE pairing_adoption ADD COLUMN full_generation_nonce TEXT CHECK(full_generation_nonce IS NULL OR (typeof(full_generation_nonce)='text' AND length(full_generation_nonce)=43));")?;
-    }
-    if !columns.1 {
-        tx.execute_batch("ALTER TABLE pairing_adoption ADD COLUMN full_initial_union_root TEXT CHECK((full_initial_union_root IS NULL OR (typeof(full_initial_union_root)='text' AND length(full_initial_union_root)=43)) AND ((full_generation_nonce IS NULL)=(full_initial_union_root IS NULL)));")?;
-    }
-    tx.commit()
 }

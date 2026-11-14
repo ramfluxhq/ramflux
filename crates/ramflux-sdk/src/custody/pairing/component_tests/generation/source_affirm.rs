@@ -223,10 +223,12 @@ mod tests {
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?,
             "test: source signing service did not run"
         );
+        rig.clock.advance_ms(1001);
         rig.primary
             .poll_full_management_control()
             .await
             .map_err(|error| format!("test: A ready sender: {error}"))?;
+        rig.clock.advance_ms(1001);
         assert!(
             rig.secondary
                 .poll_full_management_control()
@@ -310,10 +312,12 @@ mod tests {
             let expected = request(&rig, &operation, &recipient)?;
             let mut delivered = false;
             for _ in 0..66 {
+                rig.clock.advance_ms(1001);
                 rig.secondary
                     .poll_full_management_control()
                     .await
                     .map_err(|error| format!("test: B candidate control: {error}"))?;
+                rig.clock.advance_ms(1001);
                 if rig
                     .primary
                     .poll_full_management_control()
@@ -374,7 +378,9 @@ mod tests {
             let expected = request(&rig, &operation, &recipient)?;
             let mut delivered = false;
             for _ in 0..66 {
+                rig.clock.advance_ms(1001);
                 rig.secondary.poll_full_management_control().await.map_err(|error|format!("test: B candidate control: {error}"))?;
+                rig.clock.advance_ms(1001);
                 if rig.primary.poll_full_management_control().await.map_err(|error|format!("test: A candidate review: {error}"))? {
                     delivered = true;
                     break;

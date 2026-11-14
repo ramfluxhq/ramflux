@@ -479,7 +479,17 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
         let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
-        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
+        // Create through the validated public path, then model corrupted vault bytes
+        // to reach the export UTF-8 cleanup branch independently of creation validation.
+        let born = ceremony.confirm_with_passphrase(
+            &words(&phrase, positions)?,
+            &vault,
+            now,
+            b"valid-agent-data-passphrase",
+        )?;
+        let reference = format!("agent-provisioning:{}", born.primary_vault_ref());
+        vault.delete(&reference)?;
+        vault.store_provisioning_secret(&reference, secret)?;
         mark_live(&root.0, account, now)?;
         if occupied {
             // Destination failure after the passphrase String was built.

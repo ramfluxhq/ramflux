@@ -20,13 +20,19 @@ use ramflux_protocol::custody::pairing::{
     native::Failure,
 };
 use ramflux_transport::{RawMeshPost, RawMeshResponse};
-use std::{cell::RefCell, net::IpAddr, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    net::IpAddr,
+    time::Instant,
+};
 use zeroize::Zeroizing;
 
 pub(crate) struct ReadContext<'a> {
     pub(crate) surface: &'a PairingHttpSurface,
     pub(crate) peer: IpAddr,
     pub(crate) deadline: Instant,
+    pub(crate) source_permit: Option<&'a crate::public_source_limits::SourceConnectionPermit>,
+    pub(crate) source_charged: &'a Cell<bool>,
     pub(crate) refusal: &'a RefCell<Option<HttpResponse>>,
 }
 pub(crate) struct PublicPermit {
@@ -102,6 +108,13 @@ pub(crate) fn admit(
     original: &str,
     length: usize,
 ) -> Result<Option<PublicPermit>, NodeCoreError> {
+    // Charge headers once before any mesh I/O or request-body allocation.
+    if ctx.source_permit.is_some_and(|permit| !permit.allow_request(Instant::now())) {
+        *ctx.refusal.borrow_mut() =
+            Some(HttpResponse::text("429 Too Many Requests", "too many requests"));
+        return Err(NodeCoreError::HttpRequestRejected { status: "429 Too Many Requests" });
+    }
+    ctx.source_charged.set(true);
     if !is_pairing_path(path) || path == PAIRING_CLAIM_PATH {
         return Ok(None);
     }
@@ -149,6 +162,10 @@ fn admit_inner(
             Ok((arm, authorization, nonce))
         };
     let (arm, authorization, nonce) = prepare().map_err(|error| failure(&error))?;
+    let scratch = surface
+        .full_scratch
+        .reserve(length, response_limit(arm))
+        .map_err(|error| failure(&error))?;
     let request = FullMeshAdmit {
         arm,
         authorization: authorization.clone(),
@@ -169,10 +186,6 @@ fn admit_inner(
         }
         return Err(failure(&PairingRelayError::WrongContext));
     };
-    let scratch = surface
-        .full_scratch
-        .reserve(length, response_limit(arm))
-        .map_err(|error| failure(&error))?;
     Ok(PublicPermit {
         arm,
         authorization,

@@ -90,11 +90,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pairing_full_cold_status_rebuilds_unselected_g1_from_current_b() -> TestResult {
         let hold = ClockHold::new();
-        for cut in [0, 1] {
-            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(cut))).await?;
-        }
+        crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(0))).await?;
         hold.finish().await?;
         Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_cold_status_rebuilds_unselected_g1_after_private_copy() -> TestResult {
+        let hold = ClockHold::new();
+        let result =
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(1))).await;
+        hold.finish().await?;
+        result
     }
     #[tokio::test(start_paused = true)]
     async fn primary_transfer_full_generation_publication_crash_cuts() -> TestResult {

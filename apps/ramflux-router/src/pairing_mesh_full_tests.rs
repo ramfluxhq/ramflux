@@ -113,7 +113,7 @@ fn raw(ctx: &ReadContext<'_>, path: &str, headers: &str, body: &[u8]) -> anyhow:
     let request = ramflux_transport::read_bounded_mesh_http_request_with_admission(
         &mut std::io::Cursor::new(bytes),
         &crate::pairing_full::cap,
-        |method, path, original, bytes| {
+        |_, method, path, original, bytes| {
             crate::pairing_full::admit(ctx, method, path, original, bytes)
         },
     )?
@@ -217,8 +217,12 @@ fn pairing_mesh_full_raw_claim_proof_and_atomic_prebody_forward_are_wired() -> T
     let socket = std::net::TcpStream::connect(listener.local_addr()?)?;
     let (_remote, _) = listener.accept()?;
     let peer = ramflux_node_core::parse_mesh_spiffe_uri("spiffe://node/ramflux-federation")?;
-    let ctx =
-        ReadContext { router: &handle, peer: &peer, socket, accepted: std::time::Instant::now() };
+    let ctx = ReadContext {
+        router: &handle,
+        peer: &peer,
+        socket: &socket,
+        accepted: std::time::Instant::now(),
+    };
     let (lease, candidate) = lease(&handle)?;
     let (a, _b) = tokens(&ctx, lease)?;
     let body = ramflux_protocol::custody::pairing::full_transfer::relay::CloseFull {

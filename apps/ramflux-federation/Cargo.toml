@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 quinn = { workspace = true }
-ramflux-relay = { path = "../ramflux-relay" }
+ramflux-relay = { version = "0.1.0", path = "../ramflux-relay" }
 ramflux-storage = { workspace = true }
 tokio = { workspace = true, features = ["process"] }
 ramflux-test-support.workspace = true

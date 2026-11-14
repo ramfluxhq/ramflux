@@ -43,6 +43,11 @@ impl Scratch {
         fs2::FileExt::try_lock_exclusive(&lock)?;
         Ok(Self { path, lock: Some(lock), retained: true })
     }
+    #[cfg(not(unix))]
+    pub(super) fn create(_stage: &Path, _retained: Option<&str>) -> Result<Self, StorageError> {
+        Err(super::stage::context())
+    }
+    #[cfg(unix)]
     pub(super) fn create(stage: &Path, retained: Option<&str>) -> Result<Self, StorageError> {
         reclaim(stage, retained)?;
         let path = stage.join(format!(
@@ -54,8 +59,6 @@ impl Scratch {
             use std::os::unix::fs::DirBuilderExt as _;
             fs::DirBuilder::new().mode(0o700).create(&path)?;
         }
-        #[cfg(not(unix))]
-        return Err(super::stage::context());
         let mut scratch = Self { path, lock: None, retained: false };
         let lock = super::stage::create_file(&scratch.path.join("owner.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)?;
@@ -65,6 +68,7 @@ impl Scratch {
         Ok(scratch)
     }
 }
+#[cfg(unix)]
 fn reclaim(stage: &Path, retained: Option<&str>) -> Result<(), StorageError> {
     for entry in fs::read_dir(stage)? {
         let entry = entry?;

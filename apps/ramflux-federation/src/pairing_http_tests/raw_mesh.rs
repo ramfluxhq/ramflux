@@ -126,7 +126,7 @@ pub(super) fn serve(
             "/pairing/v1/full/send" => 524_288,
             _ => 65_536,
         },
-        |method, path, raw, bytes| {
+        |_, method, path, raw, bytes| {
             if method != "POST" {
                 return Err(invalid());
             }

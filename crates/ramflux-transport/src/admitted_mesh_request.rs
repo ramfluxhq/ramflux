@@ -36,13 +36,14 @@ impl<P> AdmittedMeshHttpRequest<P> {
 }
 /// Read only the fixed header window before obtaining the route's owning admission guard.
 /// The callback must authenticate/reserve full routes; return None only for ordinary routes.
+/// It borrows the reader only after headers arrive, avoiding idle socket clones.
 /// It sees the exact original header, which is erased and never placed in a Value or log.
 /// # Errors
 /// Refuses oversized/malformed framing, failed admission, duplicate length, chunking or EOF.
 pub fn read_bounded_mesh_http_request_with_admission<R: Read, P>(
     reader: &mut R,
     cap_for: &dyn Fn(&str, &str) -> usize,
-    admit: impl FnOnce(&str, &str, &str, usize) -> Result<Option<P>, TransportError>,
+    admit: impl FnOnce(&R, &str, &str, &str, usize) -> Result<Option<P>, TransportError>,
 ) -> Result<Option<AdmittedMeshHttpRequest<P>>, TransportError> {
     let Some(raw) = read_headers(reader)? else {
         return Ok(None);
@@ -84,7 +85,7 @@ pub fn read_bounded_mesh_http_request_with_admission<R: Read, P>(
     }
     // No body prefetch or body allocation precedes this call. A failed callback releases
     // no other request's claimed guard; an early EOF below drops only this owned guard.
-    let permit = admit(method, path, header, length)?;
+    let permit = admit(reader, method, path, header, length)?;
     let mut body = Zeroizing::new(vec![0; length]);
     reader.read_exact(&mut body).map_err(|_| invalid())?;
     Ok(Some(AdmittedMeshHttpRequest {
@@ -153,7 +154,7 @@ mod tests {
         let result = read_bounded_mesh_http_request_with_admission::<_, Permit>(
             &mut input,
             &|_, _| 524_288,
-            |method, path, original, length| {
+            |_, method, path, original, length| {
                 assert_eq!(
                     (method, path, original, length),
                     ("POST", "/pairing/v1/full/send", header, 60_000)
@@ -173,7 +174,7 @@ mod tests {
         let request = read_bounded_mesh_http_request_with_admission(
             &mut input,
             &|_, _| 524_288,
-            |_, _, _, _| {
+            |_, _, _, _, _| {
                 assert_eq!(read.load(Ordering::SeqCst), header.len());
                 Ok(Some(Permit(drops.clone())))
             },
@@ -189,7 +190,7 @@ mod tests {
             read_bounded_mesh_http_request_with_admission(
                 &mut short,
                 &|_, _| 524_288,
-                |_, _, _, _| Ok(Some(Permit(drops.clone())))
+                |_, _, _, _, _| Ok(Some(Permit(drops.clone())))
             )
             .is_err()
         );
@@ -212,7 +213,7 @@ mod tests {
             let result = read_bounded_mesh_http_request_with_admission::<_, Permit>(
                 &mut input,
                 &|_, _| 524_288,
-                |_, _, _, _| {
+                |_, _, _, _, _| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Err(invalid())
                 },

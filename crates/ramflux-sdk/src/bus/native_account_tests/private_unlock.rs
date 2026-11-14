@@ -37,15 +37,16 @@ mod tests {
     }
     #[tokio::test]
     async fn pairing_private_bus_unlock_uses_native_actor_after_restart() -> Result {
-        crate::bus::credentials::contract_tests::deadline(async {
+        crate::bus::credentials::contract_tests::deadline(Box::pin(async {
         let root = tempfile::tempdir()?;
         let now = crate::custody::network_now()?;
+        let vault = Arc::new(TestVault::default());
         let mut ceremony = CreationCeremony::begin(root.path(), input("private-native"), now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
         let born = ceremony.confirm_with_passphrase(
             &words(&phrase, positions)?,
-            &TestVault::default(),
+            vault.as_ref(),
             now,
             b"native-private-data-canary",
         )?;
@@ -85,6 +86,17 @@ mod tests {
                     .await?;
                 assert_eq!(status["principal_commitment"], anchor, "test: private native unlock credential refusal or account lifecycle changed");
                 assert_eq!(status["state"], "unlocked", "test: private native unlock credential refusal or account lifecycle changed");
+                let mut source = crate::RamfluxClient::new();
+                source.open_account_index(root.path())?;
+                source.unlock_account("private-native", b"native-private-data-canary")?;
+                source.initialize_born_v3_branch("primary", vault.clone()).await?;
+                let refused = source.account_db()?.prepare_full_transfer_source()
+                    .and_then(ramflux_storage::FullSourcePreparation::into_encoding_work)
+                    .and_then(ramflux_storage::FullSourcePreparationWork::encode).map_err(crate::SdkError::from)
+                    .err().ok_or("test: daemon-unlocked source unexpectedly passed full preflight")?;
+                assert!(matches!(refused, crate::SdkError::PairingField("UnsupportedRecord")),
+                    "test: daemon-unlocked source passed OVP-12 without typed event/actor owners");
+                drop(source);
                 ordinary
                     .request(Some("private-native".into()), "account", "account.lock", json!({}))
                     .await?;
@@ -99,7 +111,7 @@ mod tests {
         }
         assert!(!root.path().join("local_bus_accounts/private-native.json").exists(), "test: private native unlock credential refusal or account lifecycle changed");
         Ok(())
-    })
+    }))
     .await
     }
 }

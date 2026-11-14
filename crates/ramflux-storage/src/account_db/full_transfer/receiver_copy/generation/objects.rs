@@ -28,6 +28,11 @@ fn paths(database: &Path) -> Result<[PathBuf; 2], StorageError> {
         database.with_extension("segments"),
     ])
 }
+#[cfg(not(unix))]
+pub(super) fn prepare(_database: &Path) -> Result<(), StorageError> {
+    Err(StorageError::AuthorizationRejected)
+}
+#[cfg(unix)]
 pub(super) fn prepare(database: &Path) -> Result<(), StorageError> {
     for path in paths(database)? {
         #[cfg(unix)]
@@ -35,8 +40,6 @@ pub(super) fn prepare(database: &Path) -> Result<(), StorageError> {
             use std::os::unix::fs::DirBuilderExt as _;
             fs::DirBuilder::new().mode(0o700).create(&path)?;
         }
-        #[cfg(not(unix))]
-        return Err(StorageError::AuthorizationRejected);
         crate::sync_path::sync_path(&path)?;
     }
     crate::sync_path::sync_path(database.parent().ok_or(StorageError::AuthorizationRejected)?)?;

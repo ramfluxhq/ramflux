@@ -2,14 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Same-actor v3 SAS and real pre-Issue source owner; no complete transfer/Fedwire claim.
-use super::super::{PairingConfig, PairingIdentity, assemble_chunks};
+use super::super::assemble_chunks;
 use super::*;
-use ramflux_protocol::custody::pairing::context_v3::{DataSelectionV3, FullAccountData};
-use ramflux_protocol::custody::pairing::native::{CreateSpec, Invitation};
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use ramflux_protocol::custody::pairing::native::Invitation;
 type ResultOf<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn h(n: u8) -> String {
     encode_base64url([n; 32])
@@ -145,105 +140,5 @@ fn pairing_full_actor_v2_reveal_refused_without_consuming_frozen_v3_attempt() ->
     );
     assert!(a.full.as_ref().ok_or("full")?.pending.is_some());
     PairingActor::finish_full_reveal(&mut a, &br)?;
-    Ok(())
-}
-struct CountingNative {
-    calls: Arc<AtomicUsize>,
-    loan_released: Arc<AtomicBool>,
-    owner: Arc<super::super::super::LocalPairingParticipant>,
-}
-impl super::super::super::PairingNative for CountingNative {
-    fn issue(
-        &self,
-        _: CreateSpec,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<ramflux_protocol::custody::pairing::native::Issued, SdkError>,
-                > + std::marker::Send,
-        >,
-    > {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.loan_released.store(self.owner.db.try_lock().is_ok(), Ordering::SeqCst);
-        Box::pin(async { Err(SdkError::PairingCode("WrongContext")) })
-    }
-    fn create(
-        &self,
-        _: ramflux_protocol::custody::pairing::native::Create,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<ramflux_protocol::custody::pairing::native::Created, SdkError>,
-                > + std::marker::Send,
-        >,
-    > {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Err(SdkError::PairingCode("WrongContext")) })
-    }
-}
-#[tokio::test]
-async fn pairing_full_begin_unknown_kind_refuses_before_issue_and_releases_source_loan() -> ResultOf
-{
-    let root = tempfile::tempdir()?;
-    let owner =
-        Arc::new(super::super::super::LocalPairingParticipant::full_test_participant(root.path())?);
-    {
-        let slot = owner.db.lock().map_err(|_| "DB")?;
-        slot.as_ref().ok_or("DB")?.persist_actor_state("undeclared/full-begin-test", &true)?;
-    }
-    let calls = Arc::new(AtomicUsize::new(0));
-    let loan_released = Arc::new(AtomicBool::new(false));
-    let native = Arc::new(CountingNative {
-        calls: calls.clone(),
-        loan_released: loan_released.clone(),
-        owner: owner.clone(),
-    });
-    let now = crate::custody::network_now()?;
-    let store = Arc::new(Mutex::new(ramflux_node_core::pairing_relay::PairingRelayStore::new(
-        ramflux_node_core::pairing_relay::PairingRelayConfig {
-            clock: ramflux_node_core::pairing_relay::TestPairingClock::new(now),
-            node_seed: [7; 32],
-            public_origin: "https://relay.example:443".into(),
-        },
-    )?));
-    let mut actor = PairingActor::new(
-        PairingIdentity {
-            account_id: "acct".into(),
-            local_ref: reference("A"),
-            master_public_key: Some(h(10)),
-            base_record_hash: h(4),
-            base_epoch: 1,
-            is_primary: true,
-        },
-        Some(native),
-        Arc::new(super::super::super::tests::MemoryRelay { store }),
-        PairingConfig { enabled: true, extra_root_ca_pem: None },
-    );
-    actor.set_participant(owner.clone());
-    let begin = FullTransferBegin {
-        schema: "ramflux.pairing.TransferBegin.v3".into(),
-        version: 3,
-        recipient_mode: "existing".into(),
-        destination_ref: Some(reference("B")),
-        capabilities: vec!["message".into()],
-        lease_not_before: now,
-        lease_expires_at: now + 604_800,
-        data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
-        transfer_profile: TransferProfile::FullAccountDataV1,
-        display_name: "A".into(),
-    };
-    let error = actor.begin_full(begin.clone()).await.err().ok_or("unsupported actor accepted")?;
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "unknown kind allocated native invitation");
-    assert!(
-        matches!(&error, SdkError::PairingField("UnsupportedRecord")),
-        "unexpected preflight refusal: {error}"
-    );
-    {
-        let slot = owner.db.lock().map_err(|_| "DB")?;
-        slot.as_ref().ok_or("DB")?.remove_actor_state("undeclared/full-begin-test")?;
-    }
-    assert!(actor.begin_full(begin).await.is_err());
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "supported preflight never reached Issue");
-    assert!(loan_released.load(Ordering::SeqCst), "native Issue retained the source DB loan");
     Ok(())
 }

@@ -64,3 +64,9 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = 'package(ramflux-sdk) & (test(=custody::pairing::component_tests::generation::recovery::tests::stage_union::pairing_full_stage_link_and_union_install_crash_cuts) | test(=custody::pairing::component_tests::generation::recovery::tests::primary_transfer_full_generation_publication_crash_cuts))'
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# These rows own two encrypted accounts through cold install/tail recovery. Keep
+# their SQLCipher/KDF work serial with other long recovery rows on the CI runner.
+[[profile.ci.overrides]]
+filter = 'package(ramflux-sdk) & (test(generation::recovery::tests::) | test(frontend_writer::tests::tail::) | test(linked_reverse::tests::races::) | test(linked_reverse::tests::third::))'
+test-group = "heavy"

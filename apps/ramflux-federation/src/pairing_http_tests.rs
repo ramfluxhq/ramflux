@@ -886,9 +886,105 @@ fn pairing_full_chunked_or_oversize_refused_before_reservation() -> TestResult {
         1,
         "valid framing never reached native admission"
     );
-    assert_eq!(scratch.reservation_attempts()?, 0, "invalid token reserved listener payload bytes");
+    assert_eq!(
+        scratch.reservation_attempts()?,
+        1,
+        "test: full request did not reserve bounded scratch before router admission"
+    );
+    let released = scratch.reserve(2 * 1024 * 1024, 2 * 1024 * 1024)?;
+    drop(released);
     Ok(())
 }
 
 #[path = "pairing_activation_tests.rs"]
 mod activation;
+
+#[test]
+fn pairing_full_source_request_limit_precedes_router_and_body() -> TestResult {
+    use crate::public_source_limits::{PublicSourceLimitConfig, PublicSourceLimits};
+    let _env = enable_pairing();
+    let node = spawn_node_mesh()?;
+    let (context, _root) = live_context(&node, vec![localhost()])?;
+    let sources = PublicSourceLimits::new(
+        PublicSourceLimitConfig::for_test(8, 16, 32).with_request_rate(1, 1),
+    );
+    // A fixed future budget instant keeps this exhausted source deterministic even
+    // when CI pauses the process. Requests still enter through the real listener.
+    let exhausted_at = Instant::now() + Duration::from_secs(60);
+    let permit = sources
+        .acquire_connection(localhost(), exhausted_at)
+        .map_err(|error| format!("test: source budget: {error:?}"))?;
+    assert!(permit.allow_request(exhausted_at), "test: source budget was not initialized");
+    let active = ramflux_node_core::ConnectionSet::new(8);
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    for _ in 0..4 {
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let (stream, _) = listener.accept()?;
+        let worker = crate::http_connections::spawn_public_test_connection(
+            stream,
+            context.clone(),
+            active.clone(),
+            crate::http_limits::defaults(true),
+            &sources,
+        )
+        .ok_or("test: exhausted-source connection was refused before request admission")?;
+        let header = format!(
+            "POST {PAIRING_SEND_PATH} HTTP/1.1\r\nContent-Length: 524288\r\n{}X-Ramflux-Pairing-Arm: send\r\nAuthorization: PairingFull {}.{}.initiator.{}\r\n\r\n",
+            proxy_headers("203.0.113.20"),
+            id(85),
+            id(86),
+            id(87),
+        );
+        client.write_all(header.as_bytes())?;
+        let mut response = String::new();
+        client.take(8193).read_to_string(&mut response)?;
+        worker.join()?;
+        assert!(
+            response.starts_with("HTTP/1.1 429"),
+            "test: full request escaped source budget: {response}"
+        );
+    }
+    assert_eq!(
+        node.full_admit_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "test: rate-limited requests allocated router work before the public body"
+    );
+    Ok(())
+}
+
+#[test]
+fn pairing_full_scratch_refusal_never_reserves_router_capacity() -> TestResult {
+    let _env = enable_pairing();
+    let node = spawn_node_mesh()?;
+    let (context, _root) = live_context(&node, vec![localhost()])?;
+    let scratch = &context.pairing.as_ref().ok_or("test: pairing surface")?.full_scratch;
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(
+            scratch
+                .reserve(524_288, 524_288)
+                .map_err(|error| format!("test: scratch: {error:?}"))?,
+        );
+    }
+    let header = format!(
+        "POST {PAIRING_SEND_PATH} HTTP/1.1\r\nContent-Length: 524288\r\n{}X-Ramflux-Pairing-Arm: send\r\nAuthorization: PairingFull {}.{}.initiator.{}\r\n\r\n",
+        proxy_headers("203.0.113.21"),
+        id(85),
+        id(86),
+        id(87),
+    );
+    let response =
+        exchange(header.as_bytes(), context.clone(), crate::http_limits::defaults(true))?;
+    assert_eq!(
+        decode_http::<Failure>(&response)?.code,
+        "Busy",
+        "test: scratch exhaustion lost its typed refusal"
+    );
+    assert_eq!(
+        node.full_admit_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "test: scratch refusal left a five-second router reservation"
+    );
+    Ok(())
+}
