@@ -12,12 +12,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExistingAuthority {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    custody_authority: Option<Box<custody::CustodyAuthority>>,
-    #[serde(default)]
-    root_public_key: Option<String>,
-    #[serde(default)]
-    signed_device_set: Option<serde_json::Value>,
+    custody_authority: Box<custody::CustodyAuthority>,
+    #[serde(rename = "root_public_key")]
+    _root_public_key: (),
+    #[serde(rename = "signed_device_set")]
+    _signed_device_set: (),
     principal_id: String,
     device_id: String,
     device_epoch: u64,
@@ -47,11 +46,10 @@ fn original(submission: &wire::Submission, now: u64) -> Result<VerifiedRecord, C
         .ok_or_else(|| reject("original native source authority is missing"))?;
     let proof: ExistingAuthority =
         custody::decode(&ramflux_protocol::canonical_json_bytes(value)?, wire::MAX_FRAME_BYTES)?;
-    if proof.revoked || proof.root_public_key.is_some() || proof.signed_device_set.is_some() {
-        return Err(reject("mixed or revoked native source authority"));
+    if proof.revoked {
+        return Err(reject("revoked native source authority"));
     }
-    let publication =
-        proof.custody_authority.ok_or_else(|| reject("native source publication required"))?;
+    let publication = proof.custody_authority;
     let historical = crate::custody::verify_publication(&publication, route.issued_at)?;
     let capability = durable_capability(route.traffic);
     let historical_branch = historical.authorize(&route.source, capability, route.issued_at)?;

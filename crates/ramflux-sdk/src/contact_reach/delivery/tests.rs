@@ -399,6 +399,44 @@ fn resign(source: &Fixture, submission: &mut Submission) -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cr_native_source_proof_requires_the_complete_current_shape() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let (source, envelope, recipient) = sealed().await?;
+        let evidence = publication(&source)?;
+        let original = submission(&source, envelope, &recipient, &evidence)?;
+        let now = crate::custody::network_now()?;
+        let current = ramflux_crypto::custody::verify_publication(&evidence, now)?;
+        ramflux_crypto::contact_reach::verify_current_source_submission(&original, &current, now)?;
+        for field in ["custody_authority", "root_public_key", "signed_device_set"] {
+            let mut missing = original.clone();
+            missing.envelope.ext.ext.get_mut("source_device_authority")
+                .and_then(serde_json::Value::as_object_mut).ok_or("source authority object")?
+                .remove(field);
+            resign(&source, &mut missing)?;
+            let error = ramflux_crypto::contact_reach::verify_current_source_submission(
+                &missing, &current, now,
+            ).err().ok_or("missing current proof field must refuse")?;
+            assert!(
+                error.to_string().contains("missing field") && error.to_string().contains(field),
+                "fresh valid envelope/route signatures cannot substitute an incomplete {field}: {error}"
+            );
+        }
+        for field in ["root_public_key", "signed_device_set"] {
+            let mut mixed = original.clone();
+            mixed.envelope.ext.ext.get_mut("source_device_authority")
+                .and_then(serde_json::Value::as_object_mut).ok_or("source authority object")?
+                .insert(field.into(), serde_json::json!({"unsupported":true}));
+            resign(&source, &mut mixed)?;
+            assert!(
+                ramflux_crypto::contact_reach::verify_current_source_submission(&mixed, &current, now).is_err(),
+                "the current native carrier requires null {field}, not another authority format"
+            );
+        }
+        Ok(())
+    }).await?
+}
+
 fn invalid_durable_inputs(
     source: &Fixture,
     original: &Submission,
