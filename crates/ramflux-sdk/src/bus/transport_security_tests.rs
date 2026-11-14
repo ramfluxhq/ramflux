@@ -17,7 +17,7 @@ struct Certificates {
     _root: ramflux_test_support::TestPath,
 }
 impl Certificates {
-    fn new(_label: &str) -> TestResult<Self> {
+    fn new(label: &str) -> TestResult<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let root = ramflux_test_support::TestPath::new()?.child("certs");
         std::fs::create_dir_all(&root)?;

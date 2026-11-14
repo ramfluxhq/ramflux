@@ -1691,7 +1691,6 @@ mod tests {
         let horizon = 4_102_444_800_u64.saturating_add(ramflux_protocol::CLOCK_UNCERTAINTY_SECONDS);
         assert_eq!(reopened.prune_closed_ids(horizon)?, 1);
         assert!(!reopened.wake_is_closed("wal_bound"));
-        remove_notify_wal_dir(root);
         Ok(())
     }
 
