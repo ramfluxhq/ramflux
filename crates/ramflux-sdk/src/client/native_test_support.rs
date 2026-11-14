@@ -4,7 +4,7 @@
 //! Real phrase-created native authority and private prekeys for ordinary feature unit tests.
 use crate::{
     GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig, RamfluxClient,
-    custody::tests::{Root, TestVault, create_with_device},
+    custody::tests::{Root, TestVault},
     prekey::SdkDeviceManifestResponse,
 };
 use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, DeviceRef, Publication};
@@ -23,17 +23,32 @@ impl Fixture {
         Self::with_device(id, "primary").await
     }
     pub(crate) async fn with_device(id: &str, device: &str) -> TestResult<Self> {
+        Self::named(id, &format!("principal-{id}"), device).await
+    }
+
+    /// `principal` is the published id. Routed card tests keep it equal to the account id.
+    pub(crate) async fn named(account: &str, principal: &str, device: &str) -> TestResult<Self> {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         let now = crate::custody::network_now()?;
-        let account = create_with_device(&root.0, id, device, vault.as_ref(), now)?;
-        let anchor = account.record().body.account_anchor.clone();
+        let mut input = crate::custody::tests::input(account);
+        input.principal_id = principal.into();
+        input.device_id = device.into();
+        let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        let created = ceremony.confirm(
+            &crate::custody::tests::words(&phrase, positions)?,
+            vault.as_ref(),
+            now,
+        )?;
+        let anchor = created.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
-        client.seal_new_account_data(id, &anchor, b"native fixture data passphrase")?;
-        client.unlock_account(id, b"native fixture data passphrase")?;
+        client.seal_new_account_data(account, &anchor, b"native fixture data passphrase")?;
+        client.unlock_account(account, b"native fixture data passphrase")?;
         client.initialize_born_v3_branch(device, vault.clone()).await?;
-        Self::ready(client, root, vault, id, device, account.record().clone())
+        Self::ready(client, root, vault, account, device, created.record().clone())
     }
     pub(crate) async fn externally_custodied(id: &str) -> TestResult<Self> {
         let root = Root::new()?;

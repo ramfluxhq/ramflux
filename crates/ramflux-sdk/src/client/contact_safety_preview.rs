@@ -5,7 +5,7 @@
 use crate::ContactReason;
 use crate::prelude::*;
 
-/// Unconfirmed previews keep at most this many manifests for the life of the client.
+/// Unconfirmed previews keep at most this many manifests until release or commit.
 pub(crate) const HELD_MANIFEST_CAP: usize = 32;
 
 impl RamfluxClient {
@@ -51,35 +51,27 @@ impl RamfluxClient {
     pub(crate) fn commit_contact_safety(
         &self,
         safety: &SdkContactSafetyNumber,
-        own: &ramflux_crypto::ContactSafetyMaterial,
-        peer: &ramflux_crypto::ContactSafetyMaterial,
+        _own: &ramflux_crypto::ContactSafetyMaterial,
+        _peer: &ramflux_crypto::ContactSafetyMaterial,
         device: &str,
     ) -> Result<(), SdkError> {
-        if self.born_v3_account.is_some() {
-            let current = self.native_safety_number(&safety.contact_identity_commitment)?;
-            if safety.algorithm_version != 2
-                || safety.self_identity_commitment != current.self_identity_commitment
-                || safety.safety_number_hash != current.safety_number_hash
-                || safety.contact_device_set_hash != current.contact_device_set_hash
-            {
-                return Err(ContactReason::RootConflict.into());
-            }
-            Self::record_contact_safety_verified(
-                &safety.contact_identity_commitment,
-                device,
-                &current,
-            )?;
-            return Ok(());
+        // A verification grant is born-v3 compare-and-record. Device-material digits are not a grant.
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
         }
-        let hash =
-            ramflux_protocol::encode_base64url(ramflux_crypto::safety_fingerprint(own, peer));
-        let device_set =
-            ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&peer.devices));
-        if hash != safety.safety_number_hash || device_set != safety.contact_device_set_hash {
+        let current = self.native_safety_number(&safety.contact_identity_commitment)?;
+        if safety.algorithm_version != 2
+            || safety.self_identity_commitment != current.self_identity_commitment
+            || safety.safety_number_hash != current.safety_number_hash
+            || safety.contact_device_set_hash != current.contact_device_set_hash
+        {
             return Err(ContactReason::RootConflict.into());
         }
-        // The shared writer records the confirmation and complete authority stamp atomically.
-        Self::record_contact_safety_verified(&safety.contact_identity_commitment, device, safety)?;
+        Self::record_contact_safety_verified(
+            &safety.contact_identity_commitment,
+            device,
+            &current,
+        )?;
         Ok(())
     }
 
@@ -100,6 +92,11 @@ impl RamfluxClient {
             held.insert(manifest.principal_commitment.clone(), manifest);
         }
         Ok(())
+    }
+
+    /// Drop every unconfirmed hold so a later preview can use the cap again.
+    pub(crate) fn release_held_manifests(&self) {
+        self.held_manifests.borrow_mut().clear();
     }
 
     pub(crate) async fn preview_contact_safety(

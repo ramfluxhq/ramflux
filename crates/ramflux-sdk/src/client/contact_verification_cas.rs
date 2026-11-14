@@ -253,11 +253,12 @@ fn persist_held_for_commit(client: &RamfluxClient, contact: &str) -> Result<(), 
         let held = client.held_manifests.borrow();
         keys.iter().filter_map(|key| held.get(key).cloned()).collect::<Vec<_>>()
     };
+    if client.born_v3_account.is_none() {
+        return Err(SdkError::CustodyModeDowngrade);
+    }
     for manifest in &manifests {
         retain_compared_manifest(client, manifest)?;
-        if client.born_v3_account.is_some()
-            && let Some(custody) = manifest.custody.as_deref()
-        {
+        if let Some(custody) = manifest.custody.as_deref() {
             client.stage_candidate_pins(custody, &manifest.principal_commitment)?;
         }
     }
@@ -445,24 +446,15 @@ fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String
     })
 }
 
-fn stored_safety_state(client: &RamfluxClient, commitment: &str) -> Result<String, SdkError> {
-    let stored = client.account_db()?.contact_verification(commitment)?;
-    if stored.as_ref().is_some_and(|row| row.verification_state == "verified")
-        && stored_confirmation(client, commitment)?.is_none()
-    {
-        return Err(SdkError::InboundRejected("safety confirmation missing".into()));
-    }
-    Ok(stored.map_or_else(|| "unverified".into(), |row| row.verification_state))
-}
-
 pub(crate) fn effective_state(
     client: &RamfluxClient,
     commitment: &str,
     _observed_hash: Option<&str>,
 ) -> Result<String, SdkError> {
-    // A non-custody account has no live comparison. Reads use the stored row only.
+    // No custody account has no authority to compare. State A is not a stored
+    // unverified verdict and not a second algorithm.
     if client.born_v3_account.is_none() {
-        return stored_safety_state(client, commitment);
+        return Err(SdkError::NetworkingPending);
     }
     let db = client.account_db()?;
     if db.is_query_only()? || db.in_transaction()? {
@@ -884,8 +876,10 @@ impl RamfluxClient {
                 other => other?,
             };
         release_compared_manifests(self, expected)?;
-        self.advance_committed_own_authority()?;
-        self.finish_pair_retirement()?;
+        let advanced = self.advance_committed_own_authority();
+        let retired = self.finish_pair_retirement();
+        advanced?;
+        retired?;
         Ok(committed)
     }
 }
@@ -900,7 +894,7 @@ fn fence_rolled_back(error: &SdkError) -> bool {
 
 fn refuse_fenced_held(client: &RamfluxClient, contact: &str) -> Result<(), SdkError> {
     if client.born_v3_account.is_none() {
-        return Ok(());
+        return Err(SdkError::CustodyModeDowngrade);
     }
     let own = client.own_account_anchor()?;
     let manifests = {

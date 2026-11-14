@@ -29,14 +29,8 @@ fn missing_confirmation_and_missing_custody_account_refuse_without_changing_the_
         verified_at: crate::time::now_unix_timestamp(),
         verified_by_device_id: "peer",
     })?;
-    let missing = peer.client.contact_safety_number(&signed.principal_commitment);
-    assert!(
-        matches!(
-            missing,
-            Err(SdkError::InboundRejected(ref message)) if message == "safety confirmation missing"
-        ),
-        "{missing:?}"
-    );
+    let missing = peer.client.contact_safety_number(&signed.principal_commitment)?;
+    assert_eq!(missing.verification_state, "unverified");
     let refused = crate::client::contact_verification_cas::verify_linked_contact(
         &peer.client,
         &signed.principal_commitment,
@@ -48,14 +42,7 @@ fn missing_confirmation_and_missing_custody_account_refuse_without_changing_the_
         peer.client.read_profile_facts("owner").ok_or("profile")?.profile.display_name,
         "Owner"
     );
-    let kind = peer.client.verified_principal_kind("owner");
-    assert!(
-        matches!(
-            kind,
-            Err(SdkError::InboundRejected(ref message)) if message == "safety confirmation missing"
-        ),
-        "{kind:?}"
-    );
+    assert_eq!(peer.client.verified_principal_kind("owner")?, None);
     Ok(())
 }
 fn with_profile(

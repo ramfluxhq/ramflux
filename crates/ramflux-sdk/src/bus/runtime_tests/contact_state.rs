@@ -63,15 +63,6 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
         verified_at: now_unix_timestamp(),
         verified_by_device_id: "local",
     })?;
-    db.persist_actor_state(
-        &format!("identity/safety_verified_set/{}", manifest.principal_commitment),
-        &crate::client::identity_authority::set_fingerprint(
-            manifest
-                .signed_device_set
-                .as_ref()
-                .ok_or_else(|| SdkError::LocalBus("fixture set absent".into()))?,
-        )?,
-    )?;
     entry.table_name = "contact_verification_projection".into();
     entry.keys = json!({"contact_identity_commitment": manifest.principal_commitment});
     let recorded = super::super::journal::project(client, &entry)?;

@@ -220,7 +220,160 @@ async fn held_manifest_cap_refuses_another_unconfirmed_preview() -> TestResult {
     replacement.principal_commitment = "hold-00".into();
     local.client.hold_compared_manifests([replacement])?;
     assert_eq!(local.client.held_manifests.borrow().len(), cap);
+    local.client.release_held_manifests();
+    assert_eq!(local.client.held_manifests.borrow().len(), 0);
+    for index in 0..cap {
+        let mut manifest = local.manifest.clone();
+        manifest.principal_commitment = format!("refill-{index:02}");
+        local.client.hold_compared_manifests([manifest])?;
+    }
+    assert_eq!(local.client.held_manifests.borrow().len(), cap);
+    let mut again = local.manifest.clone();
+    again.principal_commitment = "refill-overflow".into();
+    let refused_again =
+        local.client.hold_compared_manifests([again]).expect_err("test: refill cap");
+    assert!(
+        matches!(
+            refused_again,
+            SdkError::InboundRejected(ref message) if message == "held manifest cap exceeded"
+        ),
+        "{refused_again:?}"
+    );
     Ok(())
+}
+
+#[tokio::test]
+async fn verified_row_without_confirmation_is_rejected() -> TestResult {
+    let (local, _peer, peer_root) = linked().await?;
+    local.client.account_db()?.mark_contact_verified(
+        ramflux_storage::ContactVerificationUpdate {
+            contact_identity_commitment: &peer_root,
+            safety_number_hash: "verified-safety",
+            device_set_hash: "stamp",
+            lineage_head: "lineage",
+            verified_at: crate::time::now_unix_timestamp(),
+            verified_by_device_id: "primary",
+        },
+    )?;
+    let missing = local.client.contact_safety_number(&peer_root);
+    assert!(
+        matches!(
+            missing,
+            Err(SdkError::InboundRejected(ref message)) if message == "safety confirmation missing"
+        ),
+        "{missing:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn equivocation_fence_survives_compare_rollback() -> TestResult {
+    let _hooks = ClearHooks;
+    let (local, peer, peer_root) = linked().await?;
+    let conflict = resigned_custody(&peer.vault, &peer.manifest, false)?;
+    let anchor = custody_anchor(&conflict)?;
+    assert_eq!(conflict.principal_commitment, peer_root);
+    assert_eq!(anchor, peer_root);
+    let held = conflict.clone();
+    test_before_cas_transaction(Box::new(move |client| {
+        client.hold_compared_manifests([held.clone()])?;
+        Ok(())
+    }));
+    let expected = compared_expected(&local.client, &peer_root)?;
+    let error = local
+        .client
+        .compare_and_record_contact_safety_verified(&expected)
+        .expect_err("test: equivocation");
+    assert!(
+        matches!(
+            error,
+            SdkError::InboundRejected(ref message)
+                if message == "identity authority: custody authority equivocation fenced"
+        ),
+        "{error:?}"
+    );
+    absent(&local.client, &peer_root)?;
+    let row = local
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!("identity/custody/{anchor}"))?
+        .ok_or("fence row")?;
+    let conflicts =
+        row.pointer(&format!("/pins/accounts/{anchor}/conflicts")).ok_or("conflicts")?;
+    assert!(conflicts.as_object().is_some_and(|entries| !entries.is_empty()), "{row}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn authority_file_advances_when_compare_commits() -> TestResult {
+    let (local, _peer, peer_root) = linked().await?;
+    let account_id =
+        local.client.born_v3_account.as_ref().ok_or("born account")?.local_account_id().to_owned();
+    let path = local
+        .client
+        .account_index()?
+        .root()
+        .join("custody_accounts")
+        .join(account_id)
+        .join("authority.json");
+    let before = std::fs::read(&path)?;
+    let mut next = resigned_custody(&local.vault, &local.manifest, true)?;
+    let own = local.client.own_account_anchor()?;
+    next.principal_commitment.clone_from(&own);
+    let head = ramflux_protocol::custody::object_hash(
+        &next.custody.as_ref().ok_or("custody")?.publication.record,
+    )?;
+    local.client.hold_compared_manifests([next])?;
+    let mut expected = compared_expected(&local.client, &peer_root)?;
+    expected.self_authority_head = head;
+    let result = local.client.compare_and_record_contact_safety_verified(&expected)?;
+    assert_eq!(result.verification_state, "verified");
+    let after = std::fs::read(&path)?;
+    assert_ne!(before, after, "the own authority file moves after the compare commit");
+    Ok(())
+}
+
+fn custody_anchor(manifest: &crate::prekey::SdkDeviceManifestResponse) -> Result<String, SdkError> {
+    Ok(manifest
+        .custody
+        .as_ref()
+        .ok_or_else(|| SdkError::LocalBus("fixture custody absent".into()))?
+        .publication
+        .record
+        .body
+        .account_anchor
+        .clone())
+}
+
+fn resigned_custody(
+    vault: &crate::custody::tests::TestVault,
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+    next_epoch: bool,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let mut next = manifest.clone();
+    let mut native = next
+        .custody
+        .as_ref()
+        .ok_or_else(|| SdkError::LocalBus("fixture custody absent".into()))?
+        .as_ref()
+        .clone();
+    let primary = vault
+        .primary_for_public_key(
+            &native.publication.record.body.master_certificate.body.self_signing_public_key,
+        )
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let mut body = native.publication.record.body.clone();
+    if next_epoch {
+        body.previous_record_hash =
+            Some(ramflux_protocol::custody::object_hash(&native.publication.record)?);
+        body.device_set_epoch = body.device_set_epoch.saturating_add(1);
+    } else {
+        body.profile.display_name = "Another name".into();
+    }
+    native.publication.record =
+        primary.sign_record(body).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    next.custody = Some(Box::new(native));
+    Ok(next)
 }
 
 #[tokio::test]

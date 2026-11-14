@@ -3,6 +3,7 @@
 
 //! Native admitted receive, winning edits and typed local search over real `SQLCipher` storage.
 use super::*;
+use crate::custody::tests::create_with_device;
 use crate::search::{LocalSearch, SearchError, SearchKind, SearchQuery};
 use ramflux_protocol::message as g;
 use ramflux_storage::local_search::{SearchActivation, SearchControl};

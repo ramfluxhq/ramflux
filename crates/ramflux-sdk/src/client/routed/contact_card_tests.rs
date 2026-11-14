@@ -107,16 +107,120 @@ impl Origin {
         Ok(())
     }
 }
+fn install_native_home(
+    origin: &Origin,
+    state: &mut LocalBusDaemonState,
+    id: &str,
+) -> Result<(), SdkError> {
+    let mut profile = crate::node::NodeProfile::from_record(
+        origin.record.clone(),
+        now_unix_timestamp().unsigned_abs(),
+    );
+    profile.discovery_url.clone_from(&origin.url);
+    let node_id = profile.node_id.clone();
+    state.nodes.profiles.insert(node_id.clone(), profile);
+    let account = state.accounts.get(id).ok_or_else(|| invalid("account"))?;
+    account.client.account_db()?.persist_actor_state("account/node-id", &node_id)?;
+    Ok(())
+}
+
+fn mismatched_native_card(
+    sender: &crate::client::native_test_support::Fixture,
+    origin: &Origin,
+) -> Result<String, SdkError> {
+    let now = crate::custody::network_now()?;
+    let account =
+        sender.client.born_v3_account.as_ref().ok_or_else(|| invalid("native account"))?;
+    let record = account.record();
+    let signed = account.sign_contact_card(
+        sender.vault.as_ref(),
+        ramflux_protocol::custody::ContactCardV3 {
+            version: 3,
+            principal_id: record.body.principal_id.clone(),
+            account_anchor: record.body.account_anchor.clone(),
+            master_public_key: record.body.master_certificate.body.master_public_key.clone(),
+            master_certificate: record.body.master_certificate.clone(),
+            authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            devices: record.body.devices.clone(),
+            node_url: origin.url.clone(),
+            node_key_fingerprint: "0".repeat(64),
+            display_name: record.body.profile.display_name.clone(),
+            issued_at: now,
+            expires_at: now.saturating_add(7 * 24 * 60 * 60),
+        },
+        now,
+    )?;
+    Ok(crate::contact_card_native::encode(
+        &signed,
+        i64::try_from(now).map_err(|_| invalid("clock"))?,
+    )?
+    .0)
+}
+
+fn born_card_state(
+    alice: &mut crate::client::native_test_support::Fixture,
+    bob: &mut crate::client::native_test_support::Fixture,
+    directory: &Directory,
+) -> Result<LocalBusDaemonState, SdkError> {
+    let mut accounts = BTreeMap::new();
+    for fixture in [&mut *alice, &mut *bob] {
+        let mut config = fixture.config.clone();
+        config.transport_kind = GatewaySessionTransportKind::TcpTls;
+        config.gateway_addr = directory.addr;
+        config.tcp_gateway_addr = Some(directory.addr);
+        config.server_name = "directory.test".into();
+        config.ca_cert.clone_from(&directory.ca);
+        let engine = GatewaySessionEngine::with_test_transport(
+            config,
+            Box::new(DirectorySession {
+                captured: directory.captured.clone(),
+                incoming: directory.incoming.clone(),
+                acknowledged: directory.acknowledged.clone(),
+                records: directory.records.clone(),
+                unavailable: directory.unavailable.clone(),
+                responses: VecDeque::new(),
+            }),
+        );
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        accounts.insert(
+            id,
+            LocalBusAccountState::new(
+                std::mem::take(&mut fixture.client),
+                engine,
+                fixture.manifest.principal_commitment.clone(),
+            ),
+        );
+    }
+    Ok(LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(alice.root.0.join("bus.sock"), &alice.root.0),
+        accounts,
+        active_account_id: None,
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    })
+}
+
 #[tokio::test]
 async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_safety_verifying_it()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
+    let mut alice = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut bob = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(|error| invalid(&error.to_string()))?;
+    let directory =
+        Directory::from_records(&alice.root.0, vec![alice.manifest.clone(), bob.manifest.clone()])
+            .await?;
     let origin = Origin::new(&directory).await?;
-    let mut s = state(&mut a, &mut b, &directory)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    let wrong = mismatched_native_card(&alice, &origin)?;
+    let vault = alice.vault.clone();
+    let mut s = born_card_state(&mut alice, &mut bob, &directory)?;
+    s.config.custody_vault = Some(vault);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     let exported = call(&mut s, "alice", "contact.card.export", json!({})).await?;
     let card = exported["card"].as_str().ok_or_else(|| invalid("card"))?;
     let link = exported["link"].as_str().ok_or_else(|| invalid("link"))?;
@@ -129,20 +233,6 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
         crate::parse_contact_card(link, now_unix_timestamp())?.root_commitment,
         parsed.root_commitment
     );
-    let mut wrong_node = parsed.clone();
-    wrong_node.node.key_fingerprint = "0".repeat(64);
-    let seed = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("account"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (wrong, _) =
-        crate::contact_card::encode_contact_card(wrong_node, seed, now_unix_timestamp())?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":wrong}))
         .await
         .err()

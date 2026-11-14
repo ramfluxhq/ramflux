@@ -63,10 +63,15 @@ impl RamfluxClient {
         let safety_number =
             ramflux_crypto::safety_number(&material.self_material, &material.contact_material);
         let device_set_hash = ramflux_crypto::device_set_hash(&material.contact_material.devices);
-        let status = self.contact_safety_verification_state(
+        let status = match self.contact_safety_verification_state(
             contact_identity_commitment,
             Some(&ramflux_protocol::encode_base64url(device_set_hash)),
-        )?;
+        ) {
+            Ok(state) => state,
+            // The directory row stays null. The number itself is still the linked material.
+            Err(SdkError::NetworkingPending) => "unverified".into(),
+            Err(error) => return Err(error),
+        };
         Ok(SdkContactSafetyNumber {
             algorithm_version: 1,
             contact_identity_commitment: contact_identity_commitment.to_owned(),
@@ -107,6 +112,10 @@ impl RamfluxClient {
             let _ = self
                 .contact_safety_material_pair_via_gateway(gateway, contact_identity_commitment)
                 .await?;
+            // CAS comparison is born-v3 only. A linked account still returns its number.
+            return Ok(serde_json::to_value(
+                self.contact_safety_number(contact_identity_commitment)?,
+            )?);
         }
         super::contact_verification_cas::compared_safety_json(self, contact_identity_commitment)
     }

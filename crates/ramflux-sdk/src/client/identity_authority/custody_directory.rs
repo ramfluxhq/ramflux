@@ -94,11 +94,7 @@ impl RamfluxClient {
         if !matches!(outcome, PinOutcome::Fenced(_)) {
             return Ok(());
         }
-        let stored =
-            db.write_transaction(|| self.write_observed_pins(manifest, expected, &verified))?;
-        if !matches!(stored, PinOutcome::Fenced(_)) {
-            return Err(invalid("custody authority equivocation fenced"));
-        }
+        db.write_transaction(|| self.write_observed_pins(manifest, expected, &verified))?;
         Err(invalid("custody authority equivocation fenced"))
     }
 
@@ -109,7 +105,7 @@ impl RamfluxClient {
     /// Returns storage, publication, and equivocation errors.
     pub(crate) fn advance_committed_own_authority(&self) -> Result<(), SdkError> {
         let Some(own) = &self.born_v3_account else {
-            return Ok(());
+            return Err(SdkError::CustodyModeDowngrade);
         };
         let anchor = own.record().body.account_anchor.clone();
         let account_id = own.local_account_id().to_owned();
