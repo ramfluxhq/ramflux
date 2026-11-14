@@ -127,7 +127,7 @@ async fn legacy_verification_is_baselined_before_the_first_query_only_directory_
                 stamp,
                 Some(set_fingerprint(manifest.signed_device_set.as_ref().ok_or("set")?)?)
             );
-            assert_eq!(peer.client.verified_principal_kind("owner")?, Some(PrincipalKind::Human));
+            assert!(peer.client.verified_principal_kind("owner")?.is_none());
         } else {
             assert!(stamp.is_none(), "a device-hash mismatch must not acquire a migration stamp");
             assert!(peer.client.verified_principal_kind("owner")?.is_none());
@@ -315,7 +315,7 @@ fn legacy_unlock_skips_corrupt_contact_warns_once_and_migrates_healthy_contact()
             &a.principal_commitment,
             healthy["device_set_hash"].as_str()
         )?,
-        "verified"
+        "unverified"
     );
     assert!(matches!(
         peer.client.contact_safety_verification_state(&b.principal_commitment, Some("hash")),

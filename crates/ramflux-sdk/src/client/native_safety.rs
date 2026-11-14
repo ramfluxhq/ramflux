@@ -58,7 +58,7 @@ impl RamfluxClient {
         &self,
         peer: &str,
     ) -> Result<Option<String>, SdkError> {
-        Ok(Some(super::contact_verification_cas::effective_state(self, peer)?))
+        Ok(Some(super::contact_verification_cas::effective_state(self, peer, None)?))
     }
 }
 

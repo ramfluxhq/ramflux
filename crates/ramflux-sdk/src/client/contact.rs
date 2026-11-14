@@ -138,8 +138,7 @@ impl RamfluxClient {
         commitment: &str,
         device_set_hash: Option<&str>,
     ) -> Result<String, SdkError> {
-        let _ = device_set_hash;
-        super::contact_verification_cas::effective_state(self, commitment)
+        super::contact_verification_cas::effective_state(self, commitment, device_set_hash)
     }
 
     /// # Errors
@@ -768,6 +767,12 @@ impl RamfluxClient {
     ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
         if self.observed_device_set(commitment)?.is_none() {
             return Ok(contact_safety_material_for(commitment));
+        }
+        if let Some(manifest) = self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(
+            &format!("identity/manifest-root/{commitment}"),
+        )? {
+            verify_device_manifest(&manifest, commitment)?;
+            return complete_safety_material(&manifest);
         }
         let principal = self
             .account_db()?

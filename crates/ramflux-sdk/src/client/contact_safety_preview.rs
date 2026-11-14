@@ -110,6 +110,9 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own = fetch(own_root.clone()).await?;
+        // Keep the compared manifests without moving a provisional contact pin.
+        super::contact_verification_cas::retain_compared_manifest(self, &own)?;
+        super::contact_verification_cas::retain_compared_manifest(self, &peer)?;
         if self.born_v3_account.is_some() {
             let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
                 let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;

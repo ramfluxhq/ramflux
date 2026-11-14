@@ -8,13 +8,11 @@ use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, Publicat
 use serde_json::json;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn native_manifest(
-    root: &Root,
-    id: &str,
+fn manifest_for(
+    account: &crate::custody::BornAccount,
     vault: &TestVault,
     now: u64,
 ) -> TestResult<CustodyManifest> {
-    let account = create(&root.0, id, vault, now)?;
     let (reference, credentials) = account.credentials(vault, "primary", now)?;
     let signed = ramflux_crypto::X25519KeyPair::random()?;
     let bundle = ramflux_crypto::create_prekey_bundle(
@@ -38,6 +36,14 @@ fn native_manifest(
         }],
     })
 }
+fn native_manifest(
+    root: &Root,
+    id: &str,
+    vault: &TestVault,
+    now: u64,
+) -> TestResult<CustodyManifest> {
+    manifest_for(&create(&root.0, id, vault, now)?, vault, now)
+}
 fn receiver(root: &Root, vault: &TestVault, now: u64) -> TestResult<RamfluxClient> {
     let account = create(&root.0, "receiver", vault, now)?;
     let mut client = RamfluxClient::new();
@@ -48,6 +54,9 @@ fn receiver(root: &Root, vault: &TestVault, now: u64) -> TestResult<RamfluxClien
         b"test-passphrase",
     )?;
     client.unlock_account("receiver", b"test-passphrase")?;
+    let manifest = manifest_for(&account, vault, now)?;
+    let anchor = account.record().body.account_anchor.clone();
+    client.observe_custody_manifest(&manifest, &anchor, now)?;
     Ok(client)
 }
 #[test]

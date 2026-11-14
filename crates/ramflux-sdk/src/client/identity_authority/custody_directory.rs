@@ -124,6 +124,8 @@ impl RamfluxClient {
             }
             db.persist_client_record("commitment", expected, &json!({"principal_id":body.principal_id}))?;
             db.persist_client_record("identity", &body.principal_id, &row)?;
+            let sdk = crate::prekey::SdkDeviceManifestResponse::from_native(manifest.clone())?;
+            db.persist_actor_state(&format!("identity/manifest-root/{expected}"), &sdk)?;
             for device in &manifest.devices {
                 let cert = verified.authorize(&device.device_ref, "message", now)?;
                 let identity = RootQualifiedDeviceRef::from_custody_record(&verified, &device.device_ref.device_id)?;

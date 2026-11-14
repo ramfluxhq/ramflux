@@ -216,6 +216,33 @@ fn load_snapshot(
     }
 }
 
+pub(crate) fn retain_compared_manifest(
+    client: &RamfluxClient,
+    manifest: &SdkDeviceManifestResponse,
+) -> Result<(), SdkError> {
+    let Some(record) = manifest.signed_device_set.as_ref() else {
+        return Ok(());
+    };
+    client.check_observed_set(record)?;
+    let db = client.account_db()?;
+    db.persist_actor_state(
+        &super::identity_authority::record_key(&record.principal_commitment),
+        record,
+    )?;
+    db.persist_actor_state(
+        &format!("identity/manifest-root/{}", manifest.principal_commitment),
+        manifest,
+    )?;
+    if db.client_record("commitment", &manifest.principal_commitment)?.is_none() {
+        db.persist_client_record(
+            "commitment",
+            &manifest.principal_commitment,
+            &serde_json::json!({ "principal_id": manifest.principal_id }),
+        )?;
+    }
+    Ok(())
+}
+
 /// Read the authenticated safety fields a human can compare. Does not record a grant.
 ///
 /// # Errors
@@ -301,34 +328,94 @@ fn legacy_view(stored: &str, stored_hash: &str, current_hash: &str, confirmed: b
     "unverified".into()
 }
 
-fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String, SdkError> {
+fn legacy_observed(state: &str, stored_hash: &str, observed_hash: Option<&str>) -> String {
+    legacy_view(state, stored_hash, observed_hash.unwrap_or(""), false)
+}
+
+fn legacy_stored(
+    client: &RamfluxClient,
+    commitment: &str,
+    stored: Option<&ramflux_storage::ContactVerificationRecord>,
+    observed_hash: Option<&str>,
+) -> Result<String, SdkError> {
+    // A corrupt signed set stays a storage error. Absence is a legacy baseline, never V.
+    let _ = client.observed_device_set(commitment)?;
+    let Some(row) = stored else {
+        return Ok("unverified".into());
+    };
+    Ok(legacy_observed(&row.verification_state, &row.verified_device_set_hash, observed_hash))
+}
+
+fn effective_in_place(
+    client: &RamfluxClient,
+    commitment: &str,
+    observed_hash: Option<&str>,
+) -> Result<String, SdkError> {
     let db = client.account_db()?;
-    let own = client.own_account_anchor()?;
-    let links = client.friend_links()?;
     let stored = db.contact_verification(commitment)?;
-    let restricted =
-        stored.as_ref().is_some_and(|row| row.verification_state == "blocked_by_policy")
-            || links.iter().any(|link| {
-                contact_peer(link, &own) == Some(commitment) && contact_link_restricted(link)
-            });
-    if restricted {
+    if stored.as_ref().is_some_and(|row| row.verification_state == "blocked_by_policy") {
         return Ok("blocked_by_policy".into());
     }
     let saved = stored_confirmation(client, commitment)?;
-    let has_evidence = saved.is_some()
+    let has_evidence = stored_has_evidence(stored.as_ref(), saved.as_ref());
+    match client.own_account_anchor() {
+        Ok(anchor) => anchored_state(
+            client,
+            commitment,
+            &anchor,
+            stored.as_ref(),
+            saved.as_ref(),
+            observed_hash,
+        ),
+        Err(SdkError::IdentityRootMissing) if saved.is_none() && !has_evidence => {
+            Ok("unverified".into())
+        }
+        Err(SdkError::IdentityRootMissing) if saved.is_none() => {
+            legacy_stored(client, commitment, stored.as_ref(), observed_hash)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn stored_has_evidence(
+    stored: Option<&ramflux_storage::ContactVerificationRecord>,
+    saved: Option<&(g::ContactSafetyConfirmation, Vec<u8>)>,
+) -> bool {
+    saved.is_some()
         || stored
-            .as_ref()
-            .is_some_and(|row| matches!(row.verification_state.as_str(), "verified" | "changed"));
-    // No complete evidence is unverified. A snapshot is only needed to judge evidence.
-    if !has_evidence {
+            .is_some_and(|row| matches!(row.verification_state.as_str(), "verified" | "changed"))
+}
+
+fn anchored_state(
+    client: &RamfluxClient,
+    commitment: &str,
+    anchor: &str,
+    stored: Option<&ramflux_storage::ContactVerificationRecord>,
+    saved: Option<&(g::ContactSafetyConfirmation, Vec<u8>)>,
+    observed_hash: Option<&str>,
+) -> Result<String, SdkError> {
+    let links = client.friend_links()?;
+    if links
+        .iter()
+        .any(|link| contact_peer(link, anchor) == Some(commitment) && contact_link_restricted(link))
+    {
+        return Ok("blocked_by_policy".into());
+    }
+    if !stored_has_evidence(stored, saved) {
         return Ok("unverified".into());
     }
     let link_id = links
         .iter()
-        .find(|link| link.state == "accepted" && contact_peer(link, &own) == Some(commitment))
+        .find(|link| link.state == "accepted" && contact_peer(link, anchor) == Some(commitment))
         .map_or("", |link| link.link_id.as_str());
-    let snapshot = load_snapshot(client, commitment, link_id)?;
-    if let Some((confirmation, inner)) = saved.as_ref()
+    let snapshot = match load_snapshot(client, commitment, link_id) {
+        Ok(snapshot) => snapshot,
+        Err(SdkError::NetworkingPending) if saved.is_none() => {
+            return legacy_stored(client, commitment, stored, observed_hash);
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some((confirmation, inner)) = saved
         && confirmation_is_current(confirmation, inner, &snapshot.expected)
     {
         return Ok("verified".into());
@@ -347,12 +434,13 @@ fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String
 pub(crate) fn effective_state(
     client: &RamfluxClient,
     commitment: &str,
+    observed_hash: Option<&str>,
 ) -> Result<String, SdkError> {
     let db = client.account_db()?;
     if db.is_query_only()? || db.in_transaction()? {
-        effective_in_place(client, commitment)
+        effective_in_place(client, commitment, observed_hash)
     } else {
-        db.read_snapshot(|| effective_in_place(client, commitment))
+        db.read_snapshot(|| effective_in_place(client, commitment, observed_hash))
     }
 }
 
