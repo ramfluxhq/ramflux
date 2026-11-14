@@ -20,6 +20,8 @@ pub(crate) mod apply_w1;
 #[cfg(test)]
 mod apply_w1_failure_tests;
 #[cfg(test)]
+mod apply_w1_real_own_copy;
+#[cfg(test)]
 mod apply_w1_sweep_tests;
 #[cfg(test)]
 mod apply_w1_tests;

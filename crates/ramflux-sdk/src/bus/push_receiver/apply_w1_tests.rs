@@ -7,10 +7,11 @@
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
     self, after_w1_cut, apply_page, binding_attempts, covered_below, force_covered_below,
-    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy, queue_policy_kind,
-    queue_projection, queue_terminal_reply, set_after_classify, set_after_w1_cut,
-    set_before_commit, set_cross_await, set_manifest_await, set_projection_key,
+    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_policy_kind, queue_projection,
+    queue_terminal_reply, set_after_classify, set_after_w1_cut, set_before_commit, set_cross_await,
+    set_manifest_await, set_projection_key,
 };
+use super::apply_w1_real_own_copy as real;
 use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::receive::bind_retry_turns;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
@@ -37,6 +38,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct Harness {
     root: tempfile::TempDir,
     account: crate::bus::state::LocalBusAccountState,
+    /// Present when the account receives a real generated own copy.
+    real: Option<Box<real::Real>>,
+}
+
+fn activate(db: &AccountDb, target: &str) -> Result<(), SdkError> {
+    let _ = db.activate_receive_ledger(ReceiveMigrate { target, incarnation: "e" })?;
+    Ok(())
+}
+
+/// A native account that holds a real sibling-sealed own copy.
+async fn open_real() -> Result<Harness, SdkError> {
+    let (account, copy) = Box::pin(real::open(activate)).await?;
+    let root = tempfile::tempdir().expect("tmp");
+    Ok(Harness { root, account, real: Some(Box::new(copy)) })
+}
+
+fn real_entry(harness: &Harness) -> Result<ReceiveEntry, SdkError> {
+    Ok(harness.real.as_ref().ok_or(SdkError::LocalBus("test: real own copy".into()))?.entry.clone())
 }
 
 fn open() -> Result<Harness, SdkError> {
@@ -47,7 +66,7 @@ fn open() -> Result<Harness, SdkError> {
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
     let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?;
-    Ok(Harness { root, account })
+    Ok(Harness { root, account, real: None })
 }
 
 /// W1 unit tests cover the Push/Terminal path unless they opt into Legacy/Compat.
@@ -1169,35 +1188,6 @@ async fn projection_refuses_unverified_key() -> Result<(), SdkError> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn own_copy_success_without_authenticated_identity_commits_w1() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let entry = live_dummy(&harness.account);
-    let identity = harness.account.client.authenticated_committed_key(
-        crate::client::identity_authority::HeadUse::NewAuthorization,
-        &entry.entry,
-    );
-    assert!(
-        identity.is_err(),
-        "fixture must lack a root-qualified authenticated identity: {identity:?}"
-    );
-    queue_own_copy();
-    drive(&mut harness.account, entry.clone(), || 1).await?;
-    let locator: Option<serde_json::Value> =
-        harness.account.client.account_db()?.load_actor_state(
-            &crate::client::own_device_copy::w1::locator_key(&entry.entry.envelope.envelope_id),
-        )?;
-    assert!(locator.is_some(), "own-copy W1 commits; missing identity is nothing owed");
-    assert_eq!(cursor(&harness.account)?, 1, "own-copy terminal cover advances C");
-    let snap = harness
-        .account
-        .client
-        .account_db()?
-        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
-    assert_eq!(snap.intents, vec![1]);
-    Ok(())
-}
-
 fn marker_present(
     account: &crate::bus::state::LocalBusAccountState,
     key: &str,
@@ -1333,9 +1323,8 @@ fn snap(
 
 #[tokio::test(flavor = "current_thread")]
 async fn terminal_cover_cut_rolls_w1_with_receipt() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let entry = live_dummy(&harness.account);
-    queue_own_copy();
+    let mut harness = open_real().await?;
+    let entry = real_entry(&harness)?;
     set_after_w1_cut(after_w1_cut());
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
     let error = cut.as_ref().err();
@@ -1362,13 +1351,11 @@ async fn terminal_cover_cut_rolls_w1_with_receipt() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn second_connected_no_redelivery() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let entry = live_dummy(&harness.account);
-    queue_own_copy();
+    let mut harness = open_real().await?;
+    let entry = real_entry(&harness)?;
     drive(&mut harness.account, entry.clone(), || 1).await?;
     assert_eq!(cursor(&harness.account)?, 1);
     assert_eq!(snap(&harness.account)?.intents, vec![1]);
-    queue_own_copy();
     drive(&mut harness.account, entry, || 1).await?;
     assert_eq!(cursor(&harness.account)?, 1, "second apply does not move C");
     assert_eq!(snap(&harness.account)?.intents, vec![1], "second apply writes no new intent");

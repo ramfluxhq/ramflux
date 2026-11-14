@@ -6,11 +6,12 @@
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
-    self, apply_page, queue_legacy_hold, queue_own_copy, queue_policy_kind, queue_projection,
-    set_after_classify, set_before_commit, set_before_commit_hook, set_manifest_await,
-    set_projection_error, set_projection_key,
+    self, apply_page, queue_legacy_hold, queue_policy_kind, queue_projection, set_after_classify,
+    set_before_commit, set_before_commit_hook, set_manifest_await, set_projection_error,
+    set_projection_key,
 };
-use super::erase_support::{erase_message_through_retention, erase_through_retention};
+use super::apply_w1_real_own_copy as real;
+use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
@@ -39,6 +40,29 @@ use std::time::Duration;
 struct Harness {
     root: tempfile::TempDir,
     account: crate::bus::state::LocalBusAccountState,
+    /// Present when the account receives a real generated own copy.
+    real: Option<Box<real::Real>>,
+}
+
+fn activate(db: &AccountDb, target: &str) -> Result<(), SdkError> {
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(target, "e")?;
+    Ok(())
+}
+
+/// A native account that holds a real sibling-sealed own copy; the router lives in a scratch dir.
+async fn open_real() -> Result<Harness, SdkError> {
+    let (account, copy) = Box::pin(real::open(activate)).await?;
+    let root = tempfile::tempdir().expect("tmp");
+    Ok(Harness { root, account, real: Some(Box::new(copy)) })
+}
+
+fn reopen_any(harness: &mut Harness) -> Result<(), SdkError> {
+    if harness.real.is_some() {
+        real::reopen(&mut harness.account)
+    } else {
+        reopen(&mut harness.account)
+    }
 }
 
 fn open() -> Result<Harness, SdkError> {
@@ -57,7 +81,7 @@ fn open() -> Result<Harness, SdkError> {
     let db = account.client.account_db()?;
     db.install_receive_ledger_schema()?;
     db.seed_receive_epoch_for_test(&target, "e")?;
-    Ok(Harness { root, account })
+    Ok(Harness { root, account, real: None })
 }
 
 fn turn(
@@ -412,7 +436,6 @@ fn arm_sweep(
     entry: &ReceiveEntry,
 ) -> Result<(), SdkError> {
     match sweep {
-        Sweep::OwnCopy => queue_own_copy(),
         Sweep::LegacyHold => queue_legacy_hold(std::iter::repeat_n(true, 8)),
         Sweep::Failure => queue_policy_kind(ReceiveFailureKind::Deterministic),
         Sweep::Projection => {
@@ -420,20 +443,25 @@ fn arm_sweep(
             set_projection_key("authenticated-projection-key");
             queue_projection();
         }
-        Sweep::LegacyDm => {}
+        // The real own copy and the legacy DM need no injection: production classifies them.
+        Sweep::OwnCopy | Sweep::LegacyDm => {}
     }
     Ok(())
 }
 
-fn sweep_entry(
-    sweep: Sweep,
-    account: &crate::bus::state::LocalBusAccountState,
-) -> Result<ReceiveEntry, SdkError> {
+fn sweep_entry(sweep: Sweep, harness: &Harness) -> Result<ReceiveEntry, SdkError> {
+    let account = &harness.account;
     match sweep {
+        Sweep::OwnCopy => Ok(harness
+            .real
+            .as_ref()
+            .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+            .entry
+            .clone()),
         Sweep::Failure => Ok(retryable_entry(account)),
         Sweep::Projection => Ok(live_dummy(account)),
         Sweep::LegacyDm => legacy_dm_entry(account),
-        _ => Ok(own_dummy(account)),
+        Sweep::LegacyHold => Ok(own_dummy(account)),
     }
 }
 
@@ -581,10 +609,14 @@ async fn redrive_once(
     Ok(())
 }
 
+async fn open_sweep(sweep: Sweep) -> Result<Harness, SdkError> {
+    if matches!(sweep, Sweep::OwnCopy) { open_real().await } else { open() }
+}
+
 async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open_sweep(sweep).await?;
     let sends = attach_counter(&mut harness.account);
-    let entry = sweep_entry(sweep, &harness.account)?;
+    let entry = sweep_entry(sweep, &harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
     let store = open_router(&path, mode)?;
@@ -607,11 +639,11 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     );
     let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
     let recovered = receive_from_inbox(&rows[0]);
-    reopen(&mut harness.account)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let _ = drive(&mut harness.account, recovered, || 1).await?;
     assert_sweep(&harness.account, sweep, &entry)?;
-    reopen(&mut harness.account)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, entry.clone()).await?;
     assert_sweep(&harness.account, sweep, &entry)?;
@@ -621,9 +653,9 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
 }
 
 async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open_sweep(sweep).await?;
     let sends = attach_counter(&mut harness.account);
-    let entry = sweep_entry(sweep, &harness.account)?;
+    let entry = sweep_entry(sweep, &harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
     let store = open_router(&path, mode)?;
@@ -632,7 +664,7 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let _ = drive(&mut harness.account, entry.clone(), || 1).await?;
     let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
     let recovered = receive_from_inbox(&rows[0]);
-    reopen(&mut harness.account)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, recovered).await?;
     assert_sweep(&harness.account, sweep, &entry)?;
@@ -742,23 +774,24 @@ fn content_rows(db: &AccountDb) -> Result<Vec<String>, SdkError> {
 }
 
 thread_local! {
-    static ERASE_MESSAGE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static ERASE_MESSAGE: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn erase_pending_message(db: &AccountDb) {
-    let owner = ERASE_MESSAGE.with(|cell| cell.borrow().clone()).expect("pending message");
-    erase_message_through_retention(db, &owner).expect("erase pending message");
+    let (conversation, owner) =
+        ERASE_MESSAGE.with(|cell| cell.borrow().clone()).expect("pending message");
+    real::erase_message_in(db, &conversation, &owner).expect("erase pending message");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let owner = "pending-w1".to_owned();
-    harness.account.client.send_direct_message("thread", &owner, "peer", b"body")?;
-    let mut entry = own_dummy(&harness.account);
-    entry.entry.envelope.envelope_id = owner.clone();
-    ERASE_MESSAGE.with(|cell| cell.replace(Some(owner.clone())));
-    queue_own_copy();
+    let mut harness = open_real().await?;
+    let copy = harness.real.as_ref().ok_or(SdkError::LocalBus("test: real own copy".into()))?;
+    let owner = copy.message.clone();
+    let conversation = copy.conversation.clone();
+    let entry = copy.entry.clone();
+    harness.account.client.send_direct_message(&conversation, &owner, "peer", b"body")?;
+    ERASE_MESSAGE.with(|cell| cell.replace(Some((conversation, owner.clone()))));
     set_after_classify(erase_pending_message);
     let refused = drive(&mut harness.account, entry.clone(), || 1).await;
     let error = refused.as_ref().err();
@@ -767,8 +800,7 @@ async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError>
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1)
     );
-    reopen(&mut harness.account)?;
-    queue_own_copy();
+    reopen_any(&mut harness)?;
     let _ = drive_disk(&mut harness.account, 1, || 1).await?;
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
@@ -935,28 +967,39 @@ async fn nothing_owed_propagates_directory_unavailable() -> Result<(), SdkError>
     settled_propagates(injected_directory(), is_directory).await
 }
 
+/// A real own copy is an ordinary routed entry: its projection key must be derivable.
+/// When the identity authority cannot answer, the receive refuses with the typed miss and
+/// commits no W1 effect, no locator, no cover and no ACK intent.
 #[tokio::test(flavor = "current_thread")]
-async fn identity_absence_is_nothing_owed() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_own_copy();
+async fn own_copy_without_projection_key_is_refused() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let entry = harness
+        .real
+        .as_ref()
+        .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+        .entry
+        .clone();
     set_projection_error(SdkError::IdentityRootMissing);
-    let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
-    let mut harness = open()?;
-    queue_own_copy();
-    set_projection_error(SdkError::InboundRejected("identity authority: missing".into()));
-    let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn own_copy_does_not_require_a_routed_projection_key() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_own_copy();
-    set_projection_error(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed));
-    let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
+    let refused = drive(&mut harness.account, entry.clone(), || 1).await;
+    assert!(
+        matches!(refused, Err(SdkError::IdentityRootMissing)),
+        "an own copy without a projection key must be refused: {:?}",
+        refused.as_ref().err()
+    );
+    let db = harness.account.client.account_db()?;
+    assert_eq!(db.receive_state_for_test(1)?, (Some("staged".into()), 1), "W0 stays staged");
+    assert_eq!(cursor(&harness.account)?, 0, "no cover advanced the cursor");
+    assert!(
+        !db.actor_state_exists(&crate::client::own_device_copy::w1::locator_key(
+            &entry.entry.envelope.envelope_id
+        ))?,
+        "no W1 locator was committed"
+    );
+    assert_eq!(
+        db.receive_ledger_snap_for_test(&harness.account.target_delivery_id)?.intents,
+        Vec::<u64>::new(),
+        "no ACK intent was written"
+    );
     Ok(())
 }
 
