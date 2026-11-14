@@ -181,6 +181,11 @@ fn delivery(target: &str, result: Result<LocalBusDispatchResult, SdkError>) -> V
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    fingerprint: String,
+    expires_at: i64,
+}
 fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
     let key = format!(
         "conversation-send/{}",
@@ -193,9 +198,11 @@ fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Resu
     let fingerprint =
         ramflux_crypto::blake3_256_base64url("ramflux.conversation.send.intent.v1", &canonical);
     let db = client.account_db()?;
+    let now = now_unix_timestamp();
     db.write_transaction(|| {
-        if let Some(existing) = db.load_actor_state::<String>(&key)? {
-            if existing != fingerprint {
+        super::conversation_journal::prune(client, now)?;
+        if let Some(old) = db.load_actor_state::<SendReceipt>(&key)? {
+            if old.fingerprint != fingerprint {
                 return Err(crate::bindings::AdapterError::new(
                     crate::bindings::GeneratedErrorCode::InvalidArgument,
                     "operation_id reused",
@@ -204,7 +211,9 @@ fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Resu
             }
             return Ok(());
         }
-        db.persist_actor_state(&key, &fingerprint)?;
+        super::conversation_journal::capacity(client, "conversation-send/")?;
+        let expires_at = super::conversation_journal::expiry(client, now)?;
+        db.persist_actor_state(&key, &SendReceipt { fingerprint, expires_at })?;
         Ok(())
     })
 }
@@ -247,5 +256,53 @@ mod tests {
             Ok::<_, Box<dyn std::error::Error>>(())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn send_fingerprint_ttl_and_capacity_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let account = crate::bus::runtime_tests::account(
+            root.path(),
+            "retention",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        let db = account.client.account_db()?;
+        let now = now_unix_timestamp();
+        db.persist_actor_state(
+            "conversation-send/expired",
+            &SendReceipt { fingerprint: "retired".into(), expires_at: now - 1 },
+        )?;
+        super::super::conversation_journal::prune(&account.client, now)?;
+        assert!(
+            !db.actor_state_exists("conversation-send/expired")?,
+            "expired fingerprints must be pruned"
+        );
+        db.write_transaction(|| {
+            for n in 0..super::super::conversation_journal::LIMIT {
+                db.persist_actor_state(
+                    &format!("conversation-send/{n:04}"),
+                    &SendReceipt { fingerprint: n.to_string(), expires_at: now + 3600 },
+                )?;
+            }
+            Ok::<_, SdkError>(())
+        })?;
+        let error = reserve_intent(&account.client, "new-operation", &json!({"text":"new"}))
+            .expect_err("test: full live retention window");
+        assert_eq!(
+            crate::bindings::AdapterError::from_sdk(&error).code,
+            crate::bindings::GeneratedErrorCode::RateLimited as i32,
+            "capacity cannot evict a live idempotency guarantee"
+        );
+        assert_eq!(
+            db.actor_state_usage("conversation-send/")?.0,
+            u64::from(super::super::conversation_journal::LIMIT),
+            "the retained namespace is bounded"
+        );
+        Ok(())
     }
 }

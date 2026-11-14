@@ -40,7 +40,14 @@ pub(super) async fn send(
     let mut deliveries = Vec::new();
     for route in routes {
         let target = route.member_id.clone();
-        let outcome = submit(account, prepared, &event, &recipients, route).await;
+        let key = route_key(&route)?;
+        let accepted = super::conversation_journal::load(&account.client, &prepared.journal_key)?
+            .is_some_and(|receipt| receipt.accepted.contains(&key));
+        let outcome = if accepted {
+            Ok(())
+        } else {
+            submit(account, prepared, &event, &recipients, route).await
+        };
         deliveries.push(match outcome {
             Ok(()) => json!({"target":target,"state":"submitted"}),
             Err(error) => {
@@ -131,6 +138,7 @@ async fn submit(
         )
         .into());
     }
+    let target_key = route_key(&route)?;
     let source = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let message = GatewayDirectMessage {
         conversation_id: prepared.identity.conversation_id.clone(),
@@ -148,6 +156,7 @@ async fn submit(
         ttl: account.client.content_ttl()?,
     };
     let mut engine = account.session_client().await?;
+    let reconcile = || reconcile_accepted(&account.client, prepared, &target_key);
     let outcome = account
         .client
         .submit_conversation_event(
@@ -157,9 +166,48 @@ async fn submit(
                 exact: &prepared.exact,
                 wire: &prepared.wire,
                 recipients,
+                reconcile: Some(&reconcile),
             },
         )
         .await;
     account.apply_session_metadata(engine);
     outcome.map(|_| ())
+}
+
+fn route_key(route: &LocalBusGroupMemberRoute) -> Result<String, SdkError> {
+    Ok(ramflux_crypto::blake3_256_base64url(
+        "ramflux.conversation.delivery.v1",
+        &ramflux_protocol::canonical_json_bytes(&(
+            &route.member_principal_commitment,
+            &route.member_id,
+        ))?,
+    ))
+}
+
+pub(crate) fn reconcile_accepted(
+    client: &RamfluxClient,
+    prepared: &Prepared,
+    target_key: &str,
+) -> Result<(), SdkError> {
+    let mut receipt = super::conversation_journal::load(client, &prepared.journal_key)?
+        .ok_or_else(|| AdapterError::new(Code::Internal, "missing receipt"))?;
+    receipt.accepted.insert(target_key.to_owned());
+    super::conversation_journal::save(client, &prepared.journal_key, &receipt)?;
+    let private = prepared.journal_key.replace("conversation-operation/", "conversation-intent/");
+    // Only the currently accepted event's payload is reattached after edit retirement.
+    // A later edit/delete retires it normally; the content-free receipt survives.
+    let (_, content) = RamfluxClient::decode_generated_inner(&prepared.exact)?;
+    let target = match content.value.as_ref() {
+        Some(ramflux_protocol::message::content::Value::Edit(v)) => v.target.as_ref(),
+        Some(ramflux_protocol::message::content::Value::Delete(v)) => v.targets.first(),
+        Some(ramflux_protocol::message::content::Value::Reaction(v)) => v.target.as_ref(),
+        Some(ramflux_protocol::message::content::Value::Message(v)) => v.reply_to.as_ref(),
+        _ => None,
+    }
+    .ok_or_else(|| AdapterError::new(Code::Internal, "missing mutation target"))?;
+    let target = ramflux_protocol::encode_base64url(&target.id);
+    if !client.account_db()?.message_is_deleted(&target)? {
+        client.account_db()?.persist_message_actor_state(&target, &private, prepared)?;
+    }
+    Ok(())
 }

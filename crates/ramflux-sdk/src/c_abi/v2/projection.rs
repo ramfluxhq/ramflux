@@ -5,71 +5,34 @@
 
 use super::super::{CAbiError, RamfluxErrorCode};
 use ramflux_client_model::{conversation, receipt};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use zeroize::Zeroize;
 
 pub(super) const MAX_ROWS: usize = 4096;
 
-#[derive(Clone, Copy, Default, Deserialize)]
-#[serde(try_from = "IntegerInput")]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Unsigned(u64);
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum IntegerInput {
-    Text(String),
-    Number(u64),
-}
-impl TryFrom<IntegerInput> for Unsigned {
-    type Error = &'static str;
-    fn try_from(value: IntegerInput) -> Result<Self, Self::Error> {
-        match value {
-            IntegerInput::Text(value) => value.parse().map(Self).map_err(|_| "invalid u64"),
-            IntegerInput::Number(value) => Ok(Self(value)),
-        }
-    }
-}
 impl Serialize for Unsigned {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0.to_string())
     }
 }
 
-#[derive(Clone, Copy, Deserialize)]
-#[serde(try_from = "SignedInput")]
+#[derive(Clone, Copy)]
 struct Signed(i64);
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SignedInput {
-    Text(String),
-    Number(i64),
-}
-impl TryFrom<SignedInput> for Signed {
-    type Error = &'static str;
-    fn try_from(value: SignedInput) -> Result<Self, Self::Error> {
-        match value {
-            SignedInput::Text(value) => value.parse().map(Self).map_err(|_| "invalid i64"),
-            SignedInput::Number(value) => Ok(Self(value)),
-        }
-    }
-}
 impl Serialize for Signed {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0.to_string())
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Row {
     id: String,
     title: String,
     preview: Option<String>,
-    #[serde(default)]
     pinned: bool,
     latest_ms: Option<Signed>,
-    #[serde(default)]
     unread: u32,
-    #[serde(default)]
     attention: u32,
 }
 impl Drop for Row {
@@ -80,20 +43,12 @@ impl Drop for Row {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Directory {
     rows: Vec<Row>,
     visible: bool,
-    #[serde(default)]
     query: String,
-    #[serde(default)]
     offset: Unsigned,
-    #[serde(default = "default_limit")]
     limit: Unsigned,
-}
-fn default_limit() -> Unsigned {
-    Unsigned(100)
 }
 impl Drop for Directory {
     fn drop(&mut self) {
@@ -151,7 +106,7 @@ pub(super) fn directory(input: &Directory) -> Result<serde_json::Value, CAbiErro
         "totals":{"unread":totals.unread.to_string(),"attention":totals.attention.to_string()}}))
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum Receipt {
     Sending,
@@ -197,8 +152,6 @@ impl TryFrom<receipt::Receipt> for Receipt {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct ReceiptRequest {
     outgoing: bool,
     receipt: Receipt,
@@ -216,4 +169,85 @@ pub(super) fn present(input: &ReceiptRequest) -> Result<serde_json::Value, CAbiE
 
 fn invalid(message: &str) -> CAbiError {
     CAbiError::new(RamfluxErrorCode::InvalidArgument, message)
+}
+
+impl super::input::Decode for Directory {
+    fn decode(value: &mut serde_json::Value) -> Result<Self, CAbiError> {
+        use super::input as i;
+        i::object(value, &["rows", "visible", "query", "offset", "limit"])?;
+        let visible = i::boolean(value, "visible", None)?;
+        let query = match value.get("query") {
+            None => "",
+            Some(serde_json::Value::String(s)) => s,
+            _ => return Err(i::invalid()),
+        };
+        let offset = Unsigned(i::unsigned(value, "offset", Some(0))?);
+        let limit = Unsigned(i::unsigned(value, "limit", Some(100))?);
+        let values =
+            value.get("rows").and_then(serde_json::Value::as_array).ok_or_else(i::invalid)?;
+        let mut rows = Vec::new();
+        for row in values {
+            i::object(
+                row,
+                &["id", "title", "preview", "pinned", "latest_ms", "unread", "attention"],
+            )?;
+            let id = i::string(row, "id")?;
+            let title = i::string(row, "title")?;
+            let preview = i::optional(row, "preview")?;
+            let pinned = i::boolean(row, "pinned", Some(false))?;
+            let latest_ms = match row.get("latest_ms") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(s)) => {
+                    Some(Signed(s.parse().map_err(|_| i::invalid())?))
+                }
+                Some(v) => Some(Signed(v.as_i64().ok_or_else(i::invalid)?)),
+            };
+            let unread =
+                u32::try_from(i::unsigned(row, "unread", Some(0))?).map_err(|_| i::invalid())?;
+            let attention =
+                u32::try_from(i::unsigned(row, "attention", Some(0))?).map_err(|_| i::invalid())?;
+            rows.push(Row {
+                id: id.into(),
+                title: title.into(),
+                preview: preview.map(str::to_owned),
+                pinned,
+                latest_ms,
+                unread,
+                attention,
+            });
+        }
+        Ok(Self { rows, visible, query: query.into(), offset, limit })
+    }
+}
+impl super::input::Decode for ReceiptRequest {
+    fn decode(value: &mut serde_json::Value) -> Result<Self, CAbiError> {
+        use super::input as i;
+        i::object(value, &["outgoing", "receipt", "now_ms"])?;
+        let outgoing = i::boolean(value, "outgoing", None)?;
+        let now_ms = Unsigned(i::unsigned(value, "now_ms", None)?);
+        let receipt = value.get("receipt").ok_or_else(i::invalid)?;
+        let receipt = match i::string(receipt, "state")? {
+            "sending" | "sent" | "delivered" | "read" => {
+                i::object(receipt, &["state"])?;
+                match i::string(receipt, "state")? {
+                    "sending" => Receipt::Sending,
+                    "sent" => Receipt::Sent,
+                    "delivered" => Receipt::Delivered,
+                    _ => Receipt::Read,
+                }
+            }
+            "failed" => {
+                i::object(receipt, &["state", "retryable"])?;
+                Receipt::Failed { retryable: i::boolean(receipt, "retryable", None)? }
+            }
+            "waiting_for_node" => {
+                i::object(receipt, &["state", "retry_at_ms"])?;
+                Receipt::WaitingForNode {
+                    retry_at_ms: Unsigned(i::unsigned(receipt, "retry_at_ms", None)?),
+                }
+            }
+            _ => return Err(i::invalid()),
+        };
+        Ok(Self { outgoing, receipt, now_ms })
+    }
 }

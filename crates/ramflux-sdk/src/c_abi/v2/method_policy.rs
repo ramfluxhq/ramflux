@@ -217,6 +217,10 @@ policies! {
 
 pub(super) const DENIED_METHODS: &[&str] = &["daemon.stop"];
 
+pub(super) fn requires_secret_export(name: &str) -> bool {
+    METHOD_POLICIES.iter().find(|row| row.name == name).is_none_or(|row| row.secret_output)
+}
+
 pub(super) fn allowed(name: &str) -> bool {
     !DENIED_METHODS.contains(&name)
         && !name.contains("itest")
@@ -229,7 +233,7 @@ pub(super) fn manifest() -> serde_json::Value {
         .map(|policy| {
             serde_json::json!({
                 "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
-                "secret_input":policy.secret_input,"secret_output":policy.secret_output,
+                "secret_input":policy.secret_input,"secret_output":requires_secret_export(policy.name),
                 "show_once":policy.show_once,
             })
         })

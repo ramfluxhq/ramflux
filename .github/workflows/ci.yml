@@ -256,16 +256,18 @@ jobs:
         env:
           RUST_TEST_THREADS: '1'
         run: |
-          timeout 600 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib c_abi::v2::
-          timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::outbound::tests
-          timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send_derives_routes_and_seals_for_every_verified_peer_device
-          timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::dispatch::conversation_mutation::
-          timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib native_conversation_
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-c_abi__v2__.xml -- timeout 600 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib c_abi::v2:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__outbound__tests.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::outbound::tests -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation_send_derives_routes_and_seals_for_every_verified_peer_device.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send_derives_routes_and_seals_for_every_verified_peer_device -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation-journal.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__dispatch__conversation_mutation__.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::dispatch::conversation_mutation:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-native_conversation_.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib native_conversation_ -- --test-threads=1
       - name: Reject generated contract drift
         run: |
           python3 -B scripts/generate-c-abi-methods.py --check
           python3 -B scripts/generate-c-abi-card-trust.py --check
           python3 -B scripts/check-c-abi-header.py
+
 
   card-runtime:
     name: Card runtime (${{ matrix.target }})

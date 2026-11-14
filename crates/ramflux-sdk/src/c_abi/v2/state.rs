@@ -63,12 +63,7 @@ pub(super) struct Shared {
 
 impl Shared {
     pub fn complete(&self, id: u64, mut value: serde_json::Value) {
-        if let Some(map) = value.as_object_mut()
-            && let Some(mut prose) = map.remove("message")
-        {
-            crate::bus::inprocess::erase_value(&mut prose);
-        }
-        scrub_errors(&mut value);
+        super::native_error::completion(&mut value);
         let success = value.get("code").and_then(serde_json::Value::as_i64) == Some(0);
         let encoded = Zeroizing::new(
             serde_json::to_vec(&value)
@@ -166,47 +161,5 @@ impl Shared {
                 self.complete(id, failure(RamfluxV2Status::Closed, "unknown"));
             }
         }
-    }
-}
-
-/// Error messages are internal diagnostics; preserve machine fields and user payloads.
-pub(super) fn scrub_errors(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.contains_key("code")
-                && (map.contains_key("effects")
-                    || map.contains_key("name")
-                    || map.contains_key("retry_after_ms")
-                    || map.get("state").and_then(serde_json::Value::as_str) == Some("error"))
-                && let Some(mut prose) = map.remove("message")
-            {
-                crate::bus::inprocess::erase_value(&mut prose);
-            }
-            // SDK event errors can contain only code/message (for example MCP failures).
-            if let Some(serde_json::Value::Object(error)) = map.get_mut("error")
-                && let Some(mut prose) = error.remove("message")
-            {
-                crate::bus::inprocess::erase_value(&mut prose);
-            }
-            // Reconciliation records retain Display diagnostics internally; native hosts
-            // receive state/retry facts and a conservative typed failure instead.
-            if (map.contains_key("transfer_state")
-                || (map.contains_key("object_id") && map.contains_key("operation_id")))
-                && map.get("last_error").is_some_and(|value| !value.is_null())
-                && let Some(mut prose) = map.insert("last_error".into(), serde_json::Value::Null)
-            {
-                crate::bus::inprocess::erase_value(&mut prose);
-                map.insert("last_error_code".into(), serde_json::json!(16));
-            }
-            for child in map.values_mut() {
-                scrub_errors(child);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                scrub_errors(child);
-            }
-        }
-        _ => {}
     }
 }

@@ -8,7 +8,6 @@ use super::super::{CAbiError, RamfluxBuffer, RamfluxErrorCode};
 use super::runtime::{Client, CloseResult, Command};
 use super::state::{self, MAX_FRAME_BYTES, MAX_OPERATIONS, Operation, OperationKind};
 use crate::{LocalBusConfig, LocalBusFrame};
-use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -35,20 +34,13 @@ struct Registry {
 }
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    #[serde(default)]
-    allow_raw_messages: bool,
-    #[serde(default)]
-    allow_secret_exports: bool,
-    data_root: std::path::PathBuf,
-    #[serde(default)]
-    builtin_nodes: Vec<crate::NodeProfile>,
+pub(super) struct Config {
+    pub(super) allow_raw_messages: bool,
+    pub(super) allow_secret_exports: bool,
+    pub(super) data_root: std::path::PathBuf,
+    pub(super) builtin_nodes: Vec<crate::NodeProfile>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Request {
     account_id: Option<String>,
     sdk_api: String,
@@ -62,6 +54,10 @@ struct Request {
 impl Drop for Request {
     fn drop(&mut self) {
         crate::bus::inprocess::erase_value(&mut self.body);
+        zeroize::Zeroize::zeroize(&mut self.account_id);
+        zeroize::Zeroize::zeroize(&mut self.sdk_api);
+        zeroize::Zeroize::zeroize(&mut self.method);
+        zeroize::Zeroize::zeroize(&mut self.operation_id);
     }
 }
 
@@ -126,29 +122,12 @@ fn write_handle(out: *mut u64, value: u64) -> Result<(), CAbiError> {
     }
     Ok(())
 }
-fn bounded(value: &serde_json::Value, depth: usize, budget: &mut usize) -> bool {
-    if depth > 32 || *budget == 0 {
-        return false;
-    }
-    *budget -= 1;
-    match value {
-        serde_json::Value::Array(items) => items.iter().all(|v| bounded(v, depth + 1, budget)),
-        serde_json::Value::Object(items) => items.values().all(|v| bounded(v, depth + 1, budget)),
-        _ => true,
-    }
-}
-fn input<T: serde::de::DeserializeOwned>(ptr: *const u8, len: usize) -> Result<T, CAbiError> {
+fn input<T: super::input::Decode>(ptr: *const u8, len: usize) -> Result<T, CAbiError> {
     if ptr.is_null() || len == 0 || len > MAX_FRAME_BYTES {
-        return Err(invalid("invalid input length"));
+        return Err(invalid("input"));
     }
-    // SAFETY: callers supply len readable bytes until this call returns; bounds were checked.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-    let value: serde_json::Value =
-        ramflux_protocol::parse_i_json(bytes).map_err(|_| invalid("invalid I-JSON request"))?;
-    if !bounded(&value, 0, &mut 4096) {
-        return Err(invalid("request complexity limit"));
-    }
-    serde_json::from_value(value).map_err(|_| invalid("invalid request schema"))
+    // SAFETY: the host lends len readable bytes until this synchronous call returns.
+    super::input::decode(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
 /// Return ABI v2 metadata, descriptor fingerprint, limits and the operation inventory.
@@ -242,7 +221,7 @@ fn open_inner(
     vault: Option<Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
 ) -> Result<(), CAbiError> {
     write_handle(out_client, 0)?;
-    let config: Config = input(config, len)?;
+    let mut config: Config = input(config, len)?;
     if config.data_root.as_os_str().is_empty() || !config.data_root.is_absolute() {
         return Err(invalid("data_root must be absolute"));
     }
@@ -270,8 +249,9 @@ fn open_inner(
         id
     };
     let _opening = Opening(candidate_root);
-    let mut bus = LocalBusConfig::new(std::path::PathBuf::new(), config.data_root);
-    bus.builtin_nodes = config.builtin_nodes;
+    let mut bus =
+        LocalBusConfig::new(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
+    bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes);
     bus.custody_vault = vault;
     let started = Client::start(bus);
     let mut registry = REGISTRY.lock().map_err(|_| internal())?;
@@ -334,6 +314,7 @@ pub extern "C" fn ramflux_v2_client_release(handle: u64) -> i32 {
 
 #[cfg(test)]
 pub(super) fn register_test_client(client: Arc<Client>) -> u64 {
+    client.shared.allow_secret_exports.store(true, std::sync::atomic::Ordering::Release);
     let mut registry = REGISTRY.lock().expect("test: registry");
     let id = next_id(&mut registry).expect("test: client id");
     registry.clients.insert(id, client);
@@ -366,10 +347,8 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "method"));
         }
         let client = client(handle)?;
-        if matches!(
-            request.method.as_str(),
-            "account.export_agent_credentials" | "account.backup.export"
-        ) && !client.shared.allow_secret_exports.load(std::sync::atomic::Ordering::Acquire)
+        if super::method_policy::requires_secret_export(&request.method)
+            && !client.shared.allow_secret_exports.load(std::sync::atomic::Ordering::Acquire)
         {
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "secret_export"));
         }
@@ -725,4 +704,63 @@ pub extern "C" fn ramflux_v2_card_trust_package(out: *mut *mut RamfluxBuffer) ->
 #[cfg(test)]
 pub(super) fn test_shared(handle: u64) -> Arc<super::state::Shared> {
     Arc::clone(&client(handle).expect("test: live client").shared)
+}
+
+impl super::input::Decode for Request {
+    fn decode(value: &mut serde_json::Value) -> Result<Self, CAbiError> {
+        use super::input as i;
+        i::object(
+            value,
+            &["account_id", "sdk_api", "method", "body", "deadline_ms", "operation_id"],
+        )?;
+        let account = i::optional(value, "account_id")?;
+        let api = i::string(value, "sdk_api")?;
+        let method = i::string(value, "method")?;
+        let operation = i::optional(value, "operation_id")?;
+        let deadline =
+            value.get("deadline_ms").and_then(serde_json::Value::as_u64).ok_or_else(i::invalid)?;
+        if value.get("body").is_none() {
+            return Err(i::invalid());
+        }
+        // All schema checks precede allocation/transfer; no partially built request can fail.
+        let result = Self {
+            account_id: account.map(str::to_owned),
+            sdk_api: api.into(),
+            method: method.into(),
+            body: serde_json::Value::Null,
+            deadline_ms: deadline,
+            operation_id: operation.map(str::to_owned),
+        };
+        let mut result = result;
+        result.body =
+            value.as_object_mut().and_then(|map| map.remove("body")).ok_or_else(i::invalid)?;
+        Ok(result)
+    }
+}
+
+impl Drop for Config {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Ok(mut path) = std::mem::take(&mut self.data_root).into_os_string().into_string() {
+            path.zeroize();
+        }
+        for node in &mut self.builtin_nodes {
+            node.discovery_url.zeroize();
+            node.node_id.zeroize();
+            node.node_public_key.zeroize();
+            node.ca_cert_pem.zeroize();
+            node.prekey_http_url.zeroize();
+            node.signaling_turn_addr.zeroize();
+            node.gateway.quic_addr.zeroize();
+            node.gateway.tcp_addr.zeroize();
+            node.gateway.server_name.zeroize();
+            node.relay.quic_addr.zeroize();
+            node.relay.server_name.zeroize();
+            node.protocol_versions.zeroize();
+            node.client_capabilities.zeroize();
+            for mut warning in std::mem::take(&mut node.safety_warnings) {
+                warning.zeroize();
+            }
+        }
+    }
 }

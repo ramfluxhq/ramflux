@@ -406,8 +406,8 @@ does not make invalid host pointers or foreign callback unwinds valid.
 The native bridge admits only explicitly classified SDK methods. `daemon.stop`
 and test-only methods are denied; use `client_close` to shut down. Negotiation
 omits denied methods, and method policy rows expose `bridge_allowed`. Raw routing
-still requires `allow_raw_messages:true`. Credential and backup-byte exports
-require the explicit trusted-host config capability `allow_secret_exports:true`;
+still requires `allow_raw_messages:true`. Every policy row with `secret_output:true`
+requires the explicit trusted-host config capability `allow_secret_exports:true`;
 SDK authorization and custody checks apply independently. An operation key is
 nonempty and at most 256 UTF-8 bytes. Conversation send persists an intent
 fingerprint in account operation metadata before routing; changed conversation,
@@ -429,3 +429,46 @@ before copying secrets and zeroize temporary buffers. Always free them using
 PR CI executes the real supervisor and generation tests under both `c-abi` and
 `card-runtime`, including signed Card rollback/exact-digest refusals, conversation
 retry/crypto regressions and both generated-manifest freshness checks.
+
+## Native security corrections
+
+The trusted custody provider is the only ABI seed path. Primary and branch seeds
+must never appear in JSON methods, completions or event frames. Android providers
+wrap seeds with a non-exportable Android Keystore AES-GCM key (StrongBox when
+available) before durable persistence; plaintext storage is forbidden. iOS uses
+non-synchronizable Keychain items with
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. All callback spans are borrowed
+only until return. SDK-owned callback input copies are wiped immediately after
+both successful and failed callbacks; load buffers and decoded temporary seeds
+are zeroized on every exit. Hosts must wipe their own temporary plaintext copies.
+
+`allow_secret_exports` gates **every** method whose generated policy row declares
+`secret_output:true`, including account lists containing private state, group sender
+keys, device sync and both show-once calls. The policy column is the authority for
+this admission check; there is no per-method exception list.
+
+After status PanicAborted (17), stop using that client, close it off the UI thread,
+retain/retry its shutdown state until confirmed, and open a new client. Locks may
+be poisoned and in-flight effects are unknown; reconcile operation keys before retry.
+Card exports independently contain Rust unwinds; status Engine (4) invalidates the
+renderer thread's sessions. The version query is a constant and cannot panic.
+
+ABI input parsing owns and wipes incomplete JSON/string values and performs schema
+checks before constructing owned requests. No consuming serde conversion can drop
+partially deserialized secrets. Error conversion occurs only at typed SDK envelope
+fields, never by recursively matching business object property names. Unknown
+error details are omitted; diagnostic prose is never promoted to a display field.
+
+Conversation mutation receipts retain only fingerprint, event identity, accepted
+recipient keys, terminal reconciliation and expiry independently of message payloads.
+Source edit projection and accepted-target progress commit atomically. Only the
+current accepted event's pending payload is reattached after retirement, under its
+target's normal erasure ownership. Other pending private payloads are erased, and
+later edits/deletion retire the current pending payload too; its receipt then
+returns a content-free retired/uncertain outcome without re-allocating or resending.
+
+Send and mutation receipts expire with the account's configured content-retention
+TTL and are bounded to 1,024 live rows per namespace. Admission at capacity refuses
+new operations rather than evicting an unexpired retry guarantee. Private pending
+rows have the same expiry. After expiry, old keys have no retry guarantee; hosts
+must reconcile history and use fresh operation keys.

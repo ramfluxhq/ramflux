@@ -110,7 +110,8 @@ fn table(host: &Host) -> RamfluxV2CustodyProvider {
 fn host_custody_preflight_drives_real_creation_and_releases_after_close() {
     let host = Arc::new(Host::default());
     let root = tempfile::tempdir().expect("test: isolated account root");
-    let config = serde_json::to_vec(&json!({"data_root":root.path()})).expect("test: config");
+    let config = serde_json::to_vec(&json!({"data_root":root.path(),"allow_secret_exports":true}))
+        .expect("test: config");
     let mut client = 0;
     let provider = table(&host);
     assert_eq!(
@@ -185,4 +186,45 @@ fn provider_errors_and_invalid_seed_lengths_fail_closed() {
     assert_eq!(host.released.load(Ordering::SeqCst), 0, "a pending SDK task retains custody");
     drop(shared);
     assert_eq!(host.released.load(Ordering::SeqCst), 1, "final task releases custody context");
+}
+
+#[test]
+fn custody_callbacks_wipe_owned_inputs_on_success_and_failure() {
+    let host = Arc::new(Host::default());
+    let vault = HostVault::new(table(&host)).expect("test: provider");
+    let reference = ramflux_protocol::encode_base64url([13; 32]);
+    let key = ramflux_crypto::custody::SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new(
+        [19; 32],
+    ));
+    super::custody::WIPED_INPUTS.with(|count| count.set(0));
+    vault.store_new(&reference, &key).expect("test: create-only protected host entry");
+    host.status.store(4, Ordering::SeqCst);
+    assert!(
+        vault.store_new(&reference, &key).is_err(),
+        "failed callback must also erase its borrowed input"
+    );
+    super::custody::WIPED_INPUTS
+        .with(|count| assert_eq!(count.get(), 2, "both callback paths erase before freeing"));
+}
+
+#[test]
+fn seed_material_has_only_the_custody_table_path() {
+    // JSON policy inventory must never add a raw authority-seed export.
+    let manifest: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../include/ramflux_sdk_methods.json"))
+            .expect("test: generated inventory");
+    let text = manifest.to_string();
+    for forbidden in ["vault_seed", "branch_seed", "load_primary", "load_branch", "export_seed"] {
+        assert!(!text.contains(forbidden), "raw seed export cannot become a method: {forbidden}");
+    }
+    assert_eq!(
+        [
+            Op::StorePrimary as u32,
+            Op::LoadPrimary as u32,
+            Op::StoreBranch as u32,
+            Op::LoadBranch as u32
+        ],
+        [1, 2, 4, 5],
+        "only explicit custody callback operations carry primary/branch seeds"
+    );
 }

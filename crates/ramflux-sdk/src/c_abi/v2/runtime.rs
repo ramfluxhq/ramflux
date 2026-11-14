@@ -398,7 +398,7 @@ async fn read_responses(
             let generation = generation.ok_or_else(|| {
                 SdkError::LocalBus("event missing subscription generation".into())
             })?;
-            super::state::scrub_errors(&mut frame);
+            super::native_error::frame(&mut frame);
             shared.push_event(serde_json::to_vec(&frame)?, generation);
         }
         crate::bus::inprocess::erase_value(&mut frame);

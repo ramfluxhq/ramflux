@@ -587,8 +587,6 @@ crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 3 | D | admitted-befor
 crates/ramflux-sdk/src/c_abi/mod.rs | parse_json_input | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/call/control.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/c_abi/v2/card.rs | trust_package | 1 | E | excluded=compile-time SDK release index; public signed library and app-pinned host assets, not peer input
-crates/ramflux-sdk/src/c_abi/v2/exports.rs | input | 1 | A | strict=parse_i_json; bounded C ABI ingress admission before typed conversion
-crates/ramflux-sdk/src/c_abi/v2/exports.rs | input | 2 | C | admission=crates/ramflux-sdk/src/c_abi/v2/exports.rs#input#1
 crates/ramflux-sdk/src/c_abi/v2/runtime.rs | read_responses | 1 | E | excluded=authenticated in-process SDK responses preserved as JSON values; no signed envelope admission
 crates/ramflux-sdk/src/client/contact.rs | verify_device_manifest_json | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/contact_requests/messages.rs | contact_message_preview | 1 | D | admitted-before-persist; stored row is not an ingress decoder

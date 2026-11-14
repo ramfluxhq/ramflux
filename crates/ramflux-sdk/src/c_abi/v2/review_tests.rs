@@ -80,7 +80,7 @@ fn c_event_poll_fences_late_zero_and_already_queued_stale_generations() {
 
 #[test]
 fn policy_refuses_unknown_sensitive_exports_and_oversized_operation_keys() {
-    let fixture = Fixture::open();
+    let fixture = Fixture::configured_exports(false, false);
     for (method, operation_id, expected) in [
         ("unknown.method", "bounded".to_owned(), 12),
         ("itest.bypass", "bounded".to_owned(), 1),
@@ -101,43 +101,53 @@ fn policy_refuses_unknown_sensitive_exports_and_oversized_operation_keys() {
 
 #[test]
 fn failure_outputs_preserve_structured_codes_and_erase_diagnostics() {
-    let shared = super::state::Shared::default();
-    let op = std::sync::Arc::new(super::state::Operation::default());
-    shared.operations.lock().expect("test: operations").insert(1, op.clone());
-    shared.failed(1, &crate::SdkError::LocalBus("private/path and diagnostic".into()));
-    let state = op.state.lock().expect("test: result");
-    let bytes = state.result.as_ref().expect("test: terminal error");
-    let value: serde_json::Value = serde_json::from_slice(bytes).expect("test: typed JSON");
-    assert!(value.get("message").is_none(), "SDK Display cannot cross the native boundary");
-    drop(state);
-    shared.complete(1,json!({"code":0,"response":{"error":{"code":"InvalidArgument","message":"private/path","retry_after_ms":null,"details":{"retryable":false}},"body":{"message":"User content","code":"user-field"},"event":{"error":{"code":"mcp_failure","message":"private/path"}},"receipt":{"object_id":"object","operation_id":"op","last_error":"private/path","state":"failed"}}}));
-    let state = op.state.lock().expect("test: result");
-    let value: serde_json::Value =
-        serde_json::from_slice(state.result.as_ref().expect("test: completion"))
-            .expect("test: JSON");
+    let mut completion = json!({"code":1,"message":"private/path","response":{"kind":"error","method":"conversation.edit","error":{"code":"edit_conflict","message":"private/path","details":{"target":"target","expected":1,"received":2,"reason":"private/path"}},"body":{"code":7,"name":"edit_conflict","message":"private/path","details":{"target":"target","expected":1,"received":2}}}});
+    super::native_error::completion(&mut completion);
+    assert!(completion.get("message").is_none(), "completion diagnostics stay internal");
     assert!(
-        value["response"]["error"].get("message").is_none(),
-        "carrier diagnostics are stripped too"
-    );
-    assert_eq!(
-        value["response"]["error"]["details"]["retryable"], false,
-        "typed structured details survive"
+        completion["response"]["error"].get("message").is_none(),
+        "error envelope diagnostics stay internal"
     );
     assert!(
-        value["response"]["event"]["error"].get("message").is_none(),
-        "code/message-only event errors are sanitized"
+        completion["response"]["error"]["details"].get("reason").is_none(),
+        "adapter details cannot smuggle a diagnostic string"
     );
+    assert_eq!(
+        completion["response"]["error"]["details"]["expected"], 1,
+        "typed conflict facts survive"
+    );
+    let mut business = json!({"code":0,"response":{"kind":"response","method":"account.config.get","body":{"code":7,"name":"custom","message":"User content","error":{"code":1,"message":"User error content"}}}});
+    let expected = business.clone();
+    super::native_error::completion(&mut business);
+    assert_eq!(
+        business, expected,
+        "business payloads are never recursively scrubbed by field patterns"
+    );
+    for (method, body) in [
+        ("object.transfer.status", json!({"transfer":{"last_error":"private/path","attempts":2}})),
+        (
+            "object.directory",
+            json!({"objects":[{"last_error":"private/path","name":"User attachment"}]}),
+        ),
+    ] {
+        let mut response = json!({"kind":"response","method":method,"body":body});
+        super::native_error::frame(&mut response);
+        assert!(
+            !response.to_string().contains("private/path"),
+            "typed transfer diagnostics stay internal"
+        );
+        if method == "object.directory" {
+            assert_eq!(
+                response["body"]["objects"][0]["name"], "User attachment",
+                "user-authored attachment name survives"
+            );
+        }
+    }
+    let mut event = json!({"kind":"event","method":"mcp.tool.failed","body":{"error":{"code":"failed","message":"private/path"}}});
+    super::native_error::frame(&mut event);
     assert!(
-        value["response"]["receipt"]["last_error"].is_null(),
-        "reconciliation diagnostics remain internal"
-    );
-    assert_eq!(
-        value["response"]["receipt"]["last_error_code"], 16,
-        "unknown diagnostic is not guessed into a retry class"
-    );
-    assert_eq!(
-        value["response"]["body"]["message"], "User content",
-        "business content is not an error string"
+        event["body"]["error"].get("message").is_none(),
+        "typed SDK event diagnostic is not peer data"
     );
 }
 
@@ -146,7 +156,8 @@ fn concurrent_opens_reserve_a_previously_missing_root() {
     let root = tempfile::tempdir().expect("test: root parent");
     let missing = root.path().join("new-root");
     let config = std::sync::Arc::new(
-        serde_json::to_vec(&json!({"data_root":missing})).expect("test: config"),
+        serde_json::to_vec(&json!({"data_root":missing,"allow_secret_exports":true}))
+            .expect("test: config"),
     );
     let (finished, outcomes) = std::sync::mpsc::sync_channel(2);
     let mut workers = Vec::new();
@@ -204,6 +215,7 @@ fn closed_command_channel_returns_closed_before_atomic_shutdown_flags() {
         &mut std::sync::Arc::get_mut(&mut client).expect("test: not registered yet").commands,
         sender,
     );
+    client.shared.allow_secret_exports.store(true, std::sync::atomic::Ordering::Release);
     let handle = super::exports::register_test_client(client.clone());
     assert!(
         !client.shared.closed.load(std::sync::atomic::Ordering::Acquire),
@@ -226,4 +238,71 @@ fn closed_command_channel_returns_closed_before_atomic_shutdown_flags() {
     );
     assert_eq!(ramflux_v2_client_close(handle), 0, "real supervisor still shuts down normally");
     drop(original);
+}
+
+#[test]
+fn every_secret_output_policy_row_requires_explicit_host_capability() {
+    let fixture = Fixture::configured_exports(false, false);
+    for policy in super::method_policy::METHOD_POLICIES.iter().filter(|row| row.secret_output) {
+        let request=serde_json::to_vec(&json!({"sdk_api":policy.capability,"method":policy.name,"body":{},"deadline_ms":deadline()})).expect("test: classified operation");
+        let mut operation = 99;
+        assert_eq!(
+            ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation),
+            12,
+            "secret-output method {} must require explicit opt-in",
+            policy.name
+        );
+        assert_eq!(operation, 0, "denied export allocates no operation");
+    }
+}
+
+#[test]
+fn rejected_complex_schema_and_cancelled_inputs_wipe_sdk_canary_allocations() {
+    use crate::bus::secrets::canary;
+    let fixture = Fixture::open();
+    let inputs = [
+        json!({"sdk_api":"account","method":"account.unlock","body":{"a_secret":canary::TEXT,"z_complex":vec![0;4096]},"deadline_ms":deadline()}),
+        json!({"sdk_api":"account","method":7,"body":{"passphrase":canary::TEXT},"deadline_ms":deadline()}),
+    ];
+    for input in inputs {
+        let bytes = serde_json::to_vec(&input).expect("test: rejected input");
+        let mut operation = 99;
+        canary::enable();
+        assert_eq!(
+            ramflux_v2_execute(fixture.handle, bytes.as_ptr(), bytes.len(), &raw mut operation),
+            1,
+            "invalid input is rejected before admission"
+        );
+        let (count, zeroed) = canary::finish();
+        assert!(
+            count > 0 && zeroed,
+            "all observed SDK-owned canary buffers are zeroed while still allocated"
+        );
+        assert_eq!(operation, 0, "rejection has no operation handle");
+    }
+    let bytes=serde_json::to_vec(&json!({"sdk_api":"account","method":"account.unlock","body":{"passphrase":canary::TEXT},"deadline_ms":1})).expect("test: expiring input");
+    let mut operation = 0;
+    canary::enable();
+    assert_eq!(
+        ramflux_v2_execute(fixture.handle, bytes.as_ptr(), bytes.len(), &raw mut operation),
+        0,
+        "valid request reaches its bounded waiter"
+    );
+    assert_eq!(
+        ramflux_v2_operation_cancel(fixture.handle, operation),
+        0,
+        "cancel shares the operation handle"
+    );
+    let result = fixture.result(operation);
+    let (count, zeroed) = canary::finish();
+    assert!(count > 0 && zeroed, "cancellation retains input/encoding wipe guarantees");
+    assert!(
+        matches!(result["code"].as_i64(), Some(10 | 25)),
+        "expired/cancelled request cannot reach business execution"
+    );
+    assert_eq!(
+        ramflux_v2_operation_release(fixture.handle, operation),
+        0,
+        "cancelled operation releases credit"
+    );
 }

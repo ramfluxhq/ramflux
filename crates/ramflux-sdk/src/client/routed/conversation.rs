@@ -10,6 +10,7 @@ pub(crate) struct ConversationEvent<'a> {
     pub message: GatewayDirectMessage,
     pub exact: &'a [u8],
     pub wire: &'a [u8],
+    pub reconcile: Option<&'a dyn Fn() -> Result<(), SdkError>>,
     pub recipients: &'a [String],
 }
 
@@ -20,7 +21,7 @@ impl RamfluxClient {
         event: ConversationEvent<'_>,
     ) -> Result<GatewayInboxEntry, SdkError> {
         crate::client::target_selection::require_schema_v1()?;
-        let ConversationEvent { mut message, exact, wire, recipients } = event;
+        let ConversationEvent { mut message, exact, wire, reconcile, recipients } = event;
         let (identity, content) = Self::decode_generated_inner(exact)?;
         let (wire_identity, _) = Self::decode_generated_inner(wire)?;
         if !matches!(
@@ -114,6 +115,7 @@ impl RamfluxClient {
                 Ok(message.envelope_id.clone())
             });
             self.finish_own_sent_copy(&message.message_id, ticket.as_deref(), true);
+            reconcile.map_or(Ok(()), |commit| commit())?;
             Ok::<_, SdkError>(())
         })?;
         Ok(accepted)

@@ -29,6 +29,8 @@ impl Drop for Intent {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Prepared {
     fingerprint: String,
+    pub(crate) journal_key: String,
+    expires_at: i64,
     pub(crate) identity: g::EventIdentity,
     pub(crate) exact: Vec<u8>,
     pub(crate) wire: Vec<u8>,
@@ -53,25 +55,64 @@ pub(super) async fn dispatch(
         .map_err(|error| SdkError::from(AdapterError::from_sdk(&error)))
 }
 
-pub(in crate::bus) async fn execute(
+pub(crate) async fn execute(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Err(refused(Code::PeerUpgradeRequired, "generation inactive"));
+    }
+    super::conversation_journal::prune(&account.client, now_unix_timestamp())?;
+    let operation = request
+        .operation_id
+        .as_deref()
+        .filter(|v| !v.is_empty() && v.len() <= 256)
+        .ok_or_else(|| refused(Code::InvalidArgument, "operation_id required"))?;
+    let journal_key = super::conversation_journal::key(operation);
+    let canonical =
+        Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?);
+    let fingerprint =
+        ramflux_crypto::blake3_256_base64url("ramflux.conversation.intent.v1", &canonical);
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Err(refused(Code::PeerUpgradeRequired, "generation inactive"));
+    }
+    if let Some(receipt) = super::conversation_journal::load(&account.client, &journal_key)? {
+        if receipt.fingerprint != fingerprint {
+            return Err(refused(Code::InvalidArgument, "operation_id reused"));
+        }
+        if let Some(terminal) = receipt.terminal {
+            return Ok(local_bus_ok(terminal));
+        }
+        if !account.client.account_db()?.actor_state_exists(
+            &journal_key.replace("conversation-operation/", "conversation-intent/"),
+        )? {
+            let response = serde_json::json!({"event_id":ramflux_protocol::encode_base64url(&receipt.identity.id),"conversation_id":receipt.identity.conversation_id,"delivery_state":"failed","retired":true,"reconcile_required":true,"effects":"unknown","accepted_targets":receipt.accepted});
+            super::conversation_journal::terminal(&account.client, &journal_key, &response)?;
+            return Ok(local_bus_ok(response));
+        }
+    }
     let prepared = prepare(&account.client, request)?;
     let event = ramflux_protocol::encode_base64url(&prepared.identity.id);
     let (_, content) = RamfluxClient::decode_generated_inner(&prepared.exact)?;
     if let Some(g::content::Value::Delete(delete)) = content.value
         && delete.scope == g::DeleteScope::Local as i32
     {
-        account.client.apply_generated_delete_authorized(
-            &account.client.owned_device_identity()?,
-            &prepared.identity,
-            &prepared.identity.conversation_id,
-            &delete,
-        )?;
-        return Ok(local_bus_ok(serde_json::json!({"event_id": event,
-            "message_id": request.body["message_id"], "conversation_id": prepared.identity.conversation_id,
-            "delivery_state":"local", "deliveries":[]})));
+        let response = serde_json::json!({"event_id":event,"message_id":request.body["message_id"],"conversation_id":prepared.identity.conversation_id,"delivery_state":"local","deliveries":[]});
+        account.client.account_db()?.write_transaction(|| {
+            account.client.apply_generated_delete_authorized(
+                &account.client.owned_device_identity()?,
+                &prepared.identity,
+                &prepared.identity.conversation_id,
+                &delete,
+            )?;
+            super::conversation_journal::terminal(
+                &account.client,
+                &prepared.journal_key,
+                &response,
+            )?;
+            Ok::<_, SdkError>(())
+        })?;
+        return Ok(local_bus_ok(response));
     }
 
     let mut response = Box::pin(super::conversation_delivery::send(account, &prepared))
@@ -79,6 +120,16 @@ pub(in crate::bus) async fn execute(
         .map_err(|error| SdkError::from(AdapterError::from_sdk(&error)))?;
     response.response_body["event_id"] = serde_json::json!(event);
     response.response_body["target_message_id"] = request.body["message_id"].clone();
+    if response.response_body["delivery_state"] == "submitted" {
+        super::conversation_journal::terminal(
+            &account.client,
+            &prepared.journal_key,
+            &response.response_body,
+        )?;
+        account.client.account_db()?.remove_actor_state(
+            &prepared.journal_key.replace("conversation-operation/", "conversation-intent/"),
+        )?;
+    }
     Ok(response)
 }
 
@@ -105,12 +156,27 @@ pub(crate) fn prepare(
             operation.as_bytes()
         )
     );
-    let fingerprint = ramflux_crypto::blake3_256_base64url(
-        "ramflux.conversation.intent.v1",
-        &ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?,
-    );
+    let canonical =
+        Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?);
+    let fingerprint =
+        ramflux_crypto::blake3_256_base64url("ramflux.conversation.intent.v1", &canonical);
+    let journal_key = super::conversation_journal::key(operation);
     let db = client.account_db()?;
     db.write_transaction(|| {
+        super::conversation_journal::prune(client, now_unix_timestamp())?;
+        if let Some(receipt) = super::conversation_journal::load(client, &journal_key)? {
+            if receipt.fingerprint != fingerprint {
+                return Err(refused(Code::InvalidArgument, "operation_id reused"));
+            }
+            if !db.actor_state_exists(&key)? {
+                return Err(refused(
+                    Code::TargetDeleted,
+                    "private pending payload retired; reconcile retained identity",
+                ));
+            }
+        } else {
+            super::conversation_journal::capacity(client, super::conversation_journal::PREFIX)?;
+        }
         if let Some(prepared) = db.load_actor_state::<Prepared>(&key)? {
             if prepared.fingerprint != fingerprint {
                 return Err(refused(
@@ -120,46 +186,70 @@ pub(crate) fn prepare(
             }
             return Ok(prepared);
         }
-        let Target { reference: target, stored, group } = target(client, &intent)?;
-        let mut content =
-            content(client, &request.method, &intent, &target, &stored, group.as_deref())?;
-        RamfluxClient::prepare_generated_revision(&mut content)?;
-        g::validation::validate_content(&content)
-            .map_err(|_| refused(Code::InvalidArgument, "invalid generated mutation content"))?;
-        let mut identity = client.allocate_generated_identity(
-            &intent.conversation_id,
-            u64::try_from(now_unix_timestamp()).unwrap_or(0).saturating_mul(1000),
-            false,
-        )?;
-        if let Some(group) = group {
-            let state = client.group_state(&group)?;
-            identity.group_id = Some(group);
-            identity.group_epoch = Some(state.group_epoch);
-        }
-        match content.value.as_mut() {
-            Some(g::content::Value::Reaction(reaction)) => {
-                reaction.operation_id.clone_from(&identity.id);
-            }
-            Some(g::content::Value::Delete(delete)) => {
-                delete.tombstone_id = g::identity::delete_tombstone(&identity.id)
-                    .map_err(|_| refused(Code::InvalidArgument, "invalid tombstone identity"))?
-                    .to_vec();
-            }
-            _ => {}
-        }
-        g::validation::validate_content(&content)
-            .map_err(|_| refused(Code::InvalidArgument, "invalid finalized mutation content"))?;
-        let exact = RamfluxClient::encode_generated_inner(identity.clone(), &content)?;
-        let wire = if identity.group_id.is_some() && request.method == "conversation.reply" {
-            client.wrap_conversation_group_reply(&identity, &exact)?
-        } else {
-            exact.clone()
+        let (identity, exact, wire) = encode_intent(client, request, &intent)?;
+        let expires_at = super::conversation_journal::expiry(client, now_unix_timestamp())?;
+        let prepared = Prepared {
+            fingerprint: fingerprint.clone(),
+            journal_key: journal_key.clone(),
+            expires_at,
+            identity,
+            exact,
+            wire,
         };
-        let prepared = Prepared { fingerprint: fingerprint.clone(), identity, exact, wire };
+        let receipt = super::conversation_journal::Receipt {
+            fingerprint,
+            identity: prepared.identity.clone(),
+            accepted: BTreeSet::new(),
+            terminal: None,
+            expires_at: super::conversation_journal::expiry(client, now_unix_timestamp())?,
+        };
+        super::conversation_journal::save(client, &journal_key, &receipt)?;
         // Private replacement text follows its target's erasure ownership.
         db.persist_message_actor_state(&intent.message_id, &key, &prepared)?;
         Ok(prepared)
     })
+}
+
+fn encode_intent(
+    client: &RamfluxClient,
+    request: &LocalBusFrame,
+    intent: &Intent,
+) -> Result<(g::EventIdentity, Vec<u8>, Vec<u8>), SdkError> {
+    let Target { reference: target, stored, group } = target(client, intent)?;
+    let mut content = content(client, &request.method, intent, &target, &stored, group.as_deref())?;
+    RamfluxClient::prepare_generated_revision(&mut content)?;
+    g::validation::validate_content(&content)
+        .map_err(|_| refused(Code::InvalidArgument, "invalid generated mutation content"))?;
+    let mut identity = client.allocate_generated_identity(
+        &intent.conversation_id,
+        u64::try_from(now_unix_timestamp()).unwrap_or(0).saturating_mul(1000),
+        false,
+    )?;
+    if let Some(group) = group {
+        let state = client.group_state(&group)?;
+        identity.group_id = Some(group);
+        identity.group_epoch = Some(state.group_epoch);
+    }
+    match content.value.as_mut() {
+        Some(g::content::Value::Reaction(reaction)) => {
+            reaction.operation_id.clone_from(&identity.id);
+        }
+        Some(g::content::Value::Delete(delete)) => {
+            delete.tombstone_id = g::identity::delete_tombstone(&identity.id)
+                .map_err(|_| refused(Code::InvalidArgument, "invalid tombstone identity"))?
+                .to_vec();
+        }
+        _ => {}
+    }
+    g::validation::validate_content(&content)
+        .map_err(|_| refused(Code::InvalidArgument, "invalid finalized mutation content"))?;
+    let exact = RamfluxClient::encode_generated_inner(identity.clone(), &content)?;
+    let wire = if identity.group_id.is_some() && request.method == "conversation.reply" {
+        client.wrap_conversation_group_reply(&identity, &exact)?
+    } else {
+        exact.clone()
+    };
+    Ok((identity, exact, wire))
 }
 
 fn validate_intent(method: &str, intent: &Intent) -> Result<(), SdkError> {

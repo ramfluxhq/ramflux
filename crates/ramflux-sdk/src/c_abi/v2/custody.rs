@@ -6,7 +6,7 @@ use crate::SdkError;
 use crate::custody::{BranchCredentials, CustodyVaultReason, PrimaryVault};
 use ramflux_crypto::custody::SelfSigningKey;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Version 1 host storage operations. References are opaque UTF-8, without a terminating NUL.
 #[repr(u32)]
@@ -111,6 +111,8 @@ impl HostVault {
             return Err(SdkError::CustodySetupInvalid);
         }
         let callback = self.0.invoke.ok_or(SdkError::CustodyVaultUnavailable)?;
+        // Copy into SDK-owned callback memory; never lend a long-lived key allocation.
+        let mut input = Zeroizing::new(input.to_vec());
         let mut output = Zeroizing::new(vec![0; MAX_SECRET]);
         let mut request = RamfluxV2CustodyRequest {
             operation,
@@ -123,6 +125,10 @@ impl HostVault {
             output_len: 0,
         };
         let status = callback(self.0.context, &raw mut request);
+        // The synchronous borrow ends here, including failed callbacks.
+        input.as_mut_slice().zeroize();
+        #[cfg(test)]
+        record_wiped_input(&input);
         let len = request.output_len;
         let reason = match status {
             0 => None,
@@ -139,6 +145,7 @@ impl HostVault {
         if len > MAX_SECRET {
             return Err(SdkError::CustodyVault(CustodyVaultReason::Corrupt));
         }
+        output.get_mut(len..).ok_or(SdkError::CustodySetupInvalid)?.zeroize();
         output.truncate(len);
         Ok(output)
     }
@@ -205,5 +212,15 @@ impl PrimaryVault for HostVault {
     }
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         self.invoke(RamfluxV2CustodyOperation::LoadProvisioning, reference, &[])
+    }
+}
+
+#[cfg(test)]
+thread_local! { pub(super) static WIPED_INPUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+fn record_wiped_input(input: &[u8]) {
+    assert!(input.iter().all(|byte| *byte == 0), "callback input must be wiped before disposal");
+    if !input.is_empty() {
+        WIPED_INPUTS.with(|count| count.set(count.get() + 1));
     }
 }

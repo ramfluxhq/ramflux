@@ -381,6 +381,7 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
         .submit_conversation_event(
             &mut transport,
             ConversationEvent {
+                reconcile: None,
                 message: message(&source, &peer)?,
                 exact: &exact,
                 wire: &exact,
@@ -413,6 +414,7 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
             .submit_conversation_event(
                 &mut transport,
                 ConversationEvent {
+                    reconcile: None,
                     message: message(&source, &peer)?,
                     exact: &prepared.exact,
                     wire: &prepared.wire,
@@ -498,6 +500,7 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
         .submit_conversation_event(
             &mut transport,
             ConversationEvent {
+                reconcile: None,
                 message: outbound,
                 exact: &exact,
                 wire: &wire,
@@ -529,6 +532,7 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
         .submit_conversation_event(
             &mut transport,
             ConversationEvent {
+                reconcile: None,
                 message: outbound,
                 exact: &prepared.exact,
                 wire: &prepared.wire,
@@ -575,5 +579,234 @@ fn prepare_conversation_group(source: &Fixture, peer: &Fixture) -> TestResult {
         Some(&primary),
     )?;
     peer.client.accept_shared_group_state(&state, &peer.config.target_delivery_id)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_conversation_edit_retry_survives_retirement_reopen_and_partial_fanout() -> TestResult
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(durable_edit_retry())).await?
+}
+
+async fn durable_edit_retry() -> TestResult {
+    use crate::bus::dispatch::{
+        conversation_delivery as delivery, conversation_journal as journal,
+        conversation_mutation as mutation,
+    };
+    use crate::client::routed::ConversationEvent;
+    use ramflux_protocol::message as g;
+    let mut source = Fixture::new("durable-edit-source").await?;
+    let mut first = Fixture::new("durable-edit-peer").await?;
+    let mut second = first.enroll_sibling("durable-edit-second", "second").await?;
+    for peer in [&first, &second] {
+        source.client.persist_fetched_identity_directory(&peer.manifest)?;
+        peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    }
+    let own = source.client.own_account_anchor()?;
+    let remote = first.client.own_account_anchor()?;
+    source.client.establish_friend_link("durable-link", &own, &remote)?;
+    for peer in [&first, &second] {
+        peer.client.establish_friend_link("durable-source", &own, &remote)?;
+    }
+    let conversation = g::dm_scope::derive(&own, &remote)?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (target, recipients) =
+        seed_durable_edit(&mut source, &mut first, &mut second, &conversation).await?;
+    let mut request = crate::LocalBusFrame::request(
+        "edit",
+        Some("source".into()),
+        "conversation",
+        "conversation.edit",
+        serde_json::json!({"conversation_id":conversation,"message_id":target,"text":"replacement"}),
+    );
+    request.operation_id = Some("durable-edit-operation".into());
+    let prepared = mutation::prepare(&source.client, &request)?;
+    let expected = zeroize::Zeroizing::new(prepared.exact.clone());
+    let event = prepared.identity.id.clone();
+    let key = prepared.journal_key.clone();
+    let mut old_pending = request.clone();
+    old_pending.operation_id = Some("superseded-pending".into());
+    old_pending.body["text"] = serde_json::json!("private superseded payload");
+    let older = mutation::prepare(&source.client, &old_pending)?;
+    let mut wire = engine(&source, &first, false)?;
+    let reconcile = || delivery::reconcile_accepted(&source.client, &prepared, "first");
+    let accepted = source
+        .client
+        .submit_conversation_event(
+            &mut wire,
+            ConversationEvent {
+                reconcile: Some(&reconcile),
+                message: message(&source, &first)?,
+                exact: &prepared.exact,
+                wire: &prepared.wire,
+                recipients: &recipients,
+            },
+        )
+        .await?;
+    first.receive(accepted.envelope, 2).await?;
+    assert!(
+        !source.client.account_db()?.actor_state_exists(
+            &older.journal_key.replace("conversation-operation/", "conversation-intent/")
+        )?,
+        "edit retirement must erase OTHER pending private payloads"
+    );
+    assert!(
+        journal::load(&source.client, &older.journal_key)?.is_some(),
+        "superseded content-free identity remains reconcilable"
+    );
+    drop(prepared);
+    drop(wire);
+    source.restart_authored_source().await?;
+    let prepared = mutation::prepare(&source.client, &request)?;
+    assert_eq!(prepared.identity.id, event, "lost reply cannot allocate another mutation identity");
+    assert_eq!(
+        prepared.exact, *expected,
+        "pending second target reuses the exact authorized payload"
+    );
+    assert_eq!(
+        journal::load(&source.client, &key)?.ok_or("receipt")?.accepted.len(),
+        1,
+        "first accepted target survives restart"
+    );
+    Box::pin(finish_durable_edit_retry(EditRetry {
+        source,
+        first,
+        second,
+        request,
+        prepared,
+        own,
+        key,
+        event,
+        recipients,
+    }))
+    .await
+}
+
+async fn seed_durable_edit(
+    source: &mut Fixture,
+    first: &mut Fixture,
+    second: &mut Fixture,
+    conversation: &str,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    use crate::client::routed::ConversationEvent;
+    use ramflux_protocol::message as g;
+    let identity = source.client.allocate_generated_identity(conversation, 1000, false)?;
+    let target = ramflux_protocol::encode_base64url(&identity.id);
+    let original = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "original".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let recipients = vec![
+        first.client.owned_device_identity()?.storage_key().to_owned(),
+        second.client.owned_device_identity()?.storage_key().to_owned(),
+    ];
+    for peer in [first, second] {
+        let mut wire = engine(source, peer, false)?;
+        let entry = source
+            .client
+            .submit_conversation_event(
+                &mut wire,
+                ConversationEvent {
+                    reconcile: None,
+                    message: message(source, peer)?,
+                    exact: &original,
+                    wire: &original,
+                    recipients: &recipients,
+                },
+            )
+            .await?;
+        peer.receive(entry.envelope, 1).await?;
+    }
+    Ok((target, recipients))
+}
+
+struct EditRetry {
+    source: Fixture,
+    first: Fixture,
+    second: Fixture,
+    request: crate::LocalBusFrame,
+    prepared: crate::bus::dispatch::conversation_mutation::Prepared,
+    own: String,
+    key: String,
+    event: Vec<u8>,
+    recipients: Vec<String>,
+}
+async fn finish_durable_edit_retry(case: EditRetry) -> TestResult {
+    use crate::bus::dispatch::{
+        conversation_delivery as delivery, conversation_journal as journal,
+        conversation_mutation as mutation,
+    };
+    use crate::client::routed::ConversationEvent;
+    let EditRetry { mut source, first, mut second, request, prepared, own, key, event, recipients } =
+        case;
+    let mut changed = request.clone();
+    changed.body["text"] = serde_json::json!("changed");
+    assert!(
+        mutation::prepare(&source.client, &changed).is_err(),
+        "changed intent cannot reuse a retired target's operation key"
+    );
+    let mut refused = engine(&source, &second, true)?;
+    let reconcile = || delivery::reconcile_accepted(&source.client, &prepared, "second");
+    assert!(
+        source
+            .client
+            .submit_conversation_event(
+                &mut refused,
+                ConversationEvent {
+                    reconcile: Some(&reconcile),
+                    message: message(&source, &second)?,
+                    exact: &prepared.exact,
+                    wire: &prepared.wire,
+                    recipients: &recipients
+                }
+            )
+            .await
+            .is_err(),
+        "partial fanout failure must remain retryable without replacing identity"
+    );
+    assert_eq!(
+        journal::load(&source.client, &key)?.ok_or("receipt")?.accepted.len(),
+        1,
+        "nack cannot invent acceptance"
+    );
+    let mut retry = engine(&source, &second, false)?;
+    let accepted = source
+        .client
+        .submit_conversation_event(
+            &mut retry,
+            ConversationEvent {
+                reconcile: Some(&reconcile),
+                message: message(&source, &second)?,
+                exact: &prepared.exact,
+                wire: &prepared.wire,
+                recipients: &recipients,
+            },
+        )
+        .await?;
+    second.receive(accepted.envelope, 2).await?;
+    let terminal = serde_json::json!({"event_id":ramflux_protocol::encode_base64url(&event),"delivery_state":"submitted","deliveries":[]});
+    journal::terminal(&source.client, &key, &terminal)?;
+    drop(prepared);
+    drop(refused);
+    drop(retry);
+    source.restart_authored_source().await?;
+    let config = engine(&source, &first, false)?;
+    let client = std::mem::replace(&mut source.client, RamfluxClient::new());
+    let mut account = crate::prelude::LocalBusAccountState::new(client, config, own);
+    let response = mutation::execute(&request, &mut account).await?;
+    assert_eq!(
+        response.response_body, terminal,
+        "lost terminal reply is returned after reopening without re-sealing or reapplying"
+    );
+    let stored = serde_json::to_string(&journal::load(&account.client, &key)?.ok_or("receipt")?)?;
+    assert!(
+        !stored.contains("replacement") && !stored.contains("private superseded payload"),
+        "surviving operation receipts contain no private content"
+    );
     Ok(())
 }

@@ -36,7 +36,7 @@ def junit(output, status):
             ET.SubElement(case, "failure").text = clean
         elif state == "ignored":
             ET.SubElement(case, "skipped")
-    valid = bool(cases) and bool(summaries) and totals == observed
+    valid = bool(cases) and bool(summaries) and totals == observed and sum(observed[:2]) > 0
     if not valid or (status and not observed[1]):
         case = ET.SubElement(suite, "testcase", classname="capture", name="command-completed")
         ET.SubElement(case, "failure").text = f"exit={status}, summary={totals}, captured={observed}\n{clean}"
@@ -75,6 +75,15 @@ class Tests(unittest.TestCase):
         suite, valid = junit("test a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;", 7)
         self.assertTrue(valid)
         self.assertEqual(suite.get("failures"), "1")
+
+    def test_empty_and_ignored_only_filters_fail(self):
+        for output in (
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;\n",
+            "test a ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out;\n",
+        ):
+            suite, valid = junit(output, 0)
+            self.assertFalse(valid)
+            self.assertGreater(int(suite.get("failures")), 0)
 
     def test_failed_test(self):
         suite, valid = junit("test a ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;", 101)
