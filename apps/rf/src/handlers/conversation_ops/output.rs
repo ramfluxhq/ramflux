@@ -71,6 +71,7 @@ mod tests {
         frame
     }
 
+    /// Locks the JSON shape of a typed refusal. It does not show that the bus emits one.
     #[test]
     fn edit_conflict_refusal_json_keeps_typed_details() {
         let details = json!({"target": "m1", "expected": 1, "received": 2});
@@ -82,15 +83,18 @@ mod tests {
         });
         let frame = error_frame("edit_conflict", "revision conflict", details, body);
         let value = outcome("conversation.edit", &frame);
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["method"], "conversation.edit");
-        assert_eq!(value["error"]["code"], "edit_conflict");
-        assert_eq!(value["error"]["message"], "revision conflict");
-        assert_eq!(value["error"]["details"]["target"], "m1");
-        assert_eq!(value["error"]["details"]["expected"], 1);
-        assert_eq!(value["error"]["details"]["received"], 2);
-        assert_eq!(value["body"]["name"], "edit_conflict");
-        assert_eq!(value["body"]["details"]["received"], 2);
+        assert_eq!(value["ok"], false, "test: a typed refusal is not ok");
+        assert_eq!(value["method"], "conversation.edit", "test: method is preserved");
+        assert_eq!(value["error"]["code"], "edit_conflict", "test: error code is preserved");
+        assert_eq!(
+            value["error"]["message"], "revision conflict",
+            "test: error message is preserved"
+        );
+        assert_eq!(value["error"]["details"]["target"], "m1", "test: details.target is preserved");
+        assert_eq!(value["error"]["details"]["expected"], 1, "test: details.expected is preserved");
+        assert_eq!(value["error"]["details"]["received"], 2, "test: details.received is preserved");
+        assert_eq!(value["body"]["name"], "edit_conflict", "test: body name is preserved");
+        assert_eq!(value["body"]["details"]["received"], 2, "test: body details are preserved");
     }
 
     #[test]
@@ -105,9 +109,9 @@ mod tests {
         frame.kind = LocalBusFrameKind::Response;
         frame.ok = Some(true);
         let value = outcome("conversation.send", &frame);
-        assert_eq!(value["ok"], true);
-        assert_eq!(value["body"]["message_id"], "m1");
-        assert!(value.get("error").is_none());
+        assert_eq!(value["ok"], true, "test: a response frame is ok");
+        assert_eq!(value["body"]["message_id"], "m1", "test: the bus body is copied");
+        assert!(value.get("error").is_none(), "test: success JSON has no error object");
     }
 
     #[test]
@@ -117,8 +121,15 @@ mod tests {
             "invalid_argument",
             "typing operation_id must be 16 to 64 bytes",
         );
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["code"], "invalid_argument");
-        assert_eq!(value["error"]["details"], serde_json::Value::Null);
+        assert_eq!(value["ok"], false, "test: a local refusal is not ok");
+        assert_eq!(
+            value["error"]["code"], "invalid_argument",
+            "test: local typing refusal uses invalid_argument"
+        );
+        assert_eq!(
+            value["error"]["details"],
+            serde_json::Value::Null,
+            "test: a local refusal has null details"
+        );
     }
 }

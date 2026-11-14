@@ -170,7 +170,7 @@ mod tests {
         ]) else {
             panic!("expected send");
         };
-        assert_eq!(send.operation_id, "op-send");
+        assert_eq!(send.operation_id, "op-send", "test: send keeps its operation id");
 
         let ConversationAction::Edit(edit) = parse(&[
             "rf",
@@ -189,7 +189,7 @@ mod tests {
         ]) else {
             panic!("expected edit");
         };
-        assert_eq!(edit.message, "m1");
+        assert_eq!(edit.message, "m1", "test: edit keeps the target message");
 
         let ConversationAction::React(react) = parse(&[
             "rf",
@@ -209,7 +209,7 @@ mod tests {
         ]) else {
             panic!("expected react");
         };
-        assert!(react.remove);
+        assert!(react.remove, "test: react --remove sets the remove flag");
 
         let ConversationAction::Delete(delete) = parse(&[
             "rf",
@@ -228,8 +228,12 @@ mod tests {
         ]) else {
             panic!("expected delete");
         };
-        assert_eq!(delete.scope, ConversationDeleteScope::Everyone);
-        assert_eq!(delete.scope.as_wire(), "everyone");
+        assert_eq!(
+            delete.scope,
+            ConversationDeleteScope::Everyone,
+            "test: delete --scope everyone parses"
+        );
+        assert_eq!(delete.scope.as_wire(), "everyone", "test: everyone scope uses the wire name");
     }
 
     #[test]
@@ -249,11 +253,15 @@ mod tests {
         let TypingAction::Watch(watch) = typing.action else {
             panic!("expected watch");
         };
-        assert_eq!(watch.for_secs, 6);
-        assert!(watch.ready_file.is_none());
-        assert!(for_secs_in_range("0").is_err());
-        assert!(for_secs_in_range("31").is_err());
-        assert_eq!(for_secs_in_range("30").expect("upper bound"), 30);
+        assert_eq!(watch.for_secs, 6, "test: typing watch defaults to 6 seconds");
+        assert!(watch.ready_file.is_none(), "test: typing watch has no ready file by default");
+        assert!(for_secs_in_range("0").is_err(), "test: typing watch rejects 0 seconds");
+        assert!(for_secs_in_range("31").is_err(), "test: typing watch rejects 31 seconds");
+        assert_eq!(
+            for_secs_in_range("30").expect("upper bound"),
+            30,
+            "test: 30 seconds is in range"
+        );
     }
 
     #[test]
@@ -273,6 +281,10 @@ mod tests {
         ]) else {
             panic!("missing operation id was accepted");
         };
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "test: reply requires an operation id"
+        );
     }
 }

@@ -3,8 +3,9 @@
 
 //! Emit typing through `message.focus` and `message.submit`, and observe `message.transient`.
 
+use super::super::{LocalBusClient, RfError, print_json};
+use super::drive::call;
 use super::output::local_refusal;
-use super::{LocalBusClient, RfError, call, print_json};
 use crate::cli::{TypingAction, TypingCommand, TypingEmit, TypingWatch};
 use ramflux_protocol::message::{self as schema, Content, MessageRequest, SendMessage, Typing};
 use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
@@ -80,7 +81,9 @@ fn submit_body(
     active: bool,
 ) -> Result<Value, RfError> {
     let request = MessageRequest {
-        request_id: String::new(),
+        // The sender clears this before the retry fingerprint. Operation identity stays the
+        // operation_id bytes; the field only has to be nonempty and stable for this operation.
+        request_id: operation_id.to_owned(),
         account_id: account.to_owned(),
         action: Some(schema::message_request::Action::Send(SendMessage {
             conversation_id: conversation.to_owned(),
@@ -175,7 +178,7 @@ fn unix_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{TYPING_OPERATION_MAX, TYPING_OPERATION_MIN, indicator, preflight};
+    use super::{TYPING_OPERATION_MAX, TYPING_OPERATION_MIN, indicator, preflight, submit_body};
     use crate::cli::{TypingAction, TypingCommand, TypingEmit};
     use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
     use serde_json::json;
@@ -193,10 +196,34 @@ mod tests {
     #[test]
     fn typing_operation_id_outside_16_to_64_bytes_is_a_local_refusal() {
         let short = preflight(&emit(&"x".repeat(TYPING_OPERATION_MIN - 1))).expect("short id");
-        assert_eq!(short["error"]["code"], "invalid_argument");
-        assert!(preflight(&emit(&"x".repeat(TYPING_OPERATION_MIN))).is_none());
-        assert!(preflight(&emit(&"x".repeat(TYPING_OPERATION_MAX))).is_none());
-        assert!(preflight(&emit(&"x".repeat(TYPING_OPERATION_MAX + 1))).is_some());
+        assert_eq!(
+            short["error"]["code"], "invalid_argument",
+            "test: a short typing operation id is invalid_argument"
+        );
+        assert!(
+            preflight(&emit(&"x".repeat(TYPING_OPERATION_MIN))).is_none(),
+            "test: 16-byte typing operation id is accepted"
+        );
+        assert!(
+            preflight(&emit(&"x".repeat(TYPING_OPERATION_MAX))).is_none(),
+            "test: 64-byte typing operation id is accepted"
+        );
+        assert!(
+            preflight(&emit(&"x".repeat(TYPING_OPERATION_MAX + 1))).is_some(),
+            "test: a 65-byte typing operation id is refused locally"
+        );
+    }
+
+    #[test]
+    fn typing_submit_request_id_is_the_operation_id_for_start_and_stop() {
+        let operation = "typing-operation-16";
+        let start = submit_body("alice", "dm:scope", operation, true).expect("start body");
+        let stop = submit_body("alice", "dm:scope", operation, false).expect("stop body");
+        assert_eq!(
+            start["requestId"], operation,
+            "test: start requestId is the stable operation id"
+        );
+        assert_eq!(stop["requestId"], operation, "test: stop reuses the same nonempty requestId");
     }
 
     #[test]
@@ -209,6 +236,9 @@ mod tests {
             json!({"text": "durable"}),
         );
         frame.kind = LocalBusFrameKind::Event;
-        assert!(indicator("thread", &frame, 1).is_none());
+        assert!(
+            indicator("thread", &frame, 1).is_none(),
+            "test: a non-typing transient event is not an indicator"
+        );
     }
 }
