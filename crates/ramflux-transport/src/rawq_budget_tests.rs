@@ -493,7 +493,9 @@ fn listeners_and_processes_share_one_host_budget() {
     assert_eq!(budget.digest(), reversed.digest());
     let nonce =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("rawq-budget-{}-{nonce}", std::process::id()));
+    let dir = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rawq-budget-{}-{nonce}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("host.ledger");
     let left = Arc::new(plan(1_000_000_000, vec![request("mesh", Mesh, Some(125_000_000))]));
@@ -681,7 +683,9 @@ fn metadata_census_covers_all_r8_classes() {
 fn release_refuses_replaced_claim_identity() {
     let nonce =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("rawq-release-{}-{nonce}", std::process::id()));
+    let dir = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rawq-release-{}-{nonce}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let budget = plan(1_000_000_000, vec![request("m", Mesh, Some(125_000_000))]);
     for offset in [0, 8, 16, 24] {

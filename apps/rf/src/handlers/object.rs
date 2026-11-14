@@ -814,8 +814,10 @@ async fn stream_upload_status(
 mod tests {
     use super::object_get_open_temp;
 
-    fn unique_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rf-object-get-{tag}-{}", std::process::id()));
+    fn unique_dir(tag: &str) -> ramflux_test_support::TestPath {
+        let dir = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-object-get-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         dir
@@ -830,7 +832,6 @@ mod tests {
         drop(object_get_open_temp(&path)?);
         let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "temp output must be created 0600");
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
@@ -847,7 +848,6 @@ mod tests {
             b"pre-existing",
             "a refused open must NOT truncate the existing file"
         );
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
@@ -868,7 +868,6 @@ mod tests {
             b"victim-content",
             "the symlink target must be untouched"
         );
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

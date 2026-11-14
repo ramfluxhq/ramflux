@@ -82,12 +82,14 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
 
     if std::env::var_os("RAMFLUX_S6C_P03_CHILD").is_none() {
         for with_wal in ["1", "0"] {
-            let capture = std::env::temp_dir().join(format!(
-                "ramflux-s6c-p03-gw-{}-{}-{}.jsonl",
-                with_wal,
-                std::process::id(),
-                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
-            ));
+            let capture = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "ramflux-s6c-p03-gw-{}-{}-{}.jsonl",
+                    with_wal,
+                    std::process::id(),
+                    ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+                ));
             let status = std::process::Command::new(std::env::current_exe()?)
                 .args(["--exact", GATEWAY_REGISTRY_TEST, "--nocapture"])
                 .env("RAMFLUX_S6C_P03_CHILD", "1")
@@ -167,7 +169,9 @@ async fn drive_control_gateway_edge(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
         "session.rs:handle_gateway_submit" => {
-            let context = crate::session::tests::test_gateway_context()?;
+            let (_fixture_directory_0, fixture_value_0) =
+                crate::session::tests::test_gateway_context()?;
+            let context = fixture_value_0;
             let (send, frames) = frame_sink();
             match crate::session::handle_gateway_submit(&send, &context, runtime, control).await {
                 Ok(()) => assert_eq!(nack_reason(&frames)?, CONTROL_SUBMIT_ERR, "{entry}"),
@@ -175,7 +179,9 @@ async fn drive_control_gateway_edge(
             }
         }
         "session.rs:handle_gateway_own_device_fanout" => {
-            let context = crate::session::tests::test_gateway_context()?;
+            let (_fixture_directory_1, fixture_value_1) =
+                crate::session::tests::test_gateway_context()?;
+            let context = fixture_value_1;
             let fanout = fanout_frame(runtime, control);
             let (send, frames) = frame_sink();
             match crate::session::handle_gateway_own_device_fanout(
@@ -189,12 +195,8 @@ async fn drive_control_gateway_edge(
         }
         "quic_dispatch.rs:forward_quic_envelope" => {
             let body = serde_json::to_value(&control.envelope)?;
-            match crate::quic_dispatch::forward_quic_envelope(
-                &crate::session::tests::test_gateway_context()?.router,
-                body,
-            )
-            .await
-            {
+            let (_context_directory, context) = crate::session::tests::test_gateway_context()?;
+            match crate::quic_dispatch::forward_quic_envelope(&context.router, body).await {
                 Ok(response) => {
                     return Err(format!("control {entry} admitted: {response}").into());
                 }
@@ -215,10 +217,12 @@ async fn drive_marked_gateway_edge(
     runtime: &crate::GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let capture = capture_path(ordinal);
+    let (_capture_directory, capture) = capture_path(ordinal);
     match entry {
         "session.rs:handle_gateway_submit" => {
-            let context = crate::session::tests::test_gateway_context()?;
+            let (_fixture_directory_3, fixture_value_3) =
+                crate::session::tests::test_gateway_context()?;
+            let context = fixture_value_3;
             let before = capture_snapshot(&capture);
             let store_before = gateway_store_snapshot(&context)?;
             let (send, frames) = frame_sink();
@@ -237,7 +241,9 @@ async fn drive_marked_gateway_edge(
             );
         }
         "session.rs:handle_gateway_own_device_fanout" => {
-            let context = crate::session::tests::test_gateway_context()?;
+            let (_fixture_directory_4, fixture_value_4) =
+                crate::session::tests::test_gateway_context()?;
+            let context = fixture_value_4;
             let before = capture_snapshot(&capture);
             let store_before = gateway_store_snapshot(&context)?;
             let fanout = fanout_frame(runtime, submit);
@@ -258,11 +264,10 @@ async fn drive_marked_gateway_edge(
         }
         "quic_dispatch.rs:forward_quic_envelope" => {
             let body = serde_json::to_value(&submit.envelope)?;
-            let response = crate::quic_dispatch::forward_quic_envelope(
-                &crate::session::tests::test_gateway_context()?.router,
-                body,
-            )
-            .await?;
+            let (_fixture_directory_5, fixture_value_5) =
+                crate::session::tests::test_gateway_context()?;
+            let response =
+                crate::quic_dispatch::forward_quic_envelope(&fixture_value_5.router, body).await?;
             assert_eq!(response["outcome"], "rejected_security:delivery_mode_refused", "{entry}");
         }
         "itest_http.rs:dispatch_protected_itest_request" => {
@@ -313,7 +318,7 @@ fn drive_itest_http_control(
     entry: &str,
     control: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_6, context) = crate::session::tests::test_gateway_context()?;
     let (mut server, mut client) = loopback()?;
     let request = envelope_http_request(&control.envelope)?;
     match crate::itest_http::dispatch_protected_itest_request(
@@ -348,7 +353,7 @@ fn drive_itest_http_marked(
     entry: &str,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_7, context) = crate::session::tests::test_gateway_context()?;
     let (mut server, mut client) = loopback()?;
     let request = envelope_http_request(&submit.envelope)?;
     crate::itest_http::dispatch_protected_itest_request(
@@ -467,14 +472,15 @@ fn resign_submit(
     Ok(())
 }
 
-fn capture_path(ordinal: u64) -> PathBuf {
-    std::env::var_os("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON").map_or_else(
-        || {
-            std::env::temp_dir()
-                .join(format!("ramflux-s6c-p03-capture-{ordinal}-{}.jsonl", std::process::id()))
-        },
-        PathBuf::from,
-    )
+fn capture_path(ordinal: u64) -> (Option<ramflux_test_support::TestPath>, PathBuf) {
+    if let Some(path) = std::env::var_os("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON") {
+        return (None, PathBuf::from(path));
+    }
+    let owner = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-s6c-p03-capture-{ordinal}-{}.jsonl", std::process::id()));
+    let path = owner.to_path_buf();
+    (Some(owner), path)
 }
 
 fn first_statement_has_mode_guard(

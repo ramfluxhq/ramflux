@@ -68,11 +68,13 @@ mod tests {
     #[test]
     fn pending_actor_sequence_selects_latest_matching_unpublished_entry()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-outbox-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-outbox-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
@@ -101,7 +103,6 @@ mod tests {
         assert_eq!(db.pending_actor_state_sequence("account/networking")?, None);
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

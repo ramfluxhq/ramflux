@@ -6,7 +6,9 @@ use super::*;
 use ramflux_protocol::TaskCancel;
 type Case<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn pair(label: &str) -> Case<(PathBuf, LocalBusAccountState, LocalBusAccountState)> {
+fn pair(
+    label: &str,
+) -> Case<(ramflux_test_support::TestPath, LocalBusAccountState, LocalBusAccountState)> {
     let root = runtime_tests::root(label);
     let agent = runtime_tests::account(
         &root.join("agent"),
@@ -138,7 +140,7 @@ fn decide(human: &LocalBusAccountState, packet: &Packet, approved: bool) -> Case
 
 #[tokio::test]
 async fn r11_fake_transport_charges_timeouts_and_keeps_worker_capacity_free() -> Case {
-    let (root, mut agent, mut human) = pair("courier-outcomes-r11")?;
+    let (_root, mut agent, mut human) = pair("courier-outcomes-r11")?;
     open_named(&human, &agent, "task-a", "grant-a")?;
     pending(&mut agent, "approval-a", "grant-a")?;
     let decision = decide(&human, &request_job(&agent, "task-a")?.packet, true)?;
@@ -183,7 +185,6 @@ async fn r11_fake_transport_charges_timeouts_and_keeps_worker_capacity_free() ->
     );
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -232,10 +233,10 @@ fn store_courier_ack(
 }
 
 struct CourierStarvationFixture {
-    root: PathBuf,
     agent: LocalBusAccountState,
     human: LocalBusAccountState,
     healthy_forward: String,
+    root: ramflux_test_support::TestPath,
 }
 
 fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
@@ -301,7 +302,7 @@ fn courier_starvation_fixture() -> Case<CourierStarvationFixture> {
             created_at: now_unix_timestamp(),
         },
     )?;
-    Ok(CourierStarvationFixture { root, agent, human, healthy_forward })
+    Ok(CourierStarvationFixture { agent, human, healthy_forward, root })
 }
 
 async fn exercise_courier_starvation(
@@ -393,14 +394,13 @@ async fn r11_sync_cycle_only_signals_stalled_task_courier_work() -> Case {
     assert_eq!(signalled.try_recv(), Ok(()));
     drop(fixture.human);
     drop(fixture.agent);
-    std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }
 
 #[test]
 fn r5_canonically_identical_decisions_apply_the_executors_original_request_and_do_not_wedge_other_grants()
 -> Case {
-    let (root, mut agent, human) = pair("canonical-task-decision")?;
+    let (_root, mut agent, human) = pair("canonical-task-decision")?;
     open_named(&human, &agent, "alias", "grant-alias")?;
     pending(&mut agent, "alias", "grant-alias")?;
     let request = request_job(&agent, "alias")?;
@@ -429,13 +429,12 @@ fn r5_canonically_identical_decisions_apply_the_executors_original_request_and_d
     assert!(agent.mcp_grants.contains_key("grant-genuine"));
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn r5_a_bad_legacy_decision_cannot_skip_cleanup_or_new_request_admission() -> Case {
-    let (root, mut agent, human) = pair("isolated-bad-approval")?;
+    let (_root, mut agent, human) = pair("isolated-bad-approval")?;
     open_named(&human, &agent, "task", "grant")?;
     let storage = key("approval_decision_in", "bad");
     agent
@@ -454,14 +453,13 @@ async fn r5_a_bad_legacy_decision_cannot_skip_cleanup_or_new_request_admission()
     assert!(agent.client.account_db()?.task_state_usage("task/approval_rejected/")?.0 > 0);
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test]
 async fn r5_exhausted_decision_delivery_is_visible_as_failed_and_attended_retry_reuses_the_signature()
 -> Case {
-    let (root, mut agent, mut human) = pair("approval-delivery-retry")?;
+    let (_root, mut agent, mut human) = pair("approval-delivery-retry")?;
     open_named(&human, &agent, "task", "grant")?;
     pending(&mut agent, "approval", "grant")?;
     let request = request_job(&agent, "task")?;
@@ -487,14 +485,13 @@ async fn r5_exhausted_decision_delivery_is_visible_as_failed_and_attended_retry_
     assert!(human.client.decide_task_approval(&format!("task_approval_{id}"), false).is_err());
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn r5_more_than_sixty_four_honest_approvals_apply_within_one_day_without_retaining_full_decisions()
 -> Case {
-    let (root, mut agent, human) = pair("approval-throughput")?;
+    let (_root, mut agent, human) = pair("approval-throughput")?;
     for n in 0..65 {
         let task = format!("task-{n}");
         let grant = format!("grant-{n}");
@@ -564,14 +561,13 @@ fn r5_more_than_sixty_four_honest_approvals_apply_within_one_day_without_retaini
     assert!(agent.client.account_db()?.task_state_usage("task/approval_receipt/")?.0 <= 64);
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn r5_an_applied_grant_keeps_the_executors_receiver_deadline_without_rewriting_its_signature()
 -> Case {
-    let (root, mut agent, human) = pair("approval-effective-expiry")?;
+    let (_root, mut agent, human) = pair("approval-effective-expiry")?;
     open_named(&human, &agent, "task", "grant")?;
     insert_pending(&mut agent, "approval", "grant")?;
     let now = now_unix_timestamp();
@@ -590,7 +586,6 @@ fn r5_an_applied_grant_keeps_the_executors_receiver_deadline_without_rewriting_i
     assert_eq!(stored.state.expires_at, grant.state.expires_at);
     drop(human);
     drop(agent);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

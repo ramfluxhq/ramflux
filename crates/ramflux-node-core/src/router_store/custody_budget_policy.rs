@@ -70,8 +70,9 @@ mod tests {
     {
         const CHILD: &str = "RAMFLUX_PREFIX_CONFIG_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            let path =
-                std::env::temp_dir().join(format!("rf-invalid-prefix-{}.redb", std::process::id()));
+            let path = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!("rf-invalid-prefix-{}.redb", std::process::id()));
             assert!(matches!(
                 crate::RouterRedbStore::open_without_wal(&path),
                 Err(NodeCoreError::InvalidConfiguration(_))

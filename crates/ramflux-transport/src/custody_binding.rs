@@ -161,24 +161,19 @@ pub fn verify_custody_peer_certificate(
 mod tests {
     use super::*;
     use std::{
-        path::PathBuf,
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
-    struct Root(PathBuf);
-    impl Drop for Root {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    struct Root(ramflux_test_support::TestPath);
 
     #[tokio::test]
     async fn actual_client_and_server_exporters_match_only_the_same_connection_and_context()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = Root(
-            std::env::temp_dir()
-                .join(format!("ramflux-custody-tls-{}-{suffix}", std::process::id())),
+            ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!("ramflux-custody-tls-{}-{suffix}", std::process::id())),
         );
         std::fs::create_dir(&root.0)?;
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;

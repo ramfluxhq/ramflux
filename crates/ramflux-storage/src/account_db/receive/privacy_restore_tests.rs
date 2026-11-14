@@ -431,8 +431,13 @@ fn ledger_privacy_restore() -> Result<(), StorageError> {
     assert_eq!(work_rows(&restored)?, 1, "one staged work row after redelivery");
     drop(restored);
 
-    let (erase_root, erase_db) = crate::tests::test_db("ledger-privacy-removed")?;
+    let erase_temp =
+        tempfile::Builder::new().prefix("ramflux-storage-ledger-privacy-removed-").tempdir()?;
+    let erase_root = erase_temp.path().to_path_buf();
     let erase_index = AccountIndex::open(&erase_root)?;
+    erase_index.create_account("acct", "principal")?;
+    let erase_key = AccountDbKey::derive("acct", b"storage-test-secret");
+    let erase_db = AccountDb::open(&erase_index, "acct", &erase_key)?;
     let record = erase_index.account("acct")?;
     drop(erase_db);
     erase_index.erase_account_database("acct")?;

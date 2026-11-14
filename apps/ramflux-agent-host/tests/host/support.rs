@@ -6,18 +6,17 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
 pub type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 pub struct Fixture {
-    pub root: PathBuf,
     pub config: Config,
+    pub root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     pub fn new() -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = ramflux_test_support::TestPath::new()?.child(format!(
             "rf-agent-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -44,11 +43,6 @@ impl Fixture {
             },
             root,
         })
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 #[derive(Default)]

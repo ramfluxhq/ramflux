@@ -6,9 +6,13 @@ use super::*;
 
 fn fence_store(
     name: &str,
-) -> Result<(NotifyRedbStore, DeviceAuthKeyResponse, DevicePushRoute), Box<dyn std::error::Error>> {
+) -> Result<
+    (ramflux_test_support::Fixture<NotifyRedbStore>, DeviceAuthKeyResponse, DevicePushRoute),
+    Box<dyn std::error::Error>,
+> {
+    let store_directory_0 = temp_store_path(name)?;
     let mut store =
-        NotifyRedbStore::open_with_route_key(temp_store_path(name)?, NodeSecret::ephemeral()?)?;
+        NotifyRedbStore::open_with_route_key(&store_directory_0, NodeSecret::ephemeral()?)?;
     store.set_push_route_authorizer(|_| Ok(true));
     let mut open = gateway_open_frame("phone", "stream");
     open.target_delivery_id = "skewed-delivery".into();
@@ -17,7 +21,7 @@ fn fence_store(
     let mut route = notify_webpush_route("skewed-delivery", "web");
     route.registered_at = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
-    Ok((store, owner, route))
+    Ok((ramflux_test_support::Fixture::new(store, store_directory_0), owner, route))
 }
 
 #[test]

@@ -9,7 +9,7 @@ use super::helpers::{
     TestResult, acknowledged_head, adoption, floor, h, head, live_phase, submitted_head, terminal,
 };
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn reopen(root: &Path) -> Result<AccountDb, StorageError> {
     AccountDb::open(
@@ -20,9 +20,9 @@ fn reopen(root: &Path) -> Result<AccountDb, StorageError> {
 }
 
 fn recover_after(
-    root: PathBuf,
+    root: ramflux_test_support::TestPath,
     db: AccountDb,
-) -> Result<(PathBuf, Recovered), Box<dyn std::error::Error>> {
+) -> Result<(ramflux_test_support::TestPath, Recovered), Box<dyn std::error::Error>> {
     drop(db);
     let db = reopen(&root)?;
     let recovered = db.recover_pairing()?;
@@ -34,7 +34,10 @@ struct Recovered {
     recovered: super::super::recovery::RecoveredPairing,
 }
 
-fn seed_floor_live(name: &str, phase: &str) -> TestResult<(std::path::PathBuf, AccountDb)> {
+fn seed_floor_live(
+    name: &str,
+    phase: &str,
+) -> TestResult<(ramflux_test_support::TestPath, AccountDb)> {
     let (root, db) = crate::tests::test_db(name)?;
     db.put_pairing_floor(&floor())?;
     db.put_pairing_live(&live_phase(phase)?)?;

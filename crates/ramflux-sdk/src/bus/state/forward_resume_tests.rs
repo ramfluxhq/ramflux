@@ -127,7 +127,6 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
     assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
     assert!(!account.restore_gateway_resume_checkpoint(&mut config)?);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

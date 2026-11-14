@@ -4,20 +4,20 @@
 use crate::{GatewayQuicContext, gateway_state, session::pre_auth_gate_for_gateway_open};
 use ramflux_node_core::{GatewayClientFrame, GatewayOpenFrame, GatewayPreAuthPolicy};
 
-fn context() -> anyhow::Result<GatewayQuicContext> {
-    let context = crate::session::tests::test_gateway_context()?;
+fn context() -> anyhow::Result<(ramflux_test_support::TestPath, GatewayQuicContext)> {
+    let (fixture_directory_0, context) = crate::session::tests::test_gateway_context()?;
     gateway_state(&context.state)?.set_pre_auth_policy(GatewayPreAuthPolicy {
         enabled: true,
         per_source_ip_handshake_rate: 1,
         window_seconds: 3_600,
         ..GatewayPreAuthPolicy::default()
     })?;
-    Ok(context)
+    Ok((fixture_directory_0, context))
 }
 
 #[test]
 fn preauth_optional_runtime_policy_preserves_or_overrides_storage() -> anyhow::Result<()> {
-    let context = context()?;
+    let (_context_directory, context) = context()?;
     context.store.save_state(&*gateway_state(&context.state)?)?;
     for config in [
         None,
@@ -78,7 +78,7 @@ fn open(source: &str, now: u64) -> anyhow::Result<GatewayOpenFrame> {
 
 #[test]
 fn rotating_source_claims_cannot_reset_pre_auth_bucket() -> anyhow::Result<()> {
-    let context = context()?;
+    let (_context_directory, context) = context()?;
     assert!(pre_auth_gate_for_gateway_open(&open("claim-0", 1)?, &context)?.is_none());
     for attempt in 1..=4 {
         let frame = open(&format!("claim-{attempt}"), 1)?;
@@ -92,7 +92,7 @@ fn rotating_source_claims_cannot_reset_pre_auth_bucket() -> anyhow::Result<()> {
 
 #[test]
 fn advancing_client_clock_cannot_expire_pre_auth_attempts() -> anyhow::Result<()> {
-    let context = context()?;
+    let (_context_directory, context) = context()?;
     assert!(pre_auth_gate_for_gateway_open(&open("same-claim", 1)?, &context)?.is_none());
     assert!(
         pre_auth_gate_for_gateway_open(&open("same-claim", 86_400)?, &context)?.is_some(),
@@ -103,7 +103,7 @@ fn advancing_client_clock_cannot_expire_pre_auth_attempts() -> anyhow::Result<()
 
 #[test]
 fn distinct_transport_peers_do_not_share_client_claimed_bucket() -> anyhow::Result<()> {
-    let mut context = context()?;
+    let (_context_directory, mut context) = context()?;
     for source in
         ["192.0.2.1:1234", "192.0.2.2:1234", "[2001:db8:1:2::1]:1234", "[2001:db8:1:3::1]:1234"]
     {
@@ -118,7 +118,7 @@ fn distinct_transport_peers_do_not_share_client_claimed_bucket() -> anyhow::Resu
 
 #[test]
 fn ipv4_mapped_nat64_and_ipv6_prefix_aliases_share_observed_buckets() -> anyhow::Result<()> {
-    let mut context = context()?;
+    let (_context_directory, mut context) = context()?;
     for (index, source) in ["192.0.2.1:1234", "[::ffff:192.0.2.1]:4321", "[64:ff9b::c000:201]:5678"]
         .into_iter()
         .enumerate()
@@ -139,7 +139,7 @@ fn ipv4_mapped_nat64_and_ipv6_prefix_aliases_share_observed_buckets() -> anyhow:
 
 #[test]
 fn cookie_retries_bind_to_observed_peer_and_server_clock() -> anyhow::Result<()> {
-    let mut context = context()?;
+    let (_context_directory, mut context) = context()?;
     context.remote_addr = "192.0.2.1:1234".parse()?;
     assert!(pre_auth_gate_for_gateway_open(&open("first", 1)?, &context)?.is_none());
     let challenge = pre_auth_gate_for_gateway_open(&open("second", 1)?, &context)?
@@ -159,7 +159,7 @@ fn cookie_retries_bind_to_observed_peer_and_server_clock() -> anyhow::Result<()>
 #[cfg(feature = "itest-http")]
 #[test]
 fn http_headers_cannot_rotate_source_or_advance_server_clock() -> anyhow::Result<()> {
-    let context = context()?;
+    let (_context_directory, context) = context()?;
     let peer = "192.0.2.1".parse()?;
     let mut request = ramflux_node_core::NodeHttpRequest {
         method: "POST".to_owned(),
@@ -217,7 +217,7 @@ fn preauth_wire_and_peer_boundary_matrix() -> anyhow::Result<()> {
         assert!(crate::ingress::parse(&serde_json::to_vec(&value)?, "192.0.2.1".parse()?).is_err());
         value["open"][field] = old;
     }
-    let mut context = context()?;
+    let (_context_directory, mut context) = context()?;
     context.remote_addr = "192.0.2.1:1000".parse()?;
     assert!(pre_auth_gate_for_gateway_open(&open("port-first", 1)?, &context)?.is_none());
     let cookie = pre_auth_gate_for_gateway_open(&open("cookie", 1)?, &context)?
@@ -236,7 +236,7 @@ fn preauth_wire_and_peer_boundary_matrix() -> anyhow::Result<()> {
 #[test]
 fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyhow::Result<()> {
     use std::time::{Duration, UNIX_EPOCH};
-    let context = context()?;
+    let (_context_directory, context) = context()?;
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
     let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
     assert!(super::admit_with_clock(&source, None, &context.state, || at(100))?.is_none());
@@ -289,11 +289,13 @@ fn production_gate_samples_clock_under_lock_and_refuses_failed_commit() -> anyho
 #[test]
 fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Result<()> {
     use std::io::Read;
-    let mut context = context()?;
-    let path = std::env::temp_dir().join(format!(
-        "preauth-http-policy-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let (_context_directory, mut context) = context()?;
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "preauth-http-policy-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(&path)?);
     let source = crate::pre_auth::source_key(context.remote_addr.ip());
     {
@@ -368,7 +370,6 @@ fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Resul
         serde_json::json!([101])
     );
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -376,7 +377,7 @@ fn preauth_http_policy_failure_preserves_policy_and_live_debt() -> anyhow::Resul
 fn unauthenticated_open_costs_no_durable_commit() -> anyhow::Result<()> {
     let mut costs = Vec::new();
     for enabled in [false, true] {
-        let context = context()?;
+        let (_context_directory, context) = context()?;
         let mut policy = gateway_state(&context.state)?.pre_auth_policy().clone();
         policy.enabled = enabled;
         gateway_state(&context.state)?.set_pre_auth_policy(policy)?;
@@ -394,11 +395,13 @@ fn unauthenticated_open_costs_no_durable_commit() -> anyhow::Result<()> {
 #[test]
 fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
     use std::time::{Duration, UNIX_EPOCH};
-    let mut context = context()?;
-    let path = std::env::temp_dir().join(format!(
-        "preauth-checkpoint-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let (_context_directory, mut context) = context()?;
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "preauth-checkpoint-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     context.store = std::sync::Arc::new(ramflux_node_core::GatewayRedbStore::open(&path)?);
     let source = super::source_key(context.remote_addr.ip());
     {
@@ -428,10 +431,12 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
     let mut restored = store.load_state()?.ok_or_else(|| anyhow::anyhow!("checkpoint"))?;
     mount_key(
         &mut restored,
-        &std::env::temp_dir().join(format!(
-            "restart-key-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        )),
+        &ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "restart-key-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ),
+        ),
     )?;
     assert!(
         restored
@@ -450,6 +455,5 @@ fn pre_auth_guarantees_survive_bounded_persistence() -> anyhow::Result<()> {
             .is_ok()
     );
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }

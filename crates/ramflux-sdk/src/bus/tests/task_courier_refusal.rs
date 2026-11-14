@@ -26,7 +26,6 @@ use crate::bus::task_courier::{Item, TaskCourier};
 use crate::bus::task_courier_apply::conflict_terminal;
 use crate::bus::task_courier_queue as queue;
 use ramflux_storage::durability_test_hooks::{Registration, observe};
-use std::path::PathBuf;
 use tokio::sync::watch;
 
 #[path = "task_courier_refusal_decision.rs"]
@@ -99,11 +98,11 @@ impl Script {
 struct Done {
     account: LocalBusAccountState,
     gateway: Arc<Mutex<super::fixture::Gateway>>,
-    root: PathBuf,
     /// The frozen clock the scenario started at.
     start: i64,
     cut: Option<Cut>,
     _peers: Vec<LocalBusAccountState>,
+    root: ramflux_test_support::TestPath,
 }
 
 impl Done {
@@ -446,7 +445,7 @@ async fn scenario(row: Row, script: Script) -> Case<Done> {
     reopen(&mut account)?;
     let mut peers = vec![peer, sibling];
     peers.extend(peer2);
-    Ok(Done { account, gateway, root, start, cut, _peers: peers })
+    Ok(Done { account, gateway, start, cut, _peers: peers, root })
 }
 
 /// The first write stalls and the sender's frame times out: the envelope was written once, the

@@ -32,7 +32,7 @@ fn relay_client_quic_ack_fail_once_fails_exactly_once_when_enabled() {
 
 #[test]
 fn relay_client_quic_get_reads_stored_chunk() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_0, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     let response = relay_client_quic_route(
@@ -53,7 +53,7 @@ fn relay_client_quic_get_reads_stored_chunk() -> Result<(), String> {
 
 #[test]
 fn relay_client_quic_get_rejects_v2_missing_snapshot_and_wrong_owner() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_1, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let matching = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
 
@@ -143,7 +143,7 @@ fn relay_client_quic_get_rejects_v2_missing_snapshot_and_wrong_owner() -> Result
 
 #[test]
 fn relay_client_quic_invalid_ack_leaves_store_untouched() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_2, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), true))?;
     // A tampered ack token fails verification BEFORE any store access, so nothing is mutated.
@@ -181,7 +181,7 @@ fn relay_client_quic_ack_is_idempotent_and_respects_delete_policy() -> Result<()
 
     // (1) Non-delete chunk: two acks by the same grantee keep `acked_by_count` at 1 and leave the
     // chunk Available.
-    let keep_store = v3_temp_store()?;
+    let (_fixture_directory_3, keep_store) = v3_temp_store()?;
     let keep = v3_state_with(&keep_store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     let first = relay_client_quic_route(
         &ack_request()?,
@@ -209,7 +209,7 @@ fn relay_client_quic_ack_is_idempotent_and_respects_delete_policy() -> Result<()
     assert_eq!(second_body.acked_by_count, 1, "re-ack by the same grantee is idempotent");
 
     // (2) Delete-on-ack chunk: the first ack consumes it; a second ack does not resurrect it.
-    let del_store = v3_temp_store()?;
+    let (_fixture_directory_4, del_store) = v3_temp_store()?;
     let consume = v3_state_with(&del_store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), true))?;
     let consumed = relay_client_quic_route(
         &ack_request()?,
@@ -244,7 +244,7 @@ fn relay_client_quic_ack_is_idempotent_and_respects_delete_policy() -> Result<()
 
 #[test]
 fn relay_client_quic_object_routes_reject_mismatch_and_malformed() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_5, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     for path in ["/relay/v1/object/put_chunk", "/relay/v1/object/tombstone"] {
@@ -274,7 +274,7 @@ fn relay_client_quic_object_routes_reject_mismatch_and_malformed() -> Result<(),
 
 #[test]
 fn relay_client_quic_put_persists_and_is_readable() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_6, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = Arc::new(Mutex::new(ramflux_node_core::RelayCacheState::new()));
     let response = relay_client_quic_route(
@@ -315,7 +315,7 @@ fn relay_client_quic_put_persists_and_is_readable() -> Result<(), String> {
 
 #[test]
 fn relay_client_quic_put_rejects_cross_owner_and_content_overwrite() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_7, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
 
     // (1) The chunk id is already owned by a DIFFERENT original owner -> 403, unchanged.
@@ -351,7 +351,7 @@ fn relay_client_quic_put_rejects_cross_owner_and_content_overwrite() -> Result<(
 
 #[test]
 fn relay_client_quic_put_same_owner_same_content_replay_is_zero_mutation() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_8, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = Arc::new(Mutex::new(ramflux_node_core::RelayCacheState::new()));
 
@@ -383,7 +383,7 @@ fn relay_client_quic_put_same_owner_same_content_replay_is_zero_mutation() -> Re
 
 #[test]
 fn relay_client_quic_invalid_put_leaves_store_unchanged() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_9, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = Arc::new(Mutex::new(ramflux_node_core::RelayCacheState::new()));
 
@@ -428,7 +428,7 @@ fn relay_client_quic_invalid_put_leaves_store_unchanged() -> Result<(), String> 
 
 #[test]
 fn relay_client_quic_tombstone_applies_and_blocks_get() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_10, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     let response = relay_client_quic_route(
@@ -463,7 +463,7 @@ fn relay_client_quic_tombstone_applies_and_blocks_get() -> Result<(), String> {
 
 #[test]
 fn relay_client_quic_tombstone_rejects_empty_and_cross_owner_scope() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_11, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
 
     // Empty scope: no owned chunk proves ownership -> 403, nothing recorded.
@@ -505,7 +505,7 @@ fn relay_client_quic_tombstone_rejects_empty_and_cross_owner_scope() -> Result<(
 
 #[test]
 fn relay_client_quic_invalid_tombstone_leaves_store_unchanged() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_12, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     // A tampered owner-session token fails verification before any store access: 403, unchanged.
@@ -533,7 +533,7 @@ fn relay_client_quic_invalid_tombstone_leaves_store_unchanged() -> Result<(), St
 
 #[test]
 fn relay_client_quic_route_serves_health_and_unknown() -> Result<(), String> {
-    let store = v3_temp_store()?;
+    let (_fixture_directory_13, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
     // Health probe is served.

@@ -397,7 +397,6 @@ mod tests {
         assert_eq!(persisted["resume_token"], "resume-token-before-timeout");
         assert_eq!(persisted["last_seen_inbox_seq"], 41);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

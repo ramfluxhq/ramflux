@@ -6,10 +6,10 @@ use super::*;
 
 struct PublicationFault {
     inner: Gateway,
-    root: PathBuf,
     entered: Option<oneshot::Sender<()>>,
     injected: Option<oneshot::Sender<()>>,
     release: Arc<tokio::sync::Notify>,
+    root: ramflux_test_support::TestPath,
 }
 fn fault_client(root: &Path) -> Result<RamfluxClient, SdkError> {
     let mut client = RamfluxClient::new();
@@ -86,7 +86,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
                     inner:Gateway {last:None,pending_cursor:None,blocked:None,
                         cancelled:Arc::new(AtomicBool::new(false)),submits:Arc::new(AtomicUsize::new(0)),
                         cancelled_notice:None},
-                    root:fixture_root,entered:Some(entered),injected:Some(injected),release:fixture_release,
+                    entered:Some(entered),injected:Some(injected),release:fixture_release,root:fixture_root,
                 })));
             Ok(account)
         });

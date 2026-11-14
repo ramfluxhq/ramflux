@@ -11,12 +11,14 @@ use crate::relay::test_support::V3_AUDIENCE_NODE;
 use redb::ReadableTableMetadata;
 use std::fs;
 
-fn dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rf-legacy-gen-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+fn dir(name: &str) -> ramflux_test_support::TestPath {
+    let dir = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-legacy-gen-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&dir).unwrap();
     dir
 }

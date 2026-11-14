@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,7 +33,9 @@ fn wait(child: &mut Child) -> std::io::Result<ExitStatus> {
 fn daemon_stop_exits_the_foreground_server_and_removes_its_socket()
 -> Result<(), Box<dyn std::error::Error>> {
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = PathBuf::from(format!("/tmp/rf-stop-{}-{unique}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-stop-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&root)?;
     let socket = root.join("rfd.sock");
     let mut daemon = Process(
@@ -71,6 +72,5 @@ fn daemon_stop_exits_the_foreground_server_and_removes_its_socket()
     assert_eq!(response["stopping"], true);
     assert!(wait(&mut daemon.0)?.success());
     assert!(!socket.exists(), "graceful shutdown must remove its socket");
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

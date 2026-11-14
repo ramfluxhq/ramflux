@@ -108,7 +108,6 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     directory.abort();
     updated_directory.abort();
     drop((peer, creator, peers, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

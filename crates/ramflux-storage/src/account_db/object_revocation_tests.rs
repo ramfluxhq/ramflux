@@ -9,17 +9,19 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Fixture {
     db: AccountDb,
-    root: std::path::PathBuf,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "rf-object-revoke-{}-{sequence}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-object-revoke-{}-{sequence}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&root)?;
         index.create_account("account", "root")?;
         let db = AccountDb::open(&index, "account", &AccountDbKey::generate()?)?;
@@ -83,12 +85,6 @@ impl Fixture {
         Ok(())
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 #[test]
 fn late_import_cannot_replace_tombstone_placeholder() -> TestResult {
     let fixture = Fixture::new()?;

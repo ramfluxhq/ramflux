@@ -17,11 +17,13 @@ fn listed(active: &str) -> Value {
 async fn agent_export_resolves_recorded_custodian_when_agent_or_unrelated_account_is_active()
 -> Result {
     for (active, selected) in [("agent", None), ("other", None), ("agent", Some("owner"))] {
-        let root = std::env::temp_dir().join(format!(
-            "rf-agent-export-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-agent-export-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         std::fs::create_dir(&root)?;
         let socket = root.join("bus.sock");
         let destination = root.join("agent.bundle");
@@ -75,11 +77,13 @@ async fn agent_export_resolves_recorded_custodian_when_agent_or_unrelated_accoun
 
 #[tokio::test]
 async fn agent_export_refuses_wrong_custodian_with_named_reason() -> Result {
-    let root = std::env::temp_dir().join(format!(
-        "rf-agent-refusal-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-agent-refusal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     std::fs::create_dir(&root)?;
     let socket = root.join("bus.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
@@ -121,7 +125,6 @@ async fn agent_export_refuses_wrong_custodian_with_named_reason() -> Result {
     assert!(!destination.exists());
     drop(bus);
     server.await??;
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

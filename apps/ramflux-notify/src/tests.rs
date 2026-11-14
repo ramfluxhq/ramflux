@@ -160,7 +160,6 @@ fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(entry.queued_at, 1_760_000_123);
     drop(ingress);
     drop(store);
-    std::fs::remove_dir_all(&root)?;
     Ok(())
 }
 
@@ -280,7 +279,6 @@ fn notify_ingest_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
         elapsed.as_millis()
     );
     drop(ingress);
-    let _ = std::fs::remove_dir_all(&temp_root);
     Ok(())
 }
 
@@ -365,8 +363,8 @@ fn bench_node_service_signing_seed() -> [u8; 32] {
     ]
 }
 
-fn notify_ingest_bench_temp_root() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+fn notify_ingest_bench_temp_root() -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "ramflux-notify-ingest-bench-{}-{}",
         std::process::id(),
         ramflux_node_core::now_unix_seconds()
@@ -382,13 +380,11 @@ struct NotifyMeshTestCert {
 #[cfg(feature = "itest-http")]
 fn notify_mesh_test_cert_root(
     name: &str,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ramflux_notify_{name}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux_notify_{name}_{}_{}", std::process::id(), nanos));
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }

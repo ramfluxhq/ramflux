@@ -133,7 +133,8 @@ fn send(
 #[test]
 fn migration_grant_binds_the_control_authority_even_when_possession_and_control_hash_match()
 -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-authority-grant")?)?;
+    let store_directory_0 = temp_store_path("migration-authority-grant")?;
+    let store = RouterRedbStore::open(&store_directory_0)?;
     let router = RouterCore::new();
     let driver = Driver::new("alice", 10)?;
     let service = service(&driver, &store)?;
@@ -161,7 +162,8 @@ fn migration_grant_binds_the_control_authority_even_when_possession_and_control_
 }
 #[test]
 fn new_to_destination_grant_is_one_use_and_does_not_import_authority_for_a_read() -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-one-use-grant")?)?;
+    let store_directory_1 = temp_store_path("migration-one-use-grant")?;
+    let store = RouterRedbStore::open(&store_directory_1)?;
     let router = RouterCore::new();
     let driver = Driver::new("alice", 10)?;
     let service = service(&driver, &store)?;
@@ -192,7 +194,8 @@ fn new_to_destination_grant_is_one_use_and_does_not_import_authority_for_a_read(
 }
 #[test]
 fn migration_possession_grant_cannot_lookup_peers_or_read_a_normal_inbox() -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-isolated-grant")?)?;
+    let store_directory_2 = temp_store_path("migration-isolated-grant")?;
+    let store = RouterRedbStore::open(&store_directory_2)?;
     let router = RouterCore::new();
     let driver = Driver::new("alice", 10)?;
     let service = service(&driver, &store)?;
@@ -216,7 +219,8 @@ fn migration_possession_grant_cannot_lookup_peers_or_read_a_normal_inbox() -> Re
 
 #[test]
 fn message_only_branch_can_obtain_a_one_use_read_grant_without_management_authority() -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-read-capability")?)?;
+    let store_directory_3 = temp_store_path("migration-read-capability")?;
+    let store = RouterRedbStore::open(&store_directory_3)?;
     let router = RouterCore::new();
     let mut driver = Driver::new("alice", 10)?;
     let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([11; 32]));
@@ -257,7 +261,8 @@ fn message_only_branch_can_obtain_a_one_use_read_grant_without_management_author
 }
 #[test]
 fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch() -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-read-isolation")?)?;
+    let store_directory_4 = temp_store_path("migration-read-isolation")?;
+    let store = RouterRedbStore::open(&store_directory_4)?;
     let router = RouterCore::new();
     let driver = Driver::new("alice", 10)?;
     let service = service(&driver, &store)?;
@@ -302,7 +307,8 @@ fn read_grant_cannot_execute_a_management_control_even_for_a_privileged_branch()
 
 #[test]
 fn ordinary_native_proofs_and_existing_sessions_obey_root_cutover() -> Result {
-    let store = RouterRedbStore::open(temp_store_path("migration-ordinary-root")?)?;
+    let store_directory_5 = temp_store_path("migration-ordinary-root")?;
+    let store = RouterRedbStore::open(&store_directory_5)?;
     let router = RouterCore::new();
     let driver = Driver::new("alice", 10)?;
     let service = service(&driver, &store)?;

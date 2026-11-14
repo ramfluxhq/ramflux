@@ -82,7 +82,7 @@ async fn survives_router_failure(timeout: bool) -> anyhow::Result<()> {
     let endpoint = server.local_addr()?.to_string();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let serving = tokio::spawn(serve_router(server, timeout, stopped));
-    let mut context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_0, mut context) = super::tests::test_gateway_context()?;
     context.router = crate::RouterMeshClient {
         endpoint: "127.0.0.1:0".into(),
         server_name: "ramflux-router".into(),
@@ -190,10 +190,11 @@ async fn client_write_failure_ends_the_session_without_attempting_a_second_reply
     let source = Source(VecDeque::from([serde_json::to_vec(
         &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 1 },
     )?]));
+    let (_fixture_directory_1, fixture_value_1) = super::tests::test_gateway_context()?;
     let error = super::run_gateway_session_loop(
         Arc::new(AsyncMutex::new(Box::new(BrokenSink(writes.clone())))),
         Box::new(source),
-        super::tests::test_gateway_context()?,
+        fixture_value_1,
         runtime()?,
     )
     .await
@@ -214,10 +215,11 @@ async fn a_missing_auth_root_gets_an_explicit_rejection_before_router_io() -> an
         "device_proof":{"schema":"ramflux.device_proof.v1","version":1,"domain":"ramflux.device_proof.v1","ext":{},"signing_key_id":"device","signature_alg":"ed25519","signature":"unused","principal_id":"alice","device_id":"device","device_epoch":1,"branch_proof_hash":"unused","capability_scope":["gateway.session"],"nonce":"nonce","expires_at":2}
     }});
     let frames = Arc::new(Mutex::new(Vec::new()));
+    let (_context_directory, context) = super::tests::test_gateway_context()?;
     super::handle_gateway_session_transport(
         Box::new(Sink(frames.clone())),
         Box::new(Source(VecDeque::from([serde_json::to_vec(&auth)?]))),
-        super::tests::test_gateway_context()?,
+        context,
         ramflux_node_core::GatewayClientFrame::Open { open },
     )
     .await?;
@@ -235,7 +237,7 @@ async fn a_missing_auth_root_gets_an_explicit_rejection_before_router_io() -> an
 #[tokio::test]
 async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reconnect_delivers()
 -> anyhow::Result<()> {
-    let context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_3, context) = super::tests::test_gateway_context()?;
     let writes = Arc::new(AtomicUsize::new(0));
     context
         .hub
@@ -359,7 +361,7 @@ impl GatewaySessionFrameSource for WaitingSource {
 }
 #[tokio::test]
 async fn resuming_the_same_session_id_survives_the_old_loops_cleanup() -> anyhow::Result<()> {
-    let context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_4, context) = super::tests::test_gateway_context()?;
     let mut old_runtime = runtime()?;
     old_runtime.target_delivery_id = "peer".into();
     old_runtime.session_id = "same-session".into();

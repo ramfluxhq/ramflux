@@ -7,12 +7,12 @@ use crate::bus::runtime_tests;
 use std::sync::{Arc, atomic::AtomicBool};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Fixture {
-    root: PathBuf,
     source: LocalBusAccountState,
     sibling: LocalBusAccountState,
     config: GatewaySessionConfig,
     receiver: GatewaySessionConfig,
     directory: tokio::task::JoinHandle<()>,
+    _root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     async fn new(name: &str) -> TestResult<Self> {
@@ -25,7 +25,7 @@ impl Fixture {
         )?;
         let (sibling, config, receiver, directory) =
             super::own_tests::sibling_fixture(&root, &mut source).await?;
-        Ok(Self { root, source, sibling, config, receiver, directory })
+        Ok(Self { source, sibling, config, receiver, directory, _root: root })
     }
     fn message(&self, id: &str) -> TestResult<GatewayDirectMessage> {
         Ok(GatewayDirectMessage {
@@ -47,12 +47,9 @@ impl Fixture {
             ttl: 300,
         })
     }
-    fn cleanup(self) -> TestResult {
+    fn cleanup(self) {
         self.directory.abort();
-        let root = self.root;
-        drop((self.source, self.sibling));
-        std::fs::remove_dir_all(root)?;
-        Ok(())
+        drop(self);
     }
     fn assert_failed_copy(&self, message: &str) -> TestResult {
         assert_eq!(
@@ -143,7 +140,8 @@ async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResu
         f.source.client.account_db()?.load_actor_state::<u64>("own-device/sent-failures")?,
         Some(2)
     );
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submission() -> TestResult {
@@ -206,7 +204,8 @@ async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submissio
     );
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     f.assert_failed_copy("large")?;
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 
 #[tokio::test]
@@ -260,7 +259,7 @@ async fn missing_group_or_peer_copy_context_cannot_roll_back_a_primary_transacti
         );
         assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
         f.assert_failed_copy("primary")?;
-        f.cleanup()?;
+        f.cleanup();
     }
     Ok(())
 }
@@ -298,7 +297,8 @@ async fn held_copies_are_never_couriered_before_confirmation_and_failed_submissi
     }
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 1);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
@@ -321,7 +321,8 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
     f.source.install_test_session(engine);
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn a_rejected_primary_group_discards_its_staged_copy() -> TestResult {
@@ -379,7 +380,8 @@ async fn a_rejected_primary_group_discards_its_staged_copy() -> TestResult {
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> TestResult {
@@ -413,7 +415,8 @@ async fn offline_authored_dates_do_not_expire_freshly_staged_live_copies() -> Te
     let rows = f.sibling.client.direct_messages("thread")?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].created_at, authored);
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn multiple_plain_copies_reuse_local_membership_without_gateway_manifest_requests()
@@ -442,7 +445,8 @@ async fn multiple_plain_copies_reuse_local_membership_without_gateway_manifest_r
             .load_actor_state::<serde_json::Value>("own-device/manifest-refresh")?
             .is_none()
     );
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 
 fn revoke_sibling(f: &Fixture) -> TestResult {
@@ -503,7 +507,8 @@ async fn a_single_active_device_sends_without_any_copy_state_writes_or_manifest_
     let _ = (&mut f.directory).await;
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 #[tokio::test]
 async fn a_device_set_change_invalidates_membership_before_preparing_queued_copies() -> TestResult {
@@ -527,7 +532,8 @@ async fn a_device_set_change_invalidates_membership_before_preparing_queued_copi
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 
 #[tokio::test]
@@ -575,7 +581,8 @@ async fn a_missing_local_manifest_backs_off_refresh_across_copy_retries() -> Tes
         f.source.client.account_db()?.message_content("refresh")?,
         Some(b"already submitted".to_vec())
     );
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 
 #[tokio::test]
@@ -612,7 +619,8 @@ async fn legacy_plain_copy_intents_without_submission_confirmation_are_not_assum
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
     assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     assert!(f.source.client.direct_message_by_id("legacy")?.is_some());
-    f.cleanup()
+    f.cleanup();
+    Ok(())
 }
 
 #[tokio::test]
@@ -679,7 +687,7 @@ async fn deleting_a_sent_message_erases_held_and_prepared_copy_work() -> TestRes
                 "conversation_id":"thread","is_own":true}),
         );
         assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
-        f.cleanup()?;
+        f.cleanup();
     }
     Ok(())
 }

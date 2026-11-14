@@ -17,9 +17,9 @@ struct Fixture {
     actor: AccountActor,
     connection: ConnectionHandle,
     io: SessionIo,
-    root: PathBuf,
     reader: AccountDb,
     router: tokio::task::JoinHandle<()>,
+    root: ramflux_test_support::TestPath,
 }
 fn command(method: &str, body: serde_json::Value) -> AccountCommand {
     let (outbound, _) = mpsc::channel(1);
@@ -98,7 +98,7 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
     .await?;
     let (connection, io, reader) = installed.await?;
     connection.require_live(held).await?;
-    Ok(Fixture { actor, connection, io, root, reader, router })
+    Ok(Fixture { actor, connection, io, reader, router, root })
 }
 
 #[tokio::test(start_paused = true)]
@@ -121,7 +121,8 @@ async fn case(post_claim: Duration) -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { actor, connection, mut io, root, router, reader } = fixture(post_claim).await?;
+    let Fixture { root: _root, actor, connection, mut io, router, reader } =
+        fixture(post_claim).await?;
     let owner = connection.clone();
     let courier = tokio::spawn(async move {
         owner
@@ -184,7 +185,6 @@ async fn case(post_claim: Duration) -> Case {
     clock.abort();
     let _ = clock.await;
     drop(reader);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

@@ -63,7 +63,8 @@ pub(crate) struct Fixture {
     /// Fires once per held request whose client stopped reading the response.
     pub cancelled: tokio::sync::mpsc::Receiver<()>,
     task: tokio::task::JoinHandle<()>,
-    root: std::path::PathBuf,
+    root: ramflux_test_support::TestPath,
+    _context_directory: ramflux_test_support::TestPath,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -90,7 +91,7 @@ impl Fixture {
             &router.tls,
             Arc::new(move || Ok(vec![gateway.ca_pem.clone()])),
         )?;
-        let mut context = crate::session::tests::test_gateway_context()?;
+        let (fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
         // Probe tests drive explicit rounds; unrelated protocol fixtures own every mesh request.
         context.hub.probe_started.store(true, std::sync::atomic::Ordering::Release);
         context.router = crate::RouterMeshClient {
@@ -116,7 +117,14 @@ impl Fixture {
                 }
             }
         });
-        Ok(Self { context, requests, cancelled, task, root })
+        Ok(Self {
+            context,
+            requests,
+            cancelled,
+            task,
+            root,
+            _context_directory: fixture_directory_0,
+        })
     }
     pub async fn next(&mut self) -> anyhow::Result<Request> {
         tokio::time::timeout(std::time::Duration::from_secs(10), self.requests.recv())

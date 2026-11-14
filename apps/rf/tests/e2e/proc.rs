@@ -184,7 +184,7 @@ pub(crate) fn run_group_output(
     command: &mut Command,
     deadline: Duration,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    let stem = std::env::temp_dir().join(format!(
+    let stem = ramflux_test_support::TestPath::new()?.child(format!(
         "rf-cli-e2e-proc-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -275,7 +275,7 @@ pub(crate) fn run_group_output_with_stdin(
     stdin_bytes: &[u8],
     deadline: Duration,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    let stem = std::env::temp_dir().join(format!(
+    let stem = ramflux_test_support::TestPath::new()?.child(format!(
         "rf-cli-e2e-proc-in-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)

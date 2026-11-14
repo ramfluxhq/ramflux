@@ -9,8 +9,8 @@ use crate::relay::attachment::grants::test_support::{auth, signed};
 use crate::relay::attachment::{AttachmentAuthority, AttachmentPolicy};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::{Arc, Barrier};
-pub(super) fn path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+pub(super) fn path(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "rf-replay-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()

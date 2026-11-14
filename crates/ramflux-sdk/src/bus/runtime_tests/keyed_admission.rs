@@ -42,8 +42,8 @@ struct Fixture {
     io: SessionIo,
     release: Arc<Notify>,
     reader: AccountDb,
-    root: PathBuf,
     router: tokio::task::JoinHandle<()>,
+    root: ramflux_test_support::TestPath,
 }
 fn command() -> AccountCommand {
     let (outbound, _) = mpsc::channel(1);
@@ -128,7 +128,7 @@ async fn fixture() -> Case<Fixture> {
     .await?;
     let (connection, io, reader) = installed.await?;
     entered.notified().await;
-    Ok(Fixture { actor, connection, io, release, reader, root, router })
+    Ok(Fixture { actor, connection, io, release, reader, router, root })
 }
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn keyed_network_refusal_leaves_no_receipt_and_the_same_intent_succeeds_after_admission()
@@ -143,7 +143,8 @@ async fn case() -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { actor, connection, mut io, release, reader, root, router } = fixture().await?;
+    let Fixture { root: _root, actor, connection, mut io, release, reader, router } =
+        fixture().await?;
     let owner = actor.clone();
     let refused = tokio::task::spawn_local(async move { owner.request(command()).await });
     while connection.test_live_waiters() == 0 {
@@ -185,6 +186,5 @@ async fn case() -> Case {
     drop(reader);
     router.await?;
     clock.abort();
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -12,12 +12,7 @@ use std::{
     sync::Arc,
 };
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-pub(super) struct Directory(pub(super) std::path::PathBuf);
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+pub(super) struct Directory(pub(super) ramflux_test_support::TestPath);
 pub(super) fn envelope(
     target: &str,
     id: &str,
@@ -95,10 +90,12 @@ pub(super) fn envelope(
     Ok(envelope)
 }
 pub(super) fn directory() -> Result<Directory, Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "rf-cutover-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-cutover-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     std::fs::create_dir(&path)?;
     Ok(Directory(path))
 }
@@ -242,7 +239,7 @@ fn repeated_remote_submits_to_committed_home_return_signed_refusal_without_abort
 #[test]
 fn new_source_submission_after_commit_is_forwarded_or_refused_never_spooled() -> TestResult {
     use crate::router_runtime::tests::{current_envelope, test_router};
-    let (state, store, path) = test_router("source-cutover")?;
+    let (path, state, store) = test_router("source-cutover")?;
     let message = current_envelope("source-cutover", "remote-target")?;
     let source = state.authenticated_envelope_source_durable(&message, &store)?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(1));

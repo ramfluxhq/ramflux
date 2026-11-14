@@ -117,11 +117,13 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn account() -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-private-prekeys-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+    fn account() -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-private-prekeys-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let mut client = RamfluxClient::new();
         client.create_identity_root("alice", [11; 32]);
         client.create_device_branch("alice", "phone", 1, [12; 32]);
@@ -143,7 +145,7 @@ mod tests {
     #[test]
     fn legacy_private_keys_need_retained_signed_root_authority_and_preserve_their_keys()
     -> Result<(), SdkError> {
-        let (path, client) = account()?;
+        let (_path, client) = account()?;
         let device = client.owned_device_identity()?;
         legacy(&client, &device)?;
         assert!(client.legacy_owned_private_prekey(&device).is_err());
@@ -160,13 +162,12 @@ mod tests {
         assert_eq!(before.signed_prekey_seed, migrated.signed_prekey_seed);
         assert_eq!(before.bundle, migrated.bundle);
         drop(client);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
     fn same_name_under_a_foreign_root_cannot_select_or_overwrite_owned_private_keys()
     -> Result<(), SdkError> {
-        let (path, client) = account()?;
+        let (_path, client) = account()?;
         let foreign = RootQualifiedDeviceRef::for_owned_account_device(
             &ramflux_crypto::create_identity_root("alice", [51; 32]),
             "phone",
@@ -181,7 +182,6 @@ mod tests {
             Some(own.root_commitment())
         );
         drop(client);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }

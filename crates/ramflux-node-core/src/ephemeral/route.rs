@@ -332,7 +332,6 @@ mod tests {
         DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
     };
     use serde_json::json;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -344,13 +343,15 @@ mod tests {
     const TARGET: &str = "target_alice";
     const DEVICE: &str = "alice_phone";
 
-    fn temp_path(name: &str) -> PathBuf {
+    fn temp_path(name: &str) -> ramflux_test_support::TestPath {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "ramflux-s6c-p06-{name}-{}-{}.redb",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "ramflux-s6c-p06-{name}-{}-{}.redb",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
     }
 
     fn descriptor(target: &str, gateway: &str, session: &str) -> SessionDescriptor {
@@ -901,7 +902,7 @@ mod replay_tests {
     };
     use crate::{RouterCore, RouterRedbStore};
     use redb::{ReadableDatabase, ReadableTable, TableHandle};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -911,13 +912,15 @@ mod replay_tests {
     const NOW_AT_D_MS: u64 = 2_000_000;
     const NOW_BEFORE_D_MS: u64 = 1_999_999;
 
-    fn temp_path(name: &str) -> PathBuf {
+    fn temp_path(name: &str) -> ramflux_test_support::TestPath {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "ramflux-s6c-p07-replay-{name}-{}-{}.redb",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "ramflux-s6c-p07-replay-{name}-{}-{}.redb",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
     }
 
     fn digest(n: u32) -> [u8; 32] {

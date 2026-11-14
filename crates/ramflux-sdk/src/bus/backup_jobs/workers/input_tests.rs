@@ -7,11 +7,13 @@ use ramflux_storage::{AccountDb, AccountIndex, BackupOpenMode};
 #[test]
 fn candidate_input_checks_authenticated_counts_before_private_changes()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-worker-input-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-worker-input-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("account", "principal")?;
     let key = AccountDbKey::generate()?;
@@ -35,7 +37,6 @@ fn candidate_input_checks_authenticated_counts_before_private_changes()
     }
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

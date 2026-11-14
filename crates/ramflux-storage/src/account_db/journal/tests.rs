@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Span Brain
 use super::*;
 use crate::{AccountDbKey, AccountIndex};
-fn database() -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn database() -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let root = std::env::temp_dir()
-        .join(format!("ramflux-journal-{}-{sequence}-{unique}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-journal-{}-{sequence}-{unique}", std::process::id()));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "principal")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::derive("a", b"secret"))?;
@@ -49,13 +50,12 @@ fn sequences_survive_reopen_and_retention_never_reuses_them() -> Result<(), Stor
         db.append_journal("new", "sync.status", &serde_json::json!({}), 1000, None)?.seq > head
     );
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn sticky_events_survive_age_count_until_ack_and_holes_are_detectable() -> Result<(), StorageError>
 {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let safety = db.append_journal(
         "safety",
         "safety.changed",
@@ -86,12 +86,11 @@ fn sticky_events_survive_age_count_until_ack_and_holes_are_detectable() -> Resul
     db.retain_journal(100, 0, 0)?;
     assert_eq!(db.journal_after(0, 128)?, Vec::<JournalEvent>::new());
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn outbox_and_journal_commit_atomically_and_quarantine_never_evicts() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.persist_actor_state("directory/conversation/example", &serde_json::json!({"id":"example"}))?;
     let entry = db.pending_outbox(128)?.pop().ok_or(StorageError::AuthorizationRejected)?;
     assert_eq!(entry.keys["state_kind"], "directory/conversation/example");
@@ -121,27 +120,25 @@ fn outbox_and_journal_commit_atomically_and_quarantine_never_evicts() -> Result<
     assert_eq!(db.unrouted_count()?, 64);
     assert_eq!(db.unrouted_entries()?.len(), 64);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn deleting_message_erases_approved_content_copy() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.send_direct_message("conversation", "message", "sender", b"encrypted bytes")?;
     db.store_message_content("conversation", "message", b"approved plaintext")?;
     assert!(db.message_content("message")?.is_some());
     db.delete_direct_message("conversation", "message", "local", "tombstone")?;
     assert_eq!(db.message_content("message")?, None);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn dead_letters_refuse_over_capacity_expire_and_keep_ciphertext_out_of_journal()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     for n in 0..65 {
         db.set_inbox_failure_policy(
             &format!("bad-{n:02}"),
@@ -174,14 +171,13 @@ fn dead_letters_refuse_over_capacity_expire_and_keep_ciphertext_out_of_journal()
             .query_row("SELECT count(*) FROM runtime_inbox_dead_letter", [], |row| row.get(0))?;
     assert_eq!(count, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backoff()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     for n in 0..65 {
         db.set_inbox_failure_policy(
             &format!("retry-{n:02}"),
@@ -210,13 +206,12 @@ fn transient_retry_capacity_and_expiry_emit_terminal_metadata_with_bounded_backo
     assert!(events.iter().any(|event| event.body["error_code"] == "retry_expired"));
     assert!(!serde_json::to_string(&events)?.contains("PRIVATE_RETRY"));
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn terminal_dead_letters_are_not_reinserted_after_membership_changes() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.set_inbox_failure_policy(
         "refused",
         b"packet",
@@ -235,13 +230,12 @@ fn terminal_dead_letters_are_not_reinserted_after_membership_changes() -> Result
     assert!(!db.has_inbox_retry("refused")?);
     assert_eq!(db.due_inbox_retries(102)?, Vec::<Vec<u8>>::new());
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn a_junk_source_cannot_evict_another_sources_pending_ciphertext() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let genuine =
         serde_json::to_vec(&serde_json::json!({"envelope":{"source_device_id":"friend"}}))?;
     db.defer_inbox_entry("genuine", &genuine, 100)?;
@@ -269,13 +263,12 @@ fn a_junk_source_cannot_evict_another_sources_pending_ciphertext() -> Result<(),
     )?;
     assert!(retained);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.set_inbox_failure_policy(
         "pending",
         b"packet",
@@ -310,13 +303,12 @@ fn redrive_preserves_original_expiry_and_never_replays_authentication_failures()
     db.expire_inbox_holds(700)?;
     assert!(!db.has_inbox_retry("pending")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn idempotent_sender_key_imports_and_unrelated_devices_do_not_trigger_redrive()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.persist_group_member_device_key("group", &retry_source("alice")?, "key")?;
     let revision = db.inbox_recovery_revision()?;
     for _ in 0..10 {
@@ -331,12 +323,11 @@ fn idempotent_sender_key_imports_and_unrelated_devices_do_not_trigger_redrive()
     db.persist_group_member_device_key("group", &retry_source("alice")?, "changed")?;
     assert!(db.inbox_recovery_revision()? > revision);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn retry_attempts_are_bounded_even_when_the_peer_chooses_a_long_ttl() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let packet = serde_json::to_vec(
         &serde_json::json!({"envelope":{"source_device_id":"stranger","created_at":100,"ttl":604_800}}),
     )?;
@@ -347,7 +338,6 @@ fn retry_attempts_are_bounded_even_when_the_peer_chooses_a_long_ttl() -> Result<
     db.expire_inbox_holds(130)?;
     assert!(!db.has_inbox_retry("pending")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -355,7 +345,7 @@ fn retry_attempts_are_bounded_even_when_the_peer_chooses_a_long_ttl() -> Result<
 fn legacy_imported_ratchets_are_erased_with_secure_delete_and_a_wal_checkpoint()
 -> Result<(), StorageError> {
     use crate::{EventStore, ProjectionStore};
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let id = "dm.session:thread:recv:own-device-sync:old-export";
     db.append_event(id, "dm.ratchet_session", b"old secret snapshot")?;
     db.set_projection_checkpoint("dm_session:thread:recv", id)?;
@@ -367,14 +357,13 @@ fn legacy_imported_ratchets_are_erased_with_secure_delete_and_a_wal_checkpoint()
     let busy: i64 = db.connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
     assert_eq!(busy, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.create_group("affected", "bob")?;
     db.set_inbox_failure_policy(
         "pending",
@@ -396,7 +385,6 @@ fn redrive_wakes_only_later_matching_changes_and_retains_rate_limited_triggers()
     assert_eq!(db.redrive_inbox_changes(104)?, 0);
     assert_eq!(db.redrive_inbox_changes(162)?, 1);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -417,7 +405,7 @@ fn legacy_pin(db: &AccountDb, group: &str, name: &str, key: &str) -> Result<(), 
 #[test]
 fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     db.create_group("group", "owner")?;
     db.add_group_member("group", "device", "member")?;
     let alice = pin_source("alice", "device")?;
@@ -432,13 +420,12 @@ fn a_reused_device_identifier_cannot_rebind_a_pinned_key_to_another_principal()
     assert!(db.persist_group_member_device_key("group", &mallory, "mallory-key").is_err());
     assert_eq!(db.group_member_device_key("group", &alice)?, None);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn unverified_device_claims_cannot_spend_a_verified_senders_failure_quota()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let packet = serde_json::to_vec(
         &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
     )?;
@@ -459,13 +446,12 @@ fn unverified_device_claims_cannot_spend_a_verified_senders_failure_quota()
     assert_eq!(db.defer_inbox_entry("genuine", &packet, 100)?, 1);
     assert!(db.has_inbox_retry("genuine")?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn authenticated_policy_promotion_wakes_backoff_without_resetting_attempts_or_first_seen()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let packet = serde_json::to_vec(
         &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
     )?;
@@ -490,13 +476,12 @@ fn authenticated_policy_promotion_wakes_backoff_without_resetting_attempts_or_fi
     }
     assert_eq!(db.defer_inbox_entry("pending", &packet, 108)?, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention_expires()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let packet = serde_json::to_vec(
         &serde_json::json!({"envelope":{"source_device_id":"friend","created_at":100,"ttl":3600}}),
     )?;
@@ -531,7 +516,6 @@ fn legacy_budget_expiry_parks_ciphertext_until_the_original_quarantine_retention
     assert_eq!(db.unrouted_count()?, 0);
     assert_eq!(db.load_actor_state::<serde_json::Value>("inbox/legacy-held/legacy-key")?, None);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -642,7 +626,7 @@ fn parked_and_expired_legacy_holds_release_shared_stranger_source_and_retry_slot
 #[test]
 fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_rejection()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let packet = br#"{"envelope":{"source_device_id":"uncached"}}"#;
     db.hold_unrouted("legacy-upgrade", 1, packet, 100)?;
     db.retain_legacy_inbox("legacy-upgrade")?;
@@ -668,13 +652,12 @@ fn parking_a_legacy_hold_keeps_only_ciphertext_and_marker_even_after_an_old_reje
         101
     )?);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn status_transitions_never_spend_the_message_retention_budget() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     for n in 1..=3 {
         db.append_journal(
             &format!("m:{n}"),
@@ -710,14 +693,13 @@ fn status_transitions_never_spend_the_message_retention_budget() -> Result<(), S
     assert_eq!(messages[1].body["message_id"], 3);
     assert!(events.iter().filter(|e| e.topic == "sync.status").count() <= 128);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn an_unscoped_group_pin_never_selects_the_only_directory_roots_authority()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let mallory = pin_source("mallory", "shared")?;
     db.create_group("unscoped", "owner")?;
     db.add_group_member("unscoped", "shared", "member")?;
@@ -728,13 +710,12 @@ fn an_unscoped_group_pin_never_selects_the_only_directory_roots_authority()
     assert!(db.persist_group_member_device_key("unscoped", &mallory, "mallory-key").is_err());
 
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let bob = pin_source("bob", "shared")?;
     let mallory = pin_source("mallory", "shared")?;
     db.create_group("legacy", "owner")?;
@@ -767,7 +748,6 @@ fn root_qualified_group_reads_ignore_legacy_pins_even_when_the_key_matches()
         1
     );
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -817,14 +797,13 @@ fn group_control_replay_uses_the_authenticated_actor_and_ignores_legacy_ids()
             .query_row("SELECT count(*) FROM group_control_event_seen", [], |r| r.get(0))?;
     assert_eq!(legacy_count, 1);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn an_invite_for_one_root_cannot_be_accepted_by_a_copied_literal_device_name()
 -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let owner = pin_source("owner", "owner")?;
     let bob = pin_source("bob", "shared")?;
     let mallory = pin_source("mallory", "shared")?;
@@ -863,7 +842,6 @@ fn an_invite_for_one_root_cannot_be_accepted_by_a_copied_literal_device_name()
     assert_eq!(db.group_member_role("g", &bob)?.as_deref(), Some("member"));
     assert_eq!(db.group_member_role("g", &mallory)?, None);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -896,7 +874,6 @@ fn removing_a_root_bound_member_allows_another_root_to_reuse_its_literal_name()
     assert!(db.group_member_role("g", &first)?.is_none());
     assert_eq!(db.group_member_role("g", &second)?.as_deref(), Some("member"));
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -933,13 +910,12 @@ fn migrating_a_removed_r5_member_does_not_reactivate_its_pin() -> Result<(), Sto
     assert_eq!(db.group_member_role("g", &new)?.as_deref(), Some("member"));
     assert_eq!(db.group_member_key_binding("g", &old)?, None);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn transient_topic_never_enters_replay_or_advances_cursor() -> Result<(), StorageError> {
-    let (root, db) = database()?;
+    let (_root, db) = database()?;
     let before = db.journal_bounds()?;
     let error = db.append_journal(
         "typing:1",
@@ -952,6 +928,5 @@ fn transient_topic_never_enters_replay_or_advances_cursor() -> Result<(), Storag
     assert_eq!(db.journal_bounds()?, before);
     assert_eq!(db.journal_after(0, 128)?, Vec::<JournalEvent>::new());
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

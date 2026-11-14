@@ -103,8 +103,9 @@ mod tests {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let ok_path = std::env::temp_dir()
-            .join(format!("ramflux-bus-fault-marker-{}-{nanos}", std::process::id()));
+        let ok_path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-bus-fault-marker-{}-{nanos}", std::process::id()));
         assert!(write_marker_to(&ok_path).is_ok());
         assert!(ok_path.exists());
         let _ = std::fs::remove_file(&ok_path);

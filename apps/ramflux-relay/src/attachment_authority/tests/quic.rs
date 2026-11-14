@@ -49,6 +49,7 @@ struct Pki {
     router: MeshTlsConfig,
     gateway: MeshTlsConfig,
     federation: MeshTlsConfig,
+    _root: ramflux_test_support::TestPath,
 }
 
 fn openssl(args: &[&str]) {
@@ -116,6 +117,7 @@ fn pki(name: &str) -> Pki {
         router: mk("ramflux-router"),
         gateway: mk("ramflux-gateway"),
         federation: mk("ramflux-federation"),
+        _root: root,
     }
 }
 

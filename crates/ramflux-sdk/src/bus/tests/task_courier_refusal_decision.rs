@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 /// A requester account holding one incoming approval request, driven through the actor.
 struct Life {
     account: LocalBusAccountState,
-    root: PathBuf,
     gateway: Arc<Mutex<super::super::fixture::Gateway>>,
     approved: bool,
     scoped: String,
@@ -21,6 +20,7 @@ struct Life {
     key: String,
     start: i64,
     _peers: Vec<LocalBusAccountState>,
+    root: ramflux_test_support::TestPath,
 }
 
 impl Life {
@@ -76,7 +76,6 @@ async fn start(approved: bool) -> Case<Life> {
     let Fixture { root, source, peer, sibling, gateway, .. } = fixture;
     Ok(Life {
         account: source,
-        root,
         gateway,
         approved,
         scoped: format!("task_approval_{id}"),
@@ -84,6 +83,7 @@ async fn start(approved: bool) -> Case<Life> {
         id,
         start: now_unix_timestamp(),
         _peers: vec![peer, sibling],
+        root,
     })
 }
 

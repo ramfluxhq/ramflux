@@ -57,7 +57,6 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     directory.abort();
     drop(peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

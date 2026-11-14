@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn device_sequence_is_durable_per_conversation_and_private_namespace()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut client, root) =
+        let (_root, mut client) =
             client_with_account("generated-counter", "principal_sync", "local")?;
         let first = client
             .account_db()?
@@ -192,14 +192,13 @@ mod tests {
             1
         );
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
     fn hlc_orders_across_authors_and_clamps_future_values() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (client, root) = client_with_account("generated-clock", "principal_sync", "local")?;
+        let (_root, client) = client_with_account("generated-clock", "principal_sync", "local")?;
         let first = client
             .account_db()?
             .write_transaction(|| client.allocate_generated_identity("c", 1000, false))?;
@@ -218,7 +217,6 @@ mod tests {
         assert_eq!(next.hlc, remote + 2);
         assert!(tick(MAX_PHYSICAL_MS, 0x1_0000).is_err());
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

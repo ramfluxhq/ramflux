@@ -99,8 +99,9 @@ mod tests {
     fn background_selection_is_bounded_and_honors_retry_limit_and_backoff() -> Result<(), SdkError>
     {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-attachment-scheduler-{}-{suffix}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-attachment-scheduler-{}-{suffix}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "commitment")?;
@@ -128,7 +129,6 @@ mod tests {
         assert_eq!(db.pending_received_attachment_ids(10, 64)?.len(), 0);
         assert_eq!(db.pending_received_attachment_ids(20, 64)?, vec!["b"]);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

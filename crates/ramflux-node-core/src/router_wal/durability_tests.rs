@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type Events = Arc<Mutex<Vec<(PathBuf, String)>>>;
 
-fn fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "wal-durability-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -182,7 +182,7 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let expected = root.clone();
     let _guard = observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |path, op, completed| {
             if path == expected && op == "directory_sync" && !completed {
                 entered_tx.send(()).map_err(io::Error::other)?;
@@ -197,7 +197,8 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     );
     let worker_root = root.clone();
     let worker = thread::spawn(move || {
-        let writer = RouterWalWriterState::open(worker_root, 0, 0, 1024).expect("open");
+        let writer =
+            RouterWalWriterState::open(worker_root.to_path_buf(), 0, 0, 1024).expect("open");
         done_tx.send(()).expect("done");
         writer
     });
@@ -206,24 +207,28 @@ fn held_directory_sync_blocks_segment_open() -> TestResult {
     release_tx.send(())?;
     drop(worker.join().expect("worker"));
     done_rx.recv_timeout(Duration::from_secs(5))?;
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn failed_recovery_sync_refuses_open() -> TestResult {
-    if std::env::var_os("RAMFLUX_FAILED_RECOVERY_CHILD").is_none() {
+    let Some(child_root) = std::env::var_os("RAMFLUX_FAILED_RECOVERY_CHILD") else {
+        let root = fixture("failed");
+        let directory = root.parent().ok_or("test: crash fixture has no directory")?.to_path_buf();
         let child = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 "router_wal::durability_tests::failed_recovery_sync_refuses_open",
                 "--nocapture",
             ])
-            .env("RAMFLUX_FAILED_RECOVERY_CHILD", "1")
+            .env("RAMFLUX_FAILED_RECOVERY_CHILD", &root)
             .spawn()?;
-        return wait_for_abort(child);
-    }
-    let root = fixture("failed");
+        wait_for_abort(child)?;
+        drop(root);
+        assert!(!directory.exists(), "parent must clean the fixture after the child aborts");
+        return Ok(());
+    };
+    let root = PathBuf::from(child_root);
     fs::create_dir_all(&root)?;
     let segment = router_wal_segment_path(&root, 0);
     fs::write(&segment, ROUTER_WAL_MAGIC)?;

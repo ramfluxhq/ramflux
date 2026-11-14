@@ -67,12 +67,14 @@ mod tests {
     const SNAPSHOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("router_snapshot_v1");
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "ramflux-router-operator-{label}-{}-{}.redb",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ))
+    fn path(label: &str) -> ramflux_test_support::TestPath {
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "ramflux-router-operator-{label}-{}-{}.redb",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
     }
 
     fn insert_row(path: &Path, stale: bool) -> anyhow::Result<()> {
@@ -119,7 +121,6 @@ mod tests {
         assert!(run(IdentityJournalCommand::Checkpoint, &locked).is_err());
         assert!(run(IdentityJournalCommand::DiscardStale, &locked).is_err());
         drop(store);
-        std::fs::remove_file(locked)?;
         Ok(())
     }
 
@@ -135,7 +136,6 @@ mod tests {
         let store = RouterRedbStore::open_existing(&path)?;
         assert_eq!(store.pending_identity_admission_count()?, 0);
         drop(store);
-        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -179,7 +179,6 @@ mod tests {
         assert!(txn.open_table(SNAPSHOTS)?.get("identity_registry")?.is_some());
         drop(txn);
         drop(db);
-        std::fs::remove_file(shutdown_path)?;
         Ok(())
     }
 }

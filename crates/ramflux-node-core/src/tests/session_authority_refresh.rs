@@ -50,7 +50,8 @@ fn old_session_refreshes_set_before_cross_node_delivery_and_revocation_refuses_i
             devices,
         },
     )?;
-    let store = RouterRedbStore::open(temp_store_path("session-revocation")?)?;
+    let store_directory_0 = temp_store_path("session-revocation")?;
+    let store = RouterRedbStore::open(&store_directory_0)?;
     router.publish_signed_device_set(
         &crate::DeviceSetPublishRequest { root_public_key: first.root_public_key, record: next },
         &store,

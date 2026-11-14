@@ -27,6 +27,7 @@ unicode-security = "=0.1.2"
 zeroize.workspace = true
 
 [dev-dependencies]
+ramflux-test-support.workspace = true
 insta = "1.47.2"
 quote = "=1.0.45"
 syn = { version = "=2.0.117", features = ["full", "visit"] }

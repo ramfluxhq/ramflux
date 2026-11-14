@@ -296,12 +296,13 @@ impl RamfluxClient {
 mod t24b1_client_db_reopen_tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> std::path::PathBuf {
+    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        std::env::temp_dir()
-            .join(format!("ramflux-sdk-t24b1-{test_name}-{}-{nanos}", std::process::id()))
+        ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-t24b1-{test_name}-{}-{nanos}", std::process::id()))
     }
 
     fn open_client(root: &std::path::Path, create: bool) -> Result<RamfluxClient, SdkError> {
@@ -344,7 +345,6 @@ mod t24b1_client_db_reopen_tests {
         );
         assert!(reopened.recv_session_checkpoint_at("conv-reopen", "env-recv-1")?);
         assert_eq!(reopened.gateway_receive_cursor("delivery-reopen")?, 41);
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -366,7 +366,6 @@ mod t24b1_client_db_reopen_tests {
         let reopened = open_client(&root, false)?;
         reopened.persist_dm_session_snapshot("conv-orphan", "env-orphan-1", "recv", &snapshot)?;
         assert!(reopened.recv_session_checkpoint_at("conv-orphan", "env-orphan-1")?);
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -394,7 +393,6 @@ mod t24b1_client_db_reopen_tests {
                 != serde_json::to_vec(&accepted_but_unpersisted.snapshot())?,
             "the reopened sender reuses the pre-send ratchet state"
         );
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

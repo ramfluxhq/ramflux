@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn delivery_retention_keeps_pending_rows_and_supports_the_larger_stream_budget()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (root, db) = crate::tests::test_db("delivery-retention")?;
+        let (_root, db) = crate::tests::test_db("delivery-retention")?;
         db.write_transaction(|| {
             for i in 0..5000 {
                 db.persist_actor_state(
@@ -109,18 +109,19 @@ mod tests {
         assert!(db.actor_state_exists("receipt0/neighbor")?);
         assert!(db.retain_delivery_actor_states("receipt/", 0, 32_769).is_err());
         drop(db);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
     fn expiry_and_row_cap_prune_only_the_selected_namespace()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-retain-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-retain-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
@@ -140,7 +141,6 @@ mod tests {
         assert!(db.retain_expiring_actor_states("", 0, 1).is_err());
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

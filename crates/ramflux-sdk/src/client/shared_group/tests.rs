@@ -3,12 +3,14 @@
 
 //! Full-state convergence, first-message keys, names and removal through SDK group APIs.
 use super::*;
-use std::path::{Path, PathBuf};
-pub(super) fn temp_root(label: &str) -> Result<PathBuf, SdkError> {
-    Ok(std::env::temp_dir().join(format!(
-        "ramflux-group-{label}-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )))
+use std::path::Path;
+pub(super) fn temp_root(label: &str) -> Result<ramflux_test_support::TestPath, SdkError> {
+    Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+        format!(
+            "ramflux-group-{label}-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ),
+    ))
 }
 pub(super) fn person(
     root: &Path,
@@ -122,7 +124,6 @@ fn three_devices_converge_and_each_first_group_message_reaches_the_other_members
     let fresh = owner.export_group_sender_key_distribution("group", "owner")?;
     assert!(peer.import_group_sender_key_distribution(&fresh).is_err());
     drop((owner, peer, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -135,7 +136,6 @@ fn readonly_group_metadata_does_not_need_private_root_material() -> Result<(), S
     reader.active_account_db = Some(owner.account_db()?.open_reader()?);
     assert_eq!(reader.shared_group_metadata("group")?, before);
     drop((reader, owner));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -253,7 +253,6 @@ fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_rece
     assert!(peer.load_group_sender_key_state("group", &source, 3, "recv").is_err());
     assert!(peer.encrypt_group_message("group", "peer", b"not a member").is_err());
     drop((owner, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -344,7 +343,6 @@ fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_names()
         b"same-name root-qualified"
     );
     drop((owner, peer, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -395,7 +393,6 @@ fn r5_contact_forwarding_cannot_adopt_a_stranger_group_or_override_decline() -> 
     assert!(user.account_db()?.shared_group_state("g")?.is_none());
     assert!(user.account_db()?.client_record("conversation", "t")?.is_none());
     drop((stranger, contact, user));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -496,7 +493,6 @@ fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> 
     owner.insert_group_request(&request, true)?;
     assert_eq!(owner.group_change_records()?.len(), 2);
     drop((owner, removed, admin, victim));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -531,7 +527,6 @@ fn r5_processed_results_still_count_toward_the_source_partition() -> Result<(), 
     }
     assert_eq!(owner.group_change_records()?.len(), 64);
     drop(owner);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -553,7 +548,6 @@ fn r5_group_aliases_follow_message_deletion_and_pending_expiry() -> Result<(), S
     owner.qualify_outgoing_group_message("g", "next")?;
     assert_eq!(owner.outgoing_group_logical_id(&pending)?, None);
     drop(owner);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -622,7 +616,6 @@ fn r5_successor_transfer_chain_replaces_an_offline_members_higher_epoch_projecti
     );
     assert!(!observer.accept_shared_group_state(&fork, "target-phone")?);
     drop((owner, laptop, bob, observer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -684,7 +677,6 @@ fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkEr
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].request, request);
     drop((owner, outsider));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -756,6 +748,5 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
     assert!(owner.group_change_record(&request, true)?.is_some_and(|row| row.result.is_none()));
     assert_eq!(owner.group_state("group")?.group_epoch, base.view().epoch);
     drop((owner, admin));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

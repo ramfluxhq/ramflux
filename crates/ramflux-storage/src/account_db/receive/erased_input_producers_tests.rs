@@ -20,7 +20,7 @@ fn work(sequence: u64, payload: &str, principal: &str, device: &str, now: i64) -
     serde_json::to_vec(&v).expect("entry encoding")
 }
 
-fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn setup(name: &str) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = super::stage_tests::setup(name)?;
     db.connection.disable_background_checkpoints_for_test();
     Ok((root, db))
@@ -36,7 +36,7 @@ fn erased_input_recorded_before_bindings_drop() -> Result<(), StorageError> {
     let expiry = lifetime(now, 3600, now);
     // (a) Work bound to M gets one binding (i) per bound envelope; deleting M leaves exactly
     // one tombstone per envelope and the bindings are gone afterwards.
-    let (root, db) = setup("erased-producers-a")?;
+    let (_root, db) = setup("erased-producers-a")?;
     db.send_direct_message("thread", "A", "peer", b"x")?;
     for (seq, payload) in [(1, "pa1"), (2, "pa2")] {
         let wire = work(seq, payload, "pa-p", "pa-d", now);
@@ -72,7 +72,6 @@ fn erased_input_recorded_before_bindings_drop() -> Result<(), StorageError> {
     assert_eq!(tombstone(&db, &sel_c)?, Some(expiry));
     assert_eq!(tombstones(&db)?, 4);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -80,7 +79,7 @@ fn erased_input_recorded_before_bindings_drop() -> Result<(), StorageError> {
 fn erased_input_remote_group_delete_converts_only_its_message() -> Result<(), StorageError> {
     // (d) A remote group delete converts only M's envelopes; an unrelated message has no row.
     let now = crate::unix_now();
-    let (root, db) = crate::tests::test_db("erased-producers-d")?;
+    let (_root, db) = crate::tests::test_db("erased-producers-d")?;
     let identity = ramflux_crypto::create_identity_root("owner", [0x72; 32]);
     let actor = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
         &identity,
@@ -114,7 +113,6 @@ fn erased_input_remote_group_delete_converts_only_its_message() -> Result<(), St
     assert_eq!(tombstone(&db, &unrelated)?, None);
     assert_eq!(tombstones(&db)?, 1);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -122,7 +120,7 @@ fn erased_input_remote_group_delete_converts_only_its_message() -> Result<(), St
 fn erased_input_conversation_delete_converts_the_sum_of_envelopes() -> Result<(), StorageError> {
     // (e) A conversation-wide expiry over k messages records exactly the sum; none is evicted.
     let now = crate::unix_now();
-    let (root, db) = crate::tests::test_db("erased-producers-e")?;
+    let (_root, db) = crate::tests::test_db("erased-producers-e")?;
     for n in 0..3 {
         let id = format!("expiring-{n}");
         db.send_direct_message_at_with_metadata(crate::DirectMessageWrite {
@@ -147,7 +145,6 @@ fn erased_input_conversation_delete_converts_the_sum_of_envelopes() -> Result<()
     }
     let _ = params![0];
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -155,7 +152,7 @@ fn erased_input_conversation_delete_converts_the_sum_of_envelopes() -> Result<()
 fn erased_input_live_capture_sweeps_expired_rows_up_to_the_bound() -> Result<(), StorageError> {
     let now = crate::unix_now();
     let expiry = lifetime(now, 3600, now);
-    let (root, db) = setup("erased-producers-sweep")?;
+    let (_root, db) = setup("erased-producers-sweep")?;
     db.send_direct_message("thread", "S", "peer", b"x")?;
     let wire = work(1, "ps", "ps-p", "ps-d", now);
     assert_eq!(run(&db, input(&wire, 1))?, super::stage::ReceiveStageResult::Staged);
@@ -181,6 +178,5 @@ fn erased_input_live_capture_sweeps_expired_rows_up_to_the_bound() -> Result<(),
     assert_eq!(tombstone(&db, "live-existing")?, Some(now + 5_000));
     assert_eq!(tombstones(&db)?, 38);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -155,7 +155,7 @@ async fn r2_key_only_recovery_then_full_merge_creates_a_unique_group_chain_accep
     let saved_path = original.root.join("full.db");
     let saved = original.client.account_db()?.write_backup_snapshot(&saved_path)?;
     // Same recovered root/device seeds, no group or sending checkpoint (legacy key import).
-    let recovered_root = original.root.join("key-recovered");
+    let recovered_root = original.root.child("key-recovered");
     let client =
         crate::bus::dispatch::account::key_backup_restore::recover_alice(&recovered_root).await?;
     let recovered = Fixture { root: recovered_root, client, id: "alice".into() };
@@ -315,10 +315,12 @@ async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ra
 
 // Key-only recovery uses the cryptographic root, rather than a display-name namespace.
 fn canonical_key_recovery_fixture() -> Result<Fixture, SdkError> {
-    let root = std::env::temp_dir().join(format!(
-        "ramflux-key-recovery-{}",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-key-recovery-{}",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let mut client = RamfluxClient::new();
     let identity = client.create_identity_root("alice", [41; 32]);
     let commitment =

@@ -27,11 +27,13 @@ fn checkpoint(db: &redb::Database) -> serde_json::Value {
 }
 #[test]
 fn large_local_backend_range_commit_is_durable() {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backend-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backend-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("db");
     let files = root.join("files");
@@ -120,11 +122,13 @@ fn large_local_backend_range_commit_is_durable() {
 
 #[test]
 fn shared_backend_contract_local() {
-    let root = std::env::temp_dir().join(format!(
-        "rf-contract-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
     let tx = db.begin_write().unwrap();
@@ -175,11 +179,13 @@ fn concurrent_readers_and_segment_writers_do_not_starve_delete() {
             Ok(())
         }
     }
-    let root = std::env::temp_dir().join(format!(
-        "rf-parallel-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-parallel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
     let tx = db.begin_write().unwrap();
@@ -286,11 +292,13 @@ fn stripe_collision_drain_busy_is_observable_and_retryable() {
                 .then_some(candidate)
         })
         .unwrap();
-    let root = std::env::temp_dir().join(format!(
-        "rf-drain-metric-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-drain-metric-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let db = Arc::new(redb::Database::create(root.join("db")).unwrap());
     let tx = db.begin_write().unwrap();

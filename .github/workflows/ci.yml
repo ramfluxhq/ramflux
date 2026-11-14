@@ -56,6 +56,7 @@ jobs:
           python3 -B scripts/ci/report-flakes.py --self-test
           python3 -B scripts/ci/report-mutants.py --self-test
           python3 -B scripts/ci/run-nextest.py --self-test
+          python3 -B scripts/ci/test-tmp.py self-test
           python3 -B scripts/ci/run-libtest.py --self-test
           python3 -B scripts/ci/test-timing.py --self-test
 
@@ -236,7 +237,7 @@ jobs:
             timeout: 15
           - os: macos-latest
             target: aarch64-apple-darwin
-            timeout: 15
+            timeout: 30
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             timeout: 30
@@ -250,6 +251,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python -B scripts/ci/test-tmp.py init
       - name: Install pinned Rust toolchain
         run: |
           toolchain="$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
@@ -295,6 +298,9 @@ jobs:
           wasm-bindgen target/wasm32-unknown-unknown/debug/ramflux_card.wasm --target web --out-dir crates/ramflux-card/web/pkg
           node crates/ramflux-card/web/build-web.mjs target/card-web/cards target/card-web/policy.json
           node crates/ramflux-card/web/build-web.mjs --check target/card-web/cards target/card-web/policy.json
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python -B scripts/ci/test-tmp.py check
 
   doctests:
     name: Doctests
@@ -305,6 +311,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -331,6 +339,9 @@ jobs:
           cargo build --workspace
           cargo fetch --locked
           CARGO_NET_OFFLINE=true ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo test --workspace --doc
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   build-sdk:
     name: Build test archive (sdk)
@@ -435,6 +446,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -486,6 +499,10 @@ jobs:
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
+
   # Independent hosted runner: B7 never consumes the smoke job budget.
   cli-e2e-b7:
     name: CLI e2e (Demo B B7, GitHub-hosted)
@@ -496,6 +513,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -540,6 +559,9 @@ jobs:
           name: junit-cli-b7
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   vault-platform:
     name: Linux vault platform stages
@@ -552,6 +574,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
       - name: Install platform fixture tools
         timeout-minutes: 8
         run: bash scripts/linux-vault-install-tools.sh
@@ -585,7 +609,7 @@ jobs:
         run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
       - name: Private user, D-Bus and actual systemd credential smoke
         timeout-minutes: 15
-        run: sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY bash scripts/linux-vault-ci.sh rest.tar.zst
+        run: sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR bash scripts/linux-vault-ci.sh rest.tar.zst
       - name: Upload vault JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -593,6 +617,9 @@ jobs:
           name: junit-vault-platform
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   vault-init:
     name: Linux vault init stages
@@ -605,6 +632,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
       - name: Install platform fixture tools
         timeout-minutes: 8
         run: bash scripts/linux-vault-install-tools.sh
@@ -630,7 +659,7 @@ jobs:
         timeout-minutes: 8
         run: |
           NEXTEST=$(command -v cargo-nextest)
-          sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY python3 -B scripts/ci/run-nextest.py --label vault-init -- "$NEXTEST" nextest run --profile ci --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
+          sudo --preserve-env=PATH,GITHUB_STEP_SUMMARY,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR python3 -B scripts/ci/run-nextest.py --label vault-init -- "$NEXTEST" nextest run --profile ci --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
       - name: Upload vault JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -638,6 +667,9 @@ jobs:
           name: junit-vault-init
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   vault-secret-service:
     name: Linux vault Secret Service stages
@@ -650,6 +682,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
       - name: Install platform fixture tools
         timeout-minutes: 8
         run: bash scripts/linux-vault-install-tools.sh
@@ -688,13 +722,13 @@ jobs:
         timeout-minutes: 8
         run: |
           NEXTEST=$(command -v cargo-nextest)
-          sudo --preserve-env=PATH "$NEXTEST" nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
-          sudo --preserve-env=PATH "$NEXTEST" nextest list --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          sudo --preserve-env=PATH,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR "$NEXTEST" nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          sudo --preserve-env=PATH,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR "$NEXTEST" nextest list --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
           mapfile -t sdk < <(find target/debug/deps -maxdepth 1 -type f -name 'ramflux_sdk-*' -executable)
           mapfile -t platform < <(find target/debug/deps -maxdepth 1 -type f -name 'linux_vault_platform-*' -executable)
           test "${#sdk[@]}" -eq 1
           test "${#platform[@]}" -eq 1
-          sudo --preserve-env=PATH python3 -B scripts/ci/run-libtest.py --junit target/nextest/ci/junit-vault-secret-service.xml -- bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
+          sudo --preserve-env=PATH,TMPDIR,TMP,TEMP,RF_TEST_TMPDIR python3 -B scripts/ci/run-libtest.py --junit target/nextest/ci/junit-vault-secret-service.xml -- bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
       - name: Upload vault JUnit
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -704,6 +738,10 @@ jobs:
           if-no-files-found: ignore
 
   # Preserve the existing check name for consumers and future branch protection.
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
+
   linux-vault-platform:
     name: Linux vault platform fixture
     if: always()
@@ -754,12 +792,13 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
+      - name: Isolate test temporary files
+        env:
+          RF_TMPFS: ${{ runner.environment == 'github-hosted' }}
         run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          if [ "$RF_TMPFS" = true ]; then export RF_CI_TMPBASE=/tmp; fi
+          python3 -B scripts/ci/test-tmp.py init
+
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -783,11 +822,6 @@ jobs:
         run: |
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label shard -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/2
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -796,6 +830,9 @@ jobs:
           name: junit-sdk-${{ matrix.shard }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   test-rest:
     name: Tests (rest ${{ matrix.shard }}/2)
@@ -830,12 +867,13 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
+      - name: Isolate test temporary files
+        env:
+          RF_TMPFS: ${{ runner.environment == 'github-hosted' }}
         run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
+          if [ "$RF_TMPFS" = true ]; then export RF_CI_TMPBASE=/tmp; fi
+          python3 -B scripts/ci/test-tmp.py init
+
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
@@ -859,11 +897,6 @@ jobs:
         run: |
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label shard -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci --partition hash:${{ matrix.shard }}/2
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -872,6 +905,9 @@ jobs:
           name: junit-rest-${{ matrix.shard }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   v-sdk-a:
     name: "SDK variant: memory vault and production absence"
@@ -882,6 +918,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -901,12 +939,6 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
-        run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -938,11 +970,6 @@ jobs:
           python3 -B scripts/ci/check-receive-crash-absence.py --self-test
           python3 -B scripts/ci/check-receive-crash-absence.py
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -951,6 +978,9 @@ jobs:
           name: junit-v-sdk-a
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   v-sdk-b:
     name: "SDK variant: deferred accounts and gateway transport"
@@ -961,6 +991,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -980,12 +1012,6 @@ jobs:
         # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
         run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
 
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
-        run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
 
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
@@ -1038,11 +1064,6 @@ jobs:
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Upload JUnit
         if: always()
@@ -1051,7 +1072,9 @@ jobs:
           name: junit-v-sdk-b
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
-
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   mutants:
     name: Mutants (advisory, diff only)
@@ -1066,6 +1089,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Rust diff
         id: diff
@@ -1140,6 +1165,9 @@ jobs:
           name: mutants-out
           path: mutants.out
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
@@ -1150,6 +1178,8 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
 
       - name: Install pinned Rust toolchain and check build prerequisites
         run: |
@@ -1211,6 +1241,9 @@ jobs:
             target/nextest/ci/junit-gateway-management.xml
             target/nextest/ci/junit-gateway-durable-fairness.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
 
   quic-dependencies:
     name: Patched QUIC dependency tests
@@ -1221,9 +1254,14 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
       - name: Cache
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
       - name: Verify patches and unique resolution
         run: python3 -B scripts/check-quic-patches.py --verify-upstream
       - name: Run dependency libraries explicitly
         run: python3 -B scripts/test-quic-dependencies.py
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check

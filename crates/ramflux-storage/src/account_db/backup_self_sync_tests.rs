@@ -30,12 +30,14 @@ fn state(
 #[test]
 fn self_sync_restore_imports_erase_floors_before_values_and_never_archives_erased_drafts()
 -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-self-sync-restore-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
-    let _root_guard = crate::tests::TestDirGuard(root.clone());
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-self-sync-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+    let _root_guard = root.clone();
     let source_index = AccountIndex::open(root.join("source"))?;
     let target_index = AccountIndex::open(root.join("target"))?;
     source_index.create_account("source", "own")?;
@@ -141,9 +143,9 @@ fn read(merged: &BackupDatabase, key: &str) -> Result<Option<Value>, Box<dyn std
 #[test]
 fn self_sync_restore_erases_local_repair_fingerprints_and_outbox_copies() -> TestResult {
     let (source_root, source) = crate::tests::test_db("sync-restore-retire-source")?;
-    let _source_root_guard = crate::tests::TestDirGuard(source_root.clone());
+    let _source_root_guard = source_root.clone();
     let (target_root, target) = crate::tests::test_db("sync-restore-retire-target")?;
-    let _target_root_guard = crate::tests::TestDirGuard(target_root.clone());
+    let _target_root_guard = target_root.clone();
     source.persist_actor_state(
         "self-sync/erase/restored-fence",
         &json!({"conversation_id":"erased","erased":true}),

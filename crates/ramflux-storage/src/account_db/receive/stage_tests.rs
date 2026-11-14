@@ -8,7 +8,9 @@ use crate::{AccountDb, StorageError};
 use rusqlite::params;
 use stage::{ReceiveStage, ReceiveStageResult as R};
 
-pub(super) fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+pub(super) fn setup(
+    name: &str,
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = crate::tests::test_db(name)?;
     db.install_receive_ledger_schema()?;
     db.connection.execute(
@@ -84,7 +86,7 @@ fn normalized_ceiling_entry(len: usize) -> Vec<u8> {
 }
 #[test]
 fn capacity_and_range_work() -> Result<(), StorageError> {
-    let (root, db) = setup("w0-capacity")?;
+    let (_root, db) = setup("w0-capacity")?;
     let wire = bytes(u64::MAX);
     assert_eq!(run(&db, input(&wire, u64::MAX))?, R::Staged);
     assert_eq!(run(&db, input(&wire, u64::MAX))?, R::Existing);
@@ -168,7 +170,6 @@ fn capacity_and_range_work() -> Result<(), StorageError> {
     clear(&db)?;
     huge_hole_uses_one_interval(&db)?;
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -277,12 +278,11 @@ fn staged_content_conflict() -> Result<(), StorageError> {
     db.connection.execute("DELETE FROM gateway_receive_work", [])?;
     assert_eq!(run(&db, input(&original, 1))?, R::Erased);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn stage_input_and_authority_fences() -> Result<(), StorageError> {
-    let (root, db) = setup("w0-fences")?;
+    let (_root, db) = setup("w0-fences")?;
     let wire = bytes(1);
     for (candidate, message) in [
         (ReceiveStage { sequence: 0, ..input(&wire, 1) }, "receive sequence must be positive"),
@@ -358,13 +358,12 @@ fn stage_input_and_authority_fences() -> Result<(), StorageError> {
             .query_row("SELECT count(*) FROM gateway_receive_receipt", [], |r| r.get(0))?;
     assert_eq!(rows, 0, "late erasure fence rolls back staged input");
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn stage_failure_rolls_back_reservation_even_if_caught() -> Result<(), StorageError> {
-    let (root, db) = setup("w0-rollback")?;
+    let (_root, db) = setup("w0-rollback")?;
     db.connection.execute_batch("CREATE TEMP TRIGGER fail_w0 BEFORE INSERT ON gateway_receive_work BEGIN SELECT RAISE(ABORT,'w0 work failure'); END;")?;
     let wire = bytes(1);
     db.receive_transaction(
@@ -392,7 +391,6 @@ fn stage_failure_rolls_back_reservation_even_if_caught() -> Result<(), StorageEr
             .query_row("SELECT count(*) FROM gateway_receive_receipt", [], |r| r.get(0))?;
     assert_eq!(count, 0, "failed work insert leaked a receipt reservation");
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -500,7 +498,6 @@ fn receive_work_footprint_registered_atomically() -> Result<(), StorageError> {
     )?;
     assert_eq!(checksum, "2026-11-06-receive-ledger-v1");
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -589,6 +586,5 @@ fn receive_erasure_marks_receipt_before_work() -> Result<(), StorageError> {
     )?;
     assert_erased_pair(&db)?;
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

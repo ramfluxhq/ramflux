@@ -115,6 +115,5 @@ async fn held_inbound_pending_logs_one_info_line_with_sequence_kind_and_reason()
     }
     drop(observed);
     drop((source, receiver));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

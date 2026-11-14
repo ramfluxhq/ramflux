@@ -265,7 +265,7 @@ mod tests {
     };
     use crate::{NodeCoreError, RouterCore, RouterRedbStore, SessionDescriptor, SessionLifecycle};
     use redb::{ReadableDatabase, ReadableTable, TableHandle};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Barrier};
@@ -273,13 +273,15 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn temp_path(name: &str) -> PathBuf {
+    fn temp_path(name: &str) -> ramflux_test_support::TestPath {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "ramflux-s6c-p04-{name}-{}-{}.redb",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "ramflux-s6c-p04-{name}-{}-{}.redb",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
     }
 
     fn descriptor(target: &str, gateway: &str, session: &str, seq: u64) -> SessionDescriptor {

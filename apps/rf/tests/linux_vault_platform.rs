@@ -36,7 +36,7 @@ fn bounded_with(
     leader: &mut u32,
 ) -> Result<Output, BoxError> {
     static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-    let stem = std::env::temp_dir().join(format!(
+    let stem = ramflux_test_support::TestPath::new()?.child(format!(
         "rf-vault-proc-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::SeqCst)

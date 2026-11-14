@@ -10,21 +10,19 @@ tokio::task_local! {
     pub(crate) static DISCOVERY_CLIENT: reqwest::Client;
 }
 
-struct TestRoot(PathBuf);
+struct TestRoot(ramflux_test_support::TestPath);
 impl TestRoot {
     fn new() -> Result<Self, SdkError> {
-        Ok(Self(std::env::temp_dir().join(format!(
-            "ramflux-node-test-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ))))
+        Ok(Self(
+            ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+                format!(
+                    "ramflux-node-test-{}",
+                    ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+                ),
+            ),
+        ))
     }
 }
-impl Drop for TestRoot {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn record(seed: u8) -> Result<WellKnownClientRecord, SdkError> {
     let mut record = WellKnownClientRecord {
         schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),

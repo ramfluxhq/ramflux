@@ -11,9 +11,9 @@ use redb::{ReadableDatabase, ReadableTable};
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 const MARKER: &str = "session_push_rotation_pending_v1";
 const T20: &str = "router_wal::durability_tests::interrupted_roll_empty_header";
-fn fixture() -> PathBuf {
+fn fixture() -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    fs::canonicalize(std::env::temp_dir()).expect("temporary root").join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "p3-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

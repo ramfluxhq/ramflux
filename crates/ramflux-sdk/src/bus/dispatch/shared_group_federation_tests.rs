@@ -210,6 +210,5 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
     }
     directory.abort();
     drop((source, peers, federation));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

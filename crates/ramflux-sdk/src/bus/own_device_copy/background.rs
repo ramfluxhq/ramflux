@@ -707,7 +707,6 @@ mod budget_tests {
         assert!(prepare(&account)?.is_none());
         assert!(!account.client.account_db()?.actor_state_exists(&key)?);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

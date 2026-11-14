@@ -172,8 +172,9 @@ async fn restore_does_not_import_pending_receipts_as_live() -> Case {
             while let Some(task) = tasks.join_next().await {
                 task?;
             }
-            let receipt =
-                lifecycle::fingerprint(root.clone(), &unlock()).await?.ok_or("missing key")?;
+            let receipt = lifecycle::fingerprint(root.to_path_buf(), &unlock())
+                .await?
+                .ok_or("missing key")?;
             assert!(matches!(
                 supervisor.index.lookup_supervisor_operation(
                     &receipt.scope,
@@ -211,6 +212,5 @@ async fn actor_mutation_pending_receipt_still_requires_reconciliation() -> Case 
     assert!(error.to_string().contains("operation requires reconciliation"));
     assert!(intent.reserve(db.client.account_db()?).is_err());
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

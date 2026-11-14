@@ -8,15 +8,12 @@ use ramflux_protocol::{
     StreamAppendCommand, SurfacePatchOp, SurfaceType, surface_args_hash, surface_snapshot_hash,
 };
 use serde_json::{Value, json};
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Fixture {
-    root: PathBuf,
     author: RamfluxClient,
     human: RamfluxClient,
+    root: ramflux_test_support::TestPath,
 }
 fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     let mut client = RamfluxClient::new();
@@ -30,11 +27,13 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "rf-surface-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-surface-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         let author = client(&root.join("author"), "author", 31)?;
         let human = client(&root.join("human"), "human", 35)?;
         for (local, remote) in [(&author, &human), (&human, &author)] {
@@ -47,14 +46,13 @@ impl Fixture {
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
         }
-        Ok(Self { root, author, human })
+        Ok(Self { author, human, root })
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.author = RamfluxClient::new();
         self.human = RamfluxClient::new();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn snapshot() -> CreateSurfaceCommand {

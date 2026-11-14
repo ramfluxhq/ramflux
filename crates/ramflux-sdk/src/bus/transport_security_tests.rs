@@ -6,25 +6,20 @@ use super::io::local_bus_error_code;
 use crate::SdkError;
 use ramflux_transport::{MeshQuicServer, MeshTlsConfig, TransportError};
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Certificates {
-    root: PathBuf,
     tls: MeshTlsConfig,
     ca_pem: String,
     leaf: rustls::pki_types::CertificateDer<'static>,
     key: Vec<u8>,
+    _root: ramflux_test_support::TestPath,
 }
 impl Certificates {
     fn new(label: &str) -> TestResult<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let root = std::env::temp_dir().join(format!(
-            "rf-r8-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()?.child("certs");
         std::fs::create_dir_all(&root)?;
         let mut ca = CertificateParams::new(Vec::<String>::new())?;
         ca.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -49,7 +44,7 @@ impl Certificates {
         std::fs::write(&tls.ca_cert, &ca_pem)?;
         std::fs::write(&tls.service_cert, cert.pem())?;
         std::fs::write(&tls.service_key, key.serialize_pem())?;
-        Ok(Self { root, tls, ca_pem, leaf: cert.der().clone(), key: key.serialize_der() })
+        Ok(Self { tls, ca_pem, leaf: cert.der().clone(), key: key.serialize_der(), _root: root })
     }
     fn mesh(&self, client_ca: String) -> TestResult<(String, tokio::task::JoinHandle<()>)> {
         let server = MeshQuicServer::bind_with_pem_roots_provider(
@@ -91,11 +86,6 @@ impl Certificates {
             .await
         });
         Ok((format!("https://{addr}/"), task))
-    }
-}
-impl Drop for Certificates {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn assert_security(error: TransportError) {

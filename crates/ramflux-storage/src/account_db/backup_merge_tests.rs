@@ -7,11 +7,13 @@ use crate::{AccountDbKey, AccountIndex, EventStore};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-merge-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
     index.create_account("source", "root")?;
@@ -81,7 +83,6 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     drop(local);
     drop(index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -132,11 +133,13 @@ fn assert_link_consent_order(db: &rusqlite::Connection) -> TestResult {
 
 #[test]
 fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-merge-deletion-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-merge-deletion-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let source_index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
     source_index.create_account("account", "root")?;
@@ -214,7 +217,6 @@ fn merge_applies_tombstones_and_newer_receipts_without_resurrecting_plaintext() 
     drop(local);
     drop(source_index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -245,11 +247,13 @@ fn assert_merged_message_origins(db: &rusqlite::Connection) -> TestResult {
 
 #[test]
 fn r2_merge_never_imports_restore_flags_or_marks_existing_local_sessions_inactive() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-flags-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-flags-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let si = AccountIndex::open(root.join("source"))?;
     let li = AccountIndex::open(root.join("local"))?;
     si.create_account("a", "root")?;
@@ -298,17 +302,18 @@ fn r2_merge_never_imports_restore_flags_or_marks_existing_local_sessions_inactiv
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn backup_tombstone_classifies_only_devices_under_the_local_account_root() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-own-classifier-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-own-classifier-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let source_index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
     source_index.create_account("account", "own-root")?;
@@ -349,17 +354,18 @@ fn backup_tombstone_classifies_only_devices_under_the_local_account_root() -> Te
     drop(reopened);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn backup_reserved_dm_scopes_require_canonical_immutable_root_bindings() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-dm-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-dm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let first = ramflux_protocol::encode_base64url([0; 32]);
     let second = ramflux_protocol::encode_base64url([208; 32]);
     let third = ramflux_protocol::encode_base64url([99; 32]);
@@ -410,6 +416,5 @@ fn backup_reserved_dm_scopes_require_canonical_immutable_root_bindings() -> Test
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

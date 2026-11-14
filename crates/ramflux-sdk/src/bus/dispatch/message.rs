@@ -989,13 +989,15 @@ mod root_tests {
     use super::*;
     #[test]
     fn receipts_use_the_conversation_root_despite_equal_device_names() -> Result<(), SdkError> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-receipt-root-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-receipt-root-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
         let mut client = RamfluxClient::new();
         client.create_identity_root("alice", [1; 32]);
         client.create_device_branch("alice", "phone", 1, [2; 32]);
@@ -1053,7 +1055,6 @@ mod root_tests {
             receipt_gateway_message(&account, "unknown", "receipt", "shared", "target", 1).is_err()
         );
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

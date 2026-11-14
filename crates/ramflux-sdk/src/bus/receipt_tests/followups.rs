@@ -32,7 +32,6 @@ fn missing_local_root_does_not_roll_back_an_incoming_message_transaction() -> Te
     assert_eq!(db.actor_state_usage(PREFIX)?.0, 0);
     drop(receiver);
     drop(sender);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -100,7 +99,6 @@ fn receipt_retention_is_bounded_preserves_legacy_payloads_and_records_journal_ga
         1
     );
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -136,7 +134,6 @@ fn legacy_receipt_enrollment_advances_bounded_pages_and_preserves_the_original_g
         );
     }
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -200,6 +197,5 @@ fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_mess
     }
     drop(receiver);
     drop(sender);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

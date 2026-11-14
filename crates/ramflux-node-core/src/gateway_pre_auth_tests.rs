@@ -35,14 +35,16 @@ fn challenge(state: &mut GatewayState, peer: &str, now: u64) -> Result<String> {
 }
 struct Store {
     store: GatewayRedbStore,
-    path: std::path::PathBuf,
+    path: ramflux_test_support::TestPath,
 }
 impl Store {
     fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "preauth-boundary-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "preauth-boundary-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         Ok(Self { store: GatewayRedbStore::open(&path)?, path })
     }
     fn restored(&self) -> Result<GatewayState> {
@@ -58,12 +60,6 @@ impl Store {
         Ok(())
     }
 }
-impl Drop for Store {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 #[test]
 fn preauth_boundary_matrix() -> Result {
     expiry_boundaries()?;
@@ -363,10 +359,12 @@ fn concurrent_callers_sample_after_acquiring_the_state_lock() -> Result {
 
 #[test]
 fn preauth_runtime_policy_and_debt_commit_atomically_across_restart() -> Result {
-    let path = std::env::temp_dir().join(format!(
-        "preauth-policy-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "preauth-policy-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let runtime = crate::GatewayPreAuthConfig {
         enabled: true,
         per_source_ip_handshake_rate: 1,
@@ -412,16 +410,17 @@ fn preauth_runtime_policy_and_debt_commit_atomically_across_restart() -> Result 
         assert!(store.load_state_with_pre_auth_config(&runtime)?.is_some());
         assert!(store.load_state()?.is_some());
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
 #[test]
 fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
-    let path = std::env::temp_dir().join(format!(
-        "preauth-cooldown-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "preauth-cooldown-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     {
         let store = GatewayRedbStore::open(&path)?;
         let mut state = GatewayState::new();
@@ -451,7 +450,6 @@ fn pre_auth_restart_cooldown_cannot_shrink_on_another_restart() -> Result {
     ));
     assert!(state.check_pre_auth(&source, None, 3731).is_ok());
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -479,10 +477,12 @@ fn disabled_admission_refuses_time_below_the_checkpoint_reservation() -> Result 
 #[test]
 fn restart_rejects_clock_below_committed_reservation_in_both_modes() -> Result {
     for enabled in [false, true] {
-        let path = std::env::temp_dir().join(format!(
-            "preauth-reservation-fence-{}.redb",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "preauth-reservation-fence-{}.redb",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         {
             let store = GatewayRedbStore::open(&path)?;
             let mut current = state()?;
@@ -557,10 +557,12 @@ fn admission_checkpoint_payload_is_independent_of_sessions() -> Result {
 
 #[test]
 fn empty_rate_zero_sources_are_reclaimed_on_reopen() -> Result {
-    let path = std::env::temp_dir().join(format!(
-        "preauth-empty-sources-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "preauth-empty-sources-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     {
         let store = GatewayRedbStore::open(&path)?;
         let mut current = state()?;
@@ -576,7 +578,6 @@ fn empty_rate_zero_sources_are_reclaimed_on_reopen() -> Result {
     assert!(restored.pre_auth_expiry_by_source.is_empty());
     assert!(matches!(restored.check_pre_auth(&source(4097), None, 100)?, Decision::Challenge(_)));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

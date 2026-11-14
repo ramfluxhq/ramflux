@@ -17,7 +17,7 @@ use std::path::Path;
 #[test]
 fn relay_client_quic_dispatch_records_ingress_and_object_rejections() -> Result<(), String> {
     let metrics = RelayClientQuicMetrics::default();
-    let store = v3_temp_store()?;
+    let (_fixture_directory_0, store) = v3_temp_store()?;
     let cache = v3_pinned_cache()?;
     let state = v3_state_with(&store, v3_stored_chunk(v3_pk(V3_OWNER_SEED), false))?;
 

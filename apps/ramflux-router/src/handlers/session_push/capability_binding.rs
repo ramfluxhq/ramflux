@@ -8,7 +8,6 @@ use ramflux_node_core::{
     EphemeralRouteGate, SessionDescriptor, SessionLifecycle, SessionPushSessionRequest,
 };
 use serde_json::Value;
-use std::path::PathBuf;
 
 type TestResult = anyhow::Result<()>;
 
@@ -59,9 +58,9 @@ fn capable_request(
     }
 }
 
-fn fresh(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
-    let (state, store, path) = crate::router_runtime::tests::test_router(name)?;
-    Ok((RouterHandle::tokio(state, store, None), path))
+fn fresh(name: &str) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
+    let (path, state, store) = crate::router_runtime::tests::test_router(name)?;
+    Ok((path, RouterHandle::tokio(state, store, None)))
 }
 
 fn post_capable(
@@ -101,15 +100,18 @@ fn assert_online(router: &RouterHandle, target: &str, gateway: &str, session: &s
     assert!(router.state().ephemeral_map_contains(target));
 }
 
-fn seed_capable(name: &str, target: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
-    let (router, path) = fresh(name)?;
+fn seed_capable(
+    name: &str,
+    target: &str,
+) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
+    let (path, router) = fresh(name)?;
     post_capable(&router, target, "gateway", "session", 1, true)?;
     assert_online(&router, target, "gateway", "session");
-    Ok((router, path))
+    Ok((path, router))
 }
 
 fn row_resume_without_capability() -> TestResult {
-    let (router, path) = seed_capable("p04-btf", "target-btf")?;
+    let (path, router) = seed_capable("p04-btf", "target-btf")?;
     post_upsert(&router, &descriptor("target-btf", "gateway", "session", 2))?;
     let mut forwards = 0;
     let gate = router.state().route_gate("target-btf");
@@ -125,7 +127,7 @@ fn row_resume_without_capability() -> TestResult {
 }
 
 fn row_resume_with_capability_after_legacy() -> TestResult {
-    let (router, path) = seed_capable("p04-reverse", "target-reverse")?;
+    let (path, router) = seed_capable("p04-reverse", "target-reverse")?;
     post_upsert(&router, &descriptor("target-reverse", "gateway", "session", 2))?;
     assert_unsupported(&router, "target-reverse");
     post_capable(&router, "target-reverse", "gateway", "session", 3, true)?;
@@ -136,7 +138,7 @@ fn row_resume_with_capability_after_legacy() -> TestResult {
 }
 
 fn row_capable_ephemeral_false_clears() -> TestResult {
-    let (router, path) = seed_capable("p04-false", "target-false")?;
+    let (path, router) = seed_capable("p04-false", "target-false")?;
     post_capable(&router, "target-false", "gateway", "session", 2, false)?;
     assert_unsupported(&router, "target-false");
     drop(router);
@@ -145,7 +147,7 @@ fn row_capable_ephemeral_false_clears() -> TestResult {
 }
 
 fn row_legacy_other_gateway() -> TestResult {
-    let (router, path) = seed_capable("p04-other-gw", "target-other-gw")?;
+    let (path, router) = seed_capable("p04-other-gw", "target-other-gw")?;
     post_upsert(&router, &descriptor("target-other-gw", "gateway-b", "session-b", 2))?;
     assert_unsupported(&router, "target-other-gw");
     let recorded = router.state().session("target-other-gw").ok_or_else(|| anyhow::anyhow!("d"))?;
@@ -157,7 +159,7 @@ fn row_legacy_other_gateway() -> TestResult {
 }
 
 fn row_new_session_without_ephemeral() -> TestResult {
-    let (router, path) = seed_capable("p04-new-sid", "target-new-session")?;
+    let (path, router) = seed_capable("p04-new-sid", "target-new-session")?;
     post_capable(&router, "target-new-session", "gateway", "session-2", 2, false)?;
     assert_unsupported(&router, "target-new-session");
     drop(router);
@@ -166,7 +168,7 @@ fn row_new_session_without_ephemeral() -> TestResult {
 }
 
 fn row_gateway_mismatch_retains_map() -> TestResult {
-    let (router, path) = seed_capable("p04-gw-eq", "target-gw-eq")?;
+    let (path, router) = seed_capable("p04-gw-eq", "target-gw-eq")?;
     let mut changed = descriptor("target-gw-eq", "gateway-b", "session", 2);
     changed.gateway_id = "gateway-b".into();
     router.state().upsert_session(changed)?;
@@ -180,7 +182,7 @@ fn row_gateway_mismatch_retains_map() -> TestResult {
 }
 
 fn row_session_mismatch_retains_map() -> TestResult {
-    let (router, path) = seed_capable("p04-sid-eq", "target-sid-eq")?;
+    let (path, router) = seed_capable("p04-sid-eq", "target-sid-eq")?;
     let mut changed = descriptor("target-sid-eq", "gateway", "session-b", 2);
     changed.session_id = "session-b".into();
     router.state().upsert_session(changed)?;

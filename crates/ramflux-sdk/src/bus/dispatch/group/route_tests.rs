@@ -88,6 +88,5 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
     assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &entry)?.is_some());
     directory.abort();
     drop((source, peers));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

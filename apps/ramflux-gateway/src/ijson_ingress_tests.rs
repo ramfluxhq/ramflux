@@ -116,7 +116,7 @@ struct FakeRouter {
     wake: SocketAddr,
     exited: std::sync::mpsc::Receiver<Result<(), String>>,
     task: std::thread::JoinHandle<()>,
-    cert_root: std::path::PathBuf,
+    cert_root: ramflux_test_support::TestPath,
 }
 
 impl FakeRouter {
@@ -137,7 +137,7 @@ impl FakeRouter {
 }
 
 fn fake_router() -> anyhow::Result<FakeRouter> {
-    let cert_root = std::env::temp_dir().join(format!(
+    let cert_root = ramflux_test_support::TestPath::new()?.child(format!(
         "ramflux-gateway-ijson-router-{}",
         ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
     ));
@@ -318,10 +318,10 @@ fn session_frame(timestamp: i64) -> anyhow::Result<Vec<u8>> {
 /// Gateway context whose router is the counting fake, so every refusal can be checked for zero calls.
 fn context_with_router(
     router: &crate::RouterMeshClient,
-) -> anyhow::Result<crate::GatewayQuicContext> {
-    let mut context = crate::session::tests::test_gateway_context()?;
+) -> anyhow::Result<(ramflux_test_support::TestPath, crate::GatewayQuicContext)> {
+    let (fixture_directory_0, mut context) = crate::session::tests::test_gateway_context()?;
     context.router = router.clone();
-    Ok(context)
+    Ok((fixture_directory_0, context))
 }
 
 fn open_frame() -> anyhow::Result<ramflux_node_core::GatewayOpenFrame> {
@@ -386,10 +386,11 @@ async fn auth_frame_rows_refuse_i_json(
         let frames = Arc::new(Mutex::new(Vec::new()));
         // Assert on the Nack before propagating the session result, so a regressed fix fails on
         // the exact-Nack assertion rather than on the propagated I-JSON error.
+        let (_context_directory, context) = context_with_router(router)?;
         let outcome = crate::session::handle_gateway_session_transport(
             Box::new(RecordingSink(Arc::clone(&frames))),
             Box::new(QueueSource(VecDeque::from([body]))),
-            context_with_router(router)?,
+            context,
             ramflux_node_core::GatewayClientFrame::Open { open: open_frame()? },
         )
         .await;
@@ -402,10 +403,11 @@ async fn auth_frame_rows_refuse_i_json(
 
     let baseline = calls.load(Ordering::Acquire);
     let frames = Arc::new(Mutex::new(Vec::new()));
+    let (_context_directory, context) = context_with_router(router)?;
     crate::session::handle_gateway_session_transport(
         Box::new(RecordingSink(Arc::clone(&frames))),
         Box::new(QueueSource(VecDeque::from([auth_frame_bytes("9007199254740991")]))),
-        context_with_router(router)?,
+        context,
         ramflux_node_core::GatewayClientFrame::Open { open: open_frame()? },
     )
     .await?;
@@ -426,7 +428,7 @@ async fn tcp_session_frames_refuse_i_json(
     router: &crate::RouterMeshClient,
     calls: &AtomicUsize,
 ) -> anyhow::Result<()> {
-    let root = std::env::temp_dir().join(format!(
+    let root = ramflux_test_support::TestPath::new()?.child(format!(
         "ramflux-gateway-ijson-session-{}",
         ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
     ));
@@ -442,7 +444,7 @@ async fn tcp_session_frames_refuse_i_json(
     std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let context = context_with_router(router)?;
+    let (_context_directory, context) = context_with_router(router)?;
     let listener_context = crate::serve::GatewayListenerContext {
         custody: context.custody,
         node_id: context.node_id,

@@ -272,7 +272,6 @@ fn custody_network_admits_only_signed_possession_and_consumes_challenge_once() -
     ));
     drop(restarted);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -398,7 +397,6 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
     ));
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -447,7 +445,6 @@ fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_res
         assert!(store.observe_custody_node(&rebound, NOW + 2).is_err());
         assert_eq!(store.custody_node_history(retired.hash())?, Some(retired.envelope().clone()));
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -494,7 +491,6 @@ fn custody_node_key_signing_deadline_cannot_restart_after_overlap_history_is_rem
         )?;
         assert!(store.observe_custody_node(&recycled, later + 1).is_err());
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -527,7 +523,6 @@ fn custody_mesh_unauthenticated_ipv6_prefix_cannot_exhaust_other_sources() -> Re
     assert!(issued <= 64);
     driver.challenge(&service, &router, &store, driver.publish())?;
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -579,7 +574,6 @@ fn custody_publication_quota_refusal_does_not_occupy_successful_replay_cache() -
     ));
     assert!(router.custody_record(&refused.reference.account_anchor, NOW)?.is_none());
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -705,7 +699,6 @@ fn custody_direct_prove_busy_and_revoked_grants_never_establish_a_session() -> R
     ));
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[path = "custody_migration.rs"]
@@ -769,7 +762,7 @@ fn durable_view_publication() -> Result {
         )?;
         let (accepted, durable) = mpsc::sync_channel(1);
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "accepted_assignment" && done {
                     let _ = accepted.try_send(());

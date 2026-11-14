@@ -85,7 +85,6 @@ fn non_author_send_is_typed_before_delta_hash_construction()
     assert_eq!(reader.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     drop(reader);
     drop(author);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -176,6 +175,5 @@ async fn group_roster_without_seed_refuses_surface_in_the_unreceived_conversatio
     assert_eq!(state.accounts["agent"].client.surface_get("surface-group", 0, None)?, Value::Null);
     drop(state);
     drop(owner);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

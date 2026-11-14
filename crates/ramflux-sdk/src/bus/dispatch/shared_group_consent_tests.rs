@@ -99,7 +99,6 @@ async fn r5_encrypted_contact_forward_and_message_preserve_consent_and_decline()
     }
     directory.abort();
     drop((user, contact, peers, stranger));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 async fn seal(

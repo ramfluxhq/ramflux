@@ -36,16 +36,15 @@ fn enabled_service_requires_a_separate_mounted_cookie_key() -> Result<(), Box<dy
 #[test]
 fn gateway_pre_auth_bounds_are_checked_when_loading_config()
 -> Result<(), Box<dyn std::error::Error>> {
-    struct ConfigFile(std::path::PathBuf);
-    impl Drop for ConfigFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let file = ConfigFile(std::env::temp_dir().join(format!(
-        "preauth-config-{}.toml",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )));
+    struct ConfigFile(ramflux_test_support::TestPath);
+    let file = ConfigFile(
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "preauth-config-{}.toml",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ),
+        ),
+    );
     let base = "node_id='test'\nservice_id='ramflux-gateway'\nredb_path='unused.redb'\n[mesh]\nlisten_addr='127.0.0.1:0'\nca_cert='unused'\nservice_cert='unused'\nservice_key='unused'\nallowed_service_ids=['ramflux-gateway']\n[mesh.endpoints]\nrouter='127.0.0.1:1'\n[gateway]\npublic_listen_addr='127.0.0.1:0'\n[gateway.pre_auth]\n";
     for (policy, valid) in [
         ("enabled=false\n", true),

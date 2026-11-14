@@ -373,8 +373,9 @@ mod tests {
         let line = capture_line(&request("/relay/v1/object/put_chunk"), 200, 7, 3, "write");
         // A writable path succeeds; an unwritable (missing parent dir) path is Err, so the
         // connection loop fails the connection instead of proceeding on a lost capture.
-        let ok_path = std::env::temp_dir()
-            .join(format!("ramflux-s62-capture-ok-{}.jsonl", std::process::id()));
+        let ok_path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-s62-capture-ok-{}.jsonl", std::process::id()));
         capture_to(&ok_path, &line).map_err(|()| "writable capture path must succeed")?;
         let _ = std::fs::remove_file(&ok_path);
         let bad_path =
@@ -397,8 +398,9 @@ mod tests {
         const THREADS: usize = 16;
         const LINES_PER_THREAD: usize = 100;
 
-        let path = std::env::temp_dir()
-            .join(format!("ramflux-capture-concurrency-{}.jsonl", std::process::id()));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-capture-concurrency-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let barrier = Arc::new(Barrier::new(THREADS));
         let handles: Vec<_> = (0..THREADS)
@@ -459,8 +461,9 @@ mod tests {
 
     #[test]
     fn hold_marker_write_is_fail_closed_on_unwritable_path() -> Result<(), String> {
-        let ok_path =
-            std::env::temp_dir().join(format!("ramflux-s62-hold-ok-{}.marker", std::process::id()));
+        let ok_path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-s62-hold-ok-{}.marker", std::process::id()));
         write_marker_to(&ok_path).map_err(|()| "writable marker path must succeed")?;
         assert!(ok_path.exists(), "hold marker must be created");
         let _ = std::fs::remove_file(&ok_path);

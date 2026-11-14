@@ -7,7 +7,6 @@ use ramflux_crypto::custody::{SelfSigningKey, verify_record};
 use ramflux_protocol::custody::{DeviceSet, object_hash};
 use ramflux_protocol::home_migration::ResolveResult;
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use zeroize::Zeroizing;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const NOW: u64 = 1_700_000_100;
@@ -35,21 +34,23 @@ fn public(seed: u8) -> String {
     ramflux_protocol::encode_base64url(signing(seed).verifying_key().to_bytes())
 }
 struct TestNode {
-    path: PathBuf,
     store: Option<RouterRedbStore>,
     core: RouterCore,
     node: MigrationNode,
+    path: ramflux_test_support::TestPath,
 }
 impl TestNode {
     fn new(id: &str, seed: u8, registered: bool) -> TestResult<Self> {
         Self::with_registration(id, seed, true, registered)
     }
     fn with_registration(id: &str, seed: u8, publish: bool, registered: bool) -> TestResult<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-mig-{}-{}.redb",
-            std::process::id(),
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-mig-{}-{}.redb",
+                std::process::id(),
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let store = RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?;
         let core = RouterCore::new();
         core.set_node_service_signer(Some(crate::NodeServiceSigningKey::from_seed([seed; 32])));
@@ -102,7 +103,7 @@ impl TestNode {
 impl Drop for TestNode {
     fn drop(&mut self) {
         drop(self.store.take());
-        let _ = std::fs::remove_file(&self.path);
+
         let _ = std::fs::remove_dir_all(self.path.with_extension("wal"));
     }
 }

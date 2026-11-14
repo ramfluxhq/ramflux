@@ -14,9 +14,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle},
         process::ExitStatusExt,
     },
-    path::PathBuf,
     process::{Child, Command, ExitStatus, Output, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -25,8 +23,6 @@ const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 0x102;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-
-static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut core::ffi::c_void;
@@ -136,13 +132,9 @@ pub(crate) fn run_group_output(
     command: &mut Command,
     deadline: Duration,
 ) -> Result<Output, Box<dyn std::error::Error>> {
-    let stem = std::env::temp_dir().join(format!(
-        "rf-cli-e2e-proc-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let out_path = PathBuf::from(format!("{}.out", stem.display()));
-    let err_path = PathBuf::from(format!("{}.err", stem.display()));
+    let root = ramflux_test_support::TestPath::new()?;
+    let out_path = root.join("stdout");
+    let err_path = root.join("stderr");
     let result = (|| -> Result<Output, Box<dyn std::error::Error>> {
         command
             .stdin(Stdio::null())
@@ -169,8 +161,8 @@ pub(crate) fn run_group_output(
             stderr: std::fs::read(&err_path).unwrap_or_default(),
         })
     })();
-    let _ = std::fs::remove_file(&out_path);
-    let _ = std::fs::remove_file(&err_path);
+    // Release Command's parent-side file handles before the directory owner drops.
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     result
 }
 

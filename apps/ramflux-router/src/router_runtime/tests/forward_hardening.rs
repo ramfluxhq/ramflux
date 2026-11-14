@@ -28,7 +28,8 @@ fn reservation(
 fn committed_forward_named_field_gate_off_is_terminal_rejected_security() -> anyhow::Result<()> {
     anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
+    let (_fixture_directory_0, handle) =
+        migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
     let mut envelope = current_envelope("named-gate-off", "target_alice")?;
     envelope.delivery_mode = Some("durable".into());
     envelope.ext.ext.remove("source_device_authority");
@@ -55,7 +56,8 @@ fn socket_timeout_uses_production_forward_completion() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
+    let (_fixture_directory_0, handle) =
+        migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
     let attempt = reservation(&handle, "timeout-branch")?;
     let RouterHandle::Tokio(inner) = &handle;
     let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
@@ -84,7 +86,8 @@ fn forward_error_uses_production_completion_and_releases_permit() -> anyhow::Res
     listener.set_nonblocking(true)?;
     let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
+    let (_fixture_directory_0, handle) =
+        migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
     let attempt = reservation(&handle, "forward-error")?;
     let RouterHandle::Tokio(inner) = &handle;
     let permit = Arc::clone(&inner.forward_semaphore).try_acquire_owned()?;
@@ -138,7 +141,8 @@ fn tcp_and_async_ingress_share_exact_forward_capacity() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, _) = migrated_test_handle(&url, 2, Duration::from_secs(20), now)?;
+    let (_fixture_directory_0, handle) =
+        migrated_test_handle(&url, 2, Duration::from_secs(20), now)?;
     let handle = Arc::new(handle);
     let (entered, receiver) = mpsc::channel();
     let mut servers = Vec::new();
@@ -197,7 +201,7 @@ fn migrated_forward_remains_enabled_after_restart() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://{}/forward", listener.local_addr()?);
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let (handle, path) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
+    let (path, handle) = migrated_test_handle(&url, 1, Duration::from_secs(20), now)?;
     handle.store().save_router(handle.state())?;
     drop(handle);
     let store = Arc::new(ramflux_node_core::RouterRedbStore::open(&path)?);
@@ -238,7 +242,7 @@ fn committed_forward_checks_cutover_without_claiming_local_delivery_on_both_ingr
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-        let (handle, _) = migrated_test_handle(
+        let (_fixture_directory_0, handle) = migrated_test_handle(
             &format!("http://{}/forward", listener.local_addr()?),
             1,
             Duration::from_secs(10),

@@ -29,7 +29,8 @@ fn router_backed_authorizer(
 fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
 -> Result<(), Box<dyn std::error::Error>> {
     let router = std::sync::Arc::new(RouterCore::new());
-    let router_store = RouterRedbStore::open_without_wal(temp_store_path("r3_revoked_router")?)?;
+    let store_directory_0 = temp_store_path("r3_revoked_router")?;
+    let router_store = RouterRedbStore::open_without_wal(&store_directory_0)?;
     let principal = "principal_revoked_push";
     let request =
         registration_request(&router, principal, "lost-phone", 921, None, "ip_revoked_push")?;
@@ -43,10 +44,9 @@ fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
     let owner = router.mvp1_device_auth_key_checked(&qualified)?.ok_or("registered device")?;
     assert!(!owner.revoked);
 
-    let mut store = NotifyRedbStore::open_with_route_key(
-        temp_store_path("r3_revoked_notify")?,
-        NodeSecret::ephemeral()?,
-    )?;
+    let store_directory_1 = temp_store_path("r3_revoked_notify")?;
+    let mut store =
+        NotifyRedbStore::open_with_route_key(&store_directory_1, NodeSecret::ephemeral()?)?;
     store.set_push_route_authorizer(router_backed_authorizer(std::sync::Arc::clone(&router)));
     let now = now_unix_seconds();
     let mut route = notify_webpush_route(&owner.target_delivery_id, "web");

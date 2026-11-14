@@ -132,7 +132,7 @@ fn edit_restore_unions_openings_only_for_the_same_winner() {
 struct Side {
     root: PathBuf,
     db: AccountDb,
-    _guard: crate::tests::TestDirGuard,
+    _guard: ramflux_test_support::TestPath,
 }
 
 fn edited_copy(
@@ -142,7 +142,7 @@ fn edited_copy(
     event: u8,
 ) -> Result<Side, Box<dyn std::error::Error>> {
     let (root, db) = crate::tests::test_db(name)?;
-    let root_guard = crate::tests::TestDirGuard(root.clone());
+    let root_guard = root.clone();
     db.send_direct_message("conversation", "target", "peer", b"original body")?;
     db.replace_generated_message_content(
         "conversation",
@@ -171,7 +171,7 @@ fn edited_copy(
             bounded_metadata: &[],
         })
     })?;
-    Ok(Side { root, db, _guard: root_guard })
+    Ok(Side { root: root.to_path_buf(), db, _guard: root_guard })
 }
 
 /// Merge `incoming` into a private generation of `local`; returns the merged generation.
@@ -282,14 +282,14 @@ fn restored_older_edit_never_replaces_local_winner_or_revives_its_openings() -> 
 #[test]
 fn restored_edit_retires_unedited_local_original_and_its_evidence() -> TestResult {
     let (root, db) = crate::tests::test_db("edit-restore-original")?;
-    let root_guard = crate::tests::TestDirGuard(root.clone());
+    let root_guard = root.clone();
     db.send_direct_message("conversation", "target", "peer", b"original-body-canary")?;
     db.persist_message_actor_state(
         "target",
         "routed/origin-evidence/target",
         &json!({"opening":"original-body-canary"}),
     )?;
-    let local = Side { root, db, _guard: root_guard };
+    let local = Side { root: root.to_path_buf(), db, _guard: root_guard };
     let archive = edited_copy("edit-restore-edited", b"edited-body", 1, 3)?;
     let merged = restore(&local, &archive)?;
     assert_eq!(register(&merged)?, Some(pair(1, 3)));
@@ -363,9 +363,9 @@ fn restored_same_winner_unions_distinct_openings_and_keeps_one_named_copy() -> T
 #[test]
 fn unsupported_raw_copy_survives_backup_restore_byte_exact() -> TestResult {
     let (source_root, source) = crate::tests::test_db("unsupported-restore-source")?;
-    let source_root_guard = crate::tests::TestDirGuard(source_root.clone());
+    let source_root_guard = source_root.clone();
     let (target_root, target) = crate::tests::test_db("unsupported-restore-target")?;
-    let target_root_guard = crate::tests::TestDirGuard(target_root.clone());
+    let target_root_guard = target_root.clone();
     // An unknown kind with unknown fields, a non-minimal varint and trailing zero bytes.
     let exact = b"\xfa\x7f\x05unkn\x00\x80\x80\x00\x0a\x00\x00\xff".to_vec();
     source.write_transaction(|| {
@@ -379,8 +379,8 @@ fn unsupported_raw_copy_survives_backup_restore_byte_exact() -> TestResult {
         })
     })?;
     assert!(source.raw_inner_copy("routed/unsupported-copy/unknown-owner")?.is_some());
-    let source = Side { root: source_root, db: source, _guard: source_root_guard };
-    let target = Side { root: target_root, db: target, _guard: target_root_guard };
+    let source = Side { root: source_root.to_path_buf(), db: source, _guard: source_root_guard };
+    let target = Side { root: target_root.to_path_buf(), db: target, _guard: target_root_guard };
     let merged = restore(&target, &source)?;
     let (kind, digest, bytes, metadata, anchor): (String, Vec<u8>, Vec<u8>, Vec<u8>, String) =
         merged.db.query_row(
@@ -413,7 +413,7 @@ fn unsupported_raw_copy_survives_backup_restore_byte_exact() -> TestResult {
 fn own_sent_attestation_copy_restores_and_stays_fenced_by_deletion() -> TestResult {
     let attest = |name: &str| -> Result<Side, Box<dyn std::error::Error>> {
         let (root, db) = crate::tests::test_db(name)?;
-        let root_guard = crate::tests::TestDirGuard(root.clone());
+        let root_guard = root.clone();
         db.send_direct_message("conversation", "target", "device", b"own sent body")?;
         db.write_transaction(|| {
             db.put_unsupported_raw_copy(RawInnerCopyWrite {
@@ -425,12 +425,12 @@ fn own_sent_attestation_copy_restores_and_stays_fenced_by_deletion() -> TestResu
                 bounded_metadata: &[],
             })
         })?;
-        Ok(Side { root, db, _guard: root_guard })
+        Ok(Side { root: root.to_path_buf(), db, _guard: root_guard })
     };
     let archive = attest("own-attestation-archive")?;
     let (root, db) = crate::tests::test_db("own-attestation-fresh")?;
-    let root_guard = crate::tests::TestDirGuard(root.clone());
-    let fresh = Side { root, db, _guard: root_guard };
+    let root_guard = root.clone();
+    let fresh = Side { root: root.to_path_buf(), db, _guard: root_guard };
     let merged = restore(&fresh, &archive)?;
     let bytes: Vec<u8> = merged.db.query_row(
         "SELECT raw_bytes FROM raw_inner_copy WHERE copy_id='routed/own-sent-attestation/target/target'",
@@ -456,7 +456,7 @@ fn restore_keeps_greatest_parked_edit_and_marks_review() -> TestResult {
                   bytes: &[u8]|
      -> Result<Side, Box<dyn std::error::Error>> {
         let (root, db) = crate::tests::test_db(name)?;
-        let root_guard = crate::tests::TestDirGuard(root.clone());
+        let root_guard = root.clone();
         let copy_id = format!("early-edit/target/{event}");
         db.write_transaction(|| {
             db.put_unsupported_raw_copy(RawInnerCopyWrite {
@@ -472,7 +472,7 @@ fn restore_keeps_greatest_parked_edit_and_marks_review() -> TestResult {
             "routed/pending-edit/target/author-root",
             &json!({"revision":3,"event_id":vec![event; 16],"copy_id":copy_id,"committed_key":"routed/committed/none"}),
         )?;
-        Ok(Side { root, db, _guard: root_guard })
+        Ok(Side { root: root.to_path_buf(), db, _guard: root_guard })
     };
     for incoming_wins in [true, false] {
         let low = parked("parked-restore-low", 1, b"parked-losing-edit-canary")?;

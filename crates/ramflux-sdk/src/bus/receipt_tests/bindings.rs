@@ -106,7 +106,6 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     drop(engine);
     drop(receiver);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -151,7 +150,6 @@ fn unknown_or_inbound_targets_cannot_poison_a_later_valid_delivery_receipt() -> 
     assert_eq!(row.receipts.len(), 1);
     assert_eq!(row.receipts[0].state, "delivered");
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -197,6 +195,5 @@ fn equal_device_names_and_wire_ids_under_different_roots_have_independent_receip
         "logical-b"
     );
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

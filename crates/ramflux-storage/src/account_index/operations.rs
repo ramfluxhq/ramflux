@@ -137,12 +137,14 @@ mod tests {
     use super::*;
     use crate::OperationLookup;
     type Case = Result<(), Box<dyn std::error::Error>>;
-    fn root() -> Result<std::path::PathBuf, std::time::SystemTimeError> {
-        Ok(std::env::temp_dir().join(format!(
-            "supervisor-lookup-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        )))
+    fn root() -> Result<ramflux_test_support::TestPath, std::time::SystemTimeError> {
+        Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!(
+                "supervisor-lookup-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ),
+        ))
     }
     #[test]
     fn typed_lookup_reports_absent_completed_pending_mismatch() -> Case {
@@ -170,7 +172,6 @@ mod tests {
         assert!(index.take_over_supervisor_operation("alice", "key", "fp").is_err());
         assert!(index.take_over_supervisor_operation("alice", "missing", "fp").is_err());
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
@@ -195,7 +196,6 @@ mod tests {
             matches!(index.reserve_supervisor_operation("alice", "key", "fp"), Err(StorageError::OperationReconciliationRequired { key }) if key == "key")
         );
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

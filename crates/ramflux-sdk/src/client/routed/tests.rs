@@ -18,9 +18,9 @@ fn assert_a2i_authority_refused<T>(result: Result<T, SdkError>) {
 }
 
 struct Fixture {
-    root: PathBuf,
     client: RamfluxClient,
     id: String,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new(id: &str, seed: u8) -> Result<Self, SdkError> {
@@ -39,10 +39,9 @@ impl Fixture {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
-        let root = PathBuf::from(format!(
-            "/tmp/ramflux-routed-{id}-{}-{sequence}-{now}",
-            std::process::id()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-routed-{id}-{}-{sequence}-{now}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [root_seed; 32]);
         client.create_device_branch(principal, id, epoch, [device_seed; 32]);
@@ -75,12 +74,6 @@ impl Fixture {
         .with_account_identity(&self.client)
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
 // These fixtures name the expected principal and its device identically. Resolve the
 // pinned principal relationship, never a directory's by-device-name candidate.
 fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {

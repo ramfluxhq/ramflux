@@ -17,7 +17,7 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
             store.inbox_status("alice-target")?.0.ok_or_else(|| anyhow::anyhow!("identity"))?;
         let core = store.publication_core()?;
         let held = core.reserve("alice-target", &id, &[])?;
-        let context = super::tests::test_gateway_context()?;
+        let (_fixture_directory_0, context) = super::tests::test_gateway_context()?;
         let runtime = super::submit_ack_tests::test_runtime()?;
         let envelope = super::submit_ack_tests::signed_submit(
             &runtime,

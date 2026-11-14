@@ -32,8 +32,9 @@ fn restore_rotation_command_resume_pipeline() -> anyhow::Result<()> {
     mode_case("pipeline")
 }
 fn mode_case(mode: &str) -> anyhow::Result<()> {
-    let root = std::fs::canonicalize(std::env::temp_dir())?
-        .join(format!("p3-command-{}-{mode}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("p3-command-{}-{mode}", std::process::id()));
     std::fs::create_dir_all(&root)?;
     std::fs::write(
         root.join("config.toml"),

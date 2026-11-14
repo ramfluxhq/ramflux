@@ -134,11 +134,9 @@ mod tests {
     #[tokio::test]
     async fn pruned_upgrade_coordinates_are_cached_as_null_and_live_pages_skip_status()
     -> Result<(), SdkError> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-status-miss-{}-{}",
-            std::process::id(),
-            now_unix_timestamp()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-status-miss-{}-{}", std::process::id(), now_unix_timestamp()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("status-account", "Status")?;
@@ -191,7 +189,6 @@ mod tests {
         assert!(page.get("status").is_none());
         drop(reopened);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
