@@ -18,16 +18,20 @@ pub(super) fn initialize(db: &Connection, epoch: i64) -> SearchResult<()> {
     if db.is_autocommit() {
         return Err(SearchError::IndexUnavailable);
     }
-    if exists(db)? {
+    let complete: bool = db.query_row("SELECT count(*)=9 FROM sqlite_schema WHERE type='table' AND lower(name) IN('local_search_state','local_search_doc','local_search_terms','local_search_fts','local_search_fts_data','local_search_fts_idx','local_search_fts_config','local_search_dependency','local_search_dirty')", [], |r| r.get(0))?;
+    let current = if complete {
         let version: (i64, i64) = db.query_row(
             "SELECT format,normalizer FROM local_search_state WHERE singleton=1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if version != (1, 1) {
-            super::lifecycle::strip(db)?;
-            db.execute_batch("DROP TABLE IF EXISTS local_search_compaction_pending;")?;
-        }
+        version == (1, 1)
+    } else {
+        false
+    };
+    if !current {
+        super::lifecycle::strip(db)?;
+        db.execute_batch("DROP TABLE IF EXISTS local_search_compaction_pending;")?;
     }
     db.execute_batch(SCHEMA)?;
     db.execute("INSERT INTO local_search_state(singleton,format,normalizer,epoch) VALUES(1,1,1,?1) ON CONFLICT(singleton) DO NOTHING",[epoch])?;

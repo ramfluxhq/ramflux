@@ -31,6 +31,7 @@ pub(crate) fn retire_locator(db: &Connection, locator: &str) -> rusqlite::Result
 pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
     let count:u64=db.query_row("SELECT count(*) FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*' AND type IN('table','trigger','index','view')",[],|row|row.get(0))?;
     if count == 0 {
+        strip_footprints(db)?;
         return Ok(false);
     }
     if count > 128 {
@@ -58,17 +59,22 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
     if remaining {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    strip_footprints(db)?;
+    // A private archive copy may pass through more than one sanitizer before publication.
+    // Carry compaction responsibility across those copies, never archive search authority.
+    db.execute_batch("CREATE TABLE local_search_compaction_pending(singleton INTEGER PRIMARY KEY CHECK(singleton=1)); INSERT INTO local_search_compaction_pending VALUES(1);")?;
+    Ok(true)
+}
+
+fn strip_footprints(db: &Connection) -> rusqlite::Result<()> {
     if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='message_footprint')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='message_footprint' COLLATE NOCASE)",
         [],
         |row| row.get::<_, bool>(0),
     )? {
         db.execute("DELETE FROM message_footprint WHERE lower(kind) GLOB 'local_search_*'", [])?;
     }
-    // A private archive copy may pass through more than one sanitizer before publication.
-    // Carry compaction responsibility across those copies, never archive search authority.
-    db.execute_batch("CREATE TABLE local_search_compaction_pending(singleton INTEGER PRIMARY KEY CHECK(singleton=1)); INSERT INTO local_search_compaction_pending VALUES(1);")?;
-    Ok(true)
+    Ok(())
 }
 
 pub(crate) use super::compact::compact;

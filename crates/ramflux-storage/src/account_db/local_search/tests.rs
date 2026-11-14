@@ -296,7 +296,7 @@ fn restore_erasure_case(native: bool) -> TestResult {
     let archive = f.directory.path().join("old.db");
     let old = f.db.write_backup_snapshot(&archive)?;
     let malicious = BackupDatabase::open(&archive, &old.key)?;
-    malicious.db.execute_batch("CREATE TABLE LoCaL_SeArCh_untrusted_cache(secret TEXT);INSERT INTO LoCaL_SeArCh_untrusted_cache VALUES('archivecanary');")?;
+    malicious.db.execute_batch("CREATE TABLE LoCaL_SeArCh_untrusted_cache(secret TEXT);INSERT INTO LoCaL_SeArCh_untrusted_cache VALUES('archivecanary'); INSERT INTO message_footprint VALUES('survivor','local_search_doc','999');")?;
     drop(malicious);
     f.db.delete_direct_message("thread", "victim", "me", "delete-victim")?;
     let merged_path = f.directory.path().join("merged.db");
@@ -316,6 +316,16 @@ fn restore_erasure_case(native: bool) -> TestResult {
         caches, 0,
         "neither full nor native merge may import archive-supplied search tables"
     );
+    let footprints: i64 = merged.db.query_row(
+        "SELECT count(*) FROM message_footprint WHERE lower(kind) GLOB 'local_search_*'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        footprints, 0,
+        "incoming cache locators must never be imported even when they point to no cache table"
+    );
+
     let erased: bool = merged.db.query_row(
         "SELECT deleted FROM direct_message_projection WHERE message_id='victim'",
         [],
@@ -560,25 +570,41 @@ fn local_search_checkpoint_resumes_and_rejects_reset_races() -> TestResult {
 #[test]
 fn local_search_corrupt_cache_is_discarded_without_canonical_loss() -> TestResult {
     let f = Fixture::new()?;
-    f.insert("survivor", "repaircanary")?;
-    let before = f.db.search_revision(&f.activation, &SearchControl::new())?;
-    f.db.connection.execute_batch("DROP TABLE local_search_terms;")?;
+    for missing in ["local_search_terms", "local_search_state", "local_search_dirty"] {
+        f.insert("survivor", "repaircanary")?;
+        let before = f.db.search_revision(&f.activation, &SearchControl::new())?;
+        f.db.connection.execute_batch(&format!("DROP TABLE {missing};"))?;
+        let _watch = f.db.search_prepare(&f.activation)?;
+        let after = f.db.search_revision(&f.activation, &SearchControl::new())?;
+        assert_ne!(before.epoch, after.epoch, "repair must publish a new derived-cache epoch");
+        assert!(
+            f.hits("repaircanary")?.is_empty(),
+            "damaged cache must be discarded instead of serving old terms as fallback"
+        );
+        assert_eq!(
+            f.db.message_content("survivor")?.as_deref(),
+            Some(b"local-content".as_slice()),
+            "cache repair must preserve the canonical source for authorized rebuild"
+        );
+        assert_eq!(
+            f.db.search_index_status(&f.activation, &SearchControl::new())?.coverage,
+            SearchCoverage::Building,
+            "cache repair must report incomplete coverage until reconstruction"
+        );
+    }
+    f.db.connection.call(|db| {
+        super::lifecycle::strip(db)?;
+        db.execute_batch("DROP TABLE IF EXISTS local_search_compaction_pending; INSERT INTO message_footprint VALUES('survivor','local_search_doc','999');")
+    })?;
     let _watch = f.db.search_prepare(&f.activation)?;
-    let after = f.db.search_revision(&f.activation, &SearchControl::new())?;
-    assert_ne!(before.epoch, after.epoch, "repair must publish a new derived-cache epoch");
+    let orphan: bool = f.db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM message_footprint WHERE kind='local_search_doc')",
+        [],
+        |r| r.get(0),
+    )?;
     assert!(
-        f.hits("repaircanary")?.is_empty(),
-        "damaged cache must be discarded instead of serving old terms as fallback"
-    );
-    assert_eq!(
-        f.db.message_content("survivor")?.as_deref(),
-        Some(b"local-content".as_slice()),
-        "cache repair must preserve the canonical source for authorized rebuild"
-    );
-    assert_eq!(
-        f.db.search_index_status(&f.activation, &SearchControl::new())?.coverage,
-        SearchCoverage::Building,
-        "cache repair must report incomplete coverage until reconstruction"
+        !orphan,
+        "recreating an absent namespace must discard orphaned locators before reusing document IDs"
     );
     Ok(())
 }
