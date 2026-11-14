@@ -95,7 +95,7 @@ fn bounded_ca(path: &std::path::Path) -> TestResult<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires prebuilt ordinary product service binaries; explicit module QA row"]
 async fn pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay() -> TestResult {
-    deadline(Box::pin(run())).await
+    tokio::task::LocalSet::new().run_until(deadline(Box::pin(run()))).await
 }
 async fn run() -> TestResult {
     let mut network = Network::open()?;
