@@ -62,16 +62,12 @@ impl Fixture {
             assert_ne!(left.root.path(), right.root.path(), "test: SDK roots overlap");
             assert!(!Arc::ptr_eq(&left.vault, &right.vault), "test: SDK vault owners overlap");
         }
-        a.client.account_db()?.seed_full_transfer_object_veto_for_test(
-            "source-veto",
-            "source-manifest",
-            3,
-        )?;
-        b.client.account_db()?.seed_full_transfer_object_veto_for_test(
-            "target-veto",
-            "target-manifest",
-            7,
-        )?;
+        a.with_db(|db| {
+            Ok(db.seed_full_transfer_object_veto_for_test("source-veto", "source-manifest", 3)?)
+        })?;
+        b.with_db(|db| {
+            Ok(db.seed_full_transfer_object_veto_for_test("target-veto", "target-manifest", 7)?)
+        })?;
         Ok(Self { a, b, c, source, target, node, operation: String::new() })
     }
     pub async fn begin(&mut self) -> ResultOf<()> {
@@ -149,8 +145,8 @@ impl Fixture {
         Ok(())
     }
     pub async fn step(&mut self) -> ResultOf<()> {
-        self.a.actor.service_full_transfer(self.a.client.account_db()?)?;
-        self.b.actor.service_full_transfer(self.b.client.account_db()?)?;
+        self.a.service_data()?;
+        self.b.service_data()?;
         for actor in [&mut self.a.actor, &mut self.b.actor] {
             self.node.clock.advance_ms(1001);
             drive(
@@ -199,11 +195,13 @@ impl Fixture {
         for iteration in 0..1024 {
             self.step().await?;
             if matches!(iteration, 2 | 8 | 16) {
-                self.b.client.account_db()?.seed_full_transfer_object_veto_for_test(
-                    &format!("concurrent-{iteration}"),
-                    "concurrent-manifest",
-                    13,
-                )?;
+                self.b.with_db(|db| {
+                    Ok(db.seed_full_transfer_object_veto_for_test(
+                        &format!("concurrent-{iteration}"),
+                        "concurrent-manifest",
+                        13,
+                    )?)
+                })?;
             }
             let a = self.status(true).await?;
             let b = self.status(false).await?;
@@ -217,7 +215,7 @@ impl Fixture {
         Err("test: external full driver did not finish durable duplex".into())
     }
     pub async fn publish(&mut self) -> ResultOf<()> {
-        let original = self.b.client.account_db()?.path.clone();
+        let original = self.b.selected_path()?;
         let request = Prepare {
             schema: "ramflux.pairing.Prepare.v2".into(),
             version: 2,
@@ -234,8 +232,8 @@ impl Fixture {
         )
         .await?;
         for _ in 0..1024 {
-            self.a.actor.service_full_transfer(self.a.client.account_db()?)?;
-            self.b.actor.service_full_transfer(self.b.client.account_db()?)?;
+            self.a.service_data()?;
+            self.b.service_data()?;
             for actor in [&mut self.b.actor, &mut self.a.actor] {
                 self.node.clock.advance_ms(1001);
                 drive(
@@ -256,7 +254,7 @@ impl Fixture {
             )
             .await?;
             self.b.actor.service_linked_installation(&mut self.b.client, &mut self.target)?;
-            if self.b.client.account_db()?.path != original
+            if self.b.selected_path()? != original
                 && ordinary_session_admitted(&self.b.client, &self.b.id)?
                 && self.b.vault.primary_entries()? == 1
             {

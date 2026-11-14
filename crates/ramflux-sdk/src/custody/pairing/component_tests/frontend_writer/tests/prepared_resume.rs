@@ -46,7 +46,7 @@ async fn run() -> TestResult {
     let expected: Publication = ramflux_protocol::parse_i_json(&head.candidate)?;
     rig.secondary.lock().await?;
     let mut old = crate::RamfluxClient::new();
-    rig.participant_b.return_client(&mut old)?;
+    rig.participant_b.return_data_client(&mut old)?;
     drop(old);
     let client = reopen_staged(&rig.participant_b, &operation)?;
     let provider = Arc::new(RefusePhrase(std::sync::atomic::AtomicUsize::new(0)));

@@ -124,7 +124,8 @@ async fn full_acceptance() -> ResultOf<()> {
             .body
             .devices
             .clone();
-    let wrapping = fixture.b.client.account_index()?.load_wrapped_db_key(&fixture.b.id)?;
+    let wrapping = ramflux_storage::AccountIndex::open(fixture.b.root.path())?
+        .load_wrapped_db_key(&fixture.b.id)?;
     Box::pin(fixture.begin()).await?;
     Box::pin(fixture.data()).await?;
     Box::pin(fixture.publish()).await?;
@@ -150,7 +151,8 @@ async fn full_acceptance() -> ResultOf<()> {
         );
     }
     assert_eq!(
-        fixture.b.client.account_index()?.load_wrapped_db_key(&fixture.b.id)?,
+        ramflux_storage::AccountIndex::open(fixture.b.root.path())?
+            .load_wrapped_db_key(&fixture.b.id)?,
         wrapping,
         "test: transfer replaced B's original password wrapping"
     );
@@ -166,15 +168,18 @@ async fn full_acceptance() -> ResultOf<()> {
         assert_eq!(dh.public, agreement, "test: transfer replaced a device agreement identity");
         assert_eq!(current, reference, "test: transfer replaced a device reference");
     }
-    for device in [&fixture.a, &fixture.b] {
+    for device in [&mut fixture.a, &mut fixture.b] {
         for iteration in [2, 8, 16] {
             assert!(
                 matches!(
-                    device.client.account_db()?.check_object_identity(
-                        &format!("concurrent-{iteration}"),
-                        "concurrent-manifest"
-                    ),
-                    Err(ramflux_storage::StorageError::ObjectErased)
+                    device.with_db(|db| Ok(matches!(
+                        db.check_object_identity(
+                            &format!("concurrent-{iteration}"),
+                            "concurrent-manifest"
+                        ),
+                        Err(ramflux_storage::StorageError::ObjectErased)
+                    )))?,
+                    true
                 ),
                 "test: concurrent B veto lost in actual union/tail"
             );

@@ -20,7 +20,7 @@ async fn run() -> TestResult {
         mut source,
         participant_a: participant,
         now,
-        _node_root,
+        node_root: _node_root,
         _clock,
         ..
     } = rig;

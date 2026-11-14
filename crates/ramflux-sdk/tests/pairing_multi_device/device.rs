@@ -169,7 +169,6 @@ impl Device {
                 now()?,
             )?;
         }
-        self.participant.return_client(&mut self.client)?;
         let native = custody::load_account(self.root.path(), &self.id, now()?)?;
         let (_, _, reference) = self.endpoint.branch()?;
         let mut actor = PairingActor::new(
@@ -189,9 +188,42 @@ impl Device {
         );
         actor.set_participant(self.participant.clone());
         actor.set_full_node(node.identity.clone());
-        let service = actor.bind_frontend_writer(self.client.account_db()?)?;
+        let service = {
+            let slot = self.participant.db.lock().map_err(|_| "test: frontend writer")?;
+            actor
+                .bind_frontend_writer(slot.as_ref().ok_or("test: frontend actual writer absent")?)?
+        };
+        self.participant.return_client(&mut self.client)?;
         self.actor = actor;
         Ok(service)
+    }
+    pub fn with_db<T>(
+        &mut self,
+        work: impl FnOnce(&ramflux_storage::AccountDb) -> ResultOf<T>,
+    ) -> ResultOf<T> {
+        self.participant.take_client(&mut self.client)?;
+        let result = (|| {
+            let slot = self.participant.db.lock().map_err(|_| "test: own writer loan")?;
+            work(slot.as_ref().ok_or("test: own actual writer absent")?)
+        })();
+        self.participant.return_client(&mut self.client)?;
+        result
+    }
+    pub fn selected_path(&self) -> ResultOf<std::path::PathBuf> {
+        let index = ramflux_storage::AccountIndex::open(self.root.path())?;
+        Ok(self.root.path().join(index.account(&self.id)?.db_relative_path))
+    }
+    pub fn service_data(&mut self) -> ResultOf<()> {
+        self.participant.take_client(&mut self.client)?;
+        let result = (|| {
+            let slot = self.participant.db.lock().map_err(|_| "test: local I/O writer loan")?;
+            self.actor.service_full_transfer(
+                slot.as_ref().ok_or("test: actual local I/O writer absent")?,
+            )?;
+            Ok(())
+        })();
+        self.participant.return_client(&mut self.client)?;
+        result
     }
     pub async fn admit_client(&mut self, node: &Node) -> ResultOf<()> {
         let native = custody::load_account(self.root.path(), &self.id, now()?)?;
