@@ -363,15 +363,15 @@ pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_b
 mod retention_compatibility_tests {
     use super::*;
     #[test]
-    fn legacy_own_copy_intent_keeps_expiry_and_fingerprint() -> Result<(), SdkError> {
+    fn own_copy_intent_without_payload_kind_is_refused() -> Result<(), SdkError> {
         let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
             "group":null,"body":"","created_at":100,"owner_record":null});
-        let intent: Intent = serde_json::from_value(old.clone())?;
-        assert_eq!(intent.expiry(), 700);
-        assert_eq!(
-            serde_json::to_value(intent)?,
-            old,
-            "adding a null changes the in-flight CAS fingerprint"
+        let error = serde_json::from_value::<Intent>(old).err().ok_or_else(|| {
+            SdkError::LocalBus("old intent row without payload_kind parsed".into())
+        })?;
+        assert!(
+            error.to_string().contains("payload_kind"),
+            "old intent row must be refused by name for payload_kind, got: {error}"
         );
         Ok(())
     }

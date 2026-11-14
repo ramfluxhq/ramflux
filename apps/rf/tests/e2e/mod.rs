@@ -956,13 +956,14 @@ pub fn dm_ack(
     })
 }
 
+/// Reads the generation-1 `rf dm send` shape: `{"envelope": {"envelope_id": ...}, ...}`.
 pub fn envelope_id_from_read(value: &Value) -> Option<String> {
-    for key in ["decrypted_messages", "gateway_entries", "messages", "envelope"] {
-        if let Some(id) = nested_envelope_id(value.get(key).unwrap_or(&Value::Null)) {
-            return Some(id);
-        }
-    }
-    nested_envelope_id(value)
+    value
+        .get("envelope")
+        .and_then(|envelope| envelope.get("envelope_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 pub fn inbox_seq_from_read(value: &Value, envelope_id: &str) -> Option<u64> {
@@ -987,21 +988,6 @@ fn nested_inbox_seq(value: &Value, envelope_id: &str) -> Option<u64> {
             map.values().find_map(|child| nested_inbox_seq(child, envelope_id))
         }
         Value::Array(rows) => rows.iter().find_map(|row| nested_inbox_seq(row, envelope_id)),
-        _ => None,
-    }
-}
-
-fn nested_envelope_id(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            if let Some(id) =
-                map.get("envelope_id").and_then(Value::as_str).filter(|id| !id.is_empty())
-            {
-                return Some(id.to_owned());
-            }
-            map.values().find_map(nested_envelope_id)
-        }
-        Value::Array(rows) => rows.iter().find_map(nested_envelope_id),
         _ => None,
     }
 }
