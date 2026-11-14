@@ -6,11 +6,13 @@ use super::*;
 use crate::search::{LocalSearch, SearchError, SearchKind, SearchQuery};
 use ramflux_protocol::message as g;
 use ramflux_storage::local_search::{SearchActivation, SearchControl};
-use std::path::Path;
 
 impl Fixture {
-    async fn search_fixture(directory: &Path, id: &str) -> TestResult<Self> {
-        let root = Root(directory.join(id));
+    async fn search_fixture(
+        directory: &ramflux_test_support::TestPath,
+        id: &str,
+    ) -> TestResult<Self> {
+        let root = Root(directory.child(id));
         std::fs::create_dir(&root.0)?;
         let vault = Arc::new(TestVault::default());
         let account = create_with_device(
@@ -89,9 +91,9 @@ async fn local_search_live_versions_and_scope() -> TestResult {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         Box::pin(async {
-            let directory = tempfile::TempDir::new()?;
-            let source = Fixture::search_fixture(directory.path(), "source").await?;
-            let mut target = Fixture::search_fixture(directory.path(), "target").await?;
+            let directory = ramflux_test_support::TestPath::new()?;
+            let source = Fixture::search_fixture(&directory, "source").await?;
+            let mut target = Fixture::search_fixture(&directory, "target").await?;
             let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             source.client.persist_fetched_identity_directory(&target.manifest)?;
             target.client.persist_fetched_identity_directory(&source.manifest)?;
@@ -188,8 +190,8 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         Box::pin(async {
-            let directory = tempfile::TempDir::new()?;
-            let mut fixture = Fixture::search_fixture(directory.path(), "epoch-owner").await?;
+            let directory = ramflux_test_support::TestPath::new()?;
+            let mut fixture = Fixture::search_fixture(&directory, "epoch-owner").await?;
             let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             let runtime =
                 LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;

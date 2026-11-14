@@ -8,10 +8,10 @@ use rusqlite::params;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Fixture {
-    directory: tempfile::TempDir,
     db: AccountDb,
     activation: SearchActivation,
     watch: std::sync::Arc<SearchWatch>,
+    directory: tempfile::TempDir,
 }
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
