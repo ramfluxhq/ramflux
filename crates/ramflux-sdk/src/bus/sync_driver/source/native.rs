@@ -26,6 +26,9 @@ pub(super) async fn prepare(
     let local = config.device_id.clone();
     let preview = writer
         .apply(move |account| {
+            if ramflux_protocol::contact_reach::enabled() {
+                return Ok(account.client.preview_reach_route(&owned_entry, &local));
+            }
             account.client.prepare_inbound_device_manifest(&owned_entry, source.as_ref())?;
             Ok(account.client.preview_inbound_route(&owned_entry, &local))
         })

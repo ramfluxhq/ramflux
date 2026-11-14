@@ -53,15 +53,38 @@ impl RamfluxClient {
         self.require_reach_entry_metadata(entry)?;
         let reach = entry.reach.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
         let now = crate::custody::network_now()?;
+        let submission = Submission {
+            route: reach.route.clone(),
+            envelope: entry.envelope.clone(),
+            cost: reach.cost.clone(),
+        };
+        ramflux_crypto::contact_reach::verify_original_source_submission(&submission, now)?;
         let authority = self
-            .current_custody_authority(&reach.route.body.source.account_anchor, now)?
-            .ok_or_else(|| refused(Reason::CustodyRefused))?;
+            .current_custody_authority(&reach.route.body.source.account_anchor, now)
+            .map_err(|error| match error {
+                error @ SdkError::Storage(_) => error,
+                _ => SdkError::InboundPending("current reach source authority unavailable".into()),
+            })?
+            .ok_or_else(|| {
+                SdkError::InboundPending("current reach source authority unavailable".into())
+            })?;
+        let root = &reach.route.body.source.account_anchor;
+        self.require_fresh_custody_head(
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            root,
+            authority.envelope(),
+        )?;
+        let capability = if matches!(reach.route.body.traffic, Traffic::OwnCopy | Traffic::SelfSync)
+        {
+            "sync"
+        } else {
+            "message"
+        };
+        if authority.authorize(&reach.route.body.source, capability, now).is_err() {
+            return Err(SdkError::FreshHeadRequired { root: root.clone() });
+        }
         ramflux_crypto::contact_reach::verify_current_source_submission(
-            &Submission {
-                route: reach.route.clone(),
-                envelope: entry.envelope.clone(),
-                cost: reach.cost.clone(),
-            },
+            &submission,
             &authority,
             now,
         )?;

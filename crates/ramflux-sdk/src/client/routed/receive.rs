@@ -179,6 +179,7 @@ impl RamfluxClient {
         } else {
             self.open_routed_with_recovery(engine, entry).await?
         };
+        self.require_reach_decrypted_route(entry, &opened, &opened.body)?;
         if native_prepared {
             self.confirm_prepared_native_contact_control(entry, &opened.routing, &opened.body)?;
         } else {
@@ -400,7 +401,7 @@ impl RamfluxClient {
         let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
         #[cfg(feature = "itest-rfd-fault")]
         let entry = fault_entry.as_deref().unwrap_or(entry);
-        self.require_reach_entry_metadata(entry)?;
+        self.require_reach_entry_authority(entry)?;
         let consume_erased = CONSUME_ERASED;
         let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
@@ -599,12 +600,36 @@ impl RamfluxClient {
     ) -> Result<(bool, Option<super::ReceiveGroupDirectory>), SdkError> {
         let directory = prepared.as_mut().and_then(|value| value.group_directory.take());
         let native_prepared = prepared.as_ref().is_some_and(|value| value.native_prepared);
-        self.ensure_prepared_inbound_device(
-            engine.config(),
-            entry,
-            prepared.map(|value| Ok(value.manifest)),
-        )
-        .await?;
+        if ramflux_protocol::contact_reach::enabled() {
+            self.preview_reach_route(entry, &engine.config().device_id)?;
+            let manifest = match prepared {
+                Some(prepared) => prepared.manifest,
+                None => match self.inbound_device_manifest_request(entry)? {
+                    Some(root) => Some(
+                        crate::client::contact::fetch_verified_device_manifest(
+                            engine.config(),
+                            &root,
+                        )
+                        .await
+                        .map_err(|source| {
+                            SdkError::DirectoryAuthorityUnavailable {
+                                root,
+                                source: Box::new(source),
+                            }
+                        })?,
+                    ),
+                    None => None,
+                },
+            };
+            self.apply_inbound_device_manifest(entry, manifest.as_ref())?;
+        } else {
+            self.ensure_prepared_inbound_device(
+                engine.config(),
+                entry,
+                prepared.map(|value| Ok(value.manifest)),
+            )
+            .await?;
+        }
         self.upgrade_replay_identity(
             &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
         )?;
@@ -915,6 +940,11 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         if !crate::client::target_selection::schema_v1_selected() {
             return Ok(());
+        }
+        match self.require_reach_entry_authority(entry) {
+            Ok(()) => {}
+            Err(error @ SdkError::Storage(_)) => return Err(error),
+            Err(_) => return Ok(()),
         }
         if matches!(code, "authentication_failed" | "schema_invalid" | "routing_rejected") {
             return match self.commit_authenticated_refused_transport(entry, local) {

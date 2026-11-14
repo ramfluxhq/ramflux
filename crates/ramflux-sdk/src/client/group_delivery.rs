@@ -21,6 +21,11 @@ impl RamfluxClient {
     }
 
     pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+        if ramflux_protocol::contact_reach::enabled() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid,
+            ));
+        }
         crate::client::routed::validate_routed_ciphertext(entry)?;
         if self.routed_seen_marker(entry)?.is_some() {
             return Ok(());

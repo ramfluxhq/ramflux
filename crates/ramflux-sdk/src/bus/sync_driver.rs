@@ -427,6 +427,11 @@ struct EntryInput {
     source: source::PreparedSource,
 }
 
+fn check_received_entry(client: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    client.require_reach_entry_authority(entry)?;
+    crate::client::routed::validate_routed_ciphertext(entry)
+}
+
 async fn prepare_entry(
     account: &mut LocalBusAccountState,
     engine: &mut impl GatewaySessionAccess,
@@ -438,7 +443,7 @@ async fn prepare_entry(
     let EntryInput { entry, source: prepared_source } = input;
     let PageContext { replay, defer_controls, now, retry_keys } = context;
     let mut replies = Vec::new();
-    let checked_ciphertext = crate::client::routed::validate_routed_ciphertext(&entry);
+    let checked_ciphertext = check_received_entry(&account.client, &entry);
     let already_seen =
         checked_ciphertext.is_ok() && account.client.routed_seen_marker(&entry)?.is_some();
     let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
@@ -593,7 +598,7 @@ async fn process_with_prepared_source(
     defer_controls: bool,
     prepared_source: source::PreparedSource,
 ) -> Result<Processed, SdkError> {
-    crate::client::routed::validate_routed_ciphertext(entry)?;
+    check_received_entry(&account.client, entry)?;
     if account.client.routed_seen_marker(entry)?.is_some() {
         return Ok(Processed::control());
     }

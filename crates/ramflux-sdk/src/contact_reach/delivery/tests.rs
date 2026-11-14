@@ -14,6 +14,7 @@ use ramflux_protocol::{
 
 struct Outgoing {
     source: Fixture,
+    target: Fixture,
     message: crate::GatewayDirectMessage,
     inner: Vec<u8>,
     prekey: Option<ramflux_crypto::PrekeyBundle>,
@@ -67,7 +68,7 @@ async fn outgoing() -> TestResult<Outgoing> {
         created_at: crate::time::now_unix_timestamp(),
         ttl: 3600,
     };
-    Ok(Outgoing { source, message, inner, prekey: material.bundle, recipient })
+    Ok(Outgoing { source, target, message, inner, prekey: material.bundle, recipient })
 }
 
 async fn sealed() -> TestResult<(Fixture, ramflux_protocol::Envelope, String)> {
@@ -86,6 +87,54 @@ async fn sealed() -> TestResult<(Fixture, ramflux_protocol::Envelope, String)> {
         "the real constructor derives DM from the exact sealed Inner"
     );
     Ok((outgoing.source, prepared.envelope, outgoing.recipient))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cr_native_receive_preview_keeps_pair_bootstrap_reusable() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), receive_preview()).await?
+}
+
+async fn receive_preview() -> TestResult {
+    let outgoing = outgoing().await?;
+    let _profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let prepared = outgoing.source.client.prepare_reach_submission(
+        &outgoing.source.config,
+        &outgoing.message,
+        &outgoing.inner,
+        outgoing.prekey,
+        crate::contact_reach::ReachSendIntent::Ordinary,
+    )?;
+    outgoing.target.client.persist_fetched_identity_directory(&outgoing.source.manifest)?;
+    let entry = crate::GatewayInboxEntry {
+        inbox_seq: 1,
+        forwarded: false,
+        target_delivery_id: prepared.envelope.target_delivery_id.clone(),
+        envelope: prepared.envelope,
+        reach: Some(Box::new(wire::DeliveryReach { route: prepared.route, cost: prepared.cost })),
+    };
+    let before = crate::contact_reach::group_test_support::sealing_state(&outgoing.target.client)?;
+    for _ in 0..2 {
+        let (routing, body) = outgoing
+            .target
+            .client
+            .preview_reach_route(&entry, &outgoing.target.config.device_id)?
+            .ok_or("native preview")?;
+        assert_eq!(
+            routing.conversation_id, outgoing.message.conversation_id,
+            "the actual receiver opens the original authenticated conversation"
+        );
+        assert_eq!(
+            body.as_slice(),
+            outgoing.inner,
+            "speculative decrypt returns the original exact Inner"
+        );
+        assert_eq!(
+            crate::contact_reach::group_test_support::sealing_state(&outgoing.target.client)?,
+            before,
+            "repeated previews cannot commit or consume the incoming pair bootstrap"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -458,6 +507,7 @@ async fn cr_native_route_expired_original_lease_needs_live_same_key_and_rejects_
         issued.checked_add(1).ok_or("renewal time")?,
     )?;
     let now = issued.checked_add(600).ok_or("delayed verification time")?;
+    ramflux_crypto::contact_reach::verify_original_source_submission(&submission, now)?;
     let current = ramflux_crypto::custody::verify_publication(&renewed, now)?;
     ramflux_crypto::contact_reach::verify_current_source_submission(&submission, &current, now)?;
     let expired = ramflux_crypto::custody::verify_publication(&original, issued)?;
@@ -478,6 +528,13 @@ async fn cr_native_route_expired_original_lease_needs_live_same_key_and_rejects_
         ramflux_crypto::contact_reach::verify_current_source_submission(&submission, &revoked, now)
             .is_err(),
         "a genuine old sender signature cannot override a current device revocation"
+    );
+    ramflux_crypto::contact_reach::verify_original_source_submission(&submission, now)?;
+    let mut changed = submission;
+    changed.route.signature = ramflux_protocol::encode_base64url([5; 64]);
+    assert!(
+        ramflux_crypto::contact_reach::verify_original_source_submission(&changed, now).is_err(),
+        "bad immutable W bytes are rejected independently of any missing or revoked current cache"
     );
     Ok(())
 }

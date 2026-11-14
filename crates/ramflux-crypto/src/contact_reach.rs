@@ -15,7 +15,7 @@ use ramflux_protocol::{
 mod groups;
 mod source;
 pub use groups::{verify_group_retirement, verify_group_roster};
-pub use source::verify_current_source_submission;
+pub use source::{verify_current_source_submission, verify_original_source_submission};
 mod continuity;
 pub use continuity::{NodeContinuityContext, verify_node_continuity};
 pub mod directory;

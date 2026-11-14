@@ -38,6 +38,12 @@ pub(crate) fn lookup_error(error: SdkError, context: &str) -> SdkError {
 
 pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
+        SdkError::ReachRefused(ramflux_protocol::contact_reach::Reason::ReachRouteInvalid) => {
+            Some("reach_route_invalid")
+        }
+        SdkError::ReachRefused(ramflux_protocol::contact_reach::Reason::GroupEpochStale) => {
+            Some("group_epoch_stale")
+        }
         SdkError::DirectoryAuthorityUnavailable { source, .. } => deterministic(source),
         SdkError::GeneratedRefused { code, .. } => Some(code.as_str()),
         SdkError::HistoryEvidence(error) => Some(match error {
@@ -132,17 +138,31 @@ pub(crate) fn verified_failure_policy(
     entry: &GatewayInboxEntry,
     at: i64,
 ) -> Result<VerifiedInboxFailure, SdkError> {
-    let verified_source =
-        client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok();
+    let reach_verified = match client.require_reach_entry_authority(entry) {
+        Ok(()) => true,
+        Err(error @ SdkError::Storage(_)) => return Err(error),
+        Err(_) => false,
+    };
+    let verified_source = reach_verified
+        .then(|| client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok())
+        .flatten();
     let authenticated = verified_source.is_some();
-    let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
+    let opened = if !authenticated {
+        None
+    } else if ramflux_protocol::contact_reach::enabled() {
+        client.preview_inbound_route(entry, local).ok().flatten()
+    } else {
+        client.open_routed(entry, local).ok().map(|opened| (opened.routing, opened.body))
+    };
     let legacy_group = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&bytes).ok())
         .filter(|g| g.schema == "ramflux.sdk.group_sender_key.message.v1" && g.version == 1)
         .map(|g| g.group_id);
-    let group =
-        opened.as_ref().and_then(|o| o.routing.group_id.as_deref()).or(legacy_group.as_deref());
+    let group = opened
+        .as_ref()
+        .and_then(|(route, _)| route.group_id.as_deref())
+        .or(legacy_group.as_deref());
     let db = client.account_db()?;
     let source_record =
         verified_source.as_ref().and_then(|source| db.client_device_record(source).ok().flatten());
@@ -171,8 +191,8 @@ pub(crate) fn verified_failure_policy(
     // A failed cache lookup is a dependency miss, not a second failure that wedges the inbox.
     let missing_manifest =
         source_record.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none());
-    let target_dependency = if let Some(opened) = opened.as_ref() {
-        missing_generated_target(client, &opened.body)?
+    let target_dependency = if let Some((_, body)) = opened.as_ref() {
+        missing_generated_target(client, body)?
     } else {
         None
     };
@@ -258,6 +278,27 @@ mod tests {
 
     #[test]
     fn deterministic_refusal_codes_are_stable() {
+        assert_eq!(
+            deterministic(&SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ReachRouteInvalid
+            )),
+            Some("reach_route_invalid"),
+            "an immutable W/Inner mismatch settles without retrying or consuming pair state"
+        );
+        assert_eq!(
+            deterministic(&SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::GroupEpochStale
+            )),
+            Some("group_epoch_stale"),
+            "a stale original group epoch cannot become current on retry"
+        );
+        assert_eq!(
+            deterministic(&SdkError::InboundPending(
+                "current reach source authority unavailable".into()
+            )),
+            None,
+            "missing current proof remains a dependency instead of an immutable-byte refusal"
+        );
         assert_eq!(deterministic(&SdkError::ReplayMismatch), Some("replay_mismatch"));
         assert_eq!(
             deterministic(&SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed)),

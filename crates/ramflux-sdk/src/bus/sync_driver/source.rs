@@ -41,10 +41,28 @@ pub(crate) async fn prepare(
     let writer = &source_writer;
     let (request, entry, backpressure, config) = writer
         .apply(move |account| {
-            let saturated = entry.replay
-                && backpressure.saturated(&account.client, &entry.entry, now_unix_timestamp())?;
-            let request =
-                if saturated { Request::Original } else { request(account, &entry, &backpressure) };
+            let proof = (|| {
+                account.client.require_reach_entry_authority(&entry.entry)?;
+                if ramflux_protocol::contact_reach::enabled()
+                    && account.client.routed_seen_marker(&entry.entry)?.is_none()
+                {
+                    account
+                        .client
+                        .preview_reach_route(&entry.entry, &account.gateway_config.device_id)?;
+                }
+                Ok::<(), SdkError>(())
+            })();
+            let request = if let Err(error) = proof {
+                Request::Prepared(Err(error))
+            } else {
+                let saturated = entry.replay
+                    && backpressure.saturated(
+                        &account.client,
+                        &entry.entry,
+                        now_unix_timestamp(),
+                    )?;
+                if saturated { Request::Original } else { request(account, &entry, &backpressure) }
+            };
             let config = account.gateway_config.clone();
             #[cfg(test)]
             let config = {
