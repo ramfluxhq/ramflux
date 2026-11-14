@@ -235,7 +235,7 @@ pub(super) fn verified_records(
     let verified = VerifiedReachState::verify(
         &manifest,
         &pages,
-        provenance,
+        fixture_stage(&manifest, provenance)?,
         ReachReadContext {
             authority: &authority,
             device: &requesting_device,
@@ -338,4 +338,20 @@ pub(super) async fn roster_fixture() -> TestResult<(Fixture, Fixture, VerifiedGr
     peer.client.accept_shared_group_state(&joined, &peer.config.target_delivery_id)?;
     install_grant(&peer, &joined)?;
     Ok((owner, peer, joined))
+}
+
+fn fixture_stage(
+    manifest: &custody::Envelope<StateManifest>,
+    provenance: ramflux_protocol::contact_reach::Provenance,
+) -> TestResult<ramflux_crypto::contact_reach::EncryptedProvenanceStage> {
+    let mut stage = ramflux_crypto::contact_reach::ProvenanceStageBuilder::new(
+        &manifest.body.account_anchor,
+        manifest.body.revision,
+        &manifest.body.state_hash,
+        provenance.signers,
+    )?;
+    for proof in provenance.authorities {
+        stage.push(&proof)?;
+    }
+    Ok(stage.finish()?)
 }

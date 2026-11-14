@@ -73,6 +73,19 @@ impl ProvenanceStageBuilder {
             valid: true,
         })
     }
+    /// Preflight a caller's shared staging budget before allocating the next ciphertext.
+    /// The fixed identity metadata is reserved even while the stream remains open.
+    /// # Errors
+    /// Refuses serialization failure and byte-counter overflow.
+    pub fn projected_staged_bytes(
+        &self,
+        proof: &ProvenanceAuthority,
+    ) -> Result<usize, CryptoError> {
+        self.bytes
+            .checked_add(ramflux_protocol::canonical_json_bytes(proof)?.len())
+            .and_then(|bytes| bytes.checked_add(proof.proof_hash.len() + 28 + 64))
+            .ok_or_else(|| reject("provenance staging capacity"))
+    }
     /// Validate/hash and encrypt one bounded proof, releasing its plaintext before the next fetch.
     /// # Errors
     /// A failed push invalidates the stage; no partial transfer can finish.

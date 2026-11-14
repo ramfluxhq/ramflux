@@ -53,7 +53,7 @@ pub struct VerifiedReachState {
     pub(crate) manifest: StateManifest,
     pub(crate) records: Vec<StateRecord>,
     home_node_key: String,
-    provenance: ramflux_protocol::contact_reach::Provenance,
+    provenance: ramflux_crypto::contact_reach::EncryptedProvenanceStage,
     positives_ready: bool,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
@@ -73,7 +73,7 @@ impl VerifiedReachState {
     pub fn verify(
         manifest: &Signed<StateManifest>,
         pages: &[StatePage],
-        provenance: ramflux_protocol::contact_reach::Provenance,
+        provenance: ramflux_crypto::contact_reach::EncryptedProvenanceStage,
         context: ReachReadContext<'_>,
     ) -> Result<Self, SdkError> {
         let b = &manifest.body;
@@ -103,7 +103,10 @@ impl VerifiedReachState {
             context.home_node_key,
         )?;
         let records = verify_pages(b, pages)?;
-        provenance.verify(b, pages)?;
+        provenance.verify_manifest(b)?;
+        if provenance.signers() != ramflux_protocol::contact_reach::page_signers(pages)? {
+            return Err(refused(Reason::ForeignSnapshotInvalid));
+        }
         let bases = verification::verify_records(&records, b, &provenance)?;
         verification::verify_placements(&records, b, &bases)?;
         let positives_ready =

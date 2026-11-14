@@ -14,7 +14,7 @@ fn request(operation: Operation) -> Request {
         operation,
     }
 }
-fn call(
+pub(super) fn call(
     service: &ReachService,
     store: &RouterRedbStore,
     f: &Fixture,

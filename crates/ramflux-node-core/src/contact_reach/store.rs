@@ -86,7 +86,13 @@ pub(super) fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64> {
     Ok(fenced)
 }
 pub(super) fn load(tx: &redb::WriteTransaction, root: &str) -> Result<AccountReach> {
-    let mut state = tx
+    let mut state = load_mirror(tx, root)?;
+    rosters::load(tx, root, &mut state)?;
+    Ok(state)
+}
+/// Canonical mirror reads never allocate the separately bounded live roster compartment.
+pub(super) fn load_mirror(tx: &redb::WriteTransaction, root: &str) -> Result<AccountReach> {
+    let state = tx
         .open_table(ACCOUNTS)
         .map_err(storage)?
         .get(root)
@@ -94,7 +100,6 @@ pub(super) fn load(tx: &redb::WriteTransaction, root: &str) -> Result<AccountRea
         .map(|v| row(v.value()))
         .transpose()?
         .unwrap_or_default();
-    rosters::load(tx, root, &mut state)?;
     Ok(state)
 }
 

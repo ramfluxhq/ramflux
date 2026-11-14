@@ -3,38 +3,35 @@
 
 //! Exact snapshot catalogue selection, separate from current custody caches and grant use.
 use super::{SdkError, refused};
+use ramflux_crypto::contact_reach::EncryptedProvenanceStage;
 use ramflux_protocol::{
-    contact_reach::{self as wire, Provenance, ProvenanceAuthority, Reason},
+    contact_reach::{self as wire, ProvenanceAuthority, Reason},
     custody::{self, Envelope as Signed},
 };
 
-pub(super) fn proof<'a, T: serde::Serialize>(
-    catalogue: &'a Provenance,
+pub(super) fn proof<T: serde::Serialize>(
+    catalogue: &EncryptedProvenanceStage,
     object: &Signed<T>,
-) -> Result<&'a ProvenanceAuthority, SdkError> {
+) -> Result<ProvenanceAuthority, SdkError> {
     let hash = custody::framed_hash(wire::OPERATION_HASH_DOMAIN, object)?;
     let reference = catalogue
-        .signers
+        .signers()
         .iter()
         .find(|entry| entry.object_hash == hash)
         .ok_or_else(|| refused(Reason::CustodyRefused))?;
-    catalogue
-        .authorities
-        .iter()
-        .find(|entry| entry.proof_hash == reference.proof_hash)
-        .ok_or_else(|| refused(Reason::CustodyRefused))
+    Ok(catalogue.read_proof(&reference.proof_hash)?)
 }
 pub(super) fn admission(
-    catalogue: &Provenance,
+    catalogue: &EncryptedProvenanceStage,
     update: &Signed<wire::Admission>,
 ) -> Result<(), SdkError> {
     Ok(ramflux_crypto::contact_reach::verify_historical_admission(
         update,
-        proof(catalogue, update)?,
+        &proof(catalogue, update)?,
     )?)
 }
 pub(super) fn retirement(
-    catalogue: &Provenance,
+    catalogue: &EncryptedProvenanceStage,
     update: &Signed<wire::Admission>,
     floor: &wire::GroupFloor,
 ) -> Result<(), SdkError> {
@@ -49,7 +46,7 @@ pub(super) fn retirement(
     if let Some(header) = &floor.roster_header {
         ramflux_crypto::contact_reach::verify_historical_roster_header(
             header,
-            proof(catalogue, header.as_ref())?,
+            &proof(catalogue, header.as_ref())?,
         )?;
     }
     Ok(())
@@ -63,34 +60,38 @@ pub(super) struct RetainedProofs {
     pub(super) authorities: Vec<ProvenanceAuthority>,
 }
 impl RetainedProofs {
-    pub(super) fn merge(previous: Option<&Self>, incoming: &Provenance) -> Result<Self, SdkError> {
-        Self::extend(previous, incoming.signers.clone(), incoming.authorities.clone())
+    pub(super) fn merge(
+        previous: Option<Self>,
+        incoming: &EncryptedProvenanceStage,
+    ) -> Result<Self, SdkError> {
+        Self::extend(
+            previous,
+            incoming.signers().to_vec(),
+            incoming.proof_hashes().map(|hash| incoming.read_proof(hash).map_err(SdkError::from)),
+        )
     }
     fn extend(
-        previous: Option<&Self>,
+        previous: Option<Self>,
         incoming_signers: Vec<wire::SignerReference>,
-        incoming_authorities: Vec<ProvenanceAuthority>,
+        incoming_authorities: impl IntoIterator<Item = Result<ProvenanceAuthority, SdkError>>,
     ) -> Result<Self, SdkError> {
+        let previous = previous.unwrap_or_default();
         let mut signers = std::collections::BTreeMap::new();
         let mut authorities = std::collections::BTreeMap::new();
-        for pool in previous.into_iter().cloned().chain(std::iter::once(Self {
-            signers: incoming_signers,
-            authorities: incoming_authorities,
-        })) {
-            for reference in pool.signers {
-                let key = (reference.object_kind, reference.object_hash.clone());
-                if let Some(old) = signers.insert(key, reference.clone())
-                    && old != reference
-                {
-                    return Err(refused(Reason::ForeignSnapshotInvalid));
-                }
+        for reference in previous.signers.into_iter().chain(incoming_signers) {
+            let key = (reference.object_kind, reference.object_hash.clone());
+            if let Some(old) = signers.insert(key, reference.clone())
+                && old != reference
+            {
+                return Err(refused(Reason::ForeignSnapshotInvalid));
             }
-            for proof in pool.authorities {
-                if let Some(old) = authorities.insert(proof.proof_hash.clone(), proof.clone())
-                    && old != proof
-                {
-                    return Err(refused(Reason::CustodyRefused));
-                }
+        }
+        for proof in previous.authorities.into_iter().map(Ok).chain(incoming_authorities) {
+            let proof = proof?;
+            if let Some(old) = authorities.insert(proof.proof_hash.clone(), proof.clone())
+                && old != proof
+            {
+                return Err(refused(Reason::CustodyRefused));
             }
         }
         let retained = Self {
@@ -115,10 +116,10 @@ impl RetainedProofs {
 const POOL_KEY: &str = "reach/provenance";
 pub(super) fn retain_snapshot(
     db: &ramflux_storage::AccountDb,
-    snapshot: &Provenance,
+    snapshot: &EncryptedProvenanceStage,
 ) -> Result<(), SdkError> {
     let previous = db.load_actor_state::<RetainedProofs>(POOL_KEY)?;
-    let retained = RetainedProofs::merge(previous.as_ref(), snapshot)?;
+    let retained = RetainedProofs::merge(previous, snapshot)?;
     db.persist_actor_state(POOL_KEY, &retained)?;
     Ok(())
 }
@@ -179,7 +180,7 @@ impl crate::RamfluxClient {
         }
         let db = self.account_db()?;
         let previous = db.load_actor_state::<RetainedProofs>(POOL_KEY)?;
-        let retained = RetainedProofs::extend(previous.as_ref(), references, vec![proof])?;
+        let retained = RetainedProofs::extend(previous, references, [Ok(proof)])?;
         db.persist_actor_state(POOL_KEY, &retained)?;
         Ok(())
     }

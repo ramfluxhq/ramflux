@@ -4,9 +4,7 @@
 //! Atomic original signer retention; no TTL and no substitution from a later current head.
 use super::{AccountReach, Reason, Result, account, encoded, key, refuse, row, storage};
 use ramflux_protocol::{
-    contact_reach::{
-        self as wire, ObjectKind, Provenance, ProvenanceAuthority, ProvenanceKind, SignerReference,
-    },
+    contact_reach::{self as wire, ObjectKind, ProvenanceAuthority, SignerReference},
     custody::{self, CustodyAuthority, Publication},
 };
 use redb::{ReadableTable, TableDefinition};
@@ -160,16 +158,25 @@ fn check_caps(tx: &redb::WriteTransaction, root: &str) -> Result<()> {
     }
     Ok(())
 }
-/// Materialize only the exact references reachable from the canonical state image.
-/// Missing originals remain custody-pending; no read-time provenance reconstruction.
-pub(in crate::contact_reach) fn catalogue(
+/// Immutable selectors are captured under the same writer as state and the clock fence.
+pub(in crate::contact_reach) struct ProvenanceIndex {
+    root: String,
+    revision: u64,
+    state_hash: String,
+    signers: Vec<SignerReference>,
+}
+impl ProvenanceIndex {
+    pub(in crate::contact_reach) fn signers(&self) -> &[SignerReference] {
+        &self.signers
+    }
+}
+pub(in crate::contact_reach) fn index(
     tx: &redb::WriteTransaction,
     root: &str,
     state: &AccountReach,
-) -> Result<Provenance> {
+) -> Result<ProvenanceIndex> {
     let records = state.records()?;
     let mut signers = BTreeMap::new();
-    let mut proofs = BTreeMap::new();
     for record in &records {
         for selected in wire::record_signers(record)? {
             let id = key(root, &reference_id(&selected)?)?;
@@ -181,27 +188,17 @@ pub(in crate::contact_reach) fn catalogue(
                 .map(|v| row(v.value()))
                 .transpose()?
                 .ok_or_else(|| refuse(Reason::CustodyRefused))?;
+            reference.validate().map_err(|_| refuse(Reason::CustodyRefused))?;
             if selected.authority_head_hash != reference.authority_head_hash
                 || selected.master_certificate_hash != reference.master_certificate_hash
             {
                 return Err(refuse(Reason::CustodyRefused));
             }
-            let proof: ProvenanceAuthority = tx
-                .open_table(PROOFS)
-                .map_err(storage)?
-                .get(key(root, &reference.proof_hash)?.as_str())
-                .map_err(storage)?
-                .map(|v| row(v.value()))
-                .transpose()?
-                .ok_or_else(|| refuse(Reason::CustodyRefused))?;
-            proofs.insert(proof.proof_hash.clone(), proof);
             signers.insert((reference.object_kind, reference.object_hash.clone()), reference);
         }
     }
-    let catalogue = Provenance {
-        kind: ProvenanceKind::ReachProvenance,
-        version: 1,
-        account_anchor: root.into(),
+    Ok(ProvenanceIndex {
+        root: root.into(),
         revision: state.revision,
         state_hash: wire::state_hash(
             root,
@@ -211,10 +208,48 @@ pub(in crate::contact_reach) fn catalogue(
             &records,
         )?,
         signers: signers.into_values().collect(),
-        authorities: proofs.into_values().collect(),
+    })
+}
+/// Read/hash/encrypt one immutable proof at a time after releasing the home writer.
+pub(in crate::contact_reach) fn stage(
+    store: &super::RouterRedbStore,
+    index: ProvenanceIndex,
+    records: &[wire::StateRecord],
+    capacity: usize,
+) -> Result<ramflux_crypto::contact_reach::EncryptedProvenanceStage> {
+    use redb::ReadableDatabase;
+    let required: std::collections::BTreeSet<_> =
+        index.signers.iter().map(|reference| reference.proof_hash.clone()).collect();
+    if required.len() > wire::MAX_PROVENANCE_OBJECTS {
+        return Err(refuse(Reason::ForeignCapacity));
+    }
+    let mut stage = ramflux_crypto::contact_reach::ProvenanceStageBuilder::new(
+        &index.root,
+        index.revision,
+        &index.state_hash,
+        index.signers,
+    )?;
+    let read = store.migration_db().begin_read().map_err(storage)?;
+    let table = match read.open_table(PROOFS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Err(refuse(Reason::CustodyRefused)),
+        Err(error) => return Err(storage(error)),
     };
-    catalogue.validate().map_err(|_| refuse(Reason::CustodyRefused))?;
-    ramflux_crypto::contact_reach::verify_historical_state_records(&records, &catalogue)
-        .map_err(|_| refuse(Reason::CustodyRefused))?;
-    Ok(catalogue)
+    for hash in required {
+        let raw = table
+            .get(key(&index.root, &hash)?.as_str())
+            .map_err(storage)?
+            .ok_or_else(|| refuse(Reason::CustodyRefused))?;
+        if raw.value().len() > 1024 * 1024 + 1024 {
+            return Err(refuse(Reason::ForeignCapacity));
+        }
+        let proof: ProvenanceAuthority = row(raw.value())?;
+        if stage.projected_staged_bytes(&proof)? > capacity {
+            return Err(refuse(Reason::ForeignCapacity));
+        }
+        stage.push(&proof).map_err(|_| refuse(Reason::CustodyRefused))?;
+    }
+    let stage = stage.finish().map_err(|_| refuse(Reason::CustodyRefused))?;
+    stage.verify_originals(records).map_err(|_| refuse(Reason::CustodyRefused))?;
+    Ok(stage)
 }

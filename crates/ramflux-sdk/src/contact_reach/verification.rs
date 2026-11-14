@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 pub(super) fn verify_records<'a>(
     records: &'a [StateRecord],
     manifest: &StateManifest,
-    catalogue: &ramflux_protocol::contact_reach::Provenance,
+    catalogue: &ramflux_crypto::contact_reach::EncryptedProvenanceStage,
 ) -> Result<BTreeMap<String, &'a StateRecord>, SdkError> {
     super::group_restrictions::verify_bindings(records)?;
     let mut bases = BTreeMap::new();
@@ -26,7 +26,7 @@ pub(super) fn verify_records<'a>(
             StateRecord::Policy { update, .. } => {
                 crypto::verify_historical_policy(
                     update,
-                    super::provenance::proof(catalogue, update)?,
+                    &super::provenance::proof(catalogue, update)?,
                 )?;
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
             }

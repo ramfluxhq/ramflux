@@ -40,15 +40,14 @@ struct LeaseContext<'a> {
 #[serde(deny_unknown_fields)]
 struct Image {
     pages: Vec<StatePage>,
-    provenance: ramflux_protocol::contact_reach::Provenance,
 }
-const MAX_IMAGE_BYTES: usize =
-    MAX_STATE_BYTES + ramflux_protocol::contact_reach::MAX_PROVENANCE_BYTES;
+const MAX_IMAGE_BYTES: usize = MAX_STATE_BYTES;
 struct Lease {
     manifest: Signed<StateManifest>,
     ciphertext: Vec<u8>,
     nonce: [u8; 12],
     session: String,
+    provenance: ramflux_crypto::contact_reach::EncryptedProvenanceStage,
 }
 pub(super) struct Snapshots {
     key: zeroize::Zeroizing<[u8; 32]>,
@@ -68,6 +67,7 @@ impl Snapshots {
         request: SnapshotRead<'_>,
     ) -> Result<OperationResult> {
         let SnapshotRead { owner, session, known, id, page, now, proof } = request;
+        let mut leases = self.leases.lock().map_err(storage)?;
         let tx = store.begin_write()?;
         let now = super::store::clock(&tx, now)?;
         let authority = super::store::authority(&tx, owner.recipient_root, now)?;
@@ -81,18 +81,17 @@ impl Snapshots {
                 Reason::HomeRollback
             }));
         }
-        let state = super::store::load(&tx, owner.recipient_root)?;
+        let state = super::store::load_mirror(&tx, owner.recipient_root)?;
         if state.revision < known {
             return Err(refuse(Reason::HomeRollback));
         }
         let provenance = if id.is_none() {
-            Some(super::store::provenance::catalogue(&tx, owner.recipient_root, &state)?)
+            Some(super::store::provenance::index(&tx, owner.recipient_root, &state)?)
         } else {
             None
         };
         // The clock fence commits before a lease becomes visible; no state record is rewritten.
         tx.commit()?;
-        let mut leases = self.leases.lock().map_err(storage)?;
         leases.retain(|_, v| {
             v.retain(|l| l.manifest.body.expires_at > now);
             !v.is_empty()
@@ -108,7 +107,16 @@ impl Snapshots {
             if account.len() >= 2 {
                 return Err(refuse(Reason::ForeignCapacity));
             }
-            account.push(self.new_lease(
+            let used = account.iter().try_fold(0_usize, |total, lease| {
+                total
+                    .checked_add(lease.staged_bytes()?)
+                    .ok_or_else(|| refuse(Reason::ForeignCapacity))
+            })?;
+            let available = ramflux_protocol::contact_reach::MAX_REACH_STAGING_BYTES
+                .checked_sub(used)
+                .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+            let lease = self.new_lease(
+                (store, available),
                 node,
                 &state,
                 provenance.ok_or_else(|| refuse(Reason::CustodyRefused))?,
@@ -119,7 +127,16 @@ impl Snapshots {
                     authority_hash: &custody::object_hash(authority.envelope())?,
                     now,
                 },
-            )?);
+            )?;
+            let bytes = account.iter().try_fold(lease.staged_bytes()?, |total, lease| {
+                total
+                    .checked_add(lease.staged_bytes()?)
+                    .ok_or_else(|| refuse(Reason::ForeignCapacity))
+            })?;
+            if bytes > ramflux_protocol::contact_reach::MAX_REACH_STAGING_BYTES {
+                return Err(refuse(Reason::ForeignCapacity));
+            }
+            account.push(lease);
         }
         let account = leases
             .get(owner.recipient_root)
@@ -133,80 +150,30 @@ impl Snapshots {
         if lease.session != session || &lease.manifest.body.requesting_device != owner.actor {
             return Err(refuse(Reason::ForeignReadRefused));
         }
-        let image = lease.image(self.key.as_ref())?;
-        if let Some(hash) = proof {
-            let selected = image
-                .provenance
-                .authorities
-                .into_iter()
-                .find(|entry| entry.proof_hash == hash)
-                .ok_or_else(|| refuse(Reason::ForeignSnapshotInvalid))?;
-            let result = OperationResult::ReachProvenance {
-                manifest: lease.manifest.clone(),
-                proof_hash: selected.proof_hash,
-                authority: Box::new(selected.authority),
-                custodian_history: selected.custodian_history,
-            };
-            if super::store::encoded(&result)?.len() + 1024
-                > ramflux_protocol::contact_reach::MAX_REPLY_BYTES
-            {
-                return Err(refuse(Reason::ForeignCapacity));
-            }
-            return Ok(result);
-        }
-        let page = image
-            .pages
-            .get(usize::try_from(page).map_err(storage)?)
-            .ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?
-            .clone();
-        Ok(OperationResult::ReachState { manifest: lease.manifest.clone(), page })
+        lease.response(page, proof, self.key.as_ref())
     }
+
     fn new_lease(
         &self,
+        resource: (&RouterRedbStore, usize),
         node: &MigrationNode,
         state: &super::AccountReach,
-        provenance: ramflux_protocol::contact_reach::Provenance,
+        index: super::store::provenance::ProvenanceIndex,
         context: LeaseContext<'_>,
     ) -> Result<Lease> {
         let LeaseContext { owner, session, now, .. } = context;
         let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
         let records = state.records()?;
-        let mut pages = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for (index, chunk) in records.chunks(32).enumerate() {
-            let value = StatePage {
-                version: 1,
-                snapshot_id: snapshot_id.clone(),
-                page: u64::try_from(index).map_err(storage)?,
-                records: chunk.to_vec(),
-                signers: {
-                    let mut selected = Vec::new();
-                    for record in chunk {
-                        for reference in ramflux_protocol::contact_reach::record_signers(record)? {
-                            if seen.insert((reference.object_kind, reference.object_hash.clone())) {
-                                selected.push(
-                                    provenance
-                                        .signers
-                                        .iter()
-                                        .find(|entry| {
-                                            entry.object_kind == reference.object_kind
-                                                && entry.object_hash == reference.object_hash
-                                        })
-                                        .ok_or_else(|| refuse(Reason::CustodyRefused))?
-                                        .clone(),
-                                );
-                            }
-                        }
-                    }
-                    selected.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
-                    selected
-                },
-            };
-            if super::store::encoded(&value)?.len() > 1024 * 1024 {
-                return Err(refuse(Reason::ForeignCapacity));
-            }
-            pages.push(value);
-        }
+        let pages = pages::pack(&records, &snapshot_id, index.signers())?;
+        // Reserve bounded working buffers before staging any proof ciphertext. This keeps
+        // existing leases readable while a second snapshot is being built.
+        let reserved = super::store::encoded(&pages)?
+            .len()
+            .checked_add(3 * MAX_STATE_BYTES + 4096 + session.len() + 28)
+            .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+        let capacity =
+            resource.1.checked_sub(reserved).ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+        let provenance = super::store::provenance::stage(resource.0, index, &records, capacity)?;
         let body = StateManifest {
             version: 1,
             account_anchor: owner.recipient_root.into(),
@@ -227,13 +194,9 @@ impl Snapshots {
                 state.admission_revision,
                 &records,
             )?,
-            provenance_hash: custody::framed_hash(
-                ramflux_protocol::contact_reach::STATE_CONTENT_DOMAIN,
-                &provenance,
-            )?,
-            provenance_count: u64::try_from(provenance.authorities.len()).map_err(storage)?,
-            provenance_bytes: u64::try_from(super::store::encoded(&provenance)?.len())
-                .map_err(storage)?,
+            provenance_hash: provenance.identity().hash.clone(),
+            provenance_count: provenance.identity().count,
+            provenance_bytes: provenance.identity().bytes,
             issued_at: now,
             expires_at: now.checked_add(60).ok_or_else(|| refuse(Reason::ForeignUnavailable))?,
         };
@@ -248,9 +211,9 @@ impl Snapshots {
         if super::store::encoded(&pages)?.len() > MAX_STATE_BYTES {
             return Err(refuse(Reason::ForeignCapacity));
         }
-        provenance.verify(&manifest.body, &pages)?;
-        let plaintext =
-            zeroize::Zeroizing::new(super::store::encoded(&Image { pages, provenance })?);
+        provenance.verify_manifest(&manifest.body)?;
+        drop(ramflux_protocol::contact_reach::verify_pages(&manifest.body, &pages)?);
+        let plaintext = zeroize::Zeroizing::new(super::store::encoded(&Image { pages })?);
         if plaintext.len() > MAX_IMAGE_BYTES {
             return Err(refuse(Reason::ForeignCapacity));
         }
@@ -265,11 +228,53 @@ impl Snapshots {
                 Payload { msg: &plaintext, aad: manifest.body.snapshot_id.as_bytes() },
             )
             .map_err(|_| refuse(Reason::ForeignUnavailable))?;
-        Ok(Lease { manifest, ciphertext, nonce, session: session.into() })
+        Ok(Lease { manifest, ciphertext, nonce, session: session.into(), provenance })
     }
 }
 
 impl Lease {
+    fn response(&self, page: u64, proof: Option<&str>, key: &[u8]) -> Result<OperationResult> {
+        if let Some(hash) = proof {
+            if !self.provenance.proof_hashes().any(|member| member == hash) {
+                return Err(refuse(Reason::ForeignSnapshotInvalid));
+            }
+            let selected = self
+                .provenance
+                .read_proof(hash)
+                .map_err(|_| refuse(Reason::ForeignSnapshotInvalid))?;
+            let result = OperationResult::ReachProvenance {
+                manifest: self.manifest.clone(),
+                proof_hash: selected.proof_hash,
+                authority: Box::new(selected.authority),
+                custodian_history: selected.custodian_history,
+            };
+            if super::store::encoded(&result)?.len() + 1024
+                > ramflux_protocol::contact_reach::MAX_REPLY_BYTES
+            {
+                return Err(refuse(Reason::ForeignCapacity));
+            }
+            return Ok(result);
+        }
+        let image = self.image(key)?;
+        let page = image
+            .pages
+            .get(usize::try_from(page).map_err(storage)?)
+            .ok_or_else(|| refuse(Reason::ForeignInvalidFrame))?
+            .clone();
+        Ok(OperationResult::ReachState { manifest: self.manifest.clone(), page })
+    }
+
+    fn staged_bytes(&self) -> Result<usize> {
+        let metadata = super::store::encoded(&self.manifest)?
+            .len()
+            .checked_add(self.session.len() + 12)
+            .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+        self.provenance
+            .staged_bytes()
+            .checked_add(self.ciphertext.len())
+            .and_then(|bytes| bytes.checked_add(metadata))
+            .ok_or_else(|| refuse(Reason::ForeignCapacity))
+    }
     fn image(&self, key: &[u8]) -> Result<Image> {
         let cipher = Aes256Gcm::new_from_slice(key).map_err(storage)?;
         let bytes = zeroize::Zeroizing::new(
@@ -286,3 +291,5 @@ impl Lease {
         Ok(decode(&bytes, MAX_IMAGE_BYTES)?)
     }
 }
+
+mod pages;

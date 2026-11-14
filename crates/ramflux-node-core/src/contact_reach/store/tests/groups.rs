@@ -739,3 +739,96 @@ fn cr_nonempty_reach_state_refuses_home_activation() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_group_duplicate_preserves_original_header_signer_reference_after_native_advance() -> TestResult
+{
+    let dir = tempfile::TempDir::new()?;
+    let (store, mut f) = initialize(&dir.path().join("duplicate-original-header.redb"))?;
+    let node = super::costs::issuer(&store, &f)?;
+    f.home = {
+        let tx = store.begin_write()?;
+        ramflux_protocol::home_migration::record_hash(&home(&tx, &f.root)?.record)?
+    };
+    install_live_group(&store, &f)?;
+    let original = {
+        let tx = store.begin_write()?;
+        load(&tx, &f.root)?.rosters.get(&subject(100).key()?).ok_or("original roster")?.clone()
+    };
+    let next = renewed_primary(&f, NOW + 3601)?;
+    let tx = store.begin_write()?;
+    let mut native = account(&tx, &f.root)?;
+    native.pins.observe(&next)?;
+    native.publication.record = next.envelope().clone();
+    tx.open_table(CUSTODY)?.insert(f.root.as_str(), encoded(&native)?.as_slice())?;
+    tx.commit()?;
+    f.authority = next;
+    let mut header = original.header.body.clone();
+    header.authority_head_hash = custody::object_hash(f.authority.envelope())?;
+    header.issued_at = NOW + 1;
+    let attempted = GroupRoster {
+        header: f.key.sign_group_roster_header(header, &f.authority, NOW + 1)?,
+        members: original.members.clone(),
+    };
+    let result = store.reach_group_roster(owner(&f), &digest(95), &attempted, NOW + 1)?;
+    assert!(
+        matches!(result, OperationResult::GroupRoster { outcome: Applied::Duplicate, .. }),
+        "same roster tuple stays duplicate even when the new valid command uses another native head"
+    );
+    let retained = {
+        let tx = store.begin_write()?;
+        load(&tx, &f.root)?.rosters.get(&subject(100).key()?).ok_or("retained roster")?.clone()
+    };
+    assert_eq!(
+        retained, original,
+        "duplicate processing must retain the exact original header and signature"
+    );
+    store.reach_owner_commit(
+        owner(&f),
+        &decision(&f, 96, subject(101), 1, Decision::Revoke, NOW + 2)?,
+        NOW + 2,
+    )?;
+    let service = crate::contact_reach::ReachService::new(node)?;
+    let state = super::provenance::call(
+        &service,
+        &store,
+        &f,
+        Operation::ReachState { known_revision: 0, snapshot_id: None, page: 0 },
+        NOW + 2,
+    );
+    let OperationResult::ReachState { manifest, page } = state else {
+        return Err(format!("owner state: {state:?}").into());
+    };
+    let object_hash = custody::framed_hash(OPERATION_HASH_DOMAIN, &original.header)?;
+    let reference = page
+        .signers
+        .iter()
+        .find(|reference| {
+            reference.object_kind == ramflux_protocol::contact_reach::ObjectKind::GroupRoster
+                && reference.object_hash == object_hash
+        })
+        .ok_or("original header reference")?;
+    let proof = super::provenance::call(
+        &service,
+        &store,
+        &f,
+        Operation::ReachProvenance {
+            snapshot_id: manifest.body.snapshot_id,
+            proof_hash: reference.proof_hash.clone(),
+        },
+        NOW + 2,
+    );
+    let OperationResult::ReachProvenance { authority, .. } = proof else {
+        return Err(format!("owner proof: {proof:?}").into());
+    };
+    assert_eq!(
+        custody::object_hash(&authority.publication.record)?,
+        original.header.body.authority_head_hash,
+        "retirement proof selects the stored header's original native context, never the duplicate attempt's signer"
+    );
+    assert_ne!(
+        original.header.body.authority_head_hash, attempted.header.body.authority_head_hash,
+        "the control must use two distinct genuinely signed native heads"
+    );
+    Ok(())
+}
