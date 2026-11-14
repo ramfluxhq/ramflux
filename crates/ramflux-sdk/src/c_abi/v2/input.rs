@@ -368,12 +368,12 @@ mod tests {
         const MAX_BYTES: usize = 256;
         const SEEDS: &[&[u8]] = &[
             br#"{"text":"hello\n\u263a","items":[1,true,null]}"#,
-            br#"[0,-0,1.25,1e3,9007199254740991]"#,
+            br"[0,-0,1.25,1e3,9007199254740991]",
             br#"{"a":1,"a":2}"#,
             br#""\ud83d\ude00""#,
-            br#"[1e-4000,1e400]"#,
+            br"[1e-4000,1e400]",
         ];
-        let mut state = 0x9e3779b97f4a7c15_u64;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let mut next = || {
             state ^= state << 13;
             state ^= state >> 7;
