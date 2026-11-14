@@ -560,7 +560,7 @@ fn serve_contact_request(
         &request.path,
         &request.body,
         crate::contact_foreign::Context {
-            own_node: &context.discovery.node_id,
+            node: &context.discovery,
             router: &context.router,
             store: &context.store,
             peer: crate::contact_foreign::PeerContext {
@@ -656,7 +656,7 @@ async fn handle_mesh_quic_request(
     {
         let response = match crate::contact_foreign::quic::Job::prepare(
             &accepted.request,
-            &context.discovery.node_id,
+            &context.discovery,
             &context.router,
             &context.store,
             crate::contact_foreign::PeerContext { uri: peer_uri, ip: Some(remote_ip) },
@@ -758,7 +758,7 @@ async fn handle_mesh_compio_quic_request(
     {
         let response = match crate::contact_foreign::quic::Job::prepare(
             &accepted.request,
-            &context.discovery.node_id,
+            &context.discovery,
             &context.router,
             &context.store,
             crate::contact_foreign::PeerContext { uri: peer_uri, ip: Some(remote_ip) },

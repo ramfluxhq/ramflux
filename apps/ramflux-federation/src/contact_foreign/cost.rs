@@ -43,7 +43,7 @@ pub(super) fn source(
     let mut permit = None;
     let result = if !wire::enabled() {
         Err(Reason::FeatureDisabled)
-    } else if request.target_node_id == context.own_node {
+    } else if request.target_node_id == context.node.node_id.as_str() {
         // Same-node R.Op issuance belongs to the authenticated router owner.
         Err(Reason::ForeignPolicyDenied)
     } else {
@@ -113,7 +113,7 @@ fn receiving(
     let body =
         ramflux_protocol::canonical_json_bytes(&next).map_err(|_| Reason::ForeignInvalidFrame)?;
     let tls = BoundedHttpTls::new(&context.router.tls, &context.router.server_name, None)
-        .and_then(|tls| tls.with_mesh_peer(context.own_node, "ramflux-router"))
+        .and_then(|tls| tls.with_mesh_peer(context.node.node_id.as_str(), "ramflux-router"))
         .map_err(|_| Reason::ForeignUnavailable)?;
     let bytes = ramflux_transport::bounded_http_post(BoundedHttpPost {
         endpoint: &context.router.endpoint,
@@ -124,7 +124,7 @@ fn receiving(
         max_bytes: wire::MAX_COST_RESPONSE_BYTES,
     })
     .map_err(|_| Reason::ForeignUnavailable)?;
-    let response = checked_reply(request, &bytes, context.own_node)?;
+    let response = checked_reply(request, &bytes, context.node.node_id.as_str())?;
     remaining(deadline)?;
     Ok(response.result)
 }

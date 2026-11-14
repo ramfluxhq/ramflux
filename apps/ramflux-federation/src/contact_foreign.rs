@@ -30,7 +30,7 @@ pub(crate) struct PeerContext<'a> {
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Context<'a> {
-    pub own_node: &'a str,
+    pub node: &'a crate::FederationDiscoverySurface,
     pub router: &'a RouterMeshClient,
     pub store: &'a FederationRedbStore,
     pub peer: PeerContext<'a>,
@@ -90,13 +90,21 @@ pub(crate) fn route(
     if !recognizes(path) {
         return Ok(None);
     }
-    let request = match request::decode(method, path, bytes, context.own_node, context.peer.uri) {
-        Ok(request::Request::Query(request)) => request,
-        Ok(request::Request::Submit(request)) => return submit::route(&request).map(Some),
-        Ok(request::Request::Cost(request)) => return cost::source(&request, context).map(Some),
-        Ok(request::Request::PeerCost(request)) => return cost::peer(&request, context).map(Some),
-        Err(response) => return Ok(Some(response)),
-    };
+    let request =
+        match request::decode(method, path, bytes, context.node.node_id.as_str(), context.peer.uri)
+        {
+            Ok(request::Request::Query(request)) => request,
+            Ok(request::Request::Submit(request)) => {
+                return submit::route(&request, context).map(Some);
+            }
+            Ok(request::Request::Cost(request)) => {
+                return cost::source(&request, context).map(Some);
+            }
+            Ok(request::Request::PeerCost(request)) => {
+                return cost::peer(&request, context).map(Some);
+            }
+            Err(response) => return Ok(Some(response)),
+        };
     let own = path == wire::FOREIGN_PATH;
     let peer_key =
         if own { request.query.target_node.as_str() } else { request.query.source_node.as_str() };
@@ -112,7 +120,7 @@ pub(crate) fn route(
         Err(Reason::FeatureDisabled)
     } else {
         let deadline = context.received + Duration::from_millis(request.remaining_ms);
-        if !own || request.query.target_node == context.own_node {
+        if !own || request.query.target_node == context.node.node_id.as_str() {
             source_proxy(&request, context.router, deadline)
         } else {
             let now = context.store.contact_clock_floor(crate::now_unix_seconds()?)?;

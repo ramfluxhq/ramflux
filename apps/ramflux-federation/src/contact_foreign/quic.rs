@@ -12,7 +12,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 pub(crate) struct Job {
     _slot: SemaphorePermit<'static>,
     request: GatewayQuicRequest,
-    own_node: String,
+    node: crate::FederationDiscoverySurface,
     router: Arc<RouterMeshClient>,
     store: Arc<FederationRedbStore>,
     peer_uri: Option<String>,
@@ -22,7 +22,7 @@ pub(crate) struct Job {
 impl Job {
     pub(crate) fn prepare(
         request: &GatewayQuicRequest,
-        own_node: &str,
+        node: &crate::FederationDiscoverySurface,
         router: &Arc<RouterMeshClient>,
         store: &Arc<FederationRedbStore>,
         peer: PeerContext<'_>,
@@ -40,7 +40,7 @@ impl Job {
         Ok(Self {
             _slot: slot,
             request: request.clone(),
-            own_node: own_node.into(),
+            node: node.clone(),
             router: Arc::clone(router),
             store: Arc::clone(store),
             peer_uri: peer.uri.map(str::to_owned),
@@ -56,7 +56,7 @@ impl Job {
             &self.request.path,
             &body,
             Context {
-                own_node: &self.own_node,
+                node: &self.node,
                 router: &self.router,
                 store: &self.store,
                 peer: PeerContext { uri: self.peer_uri.as_deref(), ip: self.peer_ip },
