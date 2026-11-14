@@ -254,16 +254,17 @@ pub(super) fn allowed(name: &str) -> bool {
 
 pub(super) const CONTACT_VERIFY_CAS_CONTRACT: &str = "CONTACT-VERIFY-CAS-01";
 pub(super) const CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas";
-pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str =
-    "ramflux.message.v1.ContactSafetyVerifyRequest";
-pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
-    "ramflux.message.v1.ContactSafetyVerifyResult";
+// The method manifest generator matches `const NAME: &str = "...";` on one line.
+#[rustfmt::skip]
+pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str = "ramflux.message.v1.ContactSafetyVerifyRequest";
+#[rustfmt::skip]
+pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str = "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
-pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
+#[rustfmt::skip]
+pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str = "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
 /// blake3 of the contract line followed by those descriptor bytes.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str =
-    "de9789f507ed75696e62ec27b7e4ff1904b9db6fff27dcafa789cd04b27eab8e";
+#[rustfmt::skip]
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "de9789f507ed75696e62ec27b7e4ff1904b9db6fff27dcafa789cd04b27eab8e";
 
 pub(super) fn contact_verify_rows() -> usize {
     METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify").count()
