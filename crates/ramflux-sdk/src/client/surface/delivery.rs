@@ -79,20 +79,10 @@ impl RamfluxClient {
             ramflux_protocol::hash_base64url("ramflux.surface.delivery.v1", &carrier.bytes()?);
         let receipt_key = super::receipt_key(&carrier)?;
         let db = self.account_db()?;
-        if let Some(receipt) = db.load_actor_state::<Receipt>(&receipt_key)? {
-            if receipt.fingerprint != fingerprint {
-                return self.reject_surface_delivery(
-                    conversation,
-                    message,
-                    sender,
-                    "message_id_conflict",
-                );
-            }
-            if !receipt.result.retryable {
-                let result = self.refresh_surface_outcome(&carrier, receipt.result)?;
-                self.store_surface_message_reference(&carrier, message, sender, &result, false)?;
-                return Ok(result);
-            }
+        if let Some(result) =
+            self.replay_surface_delivery(&carrier, message, sender, &fingerprint)?
+        {
+            return Ok(result);
         }
         if !self.surface_pending_id_matches(&carrier)? {
             return self.reject_surface_delivery(
@@ -149,6 +139,35 @@ impl RamfluxClient {
         }
         self.store_surface_message_reference(&carrier, message, sender, &outcome, false)?;
         Ok(outcome)
+    }
+    fn replay_surface_delivery(
+        &self,
+        carrier: &Carrier,
+        message: &str,
+        sender: SurfaceSender<'_>,
+        fingerprint: &str,
+    ) -> Result<Option<Outcome>, SdkError> {
+        let Some(receipt) =
+            self.account_db()?.load_actor_state::<Receipt>(&super::receipt_key(carrier)?)?
+        else {
+            return Ok(None);
+        };
+        if receipt.fingerprint != fingerprint {
+            return self
+                .reject_surface_delivery(
+                    &carrier.conversation_id,
+                    message,
+                    sender,
+                    "message_id_conflict",
+                )
+                .map(Some);
+        }
+        if receipt.result.retryable {
+            return Ok(None);
+        }
+        let result = self.refresh_surface_outcome(carrier, receipt.result)?;
+        self.store_surface_message_reference(carrier, message, sender, &result, false)?;
+        Ok(Some(result))
     }
     fn project_surface_fallback_only(
         &self,
