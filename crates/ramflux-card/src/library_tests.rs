@@ -215,6 +215,12 @@ fn complete_form_enforces_types_required_errors_disabled_and_owned_submit() {
 }
 #[test]
 fn chart_bar_table_and_approval_host_boundary_are_closed() {
+    fn assert_no_approval_action(node: &crate::Node) {
+        assert!(node.action.is_none(), "single-tap approval actions stay on the host surface");
+        for child in &node.children {
+            assert_no_approval_action(child);
+        }
+    }
     let _guard = guard();
     let chart = FIXTURES.get(2).expect("test: chart fixture");
     let mut spec = CardSpec::parse(chart.input).expect("test: chart");
@@ -245,12 +251,6 @@ fn chart_bar_table_and_approval_host_boundary_are_closed() {
             .expect("test: approval renderer");
     assert_eq!(batch.host_slots.len(), 1, "host receives untrusted reference outside tree");
     let tree = session.tree().expect("test: approval tree");
-    fn assert_no_approval_action(node: &crate::Node) {
-        assert!(node.action.is_none(), "single-tap approval actions stay on the host surface");
-        for child in &node.children {
-            assert_no_approval_action(child);
-        }
-    }
     assert_no_approval_action(&tree.root);
     let serialized = serde_json::to_string(&tree).expect("test: serialized approval tree");
     assert!(
