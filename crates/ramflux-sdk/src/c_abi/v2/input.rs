@@ -378,19 +378,19 @@ mod tests {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            state
+            state.to_le_bytes()[0]
         };
         let mut accepted = 0;
         for case in 0..CASES {
             let mut bytes = if case % 3 == 0 {
-                let len = (next() as usize) % MAX_BYTES;
-                (0..len).map(|_| next() as u8).collect::<Vec<_>>()
+                let len = usize::from(next()) % MAX_BYTES;
+                (0..len).map(|_| next()).collect::<Vec<_>>()
             } else {
                 SEEDS[case % SEEDS.len()].to_vec()
             };
             if case % 3 == 1 && !bytes.is_empty() {
-                let index = (next() as usize) % bytes.len();
-                bytes[index] = next() as u8;
+                let index = usize::from(next()) % bytes.len();
+                bytes[index] = next();
             }
             let actual = decode::<Wiping>(&bytes);
             let expected = ramflux_protocol::parse_i_json::<Value>(&bytes);
