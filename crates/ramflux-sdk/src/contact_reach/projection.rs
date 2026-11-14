@@ -34,6 +34,7 @@ impl SavedReachState {
         conversation_id: &str,
         now: u64,
     ) -> Result<ConversationReach, SdkError> {
+        self.require_positive_ready()?;
         if self.conflict {
             return Err(refused(Reason::HomeFork));
         }

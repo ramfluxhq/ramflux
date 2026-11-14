@@ -54,6 +54,7 @@ pub struct VerifiedReachState {
     pub(crate) records: Vec<StateRecord>,
     home_node_key: String,
     provenance: ramflux_protocol::contact_reach::Provenance,
+    positives_ready: bool,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
 #[derive(Clone, Copy)]
@@ -105,7 +106,10 @@ impl VerifiedReachState {
         provenance.verify(b, pages)?;
         let bases = verification::verify_records(&records, b, &provenance)?;
         verification::verify_placements(&records, b, &bases)?;
+        let positives_ready =
+            verification::current_positives(&records, context.authority, context.now);
         Ok(Self {
+            positives_ready,
             manifest: b.clone(),
             records,
             home_node_key: context.home_node_key.to_owned(),
@@ -135,11 +139,11 @@ pub(crate) struct SavedReachState {
     state_hash: String,
     #[serde(default)]
     provenance_hash: Option<String>,
-    #[serde(default)]
-    provenance: Option<provenance::RetainedProofs>,
     records: Vec<StateRecord>,
     restrictions: BTreeMap<String, StateRecord>,
     conflict: bool,
+    #[serde(default = "positive_pending_default")]
+    positive_pending: bool,
 }
 impl crate::RamfluxClient {
     pub(super) fn require_reach_authority_head(
@@ -178,6 +182,7 @@ impl crate::RamfluxClient {
             )?;
             let previous: Option<SavedReachState> =
                 db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
+            provenance::retain_snapshot(db, &verified.provenance)?;
             if let Some(saved) = &previous {
                 if saved.root != verified.manifest.account_anchor
                     || saved.conflict
@@ -191,6 +196,7 @@ impl crate::RamfluxClient {
                             == Some(verified.manifest.provenance_hash.as_str())
                     {
                         let mut refreshed = saved.clone();
+                        refreshed.positive_pending = !verified.positives_ready;
                         refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
                         refreshed.home_node_key = Some(verified.home_node_key.clone());
                         refreshed
@@ -223,10 +229,6 @@ impl crate::RamfluxClient {
                 }
                 Err(error) => return Err(error),
             };
-            let proofs = provenance::RetainedProofs::merge(
-                previous.as_ref().and_then(|saved| saved.provenance.as_ref()),
-                &verified.provenance,
-            )?;
             let saved = SavedReachState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
@@ -236,10 +238,10 @@ impl crate::RamfluxClient {
                 authority_head_hash: verified.manifest.authority_head_hash,
                 state_hash: verified.manifest.state_hash,
                 provenance_hash: Some(verified.manifest.provenance_hash),
-                provenance: Some(proofs),
                 records: verified.records,
                 restrictions,
                 conflict: false,
+                positive_pending: !verified.positives_ready,
             };
             db.persist_client_record("reach", "state", &serde_json::to_value(saved)?)?;
             Ok::<_, SdkError>(())
@@ -368,4 +370,18 @@ fn merge_restrictions(
             .chain(retained.values()),
     )?;
     Ok(retained)
+}
+
+fn positive_pending_default() -> bool {
+    true
+}
+impl SavedReachState {
+    fn require_positive_ready(&self) -> Result<(), SdkError> {
+        if self.positive_pending {
+            return Err(SdkError::InboundPending(
+                "reach positive permissions require current management reconciliation".into(),
+            ));
+        }
+        Ok(())
+    }
 }

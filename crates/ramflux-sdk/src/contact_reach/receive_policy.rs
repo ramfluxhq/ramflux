@@ -78,6 +78,7 @@ impl RamfluxClient {
         )
         .map_err(|_| pending())?;
         state.peer_denials(owner, peer, conversation, now)?;
+        state.require_positive_ready()?;
         self.require_reach_authority_head(&state.root, &state.authority_head_hash, now)?;
         Ok(state)
     }

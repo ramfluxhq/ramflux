@@ -215,6 +215,7 @@ impl RamfluxClient {
             {
                 return Err(pending());
             }
+            self.retain_reach_intent_signer(&operation, context.now)?;
             db.persist_actor_state(&key(group), &intent)?;
             Ok::<_, SdkError>(())
         })?;

@@ -180,7 +180,11 @@ pub(super) fn verified_records(
     let hash = state_hash(root, revision, policy_revision, admission_revision, &records)?;
     let count = u64::try_from(records.len())?;
     let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    let provenance = fixture_provenance(&authority, revision, &hash, &records)?;
+    let previous = peer
+        .client
+        .account_db()?
+        .load_actor_state::<super::provenance::RetainedProofs>("reach/provenance")?;
+    let provenance = fixture_provenance(&authority, revision, &hash, &records, previous.as_ref())?;
     let signers = provenance.signers.clone();
     let pages =
         vec![StatePage { version: 1, snapshot_id: snapshot_id.clone(), page: 0, records, signers }];
@@ -214,7 +218,7 @@ pub(super) fn verified_records(
             ramflux_protocol::contact_reach::STATE_CONTENT_DOMAIN,
             &provenance,
         )?,
-        provenance_count: 1,
+        provenance_count: u64::try_from(provenance.authorities.len())?,
         provenance_bytes: u64::try_from(
             ramflux_protocol::canonical_json_bytes(&provenance)?.len(),
         )?,
@@ -249,6 +253,7 @@ fn fixture_provenance(
     revision: u64,
     hash: &str,
     records: &[StateRecord],
+    previous: Option<&super::provenance::RetainedProofs>,
 ) -> TestResult<ramflux_protocol::contact_reach::Provenance> {
     let root = &authority.envelope().body.account_anchor;
     let mut proof = ramflux_protocol::contact_reach::ProvenanceAuthority {
@@ -264,9 +269,29 @@ fn fixture_provenance(
     };
     proof.proof_hash = proof.content_hash()?;
     let mut signers = std::collections::BTreeMap::new();
+    let mut proofs = std::collections::BTreeMap::new();
     for record in records {
         for mut reference in ramflux_protocol::contact_reach::record_signers(record)? {
-            reference.proof_hash.clone_from(&proof.proof_hash);
+            let selected =
+                if reference.authority_head_hash == custody::object_hash(authority.envelope())? {
+                    &proof
+                } else {
+                    let pool = previous.ok_or("original historical fixture pool")?;
+                    let old = pool
+                        .signers
+                        .iter()
+                        .find(|old| {
+                            old.object_kind == reference.object_kind
+                                && old.object_hash == reference.object_hash
+                        })
+                        .ok_or("original historical fixture reference")?;
+                    pool.authorities
+                        .iter()
+                        .find(|proof| proof.proof_hash == old.proof_hash)
+                        .ok_or("original historical fixture proof")?
+                };
+            reference.proof_hash.clone_from(&selected.proof_hash);
+            proofs.insert(selected.proof_hash.clone(), selected.clone());
             signers.insert((reference.object_kind, reference.object_hash.clone()), reference);
         }
     }
@@ -278,6 +303,39 @@ fn fixture_provenance(
         revision,
         state_hash: hash.to_owned(),
         signers: signers.clone(),
-        authorities: vec![proof],
+        authorities: proofs.into_values().collect(),
     })
+}
+
+pub(super) async fn roster_fixture() -> TestResult<(Fixture, Fixture, VerifiedGroupState)> {
+    let owner = Fixture::new("reach-roster-owner").await?;
+    let peer = Fixture::new("reach-roster-peer").await?;
+    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    let primary = owner
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("owner account")?
+        .group_primary(owner.vault.as_ref())?;
+    owner.client.shared_group_create_with_primary(
+        "roster-group",
+        "roster-thread",
+        None,
+        &owner.config.target_delivery_id,
+        Some(&primary),
+    )?;
+    let member = peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity;
+    let joined = owner.client.shared_group_change_with_primary(
+        "roster-group",
+        &owner.config.target_delivery_id,
+        ramflux_protocol::group_state::GroupStateChange::Add {
+            member,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    peer.client.accept_shared_group_state(&joined, &peer.config.target_delivery_id)?;
+    install_grant(&peer, &joined)?;
+    Ok((owner, peer, joined))
 }

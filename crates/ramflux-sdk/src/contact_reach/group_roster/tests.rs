@@ -2,40 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Adopted native heads exercise automatic staging, continuous-root floors and repair.
-use super::super::group_test_support::{install_grant, verified_records};
+use super::super::group_test_support::{roster_fixture as group_fixture, verified_records};
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_protocol::{contact_reach::Applied, group_state::GroupStateChange};
 
-async fn group_fixture() -> TestResult<(Fixture, Fixture, VerifiedGroupState)> {
-    let owner = Fixture::new("reach-roster-owner").await?;
-    let peer = Fixture::new("reach-roster-peer").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
-    let primary = owner
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("owner account")?
-        .group_primary(owner.vault.as_ref())?;
-    owner.client.shared_group_create_with_primary(
-        "roster-group",
-        "roster-thread",
-        None,
-        &owner.config.target_delivery_id,
-        Some(&primary),
-    )?;
-    let member = peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity;
-    let joined = owner.client.shared_group_change_with_primary(
-        "roster-group",
-        &owner.config.target_delivery_id,
-        GroupStateChange::Add { member, role: ramflux_protocol::SharedGroupRole::Member },
-        Some(&primary),
-    )?;
-    peer.client.accept_shared_group_state(&joined, &peer.config.target_delivery_id)?;
-    install_grant(&peer, &joined)?;
-    Ok((owner, peer, joined))
-}
 fn advance(owner: &Fixture, change: GroupStateChange) -> TestResult<VerifiedGroupState> {
     let primary = owner
         .client

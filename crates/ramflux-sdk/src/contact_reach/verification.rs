@@ -146,3 +146,19 @@ pub(super) fn verify_placements(
     }
     Ok(())
 }
+
+pub(super) fn current_positives(
+    records: &[StateRecord],
+    current: &ramflux_crypto::custody::VerifiedRecord,
+    now: u64,
+) -> bool {
+    records.iter().all(|record| match record {
+        StateRecord::Policy { update, .. } => {
+            crypto::verify_retained_policy(update, current, now).is_ok()
+        }
+        StateRecord::Grant { update, .. } => {
+            crypto::verify_retained_admission(update, current, now).is_ok()
+        }
+        _ => true,
+    })
+}

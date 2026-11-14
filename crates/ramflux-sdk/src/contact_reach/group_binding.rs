@@ -223,6 +223,7 @@ impl RamfluxClient {
                 .client_record("reach", "state")?
                 .ok_or_else(|| refused(Reason::ReachPolicyRequired))?,
         )?;
+        state.require_positive_ready()?;
         if state.root != route.recipient_root || state.conflict {
             return Err(refused(Reason::HomeFork));
         }
