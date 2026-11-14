@@ -24,6 +24,7 @@ pub(in crate::custody::pairing::component_tests) struct NodeEvidence {
     corrupt_next: AtomicBool,
     corruption_relayed: AtomicUsize,
     sends: AtomicUsize,
+    admitted_sends: AtomicUsize,
     bytes: AtomicUsize,
     logs: AtomicUsize,
     roots: Mutex<Option<zeroize::Zeroizing<[[u8; 32]; 2]>>>,
@@ -68,6 +69,12 @@ impl NodeEvidence {
         *self.roots.lock().map_err(|_| "test: private root observation lock")? =
             Some(zeroize::Zeroizing::new([root, census]));
         Ok(())
+    }
+    pub(super) fn admitted_send(&self) {
+        self.admitted_sends.fetch_add(1, Ordering::Release);
+    }
+    pub(in crate::custody::pairing::component_tests) fn admitted_sends(&self) -> usize {
+        self.admitted_sends.load(Ordering::Acquire)
     }
     pub(super) fn sent(&self, bytes: usize) {
         self.sends.fetch_add(1, Ordering::Relaxed);

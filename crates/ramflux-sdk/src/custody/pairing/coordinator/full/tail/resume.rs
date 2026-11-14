@@ -308,6 +308,8 @@ impl PairingActor {
                     Phase::Manifest
                 },
                 manifest: None,
+                #[cfg(test)]
+                manifest_override: None,
                 assembler:
                     ramflux_protocol::custody::pairing::full_transfer::ManifestAssembler::default(),
                 cached_reply: None,

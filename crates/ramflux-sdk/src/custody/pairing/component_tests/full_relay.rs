@@ -147,6 +147,7 @@ impl FullPairingTransport for FullNativeFixture {
             self.wire_evidence.sent(encrypted.len());
             match self.full_request(&request, FullArm::Send)? {
                 FullAdmittedReply::Sent(counter) => {
+                    self.wire_evidence.admitted_send();
                     if corrupt {
                         self.wire_evidence.relayed_corruption();
                     }

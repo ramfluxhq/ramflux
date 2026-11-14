@@ -9,6 +9,8 @@ use ramflux_protocol::custody::pairing::full_transfer::{
 };
 use std::sync::Arc;
 mod abandon;
+#[cfg(test)]
+mod hostile_fixture;
 mod io;
 mod receive;
 mod resume;
@@ -42,6 +44,8 @@ pub(in crate::custody::pairing::coordinator) struct TailJob {
     origin: String,
     phase: Phase,
     manifest: Option<SourceManifest>,
+    #[cfg(test)]
+    manifest_override: Option<hostile_fixture::ManifestOverride>,
     assembler: ManifestAssembler,
     cached_reply: Option<ramflux_protocol::custody::pairing::full_transfer::relay::EncryptedPacket>,
     cleanup_pending: bool,
@@ -86,7 +90,13 @@ impl TailJob {
         }
         match self.phase {
             Phase::Prepare => {
-                self.manifest = Some(self.io.source_manifest().await?);
+                let manifest = self.io.source_manifest().await?;
+                #[cfg(test)]
+                let manifest = match self.manifest_override.take() {
+                    Some(replace) => replace(manifest)?,
+                    None => manifest,
+                };
+                self.manifest = Some(manifest);
                 self.phase = Phase::SendManifest;
             }
             Phase::SendManifest => self.send_manifest().await?,
@@ -260,6 +270,8 @@ impl PairingActor {
                     Phase::Manifest
                 },
                 manifest: None,
+                #[cfg(test)]
+                manifest_override: None,
                 assembler: ManifestAssembler::default(),
                 cached_reply: None,
                 cleanup_pending: false,

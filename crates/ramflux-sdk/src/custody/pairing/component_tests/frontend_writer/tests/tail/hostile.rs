@@ -6,9 +6,19 @@ use super::*;
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_relay_admission_is_data_only_endpoints_enforce() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await;
+    crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await?;
+    for fault in [
+        super::hostile_context::Fault::Parent,
+        super::hostile_context::Fault::Transfer,
+        super::hostile_context::Fault::DeltaAfterJ6,
+    ] {
+        crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
+            fault,
+        )))
+        .await?;
+    }
     hold.finish().await?;
-    result
+    Ok(())
 }
 async fn run() -> TestResult {
     let (mut rig, mut source, mut client, mut target, request) = Box::pin(setup()).await?;
