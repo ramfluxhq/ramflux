@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
+#[cfg(test)]
+mod clock_tests;
 mod collection;
 mod current_authority;
 mod delivery;
@@ -180,8 +182,9 @@ impl crate::RamfluxClient {
             return Err(refused(Reason::AnchorMismatch));
         }
         let db = self.account_db()?;
+        // Observe before the fallible install; rejection cannot roll back the clock fence.
+        let now = db.reach_fenced_now(crate::custody::network_now()?)?;
         db.write_transaction(|| {
-            let now = crate::custody::network_now()?;
             check_submission_time(verified.manifest.issued_at, verified.manifest.expires_at, now)?;
             self.require_reach_authority_head(
                 &verified.manifest.account_anchor,

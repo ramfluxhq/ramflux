@@ -134,6 +134,7 @@ impl crate::RamfluxClient {
         now: u64,
     ) -> Result<ConversationReach, SdkError> {
         let own = self.owned_device_identity()?;
+        let now = self.account_db()?.reach_fenced_now(now.max(crate::custody::network_now()?))?;
         let state =
             self.saved_reach_state()?.ok_or_else(|| refused(Reason::ReachPolicyRequired))?;
         if state.root != own.root_commitment() {
