@@ -271,8 +271,12 @@ impl AccountSessionHarness {
         let mut ids = Vec::new();
         for seed in [91u8, 92] {
             let id = ramflux_protocol::encode_base64url([seed; 16]);
-            let thread = format!("call-thread-{seed}");
-            account.client.account_db()?.persist_client_record("conversation",&thread,&serde_json::json!({"kind":"direct","group_id":null,"participants":[account.gateway_config.principal_id,manifest.principal_id]}))?;
+            let thread = ramflux_protocol::message::dm_scope::derive(
+                &account.principal_commitment,
+                &manifest.principal_commitment,
+            )
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+            account.client.account_db()?.persist_client_record("conversation",&thread,&serde_json::json!({"kind":"direct","group_id":null,"participants":[account.gateway_config.principal_id,manifest.principal_id],"participant_roots":[account.principal_commitment,manifest.principal_commitment]}))?;
             let mut call = crate::client::call::state::LiveCall::outgoing(
                 id.clone(),
                 thread,
@@ -332,10 +336,18 @@ impl AccountSessionHarness {
             {
                 return Ok(());
             }
-            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+            let work = match tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
                 .await
-                .map_err(|_| SdkError::NetworkingPending)?
-                .ok_or(SdkError::GatewaySessionNotEstablished)?;
+            {
+                Ok(Some(work)) => work,
+                Ok(None) => return Err(SdkError::GatewaySessionNotEstablished),
+                Err(_) => {
+                    return Err(SdkError::InboundPending(format!(
+                        "native call receive deadline: {}",
+                        self.diagnostics()?
+                    )));
+                }
+            };
             Box::pin(self.runtime.apply_connection_work(work)).await?;
         }
     }
@@ -600,9 +612,15 @@ impl AccountSessionHarness {
             .accounts
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
-        Ok(
-            serde_json::json!({"connection":self.handle()?.snapshot(), "ledger":format!("{:?}", account.client.account_db()?.receive_status_counters(&account.target_delivery_id)?), "journal":format!("{:?}",account.client.account_db()?.journal_bounds()?), "startup":account.client.account_db()?.receive_startup(&account.target_delivery_id)?}),
-        )
+        let db = account.client.account_db()?;
+        let journal = db.journal_after(0, 16)?.into_iter().map(|event| serde_json::json!({
+            "seq":event.seq, "topic":event.topic,
+            "reason":event.body.get("reason"), "reason_code":event.body.get("reason_code"),
+            "code":event.body.get("code"), "error_code":event.body.get("error_code"), "keys":event.body.as_object().map(|body| body.keys().take(16).cloned().collect::<Vec<_>>()),
+        })).collect::<Vec<_>>();
+        Ok(serde_json::json!({"voice_persisted":db.actor_state_usage("voice/public/")?.0,
+                "voice_resident":account.client.voice_calls.len(), "journal_events":journal,
+                "connection":self.handle()?.snapshot(), "ledger":format!("{:?}", account.client.account_db()?.receive_status_counters(&account.target_delivery_id)?), "journal":format!("{:?}",account.client.account_db()?.journal_bounds()?), "startup":account.client.account_db()?.receive_startup(&account.target_delivery_id)?}))
     }
 
     /// Stop all account-owned session work before ordinary database reopen.

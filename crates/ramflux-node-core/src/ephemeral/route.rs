@@ -328,9 +328,7 @@ mod tests {
         IDENTITY_BIND_AUDIENCE, IDENTITY_BIND_CAPABILITY, IdentityRegisterRequest, RouterRedbStore,
         SessionDescriptor, SessionLifecycle, source_ip_hash,
     };
-    use ramflux_protocol::{
-        DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
-    };
+    use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -442,9 +440,9 @@ mod tests {
     fn signed_ephemeral(id: &str, target: &str) -> Fallible<Envelope> {
         let created_at = i64::try_from(NOW_MS / 1_000)?;
         let mut envelope = Envelope {
-            schema: "ramflux.envelope.v1".into(),
-            version: 1,
-            domain: "ramflux.envelope.v1".into(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
             ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "test_key".into(),
@@ -460,13 +458,16 @@ mod tests {
             priority: Priority::Low,
             ttl: 5,
             created_at,
-            encrypted_payload: "ciphertext".into(),
-            payload_hash: "payload_hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+            payload_hash: ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+            ),
+            delivery_mode: Some("ephemeral".into()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         };
-        envelope.ext.ext.insert(proto::DELIVERY_MODE_EXTENSION.into(), json!("ephemeral"));
+
         let root = ramflux_crypto::create_identity_root(
             "alice",
             ramflux_crypto::blake3_256("ramflux.test.registration_root.v1", b"alice"),

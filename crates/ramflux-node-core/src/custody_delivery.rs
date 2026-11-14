@@ -150,10 +150,9 @@ fn verify_sender(
         || envelope.source_principal_id != authority.envelope().body.principal_id
         || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
             != Some(source.root_commitment())
-        || (envelope.schema != "ramflux.envelope.v2"
-            && (envelope.schema != "ramflux.envelope.v1"
-                || envelope.domain != ramflux_protocol::domain::ENVELOPE
-                || envelope.version != 1))
+        || envelope.schema != ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        || envelope.domain != ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA
+        || envelope.version != 2
     {
         return Err(CustodyRefusal::InvalidInput);
     }

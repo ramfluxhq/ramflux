@@ -26,10 +26,15 @@ pub(crate) fn fixture(name: &str) -> ramflux_test_support::TestPath {
 
 pub(crate) fn entry(seq: u64) -> InboxEntry {
     let envelope = ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.into(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.into(),
-        ext: ramflux_protocol::Ext::default(),
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        ext: ramflux_protocol::Ext {
+            ext: std::collections::BTreeMap::from([(
+                "test_payload_marker".into(),
+                serde_json::json!("ciphertext-must-not-enter-aborted-record"),
+            )]),
+        },
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "fixture".into(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -44,11 +49,14 @@ pub(crate) fn entry(seq: u64) -> InboxEntry {
         priority: ramflux_protocol::Priority::Normal,
         ttl: 3600,
         created_at: i64::try_from(crate::now_unix_seconds()).expect("time"),
-        encrypted_payload: "ciphertext-must-not-enter-aborted-record".into(),
-        payload_hash: "hash".into(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+        payload_hash: ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::ENVELOPE,
+            b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+        ),
+        delivery_mode: Some("durable".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     };
     let mut entry = OpaqueDeviceInbox::new().append(envelope);
     entry.inbox_seq = seq;

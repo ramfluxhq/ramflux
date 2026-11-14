@@ -389,13 +389,12 @@ fn row_malformed_named_candidate_fields_are_refused() -> TestResult {
     let mut envelope = signed_ephemeral("named", TARGET)?;
     envelope.delivery_mode = Some("durable".into());
     envelope.collapse_tag = Some("junk".into());
-    envelope.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_seed(&envelope, sign_seed())?;
+    // The profile signer refuses malformed tags; exercise ingress using the signed control.
     match ramflux_node_core::check_entry_bound(&envelope) {
         Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused) => {}
         other => anyhow::bail!("node entry exact DeliveryModeRefused, got {other:?}"),
     }
-    let expires = computed_expires(&envelope, now_ms())?;
+    let expires = u64::try_from(envelope.created_at + i64::from(envelope.ttl))? * 1000;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::Invalid));
     let response = observe_post(&router, &path, TARGET, &request_body(&envelope, expires)?)?;
@@ -554,7 +553,8 @@ fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
 fn ephemeral_dispatch_observer_calibrates_durable_enqueue() -> TestResult {
     let (_path, router) = fresh("p16-dispatch-control")?;
     let mut envelope = signed_ephemeral("dispatch-control", TARGET)?;
-    envelope.ext.ext.remove("delivery_mode");
+    envelope.delivery_mode = Some("durable".into());
+    envelope.ttl = 3600;
     envelope.signed.signature =
         ramflux_crypto::sign_protocol_object_with_seed(&envelope, sign_seed())?;
     let before = dispatch_of(&router, TARGET);

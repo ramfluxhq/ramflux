@@ -111,7 +111,11 @@ fn changed(
     state: &ramflux_node_core::RouterCore,
 ) -> anyhow::Result<ramflux_protocol::Envelope> {
     let mut changed = envelope.clone();
-    changed.encrypted_payload.push('x');
+    changed.encrypted_payload = ramflux_protocol::encode_base64url(b"different retry ciphertext");
+    changed.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        changed.encrypted_payload.as_bytes(),
+    );
     changed.ext.ext.remove("source_device_authority");
     changed.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
         &changed,

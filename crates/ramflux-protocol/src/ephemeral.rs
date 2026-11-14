@@ -6,7 +6,7 @@
 use crate::{Envelope, Priority};
 use serde::{Deserialize, Serialize};
 
-/// Name of the signed extension that selects an envelope's delivery mode.
+/// Retired signed extension key, refused by the generation-one mode classifier.
 pub const DELIVERY_MODE_EXTENSION: &str = "delivery_mode";
 /// Smallest permitted ephemeral TTL, in seconds.
 pub const MIN_EPHEMERAL_TTL_SECONDS: u32 = 1;
@@ -17,7 +17,7 @@ pub const EPHEMERAL_FUTURE_TOLERANCE_MS: u64 = 2_000;
 /// Capability identifier for gateway ephemeral delivery; defined here but not advertised by P01.
 pub const GATEWAY_EPHEMERAL_CAPABILITY: &str = "gateway.ephemeral.v1";
 
-/// D1's interpretation of the signed delivery-mode extension.
+/// Classification of the required named delivery mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeliveryMode {
     Durable,
@@ -138,8 +138,7 @@ impl EphemeralSubmitResult {
     }
 }
 
-/// Classify `ext.delivery_mode`: absent and `durable` are durable, while an
-/// unrecognized value is invalid rather than silently falling back to durable.
+/// Classify the required named delivery mode; retired bridge metadata is refused.
 #[must_use]
 pub fn classify_delivery_mode(envelope: &Envelope) -> DeliveryMode {
     if crate::message::outer::refuse_live_bridge(envelope).is_err() {
@@ -216,7 +215,6 @@ pub fn deadline(envelope: &Envelope, now_ms: u64) -> Result<u64, EphemeralModeEr
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
-    use std::collections::BTreeMap;
 
     use super::{
         DELIVERY_MODE_EXTENSION, DeliveryMode, EPHEMERAL_FUTURE_TOLERANCE_MS, EphemeralModeError,
@@ -230,14 +228,11 @@ mod tests {
     const NOW_MS: u64 = 1_000_000;
 
     fn valid_envelope() -> Envelope {
-        let mut extensions = BTreeMap::new();
-        extensions
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
         Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.message".to_owned(),
-            ext: Ext { ext: extensions },
+            schema: crate::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            version: 2,
+            domain: crate::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "key".to_owned(),
                 signature_alg: SignatureAlg::Ed25519,
@@ -254,9 +249,9 @@ mod tests {
             created_at: 1_000,
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("ephemeral".into()),
+            collapse_tag: Some(crate::encode_base64url([0x22; 32])),
+            report_commitment: Some(crate::encode_base64url([0x33; 32])),
         }
     }
 
@@ -269,7 +264,11 @@ mod tests {
 
     fn with_mode(value: Value) -> Envelope {
         mutated(|e| {
-            e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), value);
+            if let Value::String(mode) = value {
+                e.delivery_mode = Some(mode);
+            } else {
+                e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), value);
+            }
         })
     }
 
@@ -407,14 +406,14 @@ mod tests {
                 ephemeral_ok,
             ),
             case(
-                "control: delivery_mode absent is durable",
+                "profile: missing named mode is invalid",
                 &mutated(|e| {
-                    e.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+                    e.delivery_mode = None;
                 }),
                 NOW_MS,
-                DeliveryMode::Durable,
-                Ok(()),
-                not_ephemeral,
+                DeliveryMode::Invalid,
+                Err(EphemeralModeError::InvalidDeliveryMode),
+                Err(EphemeralModeError::InvalidDeliveryMode),
             ),
             case(
                 "control: delivery_mode durable is durable",
@@ -560,14 +559,14 @@ mod tests {
         let ephemeral_ok = Ok(1_005_000);
         [
             case(
-                "deadline Durable arm: absent mode",
+                "deadline Invalid arm: absent named mode",
                 &mutated(|e| {
-                    e.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+                    e.delivery_mode = None;
                 }),
                 NOW_MS,
-                DeliveryMode::Durable,
-                Ok(()),
-                not_ephemeral,
+                DeliveryMode::Invalid,
+                Err(EphemeralModeError::InvalidDeliveryMode),
+                Err(EphemeralModeError::InvalidDeliveryMode),
             ),
             case(
                 "deadline Durable arm: explicit durable",

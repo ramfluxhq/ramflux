@@ -60,6 +60,20 @@ fn live_envelope(mode: Option<&str>) -> Envelope {
     }
 }
 
+fn active_envelope(mode: Option<&str>) -> Envelope {
+    let mut envelope = live_envelope(None);
+    envelope.schema = CANDIDATE_ENVELOPE_SCHEMA.into();
+    envelope.domain = CANDIDATE_ENVELOPE_SCHEMA.into();
+    envelope.version = 2;
+    envelope.delivery_mode = mode.map(str::to_owned);
+    envelope.collapse_tag = Some(collapse_tag());
+    envelope.report_commitment = Some(report_commitment());
+    envelope.encrypted_payload = encode_base64url(b"ciphertext");
+    envelope.payload_hash =
+        crate::hash_base64url(crate::domain::ENVELOPE, envelope.encrypted_payload.as_bytes());
+    envelope
+}
+
 fn collapse_tag() -> String {
     crate::encode_base64url([0x22_u8; 32])
 }
@@ -155,19 +169,19 @@ fn refuse_over_cap(sizes: IngressSizes) {
 fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        ephemeral::classify_delivery_mode(&live_envelope(None)),
+        ephemeral::classify_delivery_mode(&active_envelope(None)),
+        ephemeral::DeliveryMode::Invalid
+    );
+    assert_eq!(
+        ephemeral::classify_delivery_mode(&active_envelope(Some("durable"))),
         ephemeral::DeliveryMode::Durable
     );
     assert_eq!(
-        ephemeral::classify_delivery_mode(&live_envelope(Some("durable"))),
-        ephemeral::DeliveryMode::Durable
-    );
-    assert_eq!(
-        ephemeral::classify_delivery_mode(&live_envelope(Some("ephemeral"))),
+        ephemeral::classify_delivery_mode(&active_envelope(Some("ephemeral"))),
         ephemeral::DeliveryMode::Ephemeral
     );
     assert_eq!(
-        ephemeral::classify_delivery_mode(&live_envelope(Some("transient"))),
+        ephemeral::classify_delivery_mode(&active_envelope(Some("transient"))),
         ephemeral::DeliveryMode::Invalid
     );
 
@@ -210,7 +224,7 @@ fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
         "new profile rejects unknown delivery_mode"
     );
     let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
-    let mut live = live_envelope(None);
+    let mut live = active_envelope(None);
     live.delivery_mode = Some("ephemeral".into());
     assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Ephemeral);
     assert!(ephemeral::require_durable(&live).is_err());
@@ -385,16 +399,18 @@ fn candidate_profile_discovery_requires_verified_canonical_token()
         .to_string()
     );
     let verified = crate::VerifiedWellKnownClientRecord::verify(&old, 1500)?;
-    super::admit_discovered_profile(&verified)?;
+    assert!(
+        super::admit_discovered_profile(&verified).is_err(),
+        "activation refuses a correctly signed discovery without the canonical profile"
+    );
 
     let mut live = unsigned_discovery_record();
     sign_discovery(&mut live, 5)?;
     discover_verified_message_schema(&live, 1500)?;
-    assert_eq!(advertised_client_protocol_versions(&["v1".to_owned()]), vec!["v1".to_owned()]);
-    assert!(
-        !advertised_client_protocol_versions(&["v1".to_owned()])
-            .iter()
-            .any(|version| version == MESSAGE_SCHEMA_V1_PROFILE)
+    assert_eq!(
+        advertised_client_protocol_versions(&["v1".to_owned()]),
+        vec!["v1".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()],
+        "generation one advertises its mandatory canonical profile"
     );
     Ok(())
 }
@@ -444,7 +460,8 @@ fn candidate_outer_refuses_missing_or_short_report_commitment()
 }
 
 #[test]
-fn measure_live_uses_nested_cryptobox_not_json_wrapper() -> Result<(), Box<dyn std::error::Error>> {
+fn measure_live_uses_compact_cryptobox_not_json_wrapper() -> Result<(), Box<dyn std::error::Error>>
+{
     let cryptobox = vec![7_u8; 32];
     let nested = json!({
         "schema": "ramflux.sdk.dm_x3dh_envelope.v2",
@@ -459,8 +476,8 @@ fn measure_live_uses_nested_cryptobox_not_json_wrapper() -> Result<(), Box<dyn s
         }
     });
     let wrapper = serde_json::to_vec(&nested)?;
-    let mut envelope = live_envelope(None);
-    envelope.encrypted_payload = encode_base64url(&wrapper);
+    let mut envelope = active_envelope(Some("durable"));
+    envelope.encrypted_payload = wire_encrypted_payload(&wrapper)?;
     envelope.source_device_id = "wire-device".to_owned();
     let sizes = IngressSizes::measure_wire(&envelope, 0, &[], &[])?;
     assert_eq!(sizes.ciphertext_bytes, 32);
@@ -825,7 +842,7 @@ fn live_named_fields_parse_mode_and_require_32_byte_tag() {
 #[test]
 fn sender_signed_bytes_cover_named_delivery_mode_and_collapse_tag()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut envelope = live_envelope(None);
+    let mut envelope = active_envelope(Some("durable"));
     envelope.delivery_mode = Some("durable".to_owned());
     envelope.collapse_tag = Some(collapse_tag());
     let signed = crate::envelope_sender_signed_bytes(&envelope)?;

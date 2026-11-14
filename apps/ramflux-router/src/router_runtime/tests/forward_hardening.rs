@@ -33,11 +33,7 @@ fn committed_forward_missing_binding_is_terminal_rejected_security() -> anyhow::
     let mut envelope = current_envelope("named-gate-off", "target_alice")?;
     envelope.collapse_tag = None;
     envelope.ext.ext.remove("source_device_authority");
-    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
-        &envelope,
-        ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
-    )?;
-    handle.state().refresh_registered_envelope_authority(&mut envelope)?;
+    // Mutate an already signed positive: the signer itself refuses missing binding.
     let response = handle.submit_envelope_from(
         envelope,
         Instant::now(),

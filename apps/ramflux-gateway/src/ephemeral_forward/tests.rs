@@ -14,7 +14,6 @@ use ramflux_node_core::{
 use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
 use ramflux_protocol::{Envelope, Ext, Priority};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,18 +44,12 @@ async fn guard_10s<F: std::future::Future>(event: &str, future: F) -> F::Output 
     }
 }
 
-fn ephemeral_ext() -> Ext {
-    let mut ext = BTreeMap::new();
-    ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
-    Ext { ext }
-}
-
 fn envelope(target: &str, envelope_id: &str) -> Envelope {
     Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        ext: ephemeral_ext(),
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        ext: Ext::default(),
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "test-c4-key".to_owned(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -73,9 +66,9 @@ fn envelope(target: &str, envelope_id: &str) -> Envelope {
         created_at: 1_760_000_000,
         encrypted_payload: "encrypted_payload".to_owned(),
         payload_hash: "payload_hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        delivery_mode: Some("ephemeral".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     }
 }
 
@@ -506,7 +499,7 @@ async fn row_deadline_mismatch_invalid() -> TestResult {
 async fn row_durable_mode_invalid() -> TestResult {
     let hub = capable_hub(TARGET).await?;
     let mut req = request(TARGET, TARGET, "env-durable");
-    req.envelope.ext = Ext::default();
+    req.envelope.delivery_mode = Some("durable".into());
     let reply = handle_at(&hub, req, NOW_LIVE_MS).await?;
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Invalid));

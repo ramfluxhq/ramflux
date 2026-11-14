@@ -99,31 +99,15 @@ pub(crate) mod tests {
             supports_forward_ack: false,
             ephemeral_rate: std::sync::Arc::default(),
         };
-        let mut envelope = ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".into(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.into(),
-            ext: ramflux_protocol::Ext::default(),
-            signed: ramflux_protocol::SignedFields {
-                signing_key_id: "shared".into(),
-                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-                signature: String::new(),
-            },
-            envelope_id: "one".into(),
-            source_principal_id: "alice".into(),
-            source_device_id: "shared".into(),
-            target_delivery_id: "peer".into(),
-            routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-            priority: ramflux_protocol::Priority::Normal,
-            ttl: 600,
-            created_at: 1000,
-            encrypted_payload: "encrypted".into(),
-            payload_hash: "hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
-        };
+        let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+            "one",
+            "peer",
+            ramflux_protocol::DeliveryClass::OpaqueEvent,
+        );
+        envelope.source_device_id = "shared".into();
+        envelope.signed.signing_key_id = "shared".into();
+        envelope.ttl = 600;
+        envelope.created_at = 1000;
         envelope.ext.ext.insert(
             "source_root_commitment".into(),
             serde_json::json!(runtime.source_identity.root_commitment()),

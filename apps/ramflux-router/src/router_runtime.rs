@@ -770,7 +770,7 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use ramflux_protocol::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
+    use ramflux_protocol::{DeliveryClass, Ext, SignatureAlg, SignedFields};
 
     use super::*;
 
@@ -1513,27 +1513,14 @@ pub(crate) mod tests {
         target_delivery_id: &str,
         delivery_class: DeliveryClass,
     ) -> ramflux_protocol::Envelope {
-        ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.envelope.v1".to_owned(),
-            ext: Ext::default(),
-            signed: signed_fields(),
-            envelope_id: envelope_id.to_owned(),
-            source_principal_id: "alice".to_owned(),
-            source_device_id: "alice_phone".to_owned(),
-            target_delivery_id: target_delivery_id.to_owned(),
-            routing_set_id: None,
+        let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+            envelope_id,
+            target_delivery_id,
             delivery_class,
-            priority: Priority::Normal,
-            ttl: 3_600,
-            created_at: 1_760_000_000,
-            encrypted_payload: "ciphertext".to_owned(),
-            payload_hash: "payload_hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
-        }
+        );
+        envelope.source_device_id = "alice_phone".into();
+        envelope.signed = signed_fields();
+        envelope
     }
 
     fn ack(envelope_id: &str, inbox_seq: u64) -> ramflux_protocol::Ack {

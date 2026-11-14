@@ -10,9 +10,9 @@ pub(super) fn entry(target: &str) -> crate::InboxEntry {
         inbox_seq: 7,
         target_delivery_id: target.into(),
         envelope: Envelope {
-            schema: ramflux_protocol::domain::ENVELOPE.into(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.into(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
             ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "test".into(),
@@ -28,11 +28,14 @@ pub(super) fn entry(target: &str) -> crate::InboxEntry {
             priority: Priority::Normal,
             ttl: 3600,
             created_at: 1_700_000_100,
-            encrypted_payload: "opaque".into(),
-            payload_hash: hash(43),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+            payload_hash: ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+            ),
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         },
     }
 }

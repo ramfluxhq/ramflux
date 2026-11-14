@@ -143,7 +143,7 @@ fn call_intent_forged_missing_noncall_and_cancel_rows() -> Result<(), Box<dyn st
     let digest = call_intent_digest(&start)?;
     let mut forged = start.clone();
     forged.signature = ramflux_protocol::encode_base64url([7_u8; 64]);
-    let call = envelope("env-start", DeliveryClass::OpaqueEvent, now, 86_400)?;
+    let call = envelope("env-start", DeliveryClass::Message, now, 86_400)?;
     let owner = caller.callee.storage_key();
     assert!(
         crate::call_intent::verify_submission(&session, &call, &forged, 4, owner, now).is_err()
@@ -154,7 +154,7 @@ fn call_intent_forged_missing_noncall_and_cancel_rows() -> Result<(), Box<dyn st
     );
     crate::call_intent::verify_submission(&session, &call, &start, 4, owner, now)?;
     let (kept, _path) = open_store("call-intent")?;
-    let missing = envelope("env-missing", DeliveryClass::OpaqueEvent, now, 86_400)?;
+    let missing = envelope("env-missing", DeliveryClass::Message, now, 86_400)?;
     let unsigned = crate::notify_wake::signed_offline_wake(
         &kept,
         &signer(),
@@ -228,8 +228,8 @@ fn wake_identity_is_opaque_stable_for_retry_and_recovery() -> Result<(), Box<dyn
     let now = ramflux_node_core::now_unix_seconds();
     let signer = signer();
     let (kept, path) = open_store("wake-identity")?;
-    let first_envelope = envelope("env-one", DeliveryClass::OpaqueEvent, now, 86_400)?;
-    let second_envelope = envelope("env-two", DeliveryClass::OpaqueEvent, now, 86_400)?;
+    let first_envelope = envelope("env-one", DeliveryClass::Message, now, 86_400)?;
+    let second_envelope = envelope("env-two", DeliveryClass::Message, now, 86_400)?;
     let first = crate::notify_wake::signed_offline_wake(
         &kept,
         &signer,
@@ -277,7 +277,7 @@ fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
     short.expires_at = now.saturating_add(10);
     let start = sign_intent(&caller, short)?;
     let digest = call_intent_digest(&start)?;
-    let call = envelope("env-deadline", DeliveryClass::OpaqueEvent, now, 10)?;
+    let call = envelope("env-deadline", DeliveryClass::Message, now, 10)?;
     crate::call_intent::verify_submission(
         &session,
         &call,
@@ -309,7 +309,7 @@ fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
     assert_eq!(signed.body.expires_at, now.saturating_add(10));
     assert_ne!(signed.body.expires_at, now.saturating_add(30));
     assert_ne!(signed.body.expires_at, now.saturating_add(86_400));
-    let wide = envelope("env-wide", DeliveryClass::OpaqueEvent, now, 86_400)?;
+    let wide = envelope("env-wide", DeliveryClass::Message, now, 86_400)?;
     let wide_start = sign_intent(
         &caller,
         intent_body(&caller, CallIntentAction::Start, 0, "env-wide", now, None),
@@ -338,7 +338,7 @@ fn call_wake_deadline_is_thirty_seconds_across_dispatch_and_replay()
     .ok_or("deadline replay was dropped")?;
     assert_eq!(replay.body.wake_id, wide_wake.body.wake_id);
     assert_eq!(replay.body.expires_at, wide_wake.body.expires_at);
-    let expired = envelope("env-old", DeliveryClass::OpaqueEvent, now.saturating_sub(100), 10)?;
+    let expired = envelope("env-old", DeliveryClass::Message, now.saturating_sub(100), 10)?;
     assert!(
         crate::notify_wake::signed_offline_wake(
             &kept,
@@ -443,7 +443,7 @@ fn cancel_uses_the_stored_start_when_the_envelope_is_later()
         intent_body(&caller, CallIntentAction::Start, 0, "env-later", now, None),
     )?;
     let digest = call_intent_digest(&start)?;
-    let mut later = envelope("env-later", DeliveryClass::OpaqueEvent, now, 86_400)?;
+    let mut later = envelope("env-later", DeliveryClass::Message, now, 86_400)?;
     later.created_at = later.created_at.saturating_add(1);
     let owner = caller.callee.storage_key();
     assert!(

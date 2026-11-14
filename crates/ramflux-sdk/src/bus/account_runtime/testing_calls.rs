@@ -232,14 +232,18 @@ impl NativeCallAccount {
             &self.client.surface_local_root_commitment()?,
             &manifest.principal_commitment,
         )?;
-        for seed in [91u8, 92] {
-            self.client.account_db()?.persist_client_record(
-                "conversation",
-                &format!("call-thread-{seed}"),
-                &serde_json::json!({"kind":"direct","group_id":null,
-                    "participants":[self.config.principal_id,manifest.principal_id]}),
-            )?;
-        }
+        let thread = ramflux_protocol::message::dm_scope::derive(
+            &self.client.surface_local_root_commitment()?,
+            &manifest.principal_commitment,
+        )
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+        self.client.account_db()?.persist_client_record(
+            "conversation",
+            &thread,
+            &serde_json::json!({"kind":"direct","group_id":null,
+                "participants":[self.config.principal_id,manifest.principal_id],
+                "participant_roots":[self.client.surface_local_root_commitment()?,manifest.principal_commitment]}),
+        )?;
         Ok(())
     }
 
@@ -248,17 +252,19 @@ impl NativeCallAccount {
     pub async fn attach(
         self,
         session: GatewaySessionState,
+        incarnation: String,
         stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     ) -> Result<AccountSessionHarness, SdkError> {
         let index = self.client.account_index()?.clone();
-        self.client.first_activate_receive_ledger(&self.config.target_delivery_id, None)?;
+        self.client
+            .first_activate_receive_ledger(&self.config.target_delivery_id, Some(&incarnation))?;
         Box::pin(AccountSessionHarness::attach_initialized(
             index,
             self.client,
             self.config,
             session,
             stream,
-            FixtureCapabilities { incarnation: None, ephemeral: false },
+            FixtureCapabilities { incarnation: Some(incarnation), ephemeral: false },
         ))
         .await
     }
