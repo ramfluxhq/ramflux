@@ -285,6 +285,10 @@ impl Fixture {
                 .await
                 .map_err(|error| format!("test: {role} management control: {error}"))?;
             }
+            // Receiving the candidate may queue the original live SAS approval.
+            // Finish that local request before deciding whether fresh attendance is needed.
+            self.a.service_data()?;
+            self.b.service_data()?;
             self.affirm_source_if_displayed()
                 .await
                 .map_err(|error| format!("test: source affirmation: {error}"))?;

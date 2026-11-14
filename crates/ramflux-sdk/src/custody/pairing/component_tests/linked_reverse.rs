@@ -610,6 +610,11 @@ mod tests {
         for _ in 0..72 {
             poll_management(fixture, false).await?;
             poll_management(fixture, true).await?;
+            {
+                let Linked { rig, target, .. } = fixture;
+                rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+                rig.secondary.service_full_transfer(target.account_db()?)?;
+            }
             affirm_displayed_candidate(fixture, &prepare.operation_id)
                 .await
                 .map_err(|error| format!("test: linked source affirmation: {error}"))?;

@@ -132,6 +132,9 @@ impl Fixture {
                 )
                 .await?;
             }
+            // Candidate reception can queue the original attended approval locally.
+            self.a.service_data(&mut self.wire.primary)?;
+            self.b.service_data(&mut self.wire.recipient)?;
             self.affirm_source_if_displayed().await?;
             drive(
                 Box::pin(self.wire.primary.advance_full_source_publication()),
