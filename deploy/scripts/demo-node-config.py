@@ -9,6 +9,7 @@ import secrets
 import shutil
 import stat
 import sys
+from urllib.parse import urlsplit
 
 SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
 SNAPSHOT_ROOT_FILES = (
@@ -30,6 +31,47 @@ MANUAL_RECOVERY = (
 
 class SnapshotError(Exception):
     """A snapshot cannot be safely captured or restored."""
+
+
+def public_origin():
+    """Resolve an optional public HTTPS origin before any managed state is written."""
+    value = os.environ.get("DEMO_PUBLIC_ORIGIN", "")
+    if not value:
+        return f"http://{os.environ['DEMO_HOST']}:{os.environ['DEMO_HTTP_PORT']}"
+    try:
+        if any(character.isspace() or ord(character) < 32 or ord(character) == 127
+               for character in value) or any(character in value for character in "\\?#"):
+            raise ValueError("forbidden URL characters")
+        url = urlsplit(value)
+        if (url.scheme != "https" or not url.netloc or url.path
+                or url.username is not None or url.password is not None):
+            raise ValueError("expected an HTTPS origin without credentials or a path")
+        host = url.hostname or ""
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+            for label in host.split(".")
+        ):
+            raise ValueError("expected a DNS name or IPv4 address")
+        if url.netloc.endswith(":") or (url.port is not None and not 1 <= url.port <= 65535):
+            raise ValueError("invalid HTTPS port")
+    except ValueError as error:
+        raise SnapshotError(f"DEMO_PUBLIC_ORIGIN_INVALID: {error}") from error
+    return value
+
+
+def client_runtime():
+    """Render the advertised client configuration used by demo-node.sh."""
+    host = os.environ["DEMO_HOST"]
+    values = {
+        "RAMFLUX_CLIENT_GATEWAY_QUIC_ADDR": f"{host}:{os.environ['DEMO_GATEWAY_PORT']}",
+        "RAMFLUX_CLIENT_GATEWAY_TCP_ADDR": f"{host}:{os.environ['DEMO_GATEWAY_PORT']}",
+        "RAMFLUX_CLIENT_GATEWAY_SERVER_NAME": "ramflux-gateway",
+        "RAMFLUX_CLIENT_RELAY_QUIC_ADDR": f"{host}:{os.environ['DEMO_RELAY_PORT']}",
+        "RAMFLUX_CLIENT_RELAY_SERVER_NAME": "ramflux-relay",
+        "RAMFLUX_CLIENT_PREKEY_HTTP_URL": public_origin(),
+        "RAMFLUX_CLIENT_SIGNALING_TURN_ADDR": f"{host}:{os.environ['DEMO_TURN_PORT']}",
+    }
+    return "".join(f"{key}={value}\n" for key, value in values.items())
 
 
 def fsync_directory(path):
@@ -501,11 +543,13 @@ def check_pending(state):
 
 
 def prepare(repo, state, command, validate_only=False):
+    public_origin()
     settings = {key: os.environ[key] for key in (
         "DEMO_PROJECT", "DEMO_HOST", "DEMO_NODE_ID", "DEMO_GATEWAY_PORT",
         "DEMO_RELAY_PORT", "DEMO_HTTP_PORT", "DEMO_TURN_PORT", "DEMO_MESH_PORT",
         "DEMO_BIND_ADDR", "DEMO_VERSION",
     )}
+    settings["DEMO_PUBLIC_ORIGIN"] = os.environ.get("DEMO_PUBLIC_ORIGIN", "")
     marker = state / "owner.json"
     pending_marker = state / "owner.json.pending"
     check_pending(state)
@@ -515,7 +559,7 @@ def prepare(repo, state, command, validate_only=False):
             sys.exit("demo settings changed: restore the original env file or use a fresh data directory/project")
         current = owner["settings"]
         if command in ("upgrade", "rollback"):
-            changed = [key for key in settings if key != "DEMO_VERSION" and settings[key] != current[key]]
+            changed = [key for key in settings if key != "DEMO_VERSION" and settings[key] != current.get(key)]
             if changed:
                 sys.exit("demo settings changed beyond DEMO_VERSION: restore every other original setting")
         if command == "upgrade":
@@ -704,7 +748,11 @@ def main():
     repo, state = map(Path, sys.argv[1:3])
     action = sys.argv[3]
     try:
-        if action == "check-pending":
+        if action == "public-origin":
+            print(public_origin())
+        elif action == "client-runtime":
+            print(client_runtime(), end="")
+        elif action == "check-pending":
             check_pending(state)
         elif action == "validate":
             owner = prepare(repo, state, sys.argv[4], validate_only=True)

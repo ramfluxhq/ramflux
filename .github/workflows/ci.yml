@@ -97,6 +97,11 @@ jobs:
           "$RUNNER_TEMP/compose-preflight/bin/python" -B -m unittest discover \
             -s deploy/scripts/tests -p test_compose_preflight.py -v
 
+      - name: Demo advertised origin and ownership regressions
+        run: |
+          python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_public_origin.py -v
+          python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_node_config.py -v
+
   # Only main pushes and same-repository PRs use the sandboxed pool.
   # Dependabot, forks, manual runs and RF_CI_RUNNER=github use GitHub-hosted runners.
   # Set repository variable RF_CI_RUNNER=github to force the hosted fallback.
