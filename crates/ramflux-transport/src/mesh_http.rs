@@ -17,6 +17,9 @@ use crate::perf_metrics::{
 use crate::tls_config::{mesh_client_config, mesh_client_config_with_pem_roots};
 use crate::{MeshHttpRequest, MeshTlsConfig, MeshTlsServerStream, TransportError};
 
+mod raw;
+pub use raw::{RawMeshPost, RawMeshResponse};
+
 #[derive(Clone, Copy)]
 struct MeshHttpTimeouts {
     connect: Duration,

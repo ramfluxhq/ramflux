@@ -29,6 +29,8 @@ struct OpenTransport<S = GatewayTcpTlsStream> {
 }
 #[derive(Clone)]
 pub struct CustodyNetworkConfig {
+    /// Weak access to the unlocked DB adoption owner; mandatory after pairing installation.
+    pub pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub account_root: PathBuf,
     pub account_id: String,
     pub device_id: String,
@@ -46,6 +48,7 @@ pub struct CustodyNetworkConfig {
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
 pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) account: BornAccount,
+    pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub(super) device: DeviceRef,
     pub(super) credentials: BranchCredentials,
     pub(super) stream: S,
@@ -57,6 +60,10 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     capacity_key: String,
 }
 pub(crate) fn now() -> Result<u64, SdkError> {
+    #[cfg(test)]
+    if let Some(frozen) = crate::time::test_clock::frozen() {
+        return u64::try_from(frozen).map_err(|_| SdkError::CustodySetupInvalid);
+    }
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SdkError::CustodySetupInvalid)?
@@ -76,6 +83,36 @@ pub(super) fn fields() -> ramflux_protocol::SignedFields {
     }
 }
 impl CustodyConnection<GatewayTcpTlsStream> {
+    /// Read this independently configured receiving node's signed identity over a fresh
+    /// bounded TLS connection. No account, vault, proof or ordinary session is opened.
+    /// Existing durable node pins and predecessor checks still apply.
+    /// # Errors
+    /// Refuses TLS/pin/identity/binding disagreement, malformed frames or a ten-second timeout.
+    pub async fn discover_pairing_node(
+        config: CustodyNetworkConfig,
+    ) -> Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            if config.binding_mode == BindingMode::NoChannelBinding {
+                return Err(CustodyRefusal::BindingRefused.into());
+            }
+            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                "0.0.0.0:0".parse().map_err(|_| invalid())?,
+                config.gateway_address,
+                &config.server_name,
+                &config.ca_certificate,
+                config.timeout,
+            )
+            .await?;
+            let opened = Self::open_stream(&config, tls.into_tls_stream()).await?;
+            let pins = opened.pins;
+            drop(opened.stream);
+            tokio::task::spawn_blocking(move || pins.current_record(now()?))
+                .await
+                .map_err(|_| invalid())?
+        })
+        .await
+        .map_err(|_| SdkError::PairingCode("ResumeRequired"))?
+    }
     /// Publish, register and establish a session using the current locally verified v3 record.
     /// # Errors
     /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and
@@ -85,11 +122,18 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
-        Box::pin(Self::connect_inner(config, vault)).await
+        Box::pin(Self::connect_inner(config, vault, false)).await
+    }
+    pub(crate) async fn connect_for_proof(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+    ) -> Result<Self, SdkError> {
+        Box::pin(Self::connect_inner(config, vault, true)).await
     }
     async fn connect_inner(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
+        proof_only: bool,
     ) -> Result<Self, SdkError> {
         let endpoint = (
             config.gateway_address,
@@ -98,18 +142,19 @@ impl CustodyConnection<GatewayTcpTlsStream> {
             config.timeout,
         );
         let mut retry = super::retry::AdmissionRetry::default();
-        let ((), connection) = Box::pin(Self::connect_with(config, vault, &mut retry, || async {
-            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
-                "0.0.0.0:0".parse().map_err(|_| invalid())?,
-                endpoint.0,
-                &endpoint.1,
-                &endpoint.2,
-                endpoint.3,
-            )
+        let ((), connection) =
+            Box::pin(Self::connect_with_mode(config, vault, &mut retry, proof_only, || async {
+                let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                    "0.0.0.0:0".parse().map_err(|_| invalid())?,
+                    endpoint.0,
+                    &endpoint.1,
+                    &endpoint.2,
+                    endpoint.3,
+                )
+                .await?;
+                Ok(((), tls.into_tls_stream()))
+            }))
             .await?;
-            Ok(((), tls.into_tls_stream()))
-        }))
-        .await?;
         Ok(connection)
     }
 }
@@ -124,8 +169,21 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
     {
+        Self::connect_with_mode(config, vault, retry, false, open).await
+    }
+    pub(crate) async fn connect_with_mode<T, F, Fut>(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        retry: &mut super::retry::AdmissionRetry,
+        proof_only: bool,
+        open: F,
+    ) -> Result<(T, Self), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
         let mut budget = retry.begin_attempt().await;
-        let result = Self::connect_attempt(config, vault, open, &mut budget).await;
+        let result = Self::connect_attempt(config, vault, open, &mut budget, proof_only).await;
         if let Err(error) = &result {
             retry.record(error, tokio::time::Instant::now());
         }
@@ -136,6 +194,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         vault: Arc<dyn PrimaryVault>,
         mut open: F,
         budget: &mut super::retry::Budget,
+        proof_only: bool,
     ) -> Result<(T, Self), SdkError>
     where
         F: FnMut() -> Fut,
@@ -150,7 +209,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let _flight =
             super::retry::single_flight(&config.account_root, &config.account_id, budget).await?;
         super::capacity_backoff::check(&capacity_key)?;
-        let result = Self::connect_admitted(&config, vault, &mut open, budget).await;
+        let result = Self::connect_admitted(&config, vault, &mut open, budget, proof_only).await;
         if let Err(error) = &result {
             super::capacity_backoff::record_error(capacity_key, error);
         }
@@ -161,6 +220,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         vault: Arc<dyn PrimaryVault>,
         mut open: F,
         budget: &mut super::retry::Budget,
+        proof_only: bool,
     ) -> Result<(T, Self), SdkError>
     where
         F: FnMut() -> Fut,
@@ -171,10 +231,17 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let device_id = config.device_id.clone();
         let node_id = config.node_id.clone();
         let node_public_key = config.node_public_key.clone();
+        let admission_config = config.clone();
         let authority = budget
             .attempt(async move {
                 tokio::task::spawn_blocking(move || {
                     let mut account = super::load_account(&root, &account_id, now()?)?;
+                    super::pairing::admission::require_network_admission(
+                        &admission_config,
+                        &account,
+                        vault.as_ref(),
+                        now()?,
+                    )?;
                     account.bind_capacity_node(&root, &node_id, &node_public_key, now()?)?;
                     let (device, credentials) =
                         account.credentials(vault.as_ref(), &device_id, now()?)?;
@@ -188,6 +255,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         super::capacity_hint::check_account(&authority.account, now()?)?;
         let (mut transport, opened) = Self::open_admitted(config, &mut open, budget).await?;
         let mut connection = Self::from_authority(authority, opened, config);
+        if proof_only {
+            return Ok((transport, connection));
+        }
         let actions = connection.registration_actions()?;
         let mut next = 0;
         loop {
@@ -274,6 +344,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     ) -> Self {
         Self {
             account: authority.account,
+            pairing_admission: config.pairing_admission.clone(),
             device: authority.device,
             credentials: authority.credentials,
             stream: opened.stream,
@@ -369,10 +440,17 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         self.credentials.prekey_bundle()
     }
+    fn require_open_data_owner(&self) -> Result<(), SdkError> {
+        if self.pairing_admission.as_ref().is_some_and(|reader| !reader.is_open()) {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        Ok(())
+    }
     pub(crate) async fn prove(
         &mut self,
         action: CustodyProofAction,
     ) -> Result<CustodyServerFrame, SdkError> {
+        self.require_open_data_owner()?;
         let response = exchange(
             &mut self.stream,
             &CustodyClientFrame::Challenge {
@@ -395,15 +473,30 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             .map_err(|_| invalid())?;
         // Mandatory even when an operator and the client explicitly choose no binding.
         let material = self.stream.custody_exporter(&nonce)?;
-        let certificate = self
-            .account
-            .record()
+        let record = match &action {
+            CustodyProofAction::Publish { publication } => &publication.record,
+            _ => self.account.record(),
+        };
+        if record.body.account_anchor != self.device.account_anchor {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
+        let certificate = record
             .body
             .devices
             .iter()
-            .find(|d| d.device_id == self.device.device_id)
-            .and_then(|d| d.branch_certificate.as_ref())
+            .find(|device| {
+                device.device_id == self.device.device_id
+                    && device.device_epoch == self.device.device_epoch
+            })
+            .and_then(|device| device.branch_certificate.as_ref())
             .ok_or_else(invalid)?;
+        if certificate.body.branch_signing_public_key
+            != ramflux_protocol::encode_base64url(
+                self.credentials.signing.signing_key.verifying_key().to_bytes(),
+            )
+        {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
         let issued = now()?;
         let proof = sign_branch_proof_v3(
             &self.credentials.signing,
@@ -412,7 +505,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                 version: 3,
                 device_ref: self.device.clone(),
                 certificate_hash: object_hash(certificate)?,
-                record_hash: object_hash(self.account.record())?,
+                record_hash: object_hash(record)?,
                 proof_id: random()?,
                 challenge_nonce: challenge.challenge_nonce,
                 action_hash: challenge.action_hash,
@@ -437,6 +530,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         &mut self,
         action: CustodySessionAction,
     ) -> Result<CustodyServerFrame, SdkError> {
+        self.require_open_data_owner()?;
         super::capacity_backoff::check(&self.capacity_key)?;
         let session = self.session.as_ref().ok_or(CustodyRefusal::SessionRequired)?;
         let clock = now()?;
@@ -559,6 +653,7 @@ fn proof_action_name(action: &CustodyProofAction) -> &'static str {
         CustodyProofAction::OpenSession => "open_session",
         CustodyProofAction::PairingIssue { .. } => "pairing_issue",
         CustodyProofAction::PairingCreate { .. } => "pairing_create",
+        CustodyProofAction::PairingDataLease { .. } => "pairing_data_lease",
         CustodyProofAction::HomeMigration { .. } => "home_migration",
         CustodyProofAction::PrekeyStatus { .. } => "prekey_status",
         CustodyProofAction::RegisterUpdate { .. } => "register_update",

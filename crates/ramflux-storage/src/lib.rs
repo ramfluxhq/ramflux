@@ -5,7 +5,7 @@
 
 mod account_db;
 mod sync_path;
-pub use account_db::backup::{AccountBackupSnapshot, BackupCounts};
+pub use account_db::backup::{AccountBackupSnapshot, BackupCounts, FullTransferCut};
 pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,
 };
@@ -14,12 +14,14 @@ pub use account_db::backup_merge::{BackupItemRefusal, BackupMergeReport};
 pub use account_db::local_search;
 pub use account_db::restore_floor::{FloorPolicy, admit_floor};
 mod account_erase;
+mod account_generation;
 mod account_index;
 mod account_writer;
+pub use account_generation::GenerationReclamationLease;
 pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
-pub use account_index::BackupIndexInstall;
+pub use account_index::{AccountGenerationSelection, BackupIndexInstall};
 mod clock;
 mod constants;
 mod conversation_helpers;
@@ -86,6 +88,24 @@ mod schema_receipt_identity;
 mod sqlite_work;
 
 pub use account_db::AccountDb;
+pub use account_db::full_transfer::{
+    CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
+    FullAppliedDataReceipt, FullBaseSourceEncoding, FullDuplexReceipt, FullForwardReader,
+    FullForwardResumePosition, FullGenerationRecoveryDraft, FullGenerationRecoveryWork,
+    FullInstalledTailScope, FullLocalUnlockGuard, FullPinnedReceiverBase,
+    FullPreparedReceiverDatabase, FullReceiverBaseCopy, FullReceiverDatabaseWork,
+    FullReceiverReplayWork, FullRecipientInstallStage, FullRecipientRecoveryIdentity,
+    FullReverseSourceDraft, FullReverseSourceWork, FullReverseValidationWork,
+    FullScalarInputCounts, FullScalarSourceCounts, FullSelectedReceiverGeneration,
+    FullSourceDeltaDraft, FullSourcePreparation, FullSourcePreparationCancel,
+    FullSourcePreparationWork, FullSourcePrimaryOwner, FullSourceSuccessorWork, FullSourceTailCut,
+    FullSourceTailEncodingWork, FullSourceTailWork, FullStageIoCancel, FullStageKey,
+    FullTailAppliedReceipt, FullTailEndpoint, FullTailValidationWork, FullTargetObservation,
+    FullTransferSchema, FullTransferStage, FullUnionEncoding, FullUnionEncodingBuilder,
+    FullValidatedReverseInput, FullValidatedTailInput, MergeRule, PreparedFullSource,
+    StageDirection, VariantRule, WrappedFullStageKey, copy_full_scalar_record, full_census_hash,
+    full_transfer_catalog, write_full_scalar_sql_row,
+};
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{
     InboxFailurePolicy, InboxFailureSource, JournalBounds, JournalEvent,
@@ -94,17 +114,22 @@ pub use account_db::large_segments::{
     SegmentCleanupPage, SegmentDirection, SegmentOrphanSweep, SegmentPageEntry, SegmentReference,
     SegmentStore,
 };
+pub use account_db::mac_subkeys::full::FullImportedMacDomain;
 pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
 };
+pub use account_db::pairing::admission::PairingAdmissionReader;
+pub use account_db::pairing::full_reference::{FULL_STAGE_REFERENCE_KIND, FullStageReference};
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
+pub use account_db::pairing::own_sync::PairingOwnSyncJob;
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,
     RawInnerQuotaScope, RawInnerReparseRow,
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
+pub use account_db::shared_group_denials::{GroupRemovalFloor, PrunedGroupFloor};
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};
 pub use constants::*;

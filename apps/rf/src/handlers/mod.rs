@@ -24,6 +24,7 @@ pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(unix)]
 mod node_custody;
+pub(crate) mod pairing;
 #[cfg(windows)]
 mod windows_console;
 #[cfg(not(unix))]

@@ -145,6 +145,16 @@ pub(crate) async fn start_server_with_ack_fault(
     root: &Root,
     corrupt_ack: bool,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
+    start_server_with_connections(root, corrupt_ack, if corrupt_ack { 4 } else { 3 }).await
+}
+async fn start_server_with_connections(
+    root: &Root,
+    corrupt_ack: bool,
+    connections: u8,
+) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
+    if connections == 0 || connections > 4 {
+        return Err("test: TLS fixture connection bound".into());
+    }
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let ca = root.0.join("ca.pem");
     let cert = root.0.join("tls.pem");
@@ -173,7 +183,7 @@ pub(crate) async fn start_server_with_ack_fault(
     let server = tokio::spawn(async move {
         let mut clients = Vec::new();
         let fault = Arc::new(std::sync::atomic::AtomicBool::new(corrupt_ack));
-        for _ in 0..if corrupt_ack { 4 } else { 3 } {
+        for _ in 0..connections {
             let (stream, _) = listener.accept().await?;
             let acceptor = acceptor.clone();
             let router = Arc::clone(&router);
@@ -216,6 +226,7 @@ async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict()
         let _bob_anchor = create(&socket, "bob", "Bob").await?;
         create(&socket, "impostor", "Alice").await?;
         let network = |id: &str| CustodyNetworkConfig {
+            pairing_admission: None,
             account_root: root.0.to_path_buf(),
             account_id: id.into(),
             device_id: "primary".into(),
@@ -260,3 +271,7 @@ async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict()
     result?;
     Ok(())
 }
+
+mod pairing_discovery;
+
+mod pairing_publication;

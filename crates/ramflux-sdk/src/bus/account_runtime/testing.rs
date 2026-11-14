@@ -18,6 +18,8 @@ use crate::{
 pub struct AccountSessionHarness {
     runtime: AccountRuntime,
     event_router: tokio::task::JoinHandle<()>,
+    _preempt: watch::Sender<u64>,
+    _shutdown: watch::Sender<bool>,
 }
 
 /// Explicit authenticated coordinates supplied by a real-component fixture.
@@ -112,8 +114,6 @@ impl AccountSessionHarness {
         capabilities: FixtureCapabilities,
     ) -> Result<Self, SdkError> {
         let FixtureCapabilities { incarnation, ephemeral } = capabilities;
-        let id = client.account_db()?.local_account_id.clone();
-        let root = index.root().to_path_buf();
         let principal = client.surface_local_root_commitment()?;
         let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), stream);
         engine.session = session;
@@ -133,6 +133,15 @@ impl AccountSessionHarness {
         account.timeouts.receive_min = Duration::from_secs(600);
         account.timeouts.receive_max = Duration::from_secs(600);
         account.timeouts.keepalive_idle = Duration::from_secs(600);
+        Box::pin(Self::start_account(index, account)).await
+    }
+
+    pub(super) async fn start_account(
+        index: AccountIndex,
+        account: super::super::state::LocalBusAccountState,
+    ) -> Result<Self, SdkError> {
+        let id = account.client.account_db()?.local_account_id.clone();
+        let root = index.root().to_path_buf();
         let timeouts = account.timeouts.clone();
         let state = LocalBusDaemonState {
             account_index: Some(index),
@@ -145,8 +154,8 @@ impl AccountSessionHarness {
         };
         let (_, receiver) = mpsc::channel(2);
         let (_, lifecycle) = mpsc::channel(2);
-        let (_, preempt) = watch::channel(0);
-        let (_, shutdown) = watch::channel(false);
+        let (preempt_owner, preempt) = watch::channel(0);
+        let (shutdown_owner, shutdown) = watch::channel(false);
         let (events, mut batches) = mpsc::channel::<super::super::events::EventBatch>(2);
         let event_router = tokio::spawn(async move {
             let mut subscribers = BTreeMap::new();
@@ -175,13 +184,15 @@ impl AccountSessionHarness {
             connection_work,
             ledger: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
+            pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             #[cfg(test)]
             receive_gate_hook: None,
             #[cfg(test)]
             courier_events: None,
         };
         runtime.start_connection()?;
-        let mut harness = Self { runtime, event_router };
+        let mut harness =
+            Self { runtime, event_router, _preempt: preempt_owner, _shutdown: shutdown_owner };
         let handle = harness.handle()?;
         harness.drive(handle.require_live(Duration::from_secs(10))).await.map_err(|error| {
             SdkError::GatewaySessionRejected(format!("fixture live admission: {error:?}"))
@@ -623,3 +634,7 @@ impl Drop for AccountSessionHarness {
         self.event_router.abort();
     }
 }
+
+#[path = "testing_pairing.rs"]
+mod pairing;
+pub use pairing::{NativePairingNetworkFixture, NativePairingSessionFixture};

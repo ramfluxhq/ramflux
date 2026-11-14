@@ -447,22 +447,42 @@ fn enroll_field_negatives(transcript: &Transcript) -> Result {
     Ok(())
 }
 
+// v2 remains a readable legacy commitment format, but cannot start a transfer.
+fn expect_legacy_transfer_commit_refusal(
+    transcript: &Transcript,
+    peer_role: PairingRole,
+    mutate: impl FnOnce(&mut RoleContext),
+) -> Result {
+    let (context, secret, salt) = match peer_role {
+        PairingRole::Initiator => (&transcript.initiator, &INIT_SECRET, &INIT_SALT),
+        PairingRole::Responder => (&transcript.responder, &RESP_SECRET, &RESP_SALT),
+    };
+    let mut changed = context.clone();
+    mutate(&mut changed);
+    assert_ne!(
+        sha256(&context_commitment_preimage(context, salt)?),
+        sha256(&context_commitment_preimage(&changed, salt)?)
+    );
+    expect_pairing(commit(peer_role, context, secret, salt).map(|_| ()), "UpdateRequired")?;
+    expect_pairing(commit(peer_role, &changed, secret, salt).map(|_| ()), "UpdateRequired")
+}
+
 fn transfer_field_negatives() -> Result {
     let transcript = transfer_transcript()?;
-    expect_commit_mismatch(&transcript, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transcript, PairingRole::Responder, |peer| {
         peer.hpke_key = Some(encode_base64url([24; 32]));
     })?;
-    expect_commit_mismatch(&transcript, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transcript, PairingRole::Responder, |peer| {
         peer.common.transfer_id = Some(encode_base64url([25; 32]));
     })?;
-    expect_commit_mismatch(&transcript, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transcript, PairingRole::Responder, |peer| {
         peer.common.data_selection[0].key_id = "hist2".into();
     })?;
-    expect_commit_mismatch(&transcript, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transcript, PairingRole::Responder, |peer| {
         peer.common.data_selection[0].purpose = "attachment".into();
     })?;
     let existing = transfer_existing_transcript()?;
-    expect_commit_mismatch(&existing, PairingRole::Initiator, |peer| {
+    expect_legacy_transfer_commit_refusal(&existing, PairingRole::Initiator, |peer| {
         if let Some(dest) = &mut peer.common.destination_ref {
             dest.device_id = "other-primary".into();
         }
@@ -511,13 +531,13 @@ fn two_leg_ordering() -> Result {
     changed.agreement_key = encode_base64url([13; 32]);
     expect_pairing(initiator.establish(&changed, &RESP_SALT).map(|_| ()), "commitment_mismatch")?;
     let transfer = transfer_transcript()?;
-    expect_commit_mismatch(&transfer, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transfer, PairingRole::Responder, |peer| {
         peer.hpke_key = Some(encode_base64url([26; 32]));
     })?;
-    expect_commit_mismatch(&transfer, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transfer, PairingRole::Responder, |peer| {
         peer.common.lease_not_before = 1_700_000_002;
     })?;
-    expect_commit_mismatch(&transfer, PairingRole::Responder, |peer| {
+    expect_legacy_transfer_commit_refusal(&transfer, PairingRole::Responder, |peer| {
         peer.common.capabilities = vec!["call".into(), "message".into(), "sync".into()];
     })?;
     Ok(())
@@ -1132,3 +1152,5 @@ fn hpke_epoch_setup_exit() -> Result {
         "device_set_epoch",
     )
 }
+
+mod v3;

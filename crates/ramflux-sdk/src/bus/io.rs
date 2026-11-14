@@ -457,7 +457,7 @@ where
     R: AsyncRead + Unpin,
 {
     let body = read_encoded_local_bus_frame(reader).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
 }
 
 /// Read one bounded, zeroizing server envelope, including compatibility custody replies.
@@ -473,14 +473,62 @@ where
     if len > MAX_LOCAL_BUS_FRAME_BYTES {
         return Err(SdkError::LocalBus(format!("local bus frame too large: {len}")));
     }
+    if len == 0 {
+        return Err(SdkError::LocalBus("empty local bus frame".into()));
+    }
+    let mut discriminator = [0_u8; 1];
+    reader.read_exact(&mut discriminator).await?;
+    let [discriminator] = discriminator;
+    if discriminator == 0xC1 {
+        // Binary private replies require their connection-owned pending slot.
+        // This generic reader never allocates or forwards their secret payload to JSON.
+        return Err(SdkError::PairingField("credential_channel"));
+    }
+    read_encoded_after_discriminator(reader, len, discriminator).await
+}
+pub(super) async fn read_json_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<LocalBusFrame, SdkError> {
+    let body = read_encoded_after_discriminator(reader, len, discriminator).await?;
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
+}
+async fn read_encoded_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    if len == 0 || len > MAX_LOCAL_BUS_FRAME_BYTES {
+        return Err(SdkError::LocalBus("invalid local bus frame length".into()));
+    }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
-    reader.read_exact(&mut body).await?;
+    let (first, remaining) =
+        body.split_first_mut().ok_or_else(|| SdkError::LocalBus("empty local bus frame".into()))?;
+    *first = discriminator;
+    reader.read_exact(remaining).await?;
     Ok(body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pairing_generic_bus_reader_refuses_private_discriminator_before_secret_payload()
+    -> Result<(), SdkError> {
+        let secret = crate::custody::pairing::CredentialOutcome::Provided {
+            passphrase: crate::custody::pairing::SecretUtf8::from_bytes(b"private-json-canary")?,
+            confirmation: None,
+        };
+        let frame =
+            crate::custody::pairing::private_credential::encode_reply(1, "unlock", &secret)?;
+        let mut reader = frame.as_slice();
+        let result = read_local_bus_frame(&mut reader).await;
+        assert_eq!(reader.len(), frame.len() - 5, "generic JSON reader consumed private payload");
+        assert!(matches!(result, Err(SdkError::PairingField("credential_channel"))));
+        Ok(())
+    }
 
     fn test_frame(body: serde_json::Value) -> LocalBusFrame {
         LocalBusFrame {
@@ -500,6 +548,22 @@ mod tests {
             ok: None,
             error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_bus_rejects_duplicate_confirmation_fields_before_typed_dispatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let encoded =
+            serde_json::to_string(&test_frame(serde_json::json!({"operation_id":"one"})))?;
+        let needle = "\"body\":{\"operation_id\":\"one\"}";
+        assert!(encoded.contains(needle));
+        let duplicate =
+            encoded.replace(needle, "\"body\":{\"operation_id\":\"one\",\"operation_id\":\"two\"}");
+        let (mut input, mut output) = tokio::io::duplex(duplicate.len() + 4);
+        input.write_u32(u32::try_from(duplicate.len())?).await?;
+        input.write_all(duplicate.as_bytes()).await?;
+        assert!(read_local_bus_frame(&mut output).await.is_err());
+        Ok(())
     }
 
     // T25-A1: an oversized frame is rejected on the write path BEFORE any byte is emitted.

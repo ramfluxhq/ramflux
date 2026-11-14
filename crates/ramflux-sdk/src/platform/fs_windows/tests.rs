@@ -516,3 +516,32 @@ fn a_publication_rename_flushes_the_directory() -> Result<(), String> {
         Err(format!("directory flush did not run ({before} -> {after})"))
     }
 }
+
+#[test]
+fn pairing_signing_input_opens_existing_read_only_and_refuses_links() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let missing = dir.path().join("missing-signing-input");
+    assert!(
+        open_read_only_no_follow(&missing).is_err() && !missing.exists(),
+        "test: reading absent signing input created a file"
+    );
+    let target = dir.path().join("signing-input");
+    const INPUT: &[u8] = b"bounded signing input";
+    let mut output = create_new_owner_only(&target).map_err(text)?;
+    output.write_all(INPUT).map_err(text)?;
+    output.sync_all().map_err(text)?;
+    drop(output);
+    let mut input = open_read_only_no_follow(&target).map_err(text)?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut input).take(64).read_to_end(&mut bytes).map_err(text)?;
+    assert_eq!(bytes, INPUT, "test: signing input was truncated or replaced");
+    assert!(input.write_all(b"x").is_err(), "test: read-only signing input allowed writes");
+    let link = dir.path().join("signing-input-link");
+    if std::os::windows::fs::symlink_file(&target, &link).is_ok() {
+        assert!(
+            open_read_only_no_follow(&link).is_err(),
+            "test: signing input followed a final reparse point"
+        );
+    }
+    Ok(())
+}

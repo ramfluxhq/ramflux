@@ -4,7 +4,7 @@
 //! Crash reopen for pairing journal writers that exist on main (P04).
 //! Vault, [`crate::AccountIndex`], `authority.json` and node persistence cuts are later parts.
 
-use super::journal::{FloorRow, HeadRow, LiveRow, TerminalRow};
+use super::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
 
@@ -32,8 +32,19 @@ pub enum Admission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveredOutcome {
     Empty,
-    HandshakeCancelled { operation_id: String },
-    CandidateFenced { operation_id: String, candidate_hash: String, head_state: String },
+    /// Data-only owner must verify the separate encrypted stage; this is never a resume grant.
+    DataStageRetained {
+        operation_id: String,
+        stage_id: String,
+    },
+    HandshakeCancelled {
+        operation_id: String,
+    },
+    CandidateFenced {
+        operation_id: String,
+        candidate_hash: String,
+        head_state: String,
+    },
 }
 
 /// Durable pairing rows observed after recover.
@@ -68,6 +79,13 @@ impl RecoveredPairing {
                 candidate_hash: head.candidate_hash.clone(),
                 head_state: head.state.clone(),
             }
+        } else if let Some((live, reference)) = live.iter().find_map(|row| {
+            row.full_stage_reference().ok().flatten().map(|reference| (row, reference))
+        }) {
+            RecoveredOutcome::DataStageRetained {
+                operation_id: live.operation_id.clone(),
+                stage_id: reference.stage_id,
+            }
         } else if let Some(row) = terminals.iter().find(|row| row.outcome == "cancelled") {
             RecoveredOutcome::HandshakeCancelled { operation_id: row.operation_id.clone() }
         } else {
@@ -78,6 +96,134 @@ impl RecoveredPairing {
 }
 
 impl AccountDb {
+    /// Persist a candidate phase and matching live phase in the same transaction.
+    ///
+    /// # Errors
+    /// Refuses changed candidate identity or an invalid phase/context combination.
+    pub fn commit_pairing_head(&self, head: &HeadRow) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_head(head)?;
+        if let Some(mut live) = self
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|live| live.operation_id == head.operation_id)
+        {
+            // Full-transfer J3 has no separate enrollment proposal. Bind the
+            // frozen candidate hash and phase in this same actual-writer commit.
+            if head.kind == "transfer" && live.proposal_hash.is_none() {
+                live.proposal_hash = Some(head.candidate_hash.clone());
+            }
+            if live.full_stage_reference()?.is_some()
+                && matches!(live.phase.as_str(), "cancelled" | "expired" | "rejected" | "completed")
+            {
+                // Exact native reconciliation may acknowledge the candidate, but
+                // cannot revive the old data opportunity after terminal cleanup.
+                if head.state != "acknowledged" {
+                    return Err(StorageError::PairingField("state"));
+                }
+            } else {
+                live.phase.clone_from(&head.state);
+            }
+            live.candidate_id = Some(head.operation_id.clone());
+            self.put_pairing_live(&live)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Allocate the monotonic local floor and its live descriptor together.
+    ///
+    /// # Errors
+    /// Rejects stale floors, duplicate invitations and live capacity overflow.
+    pub fn commit_pairing_invitation(
+        &self,
+        floor: &FloorRow,
+        live: &LiveRow,
+    ) -> Result<(), StorageError> {
+        require(floor.account_id == live.account_id, "account_id")?;
+        let descriptor: ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::native::Invitation,
+        > = ramflux_protocol::parse_i_json(&live.descriptor).map_err(|_| field("descriptor"))?;
+        require(floor.account_anchor == descriptor.body.account_anchor, "account_anchor")?;
+        require(floor.issued_seq == live.local_seq, "local_seq")?;
+        require(floor.next_generation > live.generation, "generation")?;
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_floor(floor)?;
+        self.put_pairing_live(live)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Retire an ordinary acknowledged head without fabricating an invitation/ceremony.
+    ///
+    /// # Errors
+    /// Refuses a different operation/hash, unacknowledged head, or pairing-owned candidate.
+    pub fn commit_ordinary_head_cleanup(&self, adoption: &AdoptionRow) -> Result<(), StorageError> {
+        adoption.validate()?;
+        self.require_local(&adoption.account_id)?;
+        let transaction = self.connection.immediate_transaction()?;
+        let head = self.pairing_head()?.ok_or(field("state"))?;
+        require(matches!(head.kind.as_str(), "head_update" | "revoke"), "kind")?;
+        require(head.operation_id == adoption.operation_id, "operation_id")?;
+        require(head.candidate_hash == adoption.record_hash, "record_hash")?;
+        require(head.state == "acknowledged", "state")?;
+        require(self.pairing_adoption()?.as_ref() == Some(adoption), "record_hash")?;
+        self.delete_head(&adoption.account_id, &adoption.operation_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Commit the adopted local authority and retire its acknowledged candidate atomically.
+    ///
+    /// # Errors
+    /// Rejects mismatched operations/hashes and rolls back the adoption if cleanup fails.
+    pub fn commit_pairing_adoption_cleanup(
+        &self,
+        adoption: &AdoptionRow,
+        terminal: &TerminalRow,
+    ) -> Result<(), StorageError> {
+        adoption.validate()?;
+        terminal.validate()?;
+        self.require_local(&adoption.account_id)?;
+        self.require_local(&terminal.account_id)?;
+        require(adoption.operation_id == terminal.operation_id, "operation_id")?;
+        require(terminal.record_hash.as_deref() == Some(&adoption.record_hash), "record_hash")?;
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_adoption(adoption)?;
+        self.require_terminal_cleanup(terminal)?;
+        self.queue_enrollment_own_sync(adoption, terminal)?;
+        self.delete_live(&terminal.account_id, &terminal.operation_id)?;
+        self.delete_head(&terminal.account_id, &terminal.operation_id)?;
+        self.put_pairing_terminal(terminal)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Commit J7c adoption and the corresponding live phase in one account transaction.
+    ///
+    /// # Errors
+    /// Rejects malformed refs, account mismatch or a live candidate for a different hash.
+    pub fn commit_pairing_install(&self, adoption: &AdoptionRow) -> Result<(), StorageError> {
+        adoption.validate()?;
+        self.require_local(&adoption.account_id)?;
+        let transaction = self.connection.immediate_transaction()?;
+        if let Some(mut live) = self
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|live| live.operation_id == adoption.operation_id)
+        {
+            let head = self.pairing_head()?.ok_or(field("state"))?;
+            require(head.operation_id == adoption.operation_id, "operation_id")?;
+            require(head.candidate_hash == adoption.record_hash, "record_hash")?;
+            require(head.state == "acknowledged", "state")?;
+            live.phase = "locally_installed".into();
+            self.put_pairing_live(&live)?;
+        }
+        self.put_pairing_adoption(adoption)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Annex F writers whose production owners are later parts. P04J models existing writers only.
     #[must_use]
     pub const fn pairing_missing_crash_writers() -> &'static [(&'static str, &'static str)] {
@@ -92,6 +238,11 @@ impl AccountDb {
     pub fn recover_pairing(&self) -> Result<RecoveredPairing, StorageError> {
         let head = self.pairing_head()?;
         for live in self.pairing_live_rows()? {
+            // A7/M5: a missing/corrupt separate stage cannot authorize deleting its account
+            // reference or possible-publication key obligations. The data owner reconciles it.
+            if live.full_stage_reference()?.is_some() {
+                continue;
+            }
             if !live_handshake_open(head.as_ref(), &live) {
                 continue;
             }
@@ -172,6 +323,14 @@ impl AccountDb {
     }
 
     fn require_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
+        if self.pairing_live_rows()?.iter().any(|live| {
+            live.operation_id == row.operation_id
+                && live.full_stage_reference().is_ok_and(|reference| reference.is_some())
+        }) {
+            // Generic v2 cancellation/J8 cannot discharge full-transfer H1/tail obligations.
+            // A dedicated stage/generation owner must prove its positive cleanup preconditions.
+            return Err(field("PublicationPending"));
+        }
         match self.pairing_head()? {
             Some(head) if head.operation_id != row.operation_id => Err(field("operation_id")),
             Some(head) => match head.state.as_str() {

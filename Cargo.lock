@@ -193,6 +193,9 @@ name = "arrayvec"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "asn1-rs"
@@ -517,6 +520,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -3466,13 +3470,17 @@ name = "ramflux-federation"
 version = "0.1.0"
 dependencies = [
  "compio",
+ "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-relay",
  "ramflux-sdk",
+ "ramflux-storage",
  "ramflux-test-support",
  "ramflux-transport",
  "redb",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -3714,6 +3722,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -3722,6 +3731,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "blake3",
+ "bytes",
  "cbindgen",
  "chacha20 0.9.1",
  "chacha20poly1305",
@@ -3760,6 +3770,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -3798,8 +3809,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "unicode-normalization 0.1.24",
  "unicode-segmentation 1.12.0",
@@ -3861,6 +3874,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x509-parser 0.17.0",
+ "zeroize",
 ]
 
 [[package]]

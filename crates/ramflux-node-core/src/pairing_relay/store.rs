@@ -3,8 +3,8 @@
 
 //! Boot-scoped in-memory pairing relay allocator. Dormant: no HTTP or native route.
 use super::bytes::{
-    claim_payload, closed_payload, direction_payload, frame_list_heap, hour_payload, slot_payload,
-    table_bytes,
+    claim_payload, closed_payload, direction_payload, frame_list_heap, hour_payload,
+    slot_body_payload, slot_payload, table_bytes,
 };
 use super::limits::{
     AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, MAX_BACKING, MAX_CLAIMS,
@@ -65,7 +65,13 @@ pub(super) enum SlotBody {
     Live(Box<LiveSlot>),
 }
 
+pub(super) struct LeaseCache {
+    pub(super) request_hash: [u8; 32],
+    pub(super) lease: Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+}
+
 pub(super) struct LiveSlot {
+    pub(super) data_lease: Option<Box<LeaseCache>>,
     pub(super) ticket: Envelope<CreateTicket>,
     pub(super) descriptor: Envelope<Invitation>,
     pub(super) primary_token: Zeroizing<[u8; 32]>,
@@ -78,6 +84,7 @@ pub(super) struct LiveSlot {
 }
 
 pub(super) struct Slot {
+    pub(super) allocation: super::PairingAllocation,
     pub(super) account: [u8; 32],
     pub(super) expires_at: u64,
     pub(super) monotonic_deadline: u64,
@@ -100,6 +107,8 @@ pub(super) struct ClaimEntry {
 
 /// Process-local issued+live pairing relay. Restored from nothing on restart.
 pub struct PairingRelayStore {
+    full_resume: Option<Box<super::full_resume::FullResumeServer>>,
+    allocations: super::PairingAllocations,
     clock: Arc<dyn PairingClock>,
     seed: Zeroizing<[u8; 32]>,
     node_key: String,
@@ -128,6 +137,8 @@ impl PairingRelayStore {
             return Err(PairingRelayError::invalid("public_origin"));
         }
         let mut store = Self {
+            full_resume: None,
+            allocations: super::PairingAllocations::default(),
             clock: config.clock,
             node_key: public_key_base64url_from_seed(config.node_seed),
             seed: Zeroizing::new(config.node_seed),
@@ -149,6 +160,348 @@ impl PairingRelayStore {
         Ok(store)
     }
 
+    /// Shared resource counter for the node-owned full-data reconnect allocator.
+    /// A resource reservation does not authenticate a branch or admit a data lease.
+    #[must_use]
+    pub fn full_allocations(&self) -> super::PairingAllocations {
+        self.allocations.clone()
+    }
+
+    /// Start a data-only reconnect after trusted-node lease/current-native admission.
+    /// Both original branches still have to prove this boot's fresh nonce before any role token.
+    /// # Errors
+    /// Refuses expiry/revocation, source-prefix or nonce bounds, and changed frozen operands.
+    pub fn begin_full_resume(
+        &mut self,
+        source: IpAddr,
+        offer: &super::FullResumeOffer,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullResumeChallenge, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_offer(
+            offer,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        let lease_id = parse_id(&offer.lease.body.lease_id, "lease_id")?;
+        self.admit_claim_budget(source, lease_id, now.mono)?;
+        if self.full_resume.is_none() {
+            let server =
+                super::full_resume::FullResumeServer::new(super::full_resume::FullResumeConfig {
+                    clock: Arc::clone(&self.clock),
+                    node_id: admission.node().envelope().body.node_id.clone(),
+                    node_key: self.node_key.clone(),
+                    boot_id: self.boot_id_b64.clone(),
+                    allocations: self.allocations.clone(),
+                })?;
+            self.full_resume = Some(Box::new(server));
+        }
+        self.full_resume.as_mut().ok_or(PairingRelayError::Retired)?.begin(offer, admission)
+    }
+
+    fn full_server(
+        &mut self,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<&mut super::full_resume::FullResumeServer, PairingRelayError> {
+        if self.full_resume.is_none() {
+            self.full_resume = Some(Box::new(super::full_resume::FullResumeServer::new(
+                super::full_resume::FullResumeConfig {
+                    clock: Arc::clone(&self.clock),
+                    node_id: admission.node().envelope().body.node_id.clone(),
+                    node_key: self.node_key.clone(),
+                    boot_id: self.boot_id_b64.clone(),
+                    allocations: self.allocations.clone(),
+                },
+            )?));
+        }
+        self.full_resume.as_deref_mut().ok_or(PairingRelayError::WrongContext)
+    }
+    /// A3 A-first proposal. Frozen role operands and the original deadline cannot be replaced.
+    /// # Errors
+    /// Refuses B-first, another pending account lease, cooldown, replay or untrusted native scope.
+    pub fn hello_full(
+        &mut self,
+        source: IpAddr,
+        hello: &ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::relay::FullDiscovery,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        hello.validate().map_err(|error| wire(&error))?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_discovery_lease(
+            &hello.lease,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        if hello.role == "responder"
+            && !self
+                .full_resume
+                .as_ref()
+                .is_some_and(|server| server.has_pending(&hello.lease.body.lease_id))
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        self.admit_claim_budget(
+            source,
+            parse_id(&hello.lease.body.lease_id, "lease_id")?,
+            now.mono,
+        )?;
+        self.full_server(admission)?.hello(hello, admission)
+    }
+    /// Bounded pre-token discovery poll. Missing discovery allocates no server/pending entry.
+    /// # Errors
+    /// Returns `NotFound` without a pending entry, or fixed lease/native/rate refusals.
+    pub fn poll_full_discovery(
+        &mut self,
+        source: IpAddr,
+        poll: &ramflux_protocol::custody::pairing::full_transfer::relay::PollFullDiscovery,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::relay::FullDiscovery,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        poll.validate().map_err(|error| wire(&error))?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_discovery_lease(
+            &poll.lease,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        if !self
+            .full_resume
+            .as_ref()
+            .is_some_and(|server| server.has_pending(&poll.lease.body.lease_id))
+        {
+            return Err(PairingRelayError::NotFound);
+        }
+        self.admit_claim_budget(
+            source,
+            parse_id(&poll.lease.body.lease_id, "lease_id")?,
+            now.mono,
+        )?;
+        self.full_server(admission)?.poll_discovery(poll, admission)
+    }
+
+    /// Complete the reconnect only with both original branches' matching fresh signatures.
+    /// # Errors
+    /// Refuses old/nonmatching boot/nonce/keys, changed native authority and slot/byte metadata Busy.
+    pub fn submit_full_resume(
+        &mut self,
+        proof: &Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::ResumeProof>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullResumeProgress, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        self.full_resume.as_mut().ok_or(PairingRelayError::Retired)?.submit(proof, admission)
+    }
+
+    /// Accept exactly one A1 control per fresh epoch, with the actual initiator token.
+    /// # Errors
+    /// Refuses replay, reflected tokens, stale native admission or bounded-resource Busy.
+    pub fn send_full_control(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::relay::SendFullControl,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<(), PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .send_control(request, admission)
+    }
+    /// Poll the same retained inner control without forwarding the sender's bearer token.
+    /// # Errors
+    /// Refuses wrong roles/tokens, retired native authority and control-poll rate Busy.
+    pub fn poll_full_control(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::relay::PollFullControl,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<Option<super::FullControlFrame>, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .poll_control(request, admission)
+    }
+
+    /// Role authentication and whole-body reservation precede extending HTTP buffering.
+    /// # Errors
+    /// Refuses stale epochs/tokens/authority, idle/expired slots and resource/rate Busy.
+    pub fn reserve_full_body(
+        &mut self,
+        route: &super::FullRoute<'_>,
+        bytes: usize,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.prune()?;
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .reserve_body(route, bytes, admission)
+    }
+
+    /// A2 admission for the HTTP reader callback, before any large body allocation/read.
+    /// TLS is established by the trusted listener/proxy owner, never by an arbitrary header.
+    /// # Errors
+    /// Refuses missing/duplicate credentials, wrong route/role/epoch/token or resource Busy.
+    pub fn reserve_full_http_body(
+        &mut self,
+        auth: &super::FullAuthorization<'_>,
+        bytes: usize,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.reserve_full_body(&auth.route(), bytes, admission)
+    }
+
+    /// Authenticate a claimed body guard before taking a fresh native loan for enqueue.
+    /// # Errors
+    /// Refuses an epoch/token retired while the raw body was in flight.
+    pub fn full_permit_grant(
+        &mut self,
+        permit: &super::FullSendPermit,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .authenticated_grant(&permit.route())
+    }
+    /// Trusted node wall time for the native owner and the data lease use the same injected clock.
+    /// # Errors
+    /// Refuses an unavailable trusted clock.
+    pub fn full_relay_now(&self) -> Result<u64, PairingRelayError> {
+        self.clock.wall_unix_secs()
+    }
+
+    /// Resolve a proof's locally held grant only after verifying its original-branch signature.
+    /// This supplies native lookup scope, never a token or authority. Submit still checks
+    /// the exact frozen template, retry identity, current native state and both proofs.
+    /// # Errors
+    /// Refuses unknown/expired challenges, invalid roles or signatures without a native lookup.
+    pub fn full_proof_grant(
+        &mut self,
+        proof: &ramflux_protocol::custody::pairing::full_transfer::relay::ProveFull,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        proof.validate().map_err(|error| wire(&error))?;
+        self.full_resume.as_mut().ok_or(PairingRelayError::WrongContext)?.proof_grant(&proof.proof)
+    }
+
+    /// Authenticate A2 before looking up native account/head state, preserving its no-oracle rule.
+    /// Release this store lock before loaning the current native owner, then reauthenticate
+    /// on admission/claim/enqueue so an intervening epoch retirement cannot race through.
+    /// # Errors
+    /// Unknown lease, wrong token/epoch and expired state all refuse without disclosing scope.
+    pub fn full_authenticated_grant(
+        &mut self,
+        authorization: &super::FullAuthorization<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .authenticated_grant(&authorization.route())
+    }
+
+    /// Federation-only internal admission: issue one opaque five-second body reservation.
+    /// The authenticated mesh owner checks its service peer before invoking this method.
+    /// # Errors
+    /// Refuses stale scope/native authority, arm/length limits and body/metadata Busy.
+    pub fn admit_full_forward(
+        &mut self,
+        request: &super::FullMeshAdmit,
+        peer: &crate::MeshPeerIdentity,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullMeshPermit, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .admit_forward(request, peer, admission)
+    }
+    /// Consume a mesh reservation BEFORE allocating/reading its forwarded raw body.
+    /// # Errors
+    /// Refuses expired/reused permits or changed authenticated scope without consuming a valid claim.
+    pub fn take_full_forward(
+        &mut self,
+        claim: &super::FullForwardClaim<'_>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .take_forward(claim, admission)
+    }
+
+    /// Apply the complete raw mesh body only after its one-use claim and scope checks.
+    /// # Errors
+    /// Refuses changed arm/scope/length, stale native authority and queue/control bounds.
+    pub fn accept_full_forward(
+        &mut self,
+        permit: super::FullSendPermit,
+        body: Vec<u8>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullAdmittedReply, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .accept_forward(permit, body, admission)
+    }
+
+    /// Consume one A2 body permit into the bounded shared queue after current-native recheck.
+    /// # Errors
+    /// Refuses header/body mismatch, replay, stale admission or resource Busy.
+    pub fn accept_full_send(
+        &mut self,
+        permit: super::FullSendPermit,
+        body: Vec<u8>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullDataAccepted, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .accept_send(permit, body, admission)
+    }
+    /// Poll a shared packet slice, acknowledging only transport delivery, never durable data.
+    /// # Errors
+    /// Refuses wrong role scope, stale native authority, unsent acknowledgements or rate Busy.
+    pub fn poll_full_data(
+        &mut self,
+        route: &super::FullRoute<'_>,
+        acknowledged: Option<u64>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<Option<super::FullDataFrame>, PairingRelayError> {
+        self.full_resume.as_mut().ok_or(PairingRelayError::WrongContext)?.poll_data(
+            route,
+            acknowledged,
+            admission,
+        )
+    }
+
+    /// Data-resource observations are separate from the ordinary relay's byte walker.
+    /// # Errors
+    /// Refuses unavailable accounting state.
+    pub fn full_resume_stats(
+        &mut self,
+    ) -> Result<Option<super::FullResumeStats>, PairingRelayError> {
+        self.prune()?;
+        self.full_resume.as_ref().map(|server| server.stats()).transpose()
+    }
+
     #[must_use]
     pub fn boot_id(&self) -> &str {
         &self.boot_id_b64
@@ -160,8 +513,10 @@ impl PairingRelayStore {
     #[must_use]
     pub fn stats(&self) -> AllocatorStats {
         let (issued, live, queued_bytes, queued_frames) = slot_counts(&self.slots);
+        let total = self.allocations.counts(&[0; 32]).map_or(self.slots.len(), |(total, _)| total);
         AllocatorStats {
-            slots: self.slots.len(),
+            slots: total,
+            full: total.saturating_sub(self.slots.len()),
             issued,
             live,
             backing: self.accounted,
@@ -205,6 +560,116 @@ impl PairingRelayStore {
             }),
             _ => Err(PairingRelayError::Retired),
         }
+    }
+
+    /// Issue a data-only lease once from a saved live primary-transfer invitation.
+    /// The native proof owner supplies fresh verified account and node authority.
+    /// # Errors
+    /// Refuses absent/expired invitations, changed original bindings, missing branch proofs,
+    /// conflicting retries and the bounded two-lease/per-account allocation budget.
+    pub fn issue_data_lease(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::lease::LeaseRequest,
+        authority: &ramflux_crypto::custody::VerifiedRecord,
+        node: &ramflux_crypto::custody::VerifiedNodeRecord,
+    ) -> Result<
+        Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        self.prune()?;
+        request.validate().map_err(|error| wire(&error))?;
+        let now = self.now()?;
+        if request.grant.node_id != node.envelope().body.node_id
+            || self.node_key != node.envelope().body.node_signing_public_key
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        let invitation = parse_id(&request.invitation_id, "invitation_id")?;
+        let live = self.live(invitation)?;
+        let original = &live.descriptor.body;
+        if live.closed_reason.is_some()
+            || original.purpose != "primary_transfer"
+            || original.issuer_seq != request.issuer_seq
+            || original.transfer_id.as_ref() != Some(&request.grant.transfer_id)
+            || original.primary_ref != request.grant.source_ref
+            || original
+                .destination_ref
+                .as_ref()
+                .is_some_and(|reference| reference != &request.grant.destination_ref)
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        ramflux_crypto::custody::pairing::verify_full_lease_request(request, authority, now.wall)
+            .map_err(|error| match error {
+            ramflux_crypto::CryptoError::Pairing("HeadChanged") => PairingRelayError::HeadChanged,
+            ramflux_crypto::CryptoError::Pairing("LeaseExpired") => PairingRelayError::LeaseExpired,
+            _ => PairingRelayError::WrongContext,
+        })?;
+        let request_hash = ramflux_crypto::blake3_256(
+            "ramflux.pairing.full.lease_request_cache.v1",
+            &request.to_wire_bytes().map_err(|error| wire(&error))?,
+        );
+        if let Some(saved) = &live.data_lease {
+            return if saved.request_hash == request_hash {
+                Ok(saved.lease.clone())
+            } else {
+                Err(PairingRelayError::Replay)
+            };
+        }
+        let mut count = 0;
+        for slot in self.slots.values() {
+            if let SlotBody::Live(other) = &slot.body
+                && other.data_lease.is_some()
+            {
+                count += 1;
+                if other.descriptor.body.account_anchor == request.grant.source_ref.account_anchor {
+                    return Err(self.busy());
+                }
+            }
+        }
+        if count >= 2 {
+            return Err(self.busy());
+        }
+        let lease = self.sign_data_lease(request.grant.clone(), now.wall)?;
+        let cached = Box::new(LeaseCache { request_hash, lease: lease.clone() });
+        let bytes = super::bytes::lease_cache_heap(&cached);
+        if bytes > 8192 {
+            return Err(PairingRelayError::invalid("lease_size"));
+        }
+        self.charge(bytes)?;
+        self.live_mut(invitation)?.data_lease = Some(cached);
+        Ok(lease)
+    }
+
+    fn sign_data_lease(
+        &self,
+        grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        now: u64,
+    ) -> Result<
+        Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+        PairingRelayError,
+    > {
+        let body =
+            ramflux_protocol::custody::pairing::full_transfer::lease::DataLease {
+                schema: "ramflux.pairing.full_transfer.data_lease.v1".into(),
+                version: 1,
+                lease_id: encode_base64url(
+                    random_32().map_err(|_| PairingRelayError::invalid("entropy"))?,
+                ),
+                expires_at: grant.expires_at.min(now.saturating_add(
+                    ramflux_protocol::custody::pairing::full_transfer::LEASE_SECONDS,
+                )),
+                grant,
+                issued_at: now,
+            };
+        Ok(Envelope {
+            signature: sign_canonical_bytes_with_seed(
+                &body.signing_bytes().map_err(|error| wire(&error))?,
+                *self.seed,
+            ),
+            body,
+        })
     }
 
     /// # Errors
@@ -485,10 +950,10 @@ impl PairingRelayStore {
     }
 
     fn check_issue_quotas(&self, account: [u8; 32]) -> Result<(), PairingRelayError> {
-        if self.slots.len() >= MAX_SLOTS {
+        let (total, owned) = self.allocations.counts(&account)?;
+        if total >= MAX_SLOTS {
             return Err(self.busy());
         }
-        let owned = self.slots.values().filter(|slot| slot.account == account).count();
         if owned >= MAX_SLOTS_PER_ACCOUNT {
             return Err(self.busy());
         }
@@ -544,6 +1009,7 @@ impl PairingRelayStore {
             return Err(self.busy());
         }
         let slot = Slot {
+            allocation: self.allocations.reserve(account, now.mono)?,
             account,
             expires_at: ticket.body.expires_at,
             monotonic_deadline: now
@@ -594,33 +1060,26 @@ impl PairingRelayStore {
         }
         let descriptor = self.build_invitation(&create, invitation_id, transfer_id)?;
         let created = created_reply(&descriptor, primary, recipient)?;
-        let (account, expires_at, monotonic_deadline, before) = {
-            let slot = self.slots.get(&id).ok_or(PairingRelayError::Retired)?;
-            (slot.account, slot.expires_at, slot.monotonic_deadline, slot_payload(slot))
-        };
-        let live_slot = Slot {
-            account,
-            expires_at,
-            monotonic_deadline,
-            body: SlotBody::Live(Box::new(LiveSlot {
-                ticket: create.ticket,
-                descriptor,
-                primary_token: Zeroizing::new(primary),
-                recipient_token: Zeroizing::new(recipient),
-                claim_nonce: None,
-                initiator: Direction::default(),
-                responder: Direction::default(),
-                closed_reason: None,
-                last_activity_ms: now.mono,
-            })),
-        };
-        let after = slot_payload(&live_slot);
+        let before = slot_payload(self.slots.get(&id).ok_or(PairingRelayError::Retired)?);
+        let live_body = SlotBody::Live(Box::new(LiveSlot {
+            data_lease: None,
+            ticket: create.ticket,
+            descriptor,
+            primary_token: Zeroizing::new(primary),
+            recipient_token: Zeroizing::new(recipient),
+            claim_nonce: None,
+            initiator: Direction::default(),
+            responder: Direction::default(),
+            closed_reason: None,
+            last_activity_ms: now.mono,
+        }));
+        let after = slot_body_payload(&live_body);
         if after >= before {
             self.charge(after.saturating_sub(before))?;
         } else {
             self.refund(before.saturating_sub(after));
         }
-        self.slots.insert(id, live_slot);
+        self.slots.get_mut(&id).ok_or(PairingRelayError::Retired)?.body = live_body;
         self.invitations.insert(invitation_id, id);
         self.sync_registry()?;
         Ok(created)
@@ -800,6 +1259,9 @@ impl PairingRelayStore {
 
     fn prune(&mut self) -> Result<(), PairingRelayError> {
         let now = self.now()?;
+        if let Some(server) = &mut self.full_resume {
+            server.prune()?;
+        }
         let expired: Vec<[u8; 32]> = self
             .slots
             .iter()
@@ -836,6 +1298,7 @@ impl PairingRelayStore {
 
     fn registry_bytes(&self) -> usize {
         table_bytes(&self.slots)
+            .saturating_add(super::PairingAllocations::fixed_bytes())
             .saturating_add(table_bytes(&self.invitations))
             .saturating_add(table_bytes(&self.hour))
             .saturating_add(table_bytes(&self.claims))

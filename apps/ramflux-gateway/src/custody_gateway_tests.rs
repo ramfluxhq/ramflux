@@ -89,6 +89,7 @@ impl Gateway {
     }
     fn config(&self, id: &str) -> CustodyNetworkConfig {
         CustodyNetworkConfig {
+            pairing_admission: None,
             account_root: self.accounts.clone(),
             account_id: id.into(),
             device_id: "primary".into(),

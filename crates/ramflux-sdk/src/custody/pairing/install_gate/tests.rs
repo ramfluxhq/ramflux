@@ -46,6 +46,7 @@ fn base(state: &str) -> Install {
         state: state.into(),
         cleanup_ref: None,
         cleanup_owner_ref: None,
+        full_transfer: None,
     }
 }
 

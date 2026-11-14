@@ -90,6 +90,30 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("pure request construction from an admitted plan"),
     ),
     (
+        "pairing_relay/full_resume.rs:proof_grant",
+        Class::NonIngress(
+            "verified original-branch reconnect proof lookup; no delivery envelope or durable sink",
+        ),
+    ),
+    (
+        "pairing_relay/full_resume.rs:submit",
+        Class::NonIngress(
+            "signed custody ResumeProof admission into ephemeral DATA relay state; no message persistence",
+        ),
+    ),
+    (
+        "pairing_relay/store.rs:issue_data_lease",
+        Class::NonIngress(
+            "node-signed custody DataLease capability issuance; no message delivery envelope",
+        ),
+    ),
+    (
+        "pairing_relay/store.rs:submit_full_resume",
+        Class::NonIngress(
+            "native-gated original-branch reconnect wrapper; only ephemeral DATA relay state",
+        ),
+    ),
+    (
         "relay/gateway_issuance.rs:validate_object_permission",
         Class::NonIngress("pure relay permission validation"),
     ),
@@ -193,7 +217,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let sink_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Sink).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 38));
+    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 42));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

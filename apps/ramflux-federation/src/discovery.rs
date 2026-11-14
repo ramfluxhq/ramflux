@@ -157,8 +157,13 @@ impl FederationDiscoverySurface {
                 .node_capabilities
                 .iter()
                 .filter(|cap| {
-                    (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
-                        || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+                    (ramflux_node_core::DEVICE_PAIRING_RELEASE_GATE
+                        || !matches!(
+                            cap.as_str(),
+                            "device_pairing_v2" | "primary_transfer_full_v1"
+                        ))
+                        && (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+                            || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
                         && (self.attachment_authority.is_some()
                             || cap.as_str() != ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY)
                 })

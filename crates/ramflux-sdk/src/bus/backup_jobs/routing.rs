@@ -90,6 +90,9 @@ impl Supervisor {
                     if reopened.is_ok() {
                         supervisor.clear_restore_state(&account);
                     }
+                    // Reopening releases the supervisor's old reader projections. Retry
+                    // reclamation only after that drain, before publishing job completion.
+                    supervisor.backup_jobs.cleanup_committed_generations();
                     match result {
                         Err(error)=>supervisor.backup_jobs.fail_install(&job.job_id,&error),
                         Ok((installed_account,restored,kept_newer))=>{

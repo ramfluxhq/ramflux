@@ -813,6 +813,78 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.affirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.join",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.prepare",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.tail_abandon",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "grant",
       "key_export": false,
       "name": "grant.approve",

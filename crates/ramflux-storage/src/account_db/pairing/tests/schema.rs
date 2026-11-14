@@ -7,6 +7,30 @@ use crate::{AccountDb, AccountDbKey, AccountIndex};
 use rusqlite::params;
 use std::path::Path;
 
+#[test]
+fn pairing_head_update_migrates_existing_fenced_candidate() -> TestResult {
+    let (_root, db) = crate::tests::test_db("pair-head-update-migration")?;
+    let old = super::super::schema::SCHEMA
+        .replace(",'head_update'", "")
+        .replace("\n    OR (kind='head_update' AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)", "");
+    db.connection.execute_batch("DROP TABLE pairing_head;")?;
+    db.connection.execute_batch(&old)?;
+    let existing = super::helpers::acknowledged_head()?;
+    db.put_pairing_head(&existing)?;
+    db.connection.call(|connection| super::super::schema::install(connection))?;
+    assert_eq!(db.pairing_head()?, Some(existing.clone()));
+    db.connection.execute("DELETE FROM pairing_head", [])?;
+    let mut update = existing;
+    update.kind = "head_update".into();
+    update.invitation_id = None;
+    update.recipient_ref = None;
+    db.put_pairing_head(&update)?;
+    assert_eq!(db.pairing_head()?, Some(update.clone()));
+    update.revoked_ref = Some(super::helpers::ref_bytes("dev-a")?);
+    assert!(db.put_pairing_head(&update).is_err());
+    Ok(())
+}
+
 pub(super) fn tables_and_indexes() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-tables")?;
     let names: Vec<String> = TABLES.iter().map(|t| (*t).to_owned()).collect();
@@ -18,7 +42,23 @@ pub(super) fn tables_and_indexes() -> TestResult {
         )?;
         assert_eq!(n, 1, "{table}");
     }
-    assert_eq!(TABLES.len(), 5);
+    assert_eq!(
+        TABLES,
+        [
+            "pairing_floor",
+            "pairing_live",
+            "pairing_head",
+            "pairing_terminal",
+            "pairing_adoption",
+            "pairing_full_tail",
+            "pairing_source_cleanup",
+            "pairing_full_tail_apply",
+            "pairing_full_tail_dependency",
+            "pairing_full_completion",
+            "pairing_own_sync",
+        ],
+        "test: pairing journal owner inventory changed"
+    );
     for index in ["pairing_live_phase", "pairing_terminal_finished"] {
         let n: i64 = db.connection.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
@@ -35,7 +75,10 @@ pub(super) fn old_open_creates_tables() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-migrate")?;
     db.connection.execute_batch(
         "DROP TABLE pairing_live; DROP TABLE pairing_head; DROP TABLE pairing_terminal;
-         DROP TABLE pairing_adoption; DROP TABLE pairing_floor;",
+         DROP TABLE pairing_adoption; DROP TABLE pairing_floor; DROP TABLE pairing_full_tail;
+         DROP TABLE pairing_source_cleanup; DROP TABLE pairing_full_tail_apply;
+         DROP TABLE pairing_full_tail_dependency; DROP TABLE pairing_full_completion;
+         DROP TABLE pairing_own_sync;",
     )?;
     drop(db);
     let db = reopen(&root)?;

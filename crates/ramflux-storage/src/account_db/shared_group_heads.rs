@@ -5,7 +5,7 @@
 use super::AccountDb;
 use crate::StorageError;
 use serde::{Deserialize, Serialize};
-const RETAINED_HEADS: usize = 64;
+pub(super) const RETAINED_HEADS: usize = 64;
 #[derive(Deserialize, Serialize)]
 struct Head {
     epoch: u64,
@@ -32,7 +32,17 @@ impl AccountDb {
         if heads.len() > RETAINED_HEADS {
             heads.drain(..heads.len() - RETAINED_HEADS);
         }
-        self.persist_actor_state(&key, &heads)
+        self.persist_actor_state(&key, &heads)?;
+        let mut signed = self.retained_signed_group_heads(&state.view().group_id)?;
+        let hash = ramflux_protocol::custody::object_hash(state.snapshot())?;
+        signed.retain(|old| {
+            ramflux_protocol::custody::object_hash(old).is_ok_and(|old_hash| old_hash != hash)
+        });
+        signed.push(state.snapshot().clone());
+        if signed.len() > RETAINED_HEADS {
+            signed.drain(..signed.len() - RETAINED_HEADS);
+        }
+        self.persist_actor_state(&signed_key(&state.view().group_id), &signed)
     }
     /// Reverify the most recently pinned snapshot at a historical epoch.
     /// # Errors
@@ -66,5 +76,31 @@ impl AccountDb {
     ) -> Result<bool, StorageError> {
         let heads: Vec<Head> = self.load_actor_state(&key(group))?.unwrap_or_default();
         Ok(heads.iter().any(|head| head.epoch == epoch && head.hash == hash))
+    }
+}
+
+fn signed_key(group: &str) -> String {
+    format!("group-state/signed-heads/{}", ramflux_protocol::encode_base64url(group))
+}
+impl AccountDb {
+    /// Retained exact signed snapshots, reverified before use as denial evidence.
+    /// # Errors
+    /// Returns decoding, storage or signature failures. Hash-only history is never a witness.
+    pub fn retained_signed_group_heads(
+        &self,
+        group: &str,
+    ) -> Result<Vec<ramflux_protocol::GroupStateSnapshot>, StorageError> {
+        let heads: Vec<ramflux_protocol::GroupStateSnapshot> =
+            self.load_actor_state(&signed_key(group))?.unwrap_or_default();
+        if heads.len() > RETAINED_HEADS {
+            return Err(StorageError::GroupPermissionDenied);
+        }
+        for head in &heads {
+            let verified = ramflux_crypto::verify_group_state_snapshot(head.clone())?;
+            if verified.view().group_id != group {
+                return Err(StorageError::GroupPermissionDenied);
+            }
+        }
+        Ok(heads)
     }
 }

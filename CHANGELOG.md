@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now fail closed at load/startup (`UnsupportedPersistedFormat` where applicable).
   Current authority and acknowledged history must be preserved during operator repair.
 
+### Device pairing preview
+
+- Added journaled native head updates and exact-head recipient installation foundations.
+  Device pairing remains default-off and preview / CLI only; desktop and mobile
+  pairing companions are unavailable. See [device pairing](docs/device_pairing.md).
+
 ### Session push
 
 - Keep an offline catch-up in one pass while committed inbox coverage advances.

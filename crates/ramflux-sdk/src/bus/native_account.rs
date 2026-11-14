@@ -262,6 +262,9 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
 pub(super) async fn refresh_public_authority(
     account: &mut LocalBusAccountState,
 ) -> Result<(), SdkError> {
+    if let Some(custody) = &account.gateway_config.custody {
+        account.client.born_v3_vault = Some(custody.vault.clone());
+    }
     let root = account.client.account_index()?.root();
     let id = &account.client.account_db()?.local_account_id;
     let native = crate::custody::load_account(root, id, crate::custody::network_now()?)?;

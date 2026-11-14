@@ -544,7 +544,7 @@ async fn process_incoming(account: &LocalBusAccountState, now: i64) -> Result<()
         if let Err(error) = client.process_group_request_with_primary(
             &record.request,
             &account.target_delivery_id,
-            primary.as_ref(),
+            primary.as_deref(),
         ) {
             tracing::debug!(%error,"group request processing deferred");
         }

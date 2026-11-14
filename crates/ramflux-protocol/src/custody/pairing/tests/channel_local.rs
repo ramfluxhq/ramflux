@@ -346,6 +346,35 @@ fn credential_cases() -> TestResult {
             Err(WireError::Field(error))
         );
     }
+    let mut phrase = req.clone();
+    phrase["action"] = json!("phrase");
+    let phrase = decode_value::<CredentialRequest>(&phrase)?;
+    phrase.validate_input(
+        &phrase,
+        CredentialInput { passphrase: b"local phrase canary", confirmation: None },
+    )?;
+    assert_eq!(
+        phrase.validate_input(
+            &phrase,
+            CredentialInput {
+                passphrase: b"local phrase canary",
+                confirmation: Some(b"local phrase canary")
+            }
+        ),
+        Err(WireError::Field("credential_confirmation"))
+    );
+    assert_eq!(
+        phrase.validate_input(
+            &r,
+            CredentialInput { passphrase: b"local phrase canary", confirmation: None }
+        ),
+        Err(WireError::Field("credential_action"))
+    );
+    // The ordinary data-unlock route cannot issue the full-transfer phrase action.
+    assert_eq!(
+        phrase.validate_recipient_mode("existing"),
+        Err(WireError::Field("credential_mode"))
+    );
     let mut unlock = req.clone();
     unlock["action"] = json!("unlock");
     let u = decode_value::<CredentialRequest>(&unlock)?;

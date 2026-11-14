@@ -3,6 +3,7 @@
 
 //! Production `ProofPairingNative::from_connection` drives `CustodyConnection::prove`.
 use super::{PairingNative, ProofPairingNative};
+use crate::SdkError;
 use crate::custody::{CustodyConnection, CustodyNetworkConfig, memory_vault::MemoryPrimaryVault};
 use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, CreateTicket};
 use ramflux_protocol::custody::{
@@ -23,6 +24,8 @@ struct MockGateway {
     sent: Arc<Mutex<Vec<Vec<u8>>>>,
     replies: VecDeque<Vec<u8>>,
     node: Envelope<NodeIdentityRecord>,
+    accept_pairing: bool,
+    _lifetime: Arc<()>,
 }
 
 impl GatewaySessionFrameSink for MockGateway {
@@ -36,7 +39,7 @@ impl GatewaySessionFrameSink for MockGateway {
 
     fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
         self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(frame.to_vec());
-        let reply = reply_for(frame, &self.node);
+        let reply = reply_for(frame, &self.node, self.accept_pairing);
         self.replies.push_back(reply);
         Box::pin(async { Ok(()) })
     }
@@ -53,7 +56,7 @@ impl GatewaySessionFrameSource for MockGateway {
     }
 }
 
-fn reply_for(frame: &[u8], node: &Envelope<NodeIdentityRecord>) -> Vec<u8> {
+fn reply_for(frame: &[u8], node: &Envelope<NodeIdentityRecord>, accept_pairing: bool) -> Vec<u8> {
     let parsed: CustodyClientFrame = match serde_json::from_slice(frame) {
         Ok(parsed) => parsed,
         Err(_) => return refused(CustodyRefusal::InvalidInput),
@@ -69,10 +72,12 @@ fn reply_for(frame: &[u8], node: &Envelope<NodeIdentityRecord>) -> Vec<u8> {
             Ok(frame) => frame,
             Err(_) => return refused(CustodyRefusal::InvalidInput),
         },
-        CustodyClientFrame::Prove { action, proof } => match prove_reply(&action, &proof) {
-            Ok(frame) => frame,
-            Err(_) => return refused(CustodyRefusal::InvalidInput),
-        },
+        CustodyClientFrame::Prove { action, proof } => {
+            match prove_reply(&action, &proof, accept_pairing) {
+                Ok(frame) => frame,
+                Err(_) => return refused(CustodyRefusal::InvalidInput),
+            }
+        }
         _ => return refused(CustodyRefusal::Unsupported),
     };
     serde_json::to_vec(&response).unwrap_or_else(|_| refused(CustodyRefusal::InvalidInput))
@@ -95,6 +100,7 @@ fn challenge_reply(action: &CustodyProofAction) -> TestResult<CustodyServerFrame
 fn prove_reply(
     action: &CustodyProofAction,
     proof: &Envelope<ramflux_protocol::custody::BranchProofV3>,
+    accept_pairing: bool,
 ) -> TestResult<CustodyServerFrame> {
     let device = &proof.body.device_ref;
     let delivery =
@@ -118,6 +124,20 @@ fn prove_reply(
                 expires_at: proof.body.expires_at,
             },
         },
+        CustodyProofAction::PairingIssue { request } if accept_pairing => {
+            use ramflux_protocol::custody::pairing::native::{Issued, NativeReply, PairingReply};
+            CustodyServerFrame::Pairing {
+                reply: Box::new(PairingReply {
+                    schema: "ramflux.pairing.PairingReply.v2".into(),
+                    version: 2,
+                    reply: NativeReply::Issued(Box::new(Issued {
+                        schema: "ramflux.pairing.Issued.v2".into(),
+                        version: 2,
+                        ticket: dummy_create(request.spec.clone()).ticket,
+                    })),
+                }),
+            }
+        }
         CustodyProofAction::PairingIssue { .. } | CustodyProofAction::PairingCreate { .. } => {
             CustodyServerFrame::Refused {
                 code: CustodyRefusal::BindingRefused,
@@ -142,6 +162,9 @@ fn proof_operations(sent: &[Vec<u8>]) -> Vec<String> {
     sent.iter()
         .filter_map(|bytes| {
             let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+            if value.get("frame_type")?.as_str()? != "prove" {
+                return None;
+            }
             Some(value.get("action")?.get("operation")?.as_str()?.to_owned())
         })
         .collect()
@@ -199,9 +222,14 @@ struct Connected {
     _root: crate::custody::tests::Root,
     connection: CustodyConnection<MockGateway>,
     sent: Arc<Mutex<Vec<Vec<u8>>>>,
+    lifetime: std::sync::Weak<()>,
 }
 
 async fn connect_mock() -> TestResult<Connected> {
+    connect_mock_mode(false).await
+}
+
+async fn connect_mock_mode(proof_only: bool) -> TestResult<Connected> {
     let root = crate::custody::tests::Root::new()?;
     let vault = Arc::new(MemoryPrimaryVault::default());
     let now = crate::custody::network_now()?;
@@ -211,6 +239,7 @@ async fn connect_mock() -> TestResult<Connected> {
         .map_err(|error| error.to_string())?;
     let sent = Arc::new(Mutex::new(Vec::new()));
     let config = CustodyNetworkConfig {
+        pairing_admission: None,
         account_root: root.0.to_path_buf(),
         account_id: "alice".into(),
         device_id: "primary".into(),
@@ -227,20 +256,33 @@ async fn connect_mock() -> TestResult<Connected> {
     let mut retry = crate::custody::retry::AdmissionRetry::default();
     let node_record = node.envelope().clone();
     let sent_open = Arc::clone(&sent);
-    let ((), connection) = Box::pin(CustodyConnection::connect_with(
+    let lifetime = Arc::new(());
+    let weak = Arc::downgrade(&lifetime);
+    let ((), connection) = Box::pin(CustodyConnection::connect_with_mode(
         config,
         vault,
         &mut retry,
+        proof_only,
         move || {
             let sent = Arc::clone(&sent_open);
             let node_record = node_record.clone();
+            let lifetime = lifetime.clone();
             async move {
-                Ok(((), MockGateway { sent, replies: VecDeque::new(), node: node_record }))
+                Ok((
+                    (),
+                    MockGateway {
+                        sent,
+                        replies: VecDeque::new(),
+                        node: node_record,
+                        accept_pairing: proof_only,
+                        _lifetime: lifetime,
+                    },
+                ))
             }
         },
     ))
     .await?;
-    Ok(Connected { _root: root, connection, sent })
+    Ok(Connected { _root: root, connection, sent, lifetime: weak })
 }
 
 #[tokio::test]
@@ -254,8 +296,14 @@ async fn pairing_native_from_connection_sends_pairing_issue_and_create_proofs() 
         connected.connection,
     )));
     let spec = dummy_spec(&anchor, "primary", record_hash);
-    let _ = PairingNative::issue(&native, spec.clone()).await;
-    let _ = PairingNative::create(&native, dummy_create(spec)).await;
+    assert!(matches!(
+        PairingNative::issue(&native, spec.clone()).await,
+        Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))
+    ));
+    assert!(matches!(
+        PairingNative::create(&native, dummy_create(spec)).await,
+        Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))
+    ));
     let added: Vec<String> =
         proof_operations(&connected.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
             .into_iter()
@@ -267,5 +315,96 @@ async fn pairing_native_from_connection_sends_pairing_issue_and_create_proofs() 
     if !added.iter().any(|op| op == "pairing_create") {
         return Err(format!("missing pairing_create in {added:?}").into());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_fresh_proof_connection_closes_and_cannot_reappear_after_cancel() -> TestResult {
+    let connected = connect_mock_mode(true).await?;
+    assert!(
+        proof_operations(&connected.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+            .is_empty(),
+        "proof-only open must not publish, register or create an ordinary session"
+    );
+    assert!(connected.connection.session().is_none());
+    let spec = dummy_spec(
+        &connected.connection.account().record().body.account_anchor,
+        "primary",
+        object_hash(connected.connection.account().record())?,
+    );
+    let slot = Arc::new(Mutex::new(Some(connected.connection)));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let native = Arc::new(super::FreshPairingNative::with_factory(Arc::new({
+        let started = started.clone();
+        let release = release.clone();
+        move || {
+            let started = started.clone();
+            let release = release.clone();
+            let slot = slot.clone();
+            Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(SdkError::PairingCode("Busy"))
+            })
+        }
+    })));
+    let task = tokio::spawn({
+        let native = native.clone();
+        async move { native.issue(spec).await }
+    });
+    started.notified().await;
+    native.close();
+    release.notify_one();
+    assert!(matches!(task.await?, Err(SdkError::PairingCode("WrongContext"))));
+    assert!(connected.lifetime.upgrade().is_none(), "cancelled late connection must be dropped");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_node_record_comes_from_owned_proof_connection_and_does_not_reopen()
+-> TestResult {
+    let connected = connect_mock_mode(true).await?;
+    let spec = dummy_spec(
+        &connected.connection.account().record().body.account_anchor,
+        "primary",
+        object_hash(connected.connection.account().record())?,
+    );
+    let slot = Arc::new(Mutex::new(Some(connected.connection)));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let native = super::FreshPairingNative::with_factory(Arc::new({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let slot = slot.clone();
+            Box::pin(async move {
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(SdkError::PairingCode("Busy"))
+            })
+        }
+    }));
+    assert!(native.full_node().await.is_err(), "node read opened an unowned proof connection");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    native.issue(spec).await?;
+    let node = native.full_node().await?;
+    assert_eq!(node.envelope().body.node_id, "node");
+    assert_eq!(
+        node.envelope().body.node_signing_public_key,
+        ramflux_crypto::fixture_public_key_base64url()
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    native.close();
+    assert!(native.full_node().await.is_err(), "closed proof owner returned pinned node");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "node read re-opened retired connection"
+    );
+    assert!(connected.lifetime.upgrade().is_none(), "public node result retained proof connection");
     Ok(())
 }

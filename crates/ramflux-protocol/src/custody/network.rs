@@ -89,6 +89,10 @@ pub enum CustodyProofAction {
     PairingCreate {
         request: Box<super::pairing::native::Create>,
     },
+    /// Full data-only lease. Appended to preserve existing binary action discriminants.
+    PairingDataLease {
+        request: Box<super::pairing::full_transfer::lease::LeaseRequest>,
+    },
 }
 impl CustodyProofAction {
     #[must_use]
@@ -99,7 +103,8 @@ impl CustodyProofAction {
             | Self::PrekeyStatus { .. }
             | Self::RegisterUpdate { .. }
             | Self::PairingIssue { .. }
-            | Self::PairingCreate { .. } => "register",
+            | Self::PairingCreate { .. }
+            | Self::PairingDataLease { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
@@ -319,6 +324,10 @@ pub enum CustodyServerFrame {
         capacity: Option<CapacityHint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryHint>,
+    },
+    /// Node-signed data capability; never an ordinary session or publication receipt.
+    PairingDataLease {
+        lease: Box<Envelope<super::pairing::full_transfer::lease::DataLease>>,
     },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately

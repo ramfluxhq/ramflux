@@ -543,6 +543,10 @@ impl RouterHandle {
             )
             .map_err(Into::into)
     }
+    pub(crate) fn pairing_node(&self) -> Option<&ramflux_crypto::custody::VerifiedNodeRecord> {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map(|service| service.pairing_node())
+    }
     pub(crate) fn pairing_relay(
         &self,
     ) -> Option<Arc<std::sync::Mutex<ramflux_node_core::pairing_relay::PairingRelayStore>>> {

@@ -38,10 +38,14 @@ pub fn reopen(
     let installed = install_store::read_installed(root, account_id)?;
     let expected_hash = installed.as_ref().and_then(|row| row.record_hash.clone());
     let files_and_db_agree = match (installed.as_ref(), adoption_hash) {
-        (Some(row), Some(hash)) => row.record_hash.as_deref() == Some(hash),
+        (Some(row), Some(hash)) => {
+            // v3 additionally requires the real generation/adoption/index receipts.
+            // This legacy record-hash-only route cannot open full-transfer admission.
+            row.full_transfer.is_none() && row.record_hash.as_deref() == Some(hash)
+        }
         _ => false,
     };
-    let restrictive = !pending.is_empty()
+    let restrictive = install_store::pending_blocks_network(&pending, installed.as_ref())
         || installed.as_ref().is_some_and(|row| row.state != "installed")
         || !files_and_db_agree
         || !authority_present;

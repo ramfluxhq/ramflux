@@ -5,8 +5,6 @@ use super::{Install, LIMIT, decode, encode, list_pending, pending_path, write_pe
 use crate::SdkError;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::encode_base64url;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 fn h(byte: u8) -> String {
     encode_base64url([byte; 32])
@@ -34,6 +32,7 @@ fn base(purpose: &str, state: &str) -> Install {
         state: state.into(),
         cleanup_ref: None,
         cleanup_owner_ref: None,
+        full_transfer: None,
     }
 }
 
@@ -161,7 +160,7 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
     let path = pending_path(&root, "acct", &h(30));
     assert!(path.is_file(), "pending enrollment file missing");
     #[cfg(unix)]
-    assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(crate::platform::fs::permission_bits(&path)?, 0o600);
     assert_eq!(list_pending(&root, "acct")?.len(), 3);
     let fourth_path = pending_path(&root, "acct", &h(40));
     std::fs::write(&fourth_path, encode(&fourth)?)?;

@@ -15,6 +15,7 @@ fn network(
     ca: &Path,
 ) -> CustodyNetworkConfig {
     CustodyNetworkConfig {
+        pairing_admission: None,
         account_root: root.into(),
         account_id: id.into(),
         device_id: device.into(),

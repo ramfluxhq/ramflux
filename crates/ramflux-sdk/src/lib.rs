@@ -208,7 +208,10 @@ pub use object::{SdkObjectRelayCapability, SdkRelayToken};
 pub use prekey::SdkDeviceManifestResponse;
 
 #[cfg(feature = "test-support")]
-pub use bus::account_runtime::testing::{AccountSessionFixture, AccountSessionHarness};
+pub use bus::account_runtime::testing::{
+    AccountSessionFixture, AccountSessionHarness, NativePairingNetworkFixture,
+    NativePairingSessionFixture,
+};
 #[cfg(feature = "test-support")]
 pub use bus::account_runtime::testing_calls::NativeCallAccount;
 

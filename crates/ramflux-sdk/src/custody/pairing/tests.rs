@@ -29,8 +29,8 @@ type BoxFut<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send>>;
 const WALL: u64 = 1_760_000_000;
 const ORIGIN: &str = "https://relay.example:443";
 
-struct StoreNative {
-    store: Arc<Mutex<PairingRelayStore>>,
+pub(super) struct StoreNative {
+    pub(super) store: Arc<Mutex<PairingRelayStore>>,
 }
 
 impl PairingNative for StoreNative {
@@ -44,8 +44,8 @@ impl PairingNative for StoreNative {
     }
 }
 
-struct MemoryRelay {
-    store: Arc<Mutex<PairingRelayStore>>,
+pub(super) struct MemoryRelay {
+    pub(super) store: Arc<Mutex<PairingRelayStore>>,
 }
 
 impl PairingTransport for MemoryRelay {
@@ -173,10 +173,34 @@ async fn pairing_disabled_without_opt_in() -> TestResult {
     let config = PairingConfig { enabled: false, extra_root_ca_pem: None };
     assert!(!config.enabled);
     let mut fx = Fixture::with_config(config)?;
-    match fx.primary.begin(begin_body()).await {
-        Err(SdkError::PairingCode("NotFound")) => Ok(()),
-        other => Err(format!("disabled begin: {other:?}").into()),
+    assert!(matches!(fx.primary.begin(begin_body()).await, Err(SdkError::PairingCode("NotFound"))));
+    let root = tempfile::tempdir()?;
+    assert!(
+        matches!(
+            super::install_actor(root.path(), "primary".into(), fx.primary),
+            Err(SdkError::PairingCode("NotFound"))
+        ),
+        "disabled actor was installed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_disabled_status_and_relay_refuse_existing_ceremony() -> TestResult {
+    let mut fx = Fixture::open()?;
+    let (operation, generation) = joined(&mut fx).await?;
+    let request = status_req(&operation, generation);
+    fx.primary.set_enabled_for_test(false);
+    for result in [
+        fx.primary.status(&request).await,
+        fx.primary.transfer_status(&request).await,
+        fx.primary.sync_relay().await,
+    ] {
+        assert!(matches!(result, Err(SdkError::PairingCode("NotFound"))), "{result:?}");
     }
+    fx.primary.set_enabled_for_test(true);
+    fx.primary.status(&request).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -272,18 +296,17 @@ async fn pairing_bad_mac_is_terminal() -> TestResult {
 }
 
 async fn joined(fx: &mut Fixture) -> TestResult<(String, u64)> {
-    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let begun = begin_result(Box::pin(fx.primary.begin(begin_body())).await?)?;
     let op = begun.operation_id.clone();
     let generation = begun.generation;
-    fx.recipient
-        .join(Join {
-            schema: "ramflux.pairing.Join.v2".into(),
-            version: 2,
-            token: begun.invite_token,
-            display_name: "Recipient".into(),
-        })
-        .await?;
-    drive_sas(fx, &op, generation).await?;
+    Box::pin(fx.recipient.join(Join {
+        schema: "ramflux.pairing.Join.v2".into(),
+        version: 2,
+        token: begun.invite_token,
+        display_name: "Recipient".into(),
+    }))
+    .await?;
+    Box::pin(drive_sas(fx, &op, generation)).await?;
     Ok((op, generation))
 }
 
@@ -384,6 +407,7 @@ fn begin_result(result: LocalResult) -> TestResult<BeginResult> {
         Outcome::Begin { value } => Ok(*value),
         Outcome::Update { value } => Err(format!("begin {}", value.phase).into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
@@ -392,6 +416,7 @@ fn update(result: LocalResult) -> TestResult<Update> {
         Outcome::Update { value } => Ok(*value),
         Outcome::Begin { .. } => Err("update was begin".into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
@@ -483,7 +508,9 @@ async fn pairing_join_commitment_uses_staged_identity() -> TestResult {
     drive_sas(&mut fx, &op, generation).await?;
     let pending = install_store::list_pending(root.path(), "acct-stage-join")?;
     assert_eq!(pending.len(), 1);
-    let committed = fx.recipient.commitment_device_id().ok_or("commitment")?;
+    let observed = update(fx.primary.status(&status_req(&op, generation)).await?)?;
+    let peer = observed.peer_ref.ok_or("primary did not receive staged commitment")?;
+    let committed = peer.device_id;
     assert_eq!(committed, pending[0].recipient_ref.device_id);
     assert_ne!(committed, "recipient");
     Ok(())
@@ -521,5 +548,47 @@ async fn pairing_staging_failure_queues_no_commit() -> TestResult {
         other => return Err(format!("staging failure: {other:?}").into()),
     }
     assert!(fx.recipient.commitment_device_id().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_bus_actor_ownership_is_root_scoped_and_lock_retires_it() -> TestResult {
+    let fx = Fixture::open()?;
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    super::install_actor(first.path(), "primary".into(), fx.primary)?;
+    let result = super::handle_bus(
+        first.path(),
+        "primary",
+        "device.pair.begin",
+        serde_json::to_value(begin_body())?,
+    )
+    .await?;
+    let begun = begin_result(result)?;
+    let request = serde_json::to_value(status_req(&begun.operation_id, begun.generation))?;
+    assert!(matches!(
+        super::handle_bus(second.path(), "primary", "device.pair.status", request.clone()).await,
+        Err(SdkError::PairingCode("NotFound"))
+    ));
+    let aliased = first.path().join(".");
+    assert_no_token(
+        &super::handle_bus(&aliased, "primary", "device.pair.status", request.clone()).await?,
+        &begun.invite_token.recipient_token,
+    )?;
+    let duplicate = PairingActor::new(
+        identity("primary", true, true),
+        None,
+        Arc::new(MemoryRelay { store: fx.store.clone() }),
+        PairingConfig { enabled: true, extra_root_ca_pem: None },
+    );
+    assert!(matches!(
+        super::install_actor(&aliased, "primary".into(), duplicate),
+        Err(SdkError::PairingCode("Busy"))
+    ));
+    super::remove_actor(&aliased, "primary")?;
+    assert!(matches!(
+        super::handle_bus(first.path(), "primary", "device.pair.status", request).await,
+        Err(SdkError::PairingCode("NotFound"))
+    ));
     Ok(())
 }

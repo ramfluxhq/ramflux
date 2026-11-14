@@ -5,6 +5,7 @@
 
 use crate::{ACCOUNT_DB_FILE, AccountIndex, BACKUP_GENERATION_MARKER, StorageError};
 use rusqlite::params;
+
 use std::path::Path;
 
 /// Backup generation trees (`generation_<job>`) live beside the root database.
@@ -70,7 +71,8 @@ impl AccountIndex {
               WHERE local_account_id = ?1",
             params![local_account_id, REMOVED],
         )?;
-        remove_root_payload(&self.root().join("accounts").join(local_account_id))
+        remove_root_payload(&self.root().join("accounts").join(local_account_id))?;
+        crate::FileVaultSecretSource::new(self.root()).remove_erased_owner(local_account_id)
     }
 }
 
@@ -136,4 +138,26 @@ fn remove_root_payload(dir: &Path) -> Result<(), StorageError> {
     }
     crate::sync_path::sync_path(dir)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pairing_owner_tests {
+    use crate::{AccountIndex, FileVaultSecretSource, VaultSecretSource};
+
+    #[test]
+    fn pairing_account_erase_removes_only_its_data_key_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (root, db) = crate::tests::test_db("pairing-data-owner-erase")?;
+        let source = FileVaultSecretSource::new(&root);
+        let _owned = zeroize::Zeroizing::new(source.vault_secret("acct")?);
+        let _other = zeroize::Zeroizing::new(source.vault_secret("other")?);
+        assert!(source.vault_secret_path("acct").is_file());
+        drop(db);
+        let index = AccountIndex::open(&root)?;
+        index.erase_account_database("acct")?;
+        assert!(!source.vault_secret_path("acct").exists());
+        assert!(source.vault_secret_path("other").is_file());
+        index.erase_account_database("acct")?;
+        Ok(())
+    }
 }

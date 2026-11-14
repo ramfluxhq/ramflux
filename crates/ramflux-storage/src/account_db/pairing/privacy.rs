@@ -7,7 +7,18 @@ use super::schema::TABLES;
 use crate::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 
-const STRIP: [&str; 4] = ["pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption"];
+const STRIP: [&str; 10] = [
+    "pairing_live",
+    "pairing_head",
+    "pairing_terminal",
+    "pairing_adoption",
+    "pairing_full_tail",
+    "pairing_source_cleanup",
+    "pairing_full_tail_dependency",
+    "pairing_full_tail_apply",
+    "pairing_full_completion",
+    "pairing_own_sync",
+];
 
 /// True when a pairing table must not be row-merged from an incoming backup.
 #[must_use]
@@ -107,7 +118,18 @@ fn table_exists(db: &Connection, table: &str) -> rusqlite::Result<bool> {
 }
 
 fn local_pairing_account(db: &Connection) -> Result<Option<String>, StorageError> {
-    for table in TABLES {
+    // Operation-scoped tail/application ledgers are stripped too, but have no
+    // account_id column and cannot establish the local floor's account binding.
+    const ACCOUNT_TABLES: [&str; 7] = [
+        "pairing_floor",
+        "pairing_live",
+        "pairing_head",
+        "pairing_terminal",
+        "pairing_adoption",
+        "pairing_full_tail",
+        "pairing_source_cleanup",
+    ];
+    for table in ACCOUNT_TABLES {
         if !table_exists(db, table)? {
             continue;
         }

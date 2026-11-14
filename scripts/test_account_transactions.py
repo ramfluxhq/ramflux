@@ -82,6 +82,20 @@ class TransactionGuardTests(unittest.TestCase):
         self.check('fn transaction() { db.execute_batch("BEGIN IMMEDIATE")?; }', False, 'database.rs')
         self.check('fn call() { db.savepoint()?; }', True, 'database.rs')
 
+    def test_array_lengths_do_not_end_function_scope(self):
+        self.check(
+            'fn capture(owners: [&DeviceRef; 2]) { db.transaction()?; }',
+            False, 'account_db/full_transfer/receiver_contributions.rs',
+        )
+        self.check(
+            'fn finish(root: [u8; 32]) -> [u8; 32] { db.execute_batch("COMMIT")?; }',
+            False, 'account_db/full_transfer/source_wire.rs',
+        )
+        self.check(
+            'fn finish(root: [u8; 32]) { } fn live_write(root: [u8; 32]) { db.execute_batch("BEGIN")?; }',
+            True, 'account_db/full_transfer/source_wire.rs',
+        )
+
     def test_raw_strings_and_nested_comments_preserve_function_boundaries(self):
         self.check('fn harmless() { let s = r#" } // "#; /* outer /* nested */ */ }\nfn bad() { db.savepoint()?; }')
 

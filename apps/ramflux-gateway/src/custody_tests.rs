@@ -510,6 +510,27 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
     let mut mismatched = grant();
     mismatched.session.record_hash = ramflux_protocol::encode_base64url([34; 32]);
     assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
+    assert!(crate::session::native_live_authority_matches(
+        &key,
+        &mismatched,
+        &key.branch_public_key,
+        now
+    ));
+    let mut revoked = key.clone();
+    revoked.revoked = true;
+    assert!(!crate::session::native_live_authority_matches(
+        &revoked,
+        &mismatched,
+        &key.branch_public_key,
+        now
+    ));
+    assert!(!crate::session::native_live_authority_matches(
+        &key,
+        &mismatched,
+        "foreign-branch",
+        now
+    ));
+
     mismatched = grant();
     mismatched.session.device_ref.device_epoch += 1;
     assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);

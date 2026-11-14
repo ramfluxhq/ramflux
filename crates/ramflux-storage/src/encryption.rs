@@ -4,7 +4,7 @@
 #![allow(clippy::wildcard_imports)]
 use crate::database::Connection;
 use crate::*;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeMap;
@@ -113,6 +113,24 @@ impl FileVaultSecretSource {
     #[must_use]
     pub fn vault_secret_path(&self, local_account_id: &str) -> PathBuf {
         self.root.join("vault").join(format!("{local_account_id}.key"))
+    }
+
+    pub(crate) fn remove_erased_owner(&self, local_account_id: &str) -> Result<(), StorageError> {
+        let path = self.vault_secret_path(local_account_id);
+        let parent = path.parent().ok_or(StorageError::AuthorizationRejected)?;
+        for candidate in [parent, path.as_path()] {
+            match fs::symlink_metadata(candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(StorageError::Integrity("account erase symlink"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        fs::remove_file(&path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
 }
 
@@ -235,14 +253,18 @@ pub fn wrap_with_vault_secret(
     let random = ramflux_crypto::random_32()?;
     let mut nonce = [0_u8; 12];
     nonce.copy_from_slice(&random[..12]);
-    let ciphertext = ChaCha20Poly1305::new(Key::from_slice(vault_secret))
-        .encrypt(
+    let mut ciphertext = zeroize::Zeroizing::new(Vec::with_capacity(48));
+    ciphertext.extend_from_slice(key);
+    ChaCha20Poly1305::new(Key::from_slice(vault_secret))
+        .encrypt_in_place(
             Nonce::from_slice(&nonce),
-            Payload { msg: key.as_slice(), aad: b"ramflux.account_db_key.wrap.v1" },
+            b"ramflux.account_db_key.wrap.v1",
+            &mut *ciphertext,
         )
-        .map_err(|_err| {
+        .map_err(|_| {
             StorageError::KeyWrappingFailed("account DB key AEAD wrap failed".to_owned())
         })?;
+    let ciphertext = std::mem::take(&mut *ciphertext);
     Ok((nonce, ciphertext))
 }
 
@@ -252,28 +274,32 @@ pub fn unwrap_with_vault_secret(
     vault_secret: &[u8; 32],
     wrapped: &WrappedAccountDbKey,
 ) -> Result<AccountDbKey, StorageError> {
-    let plaintext = ChaCha20Poly1305::new(Key::from_slice(vault_secret))
-        .decrypt(
+    let mut plaintext = zeroize::Zeroizing::new(wrapped.wrapped_key.clone());
+    ChaCha20Poly1305::new(Key::from_slice(vault_secret))
+        .decrypt_in_place(
             Nonce::from_slice(&wrapped.nonce),
-            Payload { msg: wrapped.wrapped_key.as_slice(), aad: b"ramflux.account_db_key.wrap.v1" },
+            b"ramflux.account_db_key.wrap.v1",
+            &mut *plaintext,
         )
-        .map_err(|_err| StorageError::Integrity("wrong passphrase or damaged local key"))?;
-    let bytes: [u8; 32] = plaintext.try_into().map_err(|bytes: Vec<u8>| {
-        StorageError::KeyWrappingFailed(format!("invalid unwrapped DB key length: {}", bytes.len()))
-    })?;
-    Ok(AccountDbKey { bytes })
+        .map_err(|_| StorageError::Integrity("wrong passphrase or damaged local key"))?;
+    if plaintext.len() != 32 {
+        return Err(StorageError::Integrity("invalid unwrapped DB key length"));
+    }
+    let mut bytes = zeroize::Zeroizing::new([0; 32]);
+    bytes.copy_from_slice(&plaintext);
+    Ok(AccountDbKey { bytes: *bytes })
 }
 
 pub(crate) fn apply_key(connection: &Connection, key: &AccountDbKey) -> Result<(), StorageError> {
-    connection.execute_batch(&format!(
+    connection.execute_batch(&zeroize::Zeroizing::new(format!(
         "PRAGMA key = \"x'{}'\";
          PRAGMA cipher_page_size = 4096;
          PRAGMA kdf_iter = 256000;
          PRAGMA cipher_hmac_algorithm = HMAC_SHA512;
          PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;
          PRAGMA foreign_keys = ON;",
-        key.sqlcipher_hex()
-    ))?;
+        zeroize::Zeroizing::new(key.sqlcipher_hex()).as_str()
+    )))?;
     Ok(())
 }
 

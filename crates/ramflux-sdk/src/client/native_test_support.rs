@@ -120,3 +120,4 @@ pub(crate) mod watchdog;
 
 #[cfg(all(ramflux_itest, not(ramflux_release_profile), not(ramflux_production)))]
 mod local_search;
+pub(crate) mod pairing_history;

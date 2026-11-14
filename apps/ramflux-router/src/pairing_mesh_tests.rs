@@ -354,3 +354,72 @@ fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
     drop(env);
     Ok(())
 }
+
+#[test]
+fn pairing_mesh_full_unknown_token_is_refused_before_bulk_read_and_redacted() -> TestResult {
+    let (_redb, _record, handle, _env, _) = wired_handle("pairing-mesh-full-prebody")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let socket = std::net::TcpStream::connect(listener.local_addr()?)?;
+    let (_remote, _) = listener.accept()?;
+    let peer = ramflux_node_core::parse_mesh_spiffe_uri("spiffe://node/ramflux-federation")?;
+    let ctx = crate::pairing_full::ReadContext {
+        router: &handle,
+        peer: &peer,
+        socket,
+        accepted: std::time::Instant::now(),
+    };
+    let token = id(73);
+    let auth = format!("Authorization: PairingFull {}.{}.initiator.{token}\r\n", id(71), id(72));
+    let route = "/pairing/v1/full/send";
+    let operands = format!(
+        "X-Ramflux-Pairing-Arm: send\r\nX-Ramflux-Pairing-Nonce: {}\r\nX-Ramflux-Pairing-Permit: {}\r\n",
+        id(74),
+        id(75)
+    );
+    for authorization in [String::new(), auth.clone(), format!("{auth}{auth}")] {
+        let raw = format!(
+            "POST {route} HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 524288\r\n{operands}{authorization}\r\n"
+        );
+        let mut header_only = std::io::Cursor::new(raw.as_bytes());
+        let result = ramflux_transport::read_bounded_mesh_http_request_with_admission(
+            &mut header_only,
+            &crate::pairing_full::cap,
+            |method, path, headers, bytes| {
+                crate::pairing_full::admit(&ctx, method, path, headers, bytes)
+            },
+        );
+        let Err(error) = result else { anyhow::bail!("unowned bulk body admitted") };
+        assert_eq!(
+            error.to_string(),
+            "HTTP error: full pairing mesh refused",
+            "test: pre-body refusal lost its redacted error class"
+        );
+        assert!(
+            !error.to_string().contains(&token),
+            "test: unknown DATA token reached diagnostics"
+        );
+        assert!(
+            !error.to_string().contains("PairingFull"),
+            "test: DATA authorization reached diagnostics"
+        );
+        assert_eq!(
+            header_only.position(),
+            u64::try_from(raw.len())?,
+            "test: unowned body bytes were read before native admission"
+        );
+        assert_eq!(
+            handle
+                .pairing_relay()
+                .ok_or_else(|| anyhow::anyhow!("relay"))?
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .stats()
+                .full,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[path = "pairing_mesh_full_tests.rs"]
+mod full;

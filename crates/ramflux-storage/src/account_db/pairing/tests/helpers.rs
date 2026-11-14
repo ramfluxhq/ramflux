@@ -163,6 +163,8 @@ pub(super) fn adoption(role: &str, primary: Option<&str>) -> TestResult<Adoption
         branch_vault_ref: "vault-branch".into(),
         data_vault_ref: "vault-data".into(),
         primary_vault_ref: primary.map(str::to_owned),
+        full_generation_nonce: None,
+        full_initial_union_root: None,
     })
 }
 
@@ -230,7 +232,7 @@ pub(super) fn publication_at(epoch: u64) -> TestResult<(Vec<u8>, String, u64)> {
     Ok((bytes, candidate_hash, epoch))
 }
 
-pub(super) fn head() -> TestResult<HeadRow> {
+pub(in crate::account_db) fn head() -> TestResult<HeadRow> {
     let (candidate, candidate_hash, _) = publication()?;
     Ok(HeadRow {
         account_id: "acct".into(),

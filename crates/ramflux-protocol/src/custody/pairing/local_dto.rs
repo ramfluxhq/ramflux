@@ -13,6 +13,13 @@ fn local_base(id: &str, generation: u64) -> Result<()> {
     integer(generation, "generation")?;
     require(generation >= 1, "generation")
 }
+mod affirm;
+pub use affirm::TransferAffirm;
+mod full;
+pub use full::FullTransferBegin;
+mod full_status;
+pub use full_status::{FullStatus, FullStatusStage, FullTailStatus};
+
 fn name(v: &str) -> Result<()> {
     require(v.len() <= 128 && crate::text_safety::free_text_is_safe(v), "display_name")
 }
@@ -67,6 +74,7 @@ pub struct TransferBegin {
     pub schema: String,
     pub version: u32,
     pub recipient_mode: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub destination_ref: Option<DeviceRef>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
@@ -228,15 +236,22 @@ pub struct Update {
     pub generation: u64,
     pub phase: String,
     pub expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub transcript_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub emoji_indices: Option<Vec<u64>>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub peer_ref: Option<DeviceRef>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub peer_name: Option<String>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
     pub lease_expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub proposal_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub record_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub result: Option<String>,
     pub cleanup: String,
 }
@@ -321,6 +336,7 @@ impl PairingWire for BeginResult {
 pub enum Outcome {
     Begin { value: Box<BeginResult> },
     Update { value: Box<Update> },
+    FullStatus { value: Box<FullStatus> },
     Error { error: Failure },
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,7 +350,7 @@ impl PairingWire for LocalResult {
     fn received_limit(&self) -> usize {
         match self.outcome {
             Outcome::Begin { .. } => 18_432,
-            Outcome::Update { .. } => 4608,
+            Outcome::Update { .. } | Outcome::FullStatus { .. } => 4608,
             Outcome::Error { .. } => 1024,
         }
     }
@@ -346,6 +362,10 @@ impl PairingWire for LocalResult {
                 value.validate()?;
             }
             Outcome::Update { value } => {
+                value.validate()?;
+                budget(self, 4608)?;
+            }
+            Outcome::FullStatus { value } => {
                 value.validate()?;
                 budget(self, 4608)?;
             }
@@ -369,16 +389,24 @@ impl LocalResult {
                 || matches!(
                     method,
                     "pair.join"
+                        | "transfer.join"
                         | "pair.confirm"
                         | "pair.approve"
                         | "pair.cancel"
                         | "pair.status"
                         | "transfer.prepare"
+                        | "transfer.affirm"
                         | "transfer.confirm"
                         | "transfer.cancel"
+                        | "transfer.tail_abandon"
                         | "transfer.status"
                 ),
             "method",
+        )?;
+        require(
+            !matches!(self.outcome, Outcome::FullStatus { .. })
+                || matches!(method, "transfer.status" | "transfer.tail_abandon"),
+            "full_status_method",
         )?;
         require(
             matches!(self.outcome, Outcome::Error { .. })
@@ -387,18 +415,33 @@ impl LocalResult {
         )
     }
 }
+/// The v2 update event is byte-compatible. Full progress uses the same tagged
+/// success arm as `LocalResult`, with no optional fields or mixed alternatives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalEvent {
-    pub schema: String,
-    pub version: u32,
-    pub update: Update,
+#[serde(untagged, deny_unknown_fields)]
+pub enum LocalEvent {
+    Update { schema: String, version: u32, update: Box<Update> },
+    FullStatus { schema: String, version: u32, outcome: FullStatusEvent },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FullStatusEvent {
+    FullStatus { value: Box<FullStatus> },
 }
 impl PairingWire for LocalEvent {
     const LIMIT: usize = 4608;
     fn validate(&self) -> Result<()> {
-        header(&self.schema, self.version, "LocalEvent")?;
-        self.update.validate()?;
+        match self {
+            Self::Update { schema, version, update } => {
+                header(schema, *version, "LocalEvent")?;
+                update.validate()?;
+            }
+            Self::FullStatus { schema, version, outcome } => {
+                header(schema, *version, "LocalEvent")?;
+                let FullStatusEvent::FullStatus { value } = outcome;
+                value.validate()?;
+            }
+        }
         budget(self, Self::LIMIT)
     }
 }
@@ -417,7 +460,7 @@ impl PairingWire for CredentialRequest {
         b32(&self.reservation_id, "reservation_id")?;
         integer(self.frontend_generation, "frontend_generation")?;
         require(self.frontend_generation >= 1, "frontend_generation")?;
-        require(matches!(self.action.as_str(), "setup" | "unlock"), "action")?;
+        require(matches!(self.action.as_str(), "setup" | "unlock" | "phrase"), "action")?;
         budget(self, Self::LIMIT)
     }
 }

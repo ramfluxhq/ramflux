@@ -13,6 +13,9 @@ mod commands;
 mod transient;
 pub(super) use transient::TransientHost;
 mod connection;
+mod pairing_calls;
+mod pairing_data;
+mod pairing_own_sync;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -66,6 +69,7 @@ struct AccountRuntime {
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     transient: TransientHost,
+    pairing: pairing_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -141,12 +145,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         connection_work,
         ledger: None,
         transient: TransientHost::default(),
+        pairing: pairing_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
     if let Some(state) = account.state.accounts.get(&account.id) {
@@ -163,7 +169,12 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
     );
     let flushed = account.publish(&request).await;
     account.close_readers().await;
-    result.and(flushed)
+    let pairing = crate::custody::pairing::remove_actor_and_drain(
+        &account.state.config.data_root,
+        &account.id,
+    )
+    .await;
+    result.and(flushed).and(pairing)
 }
 
 impl AccountRuntime {
@@ -326,6 +337,41 @@ impl AccountRuntime {
         Ok(true)
     }
 
+    fn reap_transfer_jobs(&mut self) {
+        self.reap_upload_jobs();
+        self.reap_fetch_jobs();
+    }
+
+    async fn service_courier_outcome(
+        &mut self,
+        outcome: Option<super::task_courier::Outcome>,
+    ) -> Result<(), SdkError> {
+        if let Some(outcome) = outcome {
+            self.apply_courier_outcome(outcome)?;
+        } else {
+            tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
+            self.stop_courier().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            self.start_connection()?;
+            self.start_courier();
+        }
+        Ok(())
+    }
+
+    fn maintain_expired_object_holds(&self) {
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && let Err(error) = account
+                .client
+                .account_db()
+                .and_then(|db| db.maintain_expired_object_holds().map_err(SdkError::from))
+        {
+            tracing::warn!(
+                error_code = local_bus_error_code(&error),
+                "expired object cleanup deferred; account remains open"
+            );
+        }
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
@@ -341,14 +387,16 @@ impl AccountRuntime {
             self.refresh_transient_host().await;
             self.publish_transient_updates();
             let transient_deadline = self.transient_deadline();
+            Box::pin(self.refresh_pairing_reader_generation()).await?;
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
                 }
                 continue;
             }
-            self.reap_upload_jobs();
-            self.reap_fetch_jobs();
+            self.reap_transfer_jobs();
+            let pairing =
+                crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => break,
@@ -372,29 +420,27 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => { self.publish_transient_updates(); continue; },
+                completion = self.pairing.receive() => {
+                    if let Some(completion) = completion
+                        && self.finish_pairing_begin(completion).await? { break; }
+                    continue;
+                },
                 command = self.receiver.recv() => command,
+                () = wait_pairing_signal(pairing) => {
+                    Box::pin(self.service_pairing_data()).await;
+                    continue;
+                },
                 outcome = async {
                     match self.courier.as_mut() {
                         Some(courier) => courier.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(outcome) = outcome {
-                        self.apply_courier_outcome(outcome)?;
-                    } else {
-                        tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
-                        self.stop_courier().await;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        self.start_connection()?;
-                        self.start_courier();
-                    }
+                    self.service_courier_outcome(outcome).await?;
                     continue;
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
-                    if let Some(account)=self.state.accounts.get(&self.id)
-                        && let Err(error)=account.client.account_db().and_then(|db|db.maintain_expired_object_holds().map_err(SdkError::from)) {
-                        tracing::warn!(error_code=local_bus_error_code(&error),"expired object cleanup deferred; account remains open");
-                    }
+                    self.maintain_expired_object_holds();
                     let mut shutdown = self.shutdown.clone();
                     let active = tokio::select! {
                         _ = shutdown.changed() => break,
@@ -433,6 +479,7 @@ impl AccountRuntime {
 
     async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
+        self.maintain_pairing_own_sync().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -483,3 +530,10 @@ pub mod testing_calls;
 
 #[cfg(feature = "test-support")]
 mod testing_authority;
+
+async fn wait_pairing_signal(signal: Option<std::sync::Arc<tokio::sync::Notify>>) {
+    match signal {
+        Some(signal) => signal.notified().await,
+        None => std::future::pending().await,
+    }
+}

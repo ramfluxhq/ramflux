@@ -5,7 +5,8 @@
 mod backup;
 mod codec;
 mod crash;
-mod helpers;
+mod full_reference;
+pub(in crate::account_db) mod helpers;
 mod schema;
 
 #[test]
@@ -53,3 +54,5 @@ fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::er
     backup::floor_merge_binds_local_account()?;
     Ok(())
 }
+
+mod full_adoption;

@@ -34,6 +34,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
+#[path = "pairing_continuity_tests/native_devices.rs"]
+mod native_devices;
+
+#[cfg(unix)]
+#[path = "../../rf/tests/e2e/mod.rs"]
+mod process_stack;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 struct Continuity {
@@ -46,8 +53,9 @@ struct Continuity {
     native: Arc<ProofPairingNative>,
     secondary_native: Arc<ProofPairingNative>,
     published: PublishedPrimary,
+    config: PairingConfig,
     _env: PairingEnv,
-    _node: NodeMesh,
+    node: NodeMesh,
     _tls: crate::test_directories::TestDirectory,
     _public: crate::public_http::PublicHttpGuard,
     _front: TlsFront,
@@ -121,7 +129,7 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
     drop(fx);
 
     let mut fx = Continuity::open()?;
-    let (op, _) = joined(&mut fx).await?;
+    let (op, _) = Box::pin(joined(&mut fx)).await?;
     let mut bad = confirm_ok(&fx.primary, &op)?;
     bad.r#match = false;
     let mismatch = update(fx.primary.confirm(&bad).await?)?;
@@ -132,7 +140,7 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
     drop(fx);
 
     let mut fx = Continuity::open()?;
-    let _ = joined(&mut fx).await?;
+    let _ = Box::pin(joined(&mut fx)).await?;
     let changed = update(fx.primary.note_head_change().await?)?;
     assert_eq!(
         (changed.phase.as_str(), changed.result.as_deref()),
@@ -219,7 +227,7 @@ async fn pairing_forged_invitation_is_refused() -> TestResult {
 #[tokio::test]
 async fn pairing_stale_generation_is_refused() -> TestResult {
     let mut fx = Continuity::open()?;
-    let (op, generation) = joined(&mut fx).await?;
+    let (op, generation) = Box::pin(joined(&mut fx)).await?;
     let mut stale = confirm_ok(&fx.primary, &op)?;
     stale.generation = generation.saturating_add(1);
     match fx.primary.confirm(&stale).await {
@@ -290,8 +298,13 @@ impl Continuity {
         let origin = format!("https://localhost:{}", front.local_addr()?.port());
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let clock = TestPairingClock::new(now);
-        let node =
-            spawn_node_mesh_at(origin.clone(), Some(Arc::clone(&clock) as Arc<dyn PairingClock>))?;
+        let node = spawn_node_mesh_at(
+            origin.clone(),
+            Some(
+                Arc::new(RelayClock { manual: clock.clone(), started: std::time::Instant::now() })
+                    as Arc<dyn PairingClock>,
+            ),
+        )?;
         let router = Arc::new(RouterMeshClient {
             endpoint: node.endpoint.clone(),
             server_name: "ramflux-router".into(),
@@ -344,7 +357,7 @@ impl Continuity {
                 },
                 None,
                 relay as _,
-                config,
+                config.clone(),
             ),
             clock,
             store: Arc::clone(&node.store),
@@ -353,8 +366,9 @@ impl Continuity {
             native,
             secondary_native,
             published,
+            config,
             _env: env,
-            _node: node,
+            node,
             _tls: tls_root,
             _public: public,
             _front: tls_front,
@@ -396,17 +410,17 @@ fn spawn_tls_front(
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     listener.set_nonblocking(true)?;
-    let thread =
-        std::thread::spawn(move || serve_tls_front(listener, backend, server_config, worker_stop));
+    let thread = std::thread::spawn(move || {
+        serve_tls_front(&listener, backend, &server_config, &worker_stop);
+    });
     Ok(TlsFront { stop, addr, thread: Some(thread) })
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn serve_tls_front(
-    listener: TcpListener,
+    listener: &TcpListener,
     backend: SocketAddr,
-    server_config: Arc<rustls::ServerConfig>,
-    stop: Arc<AtomicBool>,
+    server_config: &Arc<rustls::ServerConfig>,
+    stop: &AtomicBool,
 ) {
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !stop.load(Ordering::Relaxed) {
@@ -430,14 +444,18 @@ fn serve_tls_front(
         let _ = tcp.set_nonblocking(false);
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = tcp.set_write_timeout(Some(Duration::from_secs(5)));
-        let Ok(mut conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+        let Ok(mut conn) = rustls::ServerConnection::new(Arc::clone(server_config)) else {
             continue;
         };
         let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
-        let Ok(request) = read_http_request(&mut tls) else {
-            continue;
+        let request = match read_http_request(&mut tls) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("test: TLS front request read refused: {error}");
+                continue;
+            }
         };
-        let Ok(mut upstream) = TcpStream::connect(backend) else {
+        let Ok(mut upstream) = TcpStream::connect_timeout(&backend, Duration::from_secs(5)) else {
             continue;
         };
         let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -446,8 +464,15 @@ fn serve_tls_front(
         if upstream.write_all(&forwarded).is_err() {
             continue;
         }
-        let mut reply = Vec::new();
-        if upstream.read_to_end(&mut reply).is_err() {
+        let mut reply = Zeroizing::new(Vec::new());
+        let cap = ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES
+            + pairing_limits().max_header_bytes;
+        if let Err(error) = upstream.take(cap as u64 + 1).read_to_end(&mut reply) {
+            eprintln!("test: TLS front upstream reply read refused: {error}");
+            continue;
+        }
+        if reply.len() > cap {
+            eprintln!("test: TLS front upstream reply exceeded cap");
             continue;
         }
         let _ = tls.write_all(&reply);
@@ -456,17 +481,24 @@ fn serve_tls_front(
     }
 }
 
-fn reconstruct_forwarded(request: &NodeHttpRequest, peer: SocketAddr) -> Vec<u8> {
+struct ForwardRequest {
+    request: NodeHttpRequest,
+    protected_headers: Zeroizing<Vec<u8>>,
+}
+fn reconstruct_forwarded(forwarded: &ForwardRequest, peer: SocketAddr) -> Zeroizing<Vec<u8>> {
+    let request = &forwarded.request;
     let mut raw = format!(
-        "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: {}\r\n\r\n",
+        "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: {}\r\n",
         request.method,
         request.path,
         request.body.len(),
         peer.ip()
     )
     .into_bytes();
+    raw.extend_from_slice(&forwarded.protected_headers);
+    raw.extend_from_slice(b"\r\n");
     raw.extend_from_slice(&request.body);
-    raw
+    Zeroizing::new(raw)
 }
 
 fn rustls_server_config(
@@ -483,8 +515,8 @@ fn rustls_server_config(
     ))
 }
 
-fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
-    let mut raw = Vec::new();
+fn read_http_request(tls: &mut impl Read) -> TestResult<ForwardRequest> {
+    let mut raw = Zeroizing::new(Vec::new());
     let mut buf = [0_u8; 512];
     let (header_end, start) = loop {
         if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -499,19 +531,28 @@ fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
             return Err("header cap".into());
         }
     };
-    let header = std::str::from_utf8(&raw[..header_end])?;
+    let header = std::str::from_utf8(raw.get(..header_end).ok_or("test: bounded proxy header")?)?;
     let mut parts = header.lines().next().ok_or("line")?.split_whitespace();
     let method = parts.next().ok_or("method")?.to_owned();
     let path = parts.next().ok_or("path")?.to_owned();
     let mut length = 0_usize;
-    for line in header.lines() {
+    let mut protected_headers = Zeroizing::new(Vec::new());
+    for line in header.lines().skip(1) {
+        if let Some((name, _)) = line.split_once(':')
+            && ["authorization", "content-type", "x-ramflux-pairing-arm"]
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+        {
+            protected_headers.extend_from_slice(line.as_bytes());
+            protected_headers.extend_from_slice(b"\r\n");
+        }
         if let Some((name, value)) = line.split_once(':')
             && name.eq_ignore_ascii_case("Content-Length")
         {
             length = value.trim().parse()?;
         }
     }
-    if length > pairing_limits().max_body_bytes {
+    if length > ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES {
         return Err("body cap".into());
     }
     while raw.len() < start + length {
@@ -524,17 +565,18 @@ fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
     if raw.len() < start + length {
         return Err("short body".into());
     }
-    Ok(NodeHttpRequest {
+    let request = NodeHttpRequest {
         method,
         path,
-        body: raw[start..start + length].to_vec(),
+        body: raw.get(start..start + length).ok_or("test: bounded proxy body")?.to_vec(),
         keep_alive: false,
         source_ip_hash: None,
         pre_auth_cookie: None,
         pre_auth_now: None,
         forwarded_proto: None,
         forwarded_for: None,
-    })
+    };
+    Ok(ForwardRequest { request, protected_headers })
 }
 
 fn refuse_plaintext_http(origin: &str) -> TestResult {
@@ -683,6 +725,7 @@ fn begin_result(result: LocalResult) -> TestResult<BeginResult> {
         Outcome::Begin { value } => Ok(*value),
         Outcome::Update { value } => Err(format!("begin {}", value.phase).into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
@@ -691,6 +734,7 @@ fn update(result: LocalResult) -> TestResult<Update> {
         Outcome::Update { value } => Ok(*value),
         Outcome::Begin { .. } => Err("update was begin".into()),
         Outcome::Error { error } => Err(error.code.into()),
+        Outcome::FullStatus { .. } => Err("unexpected full status".into()),
     }
 }
 
@@ -904,4 +948,69 @@ fn enroll_secondary(
         cert_id: encode_base64url([seed.wrapping_add(8); 32]),
     })?;
     Ok(primary.enroll_device(&current, cert, now.saturating_add(1))?)
+}
+
+pub(super) fn native_issue_refused_when_disabled() -> TestResult {
+    // This fixture owns an explicit relay for the mesh plumbing; the service under
+    // test below is separately built through the real environment-gated constructor.
+    let clock = ramflux_node_core::pairing_relay::TestPairingClock::new(wall()?);
+    let node = spawn_node_mesh_at("https://relay.example:443".into(), Some(clock))?;
+    let mut prover = PrimaryProver::bootstrap(&node)?;
+    prover.service = Arc::new(
+        ramflux_node_core::CustodyService::new(
+            node.node.clone(),
+            false,
+            node.redb.as_ref(),
+            wall()?,
+        )?
+        .with_pairing_relay_if_enabled(
+            ramflux_crypto::fixture_signing_key().to_bytes(),
+            "https://relay.example:443".into(),
+        )?,
+    );
+    prover.publish()?;
+    let now = wall()?;
+    let reply = prover.run(CustodyProofAction::PairingIssue {
+        request: Box::new(ramflux_protocol::custody::pairing::native::Issue {
+            schema: "ramflux.pairing.Issue.v2".into(),
+            version: 2,
+            spec: ramflux_protocol::custody::pairing::native::CreateSpec {
+                schema: "ramflux.pairing.CreateSpec.v2".into(),
+                version: 2,
+                account_anchor: prover.reference.account_anchor.clone(),
+                primary_ref: prover.reference.clone(),
+                base_record_hash: object_hash(&prover.publication.record)?,
+                base_epoch: prover.publication.record.body.device_set_epoch,
+                purpose: "enroll".into(),
+                recipient_mode: "new".into(),
+                destination_ref: None,
+                capabilities: vec!["message".into()],
+                lease_not_before: now,
+                lease_expires_at: now + 86_400,
+                data_selection: vec![],
+                ttl_seconds: 300,
+            },
+        }),
+    })?;
+    assert!(
+        matches!(reply, CustodyServerFrame::Refused { code: CustodyRefusal::Unsupported, .. }),
+        "test: default-off native service issued an invitation: {reply:?}"
+    );
+    Ok(())
+}
+
+// The real background DATA handshake must advance even while the test awaits its owner.
+struct RelayClock {
+    manual: Arc<TestPairingClock>,
+    started: std::time::Instant,
+}
+impl PairingClock for RelayClock {
+    fn wall_unix_secs(&self) -> Result<u64, ramflux_node_core::pairing_relay::PairingRelayError> {
+        self.manual.wall_unix_secs()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.manual
+            .monotonic_ms()
+            .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
 }
