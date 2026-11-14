@@ -61,10 +61,35 @@ pub fn single_entry_frame_size(
 pub fn single_reach_entry_frame_size(
     submission: &ramflux_protocol::contact_reach::Submission,
 ) -> Result<usize, NodeCoreError> {
+    reach_frame_size(&submission.envelope, &submission.route, submission.cost.as_ref(), None)
+}
+
+/// Measure the actual receiving-home sidecar together with every downstream frame field.
+/// # Errors
+/// Returns serialization or checked size-overflow errors.
+pub fn single_reach_delivery_frame_size(
+    envelope: &ramflux_protocol::Envelope,
+    reach: &ramflux_protocol::contact_reach::DeliveryReach,
+) -> Result<usize, NodeCoreError> {
+    reach_frame_size(
+        envelope,
+        &reach.route,
+        reach.cost.as_ref(),
+        reach.node_report_receipt.as_ref(),
+    )
+}
+
+fn reach_frame_size(
+    envelope: &ramflux_protocol::Envelope,
+    route: &ramflux_protocol::custody::Envelope<ramflux_protocol::contact_reach::Route>,
+    cost: Option<&ramflux_protocol::contact_reach::Cost>,
+    node_report_receipt: Option<&ramflux_protocol::NodeReportReceipt>,
+) -> Result<usize, NodeCoreError> {
     #[derive(Serialize)]
     struct Reach<'a> {
         route: &'a ramflux_protocol::custody::Envelope<ramflux_protocol::contact_reach::Route>,
-        cost: &'a Option<ramflux_protocol::contact_reach::Cost>,
+        cost: Option<&'a ramflux_protocol::contact_reach::Cost>,
+        node_report_receipt: Option<&'a ramflux_protocol::NodeReportReceipt>,
     }
     #[derive(Serialize)]
     struct Entry<'a> {
@@ -75,13 +100,27 @@ pub fn single_reach_entry_frame_size(
     }
     let entry = Entry {
         inbox_seq: u64::MAX,
-        target_delivery_id: &submission.envelope.target_delivery_id,
-        envelope: &submission.envelope,
-        reach: Reach { route: &submission.route, cost: &submission.cost },
+        target_delivery_id: &envelope.target_delivery_id,
+        envelope,
+        reach: Reach { route, cost, node_report_receipt },
     };
     serialized_size(&entry)?
         .checked_add(LEGACY_OVERHEAD.max(CAPABLE_OVERHEAD).max(ENTRY_OVERHEAD))
         .ok_or_else(|| NodeCoreError::ItestJson("reach frame size overflow".into()))
+}
+
+/// Enforce the complete delivery bound after issuing the node receipt and before payload staging.
+/// # Errors
+/// Refuses an actual complete entry over the single-entry ceiling.
+pub fn check_reach_delivery_bound(
+    envelope: &ramflux_protocol::Envelope,
+    reach: &ramflux_protocol::contact_reach::DeliveryReach,
+) -> Result<(), NodeCoreError> {
+    check_entry_bound(envelope)?;
+    if single_reach_delivery_frame_size(envelope, reach)? > ENTRY_FRAME_BYTE_CAP {
+        return Err(NodeCoreError::PayloadTooLarge);
+    }
+    Ok(())
 }
 
 /// Enforce existing envelope/profile bounds plus the added route/cost delivery bytes.

@@ -33,7 +33,7 @@ fn independent_reach_size(
     submission: &ramflux_protocol::contact_reach::Submission,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let row = serde_json::json!({"inbox_seq":u64::MAX,"target_delivery_id":submission.envelope.target_delivery_id,
-        "envelope":submission.envelope,"reach":{"route":submission.route,"cost":submission.cost}});
+        "envelope":submission.envelope,"reach":{"route":submission.route,"cost":submission.cost,"node_report_receipt":null}});
     let frames = [
         serde_json::json!({"frame_type":"deliver","entry":row}),
         serde_json::json!({"frame_type":"deliver","incarnation_id":"ffffffffffffffffffffffffffffffff","entry":row,"retain_until":i64::MIN}),
@@ -78,6 +78,8 @@ fn cr_reach_entry_bound_counts_added_metadata_at_exact_wire_boundary()
         envelope,
         cost: None,
     };
+    // Byte-accounting control only. Tighter current-profile ciphertext/metadata limits can
+    // dominate this outer ceiling; this does not claim a legal maximum-size Native delivery.
     let base = independent_reach_size(&submission)?;
     for over in [false, true] {
         submission.envelope.encrypted_payload =
@@ -91,7 +93,7 @@ fn cr_reach_entry_bound_counts_added_metadata_at_exact_wire_boundary()
         assert_eq!(
             single_reach_entry_frame_size(&submission)?,
             actual,
-            "counting includes the required route and explicit-null cost"
+            "counting includes the required route, explicit-null cost and explicit-null receipt"
         );
         assert!(
             check_entry_bound(&submission.envelope).is_ok(),

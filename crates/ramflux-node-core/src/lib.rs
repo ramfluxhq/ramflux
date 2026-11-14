@@ -69,8 +69,8 @@ mod entry_fetch;
 mod inbox;
 mod inbox_page;
 pub use entry_bound::{
-    ENTRY_FRAME_BYTE_CAP, check_entry_bound, check_reach_entry_bound, single_entry_frame_size,
-    single_reach_entry_frame_size,
+    ENTRY_FRAME_BYTE_CAP, check_entry_bound, check_reach_delivery_bound, check_reach_entry_bound,
+    single_entry_frame_size, single_reach_delivery_frame_size, single_reach_entry_frame_size,
 };
 pub use entry_fetch::{EntryFetchError, EntryGoneReason, InboxEntryResponse};
 pub use inbox_page::{

@@ -275,6 +275,12 @@ fn make_pending(
             policy_revision,
         },
     };
+    crate::check_reach_delivery_bound(&pending.entry.envelope, &pending.entry.reach).map_err(
+        |error| match error {
+            crate::NodeCoreError::PayloadTooLarge => refuse(Reason::ForeignCapacity),
+            error => error.into(),
+        },
+    )?;
     Ok(pending)
 }
 
@@ -357,6 +363,16 @@ impl RouterRedbStore {
         let local_home = store::home(&tx, &root)?;
         if local_home.record.home() != (node.node_id(), node.public_key()) {
             return Err(refuse(Reason::HomeRollback));
+        }
+        if matches!(
+            route.traffic,
+            ramflux_protocol::contact_reach::Traffic::OwnCopy
+                | ramflux_protocol::contact_reach::Traffic::SelfSync
+        ) && (source_home != node.node_id()
+            || peer.home().hash()
+                != ramflux_protocol::home_migration::record_hash(&local_home.record)?)
+        {
+            return Err(refuse(Reason::ForeignReadRefused));
         }
         let state = store::load(&tx, &root)?;
         let recipient_authority = store::authority(&tx, &root, now)?;
