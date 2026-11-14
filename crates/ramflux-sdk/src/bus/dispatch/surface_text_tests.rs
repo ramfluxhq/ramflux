@@ -103,7 +103,6 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
     directory.abort();
     drop(peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -438,7 +437,6 @@ async fn maximal_create_and_full_resync_with_all_finality_seal_under_shared_fram
     directory.abort();
     drop(peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -635,7 +633,6 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
         ramflux_transport::MAX_GATEWAY_FRAME_BYTES - measured
     );
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

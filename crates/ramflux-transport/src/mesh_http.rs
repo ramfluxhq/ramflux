@@ -963,7 +963,6 @@ pub fn write_mesh_text_response(
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -990,13 +989,14 @@ mod tests {
             &[String],
         ) -> Result<serde_json::Value, crate::TransportError>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let ca = test_ca_dir()?;
         let cases = [
             (r#"{"outer":{"x_probe":null,"x_probe":null}}"#, Some("duplicate I-JSON member")),
             (r#"{"created_at":9007199254740992}"#, Some("unsafe exact JSON integer")),
             (r#"{"created_at":9007199254740991}"#, None),
         ];
         for (body, rejected_reason) in cases {
-            let server_tls = test_mesh_tls_config("router")?;
+            let server_tls = test_mesh_tls_config(ca.path(), "router")?;
             let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
             let endpoint = server.local_addr()?.to_string();
             let response_body = body.as_bytes().to_vec();
@@ -1028,7 +1028,7 @@ mod tests {
                 let _ = server_done_tx.send(result.clone());
                 result
             });
-            let client_tls = test_mesh_tls_config("gateway")?;
+            let client_tls = test_mesh_tls_config(ca.path(), "gateway")?;
             let peer_roots = [std::fs::read_to_string(&server_tls.ca_cert)?];
             let result = reader(&endpoint, &client_tls, "ramflux-router", &peer_roots);
             match rejected_reason {
@@ -1176,7 +1176,8 @@ mod tests {
     #[test]
     fn mesh_server_close_notify_and_client_read_complete_body()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router")?;
+        let ca = test_ca_dir()?;
+        let server_tls = test_mesh_tls_config(ca.path(), "router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let server_thread = thread::spawn(move || -> Result<(), String> {
@@ -1194,7 +1195,7 @@ mod tests {
         let body: serde_json::Value = mesh_http_get_json(
             &endpoint,
             "/healthz",
-            &test_mesh_tls_config("gateway")?,
+            &test_mesh_tls_config(ca.path(), "gateway")?,
             "ramflux-router",
         )?;
         assert_eq!(body["status"], "ok");
@@ -1204,7 +1205,8 @@ mod tests {
 
     #[test]
     fn pooled_mesh_client_reuses_same_peer_connection() -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router")?;
+        let ca = test_ca_dir()?;
+        let server_tls = test_mesh_tls_config(ca.path(), "router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1230,7 +1232,7 @@ mod tests {
             crate::close_mesh_server_stream(&mut accepted).map_err(|error| error.to_string())
         });
         let client = MeshHttpClient::new();
-        let client_tls = test_mesh_tls_config("gateway")?;
+        let client_tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let first: serde_json::Value =
             client.get_json(&endpoint, "/healthz", &client_tls, "ramflux-router")?;
         let second: serde_json::Value =
@@ -1245,7 +1247,8 @@ mod tests {
     #[test]
     fn mesh_pool_key_separates_server_name_and_peer_roots() -> Result<(), Box<dyn std::error::Error>>
     {
-        let tls = test_mesh_tls_config("gateway")?;
+        let ca = test_ca_dir()?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let local_router = mesh_http_pool_key("ramflux-router:7443", "ramflux-router", &tls, None);
         let local_federation =
             mesh_http_pool_key("ramflux-router:7443", "ramflux-federation", &tls, None);
@@ -1269,7 +1272,8 @@ mod tests {
 
     #[test]
     fn pooled_mesh_client_rebuilds_stale_connection() -> Result<(), Box<dyn std::error::Error>> {
-        let server_tls = test_mesh_tls_config("router")?;
+        let ca = test_ca_dir()?;
+        let server_tls = test_mesh_tls_config(ca.path(), "router")?;
         let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
         let endpoint = server.local_addr()?.to_string();
         let server_thread = thread::spawn(move || -> Result<(), String> {
@@ -1294,7 +1298,7 @@ mod tests {
             Ok(())
         });
         let client = MeshHttpClient::new();
-        let client_tls = test_mesh_tls_config("gateway")?;
+        let client_tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let first: serde_json::Value =
             client.get_json(&endpoint, "/healthz", &client_tls, "ramflux-router")?;
         let second: serde_json::Value =
@@ -1308,7 +1312,8 @@ mod tests {
     #[test]
     fn bounded_migration_http_requires_the_independently_pinned_peer_ca()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_cert_root("bounded_migration_http_peer_ca")?;
+        let temp = temp_cert_root("bounded_migration_http_peer_ca")?;
+        let root = temp.path().to_path_buf();
         let a = issue_test_ca_and_service_cert(&root, "node-a")?;
         let b = issue_test_ca_and_service_cert(&root, "node-b")?;
         let c = issue_test_ca_and_service_cert(&root, "node-c")?;
@@ -1370,7 +1375,8 @@ mod tests {
     #[test]
     fn federation_peer_mtls_uses_independent_pinned_ca_roots()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_cert_root("federation_peer_mtls_uses_independent_pinned_ca_roots")?;
+        let temp = temp_cert_root("federation_peer_mtls_uses_independent_pinned_ca_roots")?;
+        let root = temp.path().to_path_buf();
         let node_a = issue_test_ca_and_service_cert(&root, "node-a")?;
         let node_b = issue_test_ca_and_service_cert(&root, "node-b")?;
 
@@ -1429,7 +1435,8 @@ mod tests {
     #[test]
     fn federation_server_reads_pinned_peer_roots_after_tcp_accept()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = temp_cert_root("federation_server_reads_pinned_peer_roots_after_tcp_accept")?;
+        let temp = temp_cert_root("federation_server_reads_pinned_peer_roots_after_tcp_accept")?;
+        let root = temp.path().to_path_buf();
         let node_a = issue_test_ca_and_service_cert(&root, "node-a")?;
         let node_b = issue_test_ca_and_service_cert(&root, "node-b")?;
         let runtime_roots = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1527,6 +1534,7 @@ mod tests {
     #[test]
     fn deadline_bounds_a_silent_router_during_handshake() -> Result<(), Box<dyn std::error::Error>>
     {
+        let ca = test_ca_dir()?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = listener.local_addr()?.to_string();
         // The router accepts and then sends nothing; it ends only when the client closes.
@@ -1536,7 +1544,7 @@ mod tests {
             while stream.read(&mut buffer).is_ok_and(|read| read > 0) {}
             Ok(())
         });
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let deadline = Instant::now() + Duration::from_secs(1);
         let result = within_hang_guard("handshake against a silent router", move || {
             post_probe(&MeshHttpClient::new(), &endpoint, &tls, deadline)
@@ -1549,7 +1557,9 @@ mod tests {
     #[test]
     fn deadline_bounds_a_tls_complete_router_that_never_replies()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server = MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config("router")?)?;
+        let ca = test_ca_dir()?;
+        let server =
+            MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config(ca.path(), "router")?)?;
         let endpoint = server.local_addr()?.to_string();
         // The TLS handshake completes and the request is read; only then does the router go
         // silent, so the deadline must fire in the response-read stage.
@@ -1562,7 +1572,7 @@ mod tests {
             hold_until_client_closes(&mut accepted);
             Ok(request.path)
         });
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let deadline = Instant::now() + Duration::from_secs(1);
         let recorder = stalling_resolver(usize::MAX);
         let (resolver, seen) = (recorder.resolver, recorder.deadlines);
@@ -1581,7 +1591,9 @@ mod tests {
     #[test]
     fn deadline_bounds_the_pooled_stale_connection_retry() -> Result<(), Box<dyn std::error::Error>>
     {
-        let server = MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config("router")?)?;
+        let ca = test_ca_dir()?;
+        let server =
+            MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config(ca.path(), "router")?)?;
         let endpoint = server.local_addr()?.to_string();
         let router = thread::spawn(move || -> Result<(), String> {
             let mut first =
@@ -1601,7 +1613,7 @@ mod tests {
             hold_until_client_closes(&mut retry);
             Ok(())
         });
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let first_deadline = Instant::now() + Duration::from_secs(30);
         let second_deadline = Instant::now() + Duration::from_secs(1);
         let recorder = stalling_resolver(usize::MAX);
@@ -1624,7 +1636,9 @@ mod tests {
     #[test]
     fn ordinary_request_restores_the_default_timeouts_on_a_pooled_socket()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server = MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config("router")?)?;
+        let ca = test_ca_dir()?;
+        let server =
+            MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config(ca.path(), "router")?)?;
         let endpoint = server.local_addr()?.to_string();
         let router = thread::spawn(move || -> Result<(), String> {
             let mut accepted =
@@ -1636,7 +1650,7 @@ mod tests {
             }
             Ok(())
         });
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let client = MeshHttpClient::new();
         // A deadline request arms the pooled socket with a short remaining-time timeout...
         post_probe(&client, &endpoint, &tls, Instant::now() + Duration::from_secs(10))?;
@@ -1693,8 +1707,9 @@ mod tests {
 
     #[test]
     fn deadline_bounds_a_stalled_dns_resolver() -> Result<(), Box<dyn std::error::Error>> {
+        let ca = test_ca_dir()?;
         let stall = stalling_resolver(0);
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let deadline = Instant::now() + Duration::from_millis(200);
         let (resolver, pool) = (stall.resolver, ResolverPool::new(4));
         let result = within_hang_guard("stalled DNS resolution", move || {
@@ -1712,7 +1727,9 @@ mod tests {
     #[test]
     fn deadline_bounds_a_stalled_dns_resolver_on_the_stale_connection_retry()
     -> Result<(), Box<dyn std::error::Error>> {
-        let server = MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config("router")?)?;
+        let ca = test_ca_dir()?;
+        let server =
+            MeshTlsServer::bind("127.0.0.1:0", &test_mesh_tls_config(ca.path(), "router")?)?;
         let endpoint = server.local_addr()?.to_string();
         let router = thread::spawn(move || -> Result<(), String> {
             let mut first =
@@ -1724,7 +1741,7 @@ mod tests {
         });
         // The first dial resolves normally; the retry's resolution stalls.
         let stall = stalling_resolver(1);
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let first_deadline = Instant::now() + Duration::from_secs(30);
         let second_deadline = Instant::now() + Duration::from_millis(750);
         let (resolver, pool) = (stall.resolver, ResolverPool::new(4));
@@ -1750,10 +1767,11 @@ mod tests {
     #[test]
     fn resolver_pool_refuses_when_stalled_lookups_fill_capacity_and_recovers()
     -> Result<(), Box<dyn std::error::Error>> {
+        let ca = test_ca_dir()?;
         let stall = stalling_resolver(0);
         let pool = ResolverPool::new(2);
         let probe_pool = Arc::clone(&pool);
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let outcomes = within_hang_guard("resolver pool exhaustion", move || {
             let client = MeshHttpClient::new().with_resolver(stall.resolver, probe_pool);
             let mut outcomes = Vec::new();
@@ -1790,7 +1808,7 @@ mod tests {
             }
             thread::yield_now();
         }
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let recovered = post_probe(
             &client,
             "router.invalid:7443",
@@ -1806,6 +1824,7 @@ mod tests {
 
     #[test]
     fn mesh_request_to_unresponsive_endpoint_times_out() -> Result<(), Box<dyn std::error::Error>> {
+        let ca = test_ca_dir()?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         std::thread::spawn(move || {
@@ -1814,7 +1833,7 @@ mod tests {
             }
         });
         let started = Instant::now();
-        let tls = test_mesh_tls_config("gateway")?;
+        let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let endpoint = addr.to_string();
         let rejected = mesh_http_json_request_with_timeouts(MeshHttpClientRequest {
             method: "GET",
@@ -1837,59 +1856,47 @@ mod tests {
         Ok(())
     }
 
-    /// Process-wide shared test CA directory, generated once on first use.
-    ///
-    /// Both the mesh server (`router`) and client (`gateway`) certificates are
-    /// signed by this single CA so mutual TLS trust holds across separate
-    /// `test_mesh_tls_config` calls without reading any on-disk deploy certs.
-    fn shared_test_ca_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        static CA_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
-        let mut guard = CA_DIR.lock().map_err(|error| error.to_string())?;
-        if let Some(dir) = guard.as_ref() {
-            return Ok(dir.clone());
-        }
-        let dir = std::env::temp_dir()
-            .join(format!("ramflux_transport_mesh_shared_ca_{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
-        let ca_key = dir.join("ca-key.pem");
-        let ca_cert = dir.join("ca.pem");
-        if !ca_cert.exists() {
-            run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &ca_key)?;
-            run_openssl(
-                &[
-                    "req",
-                    "-x509",
-                    "-new",
-                    "-key",
-                    path_str(&ca_key)?,
-                    "-out",
-                    path_str(&ca_cert)?,
-                    "-days",
-                    "30",
-                    "-subj",
-                    "/CN=Ramflux Test Mesh CA",
-                ],
-                Path::new(""),
-            )?;
-        }
-        *guard = Some(dir.clone());
-        Ok(dir)
+    /// A test owns its CA until all server threads and clients have finished.
+    fn test_ca_dir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+        let temp = tempfile::Builder::new().prefix("ramflux-mesh-ca-").tempdir()?;
+        let ca_key = temp.path().join("ca-key.pem");
+        let ca_cert = temp.path().join("ca.pem");
+        run_openssl(&["genpkey", "-algorithm", "ED25519", "-out"], &ca_key)?;
+        run_openssl(
+            &[
+                "req",
+                "-x509",
+                "-new",
+                "-key",
+                path_str(&ca_key)?,
+                "-out",
+                path_str(&ca_cert)?,
+                "-days",
+                "30",
+                "-subj",
+                "/CN=Ramflux Test Mesh CA",
+            ],
+            Path::new(""),
+        )?;
+        Ok(temp)
     }
 
-    /// Generate a mesh TLS config for `service` at runtime, signed by the shared
-    /// process-wide CA so server (`router`) and client (`gateway`) interoperate.
+    /// Generate a mesh TLS config for `service` at runtime, signed by the
+    /// test-owned CA so server (`router`) and client (`gateway`) interoperate.
     ///
     /// Layout-independent: requires no on-disk deploy certs, only `openssl`.
-    fn test_mesh_tls_config(service: &str) -> Result<MeshTlsConfig, Box<dyn std::error::Error>> {
+    fn test_mesh_tls_config(
+        ca_dir: &Path,
+        service: &str,
+    ) -> Result<MeshTlsConfig, Box<dyn std::error::Error>> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        let ca_dir = shared_test_ca_dir()?;
         let ca_cert = ca_dir.join("ca.pem");
         let ca_key = ca_dir.join("ca-key.pem");
 
         // Unique per-call subdir so concurrently running tests never race on the
-        // same on-disk files; the shared CA above is what ties them together.
+        // same on-disk files; the test-owned CA ties client and server together.
         let dir = ca_dir.join(format!("{service}_{seq}"));
         std::fs::create_dir_all(&dir)?;
         let service_key = dir.join(format!("{service}-key.pem"));
@@ -1949,17 +1956,8 @@ mod tests {
         ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_transport_{name}_{}_{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        std::fs::create_dir_all(&root)?;
-        Ok(root)
+    fn temp_cert_root(name: &str) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+        Ok(tempfile::Builder::new().prefix(&format!("ramflux-transport-{name}-")).tempdir()?)
     }
 
     fn issue_test_ca_and_service_cert(

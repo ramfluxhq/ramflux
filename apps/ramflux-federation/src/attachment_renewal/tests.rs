@@ -324,11 +324,13 @@ fn pin_lookup_is_empty_unless_advertised_and_unadmitted_nodes_are_source_unknown
 -> Result<(), NodeCoreError> {
     let state =
         crate::SharedFederationTrustState::new(ramflux_node_core::FederationTrustState::new());
-    let path = std::env::temp_dir().join(format!(
-        "rf-fed-pin-answer-{}-{}",
-        std::process::id(),
-        Instant::now().elapsed().as_nanos()
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-fed-pin-answer-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
     let store = ramflux_node_core::FederationRedbStore::open(&path)?;
     // Not advertised: nothing is exposed, whatever the peer is.
     assert_eq!(
@@ -340,7 +342,6 @@ fn pin_lookup_is_empty_unless_advertised_and_unadmitted_nodes_are_source_unknown
         pin_answer_for(&state, &store, true, "node-a")?,
         ramflux_node_core::PinAnswer::SourceUnknown
     );
-    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 

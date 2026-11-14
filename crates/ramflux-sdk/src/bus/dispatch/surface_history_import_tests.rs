@@ -165,7 +165,6 @@ async fn signed_cached_own_history_import_commits_and_replays_without_weakening_
     directory.abort();
     drop(target);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

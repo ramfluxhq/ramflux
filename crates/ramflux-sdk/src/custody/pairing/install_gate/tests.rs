@@ -8,7 +8,7 @@ use crate::custody::pairing::install_store::{
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::encode_base64url;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn h(byte: u8) -> String {
     encode_base64url([byte; 32])
@@ -18,12 +18,11 @@ fn device() -> DeviceRef {
     DeviceRef { account_anchor: h(2), device_id: "dev-a".into(), device_epoch: 1 }
 }
 
-fn root(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "pair01-p04j-gate-{tag}-{}-{}",
-        std::process::id(),
-        encode_base64url([9; 8])
-    ));
+fn root(tag: &str) -> ramflux_test_support::TestPath {
+    let path =
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("pair01-p04j-gate-{tag}-{}-{}", std::process::id(), encode_base64url([9; 8])),
+        );
     let _ = std::fs::remove_dir_all(&path);
     let _ = std::fs::create_dir_all(&path);
     path

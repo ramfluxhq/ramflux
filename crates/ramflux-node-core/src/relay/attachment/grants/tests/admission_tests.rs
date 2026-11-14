@@ -48,11 +48,13 @@ fn registration(g: &VerifiedScopedGrant, native: &VerifiedContentManifest) -> Ve
 fn reference_collision_with_fresh_grant_and_second_upload_is_refused() {
     let now = 1_700_000_001;
     let (native, grant) = fixtures();
-    let root = std::env::temp_dir().join(format!(
-        "rf-ref-binding-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-ref-binding-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let store = RelayRedbStore::open(root.join("db")).unwrap();
     let ledger = store.attachment_ledger(crate::AttachmentPolicy::default()).unwrap();
@@ -92,11 +94,13 @@ fn reference_collision_with_fresh_grant_and_second_upload_is_refused() {
 fn owner_grant_cap_and_reference_seek_ignore_unrelated_owner_volume() {
     let now = 1_700_000_001;
     let (native, grant) = fixtures();
-    let root = std::env::temp_dir().join(format!(
-        "rf-owner-grants-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-owner-grants-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("db");
     let store = RelayRedbStore::open(&path).unwrap();

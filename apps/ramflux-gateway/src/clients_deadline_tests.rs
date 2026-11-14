@@ -89,12 +89,12 @@ fn is_deadline_timeout(error: &ramflux_transport::TransportError) -> bool {
 }
 
 struct Fixture {
-    root: std::path::PathBuf,
     router: super::tests::TestPeerCerts,
     gateway_tls: ramflux_transport::MeshTlsConfig,
     endpoint: String,
     seen: tokio::sync::mpsc::UnboundedReceiver<()>,
     release: std::sync::mpsc::Sender<()>,
+    _root: ramflux_test_support::TestPath,
 }
 
 fn fixture(name: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
@@ -107,7 +107,7 @@ fn fixture(name: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
         service_cert: gateway.tls.service_cert.clone(),
         service_key: gateway.tls.service_key.clone(),
     };
-    Ok(Fixture { root, router, gateway_tls, endpoint, seen, release })
+    Ok(Fixture { router, gateway_tls, endpoint, seen, release, _root: root })
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, Box<dyn std::error::Error>> {
@@ -228,7 +228,6 @@ fn blocking_worker_ends_with_the_typed_deadline_timeout_against_a_silent_router(
     assert!(result, "expected the exact typed deadline timeout");
     assert!(seen.try_recv().is_ok(), "the request never reached the router");
     drop(fixture.release);
-    std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }
 
@@ -268,6 +267,5 @@ fn admission_is_released_only_after_the_blocking_worker_exits() -> TestResult {
     })??;
     assert!(outcome.0, "admission was released while the worker was still running");
     assert!(outcome.1, "admission was never released after the worker exited");
-    std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }

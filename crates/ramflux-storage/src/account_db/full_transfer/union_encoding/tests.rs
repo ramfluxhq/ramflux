@@ -11,7 +11,11 @@ type ResultOf<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn fixture(
     label: &str,
-) -> ResultOf<(std::path::PathBuf, AccountDb, ramflux_crypto::custody::pairing::FullResumeRecord)> {
+) -> ResultOf<(
+    ramflux_test_support::TestPath,
+    AccountDb,
+    ramflux_crypto::custody::pairing::FullResumeRecord,
+)> {
     let (record, _, _) = super::super::stage_tests::fixture()?;
     let root = crate::tests::temp_root(label);
     let index = AccountIndex::open(&root)?;

@@ -93,7 +93,6 @@ pub(super) struct GatewayHold {
 pub(super) type AckHold = GatewayHold;
 
 pub(super) struct Fixture {
-    pub root: PathBuf,
     pub source: LocalBusAccountState,
     pub peer: LocalBusAccountState,
     pub sibling: LocalBusAccountState,
@@ -103,6 +102,7 @@ pub(super) struct Fixture {
     pub peer2: Option<LocalBusAccountState>,
     pub gateway: Arc<Mutex<Gateway>>,
     _server: tokio::task::JoinHandle<()>,
+    pub root: ramflux_test_support::TestPath,
 }
 
 fn account(root: &Path, id: &str) -> Result<LocalBusAccountState, SdkError> {
@@ -246,7 +246,7 @@ impl Fixture {
             engine.frame_timeout = frame_timeout;
         }
         source.install_test_session(engine);
-        Ok(Self { root, source, peer, sibling, peer2, gateway, _server: server })
+        Ok(Self { source, peer, sibling, peer2, gateway, _server: server, root })
     }
 
     pub async fn inbound(&mut self) -> Case<String> {

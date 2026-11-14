@@ -124,16 +124,17 @@ fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>
         ));
         store.save_state(&state)?;
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
 #[test]
 fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-auth-cost-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "gateway-auth-cost-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let store = GatewayRedbStore::open(&path)?;
     store.configure_replay(
         crate::test_support::federation_fixtures::gateway_replay_fixture_config(),
@@ -191,7 +192,6 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
     let restored = store.load_state()?.ok_or("missing pruned checkpoint")?;
     assert!(restored.session("session-7").is_none(), "pruned overlays must not resurrect sessions");
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -224,7 +224,6 @@ fn signed_request_capacity_is_root_scoped_and_survives_restore()
     let (open, auth, registered, _) = rooted_auth(2, "bob", "other-root", now)?;
     store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1)?;
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

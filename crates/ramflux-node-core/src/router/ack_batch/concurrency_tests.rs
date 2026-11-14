@@ -64,7 +64,7 @@ fn ack_commit_releases_shard_and_clones_only_target() -> Result {
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let observer = crate::durability_test_hooks::observe(
-        root.clone(),
+        root.to_path_buf(),
         Arc::new(move |_, op, done| {
             if op == "direct_commit" && !done {
                 entered_tx.send(()).map_err(std::io::Error::other)?;

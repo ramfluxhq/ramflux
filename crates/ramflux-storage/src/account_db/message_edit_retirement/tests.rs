@@ -34,7 +34,7 @@ fn replace(db: &AccountDb, body: &[u8]) -> Result<(), StorageError> {
 #[test]
 fn edit_retires_original_opening_everywhere() -> TestResult {
     let (root, db) = crate::tests::test_db("edit-retirement-all-copies")?;
-    let _root_guard = crate::tests::TestDirGuard(root.clone());
+    let _root_guard = root.clone();
     populate(&db)?;
     replace(&db, b"current Edit")?;
     assert!(db.known_content_evidence("target")?.is_none());
@@ -59,7 +59,7 @@ fn edit_retires_original_opening_everywhere() -> TestResult {
 #[test]
 fn edit_retirement_failure_rolls_back_content_and_original_evidence() -> TestResult {
     let (root, db) = crate::tests::test_db("edit-retirement-rollback")?;
-    let _root_guard = crate::tests::TestDirGuard(root.clone());
+    let _root_guard = root.clone();
     populate(&db)?;
     let result: Result<(), StorageError> = db.write_transaction(|| {
         db.retire_message_payload_copies("target", &[])?;
@@ -111,7 +111,7 @@ fn scan(db: &AccountDb, forbidden: &[u8]) -> Result<(), StorageError> {
 #[test]
 fn edit_delete_retire_private_revision_nonce_copies_and_rollback() -> TestResult {
     let (root, db) = crate::tests::test_db("edit-private-nonce-retirement")?;
-    let _root_guard = crate::tests::TestDirGuard(root.clone());
+    let _root_guard = root.clone();
     populate(&db)?;
     let nonce = [117_u8; 32];
     let mut bytes = b"\x0a\x03yes\x8a\x01\x20".to_vec();
@@ -185,7 +185,7 @@ fn edit_delete_retire_private_revision_nonce_copies_and_rollback() -> TestResult
 #[test]
 fn selected_copy_retirement_is_scoped_and_rolls_back_atomically() -> TestResult {
     let (root, db) = crate::tests::test_db("selected-copy-retirement")?;
-    let _root_guard = crate::tests::TestDirGuard(root.clone());
+    let _root_guard = root.clone();
     db.write_transaction(|| {
         db.persist_message_actor_state(
             "selected",

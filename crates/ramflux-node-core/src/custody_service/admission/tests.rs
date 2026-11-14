@@ -10,10 +10,12 @@ use ramflux_protocol::custody::{CapacityHint, CapacityScope};
 fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
 -> Result<(), Box<dyn std::error::Error>> {
     let now = 1_760_000_000;
-    let path = std::env::temp_dir().join(format!(
-        "custody-final-admission-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "custody-final-admission-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     {
         let store = crate::RouterRedbStore::open_without_wal(&path)?;
         let router = crate::RouterCore::new();
@@ -84,7 +86,6 @@ fn custody_daily_failure_never_promotes_a_listener_to_authenticated()
             "a refused frame must not have authenticated its principal"
         );
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -95,10 +96,12 @@ fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn 
         return Ok(());
     }
     let now = 1_760_000_000;
-    let path = std::env::temp_dir().join(format!(
-        "custody-revoked-grant-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "custody-revoked-grant-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     {
         let store = crate::RouterRedbStore::open_without_wal(&path)?;
         let driver = Driver::new("revoked-session", 170)?;
@@ -142,7 +145,6 @@ fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn 
         let next = pool.acquire("192.0.2.1".parse()?, None, tick)?;
         next.mark_authenticated("two")?;
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -150,10 +152,12 @@ fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn 
 fn require_current_primary_rejects_either_mismatched_half() -> Result<(), Box<dyn std::error::Error>>
 {
     let now = 1_760_000_000;
-    let path = std::env::temp_dir().join(format!(
-        "custody-primary-halves-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "custody-primary-halves-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     {
         let store = crate::RouterRedbStore::open_without_wal(&path)?;
         let router = crate::RouterCore::new();
@@ -179,6 +183,5 @@ fn require_current_primary_rejects_either_mismatched_half() -> Result<(), Box<dy
             Err(CustodyRefusal::BindingRefused)
         );
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }

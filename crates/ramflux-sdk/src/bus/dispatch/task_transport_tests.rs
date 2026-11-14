@@ -258,7 +258,6 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     directory.abort();
     drop(peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

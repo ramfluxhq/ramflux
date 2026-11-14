@@ -3,13 +3,16 @@
 
 use super::*;
 use crate::client::surface::{ControlKind, control::SurfaceControl};
+use std::path::PathBuf;
 pub(super) struct Terminals {
-    root: PathBuf,
     pub(super) clients: Vec<RamfluxClient>,
+    _root: ramflux_test_support::TestPath,
 }
 impl Terminals {
     pub(super) fn new() -> Result<Self, SdkError> {
-        let root = std::env::temp_dir().join(crate::new_surface_message_id()?);
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(crate::new_surface_message_id()?);
         let mut clients = Vec::new();
         for (principal, device, root_seed, device_seed) in [
             ("author", "author-device", 31, 32),
@@ -60,13 +63,12 @@ impl Terminals {
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
         }
-        Ok(Self { root, clients })
+        Ok(Self { clients, _root: root })
     }
 }
 impl Drop for Terminals {
     fn drop(&mut self) {
         self.clients.clear();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 pub(super) fn entry(

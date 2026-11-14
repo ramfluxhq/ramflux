@@ -8,12 +8,12 @@ use super::{
 };
 use crate::client::delivery_receipts::{PREFIX, Work};
 struct Pending {
-    root: PathBuf,
     a: Spec,
     b: Spec,
     mail: Shared,
     receiver: LocalBusAccountState,
     key: String,
+    root: ramflux_test_support::TestPath,
 }
 async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
     let root = runtime_tests::root(name);
@@ -46,7 +46,7 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
         .into_iter()
         .next()
         .ok_or("pending")?;
-    Ok(Pending { root, a, b, mail, receiver, key })
+    Ok(Pending { a, b, mail, receiver, key, root })
 }
 fn ready(p: &Pending) -> Result<Work, SdkError> {
     let mut work = p
@@ -176,7 +176,6 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
         .count();
     assert_eq!(failures, 1);
     drop(p.receiver);
-    std::fs::remove_dir_all(p.root)?;
     Ok(())
 }
 #[tokio::test]
@@ -253,7 +252,6 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     assert_eq!(receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 257);
     drop(engine);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -331,7 +329,6 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
     drop(account);
     drop(source);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test]
@@ -369,7 +366,6 @@ async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestRes
 
     drop(engine);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -400,7 +396,6 @@ async fn a_page_of_backed_off_receipts_cannot_hide_later_due_work() -> TestResul
     );
     assert!(!p.receiver.client.account_db()?.actor_state_exists(&due_key)?);
     drop(p.receiver);
-    std::fs::remove_dir_all(p.root)?;
     Ok(())
 }
 
@@ -461,7 +456,6 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     attempts.sort_unstable();
     assert_eq!(attempts, vec![0, 1]);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -489,7 +483,6 @@ async fn an_empty_receipt_queue_never_allocates_journal_events_or_requires_a_liv
         }
     }
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -524,7 +517,6 @@ async fn a_receipt_deadline_retires_the_session_and_throttles_other_queue_entrie
         "cooldown prevents another connect attempt"
     );
     drop(p.receiver);
-    std::fs::remove_dir_all(p.root)?;
     Ok(())
 }
 
@@ -611,7 +603,6 @@ async fn a_backwards_clock_step_cannot_extend_the_receipt_gateway_cooldown() -> 
     assert_eq!(flush(&mut p.receiver).await?, 1);
     assert!(!p.receiver.client.account_db()?.actor_state_exists(GATEWAY_RETRY_AT)?);
     drop(p.receiver);
-    std::fs::remove_dir_all(p.root)?;
     Ok(())
 }
 

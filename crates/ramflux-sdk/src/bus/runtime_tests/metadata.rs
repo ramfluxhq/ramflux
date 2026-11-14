@@ -54,6 +54,5 @@ fn typed_account_and_attachment_metadata_reach_client_records() -> Result<(), Sd
     assert_eq!(object["mime"], "text/plain");
     assert_eq!(object["size"], 6);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -9,8 +9,8 @@ use ramflux_protocol::{DeviceSetStatus, PrincipalKind};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Actor {
     client: RamfluxClient,
-    path: PathBuf,
     id: String,
+    path: ramflux_test_support::TestPath,
 }
 impl Actor {
     fn new(
@@ -21,11 +21,13 @@ impl Actor {
         epoch: u64,
     ) -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "rf-authority-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-authority-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal, [root_seed; 32]);
         client.create_device_branch(principal, id, epoch, [device_seed; 32]);
@@ -48,7 +50,6 @@ impl Actor {
 impl Drop for Actor {
     fn drop(&mut self) {
         self.client = RamfluxClient::new();
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 fn observe(client: &RamfluxClient, manifest: &SdkDeviceManifestResponse) -> Result<(), SdkError> {

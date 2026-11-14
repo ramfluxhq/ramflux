@@ -103,11 +103,13 @@ mod tests {
     #[test]
     fn inactive_receive_secrets_expire_after_the_late_delivery_window_including_archived_copies()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-retention-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-retention-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let key = crate::AccountDbKey::generate()?;
@@ -126,7 +128,6 @@ mod tests {
         assert_eq!(db.connection.query_row("SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='dm-pair/session/old'",[],|r|r.get::<_,u64>(0))?,0);
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

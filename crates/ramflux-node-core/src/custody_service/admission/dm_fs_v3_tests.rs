@@ -138,8 +138,9 @@ fn snapshot(store: &RouterRedbStore) -> Result<BTreeMap<String, Option<Rows>>> {
 }
 #[test]
 fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
-    let path = std::env::temp_dir()
-        .join(format!("ramflux-dm-fs-v3-{}.redb", encode_base64url(ramflux_crypto::random_32()?)));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-dm-fs-v3-{}.redb", encode_base64url(ramflux_crypto::random_32()?)));
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -200,7 +201,6 @@ fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
     }
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 fn proof_negatives(
@@ -363,10 +363,12 @@ fn live_verify(
 }
 #[test]
 fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result {
-    let path = std::env::temp_dir().join(format!(
-        "ramflux-dm-fs-v3-verifier-{}.redb",
-        encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-dm-fs-v3-verifier-{}.redb",
+            encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
@@ -451,7 +453,6 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
     }
     drop(service);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -569,10 +570,12 @@ fn with_live_authority<T>(
         &CustodyService,
     ) -> Result<T>,
 ) -> Result<T> {
-    let path = std::env::temp_dir().join(format!(
-        "ramflux-dm-fs-v3-live-{}.redb",
-        encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "ramflux-dm-fs-v3-live-{}.redb",
+            encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

@@ -6,7 +6,9 @@ use super::*;
 use crate::bus::actor::AccountCommand;
 use crate::client::call;
 use std::sync::{Arc, atomic::AtomicBool};
-pub(crate) fn fixture(name: &str) -> Result<(PathBuf, LocalBusDaemonState, String), SdkError> {
+pub(crate) fn fixture(
+    name: &str,
+) -> Result<(ramflux_test_support::TestPath, LocalBusDaemonState, String), SdkError> {
     let root = crate::bus::runtime_tests::root(name);
     let mut account =
         crate::bus::runtime_tests::account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
@@ -82,7 +84,7 @@ async fn an_active_call_reholds_media_keys_after_its_gateway_generation_changes(
 #[tokio::test]
 async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
 -> Result<(), SdkError> {
-    let (root, mut state, id) = fixture("call-media-receipt")?;
+    let (_root, mut state, id) = fixture("call-media-receipt")?;
     let (outbound, _) = mpsc::channel(4);
     let mut frame = request("call.media.session", &id);
     frame.operation_id = Some("media-key-request".into());
@@ -121,19 +123,17 @@ async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
         assert!(!journal.contains(secret));
     }
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test]
 async fn a_media_engine_cannot_reacquire_keys_with_a_restart_flag() -> Result<(), SdkError> {
-    let (root, mut state, id) = fixture("call-legacy-media")?;
+    let (_root, mut state, id) = fixture("call-legacy-media")?;
     dispatch(&request("call.media.session", &id), &mut state).await?;
     assert!(dispatch(&request("call.media.session", &id), &mut state).await.is_err());
     let mut restart = request("call.media.session", &id);
     restart.body["counter_lease_v1"] = json!(true);
     assert!(dispatch(&restart, &mut state).await.is_err());
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test]
@@ -163,13 +163,12 @@ async fn headless_and_nonhuman_accounts_cannot_mutate_calls_or_obtain_media_keys
     }
     assert_eq!(local_bus_account(&state, "alice")?.client.voice_calls[&id].row.state, "active");
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record()
 -> Result<(), SdkError> {
-    let (root, mut state, id) = fixture("call-restart")?;
+    let (_root, mut state, id) = fixture("call-restart")?;
     let account = local_bus_account_mut(&mut state, "alice")?;
     account.client.voice_calls.clear();
     recover(account)?;
@@ -193,14 +192,13 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
     assert!(crate::bus::readers::is_reader_request("call.list"));
     assert_eq!(crate::bus::readers::read(&account.client, &request("call.list", &id))?, listed);
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call()
 -> Result<(), SdkError> {
-    let (root, mut state, _) = fixture("call-control-cache")?;
+    let (_root, mut state, _) = fixture("call-control-cache")?;
     let account = local_bus_account_mut(&mut state, "alice")?;
     account.client.voice_calls.clear();
     recover(account)?;
@@ -250,7 +248,6 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
         Some(Some("failed".into()))
     );
     drop(state);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

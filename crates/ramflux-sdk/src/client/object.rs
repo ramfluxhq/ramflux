@@ -2141,12 +2141,15 @@ mod t21a1_tests {
         Ok(())
     }
 
-    fn slot_test_client(test_name: &str) -> Result<(std::path::PathBuf, RamfluxClient), SdkError> {
+    fn slot_test_client(
+        test_name: &str,
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-sdk-slot-{test_name}-{}-{nanos}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-slot-{test_name}-{}-{nanos}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("acct", "principal")?;
@@ -2161,7 +2164,7 @@ mod t21a1_tests {
     #[test]
     fn decrypt_object_key_slot_defers_slot_session_commit_until_committed() -> Result<(), SdkError>
     {
-        let (root, client) = slot_test_client("defer-commit")?;
+        let (_root, client) = slot_test_client("defer-commit")?;
         let object_id = "object_slot_defer";
         let slot_conversation_id = "conv_slot_defer";
         let recipient_device_id = "recipient_device_slot";
@@ -2219,7 +2222,6 @@ mod t21a1_tests {
             dm_session_event_id(slot_conversation_id, "recv", &format!("object-slot:{object_id}"));
         assert_eq!(client.projection_checkpoint(&checkpoint_name)?, Some(expected));
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 }

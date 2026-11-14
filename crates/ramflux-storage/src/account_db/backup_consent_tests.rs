@@ -7,12 +7,14 @@ use crate::{AccountDbKey, AccountIndex};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn account(
     label: &str,
-) -> Result<(std::path::PathBuf, AccountIndex, AccountDb), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "backup-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+) -> Result<(ramflux_test_support::TestPath, AccountIndex, AccountDb), Box<dyn std::error::Error>> {
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "backup-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::generate()?)?;
@@ -129,7 +131,6 @@ fn r4_newer_restored_lifts_and_denials_win_in_both_merge_directions() -> TestRes
     drop(merged);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
@@ -257,12 +258,11 @@ fn r4_merge_replacement_of_a_newer_held_message_does_not_create_an_erasure_fence
     drop(merged);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn r4_expired_held_message_erasure_fences_are_pruned_while_recent_fences_remain() -> TestResult {
-    let (root, index, db) = account("held-retention")?;
+    let (_root, index, db) = account("held-retention")?;
     db.connection.execute_batch("INSERT INTO contact_message_request VALUES('old','sender','expired','thread',x'7b7d',2,200,100); INSERT INTO contact_message_request VALUES('new','sender','recent','thread',x'7b7d',2,900000,800000)")?;
     db.discard_contact_messages("old")?;
     db.discard_contact_messages("new")?;
@@ -285,7 +285,6 @@ fn r4_expired_held_message_erasure_fences_are_pruned_while_recent_fences_remain(
     );
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -421,8 +420,6 @@ fn merge_clamps_a_newer_archive_block_without_a_link_projection() -> TestResult 
     drop(accepted);
     drop(blocked_index);
     drop(accepted_index);
-    std::fs::remove_dir_all(blocked_root)?;
-    std::fs::remove_dir_all(accepted_root)?;
     Ok(())
 }
 

@@ -106,7 +106,9 @@ fn legacy_retry(
 fn legacy_fanout_prepares_and_measures_each_child_once() -> Result {
     for mode in 0..=1 {
         for leased in [false, true] {
-            let root = temp_store_path(&format!("legacy-fanout-once-{mode}-{leased}"))?;
+            let store_directory_1 =
+                temp_store_path(&format!("legacy-fanout-once-{mode}-{leased}"))?;
+            let root = store_directory_1.to_path_buf();
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;

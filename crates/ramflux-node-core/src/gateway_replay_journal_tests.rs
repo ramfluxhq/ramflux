@@ -28,10 +28,12 @@ fn request(index: usize, expires_at: i64) -> ramflux_protocol::SignedRequest {
 }
 
 fn renewal_case(inject_obsolete_index: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-renewed-replay-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "gateway-renewed-replay-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ));
     let root = ramflux_crypto::create_identity_root("owner", [41; 32]);
     let branch = ramflux_crypto::create_device_branch("owner", "device", 1, [42; 32]);
     let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
@@ -102,11 +104,13 @@ fn source(seed: u8) -> Result<ramflux_crypto::RootQualifiedDeviceRef, Box<dyn st
     let device = ramflux_crypto::create_device_branch("owner", "device", 1, [42; 32]);
     Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &device)?)
 }
-fn test_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    Ok(std::env::temp_dir().join(format!(
-        "gateway-quota-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    )))
+fn test_path() -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+        format!(
+            "gateway-quota-{}.redb",
+            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+        ),
+    ))
 }
 fn config(roots: u64, share: u64) -> crate::GatewayReplayConfig {
     crate::GatewayReplayConfig {
@@ -161,7 +165,6 @@ fn inclusive_expiry_releases_zero_live_roots_without_resurrection()
         store.save_auth_replay(&alice, &next, 201)?;
         assert_eq!(root_count(&store)?, 1);
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -190,7 +193,6 @@ fn pending_failed_commit_never_installs_or_reserves_a_root_after_reopen()
     store.save_auth_replay(&source(2)?, &request(2, 100), 0)?;
     assert_eq!(root_count(&store)?, 1);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -289,7 +291,6 @@ fn disk_replay_storage_measurement_and_bounded_restore() -> Result<(), Box<dyn s
                 < super::super::GATEWAY_REPLAY_MEMORY_LIMIT_BYTES
         );
     }
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -319,7 +320,6 @@ fn own_expired_share_is_reclaimed_before_other_roots_backlog()
         "share reclamation forgot live evidence"
     );
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -377,7 +377,6 @@ fn old_generation_gc_cannot_charge_or_remove_a_new_live_reservation()
     ));
     store.save_auth_replay(&owner, &next, 102)?;
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -398,7 +397,6 @@ fn durable_replay_gc_visits_at_most_sixty_four_identities() -> Result<(), Box<dy
         Err(NodeCoreError::ReplayGuard(_))
     ));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -420,7 +418,6 @@ fn unfunded_configuration_refuses_before_any_root_or_fence_write()
         Err(NodeCoreError::GatewayReplayUnfunded { .. })
     ));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -457,6 +454,5 @@ fn renewed_identity_and_owner_lease_share_the_sixty_four_gc_budget()
         Err(NodeCoreError::ReplayGuard(_))
     ));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }

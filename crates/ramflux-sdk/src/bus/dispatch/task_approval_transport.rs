@@ -214,7 +214,6 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].delivery, "bob");
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

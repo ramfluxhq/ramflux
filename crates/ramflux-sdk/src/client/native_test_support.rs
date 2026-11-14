@@ -73,7 +73,7 @@ impl Fixture {
         };
         let mut config = GatewaySessionConfig::auto(endpoint)
             .with_native_custody(GatewayCustodyConfig {
-                account_root: root.0.clone(),
+                account_root: root.0.to_path_buf(),
                 account_id: id.into(),
                 node_id: "fixture-node".into(),
                 node_public_key: ramflux_protocol::encode_base64url([7; 32]),

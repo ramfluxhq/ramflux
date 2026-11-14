@@ -21,7 +21,6 @@ async fn confirmed_background_deregistration_clears_the_persisted_marker() -> Re
     account.install_test_session(engine);
     assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -40,6 +39,5 @@ async fn the_push_route_sequence_is_persisted_and_never_reused() -> Result<(), S
     assert_eq!(saved.as_deref(), Some("4000000000000"));
     assert_eq!(crate::bus::dispatch::device::stored_push_route_seq(&account.client)?, ahead);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

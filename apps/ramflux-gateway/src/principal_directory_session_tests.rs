@@ -35,10 +35,11 @@ impl GatewaySessionFrameSource for NoReceive {
 async fn an_unauthenticated_directory_frame_is_rejected_before_reading_or_contacting_the_router()
 -> anyhow::Result<()> {
     let frames = Arc::new(Mutex::new(Vec::new()));
+    let (_context_directory, context) = super::tests::test_gateway_context()?;
     super::handle_gateway_session_transport(
         Box::new(Sink(frames.clone())),
         Box::new(NoReceive),
-        super::tests::test_gateway_context()?,
+        context,
         ramflux_node_core::GatewayClientFrame::PrincipalManifestFetch {
             principal_id: "alice".into(),
         },
@@ -58,7 +59,7 @@ async fn an_unauthenticated_directory_frame_is_rejected_before_reading_or_contac
 #[tokio::test]
 async fn raw_name_lookup_rejects_known_and_unknown_queries_before_router_io() -> anyhow::Result<()>
 {
-    let context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_1, context) = super::tests::test_gateway_context()?;
     let mut bodies = Vec::new();
     for name in ["alice", "unknown"] {
         let response = crate::dispatch_quic_json_request(
@@ -113,7 +114,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
     };
     let (done, finished) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(serve_lookup_router(server, expected.clone(), finished));
-    let mut context = super::tests::test_gateway_context()?;
+    let (_fixture_directory_2, mut context) = super::tests::test_gateway_context()?;
     context.router = crate::RouterMeshClient {
         endpoint: "127.0.0.1:0".into(),
         server_name: "ramflux-router".into(),
@@ -180,7 +181,6 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         }
     );
     drop(frames);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

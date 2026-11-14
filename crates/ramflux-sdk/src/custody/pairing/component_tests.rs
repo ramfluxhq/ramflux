@@ -208,7 +208,7 @@ impl Rig {
         let (native, relay, verified_node, full_hellos, wire_evidence) =
             fixture_transports(full, now, clock.clone(), node.clone())?;
         let participant_a = Arc::new(LocalPairingParticipant {
-            root: source.root.0.clone(),
+            root: source.root.0.to_path_buf(),
             account_id: "component-source".into(),
             vault: source.vault.clone(),
             provider: Arc::new(super::recipient::tests::Phrase::setup(

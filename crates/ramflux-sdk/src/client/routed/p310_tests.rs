@@ -18,17 +18,13 @@ const PUT_CHUNK: &str = "/relay/v1/object/put_chunk";
 struct Relay {
     addr: std::net::SocketAddr,
     ca: PathBuf,
-    root: PathBuf,
     puts: Puts,
     task: tokio::task::JoinHandle<()>,
+    _root: ramflux_test_support::TestPath,
 }
 impl Relay {
     fn start(expected: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-p310-relay-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()?.child("relay");
         std::fs::create_dir_all(&root)?;
         let mut ca = CertificateParams::new(Vec::<String>::new())?;
         ca.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -57,7 +53,7 @@ impl Relay {
         let puts = Puts::default();
         let expected = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
         let task = tokio::spawn(serve(endpoint, puts.clone(), expected));
-        Ok(Self { addr, ca: tls.ca_cert, root, puts, task })
+        Ok(Self { addr, ca: tls.ca_cert, puts, task, _root: root })
     }
     fn options(&self, principal: &str) -> RelayTransferOptions {
         RelayTransferOptions {
@@ -79,7 +75,6 @@ impl Relay {
 impl Drop for Relay {
     fn drop(&mut self) {
         self.task.abort();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 async fn serve(endpoint: quinn::Endpoint, puts: Puts, expected: Vec<String>) {
@@ -199,7 +194,7 @@ async fn outgoing_after_ack_fence_is_consumed() -> TestResult {
         c.a.client.owned_device_identity()?.root_commitment(),
     )?;
     c.a.client.node_relay_options = Some(relay.options("alice"));
-    let hook = fence_by_path(c.a.root.clone(), c.a.id.clone(), "refused");
+    let hook = fence_by_path(c.a.root.to_path_buf(), c.a.id.clone(), "refused");
     let (mut engine, sent) = Wire::engine_with_hook(&c.a, &c.b, Some(hook))?;
     let message = super::r5::outgoing(&c.a, &c.b, "p310-send");
     let attachments = ids.map(attachment);

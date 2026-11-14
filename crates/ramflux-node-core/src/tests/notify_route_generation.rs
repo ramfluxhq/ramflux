@@ -7,8 +7,10 @@ use super::*;
 
 fn rotated_store(
     name: &str,
-) -> Result<(NotifyRedbStore, DeviceAuthKeyResponse, NodeSecret, PathBuf), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (ramflux_test_support::TestPath, NotifyRedbStore, DeviceAuthKeyResponse, NodeSecret),
+    Box<dyn std::error::Error>,
+> {
     let path = temp_store_path(name)?;
     let key = NodeSecret::ephemeral()?;
     let mut store = NotifyRedbStore::open_with_route_key(&path, key.clone())?;
@@ -16,7 +18,7 @@ fn rotated_store(
     let mut open = gateway_open_frame("phone", "stream");
     open.target_delivery_id = "rotated-delivery".into();
     let owner = gateway_registered_key(&open)?;
-    Ok((store, owner, key, path))
+    Ok((path, store, owner, key))
 }
 
 fn route_at(token: &str, now: u64) -> DevicePushRoute {
@@ -42,7 +44,7 @@ fn current_route(
 
 #[test]
 fn stale_registration_cannot_undo_rotation() -> Result<(), Box<dyn std::error::Error>> {
-    let (store, owner, key, path) = rotated_store("stale_registration_cannot_undo_rotation")?;
+    let (path, store, owner, key) = rotated_store("stale_registration_cannot_undo_rotation")?;
     let now = now_unix_seconds();
     let first = route_at("token-a", now);
     let second = route_at("token-b", now);
@@ -112,7 +114,7 @@ fn one_provider(
 #[test]
 fn dual_apns_routes_survive_rotation_reconnect_and_delete() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (store, owner, key, path) = rotated_store("dual_apns_routes_survive_rotation")?;
+    let (path, store, owner, key) = rotated_store("dual_apns_routes_survive_rotation")?;
     let now = now_unix_seconds();
     let alert = kind_route("token-a", PushProviderKind::Apns, now);
     let voip = kind_route("token-v", PushProviderKind::ApnsVoip, now);

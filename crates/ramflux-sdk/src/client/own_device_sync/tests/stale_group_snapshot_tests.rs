@@ -7,10 +7,19 @@ use crate::client::identity_authority::HeadUse;
 use crate::own_device_sync::SdkOwnDeviceGroupMemberPin;
 fn setup(
     name: &str,
-) -> Result<(RamfluxClient, PathBuf, RamfluxClient, PathBuf, SdkOwnDeviceHistoryBundle), SdkError> {
-    let (source, sr) =
+) -> Result<
+    (
+        ramflux_test_support::TestPath,
+        ramflux_test_support::TestPath,
+        RamfluxClient,
+        RamfluxClient,
+        SdkOwnDeviceHistoryBundle,
+    ),
+    SdkError,
+> {
+    let (sr, source) =
         client_with_account(&format!("{name}-source"), "principal_sync", "source_device_sync")?;
-    let (mut target, tr) =
+    let (tr, mut target) =
         client_with_account(&format!("{name}-target"), "principal_sync", "target_device_sync")?;
     target.create_device_branch("principal_sync", "target_device_sync", 1, [0x53; 32]);
     let mut own_manifest =
@@ -41,13 +50,13 @@ fn setup(
         "target_device_sync",
         "snapshot_sync",
     )?;
-    Ok((source, sr, target, tr, history))
+    Ok((sr, tr, source, target, history))
 }
 fn finish(
     source: RamfluxClient,
-    sr: PathBuf,
+    sr: ramflux_test_support::TestPath,
     target: RamfluxClient,
-    tr: PathBuf,
+    tr: ramflux_test_support::TestPath,
 ) -> Result<(), SdkError> {
     drop(source);
     drop(target);
@@ -58,12 +67,12 @@ fn finish(
 #[test]
 fn stale_snapshot_preserves_removed_members_and_retired_pins_after_reopen() -> Result<(), SdkError>
 {
-    let (source, sr, mut target, tr, history) = setup("stale-member")?;
+    let (sr, tr, source, mut target, history) = setup("stale-member")?;
     target.import_own_device_history_bundle(
         &envelope("source_device_sync", "target_device_sync"),
         &history,
     )?;
-    let (mut bob, bob_root) = client_with_account("stale-member-bob", "bob", "bob")?;
+    let (bob_root, mut bob) = client_with_account("stale-member-bob", "bob", "bob")?;
     bob.create_identity_root(
         "bob",
         ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &[0x63; 32]),
@@ -135,7 +144,7 @@ fn stale_snapshot_preserves_removed_members_and_retired_pins_after_reopen() -> R
 fn highest_snapshot_epoch_wins_for_an_unseen_group_regardless_of_bundle_order()
 -> Result<(), SdkError> {
     for reverse in [false, true] {
-        let (source, sr, target, tr, mut history) = setup(&format!("unseen-{reverse}"))?;
+        let (sr, tr, source, target, mut history) = setup(&format!("unseen-{reverse}"))?;
         let mut newest = history.groups[0].clone();
         newest.group_epoch += 2;
         newest.members.retain(|m| m.member_id != "bob");
@@ -170,7 +179,7 @@ fn highest_snapshot_epoch_wins_for_an_unseen_group_regardless_of_bundle_order()
 #[test]
 fn a_newer_snapshot_omission_retires_members_before_an_older_snapshot_can_reintroduce_them()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, history) = setup("newer-omission")?;
+    let (sr, tr, source, target, history) = setup("newer-omission")?;
     target.import_own_device_history_bundle(
         &envelope("source_device_sync", "target_device_sync"),
         &history,
@@ -205,7 +214,7 @@ fn a_newer_snapshot_omission_retires_members_before_an_older_snapshot_can_reintr
 }
 #[test]
 fn snapshot_import_cannot_reactivate_a_removed_local_device() -> Result<(), SdkError> {
-    let (source, sr, target, tr, history) = setup("removed-local")?;
+    let (sr, tr, source, target, history) = setup("removed-local")?;
     let db = target.account_db()?;
     db.upsert_group_local_membership_snapshot(
         "g",
@@ -260,7 +269,7 @@ fn snapshot_import_cannot_reactivate_a_removed_local_device() -> Result<(), SdkE
 #[test]
 fn a_distribution_for_a_member_omitted_from_the_snapshot_is_skipped_without_losing_direct_history()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("orphan-distribution")?;
+    let (sr, tr, source, target, mut history) = setup("orphan-distribution")?;
     let valid = history.sender_key_distributions_base64[0].clone();
     let mut distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(
         &ramflux_protocol::decode_base64url(&valid).map_err(|_| SdkError::IdentityRootMissing)?,
@@ -286,7 +295,7 @@ fn a_distribution_for_a_member_omitted_from_the_snapshot_is_skipped_without_losi
 
 #[test]
 fn equal_epoch_conflicting_snapshots_fail_closed_for_an_unseen_group() -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("same-epoch-conflict")?;
+    let (sr, tr, source, target, mut history) = setup("same-epoch-conflict")?;
     let mut conflicting = history.groups[0].clone();
     conflicting.members.retain(|m| m.member_id != "bob");
     history.groups.push(conflicting);
@@ -306,7 +315,7 @@ fn equal_epoch_conflicting_snapshots_fail_closed_for_an_unseen_group() -> Result
 }
 #[test]
 fn a_member_joined_after_the_snapshot_epoch_is_not_activated_or_pinned() -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("future-member")?;
+    let (sr, tr, source, target, mut history) = setup("future-member")?;
     history.groups[0]
         .members
         .iter_mut()
@@ -337,7 +346,7 @@ fn a_member_joined_after_the_snapshot_epoch_is_not_activated_or_pinned() -> Resu
 #[test]
 fn equal_epoch_snapshot_does_not_lower_the_existing_local_join_floor_or_raise_its_role()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("join-floor")?;
+    let (sr, tr, source, target, mut history) = setup("join-floor")?;
     history.groups[0].group_epoch = 5;
     target.account_db()?.upsert_group_local_membership_snapshot(
         "g",
@@ -436,7 +445,7 @@ fn direct_history(id: &str) -> DirectMessageRecord {
 #[test]
 fn a_target_joining_after_the_source_skips_older_group_messages_without_rolling_back_direct_history()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("later-target-floor")?;
+    let (sr, tr, source, target, mut history) = setup("later-target-floor")?;
     history.groups[0].group_epoch = 4;
     history.groups[0].local_joined_epoch = 1;
     history.groups[0].members.push(SdkOwnDeviceGroupMemberSnapshot {
@@ -478,7 +487,7 @@ fn a_target_joining_after_the_source_skips_older_group_messages_without_rolling_
 #[test]
 fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_keys_and_history()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("foreign-self-pin")?;
+    let (sr, tr, source, target, mut history) = setup("foreign-self-pin")?;
     history.groups[0].members.push(SdkOwnDeviceGroupMemberSnapshot {
         member_id: "target_device_sync".into(),
         role: "member".into(),
@@ -541,7 +550,7 @@ fn a_reused_local_device_id_ignores_foreign_self_pins_and_later_restores_group_k
 #[test]
 fn history_for_an_unavailable_group_is_reported_as_unavailable_without_blocking_direct_history()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, mut history) = setup("unavailable-reason")?;
+    let (sr, tr, source, target, mut history) = setup("unavailable-reason")?;
     let mut unavailable = snapshot_message(&source, "unavailable", 1)?;
     let mut body: serde_json::Value = serde_json::from_slice(&unavailable.encrypted_body)?;
     body["group_id"] = serde_json::json!("not-in-snapshot");
@@ -568,7 +577,7 @@ fn history_for_an_unavailable_group_is_reported_as_unavailable_without_blocking_
 fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip()
 -> Result<(), SdkError> {
     for removed in [true, false] {
-        let (source, sr, target, tr, mut history) = setup(&format!("surface-skip-{removed}"))?;
+        let (sr, tr, source, target, mut history) = setup(&format!("surface-skip-{removed}"))?;
         let db = target.account_db()?;
         db.upsert_group_local_membership_snapshot(
             "g",
@@ -646,8 +655,8 @@ fn skipped_group_surface_history_preserves_direct_history_and_records_each_skip(
 #[test]
 fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_offline_decryption()
 -> Result<(), SdkError> {
-    let (source, sr, target, tr, _) = setup("fresh-sibling-authority")?;
-    let (mut bob, br) = client_with_account("fresh-sibling-bob", "bob", "bob")?;
+    let (_sr, tr, source, target, _) = setup("fresh-sibling-authority")?;
+    let (_br, mut bob) = client_with_account("fresh-sibling-bob", "bob", "bob")?;
     bob.create_identity_root(
         "bob",
         ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &[0x63; 32]),
@@ -716,8 +725,5 @@ fn freshly_activated_sibling_restores_foreign_authority_before_group_keys_and_of
         b"history from authenticated remote root"
     );
     drop((source, bob, reader));
-    std::fs::remove_dir_all(sr)?;
-    std::fs::remove_dir_all(tr)?;
-    std::fs::remove_dir_all(br)?;
     Ok(())
 }

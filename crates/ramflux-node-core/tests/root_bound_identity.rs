@@ -211,11 +211,9 @@ fn unbound_stored_proof_is_not_directory_authority_and_current_registration_reco
 #[test]
 fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     let f = Fixture::new()?;
-    let path = std::env::temp_dir().join(format!(
-        "rf-id01-{}-{}.redb",
-        std::process::id(),
-        encode_base64url(random_32()?)
-    ));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-id01-{}-{}.redb", std::process::id(), encode_base64url(random_32()?)));
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     router.register_identity_durable(&f.request, &store)?;
@@ -240,7 +238,6 @@ fn highest_signed_epoch_and_revocation_survive_durable_restart() -> TestResult {
     );
     drop(restored);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -325,11 +322,10 @@ fn root_authorized_rotation_disables_old_keys_until_the_new_bound_registration()
 fn concurrent_publication_and_snapshot_persistence_never_restore_a_lower_epoch() -> TestResult {
     use std::sync::Arc;
     let f = Fixture::new()?;
-    let path = std::env::temp_dir().join(format!(
-        "rf-id01-race-{}-{}.redb",
-        std::process::id(),
-        encode_base64url(random_32()?)
-    ));
+    let path =
+        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
+            format!("rf-id01-race-{}-{}.redb", std::process::id(), encode_base64url(random_32()?)),
+        );
     let store = Arc::new(RouterRedbStore::open(&path)?);
     let router = Arc::new(RouterCore::new());
     router.register_identity_durable(&f.request, &store)?;
@@ -365,7 +361,6 @@ fn concurrent_publication_and_snapshot_persistence_never_restore_a_lower_epoch()
     );
     drop(restored);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 

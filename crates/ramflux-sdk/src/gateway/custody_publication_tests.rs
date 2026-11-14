@@ -134,7 +134,7 @@ async fn native_pending_recovery_publishes_before_refreshing_the_old_directory_h
     )?;
     let mut config = fixture.config.clone();
     config.custody = Some(GatewayCustodyConfig {
-        account_root: root.0.clone(),
+        account_root: root.0.to_path_buf(),
         account_id: "recovery".into(),
         node_id: "fixture-node".into(),
         node_public_key: ramflux_protocol::encode_base64url([7; 32]),

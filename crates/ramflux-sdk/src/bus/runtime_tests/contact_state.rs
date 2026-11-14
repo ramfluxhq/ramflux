@@ -86,7 +86,6 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
         && row["verified"] == false
         && row["safety_state"] == "verification_stale"));
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -108,6 +107,5 @@ fn owned_profile_publication_preserves_self_device_routes_during_daemon_initiali
         })
     }));
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

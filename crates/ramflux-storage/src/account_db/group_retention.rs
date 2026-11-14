@@ -85,11 +85,13 @@ mod tests {
     #[test]
     fn upgrade_marker_is_a_typed_blob_and_repairs_text_without_renewing_the_window()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-group-marker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-group-marker-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = crate::AccountIndex::open(&root)?;
         index.create_account("a", "root")?;
         let db = AccountDb::open(&index, "a", &crate::AccountDbKey::derive("a", b"secret"))?;
@@ -101,7 +103,6 @@ mod tests {
         assert_eq!(db.load_actor_state::<i64>("group-message/upgrade-start")?, Some(12345));
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

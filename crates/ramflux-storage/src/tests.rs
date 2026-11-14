@@ -4,27 +4,17 @@
 #![cfg(test)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
+pub(crate) use ramflux_test_support::TestPath;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn temp_root(test_name: &str) -> PathBuf {
-    let nanos =
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir().join(format!("ramflux-storage-{test_name}-{}-{nanos}", std::process::id()))
+pub(crate) fn temp_root(test_name: &str) -> TestPath {
+    TestPath::new().expect("test: create storage directory").child(test_name)
 }
 
-pub(crate) struct TestDirGuard(pub(crate) PathBuf);
-impl Drop for TestDirGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageError> {
+pub(crate) fn test_db(test_name: &str) -> Result<(TestPath, AccountDb), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
@@ -35,7 +25,7 @@ pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageEr
 
 pub(crate) fn signed_test_db(
     test_name: &str,
-) -> Result<(PathBuf, AccountDb, ramflux_crypto::DeviceBranch), StorageError> {
+) -> Result<(TestPath, AccountDb, ramflux_crypto::DeviceBranch), StorageError> {
     let root = temp_root(test_name);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
@@ -64,7 +54,6 @@ fn account_db_open_fails_closed_without_sqlcipher() -> Result<(), StorageError> 
         rejected,
         Err(StorageError::EncryptionUnavailable { mode: EncryptionMode::InsecureTestSqlite })
     ));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -226,7 +215,6 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
     assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 55);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -334,7 +322,7 @@ fn mcp_grant_audit_and_tools_roundtrip() -> Result<(), StorageError> {
 
 #[test]
 fn device_directory_upserts_verified_device_mapping() -> Result<(), StorageError> {
-    let (root, db) = test_db("device-directory")?;
+    let (_root, db) = test_db("device-directory")?;
     let first =
         db.upsert_device_directory_entry("device_a", "principal_a", "contact.add", 1_000)?;
     assert_eq!(first.device_id, "device_a");
@@ -355,7 +343,6 @@ fn device_directory_upserts_verified_device_mapping() -> Result<(), StorageError
     let bob = ramflux_protocol::qualified_device_id("principal_b", "device_a")?;
     assert_eq!(db.device_directory_entry(&alice)?, Some(first));
     assert_eq!(db.device_directory_entry(&bob)?, Some(second));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -495,7 +482,7 @@ fn object_operation_record_lifecycle_and_atomic_local_commit() -> Result<(), Sto
 
 #[test]
 fn object_share_grants_record_query_and_revoke_idempotently() -> Result<(), StorageError> {
-    let (root, db) = test_db("object-share-grant")?;
+    let (_root, db) = test_db("object-share-grant")?;
     let write = ObjectShareGrantWrite {
         object_id: "object_grant_1",
         recipient_principal_id: "principal_bob",
@@ -528,13 +515,12 @@ fn object_share_grants_record_query_and_revoke_idempotently() -> Result<(), Stor
         .ok_or_else(|| StorageError::MessageNotFound("object_grant_1".to_owned()))?;
     assert_eq!(revoked_again.revoked_at, Some(2_000));
 
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn object_share_grant_reshare_clears_revocation() -> Result<(), StorageError> {
-    let (root, db) = test_db("object-share-grant-reshare")?;
+    let (_root, db) = test_db("object-share-grant-reshare")?;
     let write = ObjectShareGrantWrite {
         object_id: "object_grant_1",
         recipient_principal_id: "principal_bob",
@@ -557,13 +543,12 @@ fn object_share_grant_reshare_clears_revocation() -> Result<(), StorageError> {
     assert_eq!(reshared.revoked_at, None);
     assert_eq!(db.object_share_grants_for_recipients(&["principal_bob"])?, vec![reshared]);
 
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn account_db_clock_controls_default_storage_timestamps() -> Result<(), StorageError> {
-    let (root, mut db) = test_db("clock-controls-created-at")?;
+    let (_root, mut db) = test_db("clock-controls-created-at")?;
     db.set_clock(AccountClock::fixed(1_900_000_123));
     db.send_direct_message("conv_clock", "msg_clock", "alice", b"encrypted")?;
     assert_eq!(message_created_at(&db, "conv_clock", "msg_clock")?, 1_900_000_123);
@@ -573,13 +558,12 @@ fn account_db_clock_controls_default_storage_timestamps() -> Result<(), StorageE
     db.send_direct_message("conv_clock", "msg_clock_3", "alice", b"encrypted")?;
     assert_eq!(message_created_at(&db, "conv_clock", "msg_clock_2")?, 1_900_000_200);
     assert_eq!(message_created_at(&db, "conv_clock", "msg_clock_3")?, 1_900_000_201);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn direct_message_metadata_stores_optional_franking_report() -> Result<(), StorageError> {
-    let (root, db) = test_db("dm-franking-report-metadata")?;
+    let (_root, db) = test_db("dm-franking-report-metadata")?;
     let metadata = MessageMetadata {
         franking_report: Some(FrankingReportMetadata {
             node_id: "localhost".to_owned(),
@@ -620,7 +604,6 @@ fn direct_message_metadata_stores_optional_franking_report() -> Result<(), Stora
         "forward_count": 0
     }))?;
     assert_eq!(legacy.franking_report, None);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -674,12 +657,11 @@ fn dm_receipts_are_idempotent_monotonic_and_read_wins() -> Result<(), StorageErr
 
 #[test]
 fn account_db_default_clock_uses_real_recent_time() -> Result<(), StorageError> {
-    let (root, db) = test_db("clock-real-created-at")?;
+    let (_root, db) = test_db("clock-real-created-at")?;
     db.send_direct_message("conv_real_clock", "msg_real_clock", "alice", b"encrypted")?;
     let created_at = message_created_at(&db, "conv_real_clock", "msg_real_clock")?;
     assert!(created_at > 1_700_000_000);
     assert_ne!(created_at, 1_760_000_000);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -733,7 +715,6 @@ fn account_index_persists_wrapped_db_key_material() -> Result<(), StorageError> 
     };
     index.store_wrapped_db_key("acct", &wrapped)?;
     assert_eq!(index.load_wrapped_db_key("acct")?, Some(wrapped));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -754,13 +735,12 @@ fn file_vault_secret_source_persists_unique_0600_account_secrets() -> Result<(),
         fs::metadata(source.vault_secret_path("acct_a"))?.permissions().mode() & 0o777,
         0o600
     );
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn append_event_with_device_signer_writes_verifiable_signature() -> Result<(), StorageError> {
-    let (root, db, device) = signed_test_db("append-signature")?;
+    let (_root, db, device) = signed_test_db("append-signature")?;
     db.append_event("evt_signed_1", "test.event", b"{\"ok\":true}")?;
     let (signature_bytes, status, created_at) = event_signature_status(&db, "evt_signed_1")?;
     let signature = String::from_utf8_lossy(&signature_bytes).into_owned();
@@ -795,13 +775,12 @@ fn append_event_with_device_signer_writes_verifiable_signature() -> Result<(), S
     assert!(
         ramflux_crypto::verify_device_branch_signature(&public_key, &tampered, &signature).is_err()
     );
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn history_import_verifies_event_signatures_and_rejects_forgery() -> Result<(), StorageError> {
-    let (source_root, source_db, _device) = signed_test_db("history-source-signature")?;
+    let (_source_root, source_db, _device) = signed_test_db("history-source-signature")?;
     source_db.append_event("evt_history_1", "test.history", b"history-body")?;
     let bundle = source_db.export_history_bundle("device", "target-device")?;
     assert_eq!(bundle.encrypted_event_batch.len(), 1);
@@ -826,15 +805,13 @@ fn history_import_verifies_event_signatures_and_rejects_forgery() -> Result<(), 
         &forged.projection_checkpoints,
     )?;
     assert!(target_db.import_history_bundle(&forged).is_err());
-    let _ = fs::remove_dir_all(source_root);
-    let _ = fs::remove_dir_all(target_root);
     Ok(())
 }
 
 #[test]
 fn history_import_rejects_bundle_when_event_actor_differs_from_source_device()
 -> Result<(), StorageError> {
-    let (source_root, source_db) = test_db("history-source-actor-mismatch")?;
+    let (_source_root, source_db) = test_db("history-source-actor-mismatch")?;
     source_db.append_event("evt_history_actor_mismatch", "test.history", b"history-body")?;
     let bundle = source_db.export_history_bundle("source-device", "target-device")?;
     assert_eq!(bundle.encrypted_event_batch.len(), 1);
@@ -850,11 +827,9 @@ fn history_import_rejects_bundle_when_event_actor_differs_from_source_device()
         )?
     );
 
-    let (target_root, target_db) = test_db("history-target-actor-mismatch")?;
+    let (_target_root, target_db) = test_db("history-target-actor-mismatch")?;
     let rejected = target_db.import_history_bundle(&bundle);
     assert!(matches!(rejected, Err(StorageError::HistoryBundleHashMismatch)));
-    let _ = fs::remove_dir_all(source_root);
-    let _ = fs::remove_dir_all(target_root);
     Ok(())
 }
 
@@ -882,7 +857,6 @@ fn sqlcipher_patched_runtime_reopens_keyed_account() -> Result<(), StorageError>
     )?;
     assert_eq!(payload, b"persisted");
     drop(reopened);
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -896,7 +870,6 @@ fn wrong_account_db_key_is_rejected() -> Result<(), StorageError> {
     let wrong_key = AccountDbKey::derive("acct", b"wrong-secret");
     let rejected = AccountDb::open(&index, "acct", &wrong_key);
     assert!(matches!(rejected, Err(StorageError::AccountKeyMismatch | StorageError::Sqlite(_))));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -925,7 +898,6 @@ fn rekey_provider_failure_rolls_back_db_key_and_wrapped_key() -> Result<(), Stor
     };
     assert_eq!(reopened.encryption_mode(), expected_mode);
     assert!(AccountDb::open(&index, "acct", &new_key).is_err());
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -939,7 +911,6 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
     assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -962,7 +933,6 @@ fn client_db_reopen_preserves_full_delete_journal_durability() -> Result<(), Sto
         reopened.connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
     assert_eq!(reopened_journal.to_ascii_lowercase(), "wal");
     assert_eq!(reopened_synchronous, 2);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -982,13 +952,12 @@ fn deterministic_event_replay_is_idempotent_but_rejects_changed_body() -> Result
         Err(StorageError::EventIdConflict(event_id)) if event_id == "event_fixed"
     ));
     assert_eq!(reopened.event_body("event_fixed")?, Some(b"snapshot-a".to_vec()));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn group_pending_undecrypted_is_bounded_per_group() -> Result<(), StorageError> {
-    let (root, db) = test_db("pending-bounded")?;
+    let (_root, db) = test_db("pending-bounded")?;
     let inserted =
         u64::try_from(GROUP_PENDING_UNDECRYPTED_PER_GROUP_LIMIT + 10).unwrap_or(u64::MAX);
     for index in 0..inserted {
@@ -1010,13 +979,12 @@ fn group_pending_undecrypted_is_bounded_per_group() -> Result<(), StorageError> 
     );
     let pending = db.group_pending_undecrypted("group_a", 1)?;
     assert!(!pending.iter().any(|record| record.message_id == "msg_0000"));
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
-    let (root, db) = test_db("sender-counter")?;
+    let (_root, db) = test_db("sender-counter")?;
     let actor = receipt_actor("alice")?;
     let record = GroupSenderKeyCounterRecord {
         group_id: "group_a".to_owned(),
@@ -1033,13 +1001,12 @@ fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
     assert!(db.group_sender_key_counter_seen("group_a", 7, &actor, "session", 42)?);
     let replay = GroupSenderKeyCounterRecord { message_id: "msg_replay".to_owned(), ..record };
     assert!(!db.record_group_sender_key_counter(&replay, &actor)?);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn conversation_summaries_lists_real_conversations_with_activity() -> Result<(), StorageError> {
-    let (root, mut db) = test_db("conversation-summaries")?;
+    let (_root, mut db) = test_db("conversation-summaries")?;
     db.set_clock(AccountClock::sequence(1_900_000_000));
     db.send_direct_message("conv_alpha", "msg_alpha_1", "alice", b"one")?;
     db.send_direct_message("conv_alpha", "msg_alpha_2", "alice", b"two")?;
@@ -1070,13 +1037,12 @@ fn conversation_summaries_lists_real_conversations_with_activity() -> Result<(),
         summaries.last().map(|summary| summary.conversation_id.as_str()),
         Some("conv_gamma")
     );
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn reject_friend_link_transitions_pending_to_rejected() -> Result<(), StorageError> {
-    let (root, db) = test_db("reject-pending-friend-link")?;
+    let (_root, db) = test_db("reject-pending-friend-link")?;
 
     let pending = db.record_pending_friend_link("link_req", "requester", "target", 1_000)?;
     assert_eq!(pending.state, "pending");
@@ -1087,13 +1053,12 @@ fn reject_friend_link_transitions_pending_to_rejected() -> Result<(), StorageErr
     assert_eq!(rejected.target_id, "target");
     assert!(!rejected.blocked);
 
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn reject_friend_link_refuses_non_pending_links() -> Result<(), StorageError> {
-    let (root, db) = test_db("reject-non-pending-friend-link")?;
+    let (_root, db) = test_db("reject-non-pending-friend-link")?;
 
     // An established (accepted) contact must be removed/blocked, never rejected.
     db.establish_friend_link("link_acc", "requester", "target")?;
@@ -1109,13 +1074,12 @@ fn reject_friend_link_refuses_non_pending_links() -> Result<(), StorageError> {
         Err(StorageError::AuthorizationRejected)
     ));
 
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn remove_friend_link_revokes_capability_for_all_scopes() -> Result<(), StorageError> {
-    let (root, db) = test_db("remove-friend-link-revokes-capability")?;
+    let (_root, db) = test_db("remove-friend-link-revokes-capability")?;
 
     for (index, (scope, expected_scope)) in
         [("me", "me"), ("own_devices", "own_devices"), ("both", "both")].into_iter().enumerate()
@@ -1141,7 +1105,6 @@ fn remove_friend_link_revokes_capability_for_all_scopes() -> Result<(), StorageE
         assert_eq!(removed_again.capability_revoked_at, Some(removed_at));
     }
 
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -1151,7 +1114,7 @@ fn friend_link_peer_is_accepted_storage_equivalent(link: &FriendLinkRecord) -> b
 
 #[test]
 fn guardian_recovery_share_record_query_and_upsert() -> Result<(), StorageError> {
-    let (root, db) = test_db("guardian-recovery-share")?;
+    let (_root, db) = test_db("guardian-recovery-share")?;
     let write = GuardianRecoveryShareWrite {
         owner_principal_id: "principal_alice",
         guardian_principal_id: "principal_bob",
@@ -1185,13 +1148,12 @@ fn guardian_recovery_share_record_query_and_upsert() -> Result<(), StorageError>
     assert_eq!(updated.share_value, vec![0x55; 32]);
     assert_eq!(updated.invite_id, "invite_b");
     assert_eq!(db.guardian_recovery_shares_for_owner("principal_alice")?.len(), 1);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
 #[test]
 fn pending_recovery_tracks_state_and_rejects_duplicate_approvals() -> Result<(), StorageError> {
-    let (root, db) = test_db("pending-recovery")?;
+    let (_root, db) = test_db("pending-recovery")?;
     let quorum = test_recovery_quorum();
     let context = ramflux_protocol::RecoveryApprovalContext {
         recovery_id: "recovery_a".to_owned(),
@@ -1248,7 +1210,6 @@ fn pending_recovery_tracks_state_and_rejects_duplicate_approvals() -> Result<(),
         Err(StorageError::MessageIdConflict(_))
     ));
     assert_eq!(db.pending_recovery_approvals("recovery_a")?.len(), 1);
-    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -1280,14 +1241,13 @@ mod write_benchmark_tests;
 #[test]
 fn optional_friend_lookup_distinguishes_absent_links_from_real_sql_failures()
 -> Result<(), StorageError> {
-    let (root, db) = test_db("optional-friend-lookup")?;
+    let (_root, db) = test_db("optional-friend-lookup")?;
     assert!(db.find_friend_link("unknown")?.is_none());
     db.establish_friend_link("known", "alice", "bob")?;
     assert_eq!(db.find_friend_link("known")?.map(|link| link.link_id), Some("known".into()));
     db.connection.execute_batch("DROP TABLE friend_link_projection")?;
     assert!(matches!(db.find_friend_link("unknown"), Err(StorageError::Sqlite(_))));
     drop(db);
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 #[path = "shared_group_state_tests.rs"]

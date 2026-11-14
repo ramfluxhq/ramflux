@@ -65,7 +65,6 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
     assert!(group.members.contains("device-sibling"));
     assert_eq!(group.members.len(), 2);
     drop((owner, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

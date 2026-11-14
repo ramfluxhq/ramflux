@@ -352,11 +352,13 @@ mod removal_tests {
     #[test]
     fn surface_removal_includes_the_scoped_reference_without_content()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-surface-removal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-surface-removal-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "root")?;
@@ -377,17 +379,18 @@ mod removal_tests {
         assert!(events[0].1.get("snapshot").is_none());
         assert!(events[0].1.get("fallback_text").is_none());
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[test]
     fn loss_outbox_projects_compact_gap_metadata() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-loss-project-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-loss-project-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "root")?;
@@ -419,7 +422,6 @@ mod removal_tests {
         assert_eq!(events[0].1["reason"], "expired");
         assert!(events[0].1.get("pad").is_none());
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

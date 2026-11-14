@@ -12,11 +12,12 @@ use std::time::{Duration, Instant};
 const WRITER_CHILD: &str = "client::account::tests::account_writer_sdk_process_fixture";
 const WRITER_ROOT_ENV: &str = "RAMFLUX_SDK_WRITER_TEST_ROOT";
 
-fn temp_root(test_name: &str) -> PathBuf {
+fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
     let nanos =
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir()
-        .join(format!("ramflux-sdk-account-{test_name}-{}-{nanos}", std::process::id()))
+    ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-sdk-account-{test_name}-{}-{nanos}", std::process::id()))
 }
 
 fn wrapped_db_key(
@@ -68,7 +69,7 @@ fn account_writer_sdk_process_fixture() -> Result<(), Box<dyn std::error::Error>
     let Some(root) = std::env::var_os(WRITER_ROOT_ENV) else {
         return Ok(());
     };
-    let index = AccountIndex::open(root)?;
+    let index = AccountIndex::open(&root)?;
     let _lease = index.acquire_account_writer("acct")?;
     std::fs::write(index.root().join("sdk-writer-ready"), [])?;
     std::thread::sleep(Duration::from_secs(60));
@@ -104,7 +105,6 @@ fn first_unlock_does_not_write_a_wrapped_key_before_process_ownership()
     );
 
     drop(holder);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -132,7 +132,6 @@ fn secret_verification_does_not_create_vault_material_before_process_ownership()
     );
 
     drop(holder);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -186,7 +185,6 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
         Err(SdkError::Storage(StorageError::Integrity(_)))
     ));
 
-    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
 
@@ -247,7 +245,6 @@ fn concurrent_account_writers_avoid_deferred_upgrade_locks_for_fifty_cycles() ->
         );
     }
     drop(actor);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -281,6 +278,5 @@ fn persist_gateway_receive_cursor_refuses_activated_ledger() -> Result<(), SdkEr
         "{refused:?}"
     );
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

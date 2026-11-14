@@ -975,13 +975,13 @@ mod tests {
 
     #[test]
     fn guardian_invite_accept_stores_share_after_e2ee_delivery() -> Result<(), SdkError> {
-        let (alice, alice_root) = unlocked_client(
+        let (_alice_root, alice) = unlocked_client(
             "guardian-invite-alice",
             "principal_alice",
             "alice_device",
             [0x31; 32],
         )?;
-        let (guardian, guardian_root) =
+        let (_guardian_root, guardian) =
             unlocked_client("guardian-invite-bob", "principal_bob", "bob_device", [0x41; 32])?;
         let members = vec![
             member(ramflux_protocol::RecoveryQuorumMemberKind::RootShare, "root-share", [0x11; 32]),
@@ -1026,22 +1026,20 @@ mod tests {
         assert_eq!(shares[0].guardian_principal_id, "principal_bob");
         assert_eq!(shares[0].share_value, guardian_share.value);
         assert_eq!(shares[0].state, "accepted");
-        let _ = std::fs::remove_dir_all(alice_root);
-        let _ = std::fs::remove_dir_all(guardian_root);
         Ok(())
     }
 
     #[test]
     fn guardian_invite_rejects_tamper_and_wrong_guardian() -> Result<(), SdkError> {
-        let (alice, alice_root) = unlocked_client(
+        let (_alice_root, alice) = unlocked_client(
             "guardian-reject-alice",
             "principal_alice",
             "alice_device",
             [0x61; 32],
         )?;
-        let (guardian, guardian_root) =
+        let (_guardian_root, guardian) =
             unlocked_client("guardian-reject-bob", "principal_bob", "bob_device", [0x62; 32])?;
-        let (carol, carol_root) = unlocked_client(
+        let (_carol_root, carol) = unlocked_client(
             "guardian-reject-carol",
             "principal_carol",
             "carol_device",
@@ -1065,17 +1063,14 @@ mod tests {
         assert!(guardian.accept_guardian_invite(&tampered).is_err());
         assert!(carol.accept_guardian_invite(&invite).is_err());
 
-        let _ = std::fs::remove_dir_all(alice_root);
-        let _ = std::fs::remove_dir_all(guardian_root);
-        let _ = std::fs::remove_dir_all(carol_root);
         Ok(())
     }
 
     #[test]
     fn pending_recovery_collects_quorum_and_finalizes_after_timelock() -> Result<(), SdkError> {
-        let (alice, alice_root) =
+        let (_alice_root, alice) =
             unlocked_client("pending-happy-alice", "principal_alice", "alice_device", [0x71; 32])?;
-        let (guardian, guardian_root) =
+        let (_guardian_root, guardian) =
             unlocked_client("pending-happy-bob", "principal_bob", "bob_device", [0x72; 32])?;
         let quorum = ramflux_protocol::RecoveryQuorumConfigured {
             recovery_quorum_id: "quorum_pending".to_owned(),
@@ -1158,8 +1153,6 @@ mod tests {
             SdkPendingRecoveryState::ReadyToFinalize
         );
         assert_pending_recovery_lineage_events(&alice)?;
-        let _ = std::fs::remove_dir_all(alice_root);
-        let _ = std::fs::remove_dir_all(guardian_root);
         Ok(())
     }
 
@@ -1186,7 +1179,7 @@ mod tests {
     #[test]
     fn pending_recovery_rejects_timelock_shortfall_duplicate_and_guardian_only()
     -> Result<(), SdkError> {
-        let (alice, alice_root) =
+        let (_alice_root, alice) =
             unlocked_client("pending-reject-alice", "principal_alice", "alice_device", [0x91; 32])?;
         let quorum = ramflux_protocol::RecoveryQuorumConfigured {
             recovery_quorum_id: "quorum_reject".to_owned(),
@@ -1248,12 +1241,11 @@ mod tests {
         assert!(alice.finalize_recovery("recovery_reject").is_err());
 
         assert_guardian_only_recovery_rejected()?;
-        let _ = std::fs::remove_dir_all(alice_root);
         Ok(())
     }
 
     fn assert_guardian_only_recovery_rejected() -> Result<(), SdkError> {
-        let (client, client_root) = unlocked_client(
+        let (client_root, client) = unlocked_client(
             "pending-guardian-only",
             "principal_alice",
             "alice_device_go",
@@ -1365,16 +1357,17 @@ mod tests {
         principal_id: &str,
         device_id: &str,
         device_seed: [u8; 32],
-    ) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let nanos = now_unix_timestamp();
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-sdk-recovery-{test_name}-{}-{nanos}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-recovery-{test_name}-{}-{nanos}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root(principal_id, [0x21; 32]);
         client.create_device_branch(principal_id, device_id, 1, device_seed);
         client.open_account_index(&root)?;
         client.create_account("acct", principal_id)?;
         client.unlock_account("acct", b"recovery-guardian-test")?;
-        Ok((client, root))
+        Ok((root, client))
     }
 }

@@ -17,7 +17,7 @@ fn revocation_case(kind: &str, quic: bool) -> anyhow::Result<()> {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let (state, store, path) = crate::router_runtime::tests::test_router("post-commit-revocation")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("post-commit-revocation")?;
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     if kind == "fanout" {
         crate::router_runtime::tests::register_test_device_at(
@@ -39,7 +39,7 @@ fn revocation_case(kind: &str, quic: bool) -> anyhow::Result<()> {
     let revoked = Arc::new(AtomicBool::new(false));
     let (flag, actor, persistence) = (Arc::clone(&revoked), Arc::clone(&state), Arc::clone(&store));
     let hook = ramflux_node_core::durability_test_hooks::observe(
-        path.clone(),
+        path.to_path_buf(),
         Arc::new(move |_, operation, _| {
             if operation == "sender_reply_lookup" && !flag.swap(true, Ordering::SeqCst) {
                 actor
@@ -147,7 +147,7 @@ fn revoked_set(
 
 #[test]
 fn incarnation_mismatch_precedes_future_sequence() -> anyhow::Result<()> {
-    let (router, path, accepted) = seed("E-before-sequence")?;
+    let (_path, router, accepted) = seed("E-before-sequence")?;
     let wrong = "ffffffffffffffffffffffffffffffff";
     for seq in [1, 2, ramflux_protocol::MAX_SAFE_JSON_INTEGER] {
         let batch = call(
@@ -176,6 +176,5 @@ fn incarnation_mismatch_precedes_future_sequence() -> anyhow::Result<()> {
     }
     assert_eq!(router.state().resume("target", 0, 10).len(), 1);
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }

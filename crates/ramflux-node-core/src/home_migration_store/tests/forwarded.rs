@@ -615,10 +615,12 @@ fn forwarded_sender_retry_attaches_without_releasing_foreign_pin_protection() ->
         mpsc,
     };
     for mode in 0..3 {
-        let root = std::env::temp_dir().join(format!(
-            "forward-retry-{mode}-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "forward-retry-{mode}-{}",
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let store = crate::publication::open_durability_fixture(&root, mode)?;
         let router = RouterCore::new();
         store.bootstrap_router(&router)?;
@@ -632,7 +634,7 @@ fn forwarded_sender_retry_attaches_without_releasing_foreign_pin_protection() ->
         let wait = Mutex::new(wait);
         let once = AtomicBool::new(false);
         let observer = crate::durability_test_hooks::observe(
-            root.clone(),
+            root.to_path_buf(),
             Arc::new(move |_, op, done| {
                 if op == "retry_attached" && done {
                     let _ = attached.try_send(());

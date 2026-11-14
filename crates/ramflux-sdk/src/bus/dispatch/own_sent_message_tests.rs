@@ -91,7 +91,6 @@ async fn sent_dm_arrives_on_an_active_sibling_as_one_outgoing_row_despite_retrie
     .await?;
     directory.abort();
     drop((source, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -164,7 +163,6 @@ async fn sent_group_message_creates_an_outgoing_sibling_row_without_history_impo
     );
     directory.abort();
     drop((source, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -246,7 +244,6 @@ async fn an_original_self_dm_and_its_pair_encrypted_copy_produce_one_outgoing_ro
     );
     directory.abort();
     drop((source, sibling));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

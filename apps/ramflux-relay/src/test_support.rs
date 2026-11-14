@@ -9,7 +9,6 @@ use ramflux_node_core::ObjectRelayCapability::{Put, Tombstone};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
 
 pub(crate) fn client_quic_request(
@@ -300,14 +299,16 @@ pub(crate) fn v3_state_with(
 }
 
 /// A fresh on-disk relay store at a process-unique temp path (avoids redb "already open" flakes).
-pub(crate) fn v3_temp_store() -> Result<Arc<ramflux_node_core::RelayRedbStore>, String> {
+pub(crate) fn v3_temp_store()
+-> Result<(ramflux_test_support::TestPath, Arc<ramflux_node_core::RelayRedbStore>), String> {
     static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(0);
     let id = NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("ramflux-relay-t14c-{}-{id}.redb", std::process::id()));
+    let path = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-relay-t14c-{}-{id}.redb", std::process::id()));
     let store =
         ramflux_node_core::RelayRedbStore::open(&path).map_err(|error| error.to_string())?;
-    Ok(Arc::new(store))
+    Ok((path, Arc::new(store)))
 }
 
 pub(crate) fn v3_acked_by_count(state: &Arc<Mutex<ramflux_node_core::RelayCacheState>>) -> usize {
@@ -522,10 +523,13 @@ pub(crate) struct TestPeerCerts {
     pub(crate) tls: ramflux_transport::MeshTlsConfig,
 }
 
-pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub(crate) fn temp_cert_root(
+    name: &str,
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("ramflux_relay_{name}_{}_{}", std::process::id(), nanos));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux_relay_{name}_{}_{}", std::process::id(), nanos));
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }

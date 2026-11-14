@@ -7,7 +7,7 @@ use crate::client::identity_authority::HeadUse;
 #[tokio::test(flavor = "current_thread")]
 async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_messages()
 -> Result<(), SdkError> {
-    let (root, sender, mut receiver, good) = legacy_group_fixture()?;
+    let (_root, sender, mut receiver, good) = legacy_group_fixture()?;
     let mut bad = good.clone();
     bad.inbox_seq = 1;
     bad.envelope.envelope_id = "bad".into();
@@ -66,17 +66,21 @@ async fn a_rejected_legacy_group_entry_does_not_block_read_or_receive_of_valid_m
     assert!(!journal.contains("valid after rejected"));
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
-fn legacy_group_fixture()
--> Result<(PathBuf, LocalBusAccountState, LocalBusAccountState, GatewayInboxEntry), SdkError> {
+fn legacy_group_fixture() -> Result<
+    (ramflux_test_support::TestPath, LocalBusAccountState, LocalBusAccountState, GatewayInboxEntry),
+    SdkError,
+> {
     legacy_group_fixture_with_pin(true)
 }
 fn legacy_group_fixture_with_pin(
     pin: bool,
-) -> Result<(PathBuf, LocalBusAccountState, LocalBusAccountState, GatewayInboxEntry), SdkError> {
+) -> Result<
+    (ramflux_test_support::TestPath, LocalBusAccountState, LocalBusAccountState, GatewayInboxEntry),
+    SdkError,
+> {
     let root = root("legacy-group-page");
     let mut sender =
         account(&root.join("sender"), "alice", None, Arc::new(AtomicBool::new(false)))?;
@@ -160,7 +164,7 @@ use crate::client::group_quarantine::{LegacyGroupDelivery, legacy_key};
 #[test]
 fn transient_gateway_and_manifest_failures_keep_genuine_legacy_ciphertext_unacknowledged()
 -> Result<(), SdkError> {
-    let (root, sender, receiver, good) = legacy_group_fixture()?;
+    let (_root, sender, receiver, good) = legacy_group_fixture()?;
     let start = now_unix_timestamp();
     for error in [
         SdkError::GatewaySessionRejected("HTTP 503 or timeout".into()),
@@ -179,7 +183,6 @@ fn transient_gateway_and_manifest_failures_keep_genuine_legacy_ciphertext_unackn
     assert!(!db.journal_after(0, 64)?.iter().any(|e| e.topic == "message.undeliverable"));
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test(flavor = "current_thread")]
@@ -187,7 +190,7 @@ async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genu
 -> Result<(), SdkError> {
     // Backoff is wall-clock seconds; freeze this test's clock so load cannot shift the schedule.
     let _clock = crate::time::test_clock::FrozenClock::freeze();
-    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let (_root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
     receiver.client.retain_legacy_group_entry(&good)?;
     let request = LocalBusFrame::request(
         "receive",
@@ -219,7 +222,6 @@ async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genu
     assert_eq!(receiver.client.account_db()?.unrouted_count()?, 0);
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test(flavor = "current_thread")]
@@ -292,7 +294,7 @@ async fn forged_sources_and_forged_claims_of_the_real_device_cannot_spend_its_re
 #[test]
 fn exhausted_or_expired_legacy_retries_stay_held_without_terminal_rejection() -> Result<(), SdkError>
 {
-    let (root, sender, receiver, good) = legacy_group_fixture()?;
+    let (_root, sender, receiver, good) = legacy_group_fixture()?;
     let start = now_unix_timestamp();
     assert!(matches!(
         receiver.client.isolate_legacy_group_delivery(
@@ -317,14 +319,13 @@ fn exhausted_or_expired_legacy_retries_stay_held_without_terminal_rejection() ->
     assert!(!db.journal_after(0, 64)?.iter().any(|e| e.topic == "message.undeliverable"));
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn gateway_receipt_replays_share_one_legacy_retry_key_but_forged_signatures_do_not()
 -> Result<(), SdkError> {
-    let (root, sender, receiver, mut original) = legacy_group_fixture()?;
+    let (_root, sender, receiver, mut original) = legacy_group_fixture()?;
     original.envelope.ext.ext.insert("franking".into(), serde_json::json!({}));
     original.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
         &ramflux_protocol::signed_bytes(&original.envelope)?,
@@ -342,7 +343,6 @@ fn gateway_receipt_replays_share_one_legacy_retry_key_but_forged_signatures_do_n
     assert_ne!(legacy_key(&original)?, legacy_key(&replay)?);
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -457,14 +457,13 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
     let _ = server.await;
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn fresh_legacy_delivery_can_complete_even_when_its_sources_retry_slots_are_full()
 -> Result<(), SdkError> {
-    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let (_root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
     for index in 0..8 {
         let mut held = good.clone();
         held.inbox_seq = 10 + index;
@@ -504,13 +503,12 @@ async fn fresh_legacy_delivery_can_complete_even_when_its_sources_retry_slots_ar
     assert!(receiver.client.direct_message_by_id("valid")?.is_some());
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test(flavor = "current_thread")]
 async fn a_verified_pin_arrival_repairs_legacy_delivery_after_its_network_retry_budget_is_exhausted()
 -> Result<(), SdkError> {
-    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let (_root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
     let pending = receiver.client.append_group_gateway_delivery_for_recipient(
         "thread",
         "g",
@@ -551,14 +549,13 @@ async fn a_verified_pin_arrival_repairs_legacy_delivery_after_its_network_retry_
     assert!(!receiver.client.account_db()?.has_inbox_retry(&key)?);
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() -> Result<(), SdkError>
 {
-    let (root, sender, receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let (_root, sender, receiver, good) = legacy_group_fixture_with_pin(false)?;
     let db = receiver.client.account_db()?;
     let now = now_unix_timestamp();
     for index in 0..64 {
@@ -609,14 +606,13 @@ fn a_legacy_failure_without_a_retry_slot_cannot_reenter_as_a_fresh_delivery() ->
     assert!(!db.journal_after(0, 64)?.iter().any(|event| event.topic == "message.undeliverable"));
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn held_legacy_group_messages_emit_one_metadata_only_unrouted_journal_event()
 -> Result<(), SdkError> {
-    let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
+    let (_root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
     receiver.client.account_db()?.hold_unrouted(
         &legacy_key(&good)?,
         good.inbox_seq,
@@ -636,7 +632,6 @@ async fn held_legacy_group_messages_emit_one_metadata_only_unrouted_journal_even
     assert_eq!(receiver.client.account_db()?.unrouted_count()?, 1);
     drop(sender);
     drop(receiver);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

@@ -11,11 +11,13 @@ use chacha20poly1305::{
 #[test]
 fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_missing_references()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-files-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-files-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let source_index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
     source_index.create_account("account", "root")?;
@@ -102,18 +104,19 @@ fn incremental_merge_preserves_attachment_bytes_keys_and_hashes_and_refuses_miss
     drop(local);
     drop(source_index);
     drop(local_index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!(
-        "rf-backup-deleted-object-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-backup-deleted-object-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let si = AccountIndex::open(root.join("source"))?;
     let li = AccountIndex::open(root.join("local"))?;
     si.create_account("a", "root")?;
@@ -152,7 +155,6 @@ fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
     drop(local);
     drop(si);
     drop(li);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -160,11 +162,13 @@ fn r2_attachment_merge_cannot_resurrect_a_local_deletion_with_a_later_upsert()
 fn r3_equal_timestamp_attachment_deletion_wins_in_both_merge_directions()
 -> Result<(), Box<dyn std::error::Error>> {
     for local_deleted in [false, true] {
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-delete-tie-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-delete-tie-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let si = AccountIndex::open(root.join("source"))?;
         let li = AccountIndex::open(root.join("local"))?;
         si.create_account("a", "root")?;

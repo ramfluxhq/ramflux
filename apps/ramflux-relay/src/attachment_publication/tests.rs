@@ -74,7 +74,9 @@ impl Write for Spy {
 }
 #[test]
 fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
-    let root = std::env::temp_dir().join(format!("rf-relay-retire-{}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-relay-retire-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let fixture = RetirementFixture::new(&root.join("db"));
@@ -199,7 +201,9 @@ fn replay_proof(now: u64, n: u8) -> AttachmentReplayProof {
 }
 #[test]
 fn legacy_zero_payload_is_refused_before_nonce_consumption_and_output() {
-    let root = std::env::temp_dir().join(format!("rf-relay-legacy-gen-{}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("rf-relay-legacy-gen-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let fixture = RetirementFixture::new(&root.join("db"));

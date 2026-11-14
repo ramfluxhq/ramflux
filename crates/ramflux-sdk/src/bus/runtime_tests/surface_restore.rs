@@ -179,7 +179,6 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
         daemon?;
         client?;
     }
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

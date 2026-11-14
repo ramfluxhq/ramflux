@@ -210,8 +210,9 @@ fn unconfigured_small_profile_starts_below_128gib_and_refuses_unfunded()
             size == "16",
         );
     }
-    let mountpoint =
-        std::env::temp_dir().join(format!("ramflux-profile-fs-{}", std::process::id()));
+    let mountpoint = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux-profile-fs-{}", std::process::id()));
     std::fs::create_dir(&mountpoint)?;
     for size in ["16", "4"] {
         let status = std::process::Command::new("unshare")

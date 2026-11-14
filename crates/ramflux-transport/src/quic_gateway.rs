@@ -999,10 +999,11 @@ mod relay_client_quic_config_tests {
         Ok(())
     }
 
-    fn temp_ca_file() -> Result<std::path::PathBuf, std::io::Error> {
+    fn temp_ca_file() -> Result<ramflux_test_support::TestPath, std::io::Error> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir()
-            .join(format!("ramflux-relay-client-ca-{}-{nanos}.pem", std::process::id()));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-relay-client-ca-{}-{nanos}.pem", std::process::id()));
         let mut file = std::fs::File::create(&path)?;
         file.write_all(b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")?;
         Ok(path)
@@ -1015,7 +1016,6 @@ mod relay_client_quic_config_tests {
         assert_eq!(config.peer_addr.port(), 17447);
         assert_eq!(config.server_name, "ramflux-relay");
         assert_eq!(config.ca_cert, ca);
-        let _ = std::fs::remove_file(ca);
         Ok(())
     }
 
@@ -1024,7 +1024,6 @@ mod relay_client_quic_config_tests {
         let ca = temp_ca_file()?;
         assert!(RelayClientQuicConfig::new("not-an-address", "ramflux-relay", &ca).is_err());
         assert!(RelayClientQuicConfig::new("", "ramflux-relay", &ca).is_err());
-        let _ = std::fs::remove_file(ca);
         Ok(())
     }
 
@@ -1032,7 +1031,6 @@ mod relay_client_quic_config_tests {
     fn rejects_empty_server_name() -> TestResult {
         let ca = temp_ca_file()?;
         assert!(RelayClientQuicConfig::new("127.0.0.1:17447", "   ", &ca).is_err());
-        let _ = std::fs::remove_file(ca);
         Ok(())
     }
 

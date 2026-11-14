@@ -195,11 +195,12 @@ async fn row_durable_wake_positive_control(context: &crate::GatewayQuicContext) 
 }
 
 async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext) -> TestResult {
-    let (peers, hub) = crate::serve::forward_identity_tests::ephemeral_pair()
+    let pair = crate::serve::forward_identity_tests::ephemeral_pair()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut caller = context.clone();
     caller.gateway_id = "gw-a".into();
-    caller.peers = peers;
+    caller.peers = pair.peers.clone();
+    let hub = &pair.hub;
     let forward = request(TARGET, TARGET, "env-nowake");
     let (recipient, received) = sink();
     hub.register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32).await?;
@@ -715,7 +716,7 @@ fn row_map_queue_full() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn final_registration_capability() -> TestResult {
-    let wake_context = crate::session::tests::test_gateway_context()?;
+    let (_fixture_directory_0, wake_context) = crate::session::tests::test_gateway_context()?;
     row_path_is_same_node_forward();
     row_map_queue_full();
     row_durable_wake_positive_control(&wake_context).await?;

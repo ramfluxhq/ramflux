@@ -85,7 +85,6 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
     assert_eq!(active(&sibling.client, &source.client.owned_device_identity()?)?, winner);
     directory.abort();
     drop((source, sibling, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

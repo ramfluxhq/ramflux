@@ -245,7 +245,6 @@ fn planted_decode_site_spellings_and_exemptions_are_detected()
             format!("unregistered decoder: {}", display_key(&key)),
         );
     }
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -282,7 +281,6 @@ fn registry_guard_rejects_class_a_or_b_without_a_strict_call()
         ),
         "a lenient A call has the stable strictness verdict"
     );
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -300,7 +298,6 @@ fn crate_root_test_modules_resolve_from_the_src_directory() -> Result<(), Box<dy
     let sites = scan_tree(&root)?;
     assert!(sites.is_empty(), "crate-root test module decoder must be exempt");
 
-    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -965,9 +962,9 @@ fn display_key(key: &Key) -> String {
     format!("{} | {} | {}", key.path, key.function, key.ordinal)
 }
 
-fn temp_tree(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let root =
-        std::env::temp_dir().join(format!("ramflux-ijson-site-{}-{label}", std::process::id()));
+fn temp_tree(label: &str) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
+    let root = ramflux_test_support::TestPath::new()?
+        .child(format!("ramflux-ijson-site-{}-{label}", std::process::id()));
     if root.exists() {
         fs::remove_dir_all(&root)?;
     }

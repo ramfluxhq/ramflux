@@ -48,7 +48,6 @@ fn capture_failure_preserves_close_reason_after_successful_tls()
             assert_eq!(record["status"], 200);
         }
     }
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -57,7 +56,7 @@ fn exercise_relay(mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     let certs = issue_test_ca_and_service_cert(&root, "node-relay-a", "ramflux-relay")?;
     let config = test_config(&certs.tls, "unused-retention:0");
     let server_config = validate_relay_client_quic_tls(&config)?;
-    let store = v3_temp_store()?;
+    let (_fixture_directory_0, store) = v3_temp_store()?;
     let metrics = RelayClientQuicMetrics::default();
     let context = RelayClientQuicContext {
         metrics: metrics.clone(),

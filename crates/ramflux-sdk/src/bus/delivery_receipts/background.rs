@@ -427,7 +427,6 @@ mod tests {
         assert!(seal(&account, &mut plan, empty())?.is_some());
         assert_eq!(plan.work.attempts, 1);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -457,7 +456,6 @@ mod retention_tests {
         assert!(prepare(&account)?.is_none());
         assert!(!db.actor_state_exists(key)?);
         drop(account);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

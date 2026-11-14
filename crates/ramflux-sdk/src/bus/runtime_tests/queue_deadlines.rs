@@ -128,7 +128,7 @@ async fn case(post_claim: Duration) -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { actor, connection, mut io, temp, router, reader } = fixture(post_claim).await?;
+    let Fixture { temp, actor, connection, mut io, router, reader } = fixture(post_claim).await?;
     let owner = connection.clone();
     let courier = tokio::spawn(async move {
         owner

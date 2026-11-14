@@ -51,6 +51,5 @@ async fn r4_missing_reference_enumeration_completes_while_the_account_writer_is_
     readers.stop().await;
     drop(readers);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

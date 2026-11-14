@@ -5,9 +5,9 @@ use super::*;
 
 struct Fixture {
     client: RamfluxClient,
-    root: PathBuf,
     reference: SdkDmAttachmentRef,
     package: SdkObjectSharePackage,
+    root: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new() -> Result<Self, SdkError> {
@@ -26,8 +26,9 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
         let sequence = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir()
-            .join(format!("rf-deferred-{}-{unique}-{sequence}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-deferred-{}-{unique}-{sequence}", std::process::id()));
         let client = open(&root, true)?;
         // Construct a real encrypted key slot using the donor's object key.
         let mut donor = RamfluxClient::new();
@@ -77,12 +78,7 @@ impl Fixture {
             object,
             key_slot: slot,
         };
-        Ok(Self { client, root, reference, package })
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        Ok(Self { client, reference, package, root })
     }
 }
 fn open(root: &Path, create: bool) -> Result<RamfluxClient, SdkError> {

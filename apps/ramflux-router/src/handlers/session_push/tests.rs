@@ -17,17 +17,17 @@ fn call(router: &RouterHandle, method: &str, path: &str, body: Value) -> anyhow:
     )?;
     Ok(serde_json::from_slice(&response.body)?)
 }
-fn seed(name: &str) -> anyhow::Result<(RouterHandle, std::path::PathBuf, Value)> {
-    let (state, store, path) = crate::router_runtime::tests::test_router(name)?;
+fn seed(name: &str) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle, Value)> {
+    let (path, state, store) = crate::router_runtime::tests::test_router(name)?;
     let router = RouterHandle::tokio(state, store, None);
     let envelope = crate::router_runtime::tests::current_envelope(name, "target")?;
     let response = call(&router, "POST", "/mvp0/envelope", serde_json::to_value(envelope)?)?;
     anyhow::ensure!(response["inbox_seq"] == 1, "{response}");
-    Ok((router, path, response))
+    Ok((path, router, response))
 }
 #[test]
 fn issued_seqs_contract() -> anyhow::Result<()> {
-    let (router, path, _) = seed("issued-contract")?;
+    let (_path, router, _) = seed("issued-contract")?;
     let invalid: Vec<Vec<String>> = vec![
         vec![],
         vec!["target".into(); 2],
@@ -55,12 +55,11 @@ fn issued_seqs_contract() -> anyhow::Result<()> {
     assert_eq!(response["issued"][0]["inbox_seq"], 1);
     assert_eq!(response["issued"][1]["inbox_seq"], 0);
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
 fn invalid_seq_terminal() -> anyhow::Result<()> {
-    let (router, path, response) = seed("invalid-terminal")?;
+    let (_path, router, response) = seed("invalid-terminal")?;
     let id = response["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?;
     let before = router.state().resume("target", 0, 10);
     for target in ["target", "unknown"] {
@@ -104,12 +103,11 @@ fn invalid_seq_terminal() -> anyhow::Result<()> {
     assert_eq!(router.store().inbox_status("unknown")?, (None, 0));
     assert!(router.state().cursor_state("unknown").is_none());
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
 fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
-    let (router, path, accepted) = seed("mesh-incarnation")?;
+    let (path, router, accepted) = seed("mesh-incarnation")?;
     let id = accepted["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?.to_owned();
     let row = router.state().fetch_entry("target", 1, 0)?;
     let row = serde_json::to_value(row)?;
@@ -165,13 +163,12 @@ fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
     let store = ramflux_node_core::RouterRedbStore::open(&path)?;
     assert_eq!(store.inbox_status("target")?.0.as_deref(), Some(id.as_str()));
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
 fn delayed_old_incarnation_ack() -> anyhow::Result<()> {
     // The raw old request is delayed before entering the restarted router.
-    let (state, store, path) = crate::router_runtime::tests::test_router("delayed-old-E")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("delayed-old-E")?;
     let old = store.initialize_inbox("target")?;
     let backup = path.with_extension("backup");
     std::fs::copy(&path, &backup)?;
@@ -232,13 +229,11 @@ fn delayed_old_incarnation_ack() -> anyhow::Result<()> {
         1
     );
     drop(store);
-    std::fs::remove_file(path)?;
-    std::fs::remove_file(backup)?;
     Ok(())
 }
 #[test]
 fn session_push_requires_gateway_peer() -> anyhow::Result<()> {
-    let (router, path, _) = seed("push-auth")?;
+    let (_path, router, _) = seed("push-auth")?;
     for path in [
         "/mvp0/issued-seqs",
         "/mvp0/ack-bound-batch",
@@ -259,12 +254,11 @@ fn session_push_requires_gateway_peer() -> anyhow::Result<()> {
         assert_eq!(response.status, "403 Forbidden");
     }
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
 fn capable_establishment_initializes_empty_inbox() -> anyhow::Result<()> {
-    let (state, store, path) = crate::router_runtime::tests::test_router("capable-empty")?;
+    let (_path, state, store) = crate::router_runtime::tests::test_router("capable-empty")?;
     let router = RouterHandle::tokio(state, store, None);
     let session = ramflux_node_core::SessionDescriptor {
         target_delivery_id: "target_alice".into(),
@@ -295,7 +289,6 @@ fn capable_establishment_initializes_empty_inbox() -> anyhow::Result<()> {
     assert_eq!(page["issued_inbox_seq"], 0);
     assert_eq!(page["settled_through_seq"], 0);
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 #[test]
@@ -306,7 +299,7 @@ fn fanout_mesh_retains_acceptance_metadata() -> anyhow::Result<()> {
     Ok(())
 }
 fn fanout_metadata_case(quic: bool) -> anyhow::Result<()> {
-    let (state, store, path) = crate::router_runtime::tests::test_router("fanout-metadata")?;
+    let (path, state, store) = crate::router_runtime::tests::test_router("fanout-metadata")?;
     crate::router_runtime::tests::register_test_device_at(
         &state,
         "alice",
@@ -355,7 +348,7 @@ mod revocation_tests;
 
 #[test]
 fn capable_nack_is_incarnation_fenced_and_durable() -> anyhow::Result<()> {
-    let (router, path, response) = seed("capable-nack")?;
+    let (path, router, response) = seed("capable-nack")?;
     let id = response["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?;
     let before = router.state().resume("target", 0, 10);
     let envelope_id = before[0].envelope.envelope_id.clone();
@@ -406,13 +399,12 @@ fn capable_nack_is_incarnation_fenced_and_durable() -> anyhow::Result<()> {
     let restored = store.load_router()?.ok_or_else(|| anyhow::anyhow!("router restore"))?;
     assert_eq!(restored.resume("target", 0, 10), []);
     drop(store);
-    std::fs::remove_file(path)?;
     Ok(())
 }
 
 #[test]
 fn legacy_nack_keeps_cursor_shape() -> anyhow::Result<()> {
-    let (router, path, accepted) = seed("legacy-nack-cursor")?;
+    let (_path, router, accepted) = seed("legacy-nack-cursor")?;
     let row = router
         .state()
         .resume("target", 0, 1)
@@ -438,6 +430,5 @@ fn legacy_nack_keeps_cursor_shape() -> anyhow::Result<()> {
     assert_eq!(modern["incarnation_id"], accepted["incarnation_id"]);
     assert_eq!(modern["cursor"]["target_delivery_id"], "target");
     drop(router);
-    std::fs::remove_file(path)?;
     Ok(())
 }

@@ -450,7 +450,6 @@ mod review_tests {
         assert!(state.head <= 105, "one GiB must coalesce chunk events into percentage updates");
         assert_eq!(state.registry.job(&row.job_id)?.progress.bytes_done, total);
         drop(state);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
@@ -468,7 +467,6 @@ mod review_tests {
         std::fs::remove_dir(&partial)?;
         jobs.expire();
         assert!(!stage.exists(), "the periodic cleanup must retry without a daemon restart");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

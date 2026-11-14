@@ -553,7 +553,7 @@ mod deadline_tests;
 pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::TcpListener;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -649,7 +649,6 @@ pub(crate) mod tests {
         assert_eq!(request.signed_wake.body.target_owner_epoch, 4);
         assert_eq!(request.signed_wake.body.class, ramflux_protocol::WakeClass::Message);
         signer.verify_wake_v2(&request.signed_wake)?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -694,7 +693,6 @@ pub(crate) mod tests {
         assert_ne!(request.signed_wake.body.wake_id, "wake_env_notify_mesh_fallback");
         assert!(!request.signed_wake.body.wake_id.contains("env_notify_mesh_fallback"));
         signer.verify_wake_v2(&request.signed_wake)?;
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -727,7 +725,6 @@ pub(crate) mod tests {
         assert_eq!(response.target_delivery_id, "target_notify_mesh");
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.envelope_id, "env_router_async_mesh");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -765,7 +762,6 @@ pub(crate) mod tests {
         assert_eq!(response.target_delivery_id, "target_notify_mesh");
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.envelope_id, "env_router_async_mesh_fallback");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -800,7 +796,6 @@ pub(crate) mod tests {
 
         assert_eq!(response["transport"], "quic");
         assert_eq!(received.recv_timeout(Duration::from_secs(5))?, "/mvp0/cursor/target_async_get");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -838,7 +833,6 @@ pub(crate) mod tests {
             received.recv_timeout(Duration::from_secs(5))?,
             "/mvp0/cursor/target_get_opt_out"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -881,7 +875,6 @@ pub(crate) mod tests {
             received.recv_timeout(Duration::from_secs(5))?,
             "/mvp0/cursor/target_get_fallback"
         );
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -900,7 +893,6 @@ pub(crate) mod tests {
 
         assert_eq!(router.endpoint, DEFAULT_ROUTER_ASYNC_ENDPOINT);
         assert_eq!(notify.endpoint, DEFAULT_NOTIFY_MESH_ENDPOINT);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -911,7 +903,6 @@ pub(crate) mod tests {
         let config = test_gateway_config(&gateway.tls);
 
         assert!(notify_mesh_client_from_endpoint_value(&config, Some("off"))?.is_none());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1331,21 +1322,28 @@ pub(crate) mod tests {
     static TEMP_CERT_ROOT_SEQUENCE: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
 
-    pub(crate) fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub(crate) fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         temp_cert_root_at(name, nanos)
     }
 
-    fn temp_cert_root_at(name: &str, nanos: u128) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_cert_root_at(
+        name: &str,
+        nanos: u128,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         for _ in 0..32 {
             let sequence =
                 TEMP_CERT_ROOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "ramflux_gateway_{name}_{}_{}_{}",
-                std::process::id(),
-                nanos,
-                sequence
-            ));
+            let root = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "ramflux_gateway_{name}_{}_{}_{}",
+                    std::process::id(),
+                    nanos,
+                    sequence
+                ));
             match std::fs::create_dir(&root) {
                 Ok(()) => return Ok(root),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1364,8 +1362,6 @@ pub(crate) mod tests {
         let second = temp_cert_root_at("same-tick", 1)?;
         assert_ne!(first, second);
         assert_eq!(std::fs::read(&marker)?, b"first");
-        std::fs::remove_dir_all(first)?;
-        std::fs::remove_dir_all(second)?;
         Ok(())
     }
 

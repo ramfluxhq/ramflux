@@ -134,11 +134,13 @@ mod tests {
     #[test]
     fn a_fresh_journal_and_the_last_pruned_cursor_resume_without_missing_events()
     -> Result<(), SdkError> {
-        let root = std::env::temp_dir().join(format!(
-            "ramflux-stream-cursor-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "ramflux-stream-cursor-{}-{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos())
+            ));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "a")?;
@@ -179,7 +181,6 @@ mod tests {
         query.body = serde_json::json!({"since_seq":3});
         assert_eq!(read(db, &query)?["resync_required"], true);
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

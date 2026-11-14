@@ -115,18 +115,20 @@ pub(super) fn auth_key(entry: &GatewayInboxEntry) -> String {
 }
 
 pub(super) struct Fixture {
-    root: std::path::PathBuf,
     pub client: RamfluxClient,
+    root: ramflux_test_support::TestPath,
 }
 
 impl Fixture {
     pub(super) fn new() -> Result<Self, SdkError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "rf-application-outbox-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-application-outbox-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
         let mut client = RamfluxClient::new();
         client.create_identity_root("acct", [41; 32]);
         client.create_device_branch("acct", "acct-device", 1, [42; 32]);
@@ -144,14 +146,13 @@ impl Fixture {
             "thread",
             &json!({"kind":"direct","participants":[client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id]}),
         )?;
-        Ok(Self { root, client })
+        Ok(Self { client, root })
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.client.active_account_db = None;
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

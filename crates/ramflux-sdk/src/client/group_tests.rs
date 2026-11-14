@@ -3,28 +3,22 @@
 
 //! Authenticated group control and membership regression fixtures.
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_root(test_name: &str) -> PathBuf {
-    let nanos =
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir().join(format!("ramflux-sdk-group-{test_name}-{nanos}"))
-}
-
 fn group_client(
     test_name: &str,
     principal: &str,
     device: &str,
     device_seed: [u8; 32],
-) -> Result<RamfluxClient, SdkError> {
-    let root = temp_root(test_name);
+) -> Result<ramflux_test_support::Fixture<RamfluxClient>, SdkError> {
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: create group directory")
+        .child(test_name);
     let mut client = RamfluxClient::new();
     client.create_identity_root(principal, root_seed(principal));
     client.create_device_branch(principal, device, 1, device_seed);
-    client.open_account_index(root)?;
+    client.open_account_index(&root)?;
     client.create_account("acct", principal)?;
     client.unlock_account("acct", b"group-control-test")?;
-    Ok(client)
+    Ok(ramflux_test_support::Fixture::new(client, root))
 }
 
 fn root_seed(principal: &str) -> [u8; 32] {

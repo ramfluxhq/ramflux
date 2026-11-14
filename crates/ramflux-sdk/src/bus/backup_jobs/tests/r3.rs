@@ -212,6 +212,5 @@ fn r3_crash_after_cleanup_ticks_and_commit_leaves_the_account_openable() -> Test
     drop(jobs);
     drop(index);
     drop(child);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -45,6 +45,5 @@ async fn list_and_read_project_deleted_peer_and_own_rows_without_identity() -> T
     }
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

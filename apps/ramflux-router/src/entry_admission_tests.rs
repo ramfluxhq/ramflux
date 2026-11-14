@@ -22,11 +22,13 @@ fn wire_size(envelope: &ramflux_protocol::Envelope) -> anyhow::Result<usize> {
 fn run(origin: &str) -> anyhow::Result<()> {
     for mode in 0..=1 {
         for over in [false, true] {
-            let root = std::env::temp_dir().join(format!(
-                "entry-bound-{origin}-{mode}-{over}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-            ));
+            let root = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!(
+                    "entry-bound-{origin}-{mode}-{over}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+                ));
             let store =
                 Arc::new(ramflux_node_core::publication::open_durability_fixture(&root, mode)?);
             let state = Arc::new(RouterCore::new());

@@ -209,13 +209,16 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         }
     }
     for with_wal in [true, false] {
-        let router_path = temp_store_path(if with_wal { "registry_wal" } else { "registry_redb" })?;
+        let store_directory_0 =
+            temp_store_path(if with_wal { "registry_wal" } else { "registry_redb" })?;
+        let router_path = store_directory_0.to_path_buf();
         let router_store = if with_wal {
             RouterRedbStore::open_with_wal(&router_path, router_path.with_extension("wal"))?
         } else {
             RouterRedbStore::open_without_wal(&router_path)?
         };
-        let federation_store = FederationRedbStore::open(temp_store_path("registry_federation")?)?;
+        let store_directory_1 = temp_store_path("registry_federation")?;
+        let federation_store = FederationRedbStore::open(&store_directory_1)?;
         let router = RouterCore::new();
         router_store.bootstrap_router(&router)?;
         // One shared foreign device keeps every marked authority identical, so the peer
@@ -1134,7 +1137,9 @@ fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
             for wrapper in
                 ["authenticated_envelope_source", "authenticated_envelope_source_durable"]
             {
-                let path = temp_store_path(&format!("e1_{wrapper}_{with_wal}_{index}"))?;
+                let store_directory_2 =
+                    temp_store_path(&format!("e1_{wrapper}_{with_wal}_{index}"))?;
+                let path = store_directory_2.to_path_buf();
                 let store = if with_wal {
                     RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?
                 } else {

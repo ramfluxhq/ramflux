@@ -352,7 +352,8 @@ fn https_exchange(
     body: &[u8],
     extra_headers: &str,
 ) -> TestResult<Vec<u8>> {
-    let root = temp_store_path("pairing-https")?.with_extension("tls");
+    let store_directory_0 = temp_store_path("pairing-https")?;
+    let root = store_directory_0.to_path_buf().with_extension("tls");
     std::fs::create_dir_all(&root)?;
     let (ca, cert, key) = openssl_leaf(&root)?;
     let server_config = rustls_server_config(&cert, &key)?;

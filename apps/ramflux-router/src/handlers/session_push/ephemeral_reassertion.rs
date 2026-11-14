@@ -9,7 +9,7 @@ use ramflux_node_core::{
     SessionPushSessionRequest,
 };
 use serde_json::{Value, json};
-use std::path::PathBuf;
+
 use std::sync::Arc;
 
 type TestResult = anyhow::Result<()>;
@@ -138,9 +138,9 @@ fn persist_and_restart(
     Ok(RouterHandle::tokio(state, store, None))
 }
 
-fn fresh(name: &str) -> anyhow::Result<(RouterHandle, PathBuf)> {
-    let (state, store, path) = crate::router_runtime::tests::test_router(name)?;
-    Ok((RouterHandle::tokio(state, store, None), path))
+fn fresh(name: &str) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle)> {
+    let (path, state, store) = crate::router_runtime::tests::test_router(name)?;
+    Ok((path, RouterHandle::tokio(state, store, None)))
 }
 
 fn assert_unsupported(router: &RouterHandle, target: &str) {
@@ -168,8 +168,8 @@ fn restarted_live(
     name: &str,
     target: &str,
     gateway: &str,
-) -> anyhow::Result<(RouterHandle, PathBuf, String)> {
-    let (router, path) = fresh(name)?;
+) -> anyhow::Result<(ramflux_test_support::TestPath, RouterHandle, String)> {
+    let (path, router) = fresh(name)?;
     establish_capable(&router, target, gateway)?;
     assert_online(&router, target, gateway, SESSION);
     let previous_boot = boot_id(&router)?;
@@ -182,11 +182,11 @@ fn restarted_live(
     anyhow::ensure!(live.gateway_id == gateway, "restored gateway");
     let new_boot = boot_id(&restored)?;
     anyhow::ensure!(previous_boot != new_boot, "boot id reused across restart");
-    Ok((restored, path, previous_boot))
+    Ok((path, restored, previous_boot))
 }
 
 fn row_restart_empty_until_reassertion() -> TestResult {
-    let (router, path, _) = restarted_live("p05-empty", "target-empty", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-empty", "target-empty", GATEWAY)?;
     assert_unsupported(&router, "target-empty");
     drop(router);
     std::fs::remove_file(path)?;
@@ -194,7 +194,7 @@ fn row_restart_empty_until_reassertion() -> TestResult {
 }
 
 fn row_valid_reassertion_restores() -> TestResult {
-    let (router, path, _) = restarted_live("p05-restore", "target-restore", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-restore", "target-restore", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = reassert(&router, &boot, &items_for("target-restore", SESSION, GATEWAY))?;
     assert_online(&router, "target-restore", GATEWAY, SESSION);
@@ -208,7 +208,7 @@ fn row_valid_reassertion_restores() -> TestResult {
 }
 
 fn row_stale_boot_refused_whole() -> TestResult {
-    let (router, path, previous_boot) = restarted_live("p05-stale", "target-stale", GATEWAY)?;
+    let (path, router, previous_boot) = restarted_live("p05-stale", "target-stale", GATEWAY)?;
     let current = boot_id(&router)?;
     anyhow::ensure!(previous_boot != current, "previous boot must differ");
     let response = reassert(&router, &previous_boot, &items_for("target-stale", SESSION, GATEWAY))?;
@@ -220,7 +220,7 @@ fn row_stale_boot_refused_whole() -> TestResult {
 }
 
 fn row_delayed_after_resume_without_capability() -> TestResult {
-    let (router, path, _) = restarted_live("p05-delayed", "target-delayed", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-delayed", "target-delayed", GATEWAY)?;
     let boot = boot_id(&router)?;
     let resumed = descriptor("target-delayed", GATEWAY, SESSION, 2);
     let body = serde_json::to_value(resumed)?;
@@ -236,7 +236,7 @@ fn row_delayed_after_resume_without_capability() -> TestResult {
 }
 
 fn row_descriptor_mismatch() -> TestResult {
-    let (router, path, _) = restarted_live("p05-mismatch", "target-mismatch", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-mismatch", "target-mismatch", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response =
         reassert(&router, &boot, &items_for("target-mismatch", "session-other", GATEWAY))?;
@@ -248,7 +248,7 @@ fn row_descriptor_mismatch() -> TestResult {
 }
 
 fn row_asserting_gateway_mismatch_refused() -> TestResult {
-    let (router, path, _) = restarted_live("p05-gw-a", "target-gw-a", "gateway-b")?;
+    let (path, router, _) = restarted_live("p05-gw-a", "target-gw-a", "gateway-b")?;
     let boot = boot_id(&router)?;
     let before = router.state().ephemeral_map_len();
     let response =
@@ -262,7 +262,7 @@ fn row_asserting_gateway_mismatch_refused() -> TestResult {
 }
 
 fn row_mixed_batch_gateway_mismatch_refuses_whole_request() -> TestResult {
-    let (router, path) = fresh("p05-mixed")?;
+    let (path, router) = fresh("p05-mixed")?;
     establish_capable(&router, "target-mix-1", GATEWAY)?;
     establish_capable(&router, "target-mix-2", "gateway-b")?;
     establish_capable(&router, "target-mix-3", GATEWAY)?;
@@ -289,7 +289,7 @@ fn row_mixed_batch_gateway_mismatch_refuses_whole_request() -> TestResult {
 }
 
 fn row_empty_gateway_is_bad_request() -> TestResult {
-    let (router, path, _) = restarted_live("p05-empty-g", "target-empty-g", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-empty-g", "target-empty-g", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = reassert(&router, &boot, &items_for("target-empty-g", SESSION, ""))?;
     assert_eq!(response["reason"], "gateway_id_empty");
@@ -300,7 +300,7 @@ fn row_empty_gateway_is_bad_request() -> TestResult {
 }
 
 fn row_ephemeral_session_rejects_another_instance_before_binding() -> TestResult {
-    let (router, path) = fresh("p05-ephemeral-instance")?;
+    let (path, router) = fresh("p05-ephemeral-instance")?;
     let body = serde_json::to_value(capable_request("target-other-instance", "gw-b", SESSION, 1))?;
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
@@ -322,7 +322,7 @@ fn row_ephemeral_session_rejects_another_instance_before_binding() -> TestResult
 }
 
 fn row_reassertion_foreign_node_is_json_node_mismatch() -> TestResult {
-    let (router, path, _) = restarted_live("p05-node-mismatch", "target-node-mismatch", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-node-mismatch", "target-node-mismatch", GATEWAY)?;
     let boot = boot_id(&router)?;
     let peer = ramflux_node_core::MeshPeerIdentity {
         node_id: "foreign-node".into(),
@@ -349,7 +349,7 @@ fn row_reassertion_foreign_node_is_json_node_mismatch() -> TestResult {
 }
 
 fn row_principal_lookup_and_session_get_gates() -> TestResult {
-    let (router, path) = fresh("p05-principal-gates")?;
+    let (path, router) = fresh("p05-principal-gates")?;
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: "POST".into(),
@@ -393,7 +393,7 @@ fn row_principal_lookup_and_session_get_gates() -> TestResult {
 }
 
 fn row_unparseable_registration_body_is_bad_request() -> TestResult {
-    let (router, path) = fresh("p05-unparseable-body")?;
+    let (path, router) = fresh("p05-unparseable-body")?;
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: "POST".into(),
@@ -411,7 +411,7 @@ fn row_unparseable_registration_body_is_bad_request() -> TestResult {
 }
 
 fn row_session_get_nested_target_is_gated() -> TestResult {
-    let (router, path) = fresh("p05-session-get-nested")?;
+    let (path, router) = fresh("p05-session-get-nested")?;
     let response = mesh(&router, "GET", "/s1/session/a/b", &Value::Null, "ramflux-federation")?;
     assert_eq!(response.status, "403 Forbidden");
     assert_eq!(serde_json::from_slice::<Value>(&response.body)?["reason"], "gateway_role_required");
@@ -421,7 +421,7 @@ fn row_session_get_nested_target_is_gated() -> TestResult {
 }
 
 fn row_asserting_gateway_match_accepted() -> TestResult {
-    let (router, path, _) = restarted_live("p05-gw-b", "target-gw-b", "gateway-b")?;
+    let (path, router, _) = restarted_live("p05-gw-b", "target-gw-b", "gateway-b")?;
     let boot = boot_id(&router)?;
     let response =
         reassert_as(&router, &boot, &items_for("target-gw-b", SESSION, "gateway-b"), "gateway-b")?;
@@ -433,7 +433,7 @@ fn row_asserting_gateway_match_accepted() -> TestResult {
 }
 
 fn row_empty_target() -> TestResult {
-    let (router, path, _) = restarted_live("p05-empty-t", "target-empty-t", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-empty-t", "target-empty-t", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = reassert(&router, &boot, &items_for("", SESSION, GATEWAY))?;
     assert_eq!(response["applied"], 0);
@@ -444,7 +444,7 @@ fn row_empty_target() -> TestResult {
 }
 
 fn row_empty_session() -> TestResult {
-    let (router, path, _) = restarted_live("p05-empty-s", "target-empty-s", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-empty-s", "target-empty-s", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = reassert(&router, &boot, &items_for("target-empty-s", "", GATEWAY))?;
     assert_eq!(response["applied"], 0);
@@ -455,7 +455,7 @@ fn row_empty_session() -> TestResult {
 }
 
 fn row_non_live_descriptor() -> TestResult {
-    let (router, path, _) = restarted_live("p05-drain", "target-drain", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-drain", "target-drain", GATEWAY)?;
     let boot = boot_id(&router)?;
     router.state().mark_draining("target-drain")?;
     let response = reassert(&router, &boot, &items_for("target-drain", SESSION, GATEWAY))?;
@@ -467,7 +467,7 @@ fn row_non_live_descriptor() -> TestResult {
 }
 
 fn row_map_saturation() -> TestResult {
-    let (router, path, _) = restarted_live("p05-map-full", "target-map-full", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-map-full", "target-map-full", GATEWAY)?;
     let boot = boot_id(&router)?;
     for index in 0..EPHEMERAL_CAPABILITY_BOUND.saturating_sub(1) {
         router.state().bind_ephemeral_capability(&format!("m{index}"), GATEWAY, SESSION);
@@ -483,7 +483,7 @@ fn row_map_saturation() -> TestResult {
 }
 
 fn row_map_saturation_next_refused() -> TestResult {
-    let (router, path, _) = restarted_live("p05-map-over", "target-map-over", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-map-over", "target-map-over", GATEWAY)?;
     let boot = boot_id(&router)?;
     for index in 0..EPHEMERAL_CAPABILITY_BOUND {
         router.state().bind_ephemeral_capability(&format!("n{index}"), GATEWAY, SESSION);
@@ -499,7 +499,7 @@ fn row_map_saturation_next_refused() -> TestResult {
 }
 
 fn row_established_in_boot_full() -> TestResult {
-    let (router, path, _) = restarted_live("p05-set-full", "target-set-full", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-set-full", "target-set-full", GATEWAY)?;
     let boot = boot_id(&router)?;
     for index in 0..EPHEMERAL_CAPABILITY_BOUND {
         router.state().clear_ephemeral_capability(&format!("f{index}"));
@@ -514,7 +514,7 @@ fn row_established_in_boot_full() -> TestResult {
 }
 
 fn row_item_bound_inclusive() -> TestResult {
-    let (router, path, _) = restarted_live("p05-item-bound", "target-bound", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-item-bound", "target-bound", GATEWAY)?;
     let boot = boot_id(&router)?;
     let mut accepted = Vec::with_capacity(EPHEMERAL_REASSERTION_ITEM_BOUND);
     accepted.push(item_json("target-bound", SESSION, GATEWAY));
@@ -530,7 +530,7 @@ fn row_item_bound_inclusive() -> TestResult {
 }
 
 fn row_1025_items_refused() -> TestResult {
-    let (router, path, _) = restarted_live("p05-over-items", "target-over", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-over-items", "target-over", GATEWAY)?;
     let boot = boot_id(&router)?;
     let mut overflow = Vec::with_capacity(EPHEMERAL_REASSERTION_ITEM_BOUND.saturating_add(1));
     overflow.push(item_json("target-over", SESSION, GATEWAY));
@@ -546,7 +546,7 @@ fn row_1025_items_refused() -> TestResult {
 }
 
 fn row_non_gateway_peer_forbidden() -> TestResult {
-    let (router, path, _) = restarted_live("p05-auth", "target-auth", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-auth", "target-auth", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = mesh(
         &router,
@@ -563,7 +563,7 @@ fn row_non_gateway_peer_forbidden() -> TestResult {
 }
 
 fn row_request_decode_negatives() -> TestResult {
-    let (router, path, _) = restarted_live("p05-decode", "target-decode", GATEWAY)?;
+    let (path, router, _) = restarted_live("p05-decode", "target-decode", GATEWAY)?;
     let boot = boot_id(&router)?;
     for body in [
         &b"{"[..],

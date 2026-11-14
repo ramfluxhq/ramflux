@@ -43,7 +43,7 @@ async fn reply(
 async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_restart()
 -> anyhow::Result<()> {
     for quic in [false, true] {
-        let (state, store, path) = crate::router_runtime::tests::test_router("forward-reply")?;
+        let (path, state, store) = crate::router_runtime::tests::test_router("forward-reply")?;
         let mut bodies = Vec::new();
         for target in ["dormant-target", "active-target"] {
             let mut envelope =

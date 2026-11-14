@@ -50,7 +50,7 @@ fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
             );
             let original = request(&driver, &session, envelope.clone(), 31)?;
             let retry = request(&driver, &session, envelope.clone(), 32)?;
-            let held = hold(root.clone(), abort);
+            let held = hold(root.to_path_buf(), abort);
             std::thread::scope(|scope| -> Result {
                 let first = scope.spawn(|| service.mesh(&router, &store, original, PEER, NOW));
                 held.arrived.recv_timeout(Duration::from_secs(30))?;

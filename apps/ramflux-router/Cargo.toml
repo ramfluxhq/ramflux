@@ -34,7 +34,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+ramflux-test-support.workspace = true
+tempfile.workspace = true
 ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "test-support"] }
 ramflux-transport = { workspace = true, features = ["test-support"] }
 ed25519-dalek = { workspace = true }

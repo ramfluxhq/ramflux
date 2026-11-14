@@ -13,7 +13,7 @@ use ramflux_transport::{MeshQuicServer, MeshTlsConfig, TransportError};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::mpsc;
@@ -27,9 +27,9 @@ const EXPIRES_AT_MS: u64 = 1_760_000_005_000;
 const NOW_LIVE_MS: u64 = 1_760_000_004_999;
 
 struct TestCa {
-    cert: PathBuf,
-    key: PathBuf,
     pem: String,
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
 }
 
 struct TestPeerCerts {
@@ -40,16 +40,16 @@ struct TestPeerCerts {
 struct ForwardServer {
     endpoint: String,
     hub: Arc<GatewaySessionHub>,
-    _root: PathBuf,
+    root: ramflux_test_support::TestPath,
 }
 
-fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn temp_cert_root(
+    name: &str,
+) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ramflux_gw_forward_id_{name}_{}_{}",
-        std::process::id(),
-        nanos
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!("ramflux_gw_forward_id_{name}_{}_{}", std::process::id(), nanos));
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
     }
@@ -199,7 +199,7 @@ fn start_gw_b_listener()
     let gw_b = issue_test_service_cert(&ca, NODE, "ramflux-gateway", Some("gw-b"))?;
     let hub = Arc::new(GatewaySessionHub::default());
     let endpoint = spawn_forward_listener(gw_b.tls.clone(), ca.pem.clone(), Arc::clone(&hub))?;
-    Ok((ForwardServer { endpoint, hub, _root: root }, ca, gw_b))
+    Ok((ForwardServer { endpoint, hub, root }, ca, gw_b))
 }
 
 fn post_json<T: serde::Serialize>(
@@ -516,11 +516,16 @@ fn forward_deliver_refuses_legacy_gateway_without_instance()
 }
 
 /// Real authenticated receiving gateway for the originating-submit regression.
-pub(crate) fn ephemeral_pair()
--> Result<(GatewayPeerDirectory, Arc<GatewaySessionHub>), Box<dyn std::error::Error>> {
-    let (server, ca, _gw_b) = start_gw_b_listener()?;
+pub(crate) fn ephemeral_pair() -> Result<EphemeralPair, Box<dyn std::error::Error>> {
+    let (server, ca, gw_b) = start_gw_b_listener()?;
     let gw_a = issue_test_service_cert(&ca, NODE, "ramflux-gateway", Some("gw-a"))?;
-    Ok((GatewayPeerDirectory::test_peer(gw_a.tls, ca.pem, "gw-b", server.endpoint), server.hub))
+    Ok(EphemeralPair {
+        peers: GatewayPeerDirectory::test_peer(gw_a.tls, ca.pem.clone(), "gw-b", server.endpoint),
+        hub: server.hub,
+        receiver_tls: gw_b.tls,
+        ca_pem: ca.pem,
+        root: server.root,
+    })
 }
 
 pub(crate) struct EphemeralPair {
@@ -528,6 +533,7 @@ pub(crate) struct EphemeralPair {
     pub hub: Arc<GatewaySessionHub>,
     pub receiver_tls: MeshTlsConfig,
     pub ca_pem: String,
+    pub(crate) root: ramflux_test_support::TestPath,
 }
 
 /// Two instance-bound gateways under a CA trusted by the same real test node.
@@ -545,5 +551,6 @@ pub(crate) fn ephemeral_pair_for_node(
         hub,
         receiver_tls: gw_b.tls,
         ca_pem: ca.pem,
+        root,
     })
 }

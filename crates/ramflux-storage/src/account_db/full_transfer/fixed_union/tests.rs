@@ -9,7 +9,6 @@ use ramflux_protocol::{
 };
 use std::{
     io::Write,
-    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
 use zeroize::Zeroizing;
@@ -20,7 +19,7 @@ fn h(value: u8) -> String {
 fn reference(id: &str) -> DeviceRef {
     DeviceRef { account_anchor: h(2), device_id: id.into(), device_epoch: 1 }
 }
-fn database(label: &str) -> ResultOf<(PathBuf, AccountDb)> {
+fn database(label: &str) -> ResultOf<(ramflux_test_support::TestPath, AccountDb)> {
     let root = crate::tests::temp_root(label);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", &h(2))?;

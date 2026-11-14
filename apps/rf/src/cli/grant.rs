@@ -5,8 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
 
+use std::path::PathBuf;
 #[derive(Args)]
 pub(crate) struct GrantCommand {
     #[command(subcommand)]

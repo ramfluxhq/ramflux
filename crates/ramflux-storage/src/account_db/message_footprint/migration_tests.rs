@@ -36,7 +36,9 @@ fn count(db: &AccountDb, sql: &str) -> Result<i64, StorageError> {
 
 /// 2,500 pre-fix rows: 1,200 no-op replay values and 1,300 envelope copies across both tables.
 /// Owners are mixed live/deleted; `late` owns the highest-rowid copy of each table.
-fn pre_fix_fixture(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+fn pre_fix_fixture(
+    name: &str,
+) -> Result<(ramflux_test_support::TestPath, AccountDb), StorageError> {
     let (root, db) = old_archive_trigger_fixture(name)?;
     for owner in ["live", "late", "gone"] {
         db.send_direct_message("thread", owner, "peer", b"secret")?;
@@ -134,7 +136,6 @@ fn replay_footprint_migration_completes_on_open() -> Result<(), StorageError> {
     assert_eq!(message_rows(&db, "late")?, (0, 0));
     assert_eq!(message_rows(&db, "live")?, (live_runtime, live_archive));
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -170,7 +171,6 @@ fn replay_footprint_migration_resumes_from_its_cursor_after_a_crash() -> Result<
     assert_eq!(count(&db, "SELECT count(*) FROM footprint_migration_test_visits")?, 2500);
     assert_eq!(message_rows(&db, "late")?, (1, 1));
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -209,7 +209,6 @@ fn replay_footprint_migration_marker_gates_deletion_and_merge() -> Result<(), St
     drop(merged);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -298,7 +297,6 @@ fn replay_footprint_migration_merge_erases_late_owner_and_registers_imported_row
     drop(reopened);
     drop(local);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -342,7 +340,6 @@ fn replay_footprint_merge_pass_cost_is_independent_of_local_history() -> Result<
     drop(merged);
     drop(source);
     drop(local);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -374,6 +371,5 @@ fn replay_footprint_migration_state_is_silent_on_fresh_and_reopened_opens()
     db.connection.execute("INSERT INTO message_footprint_migration VALUES('probe','x')", [])?;
     assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0);
     drop(db);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

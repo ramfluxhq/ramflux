@@ -379,7 +379,9 @@ fn turn_media_relay_packet_round_trips_header_and_opaque_payload()
 #[test]
 fn gateway_redb_store_restores_session_and_delivery_frames()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("gateway_redb_store_restores_session_and_delivery_frames")?;
+    let store_directory_1 =
+        temp_store_path("gateway_redb_store_restores_session_and_delivery_frames")?;
+    let path = store_directory_1.to_path_buf();
     let store = GatewayRedbStore::open(&path)?;
     let mut state = GatewayState::new();
     state.issue_challenge(pre_auth_challenge("challenge_1"));
@@ -410,7 +412,9 @@ fn gateway_redb_store_restores_session_and_delivery_frames()
 #[test]
 fn gateway_resume_token_is_bound_ttl_checked_and_persisted()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("gateway_resume_token_is_bound_ttl_checked_and_persisted")?;
+    let store_directory_2 =
+        temp_store_path("gateway_resume_token_is_bound_ttl_checked_and_persisted")?;
+    let path = store_directory_2.to_path_buf();
     let store = GatewayRedbStore::open(&path)?;
     let mut state = GatewayState::new();
     state.open_session(gateway_session("session_resume"));

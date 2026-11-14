@@ -8,12 +8,12 @@ use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceTyp
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Group {
-    root: PathBuf,
     source: LocalBusAccountState,
     peers: Vec<LocalBusAccountState>,
     config: GatewaySessionConfig,
     directory: tokio::task::JoinHandle<()>,
     create: Carrier,
+    _root: ramflux_test_support::TestPath,
 }
 impl Group {
     async fn new() -> TestResult<Self> {
@@ -112,7 +112,7 @@ impl Group {
         }
         let delta = super::own_tests::append(&source.client, &create, 2)?;
         send(&mut source, &delta).await?;
-        Ok(Self { root, source, peers, config, directory, create })
+        Ok(Self { source, peers, config, directory, create, _root: root })
     }
     fn peer_config(&self, index: usize) -> TestResult<GatewaySessionConfig> {
         let branch =
@@ -245,6 +245,5 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
     group.directory.abort();
     drop(group.peers);
     drop(group.source);
-    std::fs::remove_dir_all(group.root)?;
     Ok(())
 }

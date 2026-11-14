@@ -147,11 +147,13 @@ mod tests {
     #[test]
     fn restart_discards_abandoned_encrypted_work_and_partial_output_but_preserves_selected_and_unmarked_data()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-recovery-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-recovery-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&root)?;
         index.create_account("alice", "root")?;
         let jobs = root.join("backup_jobs");
@@ -199,7 +201,6 @@ mod tests {
         assert!(older.join("account.db").exists());
         assert_eq!(std::fs::read(complete)?, b"complete archive");
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

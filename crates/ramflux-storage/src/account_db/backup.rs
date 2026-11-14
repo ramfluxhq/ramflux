@@ -316,11 +316,13 @@ mod tests {
     #[test]
     fn encrypted_snapshot_includes_uncheckpointed_wal_and_all_rows_without_decoding_blobs()
     -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "rf-backup-snapshot-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-snapshot-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&path)?;
         index.create_account("account", "root")?;
         let key = AccountDbKey::generate()?;
@@ -375,7 +377,6 @@ mod tests {
         raw.close().map_err(|(_, error)| error)?;
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }
@@ -387,11 +388,13 @@ mod archived_event_tests {
     #[test]
     fn archived_history_never_revives_retired_events_or_guesses_conflicting_bodies()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-archive-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-archive-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&root)?;
         index.create_account("account", "root")?;
         let key = AccountDbKey::generate()?;
@@ -411,7 +414,6 @@ mod archived_event_tests {
         ));
         drop(db);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

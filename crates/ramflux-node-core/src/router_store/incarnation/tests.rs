@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn fixture(name: &str) -> PathBuf {
+fn fixture(name: &str) -> ramflux_test_support::TestPath {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "inbox-incarnation-{name}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -132,7 +132,6 @@ fn inbox_incarnation_lifecycle() -> Result {
     assert_eq!(stored(&store, "empty")?.expect("empty cursor").inbox_incarnation_id, Some(empty));
     assert!(stored(&store, "unknown")?.is_none());
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -182,7 +181,6 @@ fn pre_s6_store_upgrade() -> Result {
     assert_eq!(stored(&store, "target")?.expect("cursor").inbox_incarnation_id, Some(id));
     assert_eq!(stored(&store, "target")?.expect("cursor").cursor.settled_inbox_seq, 49);
     drop(store);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

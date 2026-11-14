@@ -190,11 +190,13 @@ mod tests {
     fn recovery_manifest_index_and_existing_wal_files_are_owner_only()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-index-permissions-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-index-permissions-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&root)?;
         index.create_account("account", "root")?;
         let paths = ["", "-wal", "-shm"]
@@ -213,17 +215,18 @@ mod tests {
         }
         drop(reopened);
         drop(index);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
     fn a_failed_generation_index_commit_keeps_the_entire_previous_selection()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "rf-backup-index-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-backup-index-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            ));
         let index = AccountIndex::open(&root)?;
         index.create_account("account", "root")?;
         let before = index.account("account")?;
@@ -260,7 +263,6 @@ mod tests {
         assert_eq!(selected.account.object_dir_relative_path, install.object_relative_path);
         assert_eq!(selected.manifest_json, Some(b"new manifest".to_vec()));
         drop(reopened);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

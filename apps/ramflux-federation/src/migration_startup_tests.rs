@@ -9,11 +9,13 @@ fn migration_enabled_startup_refuses_without_matching_node_signer()
     const NAME: &str =
         "migration_startup_tests::migration_enabled_startup_refuses_without_matching_node_signer";
     if std::env::var_os("RAMFLUX_MIGRATION_PREFLIGHT_CHILD").is_none() {
-        let path = std::env::temp_dir().join(format!(
-            "rf-migration-preflight-{}-{}",
-            std::process::id(),
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "rf-migration-preflight-{}-{}",
+                std::process::id(),
+                ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+            ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]

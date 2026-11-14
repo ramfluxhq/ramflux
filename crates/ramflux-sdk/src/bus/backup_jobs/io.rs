@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn insufficient_space_is_typed_with_estimated_needed_and_observed_available()
     -> Result<(), std::io::Error> {
-        let root = std::env::temp_dir();
+        let root = ramflux_test_support::TestPath::new().expect("test: allocate fixture directory");
         let failure = check_space(&root, u64::MAX)
             .err()
             .ok_or_else(|| std::io::Error::other("space unexpectedly unlimited"))?;

@@ -900,7 +900,6 @@ mod live_tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::io::Write as _;
     use std::net::SocketAddr;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -938,7 +937,7 @@ mod live_tests {
     struct TestCert {
         cert_der: CertificateDer<'static>,
         key_der: PrivateKeyDer<'static>,
-        ca_path: PathBuf,
+        ca_path: ramflux_test_support::TestPath,
     }
 
     fn make_cert(tag: &str) -> Result<TestCert, Box<dyn std::error::Error>> {
@@ -947,8 +946,9 @@ mod live_tests {
         let key_der =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()));
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let ca_path = std::env::temp_dir()
-            .join(format!("ramflux-relay-pool-ca-{tag}-{}-{nanos}.pem", std::process::id()));
+        let ca_path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-relay-pool-ca-{tag}-{}-{nanos}.pem", std::process::id()));
         let mut file = std::fs::File::create(&ca_path)?;
         file.write_all(certified.cert.pem().as_bytes())?;
         Ok(TestCert { cert_der, key_der, ca_path })

@@ -32,12 +32,14 @@ impl CheckpointClock for Clock {
     }
 }
 struct Fixture {
-    dir: PathBuf,
     clock: Arc<Clock>,
+    dir: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new() -> Result<Self> {
-        let dir = std::env::temp_dir().join(format!("rf-username-checkpoint-{}", nonce()?));
+        let dir = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-username-checkpoint-{}", nonce()?));
         std::fs::create_dir(&dir)?;
         Ok(Self { dir, clock: Arc::new(Clock::new()) })
     }
@@ -54,11 +56,6 @@ impl Fixture {
     }
     fn reopen(&self) -> Result<CheckpointWitness> {
         CheckpointWitness::open(&self.path("witness"), "center.example", 1, self.clock.clone())
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 fn root(epoch: u64, deleted: bool) -> wire::RootRow {

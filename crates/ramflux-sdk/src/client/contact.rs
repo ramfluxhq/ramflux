@@ -1297,22 +1297,25 @@ mod tests {
         Ok(())
     }
 
-    pub(super) fn unlocked_client(test_name: &str) -> Result<(RamfluxClient, PathBuf), SdkError> {
+    pub(super) fn unlocked_client(
+        test_name: &str,
+    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
         let nanos = now_unix_timestamp();
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-sdk-contact-{test_name}-{}-{nanos}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-sdk-contact-{test_name}-{}-{nanos}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root("principal_contact", [0x61; 32]);
         client.create_device_branch("principal_contact", "device_contact", 1, [0x62; 32]);
         client.open_account_index(&root)?;
         client.create_account("acct", "principal_contact")?;
         client.unlock_account("acct", b"contact-reject-test")?;
-        Ok((client, root))
+        Ok((root, client))
     }
 
     #[test]
     fn reject_friend_link_transitions_pending_to_rejected() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("reject-pending")?;
+        let (_root, client) = unlocked_client("reject-pending")?;
 
         let pending =
             client.record_pending_friend_link("link_pending", "requester", "principal_contact")?;
@@ -1325,13 +1328,12 @@ mod tests {
         // A second reject is refused: the link is no longer a pending request.
         assert!(client.reject_friend_link("link_pending").is_err());
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn reject_friend_link_refuses_established_contact() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("reject-established")?;
+        let (_root, client) = unlocked_client("reject-established")?;
 
         client.establish_friend_link("link_acc", "requester", "principal_contact")?;
         assert!(client.reject_friend_link("link_acc").is_err());
@@ -1342,13 +1344,12 @@ mod tests {
             .ok_or_else(|| SdkError::LocalBus("established link present".to_owned()))?;
         assert_eq!(link.state, "accepted");
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn dm_send_friend_gate_rejects_non_friend_and_allows_self() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("dm-send-friend-gate")?;
+        let (_root, client) = unlocked_client("dm-send-friend-gate")?;
 
         let rejected = client.require_accepted_friend_link_for_dm_send(
             "principal_contact",
@@ -1385,13 +1386,12 @@ mod tests {
             matches!(rejected, Err(SdkError::LocalBus(message)) if message.contains("friend_link not accepted"))
         );
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn remove_friend_link_cascades_object_share_revocations() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("remove-object-share-cascade")?;
+        let (_root, client) = unlocked_client("remove-object-share-cascade")?;
         client.establish_friend_link("link_bob", "principal_contact", "principal_bob")?;
         client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
             object_id: "object_shared",
@@ -1440,13 +1440,12 @@ mod tests {
         assert!(body["effective_at"].as_i64().is_some());
         assert_eq!(client.projection_checkpoint("object.revoke_access")?, Some(event_id.clone()));
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn block_friend_link_cascades_object_share_revocations() -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("block-object-share-cascade")?;
+        let (_root, client) = unlocked_client("block-object-share-cascade")?;
         client.establish_friend_link("link_bob", "principal_contact", "principal_bob")?;
         client.account_db()?.record_object_share_grant(&ObjectShareGrantWrite {
             object_id: "object_shared",
@@ -1472,13 +1471,12 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&event)?;
         assert_eq!(body["reason"], "blocked");
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn apply_friend_requested_event_records_pending_link() -> Result<(), SdkError> {
-        let (mut client, root) = unlocked_client("apply-requested")?;
+        let (_root, mut client) = unlocked_client("apply-requested")?;
 
         let event = serde_json::to_vec(&serde_json::json!({
             "type": "friend.requested",
@@ -1498,13 +1496,12 @@ mod tests {
         let rejected = client.reject_friend_link("link_inbound")?;
         assert_eq!(rejected.state, "rejected");
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[test]
     fn apply_object_revoke_access_tombstones_local_object_best_effort() -> Result<(), SdkError> {
-        let (mut client, root) = unlocked_client("apply-object-revoke-access")?;
+        let (_root, mut client) = unlocked_client("apply-object-revoke-access")?;
         client.put_encrypted_object("object_shared", b"shared body")?;
         let event = serde_json::to_vec(&serde_json::json!({
             "type": "object.revoke_access",
@@ -1527,13 +1524,12 @@ mod tests {
         }))?;
         client.apply_fixture_contact_event_plaintext(&missing)?;
 
-        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
     #[test]
     fn a_same_principal_manifest_key_change_preserves_the_pin_and_reports_safety()
     -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("manifest_group_rotation")?;
+        let (_root, client) = unlocked_client("manifest_group_rotation")?;
         let initial = manifest_fixture(
             "peer",
             "peer_device",
@@ -1611,13 +1607,12 @@ mod tests {
                 .any(|event| event.topic == "safety.changed")
         );
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
     fn another_roots_equal_device_name_cannot_replace_a_pin_or_raise_false_safety()
     -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("cross-principal-key-change")?;
+        let (_root, client) = unlocked_client("cross-principal-key-change")?;
         let initial = manifest_fixture(
             "victim",
             "victim_device",
@@ -1682,13 +1677,12 @@ mod tests {
                 .any(|event| event.topic == "safety.changed")
         );
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
     fn safety_change_floods_keep_the_first_unacknowledged_notice_and_bounded_history()
     -> Result<(), SdkError> {
-        let (client, root) = unlocked_client("safety-flood")?;
+        let (_root, client) = unlocked_client("safety-flood")?;
         let initial =
             manifest_fixture("peer", "device", [0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32])?;
         client.persist_identity_directory(&initial)?;
@@ -1766,7 +1760,6 @@ mod tests {
             assert!(value["history"].as_array().is_some_and(|items| items.len() <= 4));
         }
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

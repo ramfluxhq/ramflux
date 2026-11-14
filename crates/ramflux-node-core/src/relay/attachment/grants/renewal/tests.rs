@@ -18,8 +18,8 @@ mod predicate_tests;
 pub(super) const RELAY: &str = "https://relay.example";
 pub(super) const ISSUER: &str = "https://gateway.owner.example";
 
-pub(super) fn path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+pub(super) fn path(name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(format!(
         "rf-renewal-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -43,7 +43,7 @@ pub(super) struct Env {
     pub policy: RenewalPolicy,
     pub cap: Vec<u8>,
     pub now: u64,
-    pub path: std::path::PathBuf,
+    pub path: ramflux_test_support::TestPath,
 }
 impl Env {
     pub fn new(name: &str) -> Self {

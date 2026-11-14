@@ -174,11 +174,13 @@ fn raw_committed(path: &Path) -> bool {
 }
 #[test]
 fn large_s3_backend_matches_local_commit_and_cleanup_contract() {
-    let root = std::env::temp_dir().join(format!(
-        "rf-s3-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-s3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("db");
     let files = root.join("files");
@@ -316,11 +318,13 @@ fn large_s3_backend_matches_local_commit_and_cleanup_contract() {
 
 #[test]
 fn shared_backend_contract_s3() {
-    let root = std::env::temp_dir().join(format!(
-        "rf-s3-contract-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "rf-s3-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
     fs::create_dir_all(&root).unwrap();
     let store = ramflux_node_core::RelayRedbStore::open(root.join("db")).unwrap();
     ramflux_node_core::attachment::backend::contract::contract_suite(|spec, second| {

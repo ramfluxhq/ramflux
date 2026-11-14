@@ -2548,13 +2548,13 @@ mod tests {
         ca_pem: String,
     }
 
-    fn temp_cert_root(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_cert_root(
+        name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ramflux_mesh_quic_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux_mesh_quic_{name}_{}_{}", std::process::id(), nanos));
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
@@ -2817,7 +2817,6 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert!(matches!(result, Err(TransportError::Protocol(_))), "{result:?}");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -2833,6 +2832,7 @@ mod tests {
         ca_pem: String,
         endpoint: quinn::Endpoint,
         addr: SocketAddr,
+        _root: ramflux_test_support::TestPath,
     }
 
     fn limited_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
@@ -2851,7 +2851,7 @@ mod tests {
             &client.tls,
             std::slice::from_ref(&ca_pem),
         )?);
-        Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr })
+        Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr, _root: root })
     }
 
     fn mesh_ijson_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
@@ -2894,7 +2894,7 @@ mod tests {
             &client_tls,
             std::slice::from_ref(&ca_pem),
         )?);
-        Ok(LimitedRig { server, client_tls, ca_pem, endpoint, addr })
+        Ok(LimitedRig { server, client_tls, ca_pem, endpoint, addr, _root: root })
     }
 
     fn frame_of(body: &str) -> Vec<u8> {

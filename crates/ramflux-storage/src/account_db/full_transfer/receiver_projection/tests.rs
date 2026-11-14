@@ -5,10 +5,7 @@
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase};
 use ramflux_crypto::custody::pairing::FullResumeRecord;
 use ramflux_protocol::{custody::pairing::full_transfer::*, encode_base64url};
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 use zeroize::Zeroizing;
 type ResultOf<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn h(n: u8) -> String {
@@ -17,7 +14,7 @@ fn h(n: u8) -> String {
 pub(in crate::account_db::full_transfer) fn db(
     label: &str,
     anchor: &str,
-) -> ResultOf<(PathBuf, AccountDb)> {
+) -> ResultOf<(ramflux_test_support::TestPath, AccountDb)> {
     let root = crate::tests::temp_root(label);
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", anchor)?;

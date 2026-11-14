@@ -22,6 +22,7 @@ default-members = [
     "apps/ramflux-retention",
 ]
 members = [
+    "crates/ramflux-test-support",
     "crates/ramflux-card",
     "tools/message-schema",
     "crates/ramflux-client-model",
@@ -51,6 +52,8 @@ license = "BSD-3-Clause"
 repository = "https://github.com/ramfluxhq/ramflux"
 
 [workspace.dependencies]
+tempfile = "3"
+ramflux-test-support = { version = "0.1.0", path = "crates/ramflux-test-support" }
 ramflux-core = { version = "0.1.0", path = "crates/ramflux-core" }
 ramflux-protocol = { version = "0.1.0", path = "crates/ramflux-protocol" }
 ramflux-crypto = { version = "0.1.0", path = "crates/ramflux-crypto" }

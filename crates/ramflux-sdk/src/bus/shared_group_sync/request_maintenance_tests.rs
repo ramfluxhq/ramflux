@@ -38,7 +38,6 @@ fn shared_group_packet_selection_propagates_real_sqlite_write_refusal() -> Resul
     ));
     assert_eq!(account.client.account_db()?.actor_state_usage(maintenance::BACKOFF)?.0, 0);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -62,7 +61,6 @@ fn shared_group_packet_selection_backs_off_bad_row_without_hiding_healthy_packet
         Some(serde_json::json!({"bad":true}))
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -77,6 +75,5 @@ async fn bad_deadline_item_does_not_abort_later_courier_work() -> Result<(), Sdk
     assert!(db.actor_state_exists(&format!("{}{bad}", maintenance::BACKOFF))?);
     assert!(db.load_actor_state::<String>("group-courier/cursor")?.is_some());
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

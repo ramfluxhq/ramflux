@@ -3,7 +3,6 @@
 
 //! Background process redirection must retain real daemon lifecycle diagnostics.
 use std::{
-    path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -19,7 +18,9 @@ fn background_daemon_rust_log_writes_ready_info_to_its_stderr_file()
 -> Result<(), Box<dyn std::error::Error>> {
     for enabled in [true, false] {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let root = PathBuf::from(format!("/tmp/rf-log-{}-{unique}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("rf-log-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let socket = root.join("bus.sock");
         let logs = root.join("daemon.log");

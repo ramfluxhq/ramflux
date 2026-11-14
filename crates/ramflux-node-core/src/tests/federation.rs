@@ -55,7 +55,9 @@ fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error
 #[test]
 fn federation_redb_store_never_persists_node_signing_seed() -> Result<(), Box<dyn std::error::Error>>
 {
-    let path = temp_store_path("federation_redb_store_never_persists_node_signing_seed")?;
+    let store_directory_1 =
+        temp_store_path("federation_redb_store_never_persists_node_signing_seed")?;
+    let path = store_directory_1.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut state = FederationTrustState::new();
     let seed = seed_from_nonce(0x77, 11);
@@ -74,8 +76,9 @@ fn federation_redb_store_never_persists_node_signing_seed() -> Result<(), Box<dy
 #[test]
 fn federation_redb_store_spools_retries_and_expires_outbound_forward()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path =
+    let store_directory_2 =
         temp_store_path("federation_redb_store_spools_retries_and_expires_outbound_forward")?;
+    let path = store_directory_2.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let forward_a = federation_forward_request("env_spool_a", "target_spool_a");
     let forward_b = federation_forward_request("env_spool_b", "target_spool_b");
@@ -106,7 +109,9 @@ fn federation_redb_store_spools_retries_and_expires_outbound_forward()
 #[test]
 fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("federation_redb_store_dedups_inbound_forward_replay_persistently")?;
+    let store_directory_3 =
+        temp_store_path("federation_redb_store_dedups_inbound_forward_replay_persistently")?;
+    let path = store_directory_3.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut forward_a = federation_forward_request("env_inbound_a", "target_inbound_a");
     let mut forward_b = federation_forward_request("env_inbound_b", "target_inbound_a");
@@ -134,7 +139,9 @@ fn federation_redb_store_dedups_inbound_forward_replay_persistently()
 #[test]
 fn inbound_forward_seen_record_survives_only_a_real_router_commit()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = temp_store_path("inbound_forward_seen_record_survives_only_a_real_router_commit")?;
+    let store_directory_4 =
+        temp_store_path("inbound_forward_seen_record_survives_only_a_real_router_commit")?;
+    let path = store_directory_4.to_path_buf();
     let store = FederationRedbStore::open(&path)?;
     let mut forward = federation_forward_request("env_inbound_commit", "target_inbound_commit");
     forward.envelope = forwarded_source_envelope(forward.envelope)?;

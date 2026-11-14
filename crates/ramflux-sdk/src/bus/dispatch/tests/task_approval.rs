@@ -111,7 +111,6 @@ fn a_remote_requester_approval_round_trip_is_accepted_by_mcp_before_the_agent_re
     );
     drop(agent);
     drop(human);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

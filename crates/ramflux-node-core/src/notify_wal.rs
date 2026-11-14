@@ -1521,7 +1521,7 @@ mod tests {
         let recovered = reopened.get("queue:wal_recover_1").ok_or("missing recovered WAL entry")?;
         assert_eq!(recovered.payload.record_id(), "queue:wal_recover_1");
         assert_eq!(reopened.len(), 1);
-        remove_notify_wal_dir(root);
+
         Ok(())
     }
 
@@ -1542,7 +1542,6 @@ mod tests {
         assert_eq!(reopened.pending_entries_without_attempts(10).len(), 0);
         assert_eq!(reopened.provider_attempts("wal_delivered_1").len(), 1);
 
-        remove_notify_wal_dir(root);
         Ok(())
     }
 
@@ -1565,7 +1564,7 @@ mod tests {
         assert!(reopened.get("queue:wal_tail_1").is_some());
         let len_after_recovery = fs::metadata(&segment)?.len();
         assert!(len_after_recovery < len_with_tail);
-        remove_notify_wal_dir(root);
+
         Ok(())
     }
 
@@ -1592,7 +1591,7 @@ mod tests {
         assert!(reopened.get("queue:wal_compact_drop").is_none());
         assert_eq!(reopened.provider_attempts("wal_compact_drop").len(), 1);
         assert_eq!(reopened.pending_entries_without_attempts(10).len(), 1);
-        remove_notify_wal_dir(root);
+
         Ok(())
     }
 
@@ -1624,7 +1623,7 @@ mod tests {
         assert!(reopened.get("queue:wal_crash_keep_2").is_none());
         assert_eq!(reopened.pending_entries_without_attempts(10).len(), 1);
         assert_eq!(reopened.provider_attempts("wal_crash_keep_2").len(), 1);
-        remove_notify_wal_dir(root);
+
         Ok(())
     }
 
@@ -1671,7 +1670,7 @@ mod tests {
             "WAL_BENCH ops_per_sec={ops_per_sec:.2} total_ops={completed_ops} threads={thread_count} elapsed_ms={:.2}",
             elapsed.as_secs_f64() * 1000.0
         );
-        remove_notify_wal_dir(root);
+
         Ok(())
     }
 
@@ -1692,7 +1691,6 @@ mod tests {
         let horizon = 4_102_444_800_u64.saturating_add(ramflux_protocol::CLOCK_UNCERTAINTY_SECONDS);
         assert_eq!(reopened.prune_closed_ids(horizon)?, 1);
         assert!(!reopened.wake_is_closed("wal_bound"));
-        remove_notify_wal_dir(root);
         Ok(())
     }
 
@@ -1748,18 +1746,18 @@ mod tests {
         }
     }
 
-    fn temp_notify_wal_dir(test_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn temp_notify_wal_dir(
+        test_name: &str,
+    ) -> Result<ramflux_test_support::TestPath, Box<dyn std::error::Error>> {
         let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-        let path = std::env::temp_dir().join(format!(
-            "ramflux-node-core-{test_name}-{}-{}",
-            std::process::id(),
-            elapsed.as_nanos()
-        ));
+        let path = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!(
+                "ramflux-node-core-{test_name}-{}-{}",
+                std::process::id(),
+                elapsed.as_nanos()
+            ));
         Ok(path)
-    }
-
-    fn remove_notify_wal_dir(path: PathBuf) {
-        let _removed = fs::remove_dir_all(path);
     }
 
     fn notify_wal_bench_env_usize(name: &str, default: usize) -> usize {

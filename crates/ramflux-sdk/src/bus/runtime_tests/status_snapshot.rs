@@ -176,6 +176,5 @@ async fn r2_older_samples_reuse_retained_coordinates_without_allocating_events()
     assert_eq!(db.journal_bounds()?.head_seq, before);
     readers.stop().await;
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

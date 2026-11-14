@@ -96,8 +96,9 @@ mod tests {
     fn projected_rows_exclude_message_content_tool_arguments_and_a2ui_payloads()
     -> Result<(), SdkError> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-journal-metadata-{}-{now}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-journal-metadata-{}-{now}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.create_identity_root("a", [3; 32]);
         client.create_device_branch("a", "device", 1, [4; 32]);
@@ -169,7 +170,6 @@ mod tests {
         assert!(topics.contains("mcp.approval.request"));
         assert!(topics.contains("ramflux.a2ui.action_submitted"));
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -182,8 +182,9 @@ mod receipt_topics {
     fn authenticated_message_metadata_preserves_received_topics_with_scoped_receipts()
     -> Result<(), SdkError> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos());
-        let root = std::env::temp_dir()
-            .join(format!("ramflux-received-topic-{}-{suffix}", std::process::id()));
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-received-topic-{}-{suffix}", std::process::id()));
         let mut client = RamfluxClient::new();
         client.open_account_index(&root)?;
         client.create_account("a", "a")?;
@@ -197,7 +198,6 @@ mod receipt_topics {
         assert!(events.iter().any(|(topic, _, _)| topic == "message.received"));
         assert!(!serde_json::to_string(&events)?.contains("PRIVATE_BODY"));
         drop(client);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

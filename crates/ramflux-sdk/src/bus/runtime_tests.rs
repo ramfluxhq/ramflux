@@ -7,7 +7,7 @@ use crate::platform::listener::BusListener;
 use crate::prelude::*;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Hang guard for real-time waits in tests. It is far above any loaded-host latency; the
@@ -127,20 +127,8 @@ impl GatewaySessionFrameSource for Gateway {
     }
 }
 
-pub(crate) fn root(name: &str) -> PathBuf {
-    const LABEL_CHARS: usize = 8;
-    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
-    let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |time| time.as_nanos());
-    let label: String =
-        ramflux_crypto::blake3_256_base64url("ramflux.sdk.test-root.v1", name.as_bytes())
-            .chars()
-            .take(LABEL_CHARS)
-            .collect();
-    std::env::temp_dir()
-        .join(format!("rf-actor-{label}-{}-{sequence}-{unique}", std::process::id()))
+pub(crate) fn root(_name: &str) -> ramflux_test_support::TestPath {
+    ramflux_test_support::TestPath::new().expect("test: allocate actor directory").child("a")
 }
 pub(crate) fn account(
     root: &Path,
@@ -708,7 +696,6 @@ fn evicted_object_cache_entries_reload_from_encrypted_db() -> Result<(), SdkErro
     assert_eq!(account.client.persisted_objects()?.len(), 4);
     assert!(account.client.object_store.objects().len() <= 2);
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -824,7 +811,6 @@ async fn client_rejects_wrong_response_kinds_and_fails_later_requests_without_ha
     server.abort();
     let _ = server.await;
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -951,7 +937,6 @@ async fn daemon_stop_works_through_the_public_embedded_entrypoint() -> Result<()
         .map_err(|error| failure(&error.to_string()))??;
     assert!(!socket.exists());
     drop(client);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1136,7 +1121,6 @@ fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Res
         Some(manifest.principal_commitment.as_str())
     );
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1161,7 +1145,6 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
     assert_eq!(super::sync_driver::run(&mut account).await?, 0);
     assert!(account.session_client().await.is_ok());
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -1180,7 +1163,6 @@ async fn own_authorization_refresh_failure_has_a_distinct_error_code() -> Result
     assert!(matches!(error, SdkError::OwnDeviceAuthorizationRefreshFailed(_)));
     assert_eq!(local_bus_error_code(&error), "OwnDeviceAuthorizationRefreshFailed");
     drop(account);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 mod contact_state;

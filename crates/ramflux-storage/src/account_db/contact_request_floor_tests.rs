@@ -7,11 +7,13 @@ use crate::{AccountDbKey, AccountIndex, ContactRequestRecord};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn legacy_floor_rows_reopen_unchanged_and_oldest_expired_slots_are_reused() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "floor-expiry-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "floor-expiry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let key = AccountDbKey::generate()?;
@@ -38,16 +40,17 @@ fn legacy_floor_rows_reopen_unchanged_and_oldest_expired_slots_are_reused() -> T
     assert_eq!(db.contact_request_authority_floor_usage(100)?, (4096, 4096));
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn clearing_retired_floors_preserves_pending_authority_and_consent_fences() -> TestResult {
-    let root = std::env::temp_dir().join(format!(
-        "floor-clear-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    ));
+    let root = ramflux_test_support::TestPath::new()
+        .expect("test: allocate fixture directory")
+        .child(format!(
+            "floor-clear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
     let index = AccountIndex::open(&root)?;
     index.create_account("a", "root")?;
     let db = AccountDb::open(&index, "a", &AccountDbKey::generate()?)?;
@@ -80,6 +83,5 @@ fn clearing_retired_floors_preserves_pending_authority_and_consent_fences() -> T
     assert_eq!(db.retained_contact_request_fence("declined")?, declined);
     drop(db);
     drop(index);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

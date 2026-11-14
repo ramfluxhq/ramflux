@@ -38,7 +38,7 @@ fn checkpoints_publish_to_core_installed_after_capture() -> Result {
             let observed = Arc::clone(&fired);
             let weak = Arc::downgrade(&store);
             let registration = crate::durability_test_hooks::observe(
-                root.clone(),
+                root.to_path_buf(),
                 Arc::new(move |_, op, done| {
                     if op == "direct_begin" && !done && !observed.swap(true, Ordering::SeqCst) {
                         // The outer writer captured None and has not acquired redb.

@@ -10,8 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 async fn attachment_fetch_prints_deleted_receipt_and_exits_one()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let root = std::path::PathBuf::from(format!("/tmp/rf-fetch-{}-{unique}", std::process::id()));
+    let root = ramflux_test_support::TestPath::new()?.child("fetch");
     std::fs::create_dir_all(&root)?;
     let socket = root.join("bus.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
@@ -56,6 +55,5 @@ async fn attachment_fetch_prints_deleted_receipt_and_exits_one()
     assert_eq!(receipt["last_error"], "attachment deleted");
     assert_eq!(receipt["retryable"], false);
     assert!(String::from_utf8(output.stderr)?.contains("attachment deleted"));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }

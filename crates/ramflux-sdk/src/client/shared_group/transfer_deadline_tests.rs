@@ -8,12 +8,12 @@ use crate::client::shared_group::tests::{person, temp_root};
 use ramflux_protocol::{GroupStateChange, SharedGroupRole};
 
 struct Fixture {
-    path: PathBuf,
     phone: RamfluxClient,
     laptop: RamfluxClient,
     next: RamfluxClient,
     base: VerifiedGroupState,
     probe: TransferProbe,
+    path: ramflux_test_support::TestPath,
 }
 impl Fixture {
     fn new(name: &str) -> Result<Self, SdkError> {
@@ -57,7 +57,7 @@ impl Fixture {
             issued_at: now,
             expires_at: now + 60,
         };
-        Ok(Self { path, phone, laptop, next, base, probe })
+        Ok(Self { phone, laptop, next, base, probe, path })
     }
     fn pending(&self, probe: &TransferProbe) -> Result<(), SdkError> {
         self.phone.reserve_group_transfer(probe, &self.base)?;

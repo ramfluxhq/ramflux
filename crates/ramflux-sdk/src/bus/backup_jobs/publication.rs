@@ -120,7 +120,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&output)?, b"authenticated archive");
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }
@@ -159,7 +158,6 @@ mod fallback_tests {
                 .is_err()
         );
         assert!(!cancelled.exists());
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

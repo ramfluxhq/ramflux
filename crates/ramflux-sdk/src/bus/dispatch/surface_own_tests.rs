@@ -210,7 +210,6 @@ async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test]
@@ -274,7 +273,6 @@ async fn lost_own_copy_ack_keeps_peer_submitted_and_replays_one_immutable_messag
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[tokio::test]
@@ -304,7 +302,6 @@ async fn first_peer_device_failure_does_not_hide_delivery_to_the_second_device()
     fixture.directory.abort();
     drop(fixture.peers);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -410,7 +407,6 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     );
     fixture.directory.abort();
     drop((peers, source));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -478,7 +474,6 @@ async fn own_copy_node_payload_hides_private_group_root_principal_and_dates() ->
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -570,7 +565,6 @@ async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retr
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -612,7 +606,6 @@ async fn an_oversized_prepared_copy_is_terminal_after_one_ratchet_step() -> Test
     directory.abort();
     drop(sibling);
     drop(source);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -649,7 +642,6 @@ async fn fresh_sibling_bootstraps_its_first_surface_copy_without_a_preseeded_pai
     directory.abort();
     drop(source);
     drop(sibling);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -771,7 +763,6 @@ async fn sibling_control_is_applied_and_acked_without_entering_message_receive_p
     assert_eq!(response.response_body["decrypted_messages"], json!([]));
     directory.abort();
     drop((state, source));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

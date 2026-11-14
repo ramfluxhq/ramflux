@@ -372,13 +372,14 @@ mod tests {
         path::Path,
     };
 
-    struct TestRoot(std::path::PathBuf);
+    struct TestRoot(ramflux_test_support::TestPath);
 
     impl TestRoot {
         fn new() -> anyhow::Result<Self> {
             let suffix = ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8]);
-            let path = std::env::temp_dir()
-                .join(format!("rf-gateway-instance-start-{}-{suffix}", std::process::id()));
+            let path = ramflux_test_support::TestPath::new()
+                .expect("test: allocate fixture directory")
+                .child(format!("rf-gateway-instance-start-{}-{suffix}", std::process::id()));
             std::fs::create_dir_all(&path)?;
             Ok(Self(path))
         }

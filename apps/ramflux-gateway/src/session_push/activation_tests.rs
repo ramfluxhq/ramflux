@@ -1109,6 +1109,7 @@ struct CrossGateway {
     context: GatewayQuicContext,
     destination: GatewayQuicContext,
     remote: std::sync::Arc<crate::GatewaySessionHub>,
+    _peer_root: ramflux_test_support::TestPath,
 }
 
 async fn cross_gateway_setup() -> anyhow::Result<CrossGateway> {
@@ -1156,7 +1157,7 @@ async fn cross_gateway_setup() -> anyhow::Result<CrossGateway> {
     )?;
     ready(&context).await?;
     ready(&destination).await?;
-    Ok(CrossGateway { child, context, destination, remote })
+    Ok(CrossGateway { child, context, destination, remote, _peer_root: pair.root })
 }
 
 async fn calibrate_cross_gateway_wake(
@@ -1246,7 +1247,7 @@ async fn cross_gateway_full(
 #[ignore = "requires a separately built same-tree router binary on QA"]
 async fn ephemeral_submit_originates_authenticated_cross_gateway_outcomes() -> TestResult {
     use ramflux_protocol::ephemeral::EphemeralDropReason as Reason;
-    let CrossGateway { child: _child, context, destination, remote } =
+    let CrossGateway { _peer_root, child: _child, context, destination, remote } =
         cross_gateway_setup().await?;
     let recipient = recipient(&destination);
     let binding = negotiate(&destination, &auth_claiming_ephemeral(true)?, &recipient).await?;
