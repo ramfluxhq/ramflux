@@ -48,9 +48,7 @@ async fn run() -> TestResult {
     let mut old = crate::RamfluxClient::new();
     rig.participant_b.return_client(&mut old)?;
     drop(old);
-    let mut client = crate::RamfluxClient::new();
-    client.open_account_index(&rig.participant_b.root)?;
-    client.unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")?;
+    let client = reopen_staged(&rig.participant_b, &operation)?;
     let provider = Arc::new(RefusePhrase(std::sync::atomic::AtomicUsize::new(0)));
     let participant = LocalPairingParticipant {
         root: rig.participant_b.root.clone(),
@@ -98,4 +96,27 @@ async fn run() -> TestResult {
     );
     rig.primary.lock().await?;
     Ok(())
+}
+
+fn reopen_staged(
+    participant: &LocalPairingParticipant,
+    operation: &str,
+) -> Result<crate::RamfluxClient, SdkError> {
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(&participant.root)?;
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation.into(),
+        generation: 1,
+    };
+    let provider =
+        crate::custody::pairing::recipient::tests::Phrase::setup(b"component-recipient-passphrase");
+    client.active_account_db = Some(crate::bus::unlock_for_test(
+        &participant.root,
+        &participant.account_id,
+        &request,
+        &provider,
+    )?);
+    Ok(client)
 }

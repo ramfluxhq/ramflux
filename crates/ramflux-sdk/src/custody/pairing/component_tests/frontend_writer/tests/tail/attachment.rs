@@ -32,8 +32,10 @@ async fn after_base() -> TestResult {
             rig.secondary
                 .service_full_transfer(slot.as_ref().ok_or("test: target writer absent")?)?;
         }
-        let _ = rig.primary.sync_relay().await;
-        let _ = rig.secondary.sync_relay().await;
+        rig.clock.advance_ms(1001);
+        let _ = drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await;
+        rig.clock.advance_ms(1001);
+        let _ = drive(Box::pin(rig.secondary.sync_relay()), &mut source, &rig.source.client).await;
         settle_stream_work(&rig).await;
         if rig.primary.full_background_error() == Some(FullError::AttachmentNotRemote) {
             refused = true;

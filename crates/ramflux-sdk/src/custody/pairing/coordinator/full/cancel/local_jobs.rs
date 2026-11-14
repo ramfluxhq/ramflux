@@ -22,7 +22,11 @@ impl FullRuntimeCancel {
         self.require_live()?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let runtime = self.clone();
+        #[cfg(test)]
+        let frozen = crate::time::test_clock::frozen();
         let worker = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _clock = frozen.map(crate::time::FixedClock::set);
             runtime.require_live()?;
             let value = work()?;
             runtime.require_live()?;
@@ -87,6 +91,27 @@ impl FullRuntimeCancel {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[tokio::test]
+    async fn pairing_full_native_clock_is_preserved_across_owned_local_workers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        crate::bus::credentials::contract_tests::deadline(async {
+            let _clock = crate::time::FixedClock::set(1_700_000_123);
+            let root = Arc::new(FullRuntimeCancel::default());
+            assert_eq!(
+                crate::custody::network_now()?,
+                1_700_000_123,
+                "test: native status ignored the controlled clock"
+            );
+            assert_eq!(
+                root.clone().run_blocking(crate::custody::network_now).await?,
+                1_700_000_123,
+                "test: off-loan native work observed another clock"
+            );
+            root.drain_local_jobs().await;
+            Ok(())
+        })
+        .await
+    }
     struct PrivateOutput {
         bytes: zeroize::Zeroizing<[u8; 32]>,
         erased: Arc<AtomicBool>,

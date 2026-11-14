@@ -60,6 +60,10 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     capacity_key: String,
 }
 pub(crate) fn now() -> Result<u64, SdkError> {
+    #[cfg(test)]
+    if let Some(frozen) = crate::time::test_clock::frozen() {
+        return u64::try_from(frozen).map_err(|_| SdkError::CustodySetupInvalid);
+    }
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SdkError::CustodySetupInvalid)?

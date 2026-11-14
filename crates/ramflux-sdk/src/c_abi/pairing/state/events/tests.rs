@@ -76,7 +76,7 @@ async fn run() -> TestResult {
         };
         let mut frame = crate::bus::io::local_bus_event(
             &request,
-            "",
+            "account",
             "device",
             crate::custody::pairing::PAIRING_EVENT_TOPIC,
             serde_json::to_value(event)?,

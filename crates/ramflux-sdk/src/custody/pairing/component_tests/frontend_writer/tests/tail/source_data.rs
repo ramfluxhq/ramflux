@@ -186,11 +186,15 @@ async fn primary_operations(rig: &Rig, target: &mut crate::RamfluxClient) -> Tes
     )?;
     let key = b.group_primary(rig.participant_b.vault.as_ref())?;
     target.initialize_born_v3_branch(b.local_device_id()?, rig.participant_b.vault.clone()).await?;
+    let delivery = ramflux_protocol::qualified_device_id(
+        &b.record().body.account_anchor,
+        b.local_device_id()?,
+    )?;
     target.shared_group_create_with_primary(
         "after-primary-handoff",
         "after-primary-handoff-thread",
         Some("New primary".into()),
-        "target-handoff",
+        &delivery,
         Some(&key),
     )?;
     assert!(

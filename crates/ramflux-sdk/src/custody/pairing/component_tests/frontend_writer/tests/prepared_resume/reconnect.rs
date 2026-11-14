@@ -41,7 +41,7 @@ async fn run() -> TestResult {
     rig.clock.set_wall(rig.now);
     crate::time::FixedClock::advance_to(i64::try_from(rig.now)?);
     rig.source.client = reopen(&rig.participant_a, b"fresh-source-data")?;
-    let target = reopen(&rig.participant_b, b"component-recipient-passphrase")?;
+    let target = reopen_staged(&rig.participant_b, &operation)?;
     rig.primary = actor(&rig.participant_a, &rig.source.client, source_relay, &operation, rig.now)?;
     rig.secondary = actor(&rig.participant_b, &target, target_relay, &operation, rig.now)?;
     let request = StatusRequest {
