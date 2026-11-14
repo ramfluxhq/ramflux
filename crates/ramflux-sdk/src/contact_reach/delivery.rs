@@ -88,6 +88,7 @@ impl RamfluxClient {
             &authority,
             now,
         )?;
+        self.require_reach_receive_policy(&reach.route.body, now)?;
         Ok(())
     }
 }

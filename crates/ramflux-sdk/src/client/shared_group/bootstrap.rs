@@ -181,7 +181,11 @@ impl RamfluxClient {
         {
             return Ok(None);
         }
-        if needs_consent {
+        if needs_consent
+            || entry.reach.as_ref().is_some_and(|reach| {
+                reach.route.body.traffic == ramflux_protocol::contact_reach::Traffic::GroupInvite
+            })
+        {
             return Ok(Some(PreparedSharedGroup::Invitation {
                 state,
                 body: Zeroizing::new(body.to_vec()),

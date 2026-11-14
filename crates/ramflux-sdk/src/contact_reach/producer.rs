@@ -85,6 +85,14 @@ impl RamfluxClient {
         };
         self.account_db()?.write_transaction(|| {
             let now = crate::custody::network_now()?;
+            if matches!(traffic, Traffic::ReceiptDelivered | Traffic::ReceiptRead) {
+                self.require_reach_outgoing_signal(
+                    &recipient,
+                    &identity.conversation_id,
+                    traffic,
+                    now,
+                )?;
+            }
             let root = self.own_account_anchor()?;
             let proof =
                 self.current_custody_evidence(&root, now)?.ok_or(SdkError::NetworkingPending)?;
@@ -219,3 +227,6 @@ fn attach_source(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod invitation_tests;

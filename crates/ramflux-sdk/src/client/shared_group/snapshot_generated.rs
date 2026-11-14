@@ -127,6 +127,34 @@ impl crate::RamfluxClient {
         state: &ramflux_crypto::VerifiedGroupState,
         recipient: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Vec<u8>, SdkError> {
+        self.shared_group_snapshot_for_recipient(state, recipient, true)
+    }
+
+    /// Build a native signed-snapshot invitation without exporting a sender key.
+    /// The exact returned Inner can be sealed with `ReachSendIntent::GroupInvitation`.
+    /// An already listed member still needs the receiving account's explicit JOIN.
+    /// # Errors
+    /// Refuses inactive native schema, uncertified recipients, a foreign transport issuer,
+    /// invalid signed state or storage/identity allocation failure.
+    pub fn reach_group_invitation_inner(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Vec<u8>, SdkError> {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return Err(SdkError::ReachRefused(
+                ramflux_protocol::contact_reach::Reason::ForeignCapabilityMissing,
+            ));
+        }
+        self.shared_group_snapshot_for_recipient(state, recipient, false)
+    }
+
+    fn shared_group_snapshot_for_recipient(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+        include_sender_key: bool,
+    ) -> Result<Vec<u8>, SdkError> {
         use crate::client::identity_authority::{HeadUse, NativeOperation};
         self.trusted_device(HeadUse::NewAuthorization, recipient)?;
         let own = self.owned_device_identity()?;
@@ -143,7 +171,8 @@ impl crate::RamfluxClient {
             self.require_native_operation(recipient, NativeOperation::Group)?;
             self.ensure_shared_group_device(state, recipient)?;
         }
-        let packet = Zeroizing::new(self.shared_group_packet(state, eligible)?);
+        let packet =
+            Zeroizing::new(self.shared_group_packet(state, eligible && include_sender_key)?);
         if !crate::client::target_selection::schema_v1_selected() {
             return Ok(packet.to_vec());
         }

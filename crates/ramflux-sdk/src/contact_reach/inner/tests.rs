@@ -58,6 +58,21 @@ fn cr_decrypted_kind_and_identity_cannot_borrow_a_dm_label() -> TestResult {
         bind_inner(&route, &changed).is_err(),
         "group content must use group admission and membership"
     );
+    for operation in [4, 5] {
+        changed = inner.clone();
+        changed.kind = 8;
+        changed.body = g::Control { operation, ..Default::default() }.encode_to_vec();
+        assert!(
+            bind_inner(&route, &changed).is_err(),
+            "removing group identity cannot relabel a group state/key control as a DM"
+        );
+    }
+    changed = inner.clone();
+    changed.identity.as_mut().ok_or("identity")?.group_epoch = Some(1);
+    assert!(
+        bind_inner(&route, &changed).is_err(),
+        "an orphan group epoch cannot borrow a DM route"
+    );
     changed = inner;
     changed.identity.as_mut().ok_or("identity")?.author.as_mut().ok_or("author")?.device_epoch = 2;
     assert!(

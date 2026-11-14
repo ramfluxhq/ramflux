@@ -89,7 +89,58 @@ async fn group_producer() -> TestResult {
         state.snapshot().state_hash,
         "W binds the original signed state hash"
     );
+    reject_keyed_invitation(&source, &target, message.clone(), material.bundle.clone())?;
     reject_namespace(&source, message, &inner, material.bundle)?;
+    Ok(())
+}
+
+fn reject_keyed_invitation(
+    source: &Fixture,
+    target: &Fixture,
+    mut message: GatewayDirectMessage,
+    prekey: Option<ramflux_crypto::PrekeyBundle>,
+) -> TestResult {
+    let primary = source
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("creator")?
+        .group_primary(source.vault.as_ref())?;
+    let state = source.client.shared_group_change_with_primary(
+        "producer-group",
+        &source.config.target_delivery_id,
+        ramflux_protocol::group_state::GroupStateChange::Add {
+            member: target.client.owned_group_actor(&target.config.target_delivery_id)?.identity,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+        Some(&primary),
+    )?;
+    let exact = zeroize::Zeroizing::new(
+        source
+            .client
+            .shared_group_packet_for_recipient(&state, &target.client.owned_device_identity()?)?,
+    );
+    message.message_id = ramflux_protocol::encode_base64url(
+        g::Inner::decode(exact.as_slice())?.identity.ok_or("keyed snapshot identity")?.id,
+    );
+    message.envelope_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+    let before = crate::contact_reach::group_test_support::sealing_state(&source.client)?;
+    let result = source.client.prepare_reach_submission(
+        &source.config,
+        &message,
+        &exact,
+        prekey,
+        ReachSendIntent::GroupInvitation,
+    );
+    assert!(
+        matches!(&result, Err(SdkError::ReachRefused(Reason::ReachRouteInvalid))),
+        "a real native key-bearing snapshot cannot borrow the invitation placement: {result:?}"
+    );
+    assert_eq!(
+        crate::contact_reach::group_test_support::sealing_state(&source.client)?,
+        before,
+        "refusing a key-bearing invitation cannot commit another pair packet"
+    );
     Ok(())
 }
 

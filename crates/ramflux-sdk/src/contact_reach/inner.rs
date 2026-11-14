@@ -10,6 +10,21 @@ use ramflux_protocol::{
     message as g,
 };
 
+fn keyless_invitation(inner: &g::Inner) -> bool {
+    let Ok(control) = g::Control::decode(inner.body.as_slice()) else { return false };
+    if control.operation != 4 {
+        return false;
+    }
+    let Some(g::control::Payload::GroupState(state)) = control.payload else { return false };
+    matches!(
+        state.body.and_then(|body| body.value),
+        Some(g::group_control_body::Value::Snapshot(g::GroupControlBodySnapshot {
+            snapshot: Some(_),
+            distribution: None
+        }))
+    )
+}
+
 pub(super) fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
     let identity = inner.identity.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
     let author = identity.author.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
@@ -29,6 +44,11 @@ pub(super) fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError
     } else {
         None
     };
+    if identity.group_id.is_some() != identity.group_epoch.is_some()
+        || matches!(operation, Some(4 | 5)) && identity.group_id.is_none()
+    {
+        return Err(refused(Reason::ReachRouteInvalid));
+    }
     if operation == Some(11) {
         return Err(SdkError::GeneratedRefused {
             code: crate::error::GeneratedRefusalCode::Authority,
@@ -57,12 +77,14 @@ pub(super) fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError
         }
         Traffic::GroupInvite => {
             !own && inner.kind == 8
-                && operation == Some(4)
+                && keyless_invitation(inner)
                 && identity.group_id.is_some()
                 && identity.group_epoch.is_some()
         }
-        Traffic::OwnCopy => own && inner.kind == 8 && operation == Some(15),
-        Traffic::SelfSync => own && inner.kind == 12,
+        Traffic::OwnCopy => {
+            own && identity.group_id.is_none() && inner.kind == 8 && operation == Some(15)
+        }
+        Traffic::SelfSync => own && identity.group_id.is_none() && inner.kind == 12,
         Traffic::Typing => false,
     };
     if !valid {
@@ -90,10 +112,14 @@ impl RamfluxClient {
         }
         g::validation::scan_inner(body).map_err(|_| refused(Reason::ReachRouteInvalid))?;
         let inner = g::Inner::decode(body).map_err(|_| refused(Reason::ReachRouteInvalid))?;
+        bind_inner(route, &inner)?;
         if route.traffic == Traffic::Group {
             self.require_reach_group_binding(route, &inner, body)?;
         }
-        bind_inner(route, &inner)
+        if route.traffic == Traffic::GroupInvite {
+            self.require_reach_group_invite_binding(route, &inner, body)?;
+        }
+        Ok(())
     }
 }
 

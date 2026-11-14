@@ -62,6 +62,66 @@ fn control_head(
     }
 }
 impl RamfluxClient {
+    pub(crate) fn require_reach_group_invite_binding(
+        &self,
+        route: &Route,
+        inner: &g::Inner,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        let candidate = crate::client::shared_group::decode_packet(body)?.ok_or_else(invalid)?;
+        let identity = inner.identity.as_ref().ok_or_else(invalid)?;
+        if identity.group_id.as_deref() != Some(candidate.view().group_id.as_str())
+            || identity.group_epoch != Some(candidate.view().epoch)
+            || identity.conversation_id != candidate.view().conversation_id
+            || route.conversation_id != candidate.view().conversation_id
+        {
+            return Err(invalid());
+        }
+        wire::group_profile::check(identity, inner.kind, Some(4), true)
+            .map_err(SdkError::ReachRefused)?;
+        let genesis = candidate.genesis_hash()?;
+        let state: SavedReachState = serde_json::from_value(
+            self.account_db()?.client_record("reach", "state")?.ok_or_else(|| {
+                SdkError::InboundPending("verified recipient reach state unavailable".into())
+            })?,
+        )?;
+        if state.root != route.recipient_root || state.conflict {
+            return Err(refused(Reason::HomeFork));
+        }
+        for record in state.records.iter().chain(state.restrictions.values()) {
+            let (subject, denied) = match record {
+                StateRecord::Grant { subject, .. } => (subject, false),
+                StateRecord::Block { subject, .. } => (subject, true),
+                StateRecord::Floor { subject, denied, .. } => (subject, *denied),
+                StateRecord::Retirement { subject, group_floor, .. } => {
+                    (subject, group_floor.as_ref().is_some_and(|floor| floor.blocked()))
+                }
+                _ => continue,
+            };
+            let Subject::Group { group_id, conversation_id, genesis_hash, .. } = subject else {
+                continue;
+            };
+            if group_id == &candidate.view().group_id
+                || conversation_id == &candidate.view().conversation_id
+                || genesis_hash == &genesis
+            {
+                if group_id != &candidate.view().group_id
+                    || conversation_id != &candidate.view().conversation_id
+                    || genesis_hash != &genesis
+                {
+                    return Err(invalid());
+                }
+                if denied {
+                    return Err(SdkError::GeneratedRefused {
+                        code: crate::error::GeneratedRefusalCode::Authority,
+                        reason: "recipient group is blocked".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_reach_group_binding(
         &self,
         route: &Route,

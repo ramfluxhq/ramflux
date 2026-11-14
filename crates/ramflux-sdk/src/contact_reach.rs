@@ -14,6 +14,8 @@ mod group_test_support;
 mod inner;
 mod producer;
 mod projection;
+mod receive_policy;
+mod signal_settings;
 mod verification;
 use crate::SdkError;
 pub use producer::ReachSendIntent;
