@@ -72,11 +72,7 @@ fn dispatch(
         .checked_add(Duration::from_millis(request.remaining_ms))
         .ok_or(Reason::ForeignUnavailable)?;
     remaining(deadline)?;
-    let now = context
-        .store
-        .contact_clock_floor(crate::now_unix_seconds().map_err(|_| Reason::ForeignUnavailable)?)
-        .map_err(|_| Reason::ForeignUnavailable)?;
-    source::verify(request, context, deadline, now)?;
+    let now = source::verify(request, context, deadline)?;
     let forward = forward::signed(request, context.node)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

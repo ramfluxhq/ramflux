@@ -22,11 +22,11 @@ impl ReachService {
         if !wire::enabled() {
             return Err(refuse(Reason::FeatureDisabled));
         }
-        if forward.target_node_id != self.node.node_id()
-            || forward.submission.envelope.delivery_class
-                != ramflux_protocol::DeliveryClass::Message
-        {
+        if forward.target_node_id != self.node.node_id() {
             return Err(refuse(Reason::ReachRouteInvalid));
+        }
+        if forward.submission.envelope.delivery_class != ramflux_protocol::DeliveryClass::Message {
+            return Err(refuse(Reason::ForeignCapabilityMissing));
         }
         let deadline = received
             .checked_add(Duration::from_secs(10))

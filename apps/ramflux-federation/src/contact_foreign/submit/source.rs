@@ -9,8 +9,7 @@ pub(super) fn verify(
     request: &SourceSubmitRequest,
     context: Context<'_>,
     deadline: Instant,
-    now: u64,
-) -> Result<(), Reason> {
+) -> Result<u64, Reason> {
     let query = wire::PeerQueryRequest {
         kind: wire::PeerQueryKind::Query,
         request_id: request.request_id.clone(),
@@ -31,6 +30,12 @@ pub(super) fn verify(
     let PeerQueryResult::Query { reply } = response.result else {
         return Err(Reason::ForeignPolicyDenied);
     };
+    // The source may have advanced while the authenticated own-router read was in flight.
+    // Commit this observation before using the reply or attempting the peer delivery.
+    let now = context
+        .store
+        .contact_clock_floor(crate::now_unix_seconds().map_err(|_| Reason::ForeignUnavailable)?)
+        .map_err(|_| Reason::ForeignUnavailable)?;
     let current = ramflux_crypto::contact_reach::verify_peer_reply(
         &reply,
         &query.query,
@@ -49,5 +54,5 @@ pub(super) fn verify(
     )
     .map_err(|_| Reason::ReachRouteInvalid)?;
     remaining(deadline)?;
-    Ok(())
+    Ok(now)
 }
