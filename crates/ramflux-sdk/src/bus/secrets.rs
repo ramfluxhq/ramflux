@@ -40,17 +40,17 @@ mod tests {
 }
 
 fn wipe_string(value: &mut String) {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "c-abi"))]
     let observed = canary::observed(value);
-    #[cfg(test)]
+    #[cfg(all(test, feature = "c-abi"))]
     let len = value.len();
     value.zeroize();
-    #[cfg(test)]
+    #[cfg(all(test, feature = "c-abi"))]
     if observed {
         canary::record(value, len);
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "c-abi"))]
 pub(crate) mod canary {
     pub const TEXT: &str = "ABI_WIPE_CANARY_R5_38D79A";
     thread_local! {static STATE:std::cell::Cell<(bool,usize,bool)>=const{std::cell::Cell::new((false,0,true))};}

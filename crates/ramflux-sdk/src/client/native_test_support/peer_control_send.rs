@@ -611,7 +611,7 @@ async fn durable_edit_retry() -> TestResult {
     let conversation = g::dm_scope::derive(&own, &remote)?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (target, recipients) =
-        seed_durable_edit(&mut source, &mut first, &mut second, &conversation).await?;
+        Box::pin(seed_durable_edit(&mut source, &mut first, &mut second, &conversation)).await?;
     let mut request = crate::LocalBusFrame::request(
         "edit",
         Some("source".into()),
