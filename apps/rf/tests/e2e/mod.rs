@@ -189,10 +189,12 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     write_seed_file(&signing_seed, &seed)?;
     let route_key = root.join("secrets").join("notify-route.key");
     write_seed_file(&route_key, &[0x11; 32])?;
-    // Custody provisioning is descriptor-relative and Unix-only. Pairing and home migration
-    // stay off in this harness, so the gateway and router start without those variables.
+    // The CLI publisher is descriptor-relative and Unix-only. Windows writes the same
+    // fresh signed record into this test directory. Pairing and home migration stay off.
     #[cfg(unix)]
     let custody = init_custody(&root, &signing_seed, node_id, seed)?;
+    #[cfg(windows)]
+    let custody = init_custody_record(&root, node_id, seed)?;
     let router_async = free_udp_addr()?;
     for (service, mesh_addr) in services.iter().zip(mesh.iter()) {
         write_service_toml(&root, service, mesh_addr, &mesh, &gateway_tcp, node_id)?;
@@ -230,14 +232,10 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env("RAMFLUX_ROUTER_ASYNC_SERVER_NAME", "ramflux-router")
             .env("RAMFLUX_ROUTER_ASYNC_PEER_CA_PEM_FILE", &ca_pem)
             .env("RUST_LOG", "info")
-            .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR");
-        #[cfg(unix)]
-        {
-            command
-                .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
-                .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
-                .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
-        }
+            .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR")
+            .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
+            .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
+            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -358,6 +356,62 @@ fn init_custody(
         .into());
     }
     parse_custody_env(&output_dir.join("custody.env"))
+}
+
+/// Same fresh record as `rf node custody-init`, written with ordinary files.
+/// The production command stays Unix-only.
+#[cfg(windows)]
+fn init_custody_record(root: &Path, node_id: &str, seed: [u8; 32]) -> Result<CustodyEnv> {
+    const DAY: u64 = 86_400;
+    const OVERLAP: u64 = 604_800 + 600;
+    const VALIDITY_DAYS: u64 = 30;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let sign_until = now.checked_add(VALIDITY_DAYS * DAY).ok_or("custody expiry overflow")?;
+    let overlap_until = sign_until.checked_add(OVERLAP).ok_or("custody overlap overflow")?;
+    let node_public_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let proxy_seed = ramflux_crypto::random_32()?;
+    let key_seed = ramflux_crypto::random_32()?;
+    let proxy_public = ramflux_protocol::encode_base64url(
+        ed25519_dalek::SigningKey::from_bytes(&proxy_seed).verifying_key().to_bytes(),
+    );
+    let body = ramflux_protocol::custody::NodeIdentityRecord {
+        schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
+        version: 1,
+        node_id: node_id.to_owned(),
+        node_signing_public_key: node_public_key.clone(),
+        client_tls_certificate_sha256: None,
+        epoch: 1,
+        previous_record_hash: None,
+        issued_at: now,
+        receipt_keys: Vec::new(),
+        revoked_receipt_key_ids: Vec::new(),
+        proxy_keys: vec![ramflux_protocol::custody::ProxyKey {
+            key_id: ramflux_protocol::encode_base64url(key_seed),
+            public_key: proxy_public,
+            not_before: now,
+            sign_until,
+            overlap_until,
+            status: ramflux_protocol::custody::ReceiptKeyStatus::Active,
+            proxy_id: "ramflux-gateway".into(),
+            audiences: vec![node_id.to_owned()],
+        }],
+        revoked_proxy_key_ids: Vec::new(),
+        channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::HomeRelayReceipt],
+    };
+    let envelope = ramflux_crypto::custody::sign_node_identity_record(
+        &ed25519_dalek::SigningKey::from_bytes(&seed),
+        body,
+    )?;
+    let bytes = ramflux_protocol::canonical_json_bytes(&envelope)?;
+    let directory = root.join("custody").join("records");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join("node-record.json");
+    std::fs::write(&path, bytes)?;
+    Ok(CustodyEnv {
+        node_public_key,
+        node_record_file: path.to_str().ok_or("custody record path is not unicode")?.to_owned(),
+        proxy_signing_seed: ramflux_protocol::encode_base64url(proxy_seed),
+    })
 }
 
 fn parse_custody_env(path: &Path) -> Result<CustodyEnv> {
