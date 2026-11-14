@@ -137,6 +137,7 @@ impl crate::RamfluxClient {
         if state.root != own.root_commitment() {
             return Err(refused(Reason::AnchorMismatch));
         }
+        self.require_reach_authority_head(&state.root, &state.authority_head_hash, now)?;
         state.conversation(peer_root, peer_node, conversation_id, now)
     }
 }

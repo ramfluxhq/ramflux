@@ -115,12 +115,29 @@ pub(crate) struct SavedReachState {
     revision: u64,
     admission_revision: u64,
     home_head_hash: String,
+    authority_head_hash: String,
     state_hash: String,
     records: Vec<StateRecord>,
     restrictions: BTreeMap<String, StateRecord>,
     conflict: bool,
 }
 impl crate::RamfluxClient {
+    pub(super) fn require_reach_authority_head(
+        &self,
+        root: &str,
+        expected: &str,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        let current = self
+            .current_custody_authority(root, now)?
+            .ok_or_else(|| refused(Reason::CustodyRefused))?;
+        if custody::object_hash(current.envelope())? != expected {
+            return Err(SdkError::InboundPending(
+                "reach state requires current custody authority".into(),
+            ));
+        }
+        Ok(())
+    }
     /// Install verified state and independent restrictive floors in one account writer commit.
     /// This read does not bootstrap message/SelfSync erase floors or authorize new-device publication.
     /// # Errors
@@ -132,6 +149,13 @@ impl crate::RamfluxClient {
         }
         let db = self.account_db()?;
         db.write_transaction(|| {
+            let now = crate::custody::network_now()?;
+            check_submission_time(verified.manifest.issued_at, verified.manifest.expires_at, now)?;
+            self.require_reach_authority_head(
+                &verified.manifest.account_anchor,
+                &verified.manifest.authority_head_hash,
+                now,
+            )?;
             let previous: Option<SavedReachState> =
                 db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
             if let Some(saved) = &previous {
@@ -143,6 +167,16 @@ impl crate::RamfluxClient {
                 }
                 if verified.manifest.revision == saved.revision {
                     if verified.manifest.state_hash == saved.state_hash {
+                        let mut refreshed = saved.clone();
+                        refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
+                        refreshed
+                            .authority_head_hash
+                            .clone_from(&verified.manifest.authority_head_hash);
+                        db.persist_client_record(
+                            "reach",
+                            "state",
+                            &serde_json::to_value(refreshed)?,
+                        )?;
                         return Ok(());
                     }
                     let mut fenced = saved.clone();
@@ -170,6 +204,7 @@ impl crate::RamfluxClient {
                 revision: verified.manifest.revision,
                 admission_revision: verified.manifest.admission_revision,
                 home_head_hash: verified.manifest.home_head_hash,
+                authority_head_hash: verified.manifest.authority_head_hash,
                 state_hash: verified.manifest.state_hash,
                 records: verified.records,
                 restrictions,

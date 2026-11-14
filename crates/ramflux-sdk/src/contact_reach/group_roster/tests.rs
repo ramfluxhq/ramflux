@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Adopted native heads exercise automatic staging, continuous-root floors and repair.
-use super::super::group_test_support::install_grant;
+use super::super::group_test_support::{install_grant, verified_records};
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_protocol::{contact_reach::Applied, group_state::GroupStateChange};
@@ -107,7 +107,11 @@ async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() ->
         peer.client.born_v3_account.as_ref().ok_or("peer account")?.verified(),
         now,
     )?;
-    assert_eq!(before.records.len(), 1, "roster maintenance never adds or replaces the live grant");
+    assert_eq!(
+        before.records.iter().filter(|record| matches!(record, StateRecord::Grant { .. })).count(),
+        1,
+        "roster maintenance never adds or replaces the live grant"
+    );
     Ok(())
 }
 
@@ -285,6 +289,49 @@ async fn cr_group_roster_missing_history_stays_unsigned_and_fork_pauses_repair()
             )
             .is_err(),
         "a fork pauses automatic signatures as well as bookkeeping repair"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cr_reach_read_rechecks_current_authority_and_refreshes_same_content_binding() -> TestResult
+{
+    let (_, mut peer, _) = group_fixture().await?;
+    let before = peer.client.group_reach_mirror()?.ok_or("verified mirror")?;
+    let home = ramflux_protocol::encode_base64url([30; 32]);
+    let now = crate::custody::network_now()?;
+    let fresh = verified_records(&peer, &home, before.records.clone(), now)?;
+    assert_eq!(
+        fresh.state_hash(),
+        before.state_hash,
+        "fresh transport/home binding does not change the canonical content identity"
+    );
+    peer.client.install_reach_state(fresh)?;
+    let refreshed = peer.client.group_reach_mirror()?.ok_or("refreshed mirror")?;
+    assert_eq!(
+        refreshed.home_head_hash, home,
+        "an equal-revision equal-content read must refresh its independently verified home binding"
+    );
+    let stale = verified_records(&peer, &home, before.records.clone(), now)?;
+    let _sibling = peer.enroll_sibling("reach-state-new-sibling", "second").await?;
+    assert!(
+        matches!(peer.client.install_reach_state(stale), Err(SdkError::InboundPending(_))),
+        "authority advancing between page verification and writer commit invalidates that read"
+    );
+    assert!(
+        peer.client.group_reach_mirror().is_err(),
+        "a stale saved authority cannot supply positive group bookkeeping after the custody head changes"
+    );
+    let current = verified_records(&peer, &home, before.records, crate::custody::network_now()?)?;
+    peer.client.install_reach_state(current)?;
+    let updated = peer.client.group_reach_mirror()?.ok_or("current mirror")?;
+    assert_ne!(
+        updated.authority_head_hash, before.authority_head_hash,
+        "the renewed authority binding is saved even when admission/content revisions stay equal"
+    );
+    assert_eq!(
+        updated.state_hash, before.state_hash,
+        "transport and current authority refresh never manufacture a new signed admission"
     );
     Ok(())
 }

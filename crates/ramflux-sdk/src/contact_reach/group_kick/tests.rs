@@ -2,11 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native adopted-head/writer test; transport submission remains a separate boundary.
-use super::super::group_test_support::install_grant;
+use super::super::group_test_support::{UnavailableVault, install_grant};
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_protocol::group_state::GroupStateChange;
-use std::sync::atomic::Ordering;
 
 async fn kick_fixture() -> TestResult<(Fixture, VerifiedGroupState, VerifiedGroupState)> {
     let owner = Fixture::new("reach-kick-owner").await?;
@@ -64,7 +63,6 @@ async fn cr_group_own_kick_stages_with_head_and_signs_after_commit() -> TestResu
         !db.actor_state_exists(&key("kick-group"))?,
         "rollback also removes the dependent revoke intent"
     );
-    peer.vault.fail.store(true, Ordering::SeqCst);
     peer.client.accept_shared_group_state(&kicked, &peer.config.target_delivery_id)?;
     let intent: KickIntent =
         db.load_actor_state(&key("kick-group"))?.ok_or("committed kick intent")?;
@@ -78,10 +76,9 @@ async fn cr_group_own_kick_stages_with_head_and_signs_after_commit() -> TestResu
         now: crate::custody::network_now()?,
     };
     assert!(
-        peer.client.prepare_reach_group_kick(peer.vault.as_ref(), context, "kick-group").is_err(),
+        peer.client.prepare_reach_group_kick(&UnavailableVault, context, "kick-group").is_err(),
         "signing requires the primary vault after the writer has committed"
     );
-    peer.vault.fail.store(false, Ordering::SeqCst);
     let operation =
         peer.client.prepare_reach_group_kick(peer.vault.as_ref(), context, "kick-group")?;
     let Operation::Admission { update, .. } = &operation else {

@@ -158,10 +158,12 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         use ramflux_crypto::{CryptoError, GroupStateRelation};
         let fork = match relation {
-            Some(Ok(GroupStateRelation::RemovalConflict | GroupStateRelation::Unrelated))
-            | Some(Err(CryptoError::Protocol(
-                ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
-            ))) => true,
+            Some(
+                Ok(GroupStateRelation::RemovalConflict | GroupStateRelation::Unrelated)
+                | Err(CryptoError::Protocol(
+                    ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
+                )),
+            ) => true,
             Some(Err(error)) => return Err(error.into()),
             _ => false,
         };
@@ -182,6 +184,11 @@ impl RamfluxClient {
         if state.root != route.recipient_root || state.conflict {
             return Err(refused(Reason::HomeFork));
         }
+        self.require_reach_authority_head(
+            &state.root,
+            &state.authority_head_hash,
+            crate::custody::network_now()?,
+        )?;
         let group = route.group.as_ref().ok_or_else(invalid)?;
         let now = crate::custody::network_now()?;
         for record in state.records.iter().chain(state.restrictions.values()) {

@@ -208,13 +208,11 @@ impl RamfluxClient {
             return Err(pending());
         }
         let account = self.born_v3_account.as_ref().ok_or_else(pending)?;
-        ramflux_crypto::contact_reach::verify_retained_admission(update, account.verified(), now)?;
+        let authority = self.current_custody_authority(&mirror.root, now)?.ok_or_else(pending)?;
+        ramflux_crypto::contact_reach::verify_retained_admission(update, &authority, now)?;
         if let Some(checkpoint) = &queue.checkpoint {
             ramflux_crypto::contact_reach::verify_group_roster(
-                checkpoint,
-                update,
-                account.verified(),
-                now,
+                checkpoint, update, &authority, now,
             )?;
         }
         let members = membership::derive(db, update, &state, queue.checkpoint.as_ref())?;
@@ -231,11 +229,9 @@ impl RamfluxClient {
             issued_at: now,
         };
         let roster = GroupRoster {
-            header: account.group_primary(vault)?.sign_group_roster_header(
-                header,
-                account.verified(),
-                now,
-            )?,
+            header: account
+                .group_primary(vault)?
+                .sign_group_roster_header(header, &authority, now)?,
             members,
         };
         roster.validate(update)?;

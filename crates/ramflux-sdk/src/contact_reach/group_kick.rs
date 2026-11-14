@@ -39,11 +39,19 @@ fn pending() -> SdkError {
 }
 impl RamfluxClient {
     pub(super) fn group_reach_mirror(&self) -> Result<Option<SavedReachState>, SdkError> {
-        self.account_db()?
+        let state: Option<SavedReachState> = self
+            .account_db()?
             .client_record("reach", "state")?
             .map(serde_json::from_value)
-            .transpose()
-            .map_err(Into::into)
+            .transpose()?;
+        if let Some(state) = &state {
+            self.require_reach_authority_head(
+                &state.root,
+                &state.authority_head_hash,
+                crate::custody::network_now()?,
+            )?;
+        }
+        Ok(state)
     }
 
     /// Called only after adoption, inside the caller's account writer; performs no signing/RPC.
@@ -178,6 +186,11 @@ impl RamfluxClient {
             return Err(pending());
         }
         let account = self.born_v3_account.as_ref().ok_or_else(pending)?;
+        self.require_reach_authority_head(
+            &account.record().body.account_anchor,
+            &custody::object_hash(account.record())?,
+            context.now,
+        )?;
         let mut body =
             account.reach_decision_body(&context, intent.subject.clone(), Decision::Revoke)?;
         body.operation_id.clone_from(&intent.operation_id);

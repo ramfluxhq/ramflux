@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Real native primary and encrypted account writer; no transport or full SDK/rf acceptance claim.
+use super::super::group_test_support::UnavailableVault;
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_protocol::contact_reach::Applied;
-use std::sync::atomic::Ordering;
 
 fn stage_fixture(owner: &Fixture) -> TestResult<JoinIntent> {
     let account = owner.client.born_v3_account.as_ref().ok_or("native account")?;
@@ -38,7 +38,6 @@ fn stage_fixture(owner: &Fixture) -> TestResult<JoinIntent> {
         !db.actor_state_exists(&key("reach-group"))?,
         "an outer rollback must leave neither JOIN intent"
     );
-    owner.vault.fail.store(true, Ordering::SeqCst);
     owner.client.stage_reach_group_join("reach-group", &acknowledged)?;
     let staged: JoinIntent = db.load_actor_state(&key("reach-group"))?.ok_or("staged JOIN")?;
     assert_ne!(
@@ -68,11 +67,10 @@ async fn cr_group_join_persists_retry_ids_before_signing_and_orders_roster() -> 
     assert!(
         owner
             .client
-            .prepare_reach_group_join_operation(owner.vault.as_ref(), context, "reach-group")
+            .prepare_reach_group_join_operation(&UnavailableVault, context, "reach-group")
             .is_err(),
         "an unavailable vault cannot sign"
     );
-    owner.vault.fail.store(false, Ordering::SeqCst);
     let grant = owner.client.prepare_reach_group_join_operation(
         owner.vault.as_ref(),
         context,

@@ -64,6 +64,11 @@ fn notice(state: &VerifiedGroupState, root: &str) -> Result<GroupJoinNotice, Sdk
 impl RamfluxClient {
     fn require_group_join_primary(&self) -> Result<(), SdkError> {
         let account = self.born_v3_account.as_ref().ok_or_else(invalid)?;
+        self.require_reach_authority_head(
+            &account.record().body.account_anchor,
+            &custody::object_hash(account.record())?,
+            crate::custody::network_now()?,
+        )?;
         let own = self.owned_device_identity()?;
         let primary = &account.record().body.master_certificate.body.primary_device_ref;
         if own.root_commitment() != primary.account_anchor || own.device_id() != primary.device_id {
