@@ -157,9 +157,8 @@ fn collect_wal_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), NodeCor
             collect_wal_files(&path, files)?;
             continue;
         }
-        let wal_extension = Path::new(name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wal"));
+        let wal_extension =
+            Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("wal"));
         if kind.is_file() && name.starts_with("router-wal-") && wal_extension {
             if files.len() >= FILE_CAP {
                 return Err(NodeCoreError::Redb(
