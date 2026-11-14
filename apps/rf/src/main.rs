@@ -17,8 +17,12 @@ pub(crate) const DEFAULT_DATA_ROOT: &str = "/tmp/ramflux/rfd-data";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RfError {
+    #[cfg(unix)]
     #[error("Pairing command did not complete.")]
     PairingExit { code: i32 },
+    #[cfg(not(unix))]
+    #[error("{command} is unsupported on this platform.")]
+    UnsupportedPlatform { command: &'static str },
     #[error("{0}")]
     Message(String),
     #[error("SDK error: {0}")]
@@ -36,7 +40,10 @@ async fn main() {
     if let Err(error) = run().await {
         eprintln!("{error}");
         std::process::exit(match error {
+            #[cfg(unix)]
             RfError::PairingExit { code } => code,
+            #[cfg(not(unix))]
+            RfError::UnsupportedPlatform { .. } => 2,
             _ => 1,
         });
     }

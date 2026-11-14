@@ -24,6 +24,10 @@ pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(unix)]
 mod node_custody;
+#[cfg(unix)]
+pub(crate) mod pairing;
+#[cfg(not(unix))]
+#[path = "pairing_unsupported.rs"]
 pub(crate) mod pairing;
 #[cfg(windows)]
 mod windows_console;
