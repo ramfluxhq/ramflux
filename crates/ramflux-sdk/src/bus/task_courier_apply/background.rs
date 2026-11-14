@@ -20,6 +20,10 @@ use std::sync::{Arc, Mutex};
 
 const QUEUED: usize = 8;
 const RUNNING: usize = 4;
+#[cfg(test)]
+#[path = "background_tests.rs"]
+mod tests;
+
 type Pending = Arc<Mutex<BTreeSet<String>>>;
 struct Ticket {
     key: String,
@@ -263,45 +267,45 @@ fn prepare(
     result
 }
 async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Result<Sent, SdkError> {
-    let preparation_deadline = tokio::time::Instant::now() + context.network_wait();
-    let material = async {
-        let mut sealed = Vec::new();
-        for mut draft in std::mem::take(&mut plan.drafts) {
-            let request = std::mem::replace(
-                &mut draft.request,
-                crate::client::routed::SendMaterialRequest { root: None, prekey: None },
-            );
-            let route = draft.target.federation.clone();
-            let material = federation::material(
+    // Share one network budget across targets. Actor-owned sealing is outside
+    // that budget: waiting for a writer checkpoint must not charge a ready item
+    // when another item's network timer expires.
+    let mut preparation_remaining = context.network_wait();
+    let mut sealed = Vec::new();
+    for mut draft in std::mem::take(&mut plan.drafts) {
+        let request = std::mem::replace(
+            &mut draft.request,
+            crate::client::routed::SendMaterialRequest { root: None, prekey: None },
+        );
+        let route = draft.target.federation.clone();
+        let started = tokio::time::Instant::now();
+        let material = tokio::time::timeout(
+            preparation_remaining,
+            federation::material(
                 context,
                 &plan.config,
                 request,
                 crate::bus::connection_manager::CallClass::Bulk,
                 route.as_ref(),
-            )
-            .await?;
-            let item = plan.item.clone();
-            let conversation = plan.conversation.clone();
-            let routing = plan.routing.clone();
-            let envelope = writer
-                .apply(move |account| {
-                    if !valid(account, &item, &conversation, &routing)? {
-                        return Ok(None);
-                    }
-                    draft.seal(account, material).map(Some)
-                })
-                .await?;
-            let Some(envelope) = envelope else { return Ok::<_, SdkError>(None) };
-            sealed.push((envelope, route));
-        }
-        Ok(Some(sealed))
-    };
-    let Some(sealed) = tokio::time::timeout_at(preparation_deadline, material)
+            ),
+        )
         .await
-        .map_err(|_| SdkError::InboundPending("task courier preparation deferred".into()))??
-    else {
-        return Ok(Sent::Done);
-    };
+        .map_err(|_| SdkError::InboundPending("task courier preparation deferred".into()))??;
+        preparation_remaining = preparation_remaining.saturating_sub(started.elapsed());
+        let item = plan.item.clone();
+        let conversation = plan.conversation.clone();
+        let routing = plan.routing.clone();
+        let envelope = writer
+            .apply(move |account| {
+                if !valid(account, &item, &conversation, &routing)? {
+                    return Ok(None);
+                }
+                draft.seal(account, material).map(Some)
+            })
+            .await?;
+        let Some(envelope) = envelope else { return Ok(Sent::Done) };
+        sealed.push((envelope, route));
+    }
     let deadline = context.task_deadline(plan.approval);
     for (envelope, route) in sealed {
         match federation::submit_classified_until(context, envelope, route, deadline, false).await?
