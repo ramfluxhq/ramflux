@@ -60,8 +60,8 @@ impl Scratch {
         let lock = super::stage::create_file(&scratch.path.join("owner.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)?;
         scratch.lock = Some(lock);
-        fs::File::open(&scratch.path)?.sync_all()?;
-        fs::File::open(stage)?.sync_all()?;
+        crate::sync_path::sync_path(&scratch.path)?;
+        crate::sync_path::sync_path(stage)?;
         Ok(scratch)
     }
 }

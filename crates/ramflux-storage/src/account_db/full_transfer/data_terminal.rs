@@ -87,7 +87,7 @@ impl AccountDb {
         drop(stage);
         let parent = directory.parent().ok_or(StorageError::PairingField("WrongContext"))?;
         std::fs::remove_dir_all(&directory)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        crate::sync_path::sync_path(parent)?;
         drop(lock);
         Ok(true)
     }

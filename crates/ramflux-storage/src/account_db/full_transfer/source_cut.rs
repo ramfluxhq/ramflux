@@ -58,9 +58,9 @@ impl SourceContext<'_> {
         open_regular_linked(&destination)?.sync_all()?;
         std::fs::remove_file(private_path)?;
         drop(open_regular(&destination, false)?);
-        std::fs::File::open(self.directory)?.sync_all()?;
+        crate::sync_path::sync_path(self.directory)?;
         if let Some(parent) = private_path.parent() {
-            std::fs::File::open(parent)?.sync_all()?;
+            crate::sync_path::sync_path(parent)?;
         }
         self.require_source_live()?;
         let snapshot_id = snapshot_id.to_owned();

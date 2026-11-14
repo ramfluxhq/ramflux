@@ -43,7 +43,7 @@ impl Contributions {
         let encoding = self.root(&tx, private, stage)?;
         tx.commit()?;
         drop(db);
-        std::fs::File::open(path)?.sync_all()?;
+        crate::sync_path::sync_path(path)?;
         Ok(encoding)
     }
 

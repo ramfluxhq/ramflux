@@ -37,9 +37,9 @@ pub(super) fn prepare(database: &Path) -> Result<(), StorageError> {
         }
         #[cfg(not(unix))]
         return Err(StorageError::AuthorizationRejected);
-        fs::File::open(&path)?.sync_all()?;
+        crate::sync_path::sync_path(&path)?;
     }
-    fs::File::open(database.parent().ok_or(StorageError::AuthorizationRejected)?)?.sync_all()?;
+    crate::sync_path::sync_path(database.parent().ok_or(StorageError::AuthorizationRejected)?)?;
     Ok(())
 }
 pub(super) fn verify(database: &Path) -> Result<(), StorageError> {

@@ -82,7 +82,7 @@ async fn run(cut: u8) -> TestResult {
     let db = open(root)?;
     let mut stage = db.create_full_stage_for_test(record, 604_900)?;
     stage.retain_forward_manifest(&manifest, &manifest.manifest.families)?;
-    std::fs::write(root.join("reference"), stage.reference().encode_secret()?.as_slice())?;
+    std::fs::write(root.join("reference"), stage.reference().to_wire_bytes()?.as_slice())?;
     drop(stage);
     drop(db);
     kill_writer(root, cut).await?;

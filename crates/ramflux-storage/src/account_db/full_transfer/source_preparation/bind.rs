@@ -150,7 +150,7 @@ impl<'db> FullSourcePreparation<'db> {
         drop(self.connection);
         if directory != self.directory {
             std::fs::rename(&self.directory, &directory)?;
-            std::fs::File::open(directory.parent().ok_or_else(context)?)?.sync_all()?;
+            crate::sync_path::sync_path(directory.parent().ok_or_else(context)?)?;
         }
         let connection = self.key.open_metadata(&directory.join("stage.db"))?;
         connection.execute_batch("DROP TABLE IF EXISTS source_preparation_ready")?;

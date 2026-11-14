@@ -167,7 +167,7 @@ impl FullReceiverDatabaseWork {
         tx.commit()?;
         drop(target);
         super::super::stage::open_regular(&self.path, false)?.sync_all()?;
-        std::fs::File::open(parent)?.sync_all()?;
+        crate::sync_path::sync_path(parent)?;
         Ok(())
     }
 }

@@ -266,7 +266,7 @@ pub(super) fn stage_directory(
             {
                 use std::os::unix::fs::DirBuilderExt as _;
                 match fs::DirBuilder::new().mode(0o700).create(&path) {
-                    Ok(()) => fs::File::open(path.parent().ok_or_else(context)?)?.sync_all()?,
+                    Ok(()) => crate::sync_path::sync_path(path.parent().ok_or_else(context)?)?,
                     Err(error)
                         if error.kind() == std::io::ErrorKind::AlreadyExists
                             && component != transfer => {}
@@ -340,12 +340,12 @@ pub(super) fn write_new_atomic(
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(temporary, directory.join(name))?;
-    fs::File::open(directory)?.sync_all()?;
+    crate::sync_path::sync_path(directory)?;
     Ok(())
 }
 pub(super) fn sync_stage(directory: &Path) -> Result<(), StorageError> {
     open_regular(&directory.join("stage.db"), false)?.sync_all()?;
-    fs::File::open(directory)?.sync_all()?;
+    crate::sync_path::sync_path(directory)?;
     Ok(())
 }
 

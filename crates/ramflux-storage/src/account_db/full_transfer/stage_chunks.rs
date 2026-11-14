@@ -197,7 +197,7 @@ impl FullTransferStage<'_> {
             drop(open_regular(&entry.path(), true)?);
             std::fs::remove_file(entry.path())?;
         }
-        std::fs::File::open(&self.directory)?.sync_all()?;
+        crate::sync_path::sync_path(&self.directory)?;
         Ok(())
     }
 
@@ -274,7 +274,7 @@ impl FullTransferStage<'_> {
         file.sync_all()?;
         #[cfg(test)]
         super::stage_tests::process_cuts::checkpoint(2)?;
-        std::fs::File::open(&self.directory)?.sync_all()?;
+        crate::sync_path::sync_path(&self.directory)?;
         #[cfg(test)]
         super::stage_tests::process_cuts::checkpoint(3)?;
         self.require_io()?;

@@ -111,7 +111,7 @@ impl FullTransferStage<'_> {
         file.seek(SeekFrom::Start(slot_offset(index)))?;
         file.write_all(encrypted.as_file_bytes())?;
         file.sync_all()?;
-        std::fs::File::open(&self.directory)?.sync_all()?;
+        crate::sync_path::sync_path(&self.directory)?;
         self.require_io()?;
         self.connection.execute(
             "INSERT INTO chunk(direction,manifest_hash,idx,length,digest,file_durable) VALUES(1,?1,?2,?3,?4,1)",

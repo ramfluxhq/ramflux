@@ -70,7 +70,7 @@ pub(super) fn reclaim(directory: &Path, metadata: &Connection) -> Result<(), Sto
         }
         remove_regular(&pending)?;
         remove_regular(&pending.with_extension("db-journal"))?;
-        std::fs::File::open(directory)?.sync_all()?;
+        crate::sync_path::sync_path(directory)?;
     }
     reclaim_aliases(directory, metadata)?;
     Ok(())
@@ -87,7 +87,7 @@ fn reclaim_aliases(directory: &Path, metadata: &Connection) -> Result<(), Storag
         {
             super::super::stage::raw32(id)?;
             remove_regular(&entry.path())?;
-            std::fs::File::open(directory)?.sync_all()?;
+            crate::sync_path::sync_path(directory)?;
             continue;
         }
         let Some(tail) = name.strip_prefix("source-").and_then(|name| name.strip_suffix(".db"))
@@ -112,7 +112,7 @@ fn reclaim_aliases(directory: &Path, metadata: &Connection) -> Result<(), Storag
         if !keyed {
             remove_regular(&entry.path())?;
             remove_regular(&entry.path().with_extension("db-journal"))?;
-            std::fs::File::open(directory)?.sync_all()?;
+            crate::sync_path::sync_path(directory)?;
         }
     }
     Ok(())

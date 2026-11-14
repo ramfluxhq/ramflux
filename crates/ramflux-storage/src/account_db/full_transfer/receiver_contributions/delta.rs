@@ -39,8 +39,8 @@ impl Contributions {
         pending.1 = true;
         tx.commit()?;
         drop(db);
-        std::fs::File::open(path)?.sync_all()?;
-        std::fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
+        crate::sync_path::sync_path(path)?;
+        crate::sync_path::sync_path(path.parent().ok_or_else(invalid)?)?;
         Ok(encoding)
     }
     fn pass(

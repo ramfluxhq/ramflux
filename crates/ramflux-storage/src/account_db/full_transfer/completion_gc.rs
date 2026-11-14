@@ -83,7 +83,7 @@ impl AccountDb {
             };
             let parent = directory.parent().ok_or_else(wrong)?;
             std::fs::remove_dir_all(&directory)?;
-            std::fs::File::open(parent)?.sync_all()?;
+            crate::sync_path::sync_path(parent)?;
             drop(lock);
         }
         self.write_transaction(|| {

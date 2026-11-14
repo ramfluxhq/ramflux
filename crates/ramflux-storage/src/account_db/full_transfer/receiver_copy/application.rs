@@ -170,7 +170,7 @@ impl FullReceiverBaseCopy {
         for name in ["private.db", "contributions.db"] {
             super::super::stage::open_regular(&self.scratch.path.join(name), false)?.sync_all()?;
         }
-        std::fs::File::open(&self.scratch.path)?.sync_all()?;
+        crate::sync_path::sync_path(&self.scratch.path)?;
         let workspace =
             self.scratch.path.file_name().and_then(|n| n.to_str()).ok_or_else(wrong)?.to_owned();
         let key = Zeroizing::new(*self.key.bytes());
