@@ -262,12 +262,10 @@ mod tests {
         );
         assert!(
             matches!(
-                result,
-                Err(SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(
-                    ramflux_protocol::ProtocolError::SenderTranscriptProfile
-                )))
+                &result,
+                Err(SdkError::InboundRejected(reason)) if reason == "candidate outer envelope is malformed"
             ),
-            "an opaque unbound body cannot select the current sender transcript"
+            "an opaque unbound body cannot select the current profile: {result:?}"
         );
     }
 

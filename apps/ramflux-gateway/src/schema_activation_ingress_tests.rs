@@ -57,7 +57,7 @@ async fn run() -> Result {
             .into_iter()
             .enumerate()
     {
-        let accepted = submission(&account, number, class, now)?;
+        let accepted = submission(&account, number, class.clone(), now)?;
         client
             .stream
             .send_frame(&serde_json::to_vec(&GatewayClientFrame::Submit {

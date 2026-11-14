@@ -740,7 +740,7 @@ async fn capture_account_baseline(
         TARGET,
         &crate::session::submit_fixtures::test_envelope(i64::try_from(
             ramflux_node_core::now_unix_seconds(),
-        )?)?,
+        )?),
     )
     .await?;
     assert_eq!(
