@@ -211,7 +211,7 @@ fn metadata_is_committed_and_empty_metadata_is_not_an_alias() -> TestResult {
         Some(Metadata { extensions: serde_json::from_value(json!({"example":"present"}))? });
     assert_ne!(before, s.hash()?, "surface metadata must participate in the signed commitment");
     let mut f = state.resync_frame()?;
-    f.metadata = Some(Metadata { extensions: Default::default() });
+    f.metadata = Some(Metadata { extensions: serde_json::Map::default() });
     assert!(f.wire_bytes().is_err(), "empty metadata cannot introduce an alternate state encoding");
     Ok(())
 }
