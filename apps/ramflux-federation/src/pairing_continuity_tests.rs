@@ -410,17 +410,17 @@ fn spawn_tls_front(
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     listener.set_nonblocking(true)?;
-    let thread =
-        std::thread::spawn(move || serve_tls_front(listener, backend, server_config, worker_stop));
+    let thread = std::thread::spawn(move || {
+        serve_tls_front(&listener, backend, &server_config, &worker_stop)
+    });
     Ok(TlsFront { stop, addr, thread: Some(thread) })
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn serve_tls_front(
-    listener: TcpListener,
+    listener: &TcpListener,
     backend: SocketAddr,
-    server_config: Arc<rustls::ServerConfig>,
-    stop: Arc<AtomicBool>,
+    server_config: &Arc<rustls::ServerConfig>,
+    stop: &AtomicBool,
 ) {
     let mut backoff = ramflux_node_core::ListenerAcceptBackoff::default();
     while !stop.load(Ordering::Relaxed) {
@@ -444,14 +444,14 @@ fn serve_tls_front(
         let _ = tcp.set_nonblocking(false);
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = tcp.set_write_timeout(Some(Duration::from_secs(5)));
-        let Ok(mut conn) = rustls::ServerConnection::new(Arc::clone(&server_config)) else {
+        let Ok(mut conn) = rustls::ServerConnection::new(Arc::clone(server_config)) else {
             continue;
         };
         let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
         let Ok(request) = read_http_request(&mut tls) else {
             continue;
         };
-        let Ok(mut upstream) = TcpStream::connect(backend) else {
+        let Ok(mut upstream) = TcpStream::connect_timeout(&backend, Duration::from_secs(5)) else {
             continue;
         };
         let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -460,8 +460,10 @@ fn serve_tls_front(
         if upstream.write_all(&forwarded).is_err() {
             continue;
         }
-        let mut reply = Vec::new();
-        if upstream.read_to_end(&mut reply).is_err() {
+        let mut reply = Zeroizing::new(Vec::new());
+        let cap = ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES
+            + pairing_limits().max_header_bytes;
+        if upstream.take(cap as u64 + 1).read_to_end(&mut reply).is_err() || reply.len() > cap {
             continue;
         }
         let _ = tls.write_all(&reply);
@@ -470,17 +472,24 @@ fn serve_tls_front(
     }
 }
 
-fn reconstruct_forwarded(request: &NodeHttpRequest, peer: SocketAddr) -> Vec<u8> {
+struct ForwardRequest {
+    request: NodeHttpRequest,
+    protected_headers: Zeroizing<Vec<u8>>,
+}
+fn reconstruct_forwarded(forwarded: &ForwardRequest, peer: SocketAddr) -> Zeroizing<Vec<u8>> {
+    let request = &forwarded.request;
     let mut raw = format!(
-        "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: {}\r\n\r\n",
+        "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: {}\r\n",
         request.method,
         request.path,
         request.body.len(),
         peer.ip()
     )
     .into_bytes();
+    raw.extend_from_slice(&forwarded.protected_headers);
+    raw.extend_from_slice(b"\r\n");
     raw.extend_from_slice(&request.body);
-    raw
+    Zeroizing::new(raw)
 }
 
 fn rustls_server_config(
@@ -497,8 +506,8 @@ fn rustls_server_config(
     ))
 }
 
-fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
-    let mut raw = Vec::new();
+fn read_http_request(tls: &mut impl Read) -> TestResult<ForwardRequest> {
+    let mut raw = Zeroizing::new(Vec::new());
     let mut buf = [0_u8; 512];
     let (header_end, start) = loop {
         if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -513,19 +522,28 @@ fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
             return Err("header cap".into());
         }
     };
-    let header = std::str::from_utf8(&raw[..header_end])?;
+    let header = std::str::from_utf8(raw.get(..header_end).ok_or("test: bounded proxy header")?)?;
     let mut parts = header.lines().next().ok_or("line")?.split_whitespace();
     let method = parts.next().ok_or("method")?.to_owned();
     let path = parts.next().ok_or("path")?.to_owned();
     let mut length = 0_usize;
-    for line in header.lines() {
+    let mut protected_headers = Zeroizing::new(Vec::new());
+    for line in header.lines().skip(1) {
+        if let Some((name, _)) = line.split_once(':')
+            && ["authorization", "content-type", "x-ramflux-pairing-arm"]
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+        {
+            protected_headers.extend_from_slice(line.as_bytes());
+            protected_headers.extend_from_slice(b"\r\n");
+        }
         if let Some((name, value)) = line.split_once(':')
             && name.eq_ignore_ascii_case("Content-Length")
         {
             length = value.trim().parse()?;
         }
     }
-    if length > pairing_limits().max_body_bytes {
+    if length > ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES {
         return Err("body cap".into());
     }
     while raw.len() < start + length {
@@ -538,17 +556,18 @@ fn read_http_request(tls: &mut impl Read) -> TestResult<NodeHttpRequest> {
     if raw.len() < start + length {
         return Err("short body".into());
     }
-    Ok(NodeHttpRequest {
+    let request = NodeHttpRequest {
         method,
         path,
-        body: raw[start..start + length].to_vec(),
+        body: raw.get(start..start + length).ok_or("test: bounded proxy body")?.to_vec(),
         keep_alive: false,
         source_ip_hash: None,
         pre_auth_cookie: None,
         pre_auth_now: None,
         forwarded_proto: None,
         forwarded_for: None,
-    })
+    };
+    Ok(ForwardRequest { request, protected_headers })
 }
 
 fn refuse_plaintext_http(origin: &str) -> TestResult {
