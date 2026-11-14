@@ -4,7 +4,6 @@
 //! The SDK actor, rf's public transport and narrow ABI observe one durable operation.
 use super::*;
 use crate::custody::pairing::private_credential::PairingBusClient;
-use crate::platform::listener::BusListener as _;
 use ramflux_protocol::custody::pairing::{PairingWire, local_dto::StatusRequest};
 
 #[tokio::test(start_paused = true)]
@@ -94,9 +93,11 @@ async fn observe(
         &serde_json::json!({"account_root":participant.root,"pairing_socket":socket,"pairing_account_id":participant.account_id}),
     )?;
     let body = request.to_wire_bytes()?;
-    let actual = tokio::task::spawn_blocking(move || abi(&config, &body))
-        .await?
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let actual = tokio::task::spawn_blocking(move || {
+        crate::c_abi::pairing_registered_state_for_test(&config, &body)
+    })
+    .await?
+    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     assert_eq!(actual, expected, "test: ABI forked rf transport's actual SDK operation state");
     Ok::<_, Box<dyn std::error::Error>>(())
 }
@@ -131,56 +132,4 @@ async fn serve(
         crate::bus::io::write_local_bus_frame(&mut stream, &response).await?;
     }
     Ok::<_, Box<dyn std::error::Error>>(())
-}
-
-struct Client(*mut crate::c_abi::RamfluxClient);
-impl Drop for Client {
-    fn drop(&mut self) {
-        crate::c_abi::ramflux_client_close(self.0);
-        crate::c_abi::ramflux_client_free(self.0);
-    }
-}
-struct Buffer(*mut crate::c_abi::RamfluxBuffer);
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        crate::c_abi::ramflux_buffer_free(self.0);
-    }
-}
-fn abi(config: &[u8], body: &[u8]) -> Result<serde_json::Value, String> {
-    let mut client = std::ptr::null_mut();
-    let mut error = std::ptr::null_mut();
-    let code = crate::c_abi::ramflux_client_new(
-        config.as_ptr(),
-        config.len(),
-        &raw mut client,
-        &raw mut error,
-    );
-    let client = Client(client);
-    let _error = Buffer(error);
-    if code != 0 {
-        return Err("test: ABI client setup refused".into());
-    }
-    let method =
-        std::ffi::CString::new("device.transfer.status").map_err(|error| error.to_string())?;
-    let mut output = std::ptr::null_mut();
-    let code = crate::c_abi::ramflux_pairing_call(
-        client.0,
-        method.as_ptr(),
-        body.as_ptr(),
-        body.len(),
-        &raw mut output,
-    );
-    let output = Buffer(output);
-    if code != 0 {
-        return Err(format!("test: actual ABI status refused with code {code}"));
-    }
-    // SAFETY: the wrapper retains this SDK-allocated buffer until its Drop frees it.
-    let buffer = unsafe { output.0.as_ref() }.ok_or("test: ABI status buffer missing")?;
-    if buffer.ptr.is_null() || buffer.len == 0 || buffer.len > LocalResult::LIMIT {
-        return Err("test: ABI status buffer bounds".into());
-    }
-    // SAFETY: the live SDK allocation contains exactly the bounded initialized length above.
-    let bytes = unsafe { std::slice::from_raw_parts(buffer.ptr, buffer.len) };
-    let result = LocalResult::from_wire_bytes(bytes).map_err(|error| error.to_string())?;
-    serde_json::to_value(result).map_err(|error| error.to_string())
 }

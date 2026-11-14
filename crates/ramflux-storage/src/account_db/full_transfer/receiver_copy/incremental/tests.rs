@@ -9,31 +9,35 @@ use ramflux_protocol::{custody::pairing::full_transfer::CHUNK_BYTES, encode_base
 use rusqlite::params;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn owned_db(anchor: &str) -> TestResult<(tempfile::TempDir, AccountDb)> {
+fn owned_db(anchor: &str, secret: &[u8]) -> TestResult<(tempfile::TempDir, AccountDb)> {
     let owner = tempfile::tempdir()?;
     let index = AccountIndex::open(owner.path())?;
     index.create_account("acct", anchor)?;
-    let db =
-        AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"incremental-original-b"))?;
+    let db = AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", secret))?;
     Ok((owner, db))
 }
 
 #[test]
 fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> TestResult {
     let (initial, _, _) = crate::account_db::full_transfer::stage_tests::fixture()?;
-    let (_aowner, a) = owned_db(&initial.grant.source_ref.account_anchor)?;
-    let (_bowner, b) = owned_db(&initial.grant.destination_ref.account_anchor)?;
+    let (_aowner, a) = owned_db(&initial.grant.source_ref.account_anchor, b"incremental-source-a")?;
+    let (_bowner, b) =
+        owned_db(&initial.grant.destination_ref.account_anchor, b"incremental-original-b")?;
     seed(&a, 11, 8)?;
     seed(&b, 21, 9)?;
-    let (record, manifest, bytes) = input(&a)?;
+    let (record, manifest, bytes) =
+        input(&a).map_err(|error| format!("test: incremental source input: {error}"))?;
     let hash = record.base_manifest_hash.clone();
     let mut stage = b.create_full_stage_for_test(record, 604_900)?;
     stage.retain_forward_manifest(&manifest, &manifest.manifest.families)?;
     for (index, chunk) in bytes.chunks(CHUNK_BYTES as usize).enumerate() {
         stage.retain_forward_chunk(&hash, index as u64, chunk)?;
     }
-    let mut copy = stage.pin_receiver_base(&hash)?.copy()?;
-    copy.project(&stage)?;
+    let pinned = stage
+        .pin_receiver_base(&hash)
+        .map_err(|error| format!("test: incremental pin B: {error}"))?;
+    let mut copy = pinned.copy().map_err(|error| format!("test: incremental copy B: {error}"))?;
+    copy.project(&stage).map_err(|error| format!("test: incremental initial union: {error}"))?;
     let directory = copy.scratch.path.clone();
     let nonce = copy.union_encoding().ok_or("test: initial union missing")?.generation_nonce;
     let key = copy.key.fingerprint();
@@ -42,7 +46,8 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
     b.connection.execute("DELETE FROM object_payload_dependency", [])?;
     seed(&b, 31, 10)?;
     b.connection.execute("INSERT INTO pairing_own_sync(operation_id,fingerprint,response_json,operation_kind) VALUES('b-local','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','pairing_own_sync_v1')",[])?;
-    b.with_full_transfer_install_fence(|| copy.rebase_current_target(&stage))?;
+    b.with_full_transfer_install_fence(|| copy.rebase_current_target(&stage))
+        .map_err(|error| format!("test: incremental retained B refresh: {error}"))?;
     assert_eq!(copy.scratch.path, directory, "test: fourth rebase allocated another full copy");
     assert_eq!(copy.key.fingerprint(), key, "test: fourth rebase generated another snapshot key");
     assert_eq!(

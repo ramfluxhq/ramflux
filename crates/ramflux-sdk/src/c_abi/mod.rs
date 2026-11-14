@@ -1226,3 +1226,11 @@ pub use pairing::{
     CredentialCallback, ramflux_pairing_call, ramflux_pairing_event_poll,
     ramflux_pairing_set_credential_provider,
 };
+
+#[cfg(test)]
+pub(crate) fn pairing_registered_state_for_test(
+    config: &[u8],
+    body: &[u8],
+) -> Result<Value, String> {
+    pairing::registered_state_for_test(config, body)
+}

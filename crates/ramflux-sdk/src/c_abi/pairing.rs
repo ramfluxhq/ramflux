@@ -121,3 +121,11 @@ pub extern "C" fn ramflux_pairing_set_credential_provider(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn registered_state_for_test(
+    config: &[u8],
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
+    tests::registered_state(config, body)
+}

@@ -238,3 +238,27 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
     );
     Ok(())
 }
+
+/// Read an actual registered actor over the configured socket through the public ABI.
+pub(super) fn registered_state(config: &[u8], body: &[u8]) -> Result<serde_json::Value, String> {
+    let mut client = std::ptr::null_mut();
+    let mut error = std::ptr::null_mut();
+    let code = ramflux_client_new(config.as_ptr(), config.len(), &raw mut client, &raw mut error);
+    let client = Client(client);
+    let _error = Buffer(error);
+    if code != 0 {
+        return Err("test: registered-state ABI client setup refused".into());
+    }
+    let method =
+        std::ffi::CString::new("device.transfer.status").map_err(|error| error.to_string())?;
+    let mut output = std::ptr::null_mut();
+    let code =
+        ramflux_pairing_call(client.0, method.as_ptr(), body.as_ptr(), body.len(), &raw mut output);
+    let output = Buffer(output);
+    if code != 0 {
+        return Err(format!("test: registered-state ABI status refused with code {code}"));
+    }
+    let result =
+        LocalResult::from_wire_bytes(&output.bytes()?).map_err(|error| error.to_string())?;
+    serde_json::to_value(result).map_err(|error| error.to_string())
+}

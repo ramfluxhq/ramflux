@@ -55,6 +55,12 @@ async fn setup() -> Result<TailFixture, Box<dyn std::error::Error>> {
 async fn setup_with_source(
     seed: impl FnOnce(&crate::RamfluxClient, &Arc<full_relay::NodeEvidence>) -> TestResult,
 ) -> Result<TailFixture, Box<dyn std::error::Error>> {
+    Box::pin(setup_with_hooks(seed, |_| Ok(()))).await
+}
+async fn setup_with_hooks(
+    seed: impl FnOnce(&crate::RamfluxClient, &Arc<full_relay::NodeEvidence>) -> TestResult,
+    before_publication: impl FnOnce(&mut crate::RamfluxClient) -> TestResult,
+) -> Result<TailFixture, Box<dyn std::error::Error>> {
     let mut rig = Box::pin(Rig::open_profile(true)).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     seed(&rig.source.client, &rig.wire_evidence)?;
@@ -76,6 +82,7 @@ async fn setup_with_source(
         400,
     )?;
     Box::pin(deliver_candidate_and_ready(&mut rig, &operation)).await?;
+    before_publication(&mut rig.source.client)?;
     assert!(
         drive(
             Box::pin(rig.primary.advance_full_source_publication()),
@@ -357,3 +364,5 @@ mod privacy;
 mod source_data;
 
 mod hostile;
+
+mod attachment;
