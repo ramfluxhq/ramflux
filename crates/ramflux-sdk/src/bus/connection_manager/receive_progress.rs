@@ -38,7 +38,14 @@ pub(super) async fn until_stalled<F: Future>(
             biased;
             // Prefer a committed advance racing the old deadline. Keep the same pass future.
             Ok(()) = observed.changed() => {}
-            result = timeout_at(deadline, &mut pass) => return result,
+            result = timeout_at(deadline, &mut pass) => {
+                // Polling the pass can commit coverage before returning Pending,
+                // after changed() was polled. Honor that advance at the old deadline.
+                if result.is_err() && observed.has_changed().unwrap_or(false) {
+                    continue;
+                }
+                return result;
+            },
         }
     }
 }
@@ -110,6 +117,26 @@ mod tests {
             .await;
             assert!(result.is_err(), "one commit must not disable the stalled-pass watchdog");
             assert_eq!(started.elapsed(), STEP + BUDGET, "the last commit anchors the deadline");
+            Ok::<_, Box<dyn std::error::Error>>(())
+        })
+        .await?
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committed_progress_during_the_deadline_poll_keeps_the_same_pass_alive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        tokio::time::timeout(TEST_LIMIT, async {
+            let (progress, observed) = Progress::start();
+            let started = Instant::now();
+            let result = until_stalled(BUDGET, observed, async {
+                tokio::time::sleep(BUDGET).await;
+                progress.advanced(0, 1);
+                tokio::time::sleep(STEP).await;
+                1
+            })
+            .await?;
+            assert_eq!(result, 1, "a commit in the deadline poll must preserve the pass");
+            assert_eq!(started.elapsed(), BUDGET + STEP, "the renewed budget must drain");
             Ok::<_, Box<dyn std::error::Error>>(())
         })
         .await?
