@@ -498,15 +498,15 @@ async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_witho
     let entry = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("surface"))?;
     deliver(&mut state, "bob", &entry).await?;
     let source = root(&state, "alice")?;
-    let at = now_unix_timestamp();
     contact(&mut state, "bob", "contact.accept", json!({"root_commitment":source})).await?;
     let receiver = account(&state, "bob")?;
     let pending = receiver.account_db()?.list_actor_states::<Value>("surface/pending/")?;
     assert!(pending.is_empty(), "human-authored cards must not enter the renderer recovery queue");
     let messages = receiver.direct_messages("request-thread")?;
-    assert!(
-        messages.first().is_some_and(|message| message.created_at >= at),
-        "contact release timestamps the fallback message"
+    assert_eq!(
+        messages.first().map(|message| message.created_at),
+        Some(entry.envelope.created_at),
+        "contact consent must preserve the fallback message's authenticated send time"
     );
     assert!(
         receiver.surface_list("request-thread", "", 100)?["surfaces"]
