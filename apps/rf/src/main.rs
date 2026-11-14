@@ -49,6 +49,9 @@ async fn run() -> Result<(), RfError> {
         Command::Contact(command) => handlers::contact::handle_contact(cli.socket, command).await,
         Command::Device(command) => handlers::device::handle_device(cli.socket, command).await,
         Command::Dm(command) => handlers::dm::handle_dm(cli.socket, command).await,
+        Command::Conversation(command) => {
+            handlers::conversation_ops::handle(cli.socket, command).await
+        }
         Command::Group(command) => handlers::group::handle_group(cli.socket, command).await,
         Command::Object(command) => handlers::object::handle_object(cli.socket, command).await,
         Command::Call(command) => handlers::call::handle_call(cli.socket, command).await,
