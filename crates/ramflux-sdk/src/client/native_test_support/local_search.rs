@@ -76,6 +76,13 @@ async fn hits(
     Ok(completion.take()?)
 }
 
+async fn search_step(
+    phase: &'static str,
+    future: impl std::future::Future<Output = TestResult>,
+) -> TestResult {
+    future.await.map_err(|error| format!("{phase}: {error}").into())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn local_search_live_versions_and_scope() -> TestResult {
     tokio::time::timeout(
@@ -96,7 +103,7 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 LocalSearch::for_db(target.client.account_db()?, SearchActivation::testing())?;
             let (original, body) = inner(&source, &conversation, "oldcanary 東京都 café")?;
             target.receive(source.seal_inner_to(&target, &body)?, 1).await?;
-            rebuild(&runtime, &target.client).await?;
+            search_step("initial rebuild", rebuild(&runtime, &target.client)).await?;
             assert_eq!(
                 hits(&runtime, &target.client, "oldcanary").await?.items.len(),
                 1,
@@ -141,15 +148,24 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 hits(&runtime, &target.client, "newcanary").await?.items.is_empty(),
                 "new terms must not appear before ID-only rebuild"
             );
-            rebuild(&runtime, &target.client).await?;
+            search_step("winning edit rebuild", rebuild(&runtime, &target.client)).await?;
             assert_eq!(
                 hits(&runtime, &target.client, "newcanary").await?.items.len(),
                 1,
                 "rebuild must index the accepted replacement"
             );
-            spoiler_scope(&source, &mut target, &runtime, &conversation).await?;
-            Box::pin(attachment_scope(&source, &mut target, &runtime, &conversation)).await?;
-            expiry_boundary(&mut target, &runtime, &original.id).await?;
+            search_step(
+                "spoiler scope",
+                spoiler_scope(&source, &mut target, &runtime, &conversation),
+            )
+            .await?;
+            search_step(
+                "attachment scope",
+                Box::pin(attachment_scope(&source, &mut target, &runtime, &conversation)),
+            )
+            .await?;
+            search_step("expiry boundary", expiry_boundary(&mut target, &runtime, &original.id))
+                .await?;
             target
                 .client
                 .account_db()?
@@ -158,7 +174,7 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 hits(&runtime, &target.client, "newcanary").await?.items.is_empty(),
                 "visibility restriction must purge all conversation derivatives"
             );
-            group_scope(&source, &target, &runtime).await?;
+            search_step("group scope", group_scope(&source, &target, &runtime)).await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         }),
     )
