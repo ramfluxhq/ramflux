@@ -45,6 +45,14 @@ impl Fixture {
         }
     }
     fn insert(&self, id: &str, text: &str) -> TestResult {
+        self.insert_controlled(id, text, SearchControl::new)
+    }
+    fn insert_controlled(
+        &self,
+        id: &str,
+        text: &str,
+        control: impl FnOnce() -> SearchControl,
+    ) -> TestResult {
         self.db.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "thread",
             message_id: id,
@@ -54,7 +62,7 @@ impl Fixture {
             created_at: 1,
         })?;
         self.db.store_message_content("thread", id, b"local-content")?;
-        let control = SearchControl::new();
+        let control = control();
         let revision = self.db.search_revision(&self.activation, &control)?;
         self.db.search_replace(&self.activation, Self::source(id, text), revision, &control)?;
         Ok(())
@@ -551,14 +559,23 @@ fn archive_compaction_preserves_erasure_locators() -> TestResult {
 #[test]
 fn local_search_checkpoint_resumes_and_rejects_reset_races() -> TestResult {
     let f = Fixture::new()?;
-    f.insert("first", "canary")?;
-    f.insert("second", "canary")?;
+    // This witnesses canonical checkpoint ownership, independently of host scheduling.
+    let now = std::time::Instant::now();
+    let clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync> =
+        std::sync::Arc::new(move || now);
+    let control = || SearchControl::with_clock(std::sync::Arc::clone(&clock));
+    f.insert_controlled("first", "canary", control)
+        .map_err(|error| format!("first checkpoint source: {error}"))?;
+    f.insert_controlled("second", "canary", control)
+        .map_err(|error| format!("second checkpoint source: {error}"))?;
     f.db.connection.execute_batch(
         "UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=1,checkpoint='first';",
     )?;
-    f.db.search_rebuild_reset(&f.activation, &SearchControl::new())?;
+    f.db.search_rebuild_reset(&f.activation, &control())
+        .map_err(|error| format!("checkpoint reset: {error}"))?;
     let batch =
-        f.db.search_rebuild_batch(&f.activation, &SearchControl::new())?
+        f.db.search_rebuild_batch(&f.activation, &control())
+            .map_err(|error| format!("checkpoint capture: {error}"))?
             .ok_or("resumable batch")?;
     assert_eq!(
         batch.checkpoint, "first",
@@ -570,17 +587,11 @@ fn local_search_checkpoint_resumes_and_rejects_reset_races() -> TestResult {
         "thread",
         &serde_json::json!({"title":"racing reset"}),
     )?;
+    let acknowledgement =
+        f.db.search_rebuild_advance(&f.activation, batch, Some("second".into()), &control());
     assert!(
-        matches!(
-            f.db.search_rebuild_advance(
-                &f.activation,
-                batch,
-                Some("second".into()),
-                &SearchControl::new()
-            ),
-            Err(SearchError::CursorStale)
-        ),
-        "a canonical reset must reject the old checkpoint acknowledgement"
+        matches!(&acknowledgement, Err(SearchError::CursorStale)),
+        "a canonical reset must reject the old checkpoint acknowledgement: {acknowledgement:?}"
     );
     Ok(())
 }
