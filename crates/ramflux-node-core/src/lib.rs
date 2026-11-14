@@ -68,7 +68,10 @@ mod entry_bound;
 mod entry_fetch;
 mod inbox;
 mod inbox_page;
-pub use entry_bound::{ENTRY_FRAME_BYTE_CAP, check_entry_bound, single_entry_frame_size};
+pub use entry_bound::{
+    ENTRY_FRAME_BYTE_CAP, check_entry_bound, check_reach_entry_bound, single_entry_frame_size,
+    single_reach_entry_frame_size,
+};
 pub use entry_fetch::{EntryFetchError, EntryGoneReason, InboxEntryResponse};
 pub use inbox_page::{
     KnownLoss, PAGE_BYTE_CAP, PageEntryRecord, PageError, PageReason, ResumePage,

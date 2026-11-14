@@ -99,7 +99,7 @@ impl ReachForward {
             &self.signature,
             source.node_key(),
         )?;
-        ramflux_crypto::contact_reach::verify_submission(
+        ramflux_crypto::contact_reach::verify_current_source_submission(
             &self.submission,
             source.authority(),
             now,

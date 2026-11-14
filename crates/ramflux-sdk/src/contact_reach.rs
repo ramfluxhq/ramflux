@@ -12,9 +12,11 @@ mod group_roster;
 #[cfg(test)]
 mod group_test_support;
 mod inner;
+mod producer;
 mod projection;
 mod verification;
 use crate::SdkError;
+pub use producer::ReachSendIntent;
 pub use projection::{ConversationPermission, ConversationReach};
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::{

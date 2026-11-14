@@ -13,7 +13,9 @@ use ramflux_protocol::{
 };
 
 mod groups;
+mod source;
 pub use groups::{verify_group_retirement, verify_group_roster};
+pub use source::verify_current_source_submission;
 mod continuity;
 pub use continuity::{NodeContinuityContext, verify_node_continuity};
 pub mod directory;
@@ -27,6 +29,13 @@ pub use peer::{
 
 fn reject(reason: &'static str) -> CryptoError {
     CryptoError::IdentityAuthority(reason)
+}
+fn durable_capability(traffic: wire::Traffic) -> &'static str {
+    if matches!(traffic, wire::Traffic::OwnCopy | wire::Traffic::SelfSync) {
+        "sync"
+    } else {
+        "message"
+    }
 }
 
 fn manager(
@@ -273,8 +282,8 @@ fn sign<T: serde::Serialize>(
     Ok(Signed { body, signature: ramflux_protocol::encode_base64url(key.sign(&bytes).to_bytes()) })
 }
 
-/// Verify exact durable route bytes and its currently certified branch signer.
-/// The caller independently authenticates the source home, target delivery and receiving policy.
+/// Verify exact durable route bytes against the original authority at the envelope's signing time.
+/// Receiving paths use `verify_current_source_submission` to additionally require current keys.
 /// # Errors
 /// Refuses substituted envelopes, source/conversation authority mismatch and expired routes.
 pub fn verify_submission(
@@ -286,8 +295,21 @@ pub fn verify_submission(
     b.validate()?;
     wire::check_submission_time(b.issued_at, b.expires_at, now)?;
     let envelope = &submission.envelope;
+    if !matches!(
+        ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope),
+        Ok(ramflux_protocol::message::outer::NamedDeliveryMode::Durable)
+    ) || ramflux_protocol::message::outer::refuse_live_bridge(envelope).is_err()
+    {
+        return Err(reject("durable reach requires the named durable envelope mode"));
+    }
+    let target = ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)?
+        .ok_or_else(|| reject("native route target required"))?;
     let created = u64::try_from(envelope.created_at).map_err(|_| reject("negative route time"))?;
     if b.authority_head_hash != custody::object_hash(authority.envelope())?
+        || envelope.ttl > ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS_U32
+        || target.0 != b.recipient_root
+        || matches!(b.traffic, wire::Traffic::OwnCopy | wire::Traffic::SelfSync)
+            && b.source.account_anchor != b.recipient_root
         || b.envelope_hash != custody::framed_hash(wire::ENVELOPE_HASH_DOMAIN, envelope)?
         || b.source.account_anchor != authority.envelope().body.account_anchor
         || b.source.device_id != envelope.source_device_id
@@ -299,13 +321,13 @@ pub fn verify_submission(
     {
         return Err(reject("reach route envelope binding mismatch"));
     }
-    let certificate = authority.authorize(&b.source, "message", now)?;
+    let certificate = authority.authorize(&b.source, durable_capability(b.traffic), b.issued_at)?;
     verify(wire::ROUTE_DOMAIN, &submission.route, &certificate.branch_signing_public_key)?;
-    crate::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(envelope)?,
-        &envelope.signed.signature,
+    ramflux_protocol::verify_envelope_sender_signature(
+        envelope,
         &certificate.branch_signing_public_key,
-    )
+    )?;
+    Ok(())
 }
 
 /// Sign a durable route with its existing envelope's device branch.

@@ -117,25 +117,7 @@ impl RamfluxClient {
             self.require_reach_group_grant(route, &candidate.genesis_hash()?)?;
             return Ok(());
         }
-        let (epoch, hash) = match inner.kind {
-            1 => {
-                let message = g::Message::decode(inner.body.as_slice()).map_err(|_| invalid())?;
-                let sealed = message.sealed_group.ok_or_else(invalid)?;
-                if sealed.group_id != group.group_id {
-                    return Err(invalid());
-                }
-                (
-                    sealed.key_epoch,
-                    Some(ramflux_protocol::encode_base64url(&sealed.group_state_hash)),
-                )
-            }
-            8 => control_head(
-                &g::Control::decode(inner.body.as_slice()).map_err(|_| invalid())?,
-                identity,
-            )?,
-            2..=5 | 9 | 10 => (identity.group_epoch.ok_or_else(invalid)?, None),
-            _ => return Err(invalid()),
-        };
+        let (epoch, hash) = referenced_head(inner)?;
         let adopted =
             self.account_db()?.shared_group_state_at_epoch(&group.group_id, epoch)?.ok_or_else(
                 || SdkError::InboundPending("group route names an unadopted head".into()),
@@ -254,4 +236,25 @@ impl RamfluxClient {
         }
         Ok(())
     }
+}
+
+pub(super) fn referenced_head(inner: &g::Inner) -> Result<(u64, Option<String>), SdkError> {
+    let identity = inner.identity.as_ref().ok_or_else(invalid)?;
+    let group_id = identity.group_id.as_deref().ok_or_else(invalid)?;
+    Ok(match inner.kind {
+        1 => {
+            let message = g::Message::decode(inner.body.as_slice()).map_err(|_| invalid())?;
+            let sealed = message.sealed_group.ok_or_else(invalid)?;
+            if sealed.group_id != group_id {
+                return Err(invalid());
+            }
+            (sealed.key_epoch, Some(ramflux_protocol::encode_base64url(&sealed.group_state_hash)))
+        }
+        8 => control_head(
+            &g::Control::decode(inner.body.as_slice()).map_err(|_| invalid())?,
+            identity,
+        )?,
+        2..=5 | 9 | 10 => (identity.group_epoch.ok_or_else(invalid)?, None),
+        _ => return Err(invalid()),
+    })
 }

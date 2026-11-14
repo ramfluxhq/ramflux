@@ -17,6 +17,25 @@ use ramflux_protocol::{
     },
     custody,
 };
+
+pub(super) fn sealing_state(
+    client: &crate::RamfluxClient,
+) -> TestResult<std::collections::BTreeMap<String, serde_json::Value>> {
+    let db = client.account_db()?;
+    let mut state = std::collections::BTreeMap::new();
+    for prefix in ["dm-pair/", "own-history/", "delivery-receipt/"] {
+        let keys = db.actor_state_key_page_after(prefix, "", 65)?;
+        if keys.len() > 64 {
+            return Err("sealing fixture exceeded its 64-row namespace bound".into());
+        }
+        for key in keys {
+            let value =
+                db.load_actor_state::<serde_json::Value>(&key)?.ok_or("actor disappeared")?;
+            state.insert(key, value);
+        }
+    }
+    Ok(state)
+}
 pub(super) struct UnavailableVault;
 impl PrimaryVault for UnavailableVault {
     fn preflight(&self) -> Result<(), SdkError> {

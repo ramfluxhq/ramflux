@@ -298,28 +298,15 @@ fn verify_source(
     let envelope = &submission.envelope;
     let route = &submission.route.body;
     ramflux_protocol::ephemeral::require_durable(envelope).map_err(crate::NodeCoreError::from)?;
-    let (evidence, source) = crate::DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
-    let evidence = evidence.custody_authority.ok_or_else(|| refuse(Reason::CustodyRefused))?;
-    let verified = ramflux_crypto::custody::verify_publication(&evidence, now)?;
-    if peer.root() != route.source.account_anchor
-        || peer.expires_at() <= now
-        || verified.envelope().body.master_certificate
-            != peer.authority().envelope().body.master_certificate
-    {
+    crate::check_reach_entry_bound(submission)?;
+    if peer.root() != route.source.account_anchor || peer.expires_at() <= now {
         return Err(refuse(Reason::CustodyRefused));
     }
-    let current_branch = peer.authority().authorize(&route.source, "message", now)?;
-    let historical_branch = verified.authorize(&route.source, "message", route.issued_at)?;
-    if current_branch.branch_signing_public_key != historical_branch.branch_signing_public_key
-        || current_branch.agreement_identity_public_key
-            != historical_branch.agreement_identity_public_key
-    {
-        return Err(refuse(Reason::CustodyRefused));
-    }
-    ramflux_crypto::contact_reach::verify_submission(submission, &verified, now)?;
-    if source.root_commitment() != route.source.account_anchor {
-        return Err(refuse(Reason::ReachRouteInvalid));
-    }
+    ramflux_crypto::contact_reach::verify_current_source_submission(
+        submission,
+        peer.authority(),
+        now,
+    )?;
     Ok(())
 }
 

@@ -154,7 +154,7 @@ impl BornAccount {
         {
             return Err(refused());
         }
-        ramflux_crypto::contact_reach::verify_submission(
+        ramflux_crypto::contact_reach::verify_current_source_submission(
             &submission,
             self.verified(),
             context.now,

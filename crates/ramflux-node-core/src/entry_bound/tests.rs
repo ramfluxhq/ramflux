@@ -29,6 +29,83 @@ fn downstream_entry_bound_matches_actual_wire_shapes() -> Result<(), Box<dyn std
     Ok(())
 }
 
+fn independent_reach_size(
+    submission: &ramflux_protocol::contact_reach::Submission,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let row = serde_json::json!({"inbox_seq":u64::MAX,"target_delivery_id":submission.envelope.target_delivery_id,
+        "envelope":submission.envelope,"reach":{"route":submission.route,"cost":submission.cost}});
+    let frames = [
+        serde_json::json!({"frame_type":"deliver","entry":row}),
+        serde_json::json!({"frame_type":"deliver","incarnation_id":"ffffffffffffffffffffffffffffffff","entry":row,"retain_until":i64::MIN}),
+        serde_json::json!({"frame_type":"entry","incarnation_id":"ffffffffffffffffffffffffffffffff","record":{"entry":row,"retain_until":i64::MIN}}),
+    ];
+    let sizes = frames
+        .iter()
+        .map(|frame| serde_json::to_vec(frame).map(|bytes| bytes.len()))
+        .collect::<Result<Vec<_>, _>>()?;
+    sizes.into_iter().max().ok_or_else(|| "three independent wire frames".into())
+}
+
+#[test]
+fn cr_reach_entry_bound_counts_added_metadata_at_exact_wire_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::{
+        contact_reach::{Route, Submission, Traffic},
+        custody::{DeviceRef, Envelope as Signed},
+    };
+    let source = ramflux_protocol::encode_base64url([1; 32]);
+    let recipient = ramflux_protocol::encode_base64url([2; 32]);
+    let mut envelope = entry(1).envelope;
+    envelope.encrypted_payload.clear();
+    let route = Route {
+        version: 1,
+        source: DeviceRef {
+            account_anchor: source.clone(),
+            device_id: "phone".into(),
+            device_epoch: 1,
+        },
+        recipient_root: recipient.clone(),
+        conversation_id: ramflux_protocol::message::dm_scope::derive(&source, &recipient)?,
+        traffic: Traffic::Dm,
+        group: None,
+        envelope_hash: ramflux_protocol::encode_base64url([3; 32]),
+        authority_head_hash: ramflux_protocol::encode_base64url([4; 32]),
+        issued_at: 100,
+        expires_at: 400,
+    };
+    let mut submission = Submission {
+        route: Signed { body: route, signature: ramflux_protocol::encode_base64url([5; 64]) },
+        envelope,
+        cost: None,
+    };
+    let base = independent_reach_size(&submission)?;
+    for over in [false, true] {
+        submission.envelope.encrypted_payload =
+            "x".repeat(ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
+        let actual = independent_reach_size(&submission)?;
+        assert_eq!(
+            actual,
+            ENTRY_FRAME_BYTE_CAP + usize::from(over),
+            "the oracle materializes the complete existing downstream frames"
+        );
+        assert_eq!(
+            single_reach_entry_frame_size(&submission)?,
+            actual,
+            "counting includes the required route and explicit-null cost"
+        );
+        assert!(
+            check_entry_bound(&submission.envelope).is_ok(),
+            "the old envelope-only bound misses this metadata boundary"
+        );
+        assert_eq!(
+            check_reach_entry_bound(&submission).is_err(),
+            over,
+            "the complete reach entry cap is unchanged"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn single_entry_bound_serializes_envelope_once() -> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = entry(1).envelope;

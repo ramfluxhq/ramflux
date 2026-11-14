@@ -580,7 +580,8 @@ fn apply_conversation(
         {
             return Err(refuse(Reason::ReachRouteInvalid));
         }
-        ramflux_crypto::contact_reach::verify_submission(submission, current, now)?;
+        ramflux_crypto::contact_reach::verify_current_source_submission(submission, current, now)?;
+        crate::check_reach_entry_bound(submission)?;
         check_allow(state, update, Some(peer_evidence), now)?;
         let id = &update.body.operation_id;
         let hash = custody::framed_hash(OPERATION_HASH_DOMAIN, operation)?;

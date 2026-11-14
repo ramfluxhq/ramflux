@@ -56,7 +56,7 @@ impl RamfluxClient {
         let authority = self
             .current_custody_authority(&reach.route.body.source.account_anchor, now)?
             .ok_or_else(|| refused(Reason::CustodyRefused))?;
-        ramflux_crypto::contact_reach::verify_submission(
+        ramflux_crypto::contact_reach::verify_current_source_submission(
             &Submission {
                 route: reach.route.clone(),
                 envelope: entry.envelope.clone(),
@@ -68,3 +68,6 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

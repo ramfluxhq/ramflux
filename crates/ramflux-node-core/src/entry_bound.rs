@@ -54,6 +54,48 @@ pub fn single_entry_frame_size(
         .checked_add(LEGACY_OVERHEAD.max(CAPABLE_OVERHEAD).max(ENTRY_OVERHEAD))
         .ok_or_else(|| NodeCoreError::ItestJson("frame size overflow".into()))
 }
+
+/// Measure every existing downstream single-entry shape with required reach metadata included.
+/// # Errors
+/// Returns canonical serialization or checked byte-count overflow errors.
+pub fn single_reach_entry_frame_size(
+    submission: &ramflux_protocol::contact_reach::Submission,
+) -> Result<usize, NodeCoreError> {
+    #[derive(Serialize)]
+    struct Reach<'a> {
+        route: &'a ramflux_protocol::custody::Envelope<ramflux_protocol::contact_reach::Route>,
+        cost: &'a Option<ramflux_protocol::contact_reach::Cost>,
+    }
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        inbox_seq: u64,
+        target_delivery_id: &'a str,
+        envelope: &'a ramflux_protocol::Envelope,
+        reach: Reach<'a>,
+    }
+    let entry = Entry {
+        inbox_seq: u64::MAX,
+        target_delivery_id: &submission.envelope.target_delivery_id,
+        envelope: &submission.envelope,
+        reach: Reach { route: &submission.route, cost: &submission.cost },
+    };
+    serialized_size(&entry)?
+        .checked_add(LEGACY_OVERHEAD.max(CAPABLE_OVERHEAD).max(ENTRY_OVERHEAD))
+        .ok_or_else(|| NodeCoreError::ItestJson("reach frame size overflow".into()))
+}
+
+/// Enforce existing envelope/profile bounds plus the added route/cost delivery bytes.
+/// # Errors
+/// Refuses any complete downstream entry over the unchanged single-entry cap.
+pub fn check_reach_entry_bound(
+    submission: &ramflux_protocol::contact_reach::Submission,
+) -> Result<(), NodeCoreError> {
+    check_entry_bound(&submission.envelope)?;
+    if single_reach_entry_frame_size(submission)? > ENTRY_FRAME_BYTE_CAP {
+        return Err(NodeCoreError::PayloadTooLarge);
+    }
+    Ok(())
+}
 /// Refuse a new delivery that cannot fit every downstream single-entry shape.
 /// # Errors
 /// Returns typed `payload_too_large` or a serialization error, before allocation/replay.

@@ -10,7 +10,7 @@ use ramflux_protocol::{
     message as g,
 };
 
-fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
+pub(super) fn bind_inner(route: &Route, inner: &g::Inner) -> Result<(), SdkError> {
     let identity = inner.identity.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
     let author = identity.author.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
     if author.account_anchor != route.source.account_anchor
