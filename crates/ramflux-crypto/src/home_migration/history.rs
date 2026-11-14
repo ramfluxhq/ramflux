@@ -164,7 +164,7 @@ fn verify_genesis(
     {
         return Err(reject("migration genesis authority mismatch"));
     }
-    super::verify_home_declaration(
+    super::declaration::verify_historical_declaration(
         &genesis.body.home_declaration,
         &authority,
         pin.0,

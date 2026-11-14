@@ -57,7 +57,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub async fn refresh_reach_state(
         &mut self,
         minimum_revision: u64,
-        home_head_hash: &str,
+        home: &ramflux_crypto::home_migration::VerifiedHome,
     ) -> Result<VerifiedReachState, SdkError> {
         let result = self
             .reach_operation(Operation::ReachState {
@@ -114,7 +114,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             ReachReadContext {
                 authority: self.account.verified(),
                 device: &self.device,
-                home_head_hash,
+                home_head_hash: home.hash(),
+                home: Some(home),
                 home_node_key: self.pins.public_key(),
                 minimum_revision,
                 now: network::now()?,

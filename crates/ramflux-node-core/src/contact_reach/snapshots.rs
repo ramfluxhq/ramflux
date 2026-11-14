@@ -81,6 +81,7 @@ impl Snapshots {
             }));
         }
         let state = super::store::load_mirror(&tx, owner.recipient_root)?;
+        super::store::provenance::adopt_current(store, &tx, owner.recipient_root, now)?;
         if state.revision < known {
             return Err(refuse(Reason::HomeRollback));
         }
@@ -172,7 +173,8 @@ impl Snapshots {
             .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
         let capacity =
             resource.1.checked_sub(reserved).ok_or_else(|| refuse(Reason::ForeignCapacity))?;
-        let provenance = super::store::provenance::stage(resource.0, index, &records, capacity)?;
+        let provenance =
+            super::store::provenance::stage(resource.0, index, &records, capacity, now)?;
         let body = StateManifest {
             version: 1,
             account_anchor: owner.recipient_root.into(),

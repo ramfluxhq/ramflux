@@ -79,7 +79,12 @@ impl RamfluxClient {
         .map_err(|_| pending())?;
         state.peer_denials(owner, peer, conversation, now)?;
         state.require_positive_ready()?;
-        self.require_reach_authority_head(&state.root, &state.authority_head_hash, now)?;
+        self.require_reach_authority_head(
+            &state.root,
+            &state.authority_head_hash,
+            state.custodian_head_hash.as_deref(),
+            now,
+        )?;
         Ok(state)
     }
     fn require_reach_signal(

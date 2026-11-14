@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
+mod current_authority;
 mod delivery;
 mod group_binding;
 mod group_join;
@@ -55,6 +56,7 @@ pub struct VerifiedReachState {
     home_node_key: String,
     provenance: ramflux_crypto::contact_reach::EncryptedProvenanceStage,
     positives_ready: bool,
+    custodian_head_hash: Option<String>,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
 #[derive(Clone, Copy)]
@@ -62,6 +64,7 @@ pub struct ReachReadContext<'a> {
     pub authority: &'a VerifiedRecord,
     pub device: &'a custody::DeviceRef,
     pub home_head_hash: &'a str,
+    pub home: Option<&'a ramflux_crypto::home_migration::VerifiedHome>,
     pub home_node_key: &'a str,
     pub minimum_revision: u64,
     pub now: u64,
@@ -102,17 +105,21 @@ impl VerifiedReachState {
             &manifest.signature,
             context.home_node_key,
         )?;
+        if context.home.is_some_and(|home| home.hash() != context.home_head_hash) {
+            return Err(refused(Reason::HomeRollback));
+        }
         let records = verify_pages(b, pages)?;
         provenance.verify_manifest(b)?;
         if provenance.signers() != ramflux_protocol::contact_reach::page_signers(pages)? {
             return Err(refused(Reason::ForeignSnapshotInvalid));
         }
-        let bases = verification::verify_records(&records, b, &provenance)?;
+        let bases = verification::verify_records(&records, b, &provenance, context.home)?;
         verification::verify_placements(&records, b, &bases)?;
         let positives_ready =
             verification::current_positives(&records, context.authority, context.now);
         Ok(Self {
             positives_ready,
+            custodian_head_hash: current_authority::custodian_head(context.authority)?,
             manifest: b.clone(),
             records,
             home_node_key: context.home_node_key.to_owned(),
@@ -139,6 +146,8 @@ pub(crate) struct SavedReachState {
     #[serde(default)]
     home_node_key: Option<String>,
     authority_head_hash: String,
+    #[serde(default)]
+    custodian_head_hash: Option<String>,
     state_hash: String,
     #[serde(default)]
     provenance_hash: Option<String>,
@@ -153,17 +162,13 @@ impl crate::RamfluxClient {
         &self,
         root: &str,
         expected: &str,
+        expected_custodian: Option<&str>,
         now: u64,
     ) -> Result<(), SdkError> {
         let current = self
             .current_custody_authority(root, now)?
             .ok_or_else(|| refused(Reason::CustodyRefused))?;
-        if custody::object_hash(current.envelope())? != expected {
-            return Err(SdkError::InboundPending(
-                "reach state requires current custody authority".into(),
-            ));
-        }
-        Ok(())
+        current_authority::require_binding(&current, expected, expected_custodian)
     }
     /// Install verified state and independent restrictive floors in one account writer commit.
     /// This read does not bootstrap message/SelfSync erase floors or authorize new-device publication.
@@ -181,6 +186,7 @@ impl crate::RamfluxClient {
             self.require_reach_authority_head(
                 &verified.manifest.account_anchor,
                 &verified.manifest.authority_head_hash,
+                verified.custodian_head_hash.as_deref(),
                 now,
             )?;
             let previous: Option<SavedReachState> =
@@ -200,6 +206,7 @@ impl crate::RamfluxClient {
                     {
                         let mut refreshed = saved.clone();
                         refreshed.positive_pending = !verified.positives_ready;
+                        refreshed.custodian_head_hash.clone_from(&verified.custodian_head_hash);
                         refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
                         refreshed.home_node_key = Some(verified.home_node_key.clone());
                         refreshed
@@ -239,6 +246,7 @@ impl crate::RamfluxClient {
                 home_head_hash: verified.manifest.home_head_hash,
                 home_node_key: Some(verified.home_node_key),
                 authority_head_hash: verified.manifest.authority_head_hash,
+                custodian_head_hash: verified.custodian_head_hash,
                 state_hash: verified.manifest.state_hash,
                 provenance_hash: Some(verified.manifest.provenance_hash),
                 records: verified.records,

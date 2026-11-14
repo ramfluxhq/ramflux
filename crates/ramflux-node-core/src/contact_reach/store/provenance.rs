@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Atomic original signer retention; no TTL and no substitution from a later current head.
+mod adoption;
+pub(in crate::contact_reach) use adoption::{adopt_current, require_ready};
+
 use super::{AccountReach, Reason, Result, account, encoded, key, refuse, row, storage};
 use ramflux_protocol::{
     contact_reach::{self as wire, ObjectKind, ProvenanceAuthority, SignerReference},
@@ -13,7 +16,12 @@ const PROOFS: TableDefinition<&str, &[u8]> = TableDefinition::new("contact_reach
 const REFERENCES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("contact_reach_signer_references_v1");
 
-fn current(tx: &redb::WriteTransaction, root: &str, now: u64) -> Result<ProvenanceAuthority> {
+fn current(
+    store: &super::RouterRedbStore,
+    tx: &redb::WriteTransaction,
+    root: &str,
+    now: u64,
+) -> Result<ProvenanceAuthority> {
     // Current pins were independently checked by the management owner before this capture.
     let state = account(tx, root)?;
     let cert = &state.publication.record.body.master_certificate.body;
@@ -34,8 +42,12 @@ fn current(tx: &redb::WriteTransaction, root: &str, now: u64) -> Result<Provenan
         custodian_publication,
     };
     ramflux_crypto::custody::verify_publication(&authority, now)?;
-    let mut proof =
-        ProvenanceAuthority { proof_hash: String::new(), authority, custodian_history: Vec::new() };
+    let custodian_history = if authority.custodian_publication.is_some() {
+        historical_home(store, root, now)?.1
+    } else {
+        Vec::new()
+    };
+    let mut proof = ProvenanceAuthority { proof_hash: String::new(), authority, custodian_history };
     proof.proof_hash = proof.content_hash()?;
     Ok(proof)
 }
@@ -45,12 +57,13 @@ fn reference_id(reference: &SignerReference) -> Result<String> {
 /// Retain only the independently verified context for the newly accepted signed object.
 /// Existing references are immutable; this never repairs legacy objects from current keys.
 pub(super) fn retain(
+    store: &super::RouterRedbStore,
     tx: &redb::WriteTransaction,
     root: &str,
     state: &AccountReach,
     now: u64,
 ) -> Result<()> {
-    let proof = current(tx, root, now)?;
+    let proof = adopt_current(store, tx, root, now)?;
     let head = custody::object_hash(&proof.authority.publication.record)?;
     let certificate =
         custody::object_hash(&proof.authority.publication.record.body.master_certificate)?;
@@ -216,6 +229,7 @@ pub(in crate::contact_reach) fn stage(
     index: ProvenanceIndex,
     records: &[wire::StateRecord],
     capacity: usize,
+    now: u64,
 ) -> Result<ramflux_crypto::contact_reach::EncryptedProvenanceStage> {
     use redb::ReadableDatabase;
     let required: std::collections::BTreeSet<_> =
@@ -223,6 +237,7 @@ pub(in crate::contact_reach) fn stage(
     if required.len() > wire::MAX_PROVENANCE_OBJECTS {
         return Err(refuse(Reason::ForeignCapacity));
     }
+    let mut home = None;
     let mut stage = ramflux_crypto::contact_reach::ProvenanceStageBuilder::new(
         &index.root,
         index.revision,
@@ -244,12 +259,43 @@ pub(in crate::contact_reach) fn stage(
             return Err(refuse(Reason::ForeignCapacity));
         }
         let proof: ProvenanceAuthority = row(raw.value())?;
+        if proof.authority.custodian_publication.is_some() && home.is_none() {
+            // Only existing retained home records supply this routing context.
+            home = Some(historical_home(store, &index.root, now)?.0);
+        }
         if stage.projected_staged_bytes(&proof)? > capacity {
             return Err(refuse(Reason::ForeignCapacity));
         }
         stage.push(&proof).map_err(|_| refuse(Reason::CustodyRefused))?;
     }
     let stage = stage.finish().map_err(|_| refuse(Reason::CustodyRefused))?;
-    stage.verify_originals(records).map_err(|_| refuse(Reason::CustodyRefused))?;
+    stage
+        .verify_originals_with_home(records, home.as_ref())
+        .map_err(|_| refuse(Reason::CustodyRefused))?;
     Ok(stage)
+}
+
+/// Reuse the stored M4 chain and its retained exact human tuples, never public current keys.
+fn historical_home(
+    store: &super::RouterRedbStore,
+    root: &str,
+    now: u64,
+) -> Result<(ramflux_crypto::home_migration::VerifiedHome, Vec<wire::HistoricalCustodian>)> {
+    let result = store.resolve_migration_home(
+        root,
+        None,
+        ramflux_protocol::home_migration::MAX_CHAIN_RECORDS,
+    )?;
+    let records: Vec<_> =
+        result.predecessors.iter().chain(std::iter::once(&result.home)).cloned().collect();
+    let base = records.first().ok_or_else(|| refuse(Reason::CustodyRefused))?;
+    let mut history = store.home_custodian_history(&records)?;
+    history.sort_by(|left, right| left.record_hash.cmp(&right.record_hash));
+    let verified = ramflux_crypto::home_migration::verify_home_chain_with_custodians(
+        &result, base, &history, now,
+    )?;
+    if verified.evidence().record.account_anchor() != root {
+        return Err(refuse(Reason::CustodyRefused));
+    }
+    Ok((verified, history))
 }

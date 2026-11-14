@@ -200,7 +200,17 @@ impl EncryptedProvenanceStage {
     /// # Errors
     /// Refuses missing references, invalid historical tuples, roles or original signatures.
     pub fn verify_originals(&self, records: &[wire::StateRecord]) -> Result<(), CryptoError> {
-        super::provenance::verify_records_with_reader(records, self)
+        self.verify_originals_with_home(records, None)
+    }
+    /// Authenticate retained M4 closure against the independently verified account home.
+    /// # Errors
+    /// Refuses missing, extra or substituted historical custodian or home evidence.
+    pub fn verify_originals_with_home(
+        &self,
+        records: &[wire::StateRecord],
+        home: Option<&crate::home_migration::VerifiedHome>,
+    ) -> Result<(), CryptoError> {
+        super::provenance::verify_records_with_reader(records, self, home)
     }
 }
 impl super::provenance::HistoricalProofReader for EncryptedProvenanceStage {

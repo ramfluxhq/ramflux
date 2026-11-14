@@ -18,15 +18,17 @@ pub(super) fn verify_records<'a>(
     records: &'a [StateRecord],
     manifest: &StateManifest,
     catalogue: &ramflux_crypto::contact_reach::EncryptedProvenanceStage,
+    home: Option<&ramflux_crypto::home_migration::VerifiedHome>,
 ) -> Result<BTreeMap<String, &'a StateRecord>, SdkError> {
     super::group_restrictions::verify_bindings(records)?;
     let mut bases = BTreeMap::new();
     for record in records {
         match record {
             StateRecord::Policy { update, .. } => {
-                crypto::verify_historical_policy(
+                crypto::verify_historical_policy_with_home(
                     update,
                     &super::provenance::proof(catalogue, update)?,
+                    home,
                 )?;
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
             }
@@ -35,14 +37,14 @@ pub(super) fn verify_records<'a>(
                     return Err(refused(Reason::ForeignSnapshotInvalid));
                 }
                 if let Some(update) = last_update {
-                    super::provenance::admission(catalogue, update)?;
+                    super::provenance::admission(catalogue, update, home)?;
                     if update.body.expected_revision.checked_add(1) != Some(*revision) {
                         return Err(refused(Reason::ForeignSnapshotInvalid));
                     }
                 }
             }
             StateRecord::Grant { subject, permissions, grant_until, update } => {
-                super::provenance::admission(catalogue, update)?;
+                super::provenance::admission(catalogue, update, home)?;
                 if &update.body.subject != subject
                     || update.body.decision != Decision::Allow
                     || update.body.permissions != Some(*permissions)
@@ -54,13 +56,13 @@ pub(super) fn verify_records<'a>(
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
             }
             StateRecord::Block { subject, update } => {
-                super::provenance::admission(catalogue, update)?;
+                super::provenance::admission(catalogue, update, home)?;
                 if &update.body.subject != subject || update.body.decision != Decision::Block {
                     return Err(refused(Reason::ForeignSnapshotInvalid));
                 }
             }
             StateRecord::Decline { root, until, update } => {
-                super::provenance::admission(catalogue, update)?;
+                super::provenance::admission(catalogue, update, home)?;
                 if update.body.subject != (Subject::Friendship { root: root.clone() })
                     || update.body.decision != Decision::Decline
                     || *until < update.body.issued_at
@@ -72,12 +74,12 @@ pub(super) fn verify_records<'a>(
             StateRecord::Retirement { subject, revision, update, group_floor } => {
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
                 let expected = if let Some(floor) = group_floor {
-                    super::provenance::retirement(catalogue, update, floor)?;
+                    super::provenance::retirement(catalogue, update, floor, home)?;
                     floor.block_control.as_ref().map_or(update.body.expected_revision, |control| {
                         control.body.expected_revision.max(update.body.expected_revision)
                     })
                 } else {
-                    super::provenance::admission(catalogue, update)?;
+                    super::provenance::admission(catalogue, update, home)?;
                     update.body.expected_revision
                 };
                 if &update.body.subject != subject

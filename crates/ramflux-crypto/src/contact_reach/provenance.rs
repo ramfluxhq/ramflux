@@ -10,6 +10,7 @@ fn selected(
     head: &str,
     certificate: &str,
     issued_at: u64,
+    home: Option<&crate::home_migration::VerifiedHome>,
 ) -> Result<crate::custody::VerifiedRecord, CryptoError> {
     proof.validate()?;
     let tuple = &proof.authority;
@@ -33,10 +34,8 @@ fn selected(
     {
         return Err(reject("unsolicited local historical closure"));
     }
-    // Transition closure needs its complete native home evidence. Never treat a list of
-    // individually valid publications as proof of an unresolved transition relation.
-    if !proof.custodian_history.is_empty() {
-        return Err(reject("historical transition reconciliation pending"));
+    if record.body.master_certificate.body.custody_kind == custody::CustodyKind::ExternalHuman {
+        home::verify_original_home(proof, root, issued_at, home)?;
     }
     crate::custody::verify_publication(tuple, issued_at)
 }
@@ -47,14 +46,28 @@ pub fn verify_historical_policy(
     update: &Signed<wire::ReachPolicy>,
     proof: &wire::ProvenanceAuthority,
 ) -> Result<(), CryptoError> {
+    verify_historical_policy_with_home(update, proof, None)
+}
+/// Verify the original signer and its retained M4 closure against an independently verified home.
+/// # Errors
+/// Refuses missing, extra or substituted home/custodian evidence and original signer failures.
+pub fn verify_historical_policy_with_home(
+    update: &Signed<wire::ReachPolicy>,
+    proof: &wire::ProvenanceAuthority,
+    home: Option<&crate::home_migration::VerifiedHome>,
+) -> Result<(), CryptoError> {
     let b = &update.body;
     b.validate()?;
+    if home.is_some_and(|home| home.hash() != b.home_head_hash) {
+        return Err(reject("original object home selector mismatch"));
+    }
     let authority = selected(
         proof,
         &b.account_anchor,
         &b.authority_head_hash,
         &b.master_certificate_hash,
         b.issued_at,
+        home,
     )?;
     manager(
         &authority,
@@ -77,14 +90,28 @@ pub fn verify_historical_admission(
     update: &Signed<wire::Admission>,
     proof: &wire::ProvenanceAuthority,
 ) -> Result<(), CryptoError> {
+    verify_historical_admission_with_home(update, proof, None)
+}
+/// Verify the original signer and its retained M4 closure against an independently verified home.
+/// # Errors
+/// Refuses missing, extra or substituted home/custodian evidence and original signer failures.
+pub fn verify_historical_admission_with_home(
+    update: &Signed<wire::Admission>,
+    proof: &wire::ProvenanceAuthority,
+    home: Option<&crate::home_migration::VerifiedHome>,
+) -> Result<(), CryptoError> {
     let b = &update.body;
     b.validate()?;
+    if home.is_some_and(|home| home.hash() != b.home_head_hash) {
+        return Err(reject("original object home selector mismatch"));
+    }
     let authority = selected(
         proof,
         &b.recipient_root,
         &b.authority_head_hash,
         &b.master_certificate_hash,
         b.issued_at,
+        home,
     )?;
     manager(
         &authority,
@@ -107,6 +134,16 @@ pub fn verify_historical_roster_header(
     header: &Signed<wire::GroupRosterHeader>,
     proof: &wire::ProvenanceAuthority,
 ) -> Result<(), CryptoError> {
+    verify_historical_roster_header_with_home(header, proof, None)
+}
+/// Verify the original signer and its retained M4 closure against an independently verified home.
+/// # Errors
+/// Refuses missing, extra or substituted home/custodian evidence and original signer failures.
+pub fn verify_historical_roster_header_with_home(
+    header: &Signed<wire::GroupRosterHeader>,
+    proof: &wire::ProvenanceAuthority,
+    home: Option<&crate::home_migration::VerifiedHome>,
+) -> Result<(), CryptoError> {
     let b = &header.body;
     b.validate()?;
     let authority = selected(
@@ -115,6 +152,7 @@ pub fn verify_historical_roster_header(
         &b.authority_head_hash,
         &b.master_certificate_hash,
         b.issued_at,
+        home,
     )?;
     let cert = &authority.envelope().body.master_certificate.body;
     manager(
@@ -132,3 +170,5 @@ mod records;
 pub use records::verify_historical_state_records;
 
 pub(in crate::contact_reach) use records::{HistoricalProofReader, verify_records_with_reader};
+
+mod home;

@@ -230,6 +230,7 @@ impl RamfluxClient {
         self.require_reach_authority_head(
             &state.root,
             &state.authority_head_hash,
+            state.custodian_head_hash.as_deref(),
             crate::custody::network_now()?,
         )?;
         let group = route.group.as_ref().ok_or_else(invalid)?;

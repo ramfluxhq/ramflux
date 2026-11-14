@@ -17,11 +17,13 @@ fn declaration_signer(
     authority: &VerifiedRecord,
     node: &str,
     now: u64,
+    historical: bool,
 ) -> Result<Signer, CryptoError> {
     let record = authority.envelope();
     let cert = &record.body.master_certificate;
     if body.principal_id != record.body.principal_id
         || cert.body.custody_kind == ramflux_protocol::custody::CustodyKind::ExternalHuman
+            && !historical
             && !ramflux_protocol::contact_reach::enabled()
         || body.account_anchor != record.body.account_anchor
         || body.home_node != node
@@ -50,8 +52,23 @@ pub fn verify_home_declaration(
     now: u64,
 ) -> Result<(), CryptoError> {
     verify_signatures(declaration)?;
-    if declaration.signers != [declaration_signer(&declaration.body, authority, node, now)?] {
+    if declaration.signers != [declaration_signer(&declaration.body, authority, node, now, false)?]
+    {
         return Err(reject("home declaration signer mismatch"));
+    }
+    Ok(())
+}
+
+// Historical validation returns no current authority and cannot authorize registration.
+pub(super) fn verify_historical_declaration(
+    declaration: &Signed<HomeDeclarationV1>,
+    authority: &VerifiedRecord,
+    node: &str,
+    now: u64,
+) -> Result<(), CryptoError> {
+    verify_signatures(declaration)?;
+    if declaration.signers != [declaration_signer(&declaration.body, authority, node, now, true)?] {
+        return Err(reject("historical home declaration signer mismatch"));
     }
     Ok(())
 }
@@ -66,7 +83,7 @@ impl SelfSigningKey {
         authority: &VerifiedRecord,
         now: u64,
     ) -> Result<Signed<HomeDeclarationV1>, CryptoError> {
-        let signer = declaration_signer(&body, authority, &body.home_node, now)?;
+        let signer = declaration_signer(&body, authority, &body.home_node, now, false)?;
         let key = ed25519_dalek::SigningKey::from_bytes(&self.vault_seed());
         sign_with_keys(body, vec![signer], &[&key])
     }

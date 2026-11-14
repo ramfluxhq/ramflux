@@ -175,6 +175,7 @@ impl ReachService {
         )?;
         let profile = super::profile::public_profile(&tx, &query.account_anchor)?;
         let state = store::load(&tx, &query.account_anchor)?;
+        store::provenance::require_ready(context.store, &tx, &query.account_anchor, &state, now)?;
         let reach = state.policy.ok_or_else(|| refuse(Reason::ReachPolicyRequired))?;
         ramflux_crypto::contact_reach::verify_retained_policy(&reach, &authority, now)?;
         let payload = SnapshotPayload {

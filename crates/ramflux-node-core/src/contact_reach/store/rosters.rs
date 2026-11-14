@@ -130,7 +130,7 @@ impl RouterRedbStore {
         };
         // Roster intent retry identity is kept separately from consent and survives reconnect.
         retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
-        super::provenance::retain(&tx, owner.recipient_root, &state, now)?;
+        super::provenance::retain(self, &tx, owner.recipient_root, &state, now)?;
         super::save(&tx, owner.recipient_root, &state)?;
         #[cfg(test)]
         fault::checkpoint(fault::Point::BeforeCommit)?;

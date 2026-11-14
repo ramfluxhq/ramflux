@@ -114,6 +114,45 @@ fn cr_retained_signer_owner_read_survives_native_advance_and_reopen() -> TestRes
     Ok(())
 }
 
+#[test]
+fn cr_current_native_advance_waits_for_durable_reach_adoption() -> TestResult {
+    use super::super::provenance::{adopt_current, require_ready};
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("reach-adoption.redb"))?;
+    store.reach_owner_commit(owner(&f), &policy(&f, 89, 0, ReachMode::ContactsOnly)?, NOW)?;
+    {
+        let tx = store.begin_write()?;
+        require_ready(&store, &tx, &f.root, &load(&tx, &f.root)?, NOW)?;
+    }
+    let renewed = groups::renewed_primary(&f, NOW + 3601)?;
+    {
+        let tx = store.begin_write()?;
+        let mut native = account(&tx, &f.root)?;
+        native.pins.observe(&renewed)?;
+        native.publication.record = renewed.envelope().clone();
+        tx.open_table(CUSTODY)?.insert(f.root.as_str(), encoded(&native)?.as_slice())?;
+        tx.commit()?;
+    }
+    {
+        let tx = store.begin_write()?;
+        let state = load(&tx, &f.root)?;
+        assert!(require_ready(&store, &tx, &f.root, &state, NOW + 1).is_err());
+        adopt_current(&store, &tx, &f.root, NOW + 1)?;
+        require_ready(&store, &tx, &f.root, &state, NOW + 1)?;
+        // Dropping the transaction must drop the attempted adoption too.
+    }
+    {
+        let tx = store.begin_write()?;
+        assert!(require_ready(&store, &tx, &f.root, &load(&tx, &f.root)?, NOW + 1).is_err());
+        adopt_current(&store, &tx, &f.root, NOW + 1)?;
+        tx.commit()?;
+    }
+    let tx = store.begin_write()?;
+    require_ready(&store, &tx, &f.root, &load(&tx, &f.root)?, NOW + 1)?;
+    assert_eq!(load(&tx, &f.root)?.revision, 1, "adoption never rewrites historical state");
+    Ok(())
+}
+
 fn owner_refusals(
     service: &ReachService,
     store: &RouterRedbStore,

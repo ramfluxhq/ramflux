@@ -81,13 +81,17 @@ impl ReachService {
             ramflux_crypto::contact_reach::verify_current_source_submission(
                 submission, &authority, now,
             )?;
-            require_return_grant(
-                &store::load(&tx, source)?,
-                &submission.route.body,
-                &authority,
-                target_node_id,
-                now,
-            )?;
+            let state = store::load(&tx, source)?;
+            if matches!(
+                submission.route.body.traffic,
+                wire::Traffic::Dm
+                    | wire::Traffic::ReceiptDelivered
+                    | wire::Traffic::ReceiptRead
+                    | wire::Traffic::Typing
+            ) {
+                store::provenance::require_ready(store, &tx, source, &state, now)?;
+            }
+            require_return_grant(&state, &submission.route.body, &authority, target_node_id, now)?;
             tx.commit()?;
         }
         call.remaining_ms = deadline

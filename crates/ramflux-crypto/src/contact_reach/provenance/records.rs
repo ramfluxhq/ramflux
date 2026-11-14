@@ -45,8 +45,13 @@ fn proof<T: serde::Serialize>(
 fn admission(
     catalogue: &impl HistoricalProofReader,
     update: &Signed<wire::Admission>,
+    home: Option<&crate::home_migration::VerifiedHome>,
 ) -> Result<(), CryptoError> {
-    super::verify_historical_admission(update, &proof(catalogue, update, ObjectKind::Admission)?)
+    super::verify_historical_admission_with_home(
+        update,
+        &proof(catalogue, update, ObjectKind::Admission)?,
+        home,
+    )
 }
 /// Authenticate every original policy, admission and retirement witness independently.
 /// This result is unit only; it cannot satisfy any current management or sender check.
@@ -57,36 +62,39 @@ pub fn verify_historical_state_records(
     catalogue: &Provenance,
 ) -> Result<(), CryptoError> {
     catalogue.validate()?;
-    verify_records_with_reader(records, catalogue)
+    verify_records_with_reader(records, catalogue, None)
 }
 pub(in crate::contact_reach) fn verify_records_with_reader(
     records: &[StateRecord],
     catalogue: &impl HistoricalProofReader,
+    home: Option<&crate::home_migration::VerifiedHome>,
 ) -> Result<(), CryptoError> {
     for record in records {
         match record {
-            StateRecord::Policy { update, .. } => super::verify_historical_policy(
+            StateRecord::Policy { update, .. } => super::verify_historical_policy_with_home(
                 update,
                 &proof(catalogue, update, ObjectKind::Policy)?,
+                home,
             )?,
             StateRecord::AdmissionMeta { last_update: Some(update), .. }
             | StateRecord::Grant { update, .. }
             | StateRecord::Block { update, .. }
-            | StateRecord::Decline { update, .. } => admission(catalogue, update)?,
+            | StateRecord::Decline { update, .. } => admission(catalogue, update, home)?,
             StateRecord::Retirement { update, group_floor, .. } => {
-                admission(catalogue, update)?;
+                admission(catalogue, update, home)?;
                 if let Some(floor) = group_floor {
                     floor.validate(update)?;
                     if let Some(grant) = &floor.grant {
-                        admission(catalogue, grant)?;
+                        admission(catalogue, grant, home)?;
                     }
                     if let Some(control) = &floor.block_control {
-                        admission(catalogue, control)?;
+                        admission(catalogue, control, home)?;
                     }
                     if let Some(header) = &floor.roster_header {
-                        super::verify_historical_roster_header(
+                        super::verify_historical_roster_header_with_home(
                             header,
                             &proof(catalogue, header.as_ref(), ObjectKind::GroupRoster)?,
+                            home,
                         )?;
                     }
                 }

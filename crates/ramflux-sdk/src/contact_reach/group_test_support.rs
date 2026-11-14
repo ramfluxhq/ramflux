@@ -240,6 +240,7 @@ pub(super) fn verified_records(
             authority: &authority,
             device: &requesting_device,
             home_head_hash: home,
+            home: None,
             home_node_key: &node_key,
             minimum_revision: 0,
             now,

@@ -452,7 +452,7 @@ impl RouterRedbStore {
             return Ok(result);
         }
         retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
-        provenance::retain(&tx, owner.recipient_root, &state, now)?;
+        provenance::retain(self, &tx, owner.recipient_root, &state, now)?;
         save(&tx, owner.recipient_root, &state)?;
         tx.commit()?;
         Ok(result)

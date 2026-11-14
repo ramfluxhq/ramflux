@@ -67,6 +67,7 @@ impl RamfluxClient {
         self.require_reach_authority_head(
             &account.record().body.account_anchor,
             &custody::object_hash(account.record())?,
+            super::current_authority::custodian_head(account.verified())?.as_deref(),
             crate::custody::network_now()?,
         )?;
         let own = self.owned_device_identity()?;

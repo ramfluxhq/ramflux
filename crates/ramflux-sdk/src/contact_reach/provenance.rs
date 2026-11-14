@@ -24,29 +24,33 @@ pub(super) fn proof<T: serde::Serialize>(
 pub(super) fn admission(
     catalogue: &EncryptedProvenanceStage,
     update: &Signed<wire::Admission>,
+    home: Option<&ramflux_crypto::home_migration::VerifiedHome>,
 ) -> Result<(), SdkError> {
-    Ok(ramflux_crypto::contact_reach::verify_historical_admission(
+    Ok(ramflux_crypto::contact_reach::verify_historical_admission_with_home(
         update,
         &proof(catalogue, update)?,
+        home,
     )?)
 }
 pub(super) fn retirement(
     catalogue: &EncryptedProvenanceStage,
     update: &Signed<wire::Admission>,
     floor: &wire::GroupFloor,
+    home: Option<&ramflux_crypto::home_migration::VerifiedHome>,
 ) -> Result<(), SdkError> {
     floor.validate(update)?;
-    admission(catalogue, update)?;
+    admission(catalogue, update, home)?;
     if let Some(grant) = &floor.grant {
-        admission(catalogue, grant)?;
+        admission(catalogue, grant, home)?;
     }
     if let Some(control) = &floor.block_control {
-        admission(catalogue, control)?;
+        admission(catalogue, control, home)?;
     }
     if let Some(header) = &floor.roster_header {
-        ramflux_crypto::contact_reach::verify_historical_roster_header(
+        ramflux_crypto::contact_reach::verify_historical_roster_header_with_home(
             header,
             &proof(catalogue, header.as_ref())?,
+            home,
         )?;
     }
     Ok(())

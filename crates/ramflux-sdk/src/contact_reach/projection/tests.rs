@@ -19,6 +19,7 @@ fn state() -> SavedReachState {
         home_head_hash: "home".into(),
         home_node_key: None,
         authority_head_hash: "authority".into(),
+        custodian_head_hash: None,
         state_hash: "content".into(),
         records: vec![],
         restrictions: BTreeMap::new(),

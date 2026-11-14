@@ -48,6 +48,7 @@ impl RamfluxClient {
             self.require_reach_authority_head(
                 &state.root,
                 &state.authority_head_hash,
+                state.custodian_head_hash.as_deref(),
                 crate::custody::network_now()?,
             )?;
         }
@@ -189,6 +190,7 @@ impl RamfluxClient {
         self.require_reach_authority_head(
             &account.record().body.account_anchor,
             &custody::object_hash(account.record())?,
+            super::current_authority::custodian_head(account.verified())?.as_deref(),
             context.now,
         )?;
         let mut body =

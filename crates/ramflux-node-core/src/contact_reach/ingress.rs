@@ -358,6 +358,13 @@ impl RouterRedbStore {
         }
         let state = store::load(&tx, &root)?;
         let recipient_authority = store::authority(&tx, &root, now)?;
+        if !matches!(
+            route.traffic,
+            ramflux_protocol::contact_reach::Traffic::OwnCopy
+                | ramflux_protocol::contact_reach::Traffic::SelfSync
+        ) {
+            store::provenance::require_ready(self, &tx, &root, &state, now)?;
+        }
         let (class, placement) =
             state.classify_current(route, source_home, &recipient_authority, now)?;
         let key = dedup_key(
@@ -464,6 +471,12 @@ impl RouterRedbStore {
         let mut bytes = 0_usize;
         let mut expired = Vec::new();
         let state = store::load(&tx, owner.recipient_root)?;
+        let proofs_ready =
+            match store::provenance::require_ready(self, &tx, owner.recipient_root, &state, now) {
+                Ok(()) => true,
+                Err(error @ super::ReachError::Storage(_)) => return Err(error),
+                Err(_) => false,
+            };
         for item in table.range(after..).map_err(storage)?.take(MAX_PENDING_SCAN_ROWS) {
             let (seq, raw) = item.map_err(storage)?;
             if seq.value() <= after {
@@ -477,6 +490,14 @@ impl RouterRedbStore {
                 || state.check_denials(&p.entry.source_root, &p.entry.peer_node, now).is_err()
             {
                 expired.push(seq.value());
+                continue;
+            }
+            if !matches!(
+                p.entry.reach.route.body.traffic,
+                ramflux_protocol::contact_reach::Traffic::OwnCopy
+                    | ramflux_protocol::contact_reach::Traffic::SelfSync
+            ) && !proofs_ready
+            {
                 continue;
             }
             let (class, placement) = match state.classify_current(
