@@ -3,6 +3,9 @@
 
 //! Full-state convergence, first-message keys, names and removal through SDK group APIs.
 use super::*;
+use crate::bus::state::LocalBusAccountState;
+use crate::client::native_test_support::{Fixture as Native, bus as native_bus};
+use crate::prekey::SdkDeviceManifestResponse;
 use std::path::Path;
 pub(super) fn temp_root(label: &str) -> Result<ramflux_test_support::TestPath, SdkError> {
     Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
@@ -28,6 +31,49 @@ pub(super) fn person(
     client.unlock_account("acct", b"shared-group-test")?;
     Ok(client)
 }
+/// Runs one native fixture future to completion on a fresh current-thread runtime.
+fn native_block_on<T>(
+    future: impl std::future::Future<Output = Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, SdkError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
+/// One native account whose only device is `device`, held as a public-bus fixture.
+fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+    native_block_on(async move {
+        let fixture = Native::with_device(id, device).await?;
+        Ok(fixture.into_bus())
+    })
+}
+
+/// A laptop sibling of `phone`. It carries the account primary, as the phone holds it.
+fn native_sibling(
+    phone: &mut LocalBusAccountState,
+    id: &str,
+    device: &str,
+) -> Result<LocalBusAccountState, SdkError> {
+    native_block_on(Box::pin(native_bus::sibling(phone, id, device)))
+}
+
+/// Manifest that the account's own native fixture published.
+fn manifest_of(account: &LocalBusAccountState) -> Result<SdkDeviceManifestResponse, SdkError> {
+    account
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .map(|material| material.manifest.clone())
+        .ok_or(SdkError::CustodySetupInvalid)
+}
+
+/// Device storage key that the raw group entry points expect as their target.
+fn native_target(client: &RamfluxClient) -> Result<String, SdkError> {
+    Ok(client.owned_device_identity()?.storage_key().into())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn three_devices_converge_and_each_first_group_message_reaches_the_other_members()
 -> crate::client::native_test_support::TestResult {
@@ -35,17 +81,15 @@ async fn three_devices_converge_and_each_first_group_message_reaches_the_other_m
 }
 #[test]
 fn readonly_group_metadata_does_not_need_private_root_material() -> Result<(), SdkError> {
-    let root = temp_root("reader")?;
-    let owner = person(&root, "owner", "owner", 11, 12)?;
-    owner.shared_group_create("group", "thread", Some("Checklist".into()), "target-owner")?;
-    let before = owner.shared_group_metadata("group")?;
+    let owner = native_person("owner", "owner")?;
+    owner.client.fixture_group_create("group", "thread", Some("Checklist".into()), "owner")?;
+    let before = owner.client.shared_group_metadata("group")?;
     let mut reader = RamfluxClient::new();
-    reader.active_account_db = Some(owner.account_db()?.open_reader()?);
+    reader.active_account_db = Some(owner.client.account_db()?.open_reader()?);
     assert_eq!(reader.shared_group_metadata("group")?, before);
     drop((reader, owner));
     Ok(())
 }
-
 #[tokio::test(flavor = "current_thread")]
 async fn one_bootstrap_packet_supplies_the_first_key_and_replays_do_not_reset_the_receiver()
 -> crate::client::native_test_support::TestResult {
@@ -71,43 +115,43 @@ mod fork_tests;
 #[test]
 fn r5_contact_forwarding_cannot_adopt_a_stranger_group_or_override_decline() -> Result<(), SdkError>
 {
-    let root = temp_root("r5-consent")?;
-    let stranger = person(&root.join("stranger"), "stranger", "phone", 11, 12)?;
-    let contact = person(&root.join("contact"), "contact", "phone", 21, 22)?;
-    let user = person(&root.join("user"), "user", "phone", 31, 32)?;
-    stranger.shared_group_create("g", "t", None, "target-phone")?;
-    stranger.shared_group_change(
+    let stranger = native_person("stranger", "phone")?;
+    let contact = native_person("contact", "phone")?;
+    let user = native_person("user", "phone")?;
+    stranger.client.fixture_group_create("g", "t", None, "phone")?;
+    stranger.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: contact.owned_group_actor("target-phone")?.identity,
+            member: contact.client.fixture_group_actor("phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    let state = stranger.shared_group_change(
+    let state = stranger.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: user.owned_group_actor("target-phone")?.identity,
+            member: user.client.fixture_group_actor("phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    let contact_root = contact.owned_device_identity()?.root_commitment().to_owned();
-    user.establish_friend_link("friend", "user", &contact_root)?;
+    let contact_root = contact.client.owned_device_identity()?.root_commitment().to_owned();
+    user.client.establish_friend_link("friend", "user", &contact_root)?;
     let forwarded = ramflux_crypto::resign_group_state_snapshot(
-        contact.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &contact.owned_group_actor("target-phone")?,
+        contact.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &contact.client.fixture_group_actor("phone")?,
         &state,
     )?;
-    assert!(user.group_snapshot_requires_consent(&forwarded)?);
-    let packet = contact.shared_group_packet(&forwarded, false)?;
-    user.hold_group_invitation(&forwarded, &packet)?;
-    user.decide_group_invitation("g", false, "target-phone")?;
-    assert!(user.group_snapshot_requires_consent(&forwarded).is_err());
-    let prepared = user.prepare_shared_group_payload(forwarded, &packet)?;
-    assert!(user.apply_prepared_shared_group(&prepared, "target-phone").is_err());
-    assert!(user.account_db()?.shared_group_state("g")?.is_none());
-    assert!(user.account_db()?.client_record("conversation", "t")?.is_none());
+    assert!(user.client.group_snapshot_requires_consent(&forwarded)?);
+    let packet = contact.client.shared_group_packet(&forwarded, false)?;
+    user.client.hold_group_invitation(&forwarded, &packet)?;
+    let user_target = native_target(&user.client)?;
+    user.client.decide_group_invitation("g", false, &user_target)?;
+    assert!(user.client.group_snapshot_requires_consent(&forwarded).is_err());
+    let prepared = user.client.prepare_shared_group_payload(forwarded, &packet)?;
+    assert!(user.client.apply_prepared_shared_group(&prepared, &user_target).is_err());
+    assert!(user.client.account_db()?.shared_group_state("g")?.is_none());
+    assert!(user.client.account_db()?.client_record("conversation", "t")?.is_none());
     drop((stranger, contact, user));
     Ok(())
 }
@@ -115,53 +159,50 @@ fn r5_contact_forwarding_cannot_adopt_a_stranger_group_or_override_decline() -> 
 fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> Result<(), SdkError>
 {
     use ramflux_crypto::{GroupChangeRequestInput, sign_group_change_request};
-    let root = temp_root("r5-requests")?;
-    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-    let removed = person(&root.join("removed"), "removed", "phone", 21, 22)?;
-    let admin = person(&root.join("admin"), "admin", "phone", 31, 32)?;
-    let victim = person(&root.join("victim"), "victim", "phone", 41, 42)?;
+    let owner = native_person("owner", "phone")?;
+    let removed = native_person("removed", "phone")?;
+    let admin = native_person("admin", "phone")?;
+    let victim = native_person("victim", "phone")?;
     for person in [&owner, &removed, &admin, &victim] {
-        owner.persist_identity_directory(
-            &crate::client::identity_authority::test_support::public_manifest(person)?,
-        )?;
+        owner.client.persist_fetched_identity_directory(&manifest_of(person)?)?;
     }
-    owner.shared_group_create("g", "t", None, "target-phone")?;
-    owner.shared_group_change(
+    owner.client.fixture_group_create("g", "t", None, "phone")?;
+    owner.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: removed.owned_group_actor("target-phone")?.identity,
+            member: removed.client.fixture_group_actor("phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
-    owner.shared_group_change(
+    owner.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-phone")?.identity,
+            member: admin.client.fixture_group_actor("phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
-    let before = owner.shared_group_change(
+    let before = owner.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: victim.owned_group_actor("target-phone")?.identity,
+            member: victim.client.fixture_group_actor("phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    owner.shared_group_change(
+    owner.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::Remove {
-            root_commitment: removed.owned_device_identity()?.root_commitment().into(),
+            root_commitment: removed.client.owned_device_identity()?.root_commitment().into(),
             device_id: "phone".into(),
         },
     )?;
     for index in 0..80 {
         let request = sign_group_change_request(
-            removed.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &removed.owned_group_actor("target-phone")?,
+            removed.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &removed.client.fixture_group_actor("phone")?,
             &before,
             GroupChangeRequestInput {
                 request_id: format!("flood-{index}"),
@@ -169,36 +210,42 @@ fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> 
                 now: now_unix_timestamp(),
             },
         )?;
-        assert!(owner.insert_group_request(&request, true).is_err());
+        assert!(owner.client.insert_group_request(&request, true).is_err());
     }
-    assert!(owner.group_change_records()?.is_empty());
+    assert!(owner.client.group_change_records()?.is_empty());
     let removal = sign_group_change_request(
-        admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &admin.owned_group_actor("target-phone")?,
+        admin.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &admin.client.fixture_group_actor("phone")?,
         &before,
         GroupChangeRequestInput {
             request_id: "admin-removal".into(),
             change: GroupStateChange::Remove {
-                root_commitment: victim.owned_device_identity()?.root_commitment().into(),
+                root_commitment: victim.client.owned_device_identity()?.root_commitment().into(),
                 device_id: "phone".into(),
             },
             now: now_unix_timestamp(),
         },
     )?;
-    owner.insert_group_request(&removal, true)?;
+    owner.client.insert_group_request(&removal, true)?;
+    let owner_target = native_target(&owner.client)?;
+    let owner_primary = owner.client.fixture_primary()?;
     assert_eq!(
-        owner.process_group_request(&removal, "target-phone")?.status,
+        owner
+            .client
+            .process_group_request_with_primary(&removal, &owner_target, owner_primary.as_ref())?
+            .status,
         ramflux_protocol::GroupChangeStatus::Applied
     );
 
-    owner.shared_group_create("other", "other-thread", None, "target-phone")?;
+    owner.client.fixture_group_create("other", "other-thread", None, "phone")?;
     let other = owner
+        .client
         .account_db()?
         .shared_group_state("other")?
         .ok_or(StorageError::GroupPermissionDenied)?;
     let request = sign_group_change_request(
-        owner.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &owner.owned_group_actor("target-phone")?,
+        owner.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &owner.client.fixture_group_actor("phone")?,
         &other,
         GroupChangeRequestInput {
             request_id: "legitimate-removal".into(),
@@ -206,22 +253,24 @@ fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> 
             now: now_unix_timestamp(),
         },
     )?;
-    owner.insert_group_request(&request, true)?;
-    assert_eq!(owner.group_change_records()?.len(), 2);
+    owner.client.insert_group_request(&request, true)?;
+    assert_eq!(owner.client.group_change_records()?.len(), 2);
     drop((owner, removed, admin, victim));
     Ok(())
 }
 #[test]
 fn r5_processed_results_still_count_toward_the_source_partition() -> Result<(), SdkError> {
-    let root = temp_root("r5-result-pool")?;
-    let owner = person(&root, "owner", "phone", 11, 12)?;
-    owner.shared_group_create("g", "t", None, "target-phone")?;
-    let state =
-        owner.account_db()?.shared_group_state("g")?.ok_or(StorageError::GroupPermissionDenied)?;
+    let owner = native_person("owner", "phone")?;
+    owner.client.fixture_group_create("g", "t", None, "phone")?;
+    let state = owner
+        .client
+        .account_db()?
+        .shared_group_state("g")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
     for index in 0..65 {
         let request = ramflux_crypto::sign_group_change_request(
-            owner.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &owner.owned_group_actor("target-phone")?,
+            owner.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &owner.client.fixture_group_actor("phone")?,
             &state,
             ramflux_crypto::GroupChangeRequestInput {
                 request_id: format!("processed-{index}"),
@@ -229,118 +278,122 @@ fn r5_processed_results_still_count_toward_the_source_partition() -> Result<(), 
                 now: now_unix_timestamp(),
             },
         )?;
-        let result = owner.insert_group_request(&request, true);
+        let result = owner.client.insert_group_request(&request, true);
         if index == 64 {
             assert!(result.is_err());
         } else {
             result?;
             let mut row = owner
+                .client
                 .group_change_record(&request, true)?
                 .ok_or(StorageError::GroupPermissionDenied)?;
             row.local_status = "result_ready".into();
-            owner.persist_group_request(&row)?;
+            owner.client.persist_group_request(&row)?;
         }
     }
-    assert_eq!(owner.group_change_records()?.len(), 64);
+    assert_eq!(owner.client.group_change_records()?.len(), 64);
     drop(owner);
     Ok(())
 }
-
 #[test]
 fn r5_group_aliases_follow_message_deletion_and_pending_expiry() -> Result<(), SdkError> {
-    let root = temp_root("r5-alias")?;
-    let owner = person(&root, "owner", "phone", 11, 12)?;
-    owner.shared_group_create("g", "t", None, "target-phone")?;
-    let (canonical, _) = owner.qualify_outgoing_group_message("g", "logical")?;
-    owner.send_direct_message("t", &canonical, "phone", b"body")?;
-    owner.account_db()?.delete_direct_message("t", &canonical, "local", "delete")?;
-    assert_eq!(owner.outgoing_group_logical_id(&canonical)?, None);
-    let (pending, _) = owner.qualify_outgoing_group_message("g", "pending")?;
+    let owner = native_person("owner", "phone")?;
+    owner.client.fixture_group_create("g", "t", None, "phone")?;
+    let (canonical, _) = owner.client.qualify_outgoing_group_message("g", "logical")?;
+    owner.client.send_direct_message("t", &canonical, "phone", b"body")?;
+    owner.client.account_db()?.delete_direct_message("t", &canonical, "local", "delete")?;
+    assert_eq!(owner.client.outgoing_group_logical_id(&canonical)?, None);
+    let (pending, _) = owner.client.qualify_outgoing_group_message("g", "pending")?;
     let alias_key = format!("group-message/alias/{pending}");
-    let mut row: serde_json::Value =
-        owner.account_db()?.load_actor_state(&alias_key)?.ok_or(SdkError::IdentityRootMissing)?;
+    let mut row: serde_json::Value = owner
+        .client
+        .account_db()?
+        .load_actor_state(&alias_key)?
+        .ok_or(SdkError::IdentityRootMissing)?;
     row["expires_at"] = serde_json::json!(0);
-    owner.account_db()?.persist_actor_state(&alias_key, &row)?;
-    owner.qualify_outgoing_group_message("g", "next")?;
-    assert_eq!(owner.outgoing_group_logical_id(&pending)?, None);
+    owner.client.account_db()?.persist_actor_state(&alias_key, &row)?;
+    owner.client.qualify_outgoing_group_message("g", "next")?;
+    assert_eq!(owner.client.outgoing_group_logical_id(&pending)?, None);
     drop(owner);
     Ok(())
 }
-
 #[test]
 fn r5_successor_transfer_chain_replaces_an_offline_members_higher_epoch_projection()
 -> Result<(), SdkError> {
-    let root = temp_root("r5-transfer-projection")?;
-    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-    let laptop = person(&root.join("laptop"), "owner", "laptop", 11, 32)?;
-    let bob = person(&root.join("bob"), "bob", "phone", 21, 22)?;
-    let observer = person(&root.join("observer"), "observer", "phone", 41, 42)?;
-    owner.shared_group_create("g", "t", None, "target-phone")?;
+    let mut owner = native_person("owner", "phone")?;
+    let laptop = native_sibling(&mut owner, "owner-laptop", "laptop")?;
+    let bob = native_person("bob", "phone")?;
+    let observer = native_person("observer", "phone")?;
+    owner.client.fixture_group_create("g", "t", None, "phone")?;
     for member in [&bob, &observer] {
-        owner.shared_group_change(
+        owner.client.fixture_group_change(
             "g",
-            "target-phone",
+            "phone",
             GroupStateChange::Add {
-                member: member.owned_group_actor("target-phone")?.identity,
+                member: member.client.fixture_group_actor("phone")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
     }
-    let base =
-        owner.account_db()?.shared_group_state("g")?.ok_or(StorageError::GroupPermissionDenied)?;
+    let base = owner
+        .client
+        .account_db()?
+        .shared_group_state("g")?
+        .ok_or(StorageError::GroupPermissionDenied)?;
     let mut fork = base.clone();
+    let laptop_primary =
+        laptop.client.fixture_primary()?.ok_or(SdkError::CustodyVaultUnavailable)?;
     for index in 0..5 {
-        fork = ramflux_crypto::advance_group_state(
-            laptop.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            laptop.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &laptop.owned_group_actor("target-laptop")?,
+        fork = ramflux_crypto::advance_native_group_state(
+            &laptop_primary,
+            laptop.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &laptop.client.fixture_group_actor("laptop")?,
             &fork,
             GroupStateChange::SetName { name: format!("fork-{index}") },
         )?;
     }
-    observer.accept_shared_group_state(&fork, "target-phone")?;
-    owner.accept_shared_group_state(&fork, "target-phone")?;
-    bob.accept_shared_group_state(&fork, "target-phone")?;
-    let creator = bob.owned_group_actor("target-phone")?;
+    observer.client.fixture_accept_group_state(&fork, "phone")?;
+    owner.client.fixture_accept_group_state(&fork, "phone")?;
+    bob.client.fixture_accept_group_state(&fork, "phone")?;
+    let creator = bob.client.fixture_group_actor("phone")?;
     let acceptance = ramflux_crypto::accept_group_transfer(
-        bob.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        bob.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &creator,
         &fork,
         &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
         now_unix_timestamp(),
     )?;
-    let transfer = owner.shared_group_change(
+    let transfer = owner.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::TransferOwnership { creator, acceptance: Box::new(acceptance) },
     )?;
-    bob.accept_shared_group_state(&transfer, "target-phone")?;
-    let successor = bob.shared_group_change(
+    bob.client.fixture_accept_group_state(&transfer, "phone")?;
+    let successor = bob.client.fixture_group_change(
         "g",
-        "target-phone",
+        "phone",
         GroupStateChange::SetName { name: "successor".into() },
     )?;
     assert!(successor.view().epoch > fork.view().epoch);
-    assert!(observer.accept_shared_group_state(&successor, "target-phone")?);
+    assert!(observer.client.fixture_accept_group_state(&successor, "phone")?);
     assert_eq!(
         observer
+            .client
             .account_db()?
             .shared_group_state("g")?
             .ok_or(StorageError::GroupPermissionDenied)?
             .creator(),
         successor.creator()
     );
-    assert!(!observer.accept_shared_group_state(&fork, "target-phone")?);
+    assert!(!observer.client.fixture_accept_group_state(&fork, "phone")?);
     drop((owner, laptop, bob, observer));
     Ok(())
 }
-
 #[test]
 fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkError> {
-    let root = temp_root("r5-old-result")?;
-    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-    let outsider = person(&root.join("outsider"), "outsider", "phone", 21, 22)?;
-    let base = owner.shared_group_create("g", "t", None, "target-phone")?;
+    let owner = native_person("owner", "phone")?;
+    let outsider = native_person("outsider", "phone")?;
+    let base = owner.client.fixture_group_create("g", "t", None, "phone")?;
     // Reconstruct a row admitted by the former receive path, using a genuine
     // root-certified outsider and a creator-signed refusal.
     let mut request = ramflux_protocol::GroupChangeRequest {
@@ -348,9 +401,9 @@ fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkEr
         group_id: "g".into(),
         genesis_hash: base.genesis_hash()?,
         base_epoch: 1,
-        creator_root: owner.owned_device_identity()?.root_commitment().into(),
+        creator_root: owner.client.owned_device_identity()?.root_commitment().into(),
         request_id: "old-outsider".into(),
-        actor: outsider.owned_group_actor("target-phone")?,
+        actor: outsider.client.fixture_group_actor("phone")?,
         change: GroupStateChange::SetName { name: "spam".into() },
         issued_at: now_unix_timestamp(),
         expires_at: now_unix_timestamp() + 86400,
@@ -359,20 +412,21 @@ fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkEr
     let mut body = serde_json::to_value(&request)?;
     body.as_object_mut().ok_or(SdkError::IdentityRootMissing)?.remove("signature");
     request.signature = ramflux_crypto::sign_with_device_branch(
-        outsider.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        outsider.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &body,
     )?;
     ramflux_crypto::verify_group_change_request(&request, now_unix_timestamp())?;
     // Retention reads stored rows; wire verification remains mandatory on new admission.
-    let result = ramflux_crypto::sign_group_change_result(
-        owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &owner.owned_group_actor("target-phone")?,
+    let owner_primary = owner.client.fixture_primary()?.ok_or(SdkError::CustodyVaultUnavailable)?;
+    let result = ramflux_crypto::sign_native_group_change_result(
+        &owner_primary,
+        &owner.client.fixture_group_actor("phone")?,
         &request,
         &base,
         ramflux_protocol::GroupChangeStatus::PermissionDenied,
         now_unix_timestamp(),
     )?;
-    owner.persist_group_request(&super::requests::RequestRecord {
+    owner.client.persist_group_request(&super::requests::RequestRecord {
         request,
         incoming: true,
         result: Some(result),
@@ -382,39 +436,39 @@ fn r5_legacy_nonmember_results_are_pruned_on_new_admission() -> Result<(), SdkEr
         delivered: BTreeSet::new(),
         federation: None,
     })?;
-    owner.shared_group_create("other", "other-thread", None, "target-phone")?;
-    let request = owner.stage_group_change_request(
+    owner.client.fixture_group_create("other", "other-thread", None, "phone")?;
+    let owner_target = native_target(&owner.client)?;
+    let request = owner.client.stage_group_change_request(
         "other",
-        "target-phone",
+        &owner_target,
         GroupStateChange::SetName { name: "legitimate".into() },
         None,
     )?;
-    let rows = owner.group_change_records()?;
+    let rows = owner.client.group_change_records()?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].request, request);
     drop((owner, outsider));
     Ok(())
 }
-
 #[test]
 fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
 -> Result<(), SdkError> {
-    let root = temp_root("r5-capacity-results")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    let base = owner.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let admin = native_person("admin", "admin")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-admin")?.identity,
+            member: admin.client.fixture_group_actor("admin")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
+    let owner_target = native_target(&owner.client)?;
     for index in 0..65 {
         let request = ramflux_crypto::sign_group_change_request(
-            admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &admin.owned_group_actor("target-admin")?,
+            admin.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+            &admin.client.fixture_group_actor("admin")?,
             &base,
             ramflux_crypto::GroupChangeRequestInput {
                 request_id: format!("flood-{index}"),
@@ -422,14 +476,14 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
                 now: now_unix_timestamp(),
             },
         )?;
-        let result = owner.insert_group_request(&request, true);
+        let result = owner.client.insert_group_request(&request, true);
         if index == 64 {
             assert!(result.is_err());
             continue;
         }
         result?;
         if index >= 8 {
-            let response = owner.process_group_request(&request, "target-owner")?;
+            let response = owner.client.process_group_request(&request, &owner_target)?;
             assert_eq!(response.status, ramflux_protocol::GroupChangeStatus::Capacity);
             ramflux_crypto::verify_group_change_result(
                 &response,
@@ -439,19 +493,19 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
             )?;
         }
     }
-    assert_eq!(owner.group_change_records()?.len(), 64);
-    owner.shared_group_create("other", "other-thread", None, "target-owner")?;
-    let other = owner.shared_group_change(
+    assert_eq!(owner.client.group_change_records()?.len(), 64);
+    owner.client.fixture_group_create("other", "other-thread", None, "owner")?;
+    let other = owner.client.fixture_group_change(
         "other",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-admin")?.identity,
+            member: admin.client.fixture_group_actor("admin")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
     let request = ramflux_crypto::sign_group_change_request(
-        admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &admin.owned_group_actor("target-admin")?,
+        admin.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &admin.client.fixture_group_actor("admin")?,
         &other,
         ramflux_crypto::GroupChangeRequestInput {
             request_id: "other-request".into(),
@@ -459,13 +513,14 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
             now: now_unix_timestamp(),
         },
     )?;
-    owner.insert_group_request(&request, true)?;
-    assert_eq!(owner.group_change_records()?.len(), 65);
-    assert!(owner.group_change_record(&request, true)?.is_some_and(|row| row.result.is_none()));
-    assert_eq!(owner.group_state("group")?.group_epoch, base.view().epoch);
+    owner.client.insert_group_request(&request, true)?;
+    assert_eq!(owner.client.group_change_records()?.len(), 65);
+    assert!(
+        owner.client.group_change_record(&request, true)?.is_some_and(|row| row.result.is_none())
+    );
+    assert_eq!(owner.client.group_state("group")?.group_epoch, base.view().epoch);
     drop((owner, admin));
     Ok(())
 }
-
 #[path = "native_activation_tests.rs"]
 mod native_activation;
