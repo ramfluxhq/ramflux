@@ -32,6 +32,7 @@ impl SearchControl {
         }
     }
     #[cfg(test)]
+    #[must_use]
     pub(super) fn with_clock(clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
         let mut control = Self::starting_at(clock());
         control.clock = Some(clock);
