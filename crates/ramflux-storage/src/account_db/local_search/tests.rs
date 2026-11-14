@@ -184,11 +184,12 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
 fn export_discards_search_namespace() -> TestResult {
     let f = Fixture::new()?;
     f.insert("message", "privatecanary")?;
+    f.db.connection.execute_batch("CREATE TABLE LoCaL_SeArCh_unknown_tokens(secret TEXT); INSERT INTO LoCaL_SeArCh_unknown_tokens VALUES('privatecanary'); CREATE VIEW LOCAL_SEARCH_unknown_view AS SELECT secret FROM LoCaL_SeArCh_unknown_tokens;")?;
     let destination = f.directory.path().join("snapshot.db");
     let snapshot = f.db.write_backup_snapshot(&destination)?;
     let backup = super::super::backup_database::BackupDatabase::open(&destination, &snapshot.key)?;
     let tables: i64 = backup.db.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*'",
+        "SELECT count(*) FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*'",
         [],
         |r| r.get(0),
     )?;
@@ -226,7 +227,7 @@ fn restore_erasure_case(native: bool) -> TestResult {
     let archive = f.directory.path().join("old.db");
     let old = f.db.write_backup_snapshot(&archive)?;
     let malicious = BackupDatabase::open(&archive, &old.key)?;
-    malicious.db.execute_batch("CREATE TABLE local_search_untrusted_cache(secret TEXT);INSERT INTO local_search_untrusted_cache VALUES('archivecanary');")?;
+    malicious.db.execute_batch("CREATE TABLE LoCaL_SeArCh_untrusted_cache(secret TEXT);INSERT INTO LoCaL_SeArCh_untrusted_cache VALUES('archivecanary');")?;
     drop(malicious);
     f.db.delete_direct_message("thread", "victim", "me", "delete-victim")?;
     let merged_path = f.directory.path().join("merged.db");
@@ -238,7 +239,7 @@ fn restore_erasure_case(native: bool) -> TestResult {
         merged.merge_backup_candidate(&archive, &old.key, || Ok(()))?;
     }
     let caches: i64 = merged.db.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*'",
+        "SELECT count(*) FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*'",
         [],
         |r| r.get(0),
     )?;
@@ -439,7 +440,7 @@ fn archive_compaction_preserves_erasure_locators() -> TestResult {
     )?;
     assert_eq!(survivor, 1, "rowid relocation must not redirect erasure onto an unrelated message");
     let namespace: i64 = backup.db.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*'",
+        "SELECT count(*) FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*'",
         [],
         |r| r.get(0),
     )?;
@@ -509,6 +510,60 @@ fn local_search_corrupt_cache_is_discarded_without_canonical_loss() -> TestResul
         f.db.search_index_status(&f.activation, &SearchControl::new())?.coverage,
         SearchCoverage::Building,
         "cache repair must report incomplete coverage until reconstruction"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_search_refuses_shadowed_page_accounting() -> TestResult {
+    let f = Fixture::new()?;
+    f.insert("survivor", "quotacanary")?;
+    for schema in ["main", "temp"] {
+        f.db.connection
+            .execute_batch(&format!("CREATE TABLE {schema}.DbStAt(name TEXT,pgsize INTEGER);"))?;
+        let control = SearchControl::new();
+        let revision = f.db.search_revision(&f.activation, &control)?;
+        assert!(
+            matches!(
+                f.db.search_replace(
+                    &f.activation,
+                    Fixture::source("survivor", "replacement"),
+                    revision,
+                    &control
+                ),
+                Err(SearchError::IndexUnavailable)
+            ),
+            "case-aliased schema objects must never impersonate the dbstat virtual module"
+        );
+        f.db.connection.execute_batch(&format!("DROP TABLE {schema}.DbStAt;"))?;
+        assert_eq!(
+            f.hits("quotacanary")?.len(),
+            1,
+            "unverified quota accounting must roll back replacement without eviction"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn local_search_page_quota_counts_owned_implicit_indexes() -> TestResult {
+    let f = Fixture::new()?;
+    f.insert("owned", "quotacanary")?;
+    let before = f.db.connection.call(|db| Ok(super::operations::index_bytes(db)))??;
+    let named: u64 = f.db.connection.query_row(
+        "SELECT COALESCE(sum(pgsize),0) FROM main.dbstat WHERE lower(name) GLOB 'local_search_*'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(
+        before > named,
+        "quota must include the search tables' SQLite-generated unique/primary-key indexes, whose names do not start with the search prefix"
+    );
+    f.db.connection.execute_batch("CREATE TABLE quota_unrelated_account_data(bytes BLOB); INSERT INTO quota_unrelated_account_data VALUES(zeroblob(1048576));")?;
+    let after = f.db.connection.call(|db| Ok(super::operations::index_bytes(db)))??;
+    assert_eq!(
+        before, after,
+        "unrelated canonical B-tree pages must never be charged to the derived search quota"
     );
     Ok(())
 }

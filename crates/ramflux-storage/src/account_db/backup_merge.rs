@@ -39,7 +39,7 @@ struct RowSelection<'a> {
     filter: &'a str,
 }
 fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
-    if table.starts_with("local_search_")
+    if super::local_search::lifecycle::is_namespace(table)
         || table.starts_with("runtime_attachment_")
         || table == "object_segment_reference_veto"
         || (native_data_only && table.starts_with("raw_inner_"))

@@ -198,10 +198,10 @@ pub(super) fn revision(db: &Connection) -> SearchResult<SearchIndexRevision> {
     .optional()?
     .ok_or(SearchError::IndexUnavailable)
 }
-fn index_bytes(db: &Connection) -> SearchResult<u64> {
+pub(super) fn index_bytes(db: &Connection) -> SearchResult<u64> {
     super::schema::verify_dbstat(db)?;
     db.query_row(
-        "SELECT COALESCE(sum(pgsize),0) FROM main.dbstat WHERE name GLOB 'local_search_*'",
+        "SELECT COALESCE(sum(s.pgsize),0) FROM main.sqlite_schema objects CROSS JOIN main.dbstat s ON s.name=objects.name WHERE objects.rootpage>0 AND lower(objects.tbl_name) GLOB 'local_search_*'",
         [],
         |r| r.get(0),
     )

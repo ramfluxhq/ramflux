@@ -4,6 +4,11 @@
 //! Privacy mutations and archives never retain or import search derivatives.
 use rusqlite::Connection;
 
+pub(crate) fn is_namespace(name: &str) -> bool {
+    name.get(.."local_search_".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("local_search_"))
+}
+
 pub(crate) fn purge_message(db: &Connection, message: &str) -> rusqlite::Result<()> {
     if !super::schema::exists(db)? {
         return Ok(());
@@ -24,7 +29,7 @@ pub(crate) fn retire_locator(db: &Connection, locator: &str) -> rusqlite::Result
 /// Strips every table/shadow/trigger in the namespace, including unknown cache revisions.
 /// The caller owns a private encrypted candidate and compacts it before publication.
 pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
-    let count:u64=db.query_row("SELECT count(*) FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view')",[],|row|row.get(0))?;
+    let count:u64=db.query_row("SELECT count(*) FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*' AND type IN('table','trigger','index','view')",[],|row|row.get(0))?;
     if count == 0 {
         return Ok(false);
     }
@@ -32,7 +37,7 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for _ in 0..128 {
-        let mut statement=db.prepare("SELECT CASE WHEN length(name)<=1024 THEN name ELSE NULL END,type FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view') ORDER BY CASE WHEN type='trigger' THEN 0 WHEN type='view' THEN 1 WHEN type='index' THEN 2 WHEN sql LIKE 'CREATE VIRTUAL TABLE%' THEN 3 ELSE 4 END,name LIMIT 1")?;
+        let mut statement=db.prepare("SELECT CASE WHEN length(name)<=1024 THEN name ELSE NULL END,type FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*' AND type IN('table','trigger','index','view') ORDER BY CASE WHEN type='trigger' THEN 0 WHEN type='view' THEN 1 WHEN type='index' THEN 2 WHEN sql LIKE 'CREATE VIRTUAL TABLE%' THEN 3 ELSE 4 END,name LIMIT 1")?;
         let mut rows = statement.query([])?;
         let Some(row) = rows.next()? else { break };
         let name: Option<String> = row.get(0)?;
@@ -49,7 +54,7 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         };
         db.execute_batch(&format!("{command} IF EXISTS \"{name}\";"))?;
     }
-    let remaining:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name GLOB 'local_search_*' AND type IN('table','trigger','index','view'))",[],|row|row.get(0))?;
+    let remaining:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE lower(name) GLOB 'local_search_*' AND type IN('table','trigger','index','view'))",[],|row|row.get(0))?;
     if remaining {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -58,7 +63,7 @@ pub(crate) fn strip(db: &Connection) -> rusqlite::Result<bool> {
         [],
         |row| row.get::<_, bool>(0),
     )? {
-        db.execute("DELETE FROM message_footprint WHERE kind GLOB 'local_search_*'", [])?;
+        db.execute("DELETE FROM message_footprint WHERE lower(kind) GLOB 'local_search_*'", [])?;
     }
     // A private archive copy may pass through more than one sanitizer before publication.
     // Carry compaction responsibility across those copies, never archive search authority.

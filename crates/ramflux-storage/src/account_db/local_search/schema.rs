@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use std::fmt::Write as _;
 
 pub(super) fn exists(db: &Connection) -> rusqlite::Result<bool> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_search_state')",[],|row|row.get(0))
+    db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_search_state' COLLATE NOCASE)",[],|row|row.get(0))
 }
 
 pub(super) fn prepare(db: &Connection) -> SearchResult<()> {
@@ -82,7 +82,7 @@ fn prerequisites(db: &Connection) -> SearchResult<()> {
 }
 
 pub(super) fn verify_dbstat(db: &Connection) -> SearchResult<()> {
-    let shadow:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='dbstat') OR EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='dbstat')",[],|r|r.get(0))?;
+    let shadow:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='dbstat' COLLATE NOCASE) OR EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='dbstat' COLLATE NOCASE)",[],|r|r.get(0))?;
     let compiled: bool =
         db.query_row("SELECT sqlite_compileoption_used('ENABLE_DBSTAT_VTAB')", [], |r| r.get(0))?;
     if shadow || !compiled {

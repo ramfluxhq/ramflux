@@ -104,6 +104,9 @@ impl LocalSearch {
             }
         }
     }
+    /// Reports coverage and the current volatile maintenance lease.
+    /// # Errors
+    /// Refuses a locked/replaced account or incompatible index without serving stale status.
     pub fn index_status(&self, client: &RamfluxClient) -> Result<SearchIndexStatus, SdkError> {
         let control = SearchControl::new();
         let epoch = self.epoch(client, &control)?;
