@@ -126,7 +126,12 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
         "pre-restart group history remains visible exactly once"
     );
     let receive = e2e::wait_receive_settled(&bob_d, &bob)?;
-    assert_eq!(receive["catch_up_passes"], 1, "one Connected catch-up, no later poll: {receive}");
+    assert_eq!(
+        receive["catch_up_passes"],
+        1,
+        "one Connected catch-up, no later poll: {receive}; logs={}",
+        dump_logs(&stack, &[&alice_d, &bob_d])
+    );
     assert!(
         e2e::receive_counter(&receive, "last_acked_seq")?
             <= e2e::receive_counter(&receive, "committed_cursor")?,

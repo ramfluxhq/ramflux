@@ -4,6 +4,7 @@
 //! Activated catch-up: real `resume_page` through `apply::apply_page`.
 
 use super::super::{AccountWork, ConnectionHandle, ReceiveTurn};
+use super::progress::Progress;
 use super::{
     ReceiveEntry, ReceiveTrigger, apply_entry, bind_retry_turns, catch_up_yields, entry_id,
     flush_acks,
@@ -34,6 +35,7 @@ pub(super) struct CatchUp<'a> {
     pub backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
     pub retries: Vec<ReceiveEntry>,
     pub limit: usize,
+    pub progress: Option<&'a Progress>,
 }
 
 pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, SdkError> {
@@ -48,6 +50,7 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         mut backpressure,
         retries,
         limit,
+        progress,
     } = job;
     flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
         .await?;
@@ -86,6 +89,7 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
                 call_timeout,
                 backpressure,
                 applied,
+                progress,
             )
             .await?;
             active |= next_active;
@@ -109,6 +113,7 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
             call_timeout,
             backpressure,
             applied,
+            progress,
         )
         .await?;
         active |= next_active;
@@ -134,15 +139,20 @@ async fn drive_page(
     call_timeout: std::time::Duration,
     mut backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
     mut applied: usize,
+    progress: Option<&Progress>,
 ) -> Result<(bool, bool, Box<crate::bus::contact_backpressure::Backpressure>, usize), SdkError> {
     let mut active = false;
     let mut paused = false;
     let records = page.entries.clone();
     loop {
+        let before = turn.cursor;
         let outcome = apply_resume(writer, turn, generation, page).await?;
         match step_outcome(outcome, page, turn)? {
             Step::Covered => {
                 mark_reorder_covered(handle, turn.cursor)?;
+                if let Some(progress) = progress {
+                    progress.advanced(before, turn.cursor);
+                }
                 break;
             }
             Step::Paused => {
@@ -166,6 +176,9 @@ async fn drive_page(
                 .await?;
                 active |= accepted;
                 backpressure = next_bp;
+                if let Some(progress) = progress {
+                    progress.advanced(before, turn.cursor);
+                }
                 applied = applied.saturating_add(1);
                 if applied.is_multiple_of(ACK_FLUSH_COUNT) {
                     flush_acks(handle, work, generation, false, call_timeout).await?;
@@ -187,6 +200,9 @@ async fn drive_page(
                 .await?;
                 backpressure = next_bp;
                 paused |= next_paused;
+                if let Some(progress) = progress {
+                    progress.advanced(before, turn.cursor);
+                }
                 if paused {
                     break;
                 }
@@ -207,22 +223,27 @@ async fn apply_leftover(
     call_timeout: std::time::Duration,
     mut backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
     mut applied: usize,
+    progress: Option<&Progress>,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let mut leftover: Vec<_> = retries.into_values().collect();
     leftover.sort_by_key(|entry| entry.entry.inbox_seq);
     bind_retry_turns(&mut leftover, Some(turn));
     let mut active = false;
     for mut entry in leftover {
+        let before = turn.cursor;
         entry.turn = Some(turn.clone());
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
         backpressure = next;
+        turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+        if let Some(progress) = progress {
+            progress.advanced(before, turn.cursor);
+        }
         applied = applied.saturating_add(1);
         if applied.is_multiple_of(ACK_FLUSH_COUNT) {
             flush_acks(handle, work, generation, false, call_timeout).await?;
         }
-        turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
     }
     Ok((active, backpressure))
 }
