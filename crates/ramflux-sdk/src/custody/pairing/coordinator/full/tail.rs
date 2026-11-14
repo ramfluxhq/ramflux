@@ -22,7 +22,7 @@ fn wrong() -> SdkError {
 fn hash(manifest: &SourceManifest) -> Result<String, SdkError> {
     manifest_hash(manifest).map(ramflux_protocol::encode_base64url).map_err(|_| wrong())
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
     Prepare,
     SendManifest,
@@ -181,6 +181,9 @@ impl PairingActor {
                 && job.error.is_none()
                 && let Err(error) = job.advance().await
             {
+                tracing::debug!(phase = ?job.phase, role = job.status.role.as_str(), code = Self::background_error_code(&error), "full tail phase refused");
+                #[cfg(test)]
+                eprintln!("test: full tail {:?} {} refused: {error}", job.phase, job.status.role);
                 job.error = Some(ramflux_protocol::custody::pairing::full_transfer::FullError::from_code(
                     Self::background_error_code(&error)
                 ).unwrap_or(ramflux_protocol::custody::pairing::full_transfer::FullError::ResumeRequired));

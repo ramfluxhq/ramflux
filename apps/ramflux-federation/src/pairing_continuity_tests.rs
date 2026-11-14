@@ -448,8 +448,12 @@ fn serve_tls_front(
             continue;
         };
         let mut tls = rustls::Stream::new(&mut conn, &mut tcp);
-        let Ok(request) = read_http_request(&mut tls) else {
-            continue;
+        let request = match read_http_request(&mut tls) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("test: TLS front request read refused: {error}");
+                continue;
+            }
         };
         let Ok(mut upstream) = TcpStream::connect_timeout(&backend, Duration::from_secs(5)) else {
             continue;
@@ -463,7 +467,12 @@ fn serve_tls_front(
         let mut reply = Zeroizing::new(Vec::new());
         let cap = ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES
             + pairing_limits().max_header_bytes;
-        if upstream.take(cap as u64 + 1).read_to_end(&mut reply).is_err() || reply.len() > cap {
+        if let Err(error) = upstream.take(cap as u64 + 1).read_to_end(&mut reply) {
+            eprintln!("test: TLS front upstream reply read refused: {error}");
+            continue;
+        }
+        if reply.len() > cap {
+            eprintln!("test: TLS front upstream reply exceeded cap");
             continue;
         }
         let _ = tls.write_all(&reply);
