@@ -23,9 +23,12 @@ const SHARD_PREFIX: &str = "router-wal-shard-";
 
 /// Logical rows of every normal table in `path`, plus the multimap table names.
 ///
+/// Tables are taken from the store. Each one is decoded with its real key and
+/// value types. A type this reader cannot open is an error, never a row.
+///
 /// # Errors
-/// Returns an error when the file is missing, larger than 32 MiB, or the copy
-/// cannot be opened.
+/// Returns an error when the file is missing, larger than 32 MiB, the copy
+/// cannot be opened, or any table cannot be decoded.
 pub fn logical_redb_rows(path: &Path) -> Result<BTreeMap<String, Vec<String>>, NodeCoreError> {
     let bytes = read_bounded(path)?;
     let copy = TempCopy::create();
@@ -47,7 +50,7 @@ pub fn logical_redb_rows(path: &Path) -> Result<BTreeMap<String, Vec<String>>, N
         if name.is_empty() {
             return Err(NodeCoreError::Redb(format!("empty table name in {}", path.display())));
         }
-        tables.insert(name.clone(), table_rows(&transaction, &name));
+        tables.insert(name.clone(), table_rows(&transaction, &name)?);
     }
     let mut multimaps = Vec::new();
     for handle in transaction
@@ -101,46 +104,136 @@ pub fn logical_wal_records(root: &Path) -> Result<LogicalWal, NodeCoreError> {
     Ok(LogicalWal { records, files })
 }
 
-fn table_rows(transaction: &redb::ReadTransaction, name: &str) -> Vec<String> {
-    match read_str_rows(transaction, name) {
-        Ok(rows) => rows,
-        Err(str_error) => match read_byte_rows(transaction, name) {
-            Ok(rows) => rows,
-            Err(byte_error) => vec![format!("unreadable:{str_error} | {byte_error}")],
-        },
-    }
+enum ReadRows {
+    Rows(Vec<String>),
+    /// The table exists with a different key/value type. `detail` names that type.
+    Mismatch(String),
+    Failed(String),
 }
 
-fn read_str_rows(transaction: &redb::ReadTransaction, name: &str) -> Result<Vec<String>, String> {
-    let table = transaction
-        .open_table(TableDefinition::<&str, &[u8]>::new(name))
-        .map_err(|error| error.to_string())?;
+fn table_rows(
+    transaction: &redb::ReadTransaction,
+    name: &str,
+) -> Result<Vec<String>, NodeCoreError> {
+    let mut mismatch = String::new();
+    for read in [
+        read_str_bytes,
+        read_byte_bytes,
+        read_str_text,
+        read_str_counter,
+        read_str_flag,
+        read_u64_bytes,
+        read_str_pair_flag,
+        read_deadline_flag,
+        read_signed_deadline_flag,
+        read_signed_deadline_counter,
+        read_owner_expiry,
+    ] {
+        match read(transaction, name) {
+            ReadRows::Rows(rows) => return Ok(rows),
+            ReadRows::Mismatch(detail) => mismatch = detail,
+            ReadRows::Failed(error) => {
+                return Err(NodeCoreError::Redb(format!("{name}: {error}")));
+            }
+        }
+    }
+    Err(NodeCoreError::Redb(format!("undecodable table {name}: {mismatch}")))
+}
+
+fn read_str_bytes(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<&str, &[u8], _>(transaction, name, |key, value| format!("{key}\t{}", hex(value)))
+}
+
+fn read_byte_bytes(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<&[u8], &[u8], _>(transaction, name, |key, value| {
+        format!("{}\t{}", hex(key), hex(value))
+    })
+}
+
+fn read_str_text(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<&str, &str, _>(transaction, name, |key, value| format!("{key}\t{value}"))
+}
+
+fn read_str_counter(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<&str, u64, _>(transaction, name, |key, value| format!("{key}\t{value}"))
+}
+
+fn read_str_flag(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<&str, u8, _>(transaction, name, |key, value| format!("{key}\t{value}"))
+}
+
+fn read_u64_bytes(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<u64, &[u8], _>(transaction, name, |key, value| format!("{key}\t{}", hex(value)))
+}
+
+fn read_str_pair_flag(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<(&str, &str), u8, _>(transaction, name, |key, value| {
+        format!("{}\t{}\t{value}", key.0, key.1)
+    })
+}
+
+fn read_deadline_flag(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<(u64, &str), u8, _>(transaction, name, |key, value| {
+        format!("{}\t{}\t{value}", key.0, key.1)
+    })
+}
+
+fn read_signed_deadline_flag(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<(i64, &str), u8, _>(transaction, name, |key, value| {
+        format!("{}\t{}\t{value}", key.0, key.1)
+    })
+}
+
+fn read_signed_deadline_counter(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<(i64, &str), u64, _>(transaction, name, |key, value| {
+        format!("{}\t{}\t{value}", key.0, key.1)
+    })
+}
+
+fn read_owner_expiry(transaction: &redb::ReadTransaction, name: &str) -> ReadRows {
+    read_table::<(&str, u64, i64, &str), u8, _>(transaction, name, |key, value| {
+        format!("{}\t{}\t{}\t{}\t{value}", key.0, key.1, key.2, key.3)
+    })
+}
+
+fn read_table<K, V, F>(
+    transaction: &redb::ReadTransaction,
+    name: &str,
+    mut format_row: F,
+) -> ReadRows
+where
+    K: redb::Key + 'static,
+    V: redb::Value + 'static,
+    F: FnMut(K::SelfType<'_>, V::SelfType<'_>) -> String,
+{
+    let table = match transaction.open_table(TableDefinition::<K, V>::new(name)) {
+        Ok(table) => table,
+        Err(redb::TableError::TableTypeMismatch { table, key, value }) => {
+            return ReadRows::Mismatch(format!(
+                "{table} is Table<{}, {}>",
+                key.name(),
+                value.name()
+            ));
+        }
+        Err(error) => return ReadRows::Failed(error.to_string()),
+    };
     let mut rows = Vec::new();
-    for entry in table.iter().map_err(|error| error.to_string())? {
-        let (key, value) = entry.map_err(|error| error.to_string())?;
-        rows.push(format!("{}\t{}", key.value(), hex(value.value())));
+    let entries = match table.iter() {
+        Ok(entries) => entries,
+        Err(error) => return ReadRows::Failed(error.to_string()),
+    };
+    for entry in entries {
+        let (key, value) = match entry {
+            Ok(pair) => pair,
+            Err(error) => return ReadRows::Failed(error.to_string()),
+        };
+        rows.push(format_row(key.value(), value.value()));
         if rows.len() > RECORD_COUNT_CAP {
-            return Err(format!("{name} exceeded {RECORD_COUNT_CAP} rows"));
+            return ReadRows::Failed(format!("{name} exceeded {RECORD_COUNT_CAP} rows"));
         }
     }
     rows.sort();
-    Ok(rows)
-}
-
-fn read_byte_rows(transaction: &redb::ReadTransaction, name: &str) -> Result<Vec<String>, String> {
-    let table = transaction
-        .open_table(TableDefinition::<&[u8], &[u8]>::new(name))
-        .map_err(|error| error.to_string())?;
-    let mut rows = Vec::new();
-    for entry in table.iter().map_err(|error| error.to_string())? {
-        let (key, value) = entry.map_err(|error| error.to_string())?;
-        rows.push(format!("{}\t{}", hex(key.value()), hex(value.value())));
-        if rows.len() > RECORD_COUNT_CAP {
-            return Err(format!("{name} exceeded {RECORD_COUNT_CAP} rows"));
-        }
-    }
-    rows.sort();
-    Ok(rows)
+    ReadRows::Rows(rows)
 }
 
 fn collect_wal_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), NodeCoreError> {
@@ -326,5 +419,197 @@ mod tests {
         assert_eq!(wal.files, vec![segment], "test: the regular segment is selected");
         let digest = super::hex(&ramflux_crypto::blake3_256("ramflux.node.wal-record.v1", payload));
         assert_eq!(wal.records, vec![digest], "test: the incomplete tail is not a record");
+    }
+
+    fn assert_one_row(
+        rows: &std::collections::BTreeMap<String, Vec<String>>,
+        table: &str,
+        expected: &str,
+        message: &str,
+    ) {
+        assert_eq!(
+            rows.get(table).map(Vec::as_slice),
+            Some([expected.to_owned()].as_slice()),
+            "test: {message}"
+        );
+    }
+
+    fn seed_typed_tables(write: &redb::WriteTransaction) {
+        write
+            .open_table(redb::TableDefinition::<&str, &str>::new("custody_node_heads_v1"))
+            .expect("heads")
+            .insert("root-a", "head-a")
+            .expect("head");
+        write
+            .open_table(redb::TableDefinition::<&str, u64>::new(
+                "federation_outbound_dead_letter_counts_v1",
+            ))
+            .expect("counts")
+            .insert("peer", 7_u64)
+            .expect("count");
+        write
+            .open_table(redb::TableDefinition::<&str, u8>::new("router_mailbox_key_format_v1"))
+            .expect("flags")
+            .insert("version", 1_u8)
+            .expect("flag");
+        write
+            .open_table(redb::TableDefinition::<u64, &[u8]>::new("router_identity_admission_v1"))
+            .expect("journal")
+            .insert(3_u64, b"row".as_slice())
+            .expect("journal row");
+        write
+            .open_table(redb::TableDefinition::<(&str, &str), u8>::new(
+                "notification_origin_receipt_scopes_v1",
+            ))
+            .expect("scopes")
+            .insert(("res", "scope"), 1_u8)
+            .expect("scope");
+        write
+            .open_table(redb::TableDefinition::<(u64, &str), u8>::new(
+                "notification_origin_shared_due_v1",
+            ))
+            .expect("due")
+            .insert((9_u64, "scope"), 1_u8)
+            .expect("due row");
+        write
+            .open_table(redb::TableDefinition::<(i64, &str), u8>::new("gateway_replay_expiry_v3"))
+            .expect("expiry")
+            .insert((4_i64, "id"), 1_u8)
+            .expect("expiry row");
+        write
+            .open_table(redb::TableDefinition::<(i64, &str), u64>::new(
+                "gateway_replay_root_expiry_v3",
+            ))
+            .expect("root expiry")
+            .insert((4_i64, "root"), 11_u64)
+            .expect("root expiry row");
+        write
+            .open_table(redb::TableDefinition::<(&str, u64, i64, &str), u8>::new(
+                "gateway_replay_owner_expiry_v3",
+            ))
+            .expect("owner")
+            .insert(("own", 2_u64, 4_i64, "id"), 1_u8)
+            .expect("owner row");
+        write
+            .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("username_checkpoint_image"))
+            .expect("image")
+            .insert(b"img".as_slice(), b"raw".as_slice())
+            .expect("image row");
+    }
+
+    #[test]
+    fn redb_snapshot_reads_text_counters_and_boot_key_types() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("types.redb");
+        let database = redb::Database::create(&path).expect("create");
+        let write = database.begin_write().expect("write");
+        seed_typed_tables(&write);
+        write.commit().expect("commit");
+        drop(database);
+        let rows = logical_redb_rows(&path).expect("rows");
+        assert_one_row(&rows, "custody_node_heads_v1", "root-a\thead-a", "text value");
+        assert_one_row(
+            &rows,
+            "federation_outbound_dead_letter_counts_v1",
+            "peer\t7",
+            "counter value",
+        );
+        assert_one_row(&rows, "router_mailbox_key_format_v1", "version\t1", "format flag");
+        assert_one_row(
+            &rows,
+            "router_identity_admission_v1",
+            &format!("3\t{}", super::hex(b"row")),
+            "numeric key",
+        );
+        assert_one_row(&rows, "notification_origin_receipt_scopes_v1", "res\tscope\t1", "pair key");
+        assert_one_row(&rows, "notification_origin_shared_due_v1", "9\tscope\t1", "deadline key");
+        assert_one_row(&rows, "gateway_replay_expiry_v3", "4\tid\t1", "signed deadline flag");
+        assert_one_row(
+            &rows,
+            "gateway_replay_root_expiry_v3",
+            "4\troot\t11",
+            "signed deadline counter",
+        );
+        assert_one_row(&rows, "gateway_replay_owner_expiry_v3", "own\t2\t4\tid\t1", "owner expiry");
+        assert_one_row(
+            &rows,
+            "username_checkpoint_image",
+            &format!("{}\t{}", super::hex(b"img"), super::hex(b"raw")),
+            "byte key and value",
+        );
+    }
+
+    #[test]
+    fn redb_snapshot_errors_when_a_table_cannot_be_decoded() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("unknown.redb");
+        let database = redb::Database::create(&path).expect("create");
+        let write = database.begin_write().expect("write");
+        {
+            write
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                    "federation_outbound_spool_v1",
+                ))
+                .expect("spool")
+                .insert("spool-1", b"payload".as_slice())
+                .expect("spool row");
+            write
+                .open_table(redb::TableDefinition::<&str, (u64, u64)>::new("notify_route_fence_v2"))
+                .expect("fence")
+                .insert("root", (1_u64, 2_u64))
+                .expect("fence row");
+        }
+        write.commit().expect("commit");
+        drop(database);
+        let error = logical_redb_rows(&path).expect_err("an unknown value type is not a snapshot");
+        let text = error.to_string();
+        assert!(text.contains("undecodable"), "test: an unknown table type is an error: {text}");
+        assert!(
+            !text.contains("unreadable:"),
+            "test: a decode failure is not comparable data: {text}"
+        );
+    }
+
+    #[test]
+    fn redb_snapshot_reads_every_table_a_service_creates_on_open() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let router = dir.path().join("ramflux-router.redb");
+        let federation = dir.path().join("ramflux-federation.redb");
+        let gateway = dir.path().join("ramflux-gateway.redb");
+        let retention = dir.path().join("ramflux-retention.redb");
+        drop(crate::RouterRedbStore::open(&router).expect("router"));
+        drop(crate::FederationRedbStore::open(&federation).expect("federation"));
+        drop(crate::gateway_state::GatewayRedbStore::open(&gateway).expect("gateway"));
+        drop(crate::retention::RetentionRedbStore::open(&retention).expect("retention"));
+        for path in [&router, &federation, &gateway, &retention] {
+            let tables = logical_redb_rows(path).expect("service tables");
+            assert!(
+                tables.keys().any(|name| name != "__multimap_tables__"),
+                "test: {} lists its tables",
+                path.display()
+            );
+            for (name, rows) in &tables {
+                assert!(
+                    rows.iter().all(|row| !row.starts_with("unreadable:")),
+                    "test: {name} in {} is decoded: {rows:?}",
+                    path.display()
+                );
+            }
+        }
+        let router_rows = logical_redb_rows(&router).expect("router rows");
+        assert_eq!(
+            router_rows.get("router_mailbox_key_format_v1").map(Vec::as_slice),
+            Some(["version\t1".to_owned()].as_slice()),
+            "test: the router format flag is a real row"
+        );
+        let gateway_rows = logical_redb_rows(&gateway).expect("gateway rows");
+        assert!(
+            gateway_rows.contains_key("gateway_replay_expiry_v3"),
+            "test: the gateway expiry table is enumerated"
+        );
+        assert!(
+            gateway_rows.contains_key("gateway_replay_owner_expiry_v3"),
+            "test: the gateway owner-expiry table is enumerated"
+        );
     }
 }

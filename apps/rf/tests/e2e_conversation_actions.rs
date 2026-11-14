@@ -288,8 +288,8 @@ fn explicit_stop(world: &World<'_>) -> e2e::Result<Vec<String>> {
     Ok(vec![start_op, stop_op])
 }
 
-/// No stop is sent. The observed frame's `expires_at` is the clear: it must be
-/// within 5s of display, and this watch stays open through that deadline.
+/// No stop is sent. The watch must observe `active=false` for that indicator
+/// within 5s of its `expires_at`. Silence after the active row fails.
 fn unforced_expiry(world: &World<'_>) -> e2e::Result<String> {
     let operation = unique("live-typing-expire");
     let watched = watch_ready(world, 8, &operation, None)?;
@@ -345,17 +345,32 @@ fn assert_unforced_expiry(watched: &Value, secs: u64) -> e2e::Result<()> {
         )
         .into());
     }
+    let author = active.get("author_anchor").and_then(Value::as_str).unwrap_or("");
     let rows = watched["indicators"].as_array().ok_or("indicators")?;
+    let mut saw_clear = false;
     for row in rows {
         let at = row["observed_at_ms"].as_u64().ok_or("observed_at_ms")?;
+        let row_author = row.get("author_anchor").and_then(Value::as_str).unwrap_or("");
         if row["active"].as_bool() == Some(true) && at >= expires_ms {
             return Err(
                 format!("typing still active at {at} after deadline {expires_ms}: {row}").into()
             );
         }
-        if row["active"].as_bool() == Some(false) && at.saturating_sub(observed) > 5_000 {
-            return Err(format!("unforced clear took more than 5s: {watched}").into());
+        if row["active"].as_bool() == Some(false) && row_author == author {
+            if at.abs_diff(expires_ms) > 5_000 {
+                return Err(format!(
+                    "unforced clear at {at} is more than 5s from deadline {expires_ms}: {row}"
+                )
+                .into());
+            }
+            saw_clear = true;
         }
+    }
+    if !saw_clear {
+        return Err(format!(
+            "unforced expiry saw no active=false row within 5s of {expires_ms}: {watched}"
+        )
+        .into());
     }
     Ok(())
 }
@@ -958,6 +973,78 @@ impl World<'_> {
     fn alice_args(&self, args: &[&str]) -> e2e::Result<Value> {
         rf_json(&self.alice_d.socket, args)
     }
+}
+
+#[test]
+fn unforced_expiry_requires_an_observed_clear() {
+    let active = serde_json::json!({
+        "active": true,
+        "observed_at_ms": 1_000_100_u64,
+        "expires_at": 1_005_u64,
+        "author_anchor": "alice",
+    });
+    let silent = serde_json::json!({
+        "started_at_ms": 1_000_000_u64,
+        "indicators": [active],
+    });
+    let silent_error = assert_unforced_expiry(&silent, 8).expect_err("silence is not a clear");
+    assert!(
+        silent_error.to_string().contains("active=false"),
+        "test: silence after one active row must fail: {silent_error}"
+    );
+    let other_author = serde_json::json!({
+        "started_at_ms": 1_000_000_u64,
+        "indicators": [
+            active,
+            {
+                "active": false,
+                "observed_at_ms": 1_005_200_u64,
+                "expires_at": 1_005_u64,
+                "author_anchor": "bob",
+            }
+        ],
+    });
+    let other_error =
+        assert_unforced_expiry(&other_author, 8).expect_err("another author is not this clear");
+    assert!(
+        other_error.to_string().contains("active=false"),
+        "test: a clear for a different author does not prove this indicator expired: {other_error}"
+    );
+    let cleared = serde_json::json!({
+        "started_at_ms": 1_000_000_u64,
+        "indicators": [
+            active,
+            {
+                "active": false,
+                "observed_at_ms": 1_005_400_u64,
+                "expires_at": 1_005_u64,
+                "author_anchor": "alice",
+            }
+        ],
+    });
+    assert_unforced_expiry(&cleared, 8).expect("a clear within 5s of expires_at");
+    let late = serde_json::json!({
+        "started_at_ms": 1_000_000_u64,
+        "indicators": [
+            {
+                "active": true,
+                "observed_at_ms": 1_000_100_u64,
+                "expires_at": 1_005_u64,
+                "author_anchor": "alice",
+            },
+            {
+                "active": false,
+                "observed_at_ms": 1_011_000_u64,
+                "expires_at": 1_005_u64,
+                "author_anchor": "alice",
+            }
+        ],
+    });
+    let late_error = assert_unforced_expiry(&late, 8).expect_err("a late clear");
+    assert!(
+        late_error.to_string().contains("5s"),
+        "test: a clear more than 5s from expires_at fails: {late_error}"
+    );
 }
 
 #[test]
