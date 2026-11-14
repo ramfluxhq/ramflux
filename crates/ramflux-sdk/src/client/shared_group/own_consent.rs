@@ -79,7 +79,7 @@ fn generated_consent(
 }
 
 impl RamfluxClient {
-    pub(super) fn own_group_acceptance(
+    pub(crate) fn own_group_acceptance(
         &self,
         state: &VerifiedGroupState,
     ) -> Result<bool, SdkError> {
@@ -132,7 +132,7 @@ impl RamfluxClient {
         )?;
         Ok(true)
     }
-    pub(super) fn publish_own_group_decision(
+    pub(crate) fn publish_own_group_decision(
         &self,
         state: &VerifiedGroupState,
         accepted: bool,

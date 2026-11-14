@@ -125,3 +125,56 @@ fn cr_group_conflicting_control_revision_fences_model() {
         "two different signed controls at the same revision cannot select a permissive interpretation"
     );
 }
+
+fn grant(epoch: u64) -> StateRecord {
+    let mut update = update(Decision::Allow, 4, epoch);
+    update.body.permissions = Some(ramflux_protocol::contact_reach::Permissions::UNACCEPTED);
+    update.body.grant_until = Some(0);
+    update.body.notice_hash = Some(digest(12));
+    update.body.evidence_hash = Some(digest(5));
+    StateRecord::Grant {
+        subject: update.body.subject.clone(),
+        permissions: ramflux_protocol::contact_reach::Permissions::UNACCEPTED,
+        grant_until: 0,
+        update,
+    }
+}
+
+#[test]
+fn cr_group_snapshot_binding_is_bijective_and_deny_wins() -> TestResult {
+    let retired = record(None, 100);
+    verify_bindings(&[retired.clone(), grant(101)])?;
+    assert!(
+        verify_bindings(&[retired.clone(), grant(100)]).is_err(),
+        "a live grant must exceed its retained floor"
+    );
+    assert!(
+        verify_bindings(&[record(Some(update(Decision::Block, 2, 1)), 100), grant(101)]).is_err(),
+        "a retained active block forbids even a higher-epoch allow"
+    );
+    for (group, conversation, genesis) in [
+        ("group", "other-thread", digest(4)),
+        ("other-group", "signed-thread", digest(4)),
+        ("other-group", "other-thread", digest(4)),
+        ("group", "signed-thread", digest(9)),
+    ] {
+        let mut forged = grant(101);
+        if let StateRecord::Grant {
+            subject: Subject::Group { group_id, conversation_id, genesis_hash, .. },
+            ..
+        } = &mut forged
+        {
+            *group_id = group.into();
+            *conversation_id = conversation.into();
+            *genesis_hash = genesis;
+        }
+        assert!(
+            matches!(
+                verify_bindings(&[retired.clone(), forged]),
+                Err(SdkError::ReachRefused(Reason::ReachRouteInvalid))
+            ),
+            "home transport signatures cannot rebind group, conversation or genesis"
+        );
+    }
+    Ok(())
+}

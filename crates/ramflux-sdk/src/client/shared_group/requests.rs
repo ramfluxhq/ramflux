@@ -301,6 +301,7 @@ impl RamfluxClient {
                     let changed = state.snapshot().state_hash != previous.snapshot().state_hash;
                     if changed {
                         self.account_db()?.commit_shared_group_state(&state, &actor)?;
+                        self.stage_reach_group_kick(&state, Some(&previous))?;
                         if let (GroupStateChange::Add { member, .. }, Some(federation)) =
                             (&request.change, &record.federation)
                         {

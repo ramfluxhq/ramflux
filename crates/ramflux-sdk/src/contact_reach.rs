@@ -4,6 +4,8 @@
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
 mod delivery;
 mod group_binding;
+mod group_join;
+mod group_kick;
 mod group_profile;
 mod group_restrictions;
 mod inner;
@@ -108,6 +110,8 @@ impl VerifiedReachState {
 pub(crate) struct SavedReachState {
     root: String,
     revision: u64,
+    admission_revision: u64,
+    home_head_hash: String,
     state_hash: String,
     records: Vec<StateRecord>,
     restrictions: BTreeMap<String, StateRecord>,
@@ -161,6 +165,8 @@ impl crate::RamfluxClient {
             let saved = SavedReachState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
+                admission_revision: verified.manifest.admission_revision,
+                home_head_hash: verified.manifest.home_head_hash,
                 state_hash: verified.manifest.state_hash,
                 records: verified.records,
                 restrictions,
@@ -285,5 +291,11 @@ fn merge_restrictions(
     {
         return Err(refused(Reason::ForeignCapacity));
     }
+    group_restrictions::verify_bindings(
+        records
+            .iter()
+            .filter(|record| !matches!(record, StateRecord::Retirement { .. }))
+            .chain(retained.values()),
+    )?;
     Ok(retained)
 }

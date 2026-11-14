@@ -19,6 +19,7 @@ pub(super) fn verify_records<'a>(
     manifest: &StateManifest,
     context: &ReachReadContext<'_>,
 ) -> Result<BTreeMap<String, &'a StateRecord>, SdkError> {
+    super::group_restrictions::verify_bindings(records)?;
     let mut bases = BTreeMap::new();
     for record in records {
         match record {

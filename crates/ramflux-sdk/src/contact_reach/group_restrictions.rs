@@ -4,7 +4,57 @@
 //! Independent local group floors survive omission and clear blocks only from newer signed control.
 use super::refused;
 use crate::SdkError;
-use ramflux_protocol::contact_reach::{Reason, StateRecord, same_group_binding};
+use ramflux_protocol::contact_reach::{Reason, StateRecord, Subject, same_group_binding};
+use std::collections::BTreeMap;
+
+/// Cross-record C1 and deny-wins checks supplement each record's original signature verification.
+pub(super) fn verify_bindings<'a>(
+    records: impl IntoIterator<Item = &'a StateRecord>,
+) -> Result<(), SdkError> {
+    let mut groups = BTreeMap::new();
+    let mut conversations = BTreeMap::new();
+    let mut geneses = BTreeMap::new();
+    let mut grants = BTreeMap::new();
+    let mut denials = BTreeMap::new();
+    for record in records {
+        let subject = match record {
+            StateRecord::Grant { subject, .. } => {
+                if let Subject::Group { group_id, group_epoch, .. } = subject
+                    && grants.insert(group_id, *group_epoch).is_some()
+                {
+                    return Err(refused(Reason::ForeignSnapshotInvalid));
+                }
+                subject
+            }
+            StateRecord::Retirement { subject, group_floor: Some(floor), .. } => {
+                if let Subject::Group { group_id, .. } = subject
+                    && denials.insert(group_id, floor).is_some()
+                {
+                    return Err(refused(Reason::ForeignSnapshotInvalid));
+                }
+                subject
+            }
+            _ => continue,
+        };
+        if let Subject::Group { group_id, conversation_id, genesis_hash, .. } = subject
+            && (groups
+                .insert(group_id, (conversation_id, genesis_hash))
+                .is_some_and(|old| old != (conversation_id, genesis_hash))
+                || conversations
+                    .insert(conversation_id, group_id)
+                    .is_some_and(|old| old != group_id)
+                || geneses.insert(genesis_hash, group_id).is_some_and(|old| old != group_id))
+        {
+            return Err(refused(Reason::ReachRouteInvalid));
+        }
+    }
+    for (group, epoch) in grants {
+        if denials.get(group).is_some_and(|floor| floor.blocked() || epoch <= floor.floor_epoch) {
+            return Err(refused(Reason::ForeignSnapshotInvalid));
+        }
+    }
+    Ok(())
+}
 pub(super) fn merge(
     previous: Option<&StateRecord>,
     next: &StateRecord,

@@ -141,6 +141,7 @@ impl RamfluxClient {
         };
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&verified, &actor)?;
+            self.stage_reach_group_kick(&verified, None)?;
             crate::bus::enqueue_shared_group(self, &verified, None)
         })?;
         Ok(verified)
@@ -192,6 +193,7 @@ impl RamfluxClient {
         };
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&state, &actor)?;
+            self.stage_reach_group_kick(&state, Some(&previous))?;
             self.record_group_write(&state, change)?;
             self.finish_group_transfer_head_change(&state)?;
             crate::bus::enqueue_shared_group(self, &state, Some(&previous))
@@ -213,6 +215,9 @@ impl RamfluxClient {
                 return Ok(false);
             };
             let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
+            if changed {
+                self.stage_reach_group_kick(&reconciled, previous.as_ref())?;
+            }
             self.finish_group_transfer_head_change(&reconciled)?;
             for record in self.group_change_records()?.into_iter().filter(|record| {
                 !record.incoming && record.request.group_id == reconciled.view().group_id

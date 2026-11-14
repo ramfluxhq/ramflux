@@ -211,7 +211,7 @@ impl BornAccount {
         })
     }
 
-    fn reach_decision_body(
+    pub(crate) fn reach_decision_body(
         &self,
         context: &ReachCommandContext<'_>,
         subject: Subject,

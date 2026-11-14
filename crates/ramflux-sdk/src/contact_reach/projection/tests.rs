@@ -13,6 +13,8 @@ fn state() -> SavedReachState {
     SavedReachState {
         root: "owner".into(),
         revision: 1,
+        admission_revision: 1,
+        home_head_hash: "home".into(),
         state_hash: "content".into(),
         records: vec![],
         restrictions: BTreeMap::new(),

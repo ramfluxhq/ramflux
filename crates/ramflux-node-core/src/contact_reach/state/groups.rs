@@ -68,9 +68,24 @@ impl AccountReach {
         {
             return Err(refuse(Reason::ForeignCapacity));
         }
+        let mut reserved = 0_usize;
+        for key in groups {
+            let mut actual = 0_usize;
+            for row in [self.grants.get(&key), self.retirements.get(&key)].into_iter().flatten() {
+                let entry = BTreeMap::from([(key.as_str(), row)]);
+                actual = actual
+                    .checked_add(ramflux_protocol::canonical_json_bytes(&entry)?.len())
+                    .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+            }
+            // The reservation includes every existing group byte and is a per-group ceiling.
+            if actual > GROUP_DENIAL_RESERVATION {
+                return Err(refuse(Reason::ForeignCapacity));
+            }
+            reserved = reserved
+                .checked_add(GROUP_DENIAL_RESERVATION)
+                .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
+        }
         if positive {
-            // Controller ruling: the 15-KiB reservation includes existing group bytes.
-            // Charge non-group state plus max(reservation, actual records) for each group.
             let mut base = self.clone();
             base.grants.retain(|_, record| {
                 !matches!(record, StateRecord::Grant { subject: Subject::Group { .. }, .. })
@@ -78,20 +93,10 @@ impl AccountReach {
             base.retirements.retain(|_, record| {
                 !matches!(record, StateRecord::Retirement { subject: Subject::Group { .. }, .. })
             });
-            let mut charged = ramflux_protocol::canonical_json_bytes(&base)?.len();
-            for key in groups {
-                let mut actual = 0_usize;
-                for row in [self.grants.get(&key), self.retirements.get(&key)].into_iter().flatten()
-                {
-                    let entry = BTreeMap::from([(key.as_str(), row)]);
-                    actual = actual
-                        .checked_add(ramflux_protocol::canonical_json_bytes(&entry)?.len())
-                        .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
-                }
-                charged = charged
-                    .checked_add(actual.max(GROUP_DENIAL_RESERVATION))
-                    .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
-            }
+            let charged = ramflux_protocol::canonical_json_bytes(&base)?
+                .len()
+                .checked_add(reserved)
+                .ok_or_else(|| refuse(Reason::ForeignCapacity))?;
             if charged > MAX_STATE_BYTES || self.records()?.len() > 8192 {
                 return Err(refuse(Reason::ForeignCapacity));
             }

@@ -9,6 +9,55 @@ use ramflux_protocol::contact_reach::{
 };
 use ramflux_protocol::custody::DeviceRef;
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+#[test]
+fn cr_group_reservation_includes_existing_bytes_and_has_a_hard_ceiling() -> TestResult {
+    let mut state = closed_state()?;
+    for index in 0..1024_u64 {
+        let mut genesis = [0_u8; 32];
+        genesis.get_mut(..8).ok_or("genesis prefix")?.copy_from_slice(&index.to_be_bytes());
+        let subject = Subject::Group {
+            group_id: format!("group-{index}"),
+            conversation_id: format!("thread-{index}"),
+            genesis_hash: ramflux_protocol::encode_base64url(genesis),
+            group_epoch: 1,
+            membership_hash: digest(15),
+        };
+        let update = command(subject.clone(), Decision::Allow, index);
+        state.grants.insert(
+            subject.key()?,
+            StateRecord::Grant {
+                subject,
+                permissions: Permissions::UNACCEPTED,
+                grant_until: 0,
+                update,
+            },
+        );
+    }
+    state.check_group_reservations(true)?;
+    assert_eq!(
+        state.grants.len(),
+        1024,
+        "the count cap remains reachable with realistic serialized grants"
+    );
+    // This reducer-only corruption probe exercises the byte ceiling independently of signature checks.
+    let Some(StateRecord::Grant { update, .. }) = state.grants.values_mut().next() else {
+        return Err("first group grant".into());
+    };
+    update.signature = "x".repeat(GROUP_DENIAL_RESERVATION);
+    assert!(
+        matches!(
+            state.check_group_reservations(true),
+            Err(ReachError::Refused(Reason::ForeignCapacity))
+        ),
+        "positive capacity cannot grow a group beyond its fixed 15-KiB reservation"
+    );
+    assert!(
+        state.check_group_reservations(false).is_err(),
+        "reopen validation also refuses an oversized group record instead of silently enlarging its reservation"
+    );
+    Ok(())
+}
 fn subject(epoch: u64) -> Subject {
     Subject::Group {
         group_id: "group".into(),

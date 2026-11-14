@@ -504,10 +504,10 @@ pub(super) fn erase_denied(
     recipient: &str,
     update: &custody::Envelope<Admission>,
 ) -> Result<()> {
-    if !matches!(update.body.decision, Decision::Block | Decision::Decline)
-        && !(matches!(update.body.subject, Subject::Group { .. })
-            && update.body.decision == Decision::Revoke)
-    {
+    let erases = matches!(update.body.decision, Decision::Block | Decision::Decline)
+        || matches!(update.body.subject, Subject::Group { .. })
+            && update.body.decision == Decision::Revoke;
+    if !erases {
         return Ok(());
     }
     let table = tx.open_table(PENDING).map_err(storage)?;
@@ -536,7 +536,6 @@ pub(super) fn erase_denied(
                         .as_ref()
                         .is_some_and(|group| group.group_id == *group_id)
             }
-            _ => false,
         };
         if denied {
             removed.push(seq.value());

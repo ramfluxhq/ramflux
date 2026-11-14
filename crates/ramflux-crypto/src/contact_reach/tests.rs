@@ -195,7 +195,7 @@ fn cr_group_roster_binds_primary_grant_and_nul_framed_members() -> TestResult {
     wrong_domain.header.body.members_hash = ramflux_protocol::hash_base64url(
         wire::GROUP_ROSTER_MEMBERS_DOMAIN,
         &ramflux_protocol::canonical_json_bytes(&wrong_domain.members)?,
-    )?;
+    );
     wrong_domain.header =
         owner.key.sign_group_roster_header(wrong_domain.header.body, &owner.record, NOW)?;
     assert!(

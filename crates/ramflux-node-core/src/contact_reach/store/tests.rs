@@ -187,3 +187,5 @@ fn cr_primary_denial_is_durable_and_unblock_restores_no_grant() -> TestResult {
     state.check_denials(&peer, "foreign.example", NOW + 3 + DECLINE_COOLDOWN)?;
     Ok(())
 }
+
+mod groups;
