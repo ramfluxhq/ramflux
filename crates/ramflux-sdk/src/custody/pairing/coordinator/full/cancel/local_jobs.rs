@@ -47,7 +47,18 @@ impl FullRuntimeCancel {
         Ok(value)
     }
     pub(super) fn retain_completion(&self, abort: AbortHandle, completion: JoinHandle<()>) {
-        let mut jobs = self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.retain_in(&self.local_jobs, abort, completion);
+    }
+    pub(super) fn retain_join_completion(&self, abort: AbortHandle, completion: JoinHandle<()>) {
+        self.retain_in(&self.joined_jobs, abort, completion);
+    }
+    fn retain_in(
+        &self,
+        owner: &std::sync::Mutex<Vec<LocalJob>>,
+        abort: AbortHandle,
+        completion: JoinHandle<()>,
+    ) {
+        let mut jobs = owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         jobs.retain(|job| !job.completion.is_finished());
         if self.require_live().is_err() {
             abort.abort();
@@ -55,18 +66,23 @@ impl FullRuntimeCancel {
         jobs.push(LocalJob { abort, completion });
     }
     pub(super) fn abort_local_jobs(&self) {
-        let jobs = self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for job in jobs.iter() {
-            job.abort.abort();
+        for owner in [&self.local_jobs, &self.joined_jobs] {
+            let jobs = owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for job in jobs.iter() {
+                job.abort.abort();
+            }
         }
     }
     /// Call after the retired actor callback/receiver is closed. Never abort a completion
     /// task: it must await and destroy even a detached blocking worker's private output.
     pub(crate) async fn drain_local_jobs(&self) {
         loop {
-            let jobs = std::mem::take(
-                &mut *self.local_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            let mut jobs = Vec::new();
+            for owner in [&self.local_jobs, &self.joined_jobs] {
+                jobs.append(&mut std::mem::take(
+                    &mut *owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                ));
+            }
             if jobs.is_empty() {
                 break;
             }

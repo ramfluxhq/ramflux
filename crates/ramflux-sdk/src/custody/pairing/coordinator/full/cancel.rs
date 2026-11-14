@@ -21,6 +21,7 @@ pub(crate) struct FullRuntimeCancel {
     activity: std::sync::Arc<tokio::sync::Notify>,
     local_workers: Mutex<usize>,
     local_jobs: Mutex<Vec<local_jobs::LocalJob>>,
+    joined_jobs: Mutex<Vec<local_jobs::LocalJob>>,
     idle: Condvar,
     stage: Mutex<Option<FullStageIoCancel>>,
     tail_stages: Mutex<Vec<FullStageIoCancel>>,

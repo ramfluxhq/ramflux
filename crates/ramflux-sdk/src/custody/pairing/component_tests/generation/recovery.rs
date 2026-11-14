@@ -326,6 +326,13 @@ mod tests {
             PairingConfig { enabled: true, extra_root_ca_pem: None },
         );
         actor.set_participant(rig.participant_b.clone());
+        actor.set_full_node(
+            crate::custody::network_tests::node(
+                rig.now,
+                ramflux_protocol::encode_base64url([29; 32]),
+            )
+            .map_err(|error| error.to_string())?,
+        );
         Ok(actor)
     }
     fn install_generation(

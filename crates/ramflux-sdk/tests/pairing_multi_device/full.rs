@@ -232,8 +232,12 @@ impl Fixture {
         )
         .await?;
         for _ in 0..1024 {
-            self.a.service_data()?;
-            self.b.service_data()?;
+            self.a
+                .service_data()
+                .map_err(|error| format!("test: publication source service: {error}"))?;
+            self.b
+                .service_data()
+                .map_err(|error| format!("test: publication target service: {error}"))?;
             for actor in [&mut self.b.actor, &mut self.a.actor] {
                 self.node.clock.advance_ms(1001);
                 drive(
@@ -253,7 +257,10 @@ impl Fixture {
                 &self.b.client,
             )
             .await?;
-            self.b.actor.service_linked_installation(&mut self.b.client, &mut self.target)?;
+            self.b
+                .actor
+                .service_linked_installation(&mut self.b.client, &mut self.target)
+                .map_err(|error| format!("test: own G3 frontend handback: {error}"))?;
             if self.b.selected_path()? != original
                 && ordinary_session_admitted(&self.b.client, &self.b.id)?
                 && self.b.vault.primary_entries()? == 1

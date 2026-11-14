@@ -66,7 +66,7 @@ impl FullRuntimeCancel {
             drop(done);
             let _ = drain.send(());
         });
-        self.retain_completion(abort.clone(), completion);
+        self.retain_join_completion(abort.clone(), completion);
         Joined { abort, drained: Some(drained), receive: Some(receive), finished }
     }
 }
@@ -96,6 +96,7 @@ mod tests {
                 private
             });
             let owned = root.own_join(worker);
+            root.settle_local_jobs().await;
             root.notify_activity();
             signal.notified().await;
             assert!(!owned.finished(), "test: an I/O wakeup released an unfinished private owner");

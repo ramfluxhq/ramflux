@@ -33,9 +33,21 @@ async fn after_base() -> TestResult {
                 .service_full_transfer(slot.as_ref().ok_or("test: target writer absent")?)?;
         }
         rig.clock.advance_ms(1001);
-        let _ = drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await;
+        let result =
+            drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await;
+        if matches!(
+            &result,
+            Err(SdkError::PairingCode("AttachmentNotRemote")
+                | SdkError::PairingField("AttachmentNotRemote"))
+        ) {
+            refused = true;
+            break;
+        }
+        result.map_err(|error| format!("test: source post-base media refusal: {error}"))?;
         rig.clock.advance_ms(1001);
-        let _ = drive(Box::pin(rig.secondary.sync_relay()), &mut source, &rig.source.client).await;
+        drive(Box::pin(rig.secondary.sync_relay()), &mut source, &rig.source.client)
+            .await
+            .map_err(|error| format!("test: target post-base media: {error}"))?;
         settle_stream_work(&rig).await;
         if rig.primary.full_background_error() == Some(FullError::AttachmentNotRemote) {
             refused = true;

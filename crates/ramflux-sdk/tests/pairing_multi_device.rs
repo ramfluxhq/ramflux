@@ -109,7 +109,9 @@ async fn pairing_receiver_concurrency_and_transfer_acceptance() -> ResultOf<()> 
     deadline(Box::pin(full_acceptance())).await
 }
 async fn full_acceptance() -> ResultOf<()> {
-    let mut fixture = Box::pin(full::Fixture::open()).await?;
+    let mut fixture = Box::pin(full::Fixture::open())
+        .await
+        .map_err(|error| format!("test: external full setup: {error}"))?;
     let identities = [&fixture.a, &fixture.b, &fixture.c]
         .into_iter()
         .map(|device| {
@@ -126,9 +128,15 @@ async fn full_acceptance() -> ResultOf<()> {
             .clone();
     let wrapping = ramflux_storage::AccountIndex::open(fixture.b.root.path())?
         .load_wrapped_db_key(&fixture.b.id)?;
-    Box::pin(fixture.begin()).await?;
-    Box::pin(fixture.data()).await?;
-    Box::pin(fixture.publish()).await?;
+    Box::pin(fixture.begin())
+        .await
+        .map_err(|error| format!("test: external attended SAS: {error}"))?;
+    Box::pin(fixture.data())
+        .await
+        .map_err(|error| format!("test: external durable duplex: {error}"))?;
+    Box::pin(fixture.publish())
+        .await
+        .map_err(|error| format!("test: external native publication: {error}"))?;
     for _ in 0..1024 {
         fixture.step().await?;
         let a = fixture.status(true).await?;
@@ -171,16 +179,13 @@ async fn full_acceptance() -> ResultOf<()> {
     for device in [&mut fixture.a, &mut fixture.b] {
         for iteration in [2, 8, 16] {
             assert!(
-                matches!(
-                    device.with_db(|db| Ok(matches!(
-                        db.check_object_identity(
-                            &format!("concurrent-{iteration}"),
-                            "concurrent-manifest"
-                        ),
-                        Err(ramflux_storage::StorageError::ObjectErased)
-                    )))?,
-                    true
-                ),
+                device.with_db(|db| Ok(matches!(
+                    db.check_object_identity(
+                        &format!("concurrent-{iteration}"),
+                        "concurrent-manifest"
+                    ),
+                    Err(ramflux_storage::StorageError::ObjectErased)
+                )))?,
                 "test: concurrent B veto lost in actual union/tail"
             );
         }
