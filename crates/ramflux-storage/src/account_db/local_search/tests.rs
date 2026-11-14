@@ -22,7 +22,7 @@ impl Fixture {
         db.enable_runtime()?;
         let activation = SearchActivation::testing();
         let watch = db.search_prepare(&activation)?;
-        Ok(Self { directory, db, activation, watch })
+        Ok(Self { db, activation, watch, directory })
     }
     fn source(id: &str, text: &str) -> SearchSource {
         SearchSource {
@@ -254,13 +254,13 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
 }
 
 fn assert_retirement_after_reopen(fixture: Fixture) -> TestResult {
-    let Fixture { directory, db, activation, watch: _ } = fixture;
+    let Fixture { db, activation, watch: _, directory } = fixture;
     drop(db);
     let index = AccountIndex::open(directory.path())?;
     let db = AccountDb::open(&index, "account", &AccountDbKey::from_bytes([42; 32]))?;
     db.enable_runtime()?;
     let watch = db.search_prepare(&activation)?;
-    let reopened = Fixture { directory, db, activation, watch };
+    let reopened = Fixture { db, activation, watch, directory };
     assert!(reopened.hits("oldcanary")?.is_empty(), "retired terms must stay absent after reopen");
     assert_eq!(
         reopened.hits("unrelatedcanary")?.len(),
@@ -368,7 +368,7 @@ fn restore_erasure_case(native: bool) -> TestResult {
         "restore must not retain a source from which erased terms could be rebuilt"
     );
     drop(merged);
-    let Fixture { directory, db, activation, watch } = f;
+    let Fixture { db, activation, watch, directory } = f;
     drop(db);
     drop(watch);
     let index = AccountIndex::open(directory.path())?;
