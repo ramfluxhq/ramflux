@@ -112,15 +112,8 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     let credential_input =
         super::credentials::connection(supervisor.config.data_root.clone(), id, outbound.clone());
     let reader_credentials = credential_input.channel();
-    let (incoming, mut frames) = mpsc::channel(64);
-    let (disconnect, mut disconnected) = watch::channel(false);
-    let reader_task = tokio::task::spawn_local(read_requests(
-        reader,
-        reader_credentials,
-        id,
-        incoming,
-        disconnect,
-    ));
+    let RequestReader { task: reader_task, mut frames, mut disconnected } =
+        spawn_request_reader(reader, reader_credentials, id);
     let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
     let writer_task = tokio::task::spawn_local(write_responses(
         writer,
@@ -204,6 +197,28 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+struct RequestReader {
+    task: tokio::task::JoinHandle<()>,
+    frames: mpsc::Receiver<Result<super::custody_setup::Incoming, SdkError>>,
+    disconnected: watch::Receiver<bool>,
+}
+fn spawn_request_reader<R: tokio::io::AsyncRead + Unpin + 'static>(
+    reader: R,
+    credentials: Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    connection: u64,
+) -> RequestReader {
+    let (incoming, frames) = mpsc::channel(64);
+    let (disconnect, disconnected) = watch::channel(false);
+    let task = tokio::task::spawn_local(read_requests(
+        reader,
+        credentials,
+        connection,
+        incoming,
+        disconnect,
+    ));
+    RequestReader { task, frames, disconnected }
 }
 
 async fn read_requests<R: tokio::io::AsyncRead + Unpin>(
