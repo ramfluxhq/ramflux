@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 mod execution;
 #[path = "pending.rs"]
 mod pending;
+#[path = "rebuild_job.rs"]
+pub(crate) mod rebuild_job;
 type Pending = Arc<Mutex<BTreeMap<SearchText, (u64, SearchCompletion, Instant)>>>;
 
 pub struct LocalSearch {
@@ -30,8 +32,8 @@ pub struct LocalSearch {
     cursors: Arc<Mutex<Cursors>>,
     pending: Pending,
     observer: Option<SearchRegistration>,
-    rebuild: super::rebuild_job::Jobs,
-    rebuild_progress: super::rebuild_job::Progress,
+    rebuild: rebuild_job::Jobs,
+    rebuild_progress: rebuild_job::Progress,
     quota_paused: std::sync::atomic::AtomicBool,
 }
 /// Keeps reply plaintext revocable until the binding's final publication boundary.

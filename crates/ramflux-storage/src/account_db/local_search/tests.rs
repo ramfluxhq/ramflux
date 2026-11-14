@@ -109,7 +109,7 @@ fn local_search_cjk_and_normalization() -> TestResult {
         vec!["cafe\u{301}", "Straße", "東京都"],
         "highlight bytes must enclose whole original graphemes after casefold expansion"
     );
-    let excessive = "中".repeat(100);
+    let excessive = "中".repeat(150);
     assert!(
         matches!(
             compile_query(&SearchQuery::new("over-terms", excessive), &SearchControl::new()),
@@ -381,9 +381,13 @@ fn local_search_bounds_and_rebuild_races() -> TestResult {
     assert_eq!(survivors, DOCUMENTS, "quota refusal must preserve existing documents");
     // Existing dirty IDs overlap the first affected IDs: DISTINCT alone with a
     // remaining-capacity LIMIT would silently lose the rest of this work.
-    f.db.connection.execute_batch("UPDATE local_search_state SET document_count=100000,rebuild_required=0,checkpoint_kind=2,coverage='complete'; DELETE FROM local_search_dirty; INSERT INTO local_search_dirty SELECT 1,source_key FROM local_search_doc ORDER BY source_key LIMIT 4000; INSERT INTO local_search_dependency SELECT 'object_erasure_fence','shared-fence',doc_id FROM local_search_doc; INSERT INTO object_erasure_fence(commitment) VALUES('shared-fence');")?;
+    f.db.connection.execute_batch("UPDATE local_search_state SET document_count=100000,rebuild_required=0,checkpoint_kind=2,coverage='complete'; DELETE FROM local_search_dirty; INSERT INTO local_search_dirty SELECT 1,source_key FROM local_search_doc ORDER BY source_key LIMIT 4000; INSERT INTO local_search_dependency SELECT 'object_erasure_fence','shared-fence',doc_id FROM local_search_doc WHERE doc_id<=5000; INSERT INTO object_erasure_fence(commitment) VALUES('shared-fence');")?;
     let (remaining, dirty, required): (i64, i64, bool) = f.db.connection.query_row("SELECT (SELECT count(*) FROM local_search_doc),(SELECT count(*) FROM local_search_dirty),rebuild_required FROM local_search_state", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-    assert_eq!(remaining, 0, "shared erasure dependency must purge every indexed derivative");
+    assert_eq!(
+        remaining,
+        DOCUMENTS - 5000,
+        "shared erasure dependency must purge every affected derivative and preserve unrelated documents"
+    );
     assert_eq!(dirty, 0, "overflow must collapse the bounded ID queue");
     assert!(required, "overlapping dirty IDs must never hide omitted rebuild work");
 

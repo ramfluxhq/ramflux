@@ -32,6 +32,9 @@ impl Admission {
         client: u64,
         id: &str,
     ) -> SearchResult<Self> {
+        if id.is_empty() || id.len() > 128 {
+            return Err(SearchError::InvalidQuery);
+        }
         static GLOBAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
         let request = RequestControl {
             control: SearchControl::new(),
@@ -40,9 +43,6 @@ impl Admission {
         let key = (client, id.to_owned());
         {
             let mut requests = active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if id.is_empty() || id.len() > 128 {
-                return Err(SearchError::InvalidQuery);
-            }
             if requests.len() >= 3 || requests.contains_key(&key) {
                 return Err(SearchError::Capacity);
             }

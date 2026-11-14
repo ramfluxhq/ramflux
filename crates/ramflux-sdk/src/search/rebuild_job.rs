@@ -2,10 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Volatile job ownership survives caller cancellation and fences reused correlation IDs.
-use super::{
-    LocalSearch, SearchError,
-    admission::{Admission, Requests},
-};
+use super::{Admission, LocalSearch, SearchError};
+use crate::search::admission::Requests;
 use crate::{RamfluxClient, SdkError};
 use ramflux_storage::local_search::{
     SearchControl, SearchIndexStatus, SearchRebuildProgress, SearchRebuildState,

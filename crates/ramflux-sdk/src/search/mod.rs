@@ -7,7 +7,7 @@ pub mod capability;
 mod cursor;
 mod hydration;
 mod projection;
-pub(crate) mod rebuild_job;
+pub(crate) use service::rebuild_job;
 mod service;
 pub use ramflux_storage::local_search::{
     SearchCoverage, SearchError, SearchHighlight, SearchIndexStatus, SearchItem, SearchKind,
