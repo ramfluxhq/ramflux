@@ -91,6 +91,7 @@ async fn accepted_retry_without_a_verified_manifest_preserves_success_without_ca
         let db = receiver.account_db()?;
         let request = db.contact_request(&root, "inbound")?.ok_or_else(|| invalid("request"))?;
         db.remove_actor_state("identity/manifest/alice")?;
+        db.remove_actor_state(&format!("identity/manifest-root/{root}"))?;
         (receiver.contact_entry("alice")?, request.request_id)
     };
     directory.unavailable.store(true, Ordering::SeqCst);
