@@ -10,7 +10,7 @@ use ramflux_protocol::{
     fixture_sig_path, hash_hex, header_hash_base64url, home_node_migration_proof_signed_bytes,
     parse_fixture_value, signed_value, verify_canonical_signature, verify_json_signature,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 

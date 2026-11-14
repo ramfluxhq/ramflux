@@ -387,3 +387,70 @@ fn date_time_owned_inputs_accept_iso_minute_precision_and_compare_offsets_as_ins
     }
     Ok(())
 }
+
+#[test]
+fn maximum_author_literal_context_allows_action_frame_overhead() -> TestResult {
+    let mut snapshot = SurfaceSnapshot {
+        surface_id: "s".into(),
+        catalog_id: CATALOG_ID.into(),
+        fallback_text: "Save".into(),
+        metadata: None,
+        components: vec![
+            json!({"id":"root","component":"Button","child":"label","action":{"event":{"name":"submit","context":{"large":""}}}}),
+            json!({"id":"label","component":"Text","text":"Save"}),
+        ],
+        data_model: json!({}),
+        final_: Vec::new(),
+        closed: false,
+    };
+    let overhead = crate::canonical_json_bytes(&snapshot)?.len();
+    snapshot.components.first_mut().ok_or("button")?["action"]["event"]["context"]["large"] =
+        json!("x".repeat(MAX_STATE_BYTES.checked_sub(overhead).ok_or("state overhead")?));
+    let mut frame: EventFrame = serde_json::from_slice(include_bytes!(
+        "../../fixtures/protocol/v1/a2ui_surface/create.event.json"
+    ))?;
+    frame.conversation_id = "c".repeat(256);
+    frame.fallback_text = Some("Save".into());
+    frame.a2ui = Some(MutationMessage::new(Mutation::CreateSurface(snapshot.create())));
+    let state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(
+        &SurfaceState::default().prepare_event(frame)?.wire_bytes()?,
+    )?)?;
+    assert_eq!(
+        crate::canonical_json_bytes(state.content().ok_or("state")?)?.len(),
+        MAX_STATE_BYTES,
+        "control state uses the design's full canonical state budget"
+    );
+    let context = snapshot
+        .components
+        .first()
+        .and_then(|c| c.pointer("/action/event/context"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or("context")?
+        .clone();
+    let mut action = ActionFrame {
+        schema: ACTION_SCHEMA.into(),
+        conversation_id: "c".repeat(256),
+        surface_version: 1,
+        surface_hash: state.hash().ok_or("hash")?.into(),
+        source_instance: Vec::new(),
+        args_hash: String::new(),
+        task_binding: None,
+        a2ui: ActionMessage {
+            version: "1.0".into(),
+            action: Action {
+                name: "submit".into(),
+                surface_id: "s".into(),
+                source_component_id: "root".into(),
+                timestamp: "2026-11-16T00:00:00Z".into(),
+                context,
+                user_message: None,
+                metadata: None,
+            },
+        },
+    };
+    action.args_hash = action.arguments_hash()?;
+    let wire = action.wire_bytes()?;
+    assert!(wire.len() > MAX_STATE_BYTES, "action framing is outside the signed state budget");
+    state.validate_action(&SurfaceAction::from_wire_bytes(&wire)?)?;
+    Ok(())
+}

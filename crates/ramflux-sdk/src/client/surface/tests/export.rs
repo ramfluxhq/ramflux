@@ -131,7 +131,7 @@ async fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_
 }
 
 fn cache_human_manifest(f: &Fixture) -> TestResult {
-    let manifest = crate::client::identity_authority::test_support::public_manifest(&f.human)?;
+    let manifest = f.human.local_own_copy_manifest()?;
     RamfluxClient::verify_device_manifest_json(
         serde_json::to_value(&manifest)?,
         &manifest.principal_commitment,

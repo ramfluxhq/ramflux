@@ -22,9 +22,7 @@ async fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResul
 #[tokio::test]
 async fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
     let f = Fixture::new().await?;
-    f.author.persist_root_verified_directory(
-        &crate::client::identity_authority::test_support::public_manifest(&f.human)?,
-    )?;
+    f.author.persist_root_verified_directory(&f.human.local_own_copy_manifest()?)?;
     f.author.create_group("g", "author-device")?;
     f.author.add_group_member("g", f.human.owned_device_identity()?.storage_key(), "member")?;
     f.author.account_db()?.persist_client_record(
@@ -295,6 +293,33 @@ async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_sta
         f.human.account_db()?.actor_state_usage("surface/rpc-response/")?.0,
         0,
         "foreign authors cannot trigger RPC responses or error reports"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_root_history_cannot_bootstrap_a_foreign_author_renderer_checkpoint() -> TestResult {
+    let f = Fixture::new().await?;
+    create(&f)?;
+    let before = f.human.surface_list("thread", "", 100)?;
+    let mut checkpoint = serde_json::to_value(
+        f.author
+            .own_surface_history_export(None)?
+            .checkpoints
+            .first()
+            .ok_or("author checkpoint")?,
+    )?;
+    checkpoint["record"]["author_principal_id"] = json!("foreign-agent");
+    checkpoint["record"]["author_device_id"] = json!("foreign-device");
+    f.human.import_owned_surface_checkpoints(&[serde_json::from_value(checkpoint)?])?;
+    assert_eq!(
+        f.human.surface_list("thread", "", 100)?,
+        before,
+        "authenticated same-root history cannot replace local creator-registry authority"
+    );
+    assert!(
+        f.human.surface_state_scoped("thread", "foreign-agent", "s")?.is_none(),
+        "foreign checkpoints cannot install signed-base state"
     );
     Ok(())
 }

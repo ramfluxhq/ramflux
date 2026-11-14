@@ -137,7 +137,8 @@ async fn r3_repeated_conflicts_stop_durably_without_resending_a_known_stale_resu
     assert_eq!(host.checkpoint().cursor, Some(20));
     assert_eq!(
         host.checkpoint().last_refusal.as_ref().ok_or("refusal")?.reason,
-        ramflux_sdk::SurfaceRefusalCode::StaleVersion
+        ramflux_sdk::SurfaceRefusalCode::StaleHash,
+        "a same-version v3 resync with a different commitment is a hash conflict"
     );
     let requests = bus.requests.len();
     drop(host);

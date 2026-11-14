@@ -224,14 +224,12 @@ async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps()
             text: "@agent checklist",
         })?;
         let Intent::CreateSurface(content) = &intents[0] else { return Err("create".into()) };
-        let mut checkpoint = serde_json::to_value(content)?;
-        let map = checkpoint.as_object_mut().ok_or("checkpoint object")?;
-        map.insert("conversationId".into(), json!("group-thread"));
-        map.insert("surfaceVersion".into(), json!(1));
-        let state = SurfaceState::from_checkpoint_bytes(&ramflux_protocol::canonical_json_bytes(
-            &checkpoint,
-        )?)?;
-        let bytes = state.resync_frame()?.wire_bytes()?;
+        let frame: ramflux_protocol::EventFrame = serde_json::from_value(json!({
+            "schema":ramflux_protocol::EVENT_SCHEMA,"conversationId":"group-thread",
+            "surfaceVersion":1,"newSurfaceHash":"","fallbackText":content.fallback_text,
+            "a2ui":{"version":"1.0","createSurface":content.create()}
+        }))?;
+        let bytes = SurfaceState::default().prepare_event(frame)?.wire_bytes()?;
         bus.state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(&bytes)?)?;
         bus.decision()?;
         let id = format!("choice-{i}");

@@ -150,10 +150,9 @@ impl RamfluxClient {
         let outcome = self.evaluate_surface(carrier, &payload, outbound)?;
         if !outcome.accepted {
             if !outbound
-                && outcome
-                    .renderer_error
-                    .as_ref()
-                    .is_some_and(|error| error["code"] == "surface_hash_mismatch")
+                && outcome.renderer_error.as_ref().is_some_and(|error| {
+                    error.pointer("/reject/reject").and_then(Value::as_str) == Some("integrity")
+                })
                 && let Payload::Event(event) = &payload
             {
                 self.mark_surface_out_of_sync(carrier, event.version())?;

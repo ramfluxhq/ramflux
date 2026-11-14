@@ -166,11 +166,31 @@ fn v3_mutations_append_and_resync_round_trip_without_legacy_shapes() -> TestResu
     let state = ramflux_protocol::SurfaceState::validate_proof(&native)?;
     let frame = state.resync_frame()?;
     let event = g::SurfaceEvent {
-        closed: Some(false),
+        schema: frame.schema,
+        conversation_id: frame.conversation_id,
+        surface_version: frame.surface_version,
+        base_surface_hash: frame.base_surface_hash,
+        new_surface_hash: frame.new_surface_hash,
+        fallback_text: frame.fallback_text,
+        close_reason: frame.close_reason,
+        closed: frame.closed,
+        metadata: frame
+            .metadata
+            .as_ref()
+            .map(|value| object(&serde_json::to_value(value)?))
+            .transpose()?,
+        r#final: frame
+            .final_
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| g::SurfaceFinalEntry {
+                pointer: entry.pointer,
+                text_hash: entry.text_hash,
+            })
+            .collect(),
         operation: Some(g::surface_event::Operation::Resync(g::SurfaceResync {
             a2ui: Some(object(&serde_json::to_value(frame.resync.ok_or("resync")?.a2ui)?)?),
         })),
-        ..create
     };
     round_trip(delivery(surface_carrier::Payload::Event(event)), b"resync")?;
     Ok(())

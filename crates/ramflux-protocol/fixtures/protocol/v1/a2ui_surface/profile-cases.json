@@ -101,7 +101,8 @@
             "value": {
               "@path": "/note"
             },
-            "variant": "obscured"
+            "variant": "obscured",
+            "label": "Note"
           }
         ],
         "dataModel": {
@@ -330,7 +331,8 @@
             "component": "TextField",
             "value": {
               "@path": "/url"
-            }
+            },
+            "label": "Note"
           },
           {
             "id": "link",

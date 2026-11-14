@@ -25,7 +25,10 @@ impl RamfluxClient {
                 && (carrier.payload_kind == PayloadKind::Event
                     || carrier.payload_kind == PayloadKind::ActionReceipt)
             {
-                self.drain_surface_pending(&carrier.surface_reference()?)?;
+                let reference = carrier.surface_reference()?;
+                if self.surface_state_ref(&reference)?.is_some() {
+                    self.drain_surface_pending(&reference)?;
+                }
             }
             Ok(Some(result))
         })

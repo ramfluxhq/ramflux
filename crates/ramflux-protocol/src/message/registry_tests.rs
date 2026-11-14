@@ -107,7 +107,7 @@ fn verify_approved_fields() -> TestResult {
         assert_eq!(actual, expected, "{message}.{name}");
         count += 1;
     }
-    assert_eq!(count, 518, "approved native mapping coverage includes both call authority fields");
+    assert_eq!(count, 484, "v3 native mapping inventory covers every descriptor field");
     Ok(())
 }
 

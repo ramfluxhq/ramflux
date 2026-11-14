@@ -96,7 +96,7 @@ impl Intent {
         if let Self::ReplaceSurface(snapshot) = self {
             let mut frame = state.resync_frame().map_err(|_| Error::State)?;
             frame.surface_version = state.version().checked_add(1).ok_or(Error::Limit)?;
-            frame.new_surface_hash = snapshot.hash().map_err(|_| Error::Limit)?;
+            frame.new_surface_hash = String::new();
             frame.fallback_text = Some(snapshot.fallback_text.clone());
             frame.final_ = Some(snapshot.final_.clone());
             frame.closed = Some(snapshot.closed);
@@ -104,7 +104,10 @@ impl Intent {
             frame.resync = Some(ramflux_protocol::Resync {
                 a2ui: MutationMessage::new(Mutation::CreateSurface(snapshot.create())),
             });
-            return Ok(frame);
+            return state.prepare_event(frame).map_err(|error| match error {
+                ramflux_protocol::SurfaceReject::Limit => Error::Limit,
+                _ => Error::State,
+            });
         }
         let mut frame = EventFrame {
             schema: EVENT_SCHEMA.into(),
@@ -132,7 +135,10 @@ impl Intent {
             }
             Self::ReplyText(_) | Self::ReplaceSurface(_) => return Err(Error::State),
         }
-        state.prepare_event(frame).map_err(|_| Error::State)
+        state.prepare_event(frame).map_err(|error| match error {
+            ramflux_protocol::SurfaceReject::Limit => Error::Limit,
+            _ => Error::State,
+        })
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -358,7 +364,11 @@ impl EngineProvider for RuleEngine {
         let model = snapshot.data_model.as_object_mut().ok_or(Error::State)?;
         model.insert("result".into(), json!(result));
         snapshot.fallback_text = result;
-        let mut intents = vec![Intent::ReplaceSurface(snapshot)];
+        let mut intents = if &snapshot == input.snapshot {
+            Vec::new()
+        } else {
+            vec![Intent::ReplaceSurface(snapshot)]
+        };
         if surface.close_on_action {
             intents.push(Intent::CloseSurface(DeleteSurface {
                 surface_id: input.snapshot.surface_id.clone(),
@@ -380,4 +390,52 @@ pub(crate) fn chunks(text: &str, bytes: usize) -> Vec<&str> {
         tail = &tail[end..];
     }
     parts
+}
+
+#[cfg(test)]
+mod surface_intent_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_hash_uses_the_canonical_pruned_component_order()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let snapshot = SurfaceSnapshot {
+            surface_id: "surface".into(),
+            catalog_id: CATALOG_ID.into(),
+            fallback_text: "Working".into(),
+            metadata: None,
+            components: vec![
+                json!({"id":"root","component":"Column","children":["label"]}),
+                json!({"id":"label","component":"Text","text":{"@path":"/text"}}),
+            ],
+            data_model: json!({"text":"old"}),
+            final_: Vec::new(),
+            closed: false,
+        };
+        let frame =
+            Intent::CreateSurface(snapshot).frame("conversation", &SurfaceState::default())?;
+        let initial = SurfaceState::default()
+            .apply(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
+        let mut replacement = initial.content().ok_or("initial snapshot")?.clone();
+        replacement.components.reverse();
+        replacement
+            .data_model
+            .as_object_mut()
+            .ok_or("model object")?
+            .insert("text".into(), json!("new"));
+        let frame = Intent::ReplaceSurface(replacement).frame("conversation", &initial)?;
+        let committed = initial
+            .apply(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
+        assert_eq!(
+            committed.content().ok_or("replacement")?.data_model.get("text"),
+            Some(&json!("new")),
+            "unordered component definitions must not produce an invalid replacement commitment"
+        );
+        assert_eq!(
+            committed.hash(),
+            Some(frame.new_surface_hash.as_str()),
+            "the sender and recipient hash the same canonical signed base"
+        );
+        Ok(())
+    }
 }

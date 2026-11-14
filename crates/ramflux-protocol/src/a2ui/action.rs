@@ -98,7 +98,7 @@ impl SurfaceAction {
     /// # Errors
     /// Refuses extra fields, invalid version/schema, identifiers and argument commitments.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, Reject> {
-        let raw: Value = decode_canonical(bytes, MAX_STATE_BYTES)?;
+        let raw: Value = decode_canonical(bytes, MAX_STATE_BYTES * 2 + MAX_DELTA_BYTES)?;
         super::wire::reject_null_fields(&raw, &["taskBinding"])?;
         if let Some(action) = raw.pointer("/a2ui/action") {
             super::wire::reject_null_fields(action, &["userMessage", "metadata"])?;

@@ -4,7 +4,8 @@
 //! Group recovery is a bounded pair reply, without group broadcasts or unrelated timeline writes.
 use super::*;
 use crate::bus::runtime_tests;
-use crate::client::surface::test_support::{create_frame, text_snapshot};
+use crate::client::surface::SurfaceSender;
+use crate::client::surface::test_support::{create_frame, native_transport_config, text_snapshot};
 use std::sync::{Arc, Mutex};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Group {
@@ -47,17 +48,19 @@ impl Group {
         }
         let (address, directory) = super::fixture::directory(&root, manifests).await?;
         let branch = source_client.device_branch.as_ref().ok_or("source branch")?;
-        let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse()?,
-            gateway_addr: address,
-            server_name: "test-gateway".into(),
-            ca_cert: root.join("ca.pem"),
-            principal_id: branch.principal_id.clone(),
-            device_id: branch.device_id.clone(),
-            target_delivery_id: branch.device_id.clone(),
-            prekey_http_url: None,
-        })
-        .with_account_identity(&source_client)?;
+        let config = native_transport_config(
+            GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+                bind_addr: "127.0.0.1:0".parse()?,
+                gateway_addr: address,
+                server_name: "test-gateway".into(),
+                ca_cert: root.join("ca.pem"),
+                principal_id: branch.principal_id.clone(),
+                device_id: branch.device_id.clone(),
+                target_delivery_id: branch.device_id.clone(),
+                prekey_http_url: None,
+            }),
+            &source_client,
+        )?;
         let snapshot = text_snapshot("surface", "中文 é 🦀", "");
         let request = crate::SurfaceSendRequest::event(&create_frame("thread", &snapshot)?)?;
         let create = source_client.sign_surface_carrier(Carrier {
@@ -169,7 +172,7 @@ impl Group {
             endpoint.principal_id = branch.principal_id.clone();
             endpoint.device_id = branch.device_id.clone();
             endpoint.target_delivery_id = branch.device_id.clone();
-            endpoint = endpoint.with_account_identity(&client)?;
+            endpoint = native_transport_config(endpoint, &client)?;
             let commitment = client.local_own_copy_manifest()?.principal_commitment;
             let engine = GatewaySessionEngine::with_test_transport(
                 endpoint,
@@ -188,7 +191,7 @@ impl Group {
         config.principal_id = branch.principal_id.clone();
         config.device_id = branch.device_id.clone();
         config.target_delivery_id = branch.device_id.clone();
-        config = config.with_account_identity(&self.peers[index].client)?;
+        config = native_transport_config(config, &self.peers[index].client)?;
         Ok(config)
     }
     async fn request(&mut self, index: usize) -> TestResult<ramflux_protocol::Envelope> {
@@ -267,7 +270,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         let config = group.peer_config(index)?;
         let envelope = frames
             .iter()
-            .find(|e| e.target_delivery_id == config.device_id)
+            .find(|e| e.target_delivery_id == config.target_delivery_id)
             .ok_or("targeted reply")?
             .clone();
         let mut engine = GatewaySessionEngine::with_test_transport(
@@ -367,7 +370,7 @@ pub(super) async fn native_pair_resync() -> TestResult {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .find(|e| e.target_delivery_id == peer_config.device_id)
+        .find(|e| e.target_delivery_id == peer_config.target_delivery_id)
         .cloned()
         .ok_or("private reply")?;
     let pool = ramflux_transport::RelayQuicPool::new(

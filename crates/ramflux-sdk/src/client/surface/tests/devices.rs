@@ -37,7 +37,10 @@ pub(super) fn entry(
         target_delivery_id: "test-target".into(),
         prekey_http_url: None,
     };
-    let config = crate::GatewaySessionConfig::quic(endpoint).with_account_identity(source)?;
+    let config = super::super::test_support::native_transport_config(
+        crate::GatewaySessionConfig::quic(endpoint),
+        source,
+    )?;
     let message = crate::GatewayDirectMessage {
         conversation_id: "thread".into(),
         message_id: id.into(),

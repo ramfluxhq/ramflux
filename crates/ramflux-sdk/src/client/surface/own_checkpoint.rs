@@ -151,9 +151,15 @@ impl RamfluxClient {
         &self,
         owned: &OwnedSurfaceCheckpoint,
     ) -> Result<(), SdkError> {
+        let record = &owned.record;
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if record.author_principal_id != local.principal_id
+            && !self.surface_author_is_own_agent(&record.author_principal_id)?
+        {
+            return Err(invalid("owned checkpoint author is not a locally owned agent"));
+        }
         self.validate_owned_checkpoint_namespace(owned)?;
         self.check_owned_surface_floor(&owned.conversation, owned.group_epoch)?;
-        let record = &owned.record;
         let reference = super::scope::surface_reference(
             &record.conversation_id,
             &record.author_principal_id,
