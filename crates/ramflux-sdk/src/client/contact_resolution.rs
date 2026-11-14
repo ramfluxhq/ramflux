@@ -307,8 +307,8 @@ impl RamfluxClient {
                 .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
             {
                 Ok(state) => state == "verified",
-                // Authority unavailable and a rootless session are refusals, not U.
-                Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => false,
+                // Authority unavailable is state A. A missing account root is an error.
+                Err(SdkError::NetworkingPending) => false,
                 Err(error) => return Err(error),
             }
         } else {

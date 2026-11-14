@@ -7,15 +7,12 @@ use super::tests::{call, finished};
 use crate::client::native_test_support::Fixture;
 use crate::custody::tests::{Root, TestVault, create};
 use crate::prelude::*;
-use prost::Message as _;
 use ramflux_crypto::backup_stream::BackupStreamDecoder;
 use ramflux_protocol::message as g;
 use serde_json::json;
 use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const GRANT: &str = "identity/contact_safety_confirmation/peer";
-const ORIGIN: &str = "identity/contact_safety_origin_inner/peer";
 const MERGED: &str = "directory/conversation/cas-restore";
 
 fn grant_rows(path: &std::path::Path, key: &ramflux_storage::AccountDbKey) -> TestResult<i64> {
@@ -47,70 +44,15 @@ fn unpack_archive(
     Ok(ramflux_storage::AccountDbKey::from_bytes(metadata.database_key))
 }
 
-fn live_grants(root: &std::path::Path) -> TestResult<(bool, bool)> {
+fn live_grants(root: &std::path::Path, grant: &str, origin: &str) -> TestResult<(bool, bool)> {
     let mut client = RamfluxClient::new();
     client.open_account_index(root)?;
     client.unlock_account("account", LOCAL_SECRET.as_bytes())?;
     let db = client.account_db()?;
-    Ok((db.actor_state_exists(GRANT)?, db.actor_state_exists(ORIGIN)?))
+    Ok((db.actor_state_exists(grant)?, db.actor_state_exists(origin)?))
 }
 
-async fn real_safety_evidence() -> TestResult<(String, String)> {
-    let source = Fixture::new("cas-archive-source").await?;
-    let peer = Fixture::new("cas-archive-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    source.client.establish_friend_link(
-        "archive-link",
-        &source.manifest.principal_commitment,
-        &peer.manifest.principal_commitment,
-    )?;
-    crate::client::contact_verification_cas::verify_linked_contact(
-        &source.client,
-        &peer.manifest.principal_commitment,
-    )?;
-    let db = source.client.account_db()?;
-    let grant = db
-        .load_actor_state::<String>(&format!(
-            "identity/contact_safety_confirmation/{}",
-            peer.manifest.principal_commitment
-        ))?
-        .ok_or("confirmation")?;
-    let origin = db
-        .load_actor_state::<String>(&format!(
-            "identity/contact_safety_origin_inner/{}",
-            peer.manifest.principal_commitment
-        ))?
-        .ok_or("origin")?;
-    g::ContactSafetyConfirmation::decode(
-        ramflux_protocol::decode_base64url(&grant).map_err(|_| "grant bytes")?.as_slice(),
-    )
-    .map_err(|_| "grant is not a confirmation")?;
-    g::Inner::decode(
-        ramflux_protocol::decode_base64url(&origin).map_err(|_| "origin bytes")?.as_slice(),
-    )
-    .map_err(|_| "origin is not an inner")?;
-    Ok((grant, origin))
-}
-
-async fn history_denial(root: &std::path::Path) -> TestResult {
-    let source = Fixture::new("cas-history-source").await?;
-    let peer = Fixture::new("cas-history-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    source.client.establish_friend_link(
-        "history-link",
-        &source.manifest.principal_commitment,
-        &peer.manifest.principal_commitment,
-    )?;
-    crate::client::contact_verification_cas::verify_linked_contact(
-        &source.client,
-        &peer.manifest.principal_commitment,
-    )?;
-    let inner = source.client.account_db()?.load_actor_state::<String>(&format!(
-        "identity/contact_safety_origin_inner/{}",
-        peer.manifest.principal_commitment
-    ))?;
-    let inner =
-        ramflux_protocol::decode_base64url(&inner.ok_or("origin")?).map_err(|_| "origin bytes")?;
+fn history_denial(root: &std::path::Path, inner: Vec<u8>, grant: &str, origin: &str) -> TestResult {
     let mut restored = RamfluxClient::new();
     restored.open_account_index(root)?;
     restored.unlock_account("account", LOCAL_SECRET.as_bytes())?;
@@ -122,18 +64,19 @@ async fn history_denial(root: &std::path::Path) -> TestResult {
         original_metadata_evidence: None,
     };
     assert!(
-        !restored
-            .import_generated_history_message(&source.client.owned_device_identity()?, &item)?,
+        !restored.import_generated_history_message(&restored.owned_device_identity()?, &item)?,
         "history replay cannot import a verification grant"
     );
-    assert!(!restored.account_db()?.actor_state_exists(GRANT)?);
-    assert!(!restored.account_db()?.actor_state_exists(ORIGIN)?);
+    assert!(!restored.account_db()?.actor_state_exists(grant)?);
+    assert!(!restored.account_db()?.actor_state_exists(origin)?);
     Ok(())
 }
 
 async fn install_without_importing_grant(
     root: &std::path::Path,
     archive: &std::path::Path,
+    grant: &str,
+    origin: &str,
 ) -> TestResult {
     let target = native_tests::supervisor(root)?;
     let id = native_tests::verify(&target, archive).await?;
@@ -148,16 +91,16 @@ async fn install_without_importing_grant(
         Some(json!({"merged": true})),
         "live data merge restores a non-grant row"
     );
-    assert!(reopened.account_db()?.actor_state_exists(GRANT)?, "matching live evidence survives");
-    reopened.account_db()?.remove_actor_state(GRANT)?;
-    reopened.account_db()?.remove_actor_state(ORIGIN)?;
+    assert!(reopened.account_db()?.actor_state_exists(grant)?, "matching live evidence survives");
+    reopened.account_db()?.remove_actor_state(grant)?;
+    reopened.account_db()?.remove_actor_state(origin)?;
     drop(reopened);
     let again = native_tests::supervisor(root)?;
     let second = native_tests::verify(&again, archive).await?;
     call(&again, "account.restore.install", None, json!({"job_id": second})).await?;
     finished(&again, &second, crate::backup::BackupJobState::Done).await?;
     again.shutdown().await?;
-    assert_eq!(live_grants(root)?, (false, false), "a fresh grant is not imported");
+    assert_eq!(live_grants(root, grant, origin)?, (false, false), "a fresh grant is not imported");
     Ok(())
 }
 
@@ -177,19 +120,28 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
                 LOCAL_SECRET.as_bytes(),
             )?;
             client.unlock_account("account", LOCAL_SECRET.as_bytes())?;
-            client.observe_custody_manifest(
-                &ramflux_protocol::custody::CustodyManifest {
-                    publication: account.publication(),
-                    custodian_publication: None,
-                    devices: Vec::new(),
-                },
-                &account.record().body.account_anchor,
-                crate::custody::network_now()?,
+            client.initialize_born_v3_branch("primary", vault.clone()).await?;
+            let peer = Fixture::new("cas-restore-peer").await?;
+            let peer_root = peer.manifest.principal_commitment.clone();
+            let grant_key = format!("identity/contact_safety_confirmation/{peer_root}");
+            let origin_key = format!("identity/contact_safety_origin_inner/{peer_root}");
+            client.persist_fetched_identity_directory(&peer.manifest)?;
+            client.establish_friend_link(
+                "restore-link",
+                &client.own_account_anchor()?,
+                &peer_root,
             )?;
-            let evidence = real_safety_evidence().await?;
+            let verified = crate::client::contact_verification_cas::verify_linked_contact(
+                &client, &peer_root,
+            )?;
+            assert_eq!(verified.verification_state, "verified");
+            let origin_text = client
+                .account_db()?
+                .load_actor_state::<String>(&origin_key)?
+                .ok_or("destination origin")?;
+            let origin_bytes = ramflux_protocol::decode_base64url(&origin_text)
+                .map_err(|_| "destination origin bytes")?;
             let db = client.account_db()?;
-            db.persist_actor_state(GRANT, &evidence.0)?;
-            db.persist_actor_state(ORIGIN, &evidence.1)?;
             db.persist_actor_state(MERGED, &json!({"merged": true}))?;
             drop(client);
             let source = native_tests::supervisor(&root.0)?;
@@ -206,7 +158,10 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
             let mut live = RamfluxClient::new();
             live.open_account_index(&root.0)?;
             live.unlock_account("account", LOCAL_SECRET.as_bytes())?;
-            assert!(live.account_db()?.actor_state_exists(GRANT)?, "export leaves the live grant");
+            assert!(
+                live.account_db()?.actor_state_exists(&grant_key)?,
+                "export leaves the live grant"
+            );
             live.account_db()?.remove_actor_state(MERGED)?;
             drop(live);
             vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -222,7 +177,7 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
             finished(&locked, &locked_id, crate::backup::BackupJobState::Verified).await?;
             locked.shutdown().await?;
             assert_eq!(
-                live_grants(&root.0)?,
+                live_grants(&root.0, &grant_key, &origin_key)?,
                 (true, true),
                 "a failed restore preserves the destination"
             );
@@ -232,8 +187,16 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
             assert!(cleared.account_db()?.load_actor_state::<serde_json::Value>(MERGED)?.is_none());
             drop(cleared);
             vault.fail.store(false, std::sync::atomic::Ordering::SeqCst);
-            install_without_importing_grant(&root.0, &archive).await?;
-            history_denial(&root.0).await?;
+            install_without_importing_grant(&root.0, &archive, &grant_key, &origin_key).await?;
+            history_denial(&root.0, origin_bytes, &grant_key, &origin_key)?;
+            let mut reopened = RamfluxClient::new();
+            reopened.open_account_index(&root.0)?;
+            reopened.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+            reopened.initialize_born_v3_branch("primary", vault.clone()).await?;
+            let renewed = crate::client::contact_verification_cas::verify_linked_contact(
+                &reopened, &peer_root,
+            )?;
+            assert_eq!(renewed.verification_state, "verified", "fresh comparison re-verifies");
             Ok(())
         }))
         .await

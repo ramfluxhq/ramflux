@@ -127,8 +127,9 @@ impl RamfluxClient {
             };
             let _ = verify(&own)?;
             let _ = verify(&peer)?;
-            self.persist_fetched_identity_directory(&own)?;
-            self.persist_fetched_identity_directory(&peer)?;
+            // The candidate stays off the principal pin until compare-and-record commits.
+            self.retain_fetched_candidate(&own)?;
+            self.retain_fetched_candidate(&peer)?;
         }
         super::contact_verification_cas::compared_safety_json(self, root)
     }

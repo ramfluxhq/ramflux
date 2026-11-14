@@ -11,10 +11,8 @@ use super::runtime::Client;
 use super::state;
 use super::tests::{deadline, take_buffer};
 use super::*;
-use crate::bus::mutation_intent::MutationIntent;
+use crate::LocalBusConfig;
 use crate::c_abi::RamfluxErrorCode;
-use crate::{LocalBusConfig, LocalBusFrame};
-use ramflux_storage::{AccountDb, AccountDbKey, AccountIndex};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -196,38 +194,118 @@ fn refuse_execute_and_reconcile() {
     reconcile_conflict();
 }
 
+fn committed_account()
+-> (crate::custody::tests::Root, ramflux_protocol::message::ExpectedContactSafety) {
+    let runtime =
+        tokio::runtime::Builder::new_current_thread().enable_all().build().expect("test: runtime");
+    runtime.block_on(async {
+        let local = crate::client::native_test_support::Fixture::new("cas-abi-commit")
+            .await
+            .expect("test: account");
+        let peer = crate::client::native_test_support::Fixture::new("cas-abi-peer")
+            .await
+            .expect("test: peer");
+        local
+            .client
+            .persist_fetched_identity_directory(&peer.manifest)
+            .expect("test: peer directory");
+        let own = local.client.own_account_anchor().expect("test: anchor");
+        let peer_root = peer.manifest.principal_commitment.clone();
+        local.client.establish_friend_link("cas-abi-link", &own, &peer_root).expect("test: link");
+        let expected = crate::client::contact_verification_cas::current_contact_safety_expectation(
+            &local.client,
+            &peer_root,
+        )
+        .expect("test: expectation");
+        (local.root, expected)
+    })
+}
+
 fn reconcile_conflict() {
-    let root = tempfile::tempdir().expect("test: account root");
-    let index = AccountIndex::open(root.path()).expect("test: index");
-    index.create_account("cas", "cas-principal").expect("test: account");
-    let db = AccountDb::open(&index, "cas", &AccountDbKey::generate().expect("test: key"))
-        .expect("test: database");
-    let mut first = LocalBusFrame::request(
-        "cas-1",
-        Some("cas".into()),
-        "contact",
-        "contact.verify",
-        json!({"expected":{"safety_number_hash":"one"}}),
-    );
-    first.operation_id = Some("cas-op".into());
-    let intent = MutationIntent::new(&first).expect("test: intent");
-    assert!(intent.reserve(&db).expect("test: reserve").is_none(), "first reserve has no receipt");
-    let pending = MutationIntent::new(&first).expect("test: pending").lookup(&db);
-    let pending = pending.expect_err("test: reconciliation");
+    let (root, expected) = committed_account();
+    let root_text = root.0.to_path_buf().display().to_string();
+    let config = serde_json::to_vec(&json!({"data_root": root_text})).expect("test: config");
+    let mut handle = 0;
     assert_eq!(
-        super::super::map_sdk_error(&pending).code,
-        RamfluxErrorCode::InvalidArgument,
-        "a lost post-admission response reconciles"
+        ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle),
+        0,
+        "supervisor opens the committed account"
     );
-    let mut changed = first.clone();
-    changed.body = json!({"expected":{"safety_number_hash":"two"}});
-    let conflict = MutationIntent::new(&changed).expect("test: conflict").reserve(&db);
-    let conflict = conflict.expect_err("test: conflict");
+    let unlock = serde_json::to_vec(&json!({
+        "account_id":"cas-abi-commit",
+        "sdk_api":"account",
+        "method":"account.unlock",
+        "body":{"passphrase":"native fixture data passphrase"},
+        "deadline_ms":deadline(),
+    }))
+    .expect("test: unlock");
+    let mut operation = 0;
+    assert_eq!(ramflux_v2_execute(handle, unlock.as_ptr(), unlock.len(), &raw mut operation), 0);
+    assert_eq!(super::tests::wait_result(handle, operation)["code"], 0, "unlock");
+    let body = serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+        expected: Some(expected.clone()),
+    })
+    .expect("test: verify body");
+    let submit = |request_body: &Value| {
+        let request = serde_json::to_vec(&json!({
+            "account_id":"cas-abi-commit",
+            "sdk_api":"contact",
+            "method":"contact.verify",
+            "body":request_body,
+            "operation_id":"cas-op",
+            "deadline_ms":deadline(),
+        }))
+        .expect("test: request");
+        let mut operation = 0;
+        assert_eq!(
+            ramflux_v2_execute(handle, request.as_ptr(), request.len(), &raw mut operation),
+            0
+        );
+        (operation, super::tests::wait_result(handle, operation))
+    };
+    let (committed_op, committed) = submit(&body);
+    assert_eq!(committed["code"], 0, "compare-and-record commits: {committed}");
+    assert!(
+        committed.to_string().contains("verified"),
+        "the committed result is verified: {committed}"
+    );
+    let (reconciled_op, reconciled) = submit(&body);
+    assert_eq!(reconciled["code"], 0, "the same operation reconciles: {reconciled}");
     assert_eq!(
-        super::super::map_sdk_error(&conflict).code,
-        RamfluxErrorCode::StorageFailed,
-        "a changed expectation under the same operation conflicts"
+        reconciled["response"]["body"], committed["response"]["body"],
+        "reconciliation returns the committed result"
     );
+    let mut changed = expected;
+    changed.safety_number_hash.push('x');
+    let changed_body =
+        serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+            expected: Some(changed),
+        })
+        .expect("test: changed body");
+    let (conflict_op, conflict) = submit(&changed_body);
+    assert_eq!(
+        conflict["code"],
+        RamfluxErrorCode::InvalidArgument as i32,
+        "a changed expectation under the same operation conflicts: {conflict}"
+    );
+    assert_eq!(
+        conflict["response"]["error"]["code"], "ValidationFailed",
+        "the bus publishes the operation mismatch as ValidationFailed"
+    );
+    let (replay_op, replay) = submit(&body);
+    assert_eq!(replay["code"], 0, "the original body still reconciles: {replay}");
+    assert_eq!(replay["response"]["body"], committed["response"]["body"]);
+    assert_eq!(ramflux_v2_operation_cancel(handle, committed_op), 0, "cancel keeps the waiter");
+    assert_eq!(
+        super::tests::wait_result(handle, committed_op),
+        committed,
+        "cancel of a committed result does not rewrite it"
+    );
+    assert_eq!(ramflux_v2_operation_release(handle, committed_op), 0);
+    assert_eq!(ramflux_v2_operation_release(handle, reconciled_op), 0);
+    assert_eq!(ramflux_v2_operation_release(handle, conflict_op), 0);
+    assert_eq!(ramflux_v2_operation_release(handle, replay_op), 0);
+    assert_eq!(ramflux_v2_client_close(handle), 0);
 }
 
 fn poll_resync_and_free() {

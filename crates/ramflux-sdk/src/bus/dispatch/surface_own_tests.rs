@@ -7,6 +7,13 @@ use crate::bus::runtime_tests;
 use crate::client::identity_authority::HeadUse;
 use ramflux_protocol::{A2uiConversationCommand, StreamAppendCommand};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+type ServedManifests = Arc<Mutex<std::collections::BTreeMap<String, serde_json::Value>>>;
+
+thread_local! {
+    static SERVED_MANIFESTS: std::cell::RefCell<Option<ServedManifests>> =
+        const { std::cell::RefCell::new(None) };
+}
 #[path = "surface_own_tests/followups.rs"]
 mod followups;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -72,7 +79,7 @@ async fn sibling_fixture_with_peer(
     source.client.persist_root_verified_directory(&own)?;
     sibling.client.persist_root_verified_directory(&own)?;
     sibling.client.persist_root_verified_directory(&remote)?;
-    let (address, directory) = super::fixture::directory(
+    let (address, directory, served) = super::fixture::directory_live(
         root,
         BTreeMap::from([
             (own.principal_commitment.clone(), serde_json::to_value(&own)?),
@@ -80,6 +87,7 @@ async fn sibling_fixture_with_peer(
         ]),
     )
     .await?;
+    SERVED_MANIFESTS.with(|slot| *slot.borrow_mut() = Some(served));
     let send = ramflux_crypto::DmSession::initiator(
         [79; 32],
         dm_device_id_hash("device-sender"),
@@ -713,6 +721,136 @@ fn fresh_sibling_gateway(
     Ok(gateway)
 }
 
+fn publish_served_manifest(manifest: &crate::prekey::SdkDeviceManifestResponse) -> TestResult {
+    let value = serde_json::to_value(manifest)?;
+    SERVED_MANIFESTS.with(|slot| {
+        let guard = slot.borrow();
+        let served = guard.as_ref().ok_or("served manifests")?;
+        served
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(manifest.principal_commitment.clone(), value);
+        Ok(())
+    })
+}
+
+fn advance_sender_roster(
+    source: &crate::RamfluxClient,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let own = source.own_account_anchor()?;
+    let mut manifest = source
+        .account_db()?
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{own}",
+        ))?
+        .ok_or_else(|| SdkError::LocalBus("own manifest absent".into()))?;
+    let epoch = manifest
+        .signed_device_set
+        .as_ref()
+        .ok_or_else(|| SdkError::LocalBus("own signed set absent".into()))?
+        .device_set_epoch
+        .saturating_add(1);
+    crate::client::identity_authority::test_support::sign_manifest(
+        source.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut manifest,
+        epoch,
+    )?;
+    source.persist_root_verified_directory(&manifest)?;
+    Ok(manifest)
+}
+
+async fn order_acknowledged_sibling_confirmation(
+    source: &mut LocalBusAccountState,
+    sibling: &mut LocalBusAccountState,
+    peer: &LocalBusAccountState,
+    sent: &Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
+    receiver: &GatewaySessionConfig,
+    peer_root: &str,
+) -> TestResult {
+    let confirmation_key = format!("identity/contact_safety_confirmation/{peer_root}");
+    let kept = sibling
+        .client
+        .account_db()?
+        .load_actor_state::<String>(&confirmation_key)?
+        .ok_or("confirmation")?;
+    let status_keys = source.client.account_db()?.actor_state_key_page("own-device/status/", 8)?;
+    let status_key = status_keys.first().ok_or("sender acknowledgement")?;
+    let status: serde_json::Value =
+        source.client.account_db()?.load_actor_state(status_key)?.ok_or("status")?;
+    assert_eq!(status["state"], "submitted");
+    assert_eq!(status["acknowledged"], true, "the sibling copy is acknowledged");
+    assert!(
+        source.client.account_db()?.actor_state_key_page("own-device/send/", 8)?.is_empty(),
+        "an acknowledged copy leaves the sender queue"
+    );
+    let stale_inner = ramflux_protocol::decode_base64url(
+        &source
+            .client
+            .account_db()?
+            .load_actor_state::<String>(&format!(
+                "identity/contact_safety_origin_inner/{peer_root}"
+            ))?
+            .ok_or("origin")?,
+    )
+    .map_err(|_| "origin bytes")?;
+    let mut remote = source
+        .client
+        .account_db()?
+        .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{peer_root}"
+        ))?
+        .ok_or("peer manifest")?;
+    let epoch =
+        remote.signed_device_set.as_ref().ok_or("signed set")?.device_set_epoch.saturating_add(1);
+    crate::client::identity_authority::test_support::sign_manifest(
+        peer.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &mut remote,
+        epoch,
+    )?;
+    source.client.persist_root_verified_directory(&remote)?;
+    sibling.client.persist_root_verified_directory(&remote)?;
+    publish_served_manifest(&remote)?;
+    // The copy id is bound to the sender roster. Advance that roster so the stale body is a new copy.
+    publish_served_manifest(&advance_sender_roster(&source.client)?)?;
+    assert!(source.client.stage_exact_own_contact_inner(&stale_inner)?);
+    assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
+    let stale_packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(receiver, &entry(stale_packet, 2)).await?);
+    assert_eq!(
+        sibling.client.account_db()?.load_actor_state::<String>(&confirmation_key)?.as_deref(),
+        Some(kept.as_str()),
+        "stale sibling evidence does not replace the current confirmation"
+    );
+    assert_eq!(
+        sibling.client.contact_safety_number(peer_root)?.verification_state,
+        "verification_stale"
+    );
+    let renewed =
+        crate::client::contact_verification_cas::verify_linked_contact(&source.client, peer_root)?;
+    assert_eq!(renewed.verification_state, "verified");
+    assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
+    let fresh = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(receiver, &entry(fresh, 3)).await?);
+    let current = sibling
+        .client
+        .account_db()?
+        .load_actor_state::<String>(&confirmation_key)?
+        .ok_or("renewed confirmation")?;
+    assert_ne!(current, kept, "the sibling installs the fresh comparison");
+    assert_eq!(sibling.client.contact_safety_number(peer_root)?.verification_state, "verified");
+    publish_served_manifest(&advance_sender_roster(&source.client)?)?;
+    assert!(source.client.stage_exact_own_contact_inner(&stale_inner)?);
+    assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
+    let older = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(sibling.client.receive_own_device_message(receiver, &entry(older, 4)).await?);
+    assert_eq!(
+        sibling.client.account_db()?.load_actor_state::<String>(&confirmation_key)?.as_deref(),
+        Some(current.as_str()),
+        "an older origin cannot overwrite the current sibling confirmation"
+    );
+    Ok(())
+}
+
 pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
     let root = runtime_tests::root("cas-sibling-e2ee");
     let mut source = runtime_tests::account(
@@ -721,7 +859,7 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory, peer) =
+    let (mut sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, true).await?;
     let own = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
@@ -743,12 +881,15 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
         "verified",
         "the sibling device installs the compared confirmation"
     );
-    assert!(
-        sibling
-            .client
-            .account_db()?
-            .actor_state_exists(&format!("identity/contact_safety_confirmation/{peer_root}"))?
-    );
+    order_acknowledged_sibling_confirmation(
+        &mut source,
+        &mut sibling,
+        &peer,
+        &sent,
+        &receiver,
+        &peer_root,
+    )
+    .await?;
     directory.abort();
     drop((source, sibling, peer));
     Ok(())

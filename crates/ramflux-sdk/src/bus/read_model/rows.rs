@@ -157,8 +157,8 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved.get("device_set_hash").and_then(Value::as_str),
     ) {
         Ok(state) => json!(state),
-        // A and a rootless session are refusals, not a persisted U state.
-        Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => Value::Null,
+        // Authority unavailable is state A and is not persisted as unverified.
+        Err(SdkError::NetworkingPending) => Value::Null,
         Err(error) => return Err(error),
     };
     let profile = client.read_profile_facts(id).map(|facts| facts.profile.clone());

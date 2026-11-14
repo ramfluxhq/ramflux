@@ -69,7 +69,8 @@ impl RamfluxClient {
     }
     /// Returns a signed kind only after the user verified this contact's current safety material.
     /// # Errors
-    /// Returns storage errors. An unverified, stale or legacy contact returns None.
+    /// Returns storage errors and [`SdkError::IdentityRootMissing`] when this account has no root.
+    /// An unverified or stale contact, or unavailable authority, returns None.
     pub fn verified_principal_kind(
         &self,
         principal: &str,
@@ -84,7 +85,7 @@ impl RamfluxClient {
             .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
         {
             Ok(state) => state == "verified",
-            Err(SdkError::NetworkingPending | SdkError::IdentityRootMissing) => false,
+            Err(SdkError::NetworkingPending) => false,
             Err(error) => return Err(error),
         };
         if verified { self.root_asserted_principal_kind(principal) } else { Ok(None) }

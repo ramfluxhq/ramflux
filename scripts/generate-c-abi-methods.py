@@ -5,6 +5,7 @@ import argparse
 import json
 import pathlib
 import re
+import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/ramflux-sdk/src/c_abi/v2/method_policy.rs"
@@ -26,6 +27,32 @@ CAS_REQUIRED = (
 )
 
 
+def require_implementation_pin(pin, descriptor):
+    if not re.fullmatch(r"[0-9a-f]{40}", pin):
+        raise SystemExit("contact.verify product pin must name a 40-character commit")
+    kind = subprocess.run(
+        ["git", "cat-file", "-t", pin], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    if kind.returncode != 0 or kind.stdout.strip() != "commit":
+        raise SystemExit("contact.verify product pin is not an immutable commit")
+    shown = subprocess.run(
+        ["git", "show", f"{pin}:crates/ramflux-sdk/src/c_abi/v2/method_policy.rs"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    policy = shown.stdout
+    if (
+        shown.returncode != 0
+        or "CONTACT-VERIFY-CAS-01" not in policy
+        or descriptor not in policy
+        or 'capability="contact.verify.cas"' not in policy
+        and 'CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas"' not in policy
+    ):
+        raise SystemExit("contact.verify product pin does not contain the CAS descriptor policy")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
@@ -41,6 +68,10 @@ def main():
     consts = dict(CAS_CONST.findall(source))
     if any(not consts.get(name) for name in CAS_REQUIRED):
         raise SystemExit("contact.verify CAS metadata constants are incomplete")
+    require_implementation_pin(
+        consts["CONTACT_VERIFY_CAS_PRODUCT_PIN"],
+        consts["CONTACT_VERIFY_CAS_DESCRIPTOR"],
+    )
     cas_fields = {
         "contract": consts["CONTACT_VERIFY_CAS_CONTRACT"],
         "request_type": consts["CONTACT_VERIFY_CAS_REQUEST_TYPE"],

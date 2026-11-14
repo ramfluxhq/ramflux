@@ -38,8 +38,32 @@ impl RamfluxClient {
         expected: &str,
         now: u64,
     ) -> Result<(), SdkError> {
+        self.record_custody_observation(manifest, expected, now, true)
+    }
+
+    /// Keep an authenticated candidate head for a later compare-and-record.
+    ///
+    /// The principal pin is unchanged. Only the guarded CAS commit may move it.
+    /// # Errors
+    /// Rejects malformed evidence, wrong roots, rollback, equivocation and storage errors.
+    pub(crate) fn retain_candidate_custody(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        self.record_custody_observation(manifest, expected, now, false)
+    }
+
+    fn record_custody_observation(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+        now: u64,
+        adopt_directory: bool,
+    ) -> Result<(), SdkError> {
         let verified = verify_native_authority(manifest, expected, now)?;
-        self.prepare_local_custody_floor(manifest, expected, &verified, now)?;
+        self.prepare_local_custody_floor(manifest, expected, &verified, now, adopt_directory)?;
         let db = self.account_db()?;
         let state_key = key(expected)?;
         // Persist a detected fence even though the caller receives a refusal.
@@ -79,10 +103,25 @@ impl RamfluxClient {
         self.current_custody_authority(expected, now)?
             .ok_or_else(|| invalid("custody authority absent"))?;
         verify_native_material(manifest, expected, now)?;
+        if !adopt_directory {
+            return Ok(());
+        }
+        self.adopt_observed_directory(manifest, expected, now, &verified)
+    }
+
+    fn adopt_observed_directory(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+        now: u64,
+        verified: &VerifiedRecord,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let state_key = key(expected)?;
         db.write_transaction(|| -> Result<(), SdkError> {
             let current = db.load_actor_state::<RetainedAuthority>(&state_key)?
                 .ok_or_else(|| invalid("custody authority absent"))?;
-            current.pins.require_current(&verified)?;
+            current.pins.require_current(verified)?;
             let body = &verified.envelope().body;
             let old = db.client_record("identity", &body.principal_id)?;
             if old.as_ref().and_then(|row| row["contact_identity_commitment"].as_str())
@@ -90,8 +129,8 @@ impl RamfluxClient {
             { return Err(invalid("principal root changed")); }
             let previous_name = old.as_ref().and_then(|row| row["display_name"].as_str()).map(str::to_owned);
             let previous_fingerprint = old.as_ref().and_then(|row| row["device_set_hash"].as_str()).map(str::to_owned);
-            let fingerprint = native_fingerprint(&verified)?;
-            let retained = retained_routes(old.as_ref(), &verified, expected, now);
+            let fingerprint = native_fingerprint(verified)?;
+            let retained = retained_routes(old.as_ref(), verified, expected, now);
             let mut row = old.unwrap_or_else(|| json!({"id":body.principal_id,"principal_id":body.principal_id}));
             row["contact_identity_commitment"] = json!(expected);
             row["root_public_key"] = json!(body.master_certificate.body.master_public_key);
@@ -128,7 +167,7 @@ impl RamfluxClient {
             db.persist_actor_state(&format!("identity/manifest-root/{expected}"), &sdk)?;
             for device in &manifest.devices {
                 let cert = verified.authorize(&device.device_ref, "message", now)?;
-                let identity = RootQualifiedDeviceRef::from_custody_record(&verified, &device.device_ref.device_id)?;
+                let identity = RootQualifiedDeviceRef::from_custody_record(verified, &device.device_ref.device_id)?;
                 let agreement = ramflux_protocol::decode_base64url(&cert.agreement_identity_public_key).map_err(|_| invalid("invalid custody agreement encoding"))?;
                 db.persist_client_record("device", identity.storage_key(), &json!({
                     "device_id": device.device_ref.device_id, "device_epoch": device.device_ref.device_epoch,
@@ -148,12 +187,13 @@ impl RamfluxClient {
         expected: &str,
         verified: &VerifiedRecord,
         now: u64,
+        adopt_directory: bool,
     ) -> Result<(), SdkError> {
         self.invalidate_changed_custody_head(
             expected,
             &ramflux_protocol::custody::object_hash(verified.envelope())?,
         );
-        self.observe_custodian_manifest(manifest, now)?;
+        self.observe_custodian_manifest(manifest, now, adopt_directory)?;
         if let Some(own) = &self.born_v3_account
             && own.record().body.account_anchor == expected
         {
@@ -176,9 +216,10 @@ impl RamfluxClient {
         &self,
         manifest: &CustodyManifest,
         now: u64,
+        adopt_directory: bool,
     ) -> Result<(), SdkError> {
         if let Some(human) = &manifest.custodian_publication {
-            self.observe_custody_manifest(
+            self.record_custody_observation(
                 &CustodyManifest {
                     publication: human.clone(),
                     custodian_publication: None,
@@ -186,6 +227,7 @@ impl RamfluxClient {
                 },
                 &human.record.body.account_anchor,
                 now,
+                adopt_directory,
             )?;
         }
         Ok(())

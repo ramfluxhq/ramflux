@@ -14,6 +14,7 @@ use std::cell::Cell;
 
 thread_local! {
     static INTERRUPT_AT: Cell<u8> = const { Cell::new(0) };
+    static FAIL_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -36,8 +37,14 @@ pub(crate) fn test_before_cas_transaction(hook: BeforeCasHook) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_fail_cas_commit(fail: bool) {
+    FAIL_COMMIT.with(|flag| flag.set(fail));
+}
+
+#[cfg(test)]
 pub(crate) fn test_clear_cas_hooks() {
     INTERRUPT_AT.with(|interrupt| interrupt.set(0));
+    FAIL_COMMIT.with(|flag| flag.set(false));
     BEFORE_TXN.with(|slot| *slot.borrow_mut() = None);
 }
 
@@ -247,28 +254,28 @@ fn load_snapshot(
     commitment: &str,
     link_id: &str,
 ) -> Result<Snapshot, SdkError> {
-    let mut snapshot = if client.born_v3_account.is_some() {
-        custody_snapshot(client, commitment, link_id)?
+    // The replacement selector is display-only. Compare-and-record reads it from the
+    // submitted expectation, so a missing selector stays a typed confirmation error.
+    if client.born_v3_account.is_some() {
+        custody_snapshot(client, commitment, link_id)
     } else {
-        signed_snapshot(client, commitment, link_id)?
-    };
-    fill_replacement(client, &mut snapshot.expected)?;
-    Ok(snapshot)
+        signed_snapshot(client, commitment, link_id)
+    }
 }
 
 pub(crate) fn retain_compared_manifest(
     client: &RamfluxClient,
     manifest: &SdkDeviceManifestResponse,
 ) -> Result<(), SdkError> {
-    let Some(record) = manifest.signed_device_set.as_ref() else {
-        return Ok(());
-    };
-    client.check_observed_set(record)?;
     let db = client.account_db()?;
-    db.persist_actor_state(
-        &super::identity_authority::record_key(&record.principal_commitment),
-        record,
-    )?;
+    if let Some(record) = manifest.signed_device_set.as_ref() {
+        client.check_observed_set(record)?;
+        db.persist_actor_state(
+            &super::identity_authority::record_key(&record.principal_commitment),
+            record,
+        )?;
+    }
+    // A fetched candidate is display material. It does not adopt the principal pin.
     db.persist_actor_state(
         &format!("identity/manifest-root/{}", manifest.principal_commitment),
         manifest,
@@ -442,7 +449,10 @@ pub(crate) fn compared_safety_json(
 ) -> Result<serde_json::Value, SdkError> {
     match decide(client, commitment)? {
         Decision::Blocked => blocked_compared_json(client, commitment),
-        Decision::Ready { state, snapshot } => ready_compared_json(state, *snapshot),
+        Decision::Ready { state, mut snapshot } => {
+            fill_replacement(client, &mut snapshot.expected)?;
+            ready_compared_json(state, *snapshot)
+        }
     }
 }
 
@@ -464,7 +474,9 @@ fn blocked_compared_json(
     if let Ok(anchor) = client.own_account_anchor() {
         let link_id = link_id_for(client, &anchor, commitment)?;
         if let Ok(snapshot) = load_snapshot(client, commitment, &link_id) {
-            value["expected"] = serde_json::to_value(snapshot.expected)?;
+            let mut expected = snapshot.expected;
+            fill_replacement(client, &mut expected)?;
+            value["expected"] = serde_json::to_value(expected)?;
         }
     }
     Ok(value)
@@ -756,6 +768,7 @@ fn commit_compared(
         let mut pinned = identity_row.clone();
         pinned["contact_identity_commitment"] =
             serde_json::json!(expected.contact_identity_commitment);
+        pinned["root_source"] = serde_json::json!(crate::ContactRootSource::Verified);
         db.persist_client_record("identity", &expected.principal_id, &pinned)?;
         snapshot = load_snapshot(client, &expected.contact_identity_commitment, &expected.link_id)?;
         if !material_eq(expected, &snapshot.expected) {
@@ -763,6 +776,10 @@ fn commit_compared(
         }
     } else if contact_peer(&link, &own) != Some(expected.contact_identity_commitment.as_str()) {
         return Err(required(ContactReason::SafetyMaterialMismatch));
+    } else {
+        let mut pinned = identity_row;
+        pinned["root_source"] = serde_json::json!(crate::ContactRootSource::Verified);
+        db.persist_client_record("identity", &expected.principal_id, &pinned)?;
     }
     let verified_at = crate::time::now_unix_timestamp();
     if verified_at < 0 {
@@ -795,6 +812,9 @@ fn commit_compared(
     persist_grant(client, &snapshot, &confirmation, &exact, device, verified_at)?;
     let pending = client.stage_exact_own_contact_inner(&exact)?;
     interrupt(5)?;
+    if FAIL_COMMIT.with(std::cell::Cell::get) {
+        return Err(SdkError::LocalBus("contact safety commit failed".into()));
+    }
     Ok(g::ContactSafetyVerifyResult {
         safety_confirmation: Some(confirmation),
         verification_state: "verified".into(),
