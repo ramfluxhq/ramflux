@@ -707,6 +707,7 @@ crates/ramflux-sdk/src/client/routed/control.rs | project_json_control | 3 | E |
 crates/ramflux-sdk/src/client/routed/control.rs | project_legacy_contact_control | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/control.rs | project_pair_or_contact_control | 1 | E | excluded=legacy application-control shape probe or native A2I row; enclosed own-history envelopes use the separate strict call
 crates/ramflux-sdk/src/client/routed/control.rs | refresh_routed_control_cache | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/routed/device_revocation_support.rs | directory | 1 | E | excluded=test-only native revocation directory GET request; no signed Envelope/Ack/Nack is admitted
 crates/ramflux-sdk/src/client/routed/group_directory.rs | legacy_group_directory_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/group_directory.rs | legacy_group_directory_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/group_directory.rs | legacy_group_directory_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
