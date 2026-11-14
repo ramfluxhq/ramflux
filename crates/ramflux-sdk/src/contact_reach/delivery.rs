@@ -15,7 +15,11 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         if !wire::enabled() {
-            return Ok(());
+            return if entry.reach.is_some() {
+                Err(refused(Reason::FeatureDisabled))
+            } else {
+                Ok(())
+            };
         }
         let reach = entry.reach.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;
         if entry.envelope.report_commitment.is_some() != reach.node_report_receipt.is_some() {
@@ -62,7 +66,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         if !wire::enabled() {
-            return Ok(());
+            return self.require_reach_entry_metadata(entry);
         }
         self.require_reach_entry_metadata(entry)?;
         let reach = entry.reach.as_ref().ok_or_else(|| refused(Reason::ReachRouteInvalid))?;

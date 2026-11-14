@@ -90,7 +90,7 @@ async fn sealed() -> TestResult<(Fixture, ramflux_protocol::Envelope, String)> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cr_native_receive_preview_keeps_pair_bootstrap_reusable() -> TestResult {
+async fn cr_inactive_reach_preview_refuses_before_pair_bootstrap() -> TestResult {
     tokio::time::timeout(std::time::Duration::from_secs(60), receive_preview()).await?
 }
 
@@ -117,25 +117,28 @@ async fn receive_preview() -> TestResult {
         })),
     };
     let before = crate::contact_reach::group_test_support::sealing_state(&outgoing.target.client)?;
+    assert!(
+        matches!(
+            outgoing.target.client.require_reach_entry_authority(&entry),
+            Err(crate::SdkError::ReachRefused(wire::Reason::FeatureDisabled))
+        ),
+        "an inactive reach carrier cannot enter ordinary effects by silently ignoring its wrapper"
+    );
     for _ in 0..2 {
-        let (routing, body) = outgoing
-            .target
-            .client
-            .preview_reach_route(&entry, &outgoing.target.config.device_id)?
-            .ok_or("native preview")?;
-        assert_eq!(
-            routing.conversation_id, outgoing.message.conversation_id,
-            "the actual receiver opens the original authenticated conversation"
-        );
-        assert_eq!(
-            body.as_slice(),
-            outgoing.inner,
-            "speculative decrypt returns the original exact Inner"
+        assert!(
+            matches!(
+                outgoing
+                    .target
+                    .client
+                    .preview_reach_route(&entry, &outgoing.target.config.device_id),
+                Err(crate::SdkError::ReachRefused(wire::Reason::FeatureDisabled))
+            ),
+            "the actual preview must stop at the inactive profile before speculative decryption"
         );
         assert_eq!(
             crate::contact_reach::group_test_support::sealing_state(&outgoing.target.client)?,
             before,
-            "repeated previews cannot commit or consume the incoming pair bootstrap"
+            "repeated inactive previews cannot commit or consume the incoming pair bootstrap"
         );
     }
     Ok(())
