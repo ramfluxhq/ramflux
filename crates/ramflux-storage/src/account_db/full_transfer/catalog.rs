@@ -572,12 +572,25 @@ macro_rules! table_rule {
 
 mod cleanup_local;
 mod completion_local;
+mod contacts;
+mod conversations;
+mod events;
+mod groups;
+mod identity;
+mod integrations;
+mod keys;
 mod message_sequence;
+mod messages;
+mod objects;
 mod own_sync_local;
-mod tables_0;
-mod tables_1;
-mod tables_2;
-mod tables_3;
+mod pairing;
+mod progress;
+mod receipts;
+mod receive;
+mod recovery;
+mod routing;
+mod runtime;
+mod surfaces;
 mod tail_application_local;
 mod tail_local;
 use tail_application_local::{APPLY as TAIL_APPLICATION, DEPENDENCY as TAIL_DEPENDENCIES};
@@ -590,171 +603,171 @@ pub const fn full_transfer_catalog() -> &'static [FamilyRule] {
 static TABLE_CATALOG: &[FamilyRule] = &[
     local_actor::GROUP_RULE,
     local_actor::SAFETY_RULE,
-    tables_0::RULE_0,       // sql/a2ui_surface_cache
-    tables_0::RULE_1,       // sql/account_erasure_generation
-    tables_0::RULE_2,       // sql/account_key_check
-    tables_0::RULE_3,       // sql/account_mac_bundle/local
-    tables_0::RULE_4,       // sql/account_mac_bundle/portable
-    tables_0::RULE_5,       // sql/ack_state
-    tables_0::RULE_6,       // sql/audit_log
-    tables_0::RULE_7,       // sql/bot_install_grant
-    tables_0::RULE_8,       // sql/bot_manifest_cache
-    tables_0::RULE_9,       // sql/bot_trust_pin
-    tables_0::RULE_10,      // sql/contact_link_decision
-    tables_0::RULE_11,      // sql/contact_message_fence_retention
-    tables_0::RULE_12,      // sql/contact_message_request
-    tables_0::RULE_13,      // sql/contact_message_request_fence
-    tables_0::RULE_14,      // sql/contact_request_authority_floor
-    tables_0::RULE_15,      // sql/contact_request_decision
-    tables_0::RULE_16,      // sql/contact_request_delivery
-    tables_0::RULE_17,      // sql/contact_request_fence
-    tables_0::RULE_18,      // sql/contact_request_projection
-    tables_0::RULE_19,      // sql/contact_request_rate
-    tables_0::RULE_20,      // sql/contact_request_retirement
-    tables_0::RULE_21,      // sql/contact_verification_projection
-    tables_0::RULE_22,      // sql/conversation_delivery_state
-    tables_0::RULE_23,      // sql/conversation_disappearing_policy
-    tables_0::RULE_24,      // sql/conversation_list_state
-    tables_0::RULE_25,      // sql/conversation_projection
-    tables_0::RULE_26,      // sql/conversation_read_state
-    tables_0::RULE_27,      // sql/conversation_tombstone
-    tables_0::RULE_28,      // sql/conversation_unread_marker
-    tables_0::RULE_29,      // sql/cursor_checkpoint
-    tables_0::RULE_30,      // sql/device_directory
-    tables_0::RULE_31,      // sql/device_identity
-    tables_0::RULE_32,      // sql/device_inbox_cursor
-    tables_0::RULE_33,      // sql/device_namespace_upgrade
-    tables_0::RULE_34,      // sql/direct_message_projection
-    tables_0::RULE_35,      // sql/event_causal_dependency
-    tables_0::RULE_36,      // sql/event_tombstone
-    tables_0::RULE_37,      // sql/friend_link_projection
-    tables_0::RULE_38,      // sql/friend_projection
-    tables_3::RULE_159,     // sql/full_imported_mac_bundle
-    tables_0::RULE_39,      // sql/group_ban_projection
-    tables_1::RULE_40,      // sql/group_control_event_seen
-    tables_1::RULE_41,      // sql/group_invite_projection
-    tables_1::RULE_42,      // sql/group_member_device_key
-    tables_1::RULE_43,      // sql/group_member_projection
-    tables_1::RULE_44,      // sql/group_message_tombstone_projection
-    tables_1::RULE_45,      // sql/group_pending_undecrypted
-    tables_1::RULE_46,      // sql/group_projection
-    tables_1::RULE_47,      // sql/group_sender_identity_upgrade
-    tables_1::RULE_48,      // sql/group_sender_key_counter_seen
-    tables_1::RULE_49,      // sql/guardian_recovery_share_projection/local
-    tables_1::RULE_50,      // sql/guardian_recovery_share_projection/portable
-    tables_1::RULE_51,      // sql/home_node_binding
-    tables_1::RULE_52,      // sql/identity_lifecycle_projection
-    tables_1::RULE_53,      // sql/legacy_conversation_delivery_state
-    tables_1::RULE_54,      // sql/legacy_conversation_read_state
-    tables_1::RULE_55,      // sql/legacy_conversation_unread_marker
-    tables_1::RULE_56,      // sql/legacy_group_member_device_key
-    tables_1::RULE_57,      // sql/legacy_group_sender_key_counter_seen
-    tables_1::RULE_58,      // sql/legacy_receipt_projection
-    tables_1::RULE_59,      // sql/lineage_checkpoint
-    tables_1::RULE_60,      // sql/local_event_counter
-    tables_1::RULE_61,      // sql/local_event_log
-    tables_1::RULE_62,      // sql/mcp_grant
-    tables_1::RULE_63,      // sql/mcp_server_registry
-    tables_1::RULE_64,      // sql/mcp_standing_approval
-    tables_1::RULE_65,      // sql/mcp_tool_manifest
-    tables_1::RULE_66,      // sql/message_copy_binding
-    tables_1::RULE_67,      // sql/message_footprint
-    tables_1::RULE_68,      // sql/message_footprint_actor_stage
-    tables_1::RULE_69,      // sql/message_footprint_journal_stage
-    tables_1::RULE_70,      // sql/message_footprint_migration
-    tables_1::RULE_71,      // sql/message_footprint_outbox_stage
-    tables_1::RULE_72,      // sql/message_projection
-    tables_1::RULE_73,      // sql/message_tombstone_projection
-    tables_1::RULE_74,      // sql/nack_state
-    tables_1::RULE_75,      // sql/object_chunk/local
-    tables_1::RULE_76,      // sql/object_chunk/portable
-    tables_1::RULE_77,      // sql/object_erasure_fence
-    tables_1::RULE_78,      // sql/object_erasure_lookup
-    tables_1::RULE_79,      // sql/object_erasure_work
-    tables_2::RULE_80,      // sql/object_identity_replacement
-    tables_2::RULE_81,      // sql/object_index/local
-    tables_2::RULE_82,      // sql/object_index/portable
-    tables_2::RULE_83,      // sql/object_key_slot
-    tables_2::RULE_84,      // sql/object_legacy_reference_context
-    tables_2::RULE_85,      // sql/object_manifest
-    tables_2::RULE_86,      // sql/object_message_reference
-    tables_2::RULE_87,      // sql/object_operation
-    tables_2::RULE_88,      // sql/object_payload_actor
-    tables_2::RULE_89,      // sql/object_payload_dependency
-    tables_2::RULE_90,      // sql/object_projection_erasure_work
-    tables_2::RULE_91,      // sql/object_reference_actor
-    tables_2::RULE_92,      // sql/object_reference_erasure_work
-    tables_2::RULE_93,      // sql/object_retention_payload
-    tables_2::RULE_94,      // sql/object_retention_reference
-    tables_2::RULE_95,      // sql/object_retention_upgrade
-    tables_2::RULE_96,      // sql/object_runtime_response
-    tables_2::RULE_97,      // sql/object_segment_file
-    tables_2::RULE_98,      // sql/object_segment_floor
-    tables_2::RULE_99,      // sql/object_segment_reference_veto
-    tables_2::RULE_100,     // sql/object_segment_resource
-    tables_2::RULE_101,     // sql/object_share_grant_projection
-    tables_2::RULE_102,     // sql/object_tombstone
-    tables_2::RULE_103,     // sql/object_transfer_state
-    tables_2::RULE_104,     // sql/object_transport_actor
-    tables_2::RULE_105,     // sql/outbox_queue
-    tables_2::RULE_106,     // sql/pairing_adoption
-    tables_2::RULE_107,     // sql/pairing_floor
+    surfaces::RULE_0,       // sql/a2ui_surface_cache
+    objects::RULE_1,        // sql/account_erasure_generation
+    keys::RULE_2,           // sql/account_key_check
+    keys::RULE_3,           // sql/account_mac_bundle/local
+    keys::RULE_4,           // sql/account_mac_bundle/portable
+    receipts::RULE_5,       // sql/ack_state
+    events::RULE_6,         // sql/audit_log
+    integrations::RULE_7,   // sql/bot_install_grant
+    integrations::RULE_8,   // sql/bot_manifest_cache
+    integrations::RULE_9,   // sql/bot_trust_pin
+    contacts::RULE_10,      // sql/contact_link_decision
+    contacts::RULE_11,      // sql/contact_message_fence_retention
+    contacts::RULE_12,      // sql/contact_message_request
+    contacts::RULE_13,      // sql/contact_message_request_fence
+    contacts::RULE_14,      // sql/contact_request_authority_floor
+    contacts::RULE_15,      // sql/contact_request_decision
+    contacts::RULE_16,      // sql/contact_request_delivery
+    contacts::RULE_17,      // sql/contact_request_fence
+    contacts::RULE_18,      // sql/contact_request_projection
+    contacts::RULE_19,      // sql/contact_request_rate
+    contacts::RULE_20,      // sql/contact_request_retirement
+    contacts::RULE_21,      // sql/contact_verification_projection
+    conversations::RULE_22, // sql/conversation_delivery_state
+    conversations::RULE_23, // sql/conversation_disappearing_policy
+    conversations::RULE_24, // sql/conversation_list_state
+    conversations::RULE_25, // sql/conversation_projection
+    conversations::RULE_26, // sql/conversation_read_state
+    conversations::RULE_27, // sql/conversation_tombstone
+    conversations::RULE_28, // sql/conversation_unread_marker
+    progress::RULE_29,      // sql/cursor_checkpoint
+    identity::RULE_30,      // sql/device_directory
+    identity::RULE_31,      // sql/device_identity
+    identity::RULE_32,      // sql/device_inbox_cursor
+    identity::RULE_33,      // sql/device_namespace_upgrade
+    conversations::RULE_34, // sql/direct_message_projection
+    events::RULE_35,        // sql/event_causal_dependency
+    events::RULE_36,        // sql/event_tombstone
+    contacts::RULE_37,      // sql/friend_link_projection
+    contacts::RULE_38,      // sql/friend_projection
+    keys::RULE_159,         // sql/full_imported_mac_bundle
+    groups::RULE_39,        // sql/group_ban_projection
+    groups::RULE_40,        // sql/group_control_event_seen
+    groups::RULE_41,        // sql/group_invite_projection
+    groups::RULE_42,        // sql/group_member_device_key
+    groups::RULE_43,        // sql/group_member_projection
+    groups::RULE_44,        // sql/group_message_tombstone_projection
+    groups::RULE_45,        // sql/group_pending_undecrypted
+    groups::RULE_46,        // sql/group_projection
+    groups::RULE_47,        // sql/group_sender_identity_upgrade
+    groups::RULE_48,        // sql/group_sender_key_counter_seen
+    recovery::RULE_49,      // sql/guardian_recovery_share_projection/local
+    recovery::RULE_50,      // sql/guardian_recovery_share_projection/portable
+    routing::RULE_51,       // sql/home_node_binding
+    identity::RULE_52,      // sql/identity_lifecycle_projection
+    conversations::RULE_53, // sql/legacy_conversation_delivery_state
+    conversations::RULE_54, // sql/legacy_conversation_read_state
+    conversations::RULE_55, // sql/legacy_conversation_unread_marker
+    groups::RULE_56,        // sql/legacy_group_member_device_key
+    groups::RULE_57,        // sql/legacy_group_sender_key_counter_seen
+    receipts::RULE_58,      // sql/legacy_receipt_projection
+    progress::RULE_59,      // sql/lineage_checkpoint
+    events::RULE_60,        // sql/local_event_counter
+    events::RULE_61,        // sql/local_event_log
+    integrations::RULE_62,  // sql/mcp_grant
+    integrations::RULE_63,  // sql/mcp_server_registry
+    integrations::RULE_64,  // sql/mcp_standing_approval
+    integrations::RULE_65,  // sql/mcp_tool_manifest
+    messages::RULE_66,      // sql/message_copy_binding
+    messages::RULE_67,      // sql/message_footprint
+    messages::RULE_68,      // sql/message_footprint_actor_stage
+    messages::RULE_69,      // sql/message_footprint_journal_stage
+    messages::RULE_70,      // sql/message_footprint_migration
+    messages::RULE_71,      // sql/message_footprint_outbox_stage
+    messages::RULE_72,      // sql/message_projection
+    messages::RULE_73,      // sql/message_tombstone_projection
+    receipts::RULE_74,      // sql/nack_state
+    objects::RULE_75,       // sql/object_chunk/local
+    objects::RULE_76,       // sql/object_chunk/portable
+    objects::RULE_77,       // sql/object_erasure_fence
+    objects::RULE_78,       // sql/object_erasure_lookup
+    objects::RULE_79,       // sql/object_erasure_work
+    objects::RULE_80,       // sql/object_identity_replacement
+    objects::RULE_81,       // sql/object_index/local
+    objects::RULE_82,       // sql/object_index/portable
+    objects::RULE_83,       // sql/object_key_slot
+    objects::RULE_84,       // sql/object_legacy_reference_context
+    objects::RULE_85,       // sql/object_manifest
+    objects::RULE_86,       // sql/object_message_reference
+    objects::RULE_87,       // sql/object_operation
+    objects::RULE_88,       // sql/object_payload_actor
+    objects::RULE_89,       // sql/object_payload_dependency
+    objects::RULE_90,       // sql/object_projection_erasure_work
+    objects::RULE_91,       // sql/object_reference_actor
+    objects::RULE_92,       // sql/object_reference_erasure_work
+    objects::RULE_93,       // sql/object_retention_payload
+    objects::RULE_94,       // sql/object_retention_reference
+    objects::RULE_95,       // sql/object_retention_upgrade
+    objects::RULE_96,       // sql/object_runtime_response
+    objects::RULE_97,       // sql/object_segment_file
+    objects::RULE_98,       // sql/object_segment_floor
+    objects::RULE_99,       // sql/object_segment_reference_veto
+    objects::RULE_100,      // sql/object_segment_resource
+    objects::RULE_101,      // sql/object_share_grant_projection
+    objects::RULE_102,      // sql/object_tombstone
+    objects::RULE_103,      // sql/object_transfer_state
+    objects::RULE_104,      // sql/object_transport_actor
+    runtime::RULE_105,      // sql/outbox_queue
+    pairing::RULE_106,      // sql/pairing_adoption
+    pairing::RULE_107,      // sql/pairing_floor
     completion_local::RULE, // sql/pairing_full_completion
     tail_local::RULE,       // sql/pairing_full_tail
     TAIL_APPLICATION,       // sql/pairing_full_tail_apply
     TAIL_DEPENDENCIES,      // sql/pairing_full_tail_dependency
-    tables_2::RULE_108,     // sql/pairing_head
-    tables_2::RULE_109,     // sql/pairing_live
+    pairing::RULE_108,      // sql/pairing_head
+    pairing::RULE_109,      // sql/pairing_live
     own_sync_local::RULE,   // sql/pairing_own_sync
     cleanup_local::RULE,    // sql/pairing_source_cleanup
-    tables_2::RULE_110,     // sql/pairing_terminal
-    tables_2::RULE_111,     // sql/pending_recovery_approval_projection
-    tables_2::RULE_112,     // sql/pending_recovery_projection
-    tables_2::RULE_113,     // sql/projection_checkpoint
-    tables_2::RULE_114,     // sql/raw_envelope_log
-    tables_2::RULE_115,     // sql/raw_inner_copy
-    tables_2::RULE_116,     // sql/raw_inner_evidence
-    tables_2::RULE_117,     // sql/raw_inner_owner
-    tables_2::RULE_118,     // sql/receipt_identity_upgrade
-    tables_2::RULE_119,     // sql/receipt_projection
-    tables_3::RULE_120,     // sql/receive_erased_input
-    tables_3::RULE_121,     // sql/rejected_inbox_projection
-    tables_3::RULE_122,     // sql/root_group_control_event_seen
-    tables_3::RULE_123,     // sql/root_group_invite_identity
-    tables_3::RULE_124,     // sql/root_group_sender_key_counter_seen
-    tables_3::RULE_125,     // sql/root_identity_key_upgrade
-    tables_3::RULE_126,     // sql/runtime_account_identity
-    tables_3::RULE_127,     // sql/runtime_ack
-    tables_3::RULE_128,     // sql/runtime_actor_state
-    tables_3::RULE_129,     // sql/runtime_attachment_budget
-    tables_3::RULE_130,     // sql/runtime_attachment_expiry
-    tables_3::RULE_131,     // sql/runtime_attachment_grant
-    tables_3::RULE_132,     // sql/runtime_attachment_reference
-    tables_3::RULE_133,     // sql/runtime_attachment_retirement
-    tables_3::RULE_134,     // sql/runtime_home_migration_job
-    tables_3::RULE_135,     // sql/runtime_home_migration_transition
-    tables_3::RULE_136,     // sql/runtime_inbox_changes
-    tables_3::RULE_137,     // sql/runtime_inbox_dead_letter
-    tables_3::RULE_138,     // sql/runtime_inbox_policy
-    tables_3::RULE_139,     // sql/runtime_inbox_recovery
-    tables_3::RULE_140,     // sql/runtime_inbox_retry
-    tables_3::RULE_141,     // sql/runtime_journal
-    tables_3::RULE_142,     // sql/runtime_journal_bounds
-    tables_3::RULE_143,     // sql/runtime_message_content
+    pairing::RULE_110,      // sql/pairing_terminal
+    recovery::RULE_111,     // sql/pending_recovery_approval_projection
+    recovery::RULE_112,     // sql/pending_recovery_projection
+    progress::RULE_113,     // sql/projection_checkpoint
+    events::RULE_114,       // sql/raw_envelope_log
+    events::RULE_115,       // sql/raw_inner_copy
+    events::RULE_116,       // sql/raw_inner_evidence
+    events::RULE_117,       // sql/raw_inner_owner
+    receipts::RULE_118,     // sql/receipt_identity_upgrade
+    receipts::RULE_119,     // sql/receipt_projection
+    receive::RULE_120,      // sql/receive_erased_input
+    receive::RULE_121,      // sql/rejected_inbox_projection
+    groups::RULE_122,       // sql/root_group_control_event_seen
+    groups::RULE_123,       // sql/root_group_invite_identity
+    groups::RULE_124,       // sql/root_group_sender_key_counter_seen
+    identity::RULE_125,     // sql/root_identity_key_upgrade
+    identity::RULE_126,     // sql/runtime_account_identity
+    receipts::RULE_127,     // sql/runtime_ack
+    runtime::RULE_128,      // sql/runtime_actor_state
+    objects::RULE_129,      // sql/runtime_attachment_budget
+    objects::RULE_130,      // sql/runtime_attachment_expiry
+    objects::RULE_131,      // sql/runtime_attachment_grant
+    objects::RULE_132,      // sql/runtime_attachment_reference
+    objects::RULE_133,      // sql/runtime_attachment_retirement
+    routing::RULE_134,      // sql/runtime_home_migration_job
+    routing::RULE_135,      // sql/runtime_home_migration_transition
+    receive::RULE_136,      // sql/runtime_inbox_changes
+    receive::RULE_137,      // sql/runtime_inbox_dead_letter
+    receive::RULE_138,      // sql/runtime_inbox_policy
+    receive::RULE_139,      // sql/runtime_inbox_recovery
+    receive::RULE_140,      // sql/runtime_inbox_retry
+    runtime::RULE_141,      // sql/runtime_journal
+    runtime::RULE_142,      // sql/runtime_journal_bounds
+    messages::RULE_143,     // sql/runtime_message_content
     message_sequence::RULE,
-    tables_3::RULE_144, // sql/runtime_operation
-    tables_3::RULE_145, // sql/runtime_outbox
-    tables_3::RULE_146, // sql/runtime_own_copy_state
-    tables_3::RULE_147, // sql/runtime_own_copy_usage
-    tables_3::RULE_148, // sql/runtime_privacy_maintenance
-    tables_3::RULE_149, // sql/runtime_receipt_retention
-    tables_3::RULE_150, // sql/runtime_scoped_ack
-    tables_3::RULE_151, // sql/runtime_unrouted
-    tables_3::RULE_152, // sql/schema_migration
-    tables_3::RULE_153, // sql/self_device_control_log
-    tables_3::RULE_154, // sql/session_capability_cache
-    tables_3::RULE_155, // sql/shared_group_floor_generation
-    tables_3::RULE_156, // sql/shared_group_member_projection
-    tables_3::RULE_157, // sql/shared_group_removal_floor
-    tables_3::RULE_158, // sql/sync_checkpoint
+    runtime::RULE_144,  // sql/runtime_operation
+    runtime::RULE_145,  // sql/runtime_outbox
+    runtime::RULE_146,  // sql/runtime_own_copy_state
+    runtime::RULE_147,  // sql/runtime_own_copy_usage
+    runtime::RULE_148,  // sql/runtime_privacy_maintenance
+    receipts::RULE_149, // sql/runtime_receipt_retention
+    receipts::RULE_150, // sql/runtime_scoped_ack
+    routing::RULE_151,  // sql/runtime_unrouted
+    progress::RULE_152, // sql/schema_migration
+    identity::RULE_153, // sql/self_device_control_log
+    routing::RULE_154,  // sql/session_capability_cache
+    groups::RULE_155,   // sql/shared_group_floor_generation
+    groups::RULE_156,   // sql/shared_group_member_projection
+    groups::RULE_157,   // sql/shared_group_removal_floor
+    progress::RULE_158, // sql/sync_checkpoint
 ];
