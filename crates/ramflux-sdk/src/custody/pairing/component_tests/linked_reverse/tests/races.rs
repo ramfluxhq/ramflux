@@ -129,7 +129,9 @@ async fn cold_vetoes() -> TestResult {
 }
 
 fn seed(db: &ramflux_storage::AccountDb, parents: &[&str]) -> TestResult {
-    db.retain_object(CHILD, HASH, ramflux_storage::ObjectRetention::Imported)?;
+    // The child is independently retained. An unowned Imported fixture is an
+    // orphan and ordinary AccountDb::open correctly reclaims it and its parents.
+    db.retain_object(CHILD, HASH, ramflux_storage::ObjectRetention::Standalone)?;
     for parent in parents {
         db.retain_object(parent, HASH, ramflux_storage::ObjectRetention::OwnDeviceTransport)?;
         db.retain_transport_dependency(parent, HASH, CHILD, HASH)?;
