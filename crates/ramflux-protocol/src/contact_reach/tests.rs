@@ -56,6 +56,38 @@ fn manifest(pages: &[StatePage]) -> Result<StateManifest, Box<dyn std::error::Er
     })
 }
 #[test]
+fn cr_snapshot_bounds_original_signing_time_without_expiring_retained_policy() -> TestResult {
+    for (issued_at, accepted) in [(1, true), (260, true), (261, false)] {
+        let mut update = policy();
+        update.body.issued_at = issued_at;
+        update.body.expires_at = issued_at + 300;
+        let records = vec![
+            StateRecord::AdmissionMeta { revision: 0, last_update: None },
+            StateRecord::Policy { revision: 1, update },
+        ];
+        let pages = vec![StatePage {
+            version: 1,
+            snapshot_id: d(10),
+            page: 0,
+            signers: references(&records)?,
+            records: records.clone(),
+        }];
+        let mut manifest = manifest(&pages)?;
+        manifest.state_hash = state_hash(&d(2), 1, 1, 0, &records)?;
+        if issued_at == 1 {
+            manifest.issued_at = 1000;
+            manifest.expires_at = 1060;
+        }
+        assert_eq!(
+            verify_pages(&manifest, &pages).is_ok(),
+            accepted,
+            "the original command's signing time {issued_at} must obey snapshot skew, not expiry"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn cr_state_identity_survives_transport_renewal_but_detects_actual_record_changes() -> TestResult {
     let first = vec![StatePage {
         version: 1,

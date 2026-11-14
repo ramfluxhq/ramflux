@@ -87,7 +87,41 @@ pub enum StateRecord {
     },
 }
 impl StateRecord {
+    fn latest_original_time(&self) -> Option<u64> {
+        match self {
+            Self::Policy { update, .. } => Some(update.body.issued_at),
+            Self::AdmissionMeta { last_update, .. } => {
+                last_update.as_ref().map(|update| update.body.issued_at)
+            }
+            Self::Grant { update, .. }
+            | Self::Block { update, .. }
+            | Self::Decline { update, .. } => Some(update.body.issued_at),
+            Self::Retirement { update, group_floor, .. } => {
+                let mut latest = update.body.issued_at;
+                if let Some(floor) = group_floor {
+                    for time in [
+                        floor.grant.as_ref().map(|grant| grant.body.issued_at),
+                        floor.roster_header.as_ref().map(|header| header.body.issued_at),
+                        floor.block_control.as_ref().map(|control| control.body.issued_at),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        latest = latest.max(time);
+                    }
+                }
+                Some(latest)
+            }
+            _ => None,
+        }
+    }
+
     fn validate_shape(&self, manifest: &StateManifest) -> Result<(), ProtocolError> {
+        // A snapshot's exact 60-second lease also bounds the allowed command clock skew.
+        // Retained commands keep their signatures after their submission deadline expires.
+        if self.latest_original_time().is_some_and(|time| time > manifest.expires_at) {
+            return Err(invalid("reach original signing time exceeds snapshot clock window"));
+        }
         if matches!(
             self,
             Self::Block { subject: Subject::Group { .. }, .. }

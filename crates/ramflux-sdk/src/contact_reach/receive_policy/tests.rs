@@ -162,6 +162,58 @@ fn assert_denied(result: &Result<(), SdkError>) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cr_future_original_clearance_cannot_remove_a_verified_block() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), future_clearance()).await?
+}
+
+async fn future_clearance() -> TestResult {
+    let fixture = PolicyFixture::new().await?;
+    let subject = Subject::Friendship { root: fixture.route.source.account_anchor.clone() };
+    let block = fixture.update(subject.clone(), wire::Decision::Block, None, 2)?;
+    fixture.install(
+        &block,
+        vec![StateRecord::Block { subject: subject.clone(), update: block.clone() }],
+    )?;
+    let before = fixture.owner.client.group_reach_mirror()?.ok_or("blocked mirror")?;
+    let account = fixture.owner.client.born_v3_account.as_ref().ok_or("owner")?;
+    let future = fixture.now.checked_add(61).ok_or("future signing time")?;
+    let mut body = fixture.update(subject.clone(), wire::Decision::Unblock, None, 3)?.body;
+    body.issued_at = future;
+    body.expires_at = future.checked_add(300).ok_or("submission deadline")?;
+    let unblock = account.group_primary(fixture.owner.vault.as_ref())?.sign_reach_admission(
+        body,
+        account.verified(),
+        future,
+    )?;
+    ramflux_crypto::contact_reach::verify_admission(
+        &unblock,
+        account.verified(),
+        &digest(24),
+        &unblock.body.actor,
+        future,
+    )?;
+    assert!(
+        fixture
+            .install(
+                &unblock,
+                vec![StateRecord::Retirement {
+                    subject,
+                    revision: 4,
+                    update: unblock.clone(),
+                    group_floor: None,
+                }],
+            )
+            .is_err(),
+        "a valid future primary signature cannot authorize clearance in an earlier home snapshot"
+    );
+    let after = fixture.owner.client.group_reach_mirror()?.ok_or("preserved mirror")?;
+    assert_eq!(after.state_hash, before.state_hash, "refusal must preserve the committed mirror");
+    assert_eq!(after.restrictions, before.restrictions, "refusal must preserve the signed block");
+    assert_denied(&fixture.check(Traffic::Dm));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cr_receipt_policy_requires_each_original_permission_and_local_setting() -> TestResult {
     tokio::time::timeout(std::time::Duration::from_secs(60), receipt_policy()).await?
 }
