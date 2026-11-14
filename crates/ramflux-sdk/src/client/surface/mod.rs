@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned surfaces in authenticated conversation messages, independent of pair sessions.
+mod attachments;
 mod authored;
 mod backfill;
 pub(crate) mod carrier;
@@ -146,3 +147,6 @@ pub(crate) fn check_delivery_size(bytes: usize) -> Result<(), crate::SdkError> {
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+mod rpc_tests;

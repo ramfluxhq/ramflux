@@ -6,7 +6,7 @@ use super::wire::identifier;
 use super::{CATALOG_ID, JsonPointer, Reject};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::OnceLock};
-const BASIC: &str = include_str!("../../vendor/a2ui/catalogs/basic/v1/catalog.json");
+const PROFILE: &str = include_str!("../../catalogs/rf-card-v1.json");
 const COMMON: &str = include_str!("../../vendor/a2ui/specification/v1_0/json/common_types.json");
 const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json";
 struct Schemas {
@@ -16,8 +16,12 @@ struct Schemas {
 static SCHEMAS: OnceLock<Result<Schemas, Reject>> = OnceLock::new();
 fn build(schema: &Value, common: &Value) -> Result<jsonschema::Validator, Reject> {
     // HTTP and filesystem resolution features are disabled. Only these embedded resources exist.
+    let mut catalog: Value = serde_json::from_str(PROFILE).map_err(|_| Reject::Encoding)?;
+    let map = catalog.as_object_mut().ok_or(Reject::Encoding)?;
+    map.insert("$id".into(), json!(BASE));
     jsonschema::options()
-        .with_base_uri(BASE)
+        .with_base_uri("https://a2ui.org/specification/v1_0/validation.json")
+        .with_resource(BASE, jsonschema::Resource::from_contents(catalog))
         .with_resource(
             "https://a2ui.org/specification/v1_0/common_types.json",
             jsonschema::Resource::from_contents(common.clone()),
@@ -28,30 +32,23 @@ fn build(schema: &Value, common: &Value) -> Result<jsonschema::Validator, Reject
         )
         .should_validate_formats(true)
         .build(schema)
-        .map_err(|_| Reject::Encoding)
+        .map_err(|error| {
+            #[cfg(test)]
+            eprintln!("embedded A2UI schema failed to compile: {error}");
+            #[cfg(not(test))]
+            let _ = error;
+            Reject::Encoding
+        })
 }
 fn schemas() -> Result<&'static Schemas, Reject> {
     SCHEMAS.get_or_init(|| {
-        let basic: Value = serde_json::from_str(BASIC).map_err(|_| Reject::Encoding)?;
+        let basic: Value = serde_json::from_str(PROFILE).map_err(|_| Reject::Encoding)?;
         let common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
         let mut components = BTreeMap::new();
         for (name, schema) in basic.get("components").and_then(Value::as_object).ok_or(Reject::Encoding)? {
-            if matches!(name.as_str(), "Video" | "AudioPlayer" | "Image") { continue; }
+
             let full = json!({"$defs":basic.get("$defs"),"allOf":[{"$ref":"common_types.json#/$defs/ComponentCommon"},schema],"unevaluatedProperties":false});
             components.insert(name.clone(),build(&full,&common)?);
-        }
-        for (name, properties, required) in [
-            ("Approval",json!({"requestRef":{"type":"string"},"taskBinding":{"type":"object","properties":{"task_id":{"type":"string"},"step_id":{"type":"string"}},"required":["task_id","step_id"],"additionalProperties":false},"explanation":{"type":"string"}}),vec!["requestRef","explanation"]),
-            ("Task",json!({"title":{"type":"string"},"taskRef":{"type":"string"},"requester":{"type":"string"},"owner":{"type":"string"},"status":{"type":"string"},"progress":{"type":["integer","null"]},"steps":{"type":"array"}}),vec!["title","taskRef","requester","owner","status","steps"]),
-            ("Chart",json!({"kind":{"enum":["line","bar"]},"unit":{"type":"string"},"scale":{"type":"integer"},"series":{"type":"array"}}),vec!["kind","unit","scale","series"]),
-            ("Table",json!({"columns":{"type":"array"},"rows":{"type":"array"}}),vec!["columns","rows"]),
-            ("Image",json!({"attachment":{"type":"object","properties":{"object_id":{"type":"string"},"manifest_digest":{"type":"string"}},"required":["object_id","manifest_digest"],"additionalProperties":false},"description":{"$ref":"common_types.json#/$defs/DynamicString"},"fit":{"enum":["contain","cover","fill","none","scaleDown"]},"variant":{"enum":["icon","avatar","smallFeature","mediumFeature","largeFeature","header"]},"weight":{"type":"number"}}),vec!["attachment","description"]),
-        ] {
-            let mut properties = properties.as_object().ok_or(Reject::Encoding)?.clone();
-            properties.insert("component".into(),json!({"const":name}));
-            let mut required = required; required.push("component");
-            let full = json!({"allOf":[{"$ref":"common_types.json#/$defs/ComponentCommon"},{"type":"object","properties":properties,"required":required}],"unevaluatedProperties":false});
-            components.insert(name.into(),build(&full,&common)?);
         }
         let mut functions = BTreeMap::new();
         for (name,schema) in basic.get("functions").and_then(Value::as_object).ok_or(Reject::Encoding)? {
@@ -76,7 +73,43 @@ pub(super) fn component(value: &Value) -> Result<(), Reject> {
     if name == "TextField" && value.get("variant").and_then(Value::as_str) == Some("obscured") {
         return Err(Reject::Expression);
     }
+    if name == "Button"
+        && let Some(checks) = value.get("@checks")
+    {
+        reject_locale_checks(checks, 0)?;
+    }
     expressions(value, false, 0)
+}
+fn reject_locale_checks(value: &Value, depth: usize) -> Result<(), Reject> {
+    if depth > 16 {
+        return Err(Reject::Limit);
+    }
+    match value {
+        Value::Object(map) => {
+            if let Some(name) = map.get("@call").and_then(Value::as_str) {
+                if super::expression::locale_sensitive(name) {
+                    return Err(Reject::LocaleDependentCheck);
+                }
+                if name == "formatString"
+                    && let Some(program) = value.pointer("/args/value").and_then(Value::as_str)
+                {
+                    for expression in super::format_string::expressions(program)? {
+                        reject_locale_checks(&expression, depth + 1)?;
+                    }
+                }
+            }
+            for child in map.values() {
+                reject_locale_checks(child, depth + 1)?;
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                reject_locale_checks(child, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 fn expressions(value: &Value, in_action: bool, depth: usize) -> Result<(), Reject> {
     if depth > 16 {
@@ -187,7 +220,14 @@ const AGENT: &str =
 const RENDERER: &str =
     include_str!("../../vendor/a2ui/specification/v1_0/json/renderer_to_agent.json");
 pub(super) fn rpc_message(value: &Value, kind: super::RpcKind) -> Result<(), Reject> {
-    let common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
+    let mut common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
+    if kind == super::RpcKind::FunctionCall {
+        // Agent calls are structurally validated but never resolve or execute a catalog
+        // function. Unsupported names still receive the mandated function response.
+        let defs =
+            common.get_mut("$defs").and_then(Value::as_object_mut).ok_or(Reject::Encoding)?;
+        defs.insert("FunctionCall".into(),json!({"allOf":[{"$ref":"#/$defs/FunctionCommon"},{"properties":{"args":{"type":"object"}}}],"unevaluatedProperties":false}));
+    }
     let source: Value =
         serde_json::from_str(if kind == super::RpcKind::FunctionCall { AGENT } else { RENDERER })
             .map_err(|_| Reject::Encoding)?;
@@ -207,7 +247,7 @@ pub(super) fn rpc_message(value: &Value, kind: super::RpcKind) -> Result<(), Rej
     let body = value.get(key).and_then(Value::as_object).ok_or(Reject::Encoding)?;
     let allowed: &[&str] = match kind {
         super::RpcKind::FunctionCall => &["surfaceId", "functionCallId", "callFunction"],
-        super::RpcKind::FunctionResponse => &["functionCallId", "result", "error"],
+        super::RpcKind::FunctionResponse => &["functionCallId", "value", "error"],
         super::RpcKind::Error => &["code", "message", "surfaceId", "path", "functionCallId"],
     };
     if body.keys().any(|k| !allowed.contains(&k.as_str())) {
@@ -224,12 +264,10 @@ pub(super) fn rpc_message(value: &Value, kind: super::RpcKind) -> Result<(), Rej
 pub(super) fn function(value: &Value) -> Result<(), Reject> {
     let name = value.get("@call").and_then(Value::as_str).ok_or(Reject::Expression)?;
     if name == "@index" {
-        let map = value.as_object().ok_or(Reject::Expression)?;
-        let args = value.get("args").and_then(Value::as_object).ok_or(Reject::Expression)?;
-        if map.len() != 2 || args.keys().any(|key| key != "offset") {
-            return Err(Reject::Expression);
-        }
-        return Ok(());
+        let common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
+        return build(&json!({"$ref":"common_types.json#/$defs/IndexSystemFunction"}), &common)?
+            .validate(value)
+            .map_err(|_| Reject::Expression);
     }
     schemas()?
         .functions

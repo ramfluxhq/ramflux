@@ -208,7 +208,7 @@ async fn r3_an_applied_result_still_closes_after_a_stale_close_refusal() -> Test
 }
 #[tokio::test]
 async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
-    use ramflux_protocol::{A2uiConversationCommand as C, SurfaceEvent, SurfaceState};
+    use ramflux_protocol::{SurfaceEvent, SurfaceState};
     // The recent-action FIFO holds 2048 ids; 2064 choices wrap it once (evicting 16 ids) and keep going.
     const CHOICES: u64 = 2064;
     let mut f = fixture()?;
@@ -224,11 +224,14 @@ async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps()
             text: "@agent checklist",
         })?;
         let Intent::CreateSurface(content) = &intents[0] else { return Err("create".into()) };
-        let bytes = ramflux_protocol::encode_a2ui_conversation_event(
-            "group-thread",
-            1,
-            &C::CreateSurface(content.clone()),
-        )?;
+        let mut checkpoint = serde_json::to_value(content)?;
+        let map = checkpoint.as_object_mut().ok_or("checkpoint object")?;
+        map.insert("conversationId".into(), json!("group-thread"));
+        map.insert("surfaceVersion".into(), json!(1));
+        let state = SurfaceState::from_checkpoint_bytes(&ramflux_protocol::canonical_json_bytes(
+            &checkpoint,
+        )?)?;
+        let bytes = state.resync_frame()?.wire_bytes()?;
         bus.state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(&bytes)?)?;
         bus.decision()?;
         let id = format!("choice-{i}");

@@ -427,7 +427,11 @@ impl BornAccount {
             if agent.record().body.principal_id == author
                 && agent.record().body.account_anchor == anchor
                 && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
-                && agent.stored.custodian_account_id.as_deref() == Some(self.local_account_id())
+                && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
+                    load_account(root, id, now).is_ok_and(|custodian| {
+                        custodian.record().body.account_anchor == self.record().body.account_anchor
+                    })
+                })
                 && agent.record().body.profile.custodian.as_ref().is_some_and(|custodian| {
                     custodian.account_anchor == self.record().body.account_anchor
                 })

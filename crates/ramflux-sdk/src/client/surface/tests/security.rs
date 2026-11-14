@@ -63,10 +63,7 @@ fn signed_in(
 ) -> Result<Carrier, SdkError> {
     let mut content = snapshot();
     content.fallback_text = fallback.into();
-    let command = serde_json::to_value(C::CreateSurface(content))?;
-    let raw = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.conversation.v2","conversationId":conversation,"version":1,"command":command}),
-    )?;
+    let raw = super::super::test_support::create_frame(conversation, &content)?.wire_bytes()?;
     let mut signed =
         carrier(sender, PayloadKind::Event, message, &event(1, C::CreateSurface(snapshot()))?)?;
     signed.author_principal_id = author.into();
@@ -148,7 +145,7 @@ async fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> 
     assert!(!project(&f.human, &unknown, "unknown")?.accepted);
     assert_eq!(
         f.human.surface_list("thread", "", 100)?["surfaces"].as_array().map(Vec::len),
-        Some(1)
+        Some(2)
     );
     Ok(())
 }

@@ -75,10 +75,10 @@ mod tests {
         let second = super::new_surface_message_id()?;
         assert_ne!(first, second);
         assert_eq!(ramflux_protocol::decode_base64url(&first)?.len(), 16);
-        let values = serde_json::json!({});
-        let wire = serde_json::to_vec(
-            &serde_json::json!({"schema":"ramflux.a2ui.action.v2","conversationId":"c","surfaceId":"s","version":1,"surfaceHash":"h","actionId":"choose","values":values,"argsHash":ramflux_protocol::surface_args_hash(&values)?}),
-        )?;
+        let wire = include_bytes!(
+            "../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/submit.action.json"
+        )
+        .to_vec();
         let request = super::SurfaceSendRequest::action("author", &wire)?;
         assert_eq!(ramflux_protocol::decode_base64url(&request.wire_base64)?, wire);
         assert_eq!(request.author_principal_id.as_deref(), Some("author"));

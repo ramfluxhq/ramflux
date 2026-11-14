@@ -9,60 +9,9 @@ pub(super) struct Terminals {
     _root: ramflux_test_support::TestPath,
 }
 impl Terminals {
-    pub(super) fn new() -> Result<Self, SdkError> {
-        let root = ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(crate::new_surface_message_id()?);
-        let mut clients = Vec::new();
-        for (principal, device, root_seed, device_seed) in [
-            ("author", "author-device", 31, 32),
-            ("author", "author-two", 31, 33),
-            ("human", "human-device", 35, 36),
-            ("human", "human-two", 35, 37),
-        ] {
-            let mut c = RamfluxClient::new();
-            c.create_identity_root(principal, [root_seed; 32]);
-            c.create_device_branch(principal, device, 1, [device_seed; 32]);
-            c.open_account_index(root.join(device))?;
-            c.create_account(principal, &c.surface_local_root_commitment()?)?;
-            c.unlock_account(principal, b"surface-test-secret")?;
-            clients.push(c);
-        }
-        let mut manifests =
-            std::collections::BTreeMap::<String, crate::prekey::SdkDeviceManifestResponse>::new();
-        for remote in &clients {
-            let next = crate::client::identity_authority::test_support::public_manifest(remote)?;
-            manifests
-                .entry(next.principal_id.clone())
-                .and_modify(|current| current.devices.extend(next.devices.clone()))
-                .or_insert(next);
-        }
-        for (principal, manifest) in &mut manifests {
-            let owner = clients
-                .iter()
-                .find(|client| {
-                    client
-                        .identity_root
-                        .as_ref()
-                        .is_some_and(|root| root.principal_id == *principal)
-                })
-                .ok_or(SdkError::IdentityRootMissing)?;
-            crate::client::identity_authority::test_support::sign_manifest(
-                owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                manifest,
-                2,
-            )?;
-        }
-        for local in &clients {
-            for manifest in manifests.values() {
-                local.persist_root_verified_directory(manifest)?;
-            }
-            local.account_db()?.persist_client_record(
-                "conversation",
-                "thread",
-                &json!({"kind":"direct","participants":["author","human"]}),
-            )?;
-        }
+    pub(super) async fn new() -> TestResult<Self> {
+        let root = ramflux_test_support::TestPath::new()?;
+        let clients = super::super::test_support::owned_terminals(&root).await?;
         Ok(Self { clients, _root: root })
     }
 }
@@ -128,7 +77,7 @@ fn own_forward(
 }
 #[tokio::test]
 async fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestResult {
-    let t = Terminals::new()?;
+    let t = Terminals::new().await?;
     let [b1, b2, a1, a2] = t.clients.as_slice() else { return Err("terminals".into()) };
     let mut create =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
@@ -195,7 +144,7 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision() -> 
 }
 #[tokio::test]
 async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> TestResult {
-    let t = Terminals::new()?;
+    let t = Terminals::new().await?;
     let b1 = &t.clients[0];
     let b2 = &t.clients[1];
     let mut c =
@@ -218,7 +167,7 @@ async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches()
 #[tokio::test]
 async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult
 {
-    let t = Terminals::new()?;
+    let t = Terminals::new().await?;
     let source = &t.clients[0];
     let target = &t.clients[1];
     let mut first =
@@ -251,7 +200,7 @@ async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallb
 
 #[tokio::test]
 async fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
-    let t = Terminals::new()?;
+    let t = Terminals::new().await?;
     let source = &t.clients[0];
     source.create_group("g", "author-device")?;
     let db = source.account_db()?;
@@ -281,7 +230,7 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
 
 #[tokio::test]
 async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
-    let t = Terminals::new()?;
+    let t = Terminals::new().await?;
     let author = &t.clients[0];
     let create =
         carrier(author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;

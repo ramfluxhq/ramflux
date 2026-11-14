@@ -4,30 +4,19 @@
 //! Reads admitted during restore use the same methods and persisted surface as warm readers.
 use super::{AccountActor, AccountCommand, ActorResponse};
 use crate::bus::runtime_tests;
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use crate::client::surface::{Carrier, PayloadKind};
 use crate::prelude::*;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::oneshot;
 
 fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
     let account = runtime_tests::account(root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let create = crate::SurfaceSendRequest::event(
+    let create = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        1,
-        &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Persisted".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":"saved"})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
+        &text_snapshot("surface", "Persisted", &("saved")),
+    )?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),

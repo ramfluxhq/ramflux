@@ -66,7 +66,7 @@ fn dropped() -> Outcome {
 fn ledger_prefix(author: &str) -> String {
     key("rpc-ledger", author) + "/"
 }
-fn ledger_key(carrier: &Carrier, id: &str) -> Result<String, SdkError> {
+pub(super) fn ledger_key(carrier: &Carrier, id: &str) -> Result<String, SdkError> {
     Ok(ledger_prefix(&carrier.author_principal_id)
         + &ramflux_protocol::hash_base64url(
             ramflux_protocol::domain::SURFACE_RPC_REQUEST,
@@ -327,7 +327,8 @@ struct Sent {
     expires_at: i64,
 }
 fn sent_key(carrier: &Carrier, id: &str) -> Result<String, SdkError> {
-    Ok("surface/rpc-sent/".to_owned()
+    Ok(key("rpc-sent", &carrier.author_principal_id)
+        + "/"
         + &ramflux_protocol::hash_base64url(
             ramflux_protocol::domain::SURFACE_RPC_REQUEST,
             &ramflux_protocol::canonical_json_bytes(&(
@@ -347,6 +348,13 @@ impl RamfluxClient {
             rpc.frame().function_call_id.as_deref().ok_or_else(|| invalid("RPC call id absent"))?;
         let key = sent_key(carrier, id)?;
         let now = crate::prelude::now_unix_timestamp();
+        let prefix = super::key("rpc-sent", &carrier.author_principal_id) + "/";
+        let db = self.account_db()?;
+        for candidate in db.actor_state_key_page(&prefix, MAX_ENTRIES + 1)? {
+            if db.load_actor_state::<Sent>(&candidate)?.is_some_and(|sent| sent.expires_at <= now) {
+                db.remove_actor_state(&candidate)?;
+            }
+        }
         let fingerprint = rpc.request_fingerprint()?;
         let scope = Scope::new(carrier, rpc.frame());
         if let Some(sent) = self.account_db()?.load_actor_state::<Sent>(&key)?
@@ -357,6 +365,9 @@ impl RamfluxClient {
             } else {
                 dropped()
             });
+        }
+        if db.actor_state_key_page(&prefix, MAX_ENTRIES)?.len() >= MAX_ENTRIES as usize {
+            return Ok(dropped());
         }
         let state = if rpc.frame().surface_id == "~rpc" {
             None

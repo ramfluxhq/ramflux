@@ -51,7 +51,12 @@ pub(super) fn evaluate(
         return Ok(expression.clone());
     };
     let name = call.as_str().ok_or(Reject::Expression)?;
-    let args = object.get("args").and_then(Value::as_object).ok_or(Reject::Expression)?;
+    let empty = serde_json::Map::new();
+    let args = match object.get("args") {
+        Some(value) => value.as_object().ok_or(Reject::Expression)?,
+        None if name == "@index" => &empty,
+        None => return Err(Reject::Expression),
+    };
     let get =
         |key: &str| evaluate(args.get(key).ok_or(Reject::Expression)?, model, prefix, depth + 1);
     match name {
@@ -105,15 +110,9 @@ pub(super) fn evaluate(
         }
         "numeric" => {
             let value = get("value")?;
-            let n = value.as_i64().ok_or(Reject::Expression)?;
-            let min = args
-                .get("min")
-                .and_then(Value::as_i64)
-                .unwrap_or(-(crate::MAX_SAFE_JSON_INTEGER as i64));
-            let max = args
-                .get("max")
-                .and_then(Value::as_i64)
-                .unwrap_or(crate::MAX_SAFE_JSON_INTEGER as i64);
+            let n = value.as_f64().ok_or(Reject::Expression)?;
+            let min = args.get("min").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+            let max = args.get("max").and_then(Value::as_f64).unwrap_or(f64::INFINITY);
             Ok(json!({"valid":n >= min && n <= max}))
         }
         "regex" => {
@@ -166,15 +165,20 @@ fn translated_regex(pattern: &str) -> Result<String, Reject> {
     let mut in_class = false;
     while let Some(c) = chars.next() {
         match c {
+            '[' if in_class => out.push_str("\\["),
             '[' => {
                 in_class = true;
+                out.push(c);
+            }
+            '&' | '~' if in_class => {
+                out.push('\\');
                 out.push(c);
             }
             ']' => {
                 in_class = false;
                 out.push(c);
             }
-            '(' => {
+            '(' if !in_class => {
                 if chars.peek() == Some(&'?') {
                     chars.next();
                     if chars.next() != Some(':') {
@@ -323,4 +327,77 @@ fn safety(ast: &Ast) -> Result<Info, Reject> {
 
 pub(super) fn locale_sensitive(name: &str) -> bool {
     matches!(name, "formatDate" | "formatNumber" | "formatCurrency" | "pluralize")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn regex_translation_preserves_ascii_ecmascript_classes_anchors_and_search()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (pattern, value, expected) in [
+            (r"\d+", "中123文", true),
+            (r"^\d+$", "١٢٣", false),
+            (r"^\w+$", "é", false),
+            (r"^.$", "\u{2028}", false),
+            (r"^.$", "🦀", true),
+            (r"a$", "a\n", false),
+            (r"^\s$", "\u{feff}", true),
+            (r"^\s$", "\u{0085}", false),
+            (r"^[a&&b]+$", "&", true),
+            (r"^[()]+$", "()", true),
+        ] {
+            let translated = translated_regex(pattern)?;
+            assert_eq!(
+                regex::Regex::new(&translated)?.is_match(value),
+                expected,
+                "portable regex semantics: {pattern} / {value:?}"
+            );
+        }
+        for pattern in
+            [r"(a+)+$", r"(a|ab)*c", r"\d+\s*\d+", r"(\w)\1", r"(?=a)a", r"(?i)a", r"\p{Letter}"]
+        {
+            assert_eq!(
+                validate_regex(pattern),
+                Err(Reject::Expression),
+                "all dialect/profile/safety refusals must fail closed: {pattern}"
+            );
+        }
+        assert_eq!(
+            validate_regex(&"x".repeat(257)),
+            Err(Reject::Expression),
+            "regex code point cap is mandatory"
+        );
+        let check = json!({"@call":"regex","args":{"value":"x".repeat(4097),"pattern":"x"}});
+        assert_eq!(
+            evaluate(&check, &json!({}), "", 0)?,
+            json!({"valid":false}),
+            "over-limit values do not match and do not throw"
+        );
+        Ok(())
+    }
+    #[test]
+    fn index_without_args_and_fractional_numeric_checks_follow_upstream()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            evaluate(&json!({"@call":"@index"}), &json!({}), "/items/1", 0)?,
+            json!(1),
+            "universal index args are optional"
+        );
+        assert!(
+            evaluate(&json!({"@call":"@index"}), &json!({}), "", 0).is_err(),
+            "index requires a template instance"
+        );
+        assert_eq!(
+            evaluate(
+                &json!({"@call":"numeric","args":{"value":1.5,"min":1.1,"max":1.9}}),
+                &json!({}),
+                "",
+                0
+            )?,
+            json!({"valid":true}),
+            "numeric is not restricted to Slider's integer input profile"
+        );
+        Ok(())
+    }
 }

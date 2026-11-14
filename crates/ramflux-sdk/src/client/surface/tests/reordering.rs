@@ -71,16 +71,19 @@ async fn future_event_survives_restart_and_waits_for_create() -> TestResult {
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 0);
     assert!(f.human.surface_get("s", 0, None)?["snapshot"].is_null());
     f.human = RamfluxClient::new();
-    f.human.create_identity_root("human", [35; 32]);
-    f.human.create_device_branch("human", "human-device", 1, [36; 32]);
-    f.human.open_account_index(f.root.join("human"))?;
+    f.human.open_account_index(&f.root)?;
     f.human.unlock_account("human", b"surface-test-secret")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
+    )
+    .await??;
     let first =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     assert!(project(&f.human, &first, "create")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 2);
     assert_eq!(
-        f.human.surface_get("s", 0, None)?["snapshot"]["components"][0]["text"],
+        f.human.surface_get("s", 0, None)?["snapshot"]["dataModel"]["stream"],
         "arrived early"
     );
     assert_eq!(pending_count(&f.human)?, 0);
@@ -99,7 +102,7 @@ async fn conflicting_pending_message_cannot_replace_the_verified_original() -> T
     assert!(!rejected.accepted);
     assert_eq!(rejected.renderer_error.ok_or("error")?["code"], "message_id_conflict");
     assert!(project(&f.human, &two, "v2")?.accepted);
-    assert_eq!(f.human.surface_get("s", 0, None)?["snapshot"]["components"][0]["text"], "original");
+    assert_eq!(f.human.surface_get("s", 0, None)?["snapshot"]["dataModel"]["stream"], "original");
     Ok(())
 }
 #[tokio::test]
@@ -146,7 +149,7 @@ async fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> T
     let mut four = stream(&f.author, "v4", 4, "three")?;
     f.author.attach_surface_snapshot(&mut four)?;
     four = f.author.sign_surface_carrier(four)?;
-    assert!(four.snapshot.is_some());
+    assert!(four.snapshot.is_none(), "v3 delta commitments live in the one event frame");
     assert!(project(&f.author, &four, "v4")?.accepted);
     let reference = four.surface_reference()?;
     let resync = f.author.prepare_surface_resync(&reference, "resync-v4")?;
@@ -154,7 +157,7 @@ async fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> T
     let recovered = f.human.surface_get("s", 0, None)?;
     assert_eq!(recovered["version"], 4);
     assert_eq!(recovered["out_of_sync"], false);
-    assert_eq!(recovered["snapshot"]["components"][0]["text"], "onetwothree");
+    assert_eq!(recovered["snapshot"]["dataModel"]["stream"], "onetwothree");
     assert_eq!(recovered["surface_hash"], f.author.surface_get("s", 0, None)?["surface_hash"]);
     assert!(project(&f.human, &two, "covered-v2")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?, recovered);
@@ -166,16 +169,30 @@ async fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> Tes
     let f = Fixture::new().await?;
     create(&f)?;
     let mut accepted = 0;
-    for version in 3..=8 {
+    let _two = stream(&f.author, "v2", 2, "")?;
+    for version in 3..=34 {
         let mut signed = stream(&f.author, &format!("large-{version}"), version, "x")?;
-        let mut raw = ramflux_protocol::decode_base64url(&signed.wire_base64)?;
-        raw.extend(std::iter::repeat_n(b' ', 200_000));
-        signed.wire_base64 = ramflux_protocol::encode_base64url(raw);
+        let native = ramflux_protocol::SurfaceEvent::from_wire_bytes(
+            &ramflux_protocol::decode_base64url(&signed.wire_base64)?,
+        )?;
+        let mut frame = native.frame().clone();
+        frame.append_text = None;
+        frame.a2ui = Some(MutationMessage::new(Mutation::UpdateDataModel(
+            ramflux_protocol::UpdateDataModel {
+                surface_id: "s".into(),
+                path: Some("/padding".into()),
+                value: json!("x".repeat(30 * 1024)),
+            },
+        )));
+        signed.wire_base64 = ramflux_protocol::encode_base64url(frame.wire_bytes()?);
         signed = f.author.sign_surface_carrier(signed)?;
         let held = project(&f.human, &signed, &signed.message_id)?;
         accepted += usize::from(held.queued);
     }
-    assert!(accepted > 0 && accepted < 6);
+    assert!(
+        accepted > 0 && accepted < 32,
+        "canonical future frames must hit the byte cap before the count cap"
+    );
     assert_eq!(pending_count(&f.human)?, accepted);
     let mut expired = stream(&f.author, "already-expired", 3, "x")?;
     expired.message_id = "expired-wire".into();
@@ -237,13 +254,9 @@ async fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResul
     assert!(project(&f.human, &first, "other-create")?.accepted);
     let mut second = stream(&f.human, "other-v2", 2, "two")?;
     second.author_principal_id = "human".into();
-    let wire = ramflux_protocol::decode_base64url(&second.wire_base64)?;
-    attach_reference_hash(&f.human, &mut second, &wire)?;
     second = f.human.sign_surface_carrier(second)?;
     let mut third = stream(&f.human, "other-v3", 3, "three")?;
     third.author_principal_id = "human".into();
-    let wire = ramflux_protocol::decode_base64url(&third.wire_base64)?;
-    attach_reference_hash(&f.human, &mut third, &wire)?;
     third = f.human.sign_surface_carrier(third)?;
     assert!(project(&f.human, &third, "other-v3")?.queued);
     assert!(project(&f.human, &second, "other-v2")?.accepted);
@@ -251,7 +264,7 @@ async fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResul
     let view = f.human.surface_get_ref(&reference, 0, None)?;
     assert_eq!(view["version"], 3);
     assert_eq!(view["out_of_sync"], false);
-    assert_eq!(view["snapshot"]["components"][0]["text"], "twothree");
+    assert_eq!(view["snapshot"]["dataModel"]["stream"], "twothree");
     Ok(())
 }
 

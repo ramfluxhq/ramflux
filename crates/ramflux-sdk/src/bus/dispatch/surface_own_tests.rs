@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::runtime_tests;
 use crate::client::identity_authority::HeadUse;
-use ramflux_protocol::{A2uiConversationCommand, StreamAppendCommand};
+use crate::client::surface::test_support::append_frame;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 #[path = "surface_own_tests/followups.rs"]
 mod followups;
@@ -129,16 +129,16 @@ pub(super) fn append(
     previous: &Carrier,
     version: u64,
 ) -> Result<Carrier, SdkError> {
-    let wire = ramflux_protocol::encode_a2ui_conversation_event(
-        "thread",
-        version,
-        &A2uiConversationCommand::StreamAppend(StreamAppendCommand {
-            surface_id: "surface".into(),
-            component_id: "result".into(),
-            text_delta: "x".into(),
-            final_: false,
-        }),
-    )?;
+    let (_, state) = client
+        .surface_state_scoped(
+            &previous.conversation_id,
+            &previous.author_principal_id,
+            &previous.surface_id,
+        )?
+        .ok_or_else(|| invalid("author state missing"))?;
+    let frame = append_frame(&state, "/result", "x", false)?;
+    assert_eq!(frame.surface_version, version, "the fixture must append the exact next version");
+    let wire = frame.wire_bytes()?;
     let mut carrier = previous.clone();
     carrier.message_id = crate::new_surface_message_id()?;
     carrier.wire_base64 = ramflux_protocol::encode_base64url(wire);

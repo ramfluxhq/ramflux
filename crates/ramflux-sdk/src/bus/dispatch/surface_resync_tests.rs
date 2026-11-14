@@ -4,7 +4,7 @@
 //! Group recovery is a bounded pair reply, without group broadcasts or unrelated timeline writes.
 use super::*;
 use crate::bus::runtime_tests;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Group {
@@ -37,21 +37,10 @@ impl Group {
             config.clone(),
             Box::new(super::fixture::RecordingGateway::new(Arc::clone(&captured))),
         ));
-        let wire = crate::SurfaceSendRequest::event(
+        let wire = crate::SurfaceSendRequest::event(&create_frame(
             "thread",
-            1,
-            &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-                surface_id: "surface".into(),
-                surface_type: SurfaceType::StatusPanel,
-                catalog: "basic".into(),
-                catalog_version: "1".into(),
-                fallback_text: "中文 é 🦀".into(),
-                fallback_markdown: None,
-                components: vec![json!({"id":"result","text":""})],
-                data_model: serde_json::Map::default(),
-                allowed_actions: Vec::new(),
-            }),
-        )?;
+            &text_snapshot("surface", "中文 é 🦀", &("")),
+        )?)?;
         let mut create = super::dm_tests::create_carrier(&source.client)?;
         create.wire_base64 = wire.wire_base64;
         create.snapshot = None;

@@ -456,45 +456,20 @@ async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback()
 }
 
 #[tokio::test]
-async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thread()
+async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_without_renderer_recovery()
 -> Result<(), SdkError> {
-    use crate::client::surface::{Carrier, PayloadKind, SnapshotProof};
-    use ramflux_protocol::{
-        A2uiConversationCommand as C, CreateSurfaceCommand, StreamAppendCommand, SurfaceEvent as E,
-        SurfaceState, SurfaceType,
-    };
+    use crate::client::surface::test_support::{append_frame, create_frame, text_snapshot};
+    use crate::client::surface::{Carrier, PayloadKind};
+    use ramflux_protocol::{SurfaceEvent as E, SurfaceState};
     let mut a = Fixture::new("alice", 231)?;
     let mut b = Fixture::new("bob", 241)?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
-    let create = C::CreateSurface(CreateSurfaceCommand {
-        surface_id: "held".into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
-        fallback_text: "Working".into(),
-        fallback_markdown: None,
-        components: vec![json!({"id":"stream","text":""})],
-        data_model: serde_json::Map::default(),
-        allowed_actions: vec![],
-    });
-    let create = ramflux_protocol::encode_a2ui_conversation_event("request-thread", 1, &create)?;
-    let append = ramflux_protocol::encode_a2ui_conversation_event(
-        "request-thread",
-        2,
-        &C::StreamAppend(StreamAppendCommand {
-            surface_id: "held".into(),
-            component_id: "stream".into(),
-            text_delta: "hello".into(),
-            final_: false,
-        }),
-    )?;
-    let expected = SurfaceState::default()
-        .apply(&E::from_wire_bytes(&create)?)
-        .map_err(|_| invalid("create"))?
-        .apply(&E::from_wire_bytes(&append)?)
-        .map_err(|_| invalid("append"))?;
+    let create =
+        create_frame("request-thread", &text_snapshot("held", "Working", ""))?.wire_bytes()?;
+    let base = SurfaceState::default().apply(&E::from_wire_bytes(&create)?)?;
+    let append = append_frame(&base, "/result", "hello", false)?.wire_bytes()?;
     let carrier = account(&state, "alice")?.sign_surface_carrier(Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -509,13 +484,7 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
         author_principal_id: "alice".into(),
         wire_base64: ramflux_protocol::encode_base64url(append),
         signature: String::new(),
-        snapshot: Some(SnapshotProof {
-            wire_base64: String::new(),
-            checkpoint_base64: String::new(),
-            surface_hash: expected.hash().map(str::to_owned),
-            metadata: None,
-            author_device_id: "alice".into(),
-        }),
+        snapshot: None,
     })?;
     let request = request(
         "alice",
@@ -533,8 +502,18 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
     contact(&mut state, "bob", "contact.accept", json!({"root_commitment":source})).await?;
     let receiver = account(&state, "bob")?;
     let pending = receiver.account_db()?.list_actor_states::<Value>("surface/pending/")?;
-    assert_eq!(pending.len(), 1, "future surface is held for its missing create");
-    assert!(pending[0]["wire_expires_at"].as_i64().is_some_and(|expiry| expiry >= at + 3600));
+    assert!(pending.is_empty(), "human-authored cards must not enter the renderer recovery queue");
+    let messages = receiver.direct_messages("request-thread")?;
+    assert!(
+        messages.first().is_some_and(|message| message.created_at >= at),
+        "contact release timestamps the fallback message"
+    );
+    assert!(
+        receiver.surface_list("request-thread", "", 100)?["surfaces"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "fallback-only authors must not bootstrap card state"
+    );
     assert!(receiver.account_db()?.client_record("conversation", "request-thread")?.is_some());
     assert_eq!(receiver.direct_messages("request-thread")?.len(), 1);
     Ok(())

@@ -215,3 +215,59 @@ fn metadata_is_committed_and_empty_metadata_is_not_an_alias() -> TestResult {
     assert!(f.wire_bytes().is_err(), "empty metadata cannot introduce an alternate state encoding");
     Ok(())
 }
+
+#[test]
+fn locale_sensitive_button_checks_are_refused_for_en_and_zh_cn_but_display_is_allowed() -> TestResult
+{
+    let base: EventFrame = serde_json::from_slice(include_bytes!(
+        "../../fixtures/protocol/v1/a2ui_surface/create.event.json"
+    ))?;
+    // Admission takes original bytes and no ambient locale. Both host settings must therefore
+    // receive the same typed refusal, including when the formatter is nested under length.
+    for locale in ["en", "zh-CN"] {
+        for function in ["formatDate", "formatNumber", "formatCurrency", "pluralize"] {
+            let args = match function {
+                "formatDate" => json!({"value":"2026-11-14T00:00:00Z","format":"MMMM"}),
+                "formatNumber" => json!({"value":1000}),
+                "formatCurrency" => json!({"value":1000,"currency":"USD"}),
+                _ => json!({"value":1,"one":"item","other":"items"}),
+            };
+            let mut frame = base.clone();
+            let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) =
+                &mut frame.a2ui
+            else {
+                return Err("fixture must create a surface".into());
+            };
+            let components = create.components.as_mut().ok_or("fixture components")?;
+            let button = components
+                .iter_mut()
+                .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("button"))
+                .ok_or("fixture button")?;
+            button["@checks"] = json!([{"condition":{"@call":"length","args":{"value":{"@call":function,"args":args},"min":5}}}]);
+            assert_eq!(
+                SurfaceState::default().prepare_event(frame),
+                Err(Reject::LocaleDependentCheck),
+                "{locale}: {function} must never gate an action through host locale"
+            );
+        }
+    }
+    let mut frame = base;
+    let Some(MutationMessage { mutation: Mutation::CreateSurface(create), .. }) = &mut frame.a2ui
+    else {
+        return Err("fixture create".into());
+    };
+    let label = create
+        .components
+        .as_mut()
+        .ok_or("components")?
+        .iter_mut()
+        .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("label"))
+        .ok_or("label")?;
+    label["text"] =
+        json!({"@call":"formatDate","args":{"value":"2026-11-14T00:00:00Z","format":"MMMM"}});
+    assert!(
+        SurfaceState::default().prepare_event(frame).is_ok(),
+        "the same locale formatter must remain valid in display-only bindings"
+    );
+    Ok(())
+}

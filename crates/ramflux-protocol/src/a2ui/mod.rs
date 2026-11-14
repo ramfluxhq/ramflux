@@ -18,3 +18,6 @@ pub use state::*;
 pub use wire::*;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod upstream_tests;

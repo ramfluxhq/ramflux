@@ -187,7 +187,7 @@ impl SurfaceEvent {
     /// # Errors
     /// Rejects malformed, noncanonical, open, out-of-profile or ambiguous frames.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, Reject> {
-        let raw: Value = decode_canonical(bytes, MAX_STATE_BYTES + MAX_MODEL_BYTES)?;
+        let raw: Value = decode_canonical(bytes, MAX_STATE_BYTES * 2 + MAX_DELTA_BYTES)?;
         reject_null_fields(
             &raw,
             &[
@@ -247,6 +247,7 @@ impl EventFrame {
     fn validate(&self) -> Result<(), Reject> {
         if self.schema != EVENT_SCHEMA
             || self.conversation_id.is_empty()
+            || self.conversation_id.len() > 256
             || !(1..=MAX_SAFE_JSON_INTEGER).contains(&self.surface_version)
             || self.new_surface_hash.is_empty()
             || usize::from(self.a2ui.is_some())

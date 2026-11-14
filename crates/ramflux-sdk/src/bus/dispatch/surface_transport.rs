@@ -320,7 +320,31 @@ async fn send_private(
             .ok_or_else(|| invalid("surface author identity missing"))?
     };
     let mut engine = account.session_client().await?;
-    let client = &account.client;
+    let result =
+        send_private_to_manifest(&account.client, &mut engine, carrier, &root, group).await;
+    account.apply_session_metadata(engine);
+    let delivery = if result.is_ok() { "submitted" } else { "failed" };
+    if carrier.payload_kind == PayloadKind::Action {
+        account.client.set_surface_outgoing_state(carrier, delivery)?;
+    }
+    result?;
+    let mut response = serde_json::to_value(outcome)?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert("delivery_state".into(), json!(delivery));
+        object.insert("message_id".into(), json!(carrier.message_id));
+    }
+    Ok(response)
+}
+
+async fn send_private_to_manifest(
+    client: &RamfluxClient,
+    engine: &mut impl GatewaySessionAccess,
+    carrier: &Carrier,
+    root: &str,
+    group: Option<&str>,
+) -> Result<(), SdkError> {
+    crate::client::surface::check_delivery_size(carrier.bytes()?.len())?;
+    let epoch = group.map(|g| client.group_state(g).map(|s| s.group_epoch)).transpose()?;
     let manifest =
         client.cache_verified_device_manifest(engine.config(), &root, "surface_peer").await?;
     let control = client
@@ -342,22 +366,17 @@ async fn send_private(
             source_principal_id: local.principal_id.clone(),
             sender_id: local.device_id.clone(),
             recipient_device_id: Some(device.device_id),
-            recipient_principal_commitment: Some(root.clone()),
+            recipient_principal_commitment: Some(root.to_owned()),
             target_delivery_id: device.target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
             ttl: client.content_ttl()?,
         };
-        submit_pair_control(client, &mut engine, message, &control, group).await?;
+        submit_pair_control(client, engine, message, &control, group).await?;
         sent += 1;
     }
     if sent == 0 {
         return Err(invalid("surface private destination has no active devices"));
     }
-    let mut response = serde_json::to_value(outcome)?;
-    if let Some(object) = response.as_object_mut() {
-        object.insert("delivery_state".into(), json!("submitted"));
-        object.insert("message_id".into(), json!(carrier.message_id));
-    }
-    Ok(response)
+    Ok(())
 }

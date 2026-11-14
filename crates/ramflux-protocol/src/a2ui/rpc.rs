@@ -100,11 +100,7 @@ impl SurfaceRpc {
                 if frame.function_call_id.is_none() || frame.rejected_version.is_some() {
                     return Err(Reject::Encoding);
                 }
-                // An absent/ill-typed inner id remains a malformed inner call, with the valid
-                // outer id extractable. A conflicting, usable inner id is a frame mismatch.
-                if let Some(inner) = inner_id.and_then(Value::as_str)
-                    && Some(inner) != frame.function_call_id.as_deref()
-                {
+                if inner_id.and_then(Value::as_str) != frame.function_call_id.as_deref() {
                     return Err(Reject::Integrity);
                 }
                 let surface = body

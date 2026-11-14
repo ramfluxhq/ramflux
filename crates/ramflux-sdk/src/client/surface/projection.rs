@@ -139,6 +139,11 @@ impl RamfluxClient {
         {
             return Ok(Err(Outcome::rejected(json!({"code":"surface_hash_mismatch"}))));
         }
+        if let Ok(state) = &next
+            && let Err(error) = self.validate_surface_attachments(state)?
+        {
+            return Ok(Err(Outcome::protocol_rejected(&error)));
+        }
         Ok(next)
     }
     pub(super) fn apply_surface_payload(

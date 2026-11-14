@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::runtime_tests;
 use crate::client::surface::SurfaceSender;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 pub(in crate::bus::dispatch) struct Delivery {
     pub(in crate::bus::dispatch) envelope: ramflux_protocol::Envelope,
@@ -46,18 +46,8 @@ async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame
         &json!({"kind":"group","group_id":"group"}),
     )?;
     let epoch = source.client.group_state("group")?.group_epoch;
-    let command = A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-        surface_id: "surface".into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
-        fallback_text: "中文 é 🦀".into(),
-        fallback_markdown: None,
-        components: vec![json!({"id":"result","text":"🦀".repeat(1500)})],
-        data_model: serde_json::Map::default(),
-        allowed_actions: Vec::new(),
-    });
-    let request = crate::SurfaceSendRequest::event("thread", 1, &command)?;
+    let command = text_snapshot("surface", "中文 é 🦀", &("🦀".repeat(1500)));
+    let request = crate::SurfaceSendRequest::event(&create_frame("thread", &command)?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -448,26 +438,38 @@ fn maximal_carrier_in(
     conversation: &str,
     surface: &str,
 ) -> Result<Carrier, Box<dyn std::error::Error>> {
-    use ramflux_protocol::{MAX_SURFACE_DATA_BYTES, canonical_json_bytes};
-    let mut content = CreateSurfaceCommand {
-        surface_id: surface.into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
-        fallback_text: "中文 é 🦀".into(),
-        fallback_markdown: None,
-        components: (0..64).map(|i| json!({"id":format!("block-{i}"),"text":""})).collect(),
-        data_model: serde_json::Map::from_iter([("padding".into(), json!(""))]),
-        allowed_actions: Vec::new(),
-    };
-    let padding = MAX_SURFACE_DATA_BYTES - canonical_json_bytes(&content)?.len();
-    content.data_model.insert("padding".into(), json!("x".repeat(padding)));
-    assert_eq!(canonical_json_bytes(&content)?.len(), MAX_SURFACE_DATA_BYTES);
-    let request = crate::SurfaceSendRequest::event(
-        conversation,
-        1,
-        &A2uiConversationCommand::CreateSurface(content),
-    )?;
+    use ramflux_protocol::{MAX_STATE_BYTES, canonical_json_bytes};
+    let mut content = text_snapshot(surface, "中文 é 🦀", "");
+    content.components = vec![
+        json!({"id":"root","component":"Column","children":(0..31).map(|i|format!("block_{i}")).collect::<Vec<_>>()}),
+    ];
+    content.components.extend((0..31).map(|i|json!({"id":format!("block_{i}"),"component":"Text","text":{"@path":format!("/block_{i}")}})));
+    let mut model = serde_json::Map::from_iter((0..64).map(|i| (format!("block_{i}"), json!(""))));
+    model.insert("padding".into(), json!(""));
+    content.data_model = json!(model);
+    let mut fully_final = content.clone();
+    fully_final.final_ = (0..64)
+        .map(|i| ramflux_protocol::FinalRecord {
+            pointer: format!("/block_{i}"),
+            text_hash: ramflux_protocol::hash_base64url("ramflux.a2ui.final_text.v2", b""),
+        })
+        .collect();
+    fully_final.final_.sort_by(|a, b| a.pointer.cmp(&b.pointer));
+    let padding = MAX_STATE_BYTES
+        .checked_sub(canonical_json_bytes(&fully_final)?.len())
+        .ok_or("maximal final state overhead")?;
+    content
+        .data_model
+        .as_object_mut()
+        .ok_or("model object")?
+        .insert("padding".into(), json!("x".repeat(padding)));
+    fully_final.data_model = content.data_model.clone();
+    assert_eq!(
+        canonical_json_bytes(&fully_final)?.len(),
+        MAX_STATE_BYTES,
+        "the final state must reach the pinned whole-state cap"
+    );
+    let request = crate::SurfaceSendRequest::event(&create_frame(conversation, &content)?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
@@ -508,18 +510,21 @@ fn finalize_all_blocks(
     carrier: &Carrier,
     epoch: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use ramflux_protocol::StreamAppendCommand;
     for i in 0..64 {
-        let wire = ramflux_protocol::encode_a2ui_conversation_event(
-            &carrier.conversation_id,
-            i + 2,
-            &A2uiConversationCommand::StreamAppend(StreamAppendCommand {
-                surface_id: carrier.surface_id.clone(),
-                component_id: format!("block-{i}"),
-                text_delta: String::new(),
-                final_: true,
-            }),
+        let (_, state) = source
+            .surface_state_scoped(
+                &carrier.conversation_id,
+                &carrier.author_principal_id,
+                &carrier.surface_id,
+            )?
+            .ok_or("author state missing")?;
+        let frame = crate::client::surface::test_support::append_frame(
+            &state,
+            &format!("/block_{i}"),
+            "",
+            true,
         )?;
+        let wire = frame.wire_bytes()?;
         let mut delta = carrier.clone();
         delta.message_id = crate::new_surface_message_id()?;
         delta.wire_base64 = ramflux_protocol::encode_base64url(wire);
@@ -531,7 +536,10 @@ fn finalize_all_blocks(
         } else {
             assert!(delta.bytes()?.len() < crate::client::surface::MAX_DELIVERY_BYTES / 8);
         }
-        assert!(!delta.snapshot.as_ref().ok_or("result hash")?.is_full());
+        assert!(
+            delta.snapshot.is_none(),
+            "append carries its frame commitments without a second snapshot shape"
+        );
         assert!(source.stage_surface_outgoing(&delta, Some(epoch))?.accepted);
     }
     Ok(())
@@ -546,7 +554,7 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
     let principal = "a".repeat(256);
     let device = "d".repeat(256);
     let conversation = "c".repeat(256);
-    let surface = "s".repeat(256);
+    let surface = "s".repeat(64);
     let remote = "r".repeat(256);
     source.client.create_identity_root(&principal, [97; 32]);
     source.client.create_device_branch(&principal, &device, 1, [98; 32]);

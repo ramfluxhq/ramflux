@@ -710,3 +710,28 @@ impl RamfluxClient {
         Ok(Some((stored.reference.object_id, stored.reference.manifest_hash)))
     }
 }
+
+impl RamfluxClient {
+    /// Check the retained encrypted reference, rather than mutable display metadata. Surface
+    /// admission must not fetch an object or grant access to a different conversation.
+    pub(crate) fn surface_attachment_in_conversation(
+        &self,
+        selector: &str,
+        manifest: &str,
+        conversation: &str,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let Some(stored) = db.load_actor_state::<ReceivedAttachment>(&reference_key(selector))?
+        else {
+            return Ok(false);
+        };
+        let reference = &stored.reference;
+        if reference.manifest_hash != manifest || reference.key_slot.conversation_id != conversation
+        {
+            return Ok(false);
+        }
+        db.check_object_access(selector)?;
+        db.check_object_identity(&reference.object_id, manifest)?;
+        Ok(true)
+    }
+}

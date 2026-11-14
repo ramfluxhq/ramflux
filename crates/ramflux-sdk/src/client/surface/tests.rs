@@ -25,6 +25,7 @@ struct Fixture {
     author: RamfluxClient,
     human: RamfluxClient,
     root: ramflux_test_support::TestPath,
+    vault: std::sync::Arc<crate::custody::tests::TestVault>,
 }
 fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
     let mut client = RamfluxClient::new();
@@ -46,7 +47,8 @@ impl Fixture {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-        let (human, author) = super::test_support::owned_pair(&root, "human", "author").await?;
+        let (human, author, vault) =
+            super::test_support::owned_pair_with_vault(&root, "human", "author").await?;
         for (local, remote) in [(&author, &human), (&human, &author)] {
             let _ = remote;
             local.account_db()?.persist_client_record(
@@ -55,7 +57,7 @@ impl Fixture {
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
         }
-        Ok(Self { author, human, root })
+        Ok(Self { author, human, root, vault })
     }
 }
 impl Drop for Fixture {
@@ -108,7 +110,15 @@ fn event(version: u64, intent: C) -> Result<Vec<u8>, SdkError> {
                         .find(|((id, _), _)| *id == surface)
                         .map(|(_, state)| state.clone())
                 })
-                .unwrap_or_default()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    let mut content = snapshot();
+                    content.surface_id = surface.clone();
+                    let frame = super::test_support::create_frame("thread", &content)?;
+                    Ok::<_, SdkError>(SurfaceState::validate_proof(
+                        &ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?,
+                    )?)
+                })?
         };
         let expected = previous.version() + 1;
         let mut frame = EventFrame {
@@ -211,10 +221,13 @@ fn project(
         .ok_or_else(|| super::invalid("not a surface"))
 }
 fn create(f: &Fixture) -> Result<(), SdkError> {
+    create_for(&f.author, &f.human)
+}
+fn create_for(author: &RamfluxClient, human: &RamfluxClient) -> Result<(), SdkError> {
     let wire = event(1, C::CreateSurface(snapshot()))?;
-    let signed = carrier(&f.author, PayloadKind::Event, "create", &wire)?;
-    project(&f.author, &signed, "create-author")?;
-    project(&f.human, &signed, "create-human")?;
+    let signed = carrier(author, PayloadKind::Event, "create", &wire)?;
+    project(author, &signed, "create-author")?;
+    project(human, &signed, "create-human")?;
     Ok(())
 }
 fn action(
@@ -324,10 +337,13 @@ async fn author_consumes_a_decision_once_across_message_and_payload_replays() ->
     assert!(project(&f.author, &signed, "duplicate")?.accepted);
     assert_eq!(f.author.surface_get("s", 0, None)?["actions"].as_array().map(Vec::len), Some(1));
     f.author = RamfluxClient::new();
-    f.author.create_identity_root("author", [31; 32]);
-    f.author.create_device_branch("author", "author-device", 1, [32; 32]);
-    f.author.open_account_index(f.root.join("author"))?;
+    f.author.open_account_index(&f.root)?;
     f.author.unlock_account("author", b"surface-test-secret")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.author.initialize_born_v3_branch("author-device", f.vault.clone()),
+    )
+    .await??;
     let repeat =
         action(&f.human, "different-message", 1, view["surface_hash"].as_str().ok_or("hash")?)?;
     let rejected = project(&f.author, &repeat, "repeat")?;
@@ -340,8 +356,10 @@ async fn stale_actions_and_signature_tampering_are_rejected() -> TestResult {
     let f = Fixture::new().await?;
     create(&f)?;
     let before = f.author.surface_get("s", 0, None)?;
-    let signed = action(&f.human, "stale", 0, before["surface_hash"].as_str().ok_or("hash")?)?;
-    assert!(!project(&f.author, &signed, "stale")?.accepted);
+    assert!(
+        action(&f.human, "stale", 0, before["surface_hash"].as_str().ok_or("hash")?).is_err(),
+        "zero-version actions are refused before signing"
+    );
     let mut signed = carrier(
         &f.author,
         PayloadKind::Event,
@@ -376,8 +394,8 @@ async fn surface_transaction_rolls_back_state_history_receipts_and_outbox() -> T
 #[tokio::test]
 async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestResult {
     let mut f = Fixture::new().await?;
-    let wire=b"{ \"schema\":\"ramflux.a2ui.conversation.v2\",\"conversationId\":\"thread\",\"version\":1,\"command\":{\"command\":\"createSurface\",\"surfaceId\":\"s\",\"surfaceType\":\"status_panel\",\"catalog\":\"basic\",\"catalogVersion\":\"1\",\"fallbackText\":\"Original bytes\"}}";
-    let signed = carrier(&f.author, PayloadKind::Event, "raw", wire)?;
+    let wire = event(1, C::CreateSurface(snapshot()))?;
+    let signed = carrier(&f.author, PayloadKind::Event, "raw", &wire)?;
     assert!(project(&f.human, &signed, "raw")?.accepted);
     let before = f.human.surface_get("s", 0, None)?;
     let history: Vec<Value> = f.human.account_db()?.surface_history_page(
@@ -392,8 +410,13 @@ async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() ->
         wire
     );
     f.human = RamfluxClient::new();
-    f.human.open_account_index(f.root.join("human"))?;
+    f.human.open_account_index(&f.root)?;
     f.human.unlock_account("human", b"surface-test-secret")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
+    )
+    .await??;
     assert_eq!(f.human.surface_get("s", 0, None)?, before);
     Ok(())
 }
@@ -566,8 +589,13 @@ async fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> Tes
     assert_eq!(view["snapshot"]["fallbackText"], raw);
     assert_eq!(view["fallback_text"], expected);
     f.human = RamfluxClient::new();
-    f.human.open_account_index(f.root.join("human"))?;
+    f.human.open_account_index(&f.root)?;
     f.human.unlock_account("human", b"surface-test-secret")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
+    )
+    .await??;
     assert_eq!(f.human.surface_get("s", 0, None)?, view);
     assert_eq!(f.human.surface_message_fallback("hostile")?.ok_or("reference")?.1, expected);
     Ok(())

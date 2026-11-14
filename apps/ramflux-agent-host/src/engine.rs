@@ -284,9 +284,11 @@ impl EngineProvider for RuleEngine {
             components.push(json!({"id":button,"component":"Button","child":label,"action":{"event":{"name":choice.id,"context":{"decision":choice.id}}}}));
             components.push(json!({"id":label,"component":"Text","text":choice.label}));
         }
-        if let Some(root) = components.first_mut() {
-            root["children"] = json!(children);
-        }
+        let root = components
+            .first_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or(Error::State)?;
+        root.insert("children".into(), json!(children));
         let content = SurfaceSnapshot {
             surface_id: id.clone(),
             catalog_id: CATALOG_ID.into(),

@@ -47,6 +47,15 @@ pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), Sdk
     let dir = genesis::reserve_account(root, id, &record.body.account_anchor)?;
     let branch_ref =
         format!("branch:{}", custody_vault_reference(root, id, &record.body.account_anchor)?);
+    let custodian_account_id = record.body.profile.custodian.as_ref().and_then(|custodian| {
+        list_accounts(root, now).ok()?.into_iter().find_map(|summary| {
+            let id = summary.get("local_account_id")?.as_str()?;
+            load_account(root, id, now)
+                .ok()
+                .filter(|account| account.record().body.account_anchor == custodian.account_anchor)
+                .map(|_| id.to_owned())
+        })
+    });
     let stored = StoredAuthority {
         schema: "ramflux.local.custody_account.v1".into(),
         local_account_id: id.into(),
@@ -68,7 +77,7 @@ pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), Sdk
         compacted_ids: None,
         custodian_publication: None,
         pins,
-        custodian_account_id: None,
+        custodian_account_id,
         agent_provisioning_vault_ref: None,
     };
     vault.store_branch(&branch_ref, branch)?;

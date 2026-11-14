@@ -4,7 +4,7 @@
 //! Shared DM transport journals one logical surface across peer devices and retries.
 use super::*;
 use crate::bus::runtime_tests;
-use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
+use crate::client::surface::test_support::{create_frame, text_snapshot};
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -281,21 +281,10 @@ fn configure_receiver(
     Ok(())
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
-    let request = crate::SurfaceSendRequest::event(
+    let request = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        1,
-        &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
-            surface_id: "surface".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Safe fallback".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"result","text":""})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: Vec::new(),
-        }),
-    )?;
+        &text_snapshot("surface", "Safe fallback", &("")),
+    )?)?;
     let mut carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),

@@ -33,6 +33,9 @@
     "specification/v1_0/test/cases/initial_state_validation.json": "5f5daeaf0dafeafc1d6f1fb54905256d5b85f9a8205488461f7b9a5383323e1e",
     "specification/v1_0/test/cases/renderer_messages.json": "a5947e13e6b9fd99a33d5c8e4dd1410aa11bc2b0df4e29d9df22a074a54365ac",
     "specification/v1_0/test/cases/tabs_checks.json": "390e42fab63f9c2918f094177b32d88c2d50661d71737abe77a03969618f451b",
-    "specification/v1_0/test/cases/text_variants.json": "c104f9ffd0ea02225d247ee50fd77f2b9b00eeb9c297e69a82d297237f39bf80"
+    "specification/v1_0/test/cases/text_variants.json": "c104f9ffd0ea02225d247ee50fd77f2b9b00eeb9c297e69a82d297237f39bf80",
+    "specification/v1_0/test/testing_catalog.json": "12a5f4dc96b7973596035f92ab5af2d6cd6be1045d32a71a72e55426a4d54807",
+    "catalogs/mcp/v1/catalog.json": "49fbff9692c8dc31fc0fded84e0c3cc6e842522133ca84e525e7e6475b81244c",
+    "catalogs/vegachart/v1/catalog.json": "b48885828364af9a40247f9cf572f7337d0c5952cf69d54e0f6813d6a5f7b627"
   }
 }

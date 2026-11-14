@@ -196,6 +196,18 @@ struct Graph<'a> {
     instances: Vec<Instance<'a>>,
     reached: BTreeSet<String>,
 }
+struct WalkFrame<'a> {
+    name: &'a str,
+    source: &'a [String],
+    prefix: &'a str,
+    scope: &'a str,
+    depth: usize,
+    in_modal: bool,
+}
+struct WalkContext<'a, 'b> {
+    definitions: &'b BTreeMap<&'a str, &'a Value>,
+    snapshot: &'a SurfaceSnapshot,
+}
 struct Input<'a> {
     instance: Instance<'a>,
     pointer: JsonPointer,
@@ -245,32 +257,39 @@ impl<'a> Graph<'a> {
             }
         }
         let mut graph = Self { instances: Vec::new(), reached: BTreeSet::new() };
+        let context = WalkContext { definitions: &definitions, snapshot };
+        graph.reached = static_references("root", &definitions, &mut BTreeSet::new(), 0, false)?;
         graph.walk(
-            "root",
-            &definitions,
-            snapshot,
-            &[],
-            "",
-            "Surface",
+            WalkFrame {
+                name: "root",
+                source: &[],
+                prefix: "",
+                scope: "Surface",
+                depth: 0,
+                in_modal: false,
+            },
+            &context,
             &mut BTreeSet::new(),
-            0,
-            false,
         )?;
+        let mut controls = BTreeSet::new();
+        for instance in &graph.instances {
+            if (input(kind(instance.component)?) || kind(instance.component)? == "Button")
+                && !controls.insert((id(instance.component)?, instance.source.clone()))
+            {
+                return Err(Reject::Validation("ambiguous control instance".into()));
+            }
+        }
         Ok(graph)
     }
-    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
-        name: &str,
-        definitions: &BTreeMap<&str, &'a Value>,
-        snapshot: &SurfaceSnapshot,
-        source: &[String],
-        prefix: &str,
-        scope: &str,
+        cursor: WalkFrame<'_>,
+        context: &WalkContext<'a, '_>,
         stack: &mut BTreeSet<String>,
-        depth: usize,
-        in_modal: bool,
     ) -> Result<(), Reject> {
+        let WalkFrame { name, source, prefix, scope, depth, in_modal } = cursor;
+        let definitions = context.definitions;
+        let snapshot = context.snapshot;
         if depth >= 16 || self.instances.len() >= 256 || source.len() > 2 {
             return Err(Reject::Limit);
         }
@@ -356,15 +375,16 @@ impl<'a> Graph<'a> {
         }
         for (child, source, prefix, scope) in children {
             self.walk(
-                &child,
-                definitions,
-                snapshot,
-                &source,
-                &prefix,
-                &scope,
+                WalkFrame {
+                    name: &child,
+                    source: &source,
+                    prefix: &prefix,
+                    scope: &scope,
+                    depth: depth + 1,
+                    in_modal: in_modal || component_kind == "Modal",
+                },
+                context,
                 stack,
-                depth + 1,
-                in_modal || component_kind == "Modal",
             )?;
         }
         stack.remove(name);
@@ -381,17 +401,78 @@ impl<'a> Graph<'a> {
                 if inputs.iter().any(|old| pointer.overlaps(&old.pointer)) {
                     return Err(Reject::Validation("input binding alias".into()));
                 }
-                validate_input(
-                    instance.component,
-                    pointer.get(&snapshot.data_model).ok_or(Reject::Expression)?,
-                    &snapshot.data_model,
-                    &instance.prefix,
-                )?;
                 inputs.push(Input { instance: instance.clone(), pointer });
             }
         }
+        for owner in &inputs {
+            for property in ["min", "max"] {
+                if let Some(value) = owner.instance.component.get(property)
+                    && value.is_object()
+                {
+                    let bound = binding(value, &owner.instance.prefix)?;
+                    if inputs.iter().any(|input| input.pointer.overlaps(&bound)) {
+                        return Err(Reject::Validation("input limit depends on an input".into()));
+                    }
+                }
+            }
+            validate_input(
+                owner.instance.component,
+                owner.pointer.get(&snapshot.data_model).ok_or(Reject::Expression)?,
+                &snapshot.data_model,
+                &owner.instance.prefix,
+            )?;
+        }
         Ok(inputs)
     }
+}
+
+fn static_references(
+    name: &str,
+    definitions: &BTreeMap<&str, &Value>,
+    stack: &mut BTreeSet<String>,
+    depth: usize,
+    in_modal: bool,
+) -> Result<BTreeSet<String>, Reject> {
+    if depth >= 16 || !stack.insert(name.into()) {
+        return Err(Reject::Integrity);
+    }
+    let component = definitions.get(name).ok_or(Reject::Integrity)?;
+    let component_kind = kind(component)?;
+    if component_kind == "Approval" && depth != 0 || component_kind == "Modal" && in_modal {
+        return Err(Reject::Validation("composition".into()));
+    }
+    let mut reached = BTreeSet::from([name.into()]);
+    let mut children = Vec::new();
+    for property in ["child", "trigger", "content"] {
+        if let Some(child) = component.get(property) {
+            children.push(child.as_str().ok_or(Reject::Encoding)?);
+        }
+    }
+    if let Some(tabs) = component.get("tabs") {
+        for tab in tabs.as_array().ok_or(Reject::Encoding)? {
+            children.push(tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?);
+        }
+    }
+    if let Some(list) = component.get("children") {
+        if let Some(array) = list.as_array() {
+            for child in array {
+                children.push(child.as_str().ok_or(Reject::Encoding)?);
+            }
+        } else {
+            children.push(list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?);
+        }
+    }
+    for child in children {
+        reached.extend(static_references(
+            child,
+            definitions,
+            stack,
+            depth + 1,
+            in_modal || component_kind == "Modal",
+        )?);
+    }
+    stack.remove(name);
+    Ok(reached)
 }
 
 pub(super) fn validate_components(snapshot: &mut SurfaceSnapshot) -> Result<(), Reject> {
@@ -456,7 +537,13 @@ fn validate_declaration(
         }
         if let Some(checks) = instance.component.get("@checks") {
             let mut reads = Vec::new();
-            collect_reads(checks, &instance.prefix, &mut reads)?;
+            let owned: Vec<_> = inputs.iter().map(|input| input.pointer.clone()).collect();
+            let context = CheckContext {
+                prefix: &instance.prefix,
+                model: &snapshot.data_model,
+                owned: &owned,
+            };
+            collect_reads(checks, &context, &mut reads, 0)?;
             for pointer in reads {
                 for input in inputs {
                     if pointer.overlaps(&input.pointer)
@@ -487,29 +574,68 @@ fn validate_declaration(
     }
     Ok(())
 }
-fn collect_reads(value: &Value, prefix: &str, reads: &mut Vec<JsonPointer>) -> Result<(), Reject> {
+struct CheckContext<'a> {
+    prefix: &'a str,
+    model: &'a Value,
+    owned: &'a [JsonPointer],
+}
+fn collect_reads(
+    value: &Value,
+    context: &CheckContext<'_>,
+    reads: &mut Vec<JsonPointer>,
+    depth: usize,
+) -> Result<(), Reject> {
+    if depth > 16 {
+        return Err(Reject::Limit);
+    }
     match value {
         Value::Object(map) => {
             if let Some(path) = map.get("@path") {
-                reads.push(resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?);
+                reads.push(resolve_pointer(
+                    path.as_str().ok_or(Reject::Expression)?,
+                    context.prefix,
+                )?);
             }
-            if map
-                .get("@call")
-                .and_then(Value::as_str)
-                .is_some_and(super::expression::locale_sensitive)
-            {
-                return Err(Reject::LocaleDependentCheck);
-            }
-            if map.get("@call").and_then(Value::as_str) == Some("openUrl") {
-                return Err(Reject::Expression);
+            if let Some(name) = map.get("@call").and_then(Value::as_str) {
+                if super::expression::locale_sensitive(name) {
+                    return Err(Reject::LocaleDependentCheck);
+                }
+                if name == "openUrl" || name == "@index" && context.prefix.is_empty() {
+                    return Err(Reject::Expression);
+                }
+                if name == "formatString" {
+                    let source = value.pointer("/args/value").ok_or(Reject::Expression)?;
+                    let mut source_reads = Vec::new();
+                    collect_reads(source, context, &mut source_reads, depth + 1)?;
+                    if source_reads
+                        .iter()
+                        .any(|read| context.owned.iter().any(|owner| read.overlaps(owner)))
+                    {
+                        // A draft cannot supply a new check program that reads arbitrary hidden inputs.
+                        return Err(Reject::Validation("input-controlled check program".into()));
+                    }
+                    let program = super::expression::evaluate(
+                        source,
+                        context.model,
+                        context.prefix,
+                        depth + 1,
+                    )?;
+                    for expression in super::format_string::expressions(
+                        program.as_str().ok_or(Reject::Expression)?,
+                    )? {
+                        collect_reads(&expression, context, reads, depth + 1)?;
+                    }
+                    reads.extend(source_reads);
+                    return Ok(());
+                }
             }
             for value in map.values() {
-                collect_reads(value, prefix, reads)?;
+                collect_reads(value, context, reads, depth + 1)?;
             }
         }
         Value::Array(array) => {
             for value in array {
-                collect_reads(value, prefix, reads)?;
+                collect_reads(value, context, reads, depth + 1)?;
             }
         }
         _ => {}
@@ -589,6 +715,9 @@ impl SurfaceState {
         let empty = Map::new();
         let context = event.get("context").and_then(Value::as_object).unwrap_or(&empty);
         let submitted = &frame.a2ui.action;
+        if submitted.metadata.is_some() {
+            return Err(Reject::Validation("action metadata has no declared egress source".into()));
+        }
         if declared_name != submitted.name
             || declared_message != submitted.user_message.as_deref()
             || context.keys().ne(submitted.context.keys())

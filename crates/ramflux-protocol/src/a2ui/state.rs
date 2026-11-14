@@ -168,10 +168,27 @@ impl SurfaceState {
     /// # Errors
     /// Refuses any invalid transition or state; never normalizes received wire bytes.
     pub fn prepare_event(&self, mut frame: EventFrame) -> Result<EventFrame, Reject> {
-        frame.new_surface_hash = "pending".into();
-        let event = SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?;
-        let next = self.apply_inner(&event, false)?;
-        frame.new_surface_hash = next.hash.ok_or(Reject::NotCreated)?;
+        if let Some(resync) = &frame.resync {
+            let Mutation::CreateSurface(create) = &resync.a2ui.mutation else {
+                return Err(Reject::Encoding);
+            };
+            let mut snapshot = SurfaceSnapshot::from_create(
+                create,
+                frame.fallback_text.as_deref().ok_or(Reject::Encoding)?,
+            );
+            snapshot.closed = frame.closed.ok_or(Reject::Encoding)?;
+            snapshot.final_ = frame.final_.clone().ok_or(Reject::Encoding)?;
+            if create.metadata != frame.metadata {
+                return Err(Reject::Integrity);
+            }
+            snapshot.validate()?;
+            frame.new_surface_hash = snapshot.hash()?;
+        } else {
+            frame.new_surface_hash = "pending".into();
+            let event = SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?;
+            let next = self.apply_inner(&event, false)?;
+            frame.new_surface_hash = next.hash.ok_or(Reject::NotCreated)?;
+        }
         self.apply(&SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
         Ok(frame)
     }
@@ -370,7 +387,7 @@ impl SurfaceSnapshot {
             return Err(Reject::Validation("catalog/fallback".into()));
         }
         validate_metadata(self.metadata.as_ref())?;
-        if self.components.len() > MAX_COMPONENTS
+        if self.components.len() > MAX_COMPONENTS * 2
             || canonical(&self.data_model)?.len() > MAX_MODEL_BYTES
             || !self.data_model.is_object()
         {
@@ -378,6 +395,9 @@ impl SurfaceSnapshot {
         }
         safe_model(&self.data_model, 0)?;
         super::action::validate_components(self)?;
+        if self.components.len() > MAX_COMPONENTS {
+            return Err(Reject::Limit);
+        }
         self.components.sort_by(|a, b| {
             a.get("id").and_then(Value::as_str).cmp(&b.get("id").and_then(Value::as_str))
         });
