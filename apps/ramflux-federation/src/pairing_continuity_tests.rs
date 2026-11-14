@@ -298,8 +298,13 @@ impl Continuity {
         let origin = format!("https://localhost:{}", front.local_addr()?.port());
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let clock = TestPairingClock::new(now);
-        let node =
-            spawn_node_mesh_at(origin.clone(), Some(Arc::clone(&clock) as Arc<dyn PairingClock>))?;
+        let node = spawn_node_mesh_at(
+            origin.clone(),
+            Some(
+                Arc::new(RelayClock { manual: clock.clone(), started: std::time::Instant::now() })
+                    as Arc<dyn PairingClock>,
+            ),
+        )?;
         let router = Arc::new(RouterMeshClient {
             endpoint: node.endpoint.clone(),
             server_name: "ramflux-router".into(),
@@ -964,4 +969,20 @@ pub(super) fn native_issue_refused_when_disabled() -> TestResult {
         "test: default-off native service issued an invitation: {reply:?}"
     );
     Ok(())
+}
+
+// The real background DATA handshake must advance even while the test awaits its owner.
+struct RelayClock {
+    manual: Arc<TestPairingClock>,
+    started: std::time::Instant,
+}
+impl PairingClock for RelayClock {
+    fn wall_unix_secs(&self) -> Result<u64, ramflux_node_core::pairing_relay::PairingRelayError> {
+        self.manual.wall_unix_secs()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.manual
+            .monotonic_ms()
+            .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
 }

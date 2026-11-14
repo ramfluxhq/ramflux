@@ -4,6 +4,7 @@
 //! Real node custody service with serialized direct frames; no HTTP/Fedwire claim.
 use super::{ResultOf, vault::Vault};
 use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
+use ramflux_node_core::pairing_relay::PairingClock as _;
 use ramflux_node_core::{CustodyService, CustodyTlsContext, RouterCore, RouterRedbStore};
 use ramflux_protocol::{custody::*, encode_base64url};
 use ramflux_sdk::{
@@ -72,7 +73,10 @@ impl Node {
         )?;
         let clock = TestPairingClock::new(time);
         let relay = Arc::new(Mutex::new(PairingRelayStore::new(PairingRelayConfig {
-            clock: clock.clone(),
+            clock: Arc::new(RelayClock {
+                manual: clock.clone(),
+                started: std::time::Instant::now(),
+            }),
             node_seed: seed,
             public_origin: "https://relay.example:443".into(),
         })?));
@@ -275,5 +279,21 @@ impl Endpoint {
             },
             Some([19; 32]),
         )
+    }
+}
+
+// Manual SAS turns and real background A3 retries share one monotonic clock.
+struct RelayClock {
+    manual: Arc<ramflux_node_core::pairing_relay::TestPairingClock>,
+    started: std::time::Instant,
+}
+impl ramflux_node_core::pairing_relay::PairingClock for RelayClock {
+    fn wall_unix_secs(&self) -> Result<u64, ramflux_node_core::pairing_relay::PairingRelayError> {
+        self.manual.wall_unix_secs()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.manual
+            .monotonic_ms()
+            .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 }

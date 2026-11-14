@@ -97,7 +97,7 @@ async fn pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_rel
     deadline(Box::pin(run())).await
 }
 async fn run() -> TestResult {
-    let network = Network::open()?;
+    let mut network = Network::open()?;
     let (mut primary, mut a) = Box::pin(device::Device::create_network(
         &network.profile,
         &network.stack,
@@ -117,6 +117,9 @@ async fn run() -> TestResult {
     assert_ne!(a.root.path(), b.root.path(), "test: history endpoints share account directory");
     assert!(!Arc::ptr_eq(&a.vault, &b.vault), "test: history endpoints share vault");
     Box::pin(enroll(&mut primary, &mut recipient)).await?;
+    let original_branch = branch_identity(&b)?;
+    let wrapping =
+        ramflux_storage::AccountIndex::open(b.root.path())?.load_wrapped_db_key(&b.id)?;
     let mut target = Box::pin(b.connect_network(&network.profile, &network.stack)).await?;
     let mut source = Box::pin(a.connect_network(&network.profile, &network.stack)).await?;
     assert!(
@@ -136,15 +139,44 @@ async fn run() -> TestResult {
         network.objects.gets.load(Ordering::SeqCst) > 0,
         "test: history bypassed authenticated object fetch"
     );
+    let before_media = network.objects.gets.load(Ordering::SeqCst);
+    let native = custody::load_account(b.root.path(), &b.id, wall()?)?;
+    let sibling = native.local_device_id()?;
+    const MEDIA: &[u8] = b"ordinary authorized media after independent pairing";
+    Box::pin(source.send_pairing_media(sibling, BODY, MEDIA)).await?;
+    Box::pin(target.wait_pairing_history("paired-ordinary-media-message", BODY)).await?;
+    Box::pin(target.fetch_pairing_media(MEDIA)).await?;
+    assert!(
+        network.objects.gets.load(Ordering::SeqCst) > before_media,
+        "test: ordinary paired media bypassed authenticated remote ciphertext fetch"
+    );
     assert_eq!(a.vault.primary_entries()?, 1, "test: history delivery retired source primary");
     assert_eq!(b.vault.primary_entries()?, 0, "test: history delivery copied management key");
+    assert_eq!(
+        branch_identity(&b)?,
+        original_branch,
+        "test: history or media import replaced B's own branch keys"
+    );
+    assert_eq!(
+        ramflux_storage::AccountIndex::open(b.root.path())?.load_wrapped_db_key(&b.id)?,
+        wrapping,
+        "test: history or media import replaced B's original data-password wrapping"
+    );
     source.stop().await;
     target.stop().await;
     primary.lock().await?;
     recipient.lock().await?;
+    network.objects.stop().await?;
     Ok(())
 }
+fn branch_identity(device: &device::Device) -> TestResult<([u8; 32], [u8; 32], DeviceRef)> {
+    let native = custody::load_account(device.root.path(), &device.id, wall()?)?;
+    let (branch, agreement, reference) = device.vault.local_branch(native.record())?;
+    Ok((branch.signing_key.verifying_key().to_bytes(), agreement.public, reference))
+}
 async fn exchange(a: &mut PairingActor, b: &mut PairingActor) -> TestResult<(String, String)> {
+    // Child services own real clocks; honor their one-second SAS poll admission turn.
+    tokio::time::sleep(Duration::from_millis(1001)).await;
     let a = update(a.sync_relay().await?)?.phase;
     let b = update(b.sync_relay().await?)?.phase;
     Ok((a, b))

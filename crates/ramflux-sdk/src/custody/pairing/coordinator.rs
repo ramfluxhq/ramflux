@@ -546,6 +546,7 @@ impl PairingActor {
         }
         if let Err(error) = self.advance_full_tails().await {
             self.note_background_error(&error);
+            self.note_relay_refusal("tail", &error);
             return Err(error);
         }
         if self.ceremony.is_none() {
@@ -573,33 +574,48 @@ impl PairingActor {
         }
         self.expire_live().await;
         if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
-            self.flush_send().await?;
+            self.flush_send()
+                .await
+                .inspect_err(|error| self.note_relay_refusal("short send", error))?;
             self.close_completed_relay().await;
             self.clear_completed_secrets();
             return self.status_update();
         }
-        if self.retry_full_data_if_due().await? {
+        if self
+            .retry_full_data_if_due()
+            .await
+            .inspect_err(|error| self.note_relay_refusal("data retry", error))?
+        {
             return self.status_update();
         }
         match self.advance_full_epoch().await {
             Ok(true) => return self.status_update(),
             Ok(false) => {}
             Err(error) => {
+                self.note_relay_refusal("data epoch", &error);
                 self.note_background_error(&error);
                 self.reject_invalid_full_head(&error).await?;
                 return Err(error);
             }
         }
         for _ in 0..SYNC_STEPS {
-            self.flush_send().await?;
-            let polled = match self.poll_once().await {
+            self.flush_send()
+                .await
+                .inspect_err(|error| self.note_relay_refusal("short send", error))?;
+            let polled = match self
+                .poll_once()
+                .await
+                .inspect_err(|error| self.note_relay_refusal("short poll", error))
+            {
                 Ok(polled) => polled,
                 Err(SdkError::PairingCode("Busy")) => break,
                 Err(error) => return Err(error),
             };
             self.ingest(polled.frames).await?;
             if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
-                self.flush_send().await?;
+                self.flush_send()
+                    .await
+                    .inspect_err(|error| self.note_relay_refusal("short send", error))?;
                 self.close_completed_relay().await;
                 self.clear_completed_secrets();
                 break;
@@ -616,6 +632,21 @@ impl PairingActor {
             }
         }
         self.status_update()
+    }
+
+    fn note_relay_refusal(&self, section: &'static str, error: &SdkError) {
+        if matches!(error, SdkError::PairingCode("Busy")) {
+            return;
+        }
+        let phase = self.ceremony.as_ref().map_or("absent", |ceremony| ceremony.phase.as_str());
+        #[cfg(test)]
+        eprintln!("test: pairing {section} phase={phase}: {error}");
+        tracing::debug!(
+            section,
+            phase,
+            error_code = Self::background_error_code(error),
+            "pairing relay work refused"
+        );
     }
 
     /// Close on lock. Frontend generation advances so a stale confirm cannot bind.

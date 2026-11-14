@@ -152,9 +152,15 @@ async fn pump(
 ) -> TestResult {
     for _ in 0..96 {
         rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.primary.sync_relay()), a, &rig.source.client).await?;
+        let source = drive(Box::pin(rig.primary.sync_relay()), a, &rig.source.client).await;
         rig.clock.advance_ms(1001);
-        drive(Box::pin(rig.secondary.sync_relay()), b, target).await?;
+        let recipient = drive(Box::pin(rig.secondary.sync_relay()), b, target).await;
+        for result in [source, recipient] {
+            match result {
+                Ok(_) | Err(SdkError::PairingCode("Busy")) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         a.try_apply_client(&rig.source.client)?;
         b.try_apply_client(target)?;
         if rig.primary.full_base_disk_complete_for_test()

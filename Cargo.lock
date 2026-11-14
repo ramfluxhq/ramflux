@@ -3469,6 +3469,7 @@ dependencies = [
  "ramflux-storage",
  "ramflux-transport",
  "redb",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",

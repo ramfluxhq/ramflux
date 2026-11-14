@@ -86,12 +86,18 @@ async fn hold_base_application(
     source: &mut PairingLocalWriterService,
 ) -> Result<FullLocalIoLoan, Box<dyn std::error::Error>> {
     for _ in 0..96 {
-        rig.primary.service_full_transfer_client(&rig.source.client)?;
+        rig.primary
+            .service_full_transfer_client(&rig.source.client)
+            .map_err(|error| format!("test: base barrier source local service: {error}"))?;
         {
             let slot = rig.participant_b.db.lock().map_err(|_| "test: base target owner")?;
-            if let Some(loan) = rig.secondary.hold_receiver_application_for_test(
-                slot.as_ref().ok_or("test: base target writer absent")?,
-            )? {
+            if let Some(loan) = rig
+                .secondary
+                .hold_receiver_application_for_test(
+                    slot.as_ref().ok_or("test: base target writer absent")?,
+                )
+                .map_err(|error| format!("test: base barrier target loan: {error}"))?
+            {
                 return Ok(loan);
             }
         }

@@ -238,10 +238,24 @@ async fn merge(
     assert!(
         merged,
         "test: bounded full production driver never committed both tail acknowledgements: A={:?} B={:?}",
-        rig.primary.transfer_status(request).await?,
-        rig.secondary.transfer_status(request).await?
+        tail_progress(&rig.primary.transfer_status(request).await?),
+        tail_progress(&rig.secondary.transfer_status(request).await?)
     );
     Ok(())
+}
+fn tail_progress(reply: &LocalResult) -> String {
+    match &reply.outcome {
+        Outcome::FullStatus { value } => format!(
+            "stage={:?} tail={:?} error={:?} bytes={}/{} cut={}",
+            value.stage,
+            value.tail_status,
+            value.result,
+            value.bytes_durable.0,
+            value.bytes_total.0,
+            value.cut.0
+        ),
+        _ => "test: full status absent".into(),
+    }
 }
 #[tokio::test(start_paused = true)]
 async fn pairing_stage_unlock_snapshot_resume_and_cleanup() -> TestResult {

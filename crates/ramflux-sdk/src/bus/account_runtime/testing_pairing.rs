@@ -144,3 +144,6 @@ impl AccountSessionHarness {
         Err(SdkError::PairingCode("TransferCapacity"))
     }
 }
+
+#[path = "testing_pairing_media.rs"]
+mod media;

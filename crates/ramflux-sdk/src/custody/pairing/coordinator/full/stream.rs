@@ -265,7 +265,9 @@ impl PairingActor {
         db: &ramflux_storage::AccountDb,
     ) -> Result<Option<crate::custody::pairing::FullLocalIoLoan>, SdkError> {
         if !self.full_base_stream_started_for_test() {
-            self.service_full_transfer(db)?;
+            self.service_full_transfer(db).inspect_err(|error| {
+                eprintln!("test: target application barrier stream start: {error}")
+            })?;
         }
         let Some(loan) = self
             .ceremony
@@ -281,7 +283,9 @@ impl PairingActor {
         if loan.is_receiver_application() {
             Ok(Some(loan))
         } else {
-            loan.apply(db)?;
+            loan.apply(db).inspect_err(|error| {
+                eprintln!("test: target application barrier preceding local request: {error}")
+            })?;
             Ok(None)
         }
     }

@@ -47,6 +47,11 @@ pub(super) fn issuer(root: &std::path::Path) -> TestResult<(String, String)> {
     Ok((encode_base64url(seed), path.to_str().ok_or("test: issuer path")?.into()))
 }
 impl Objects {
+    pub(super) async fn stop(&mut self) -> TestResult {
+        self.endpoint.close(0_u32.into(), b"history fixture complete");
+        (&mut self.task).await.map_err(|_| "test: ordinary object listener did not drain")?;
+        Ok(())
+    }
     pub(super) fn open(
         stack: &process_stack::Stack,
         socket: std::net::UdpSocket,

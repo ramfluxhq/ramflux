@@ -39,9 +39,8 @@ fn pairing_full_cold_prelink_stage_refuses_resume_until_exact_account_commit() -
         digest,
         "test: cold account commit reopened another stage record"
     );
-    assert_eq!(
-        reopened.reference(),
-        &reference,
+    assert!(
+        reopened.reference() == &reference,
         "test: cold resume changed its exact local binding"
     );
     assert_eq!(
