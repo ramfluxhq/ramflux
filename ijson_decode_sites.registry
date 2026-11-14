@@ -435,6 +435,7 @@ crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 7 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_verify | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | provisional_safety | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
