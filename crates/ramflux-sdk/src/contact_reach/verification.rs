@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Original account signatures and signed placement bases, independent of home assertions.
-use super::{ReachReadContext, refused};
+use super::refused;
 use crate::SdkError;
 use ramflux_crypto::contact_reach as crypto;
 use ramflux_protocol::{
@@ -17,14 +17,17 @@ use std::collections::BTreeMap;
 pub(super) fn verify_records<'a>(
     records: &'a [StateRecord],
     manifest: &StateManifest,
-    context: &ReachReadContext<'_>,
+    catalogue: &ramflux_protocol::contact_reach::Provenance,
 ) -> Result<BTreeMap<String, &'a StateRecord>, SdkError> {
     super::group_restrictions::verify_bindings(records)?;
     let mut bases = BTreeMap::new();
     for record in records {
         match record {
             StateRecord::Policy { update, .. } => {
-                crypto::verify_retained_policy(update, context.authority, context.now)?;
+                crypto::verify_historical_policy(
+                    update,
+                    super::provenance::proof(catalogue, update)?,
+                )?;
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
             }
             StateRecord::AdmissionMeta { revision, last_update } => {
@@ -32,14 +35,14 @@ pub(super) fn verify_records<'a>(
                     return Err(refused(Reason::ForeignSnapshotInvalid));
                 }
                 if let Some(update) = last_update {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
+                    super::provenance::admission(catalogue, update)?;
                     if update.body.expected_revision.checked_add(1) != Some(*revision) {
                         return Err(refused(Reason::ForeignSnapshotInvalid));
                     }
                 }
             }
             StateRecord::Grant { subject, permissions, grant_until, update } => {
-                crypto::verify_retained_admission(update, context.authority, context.now)?;
+                super::provenance::admission(catalogue, update)?;
                 if &update.body.subject != subject
                     || update.body.decision != Decision::Allow
                     || update.body.permissions != Some(*permissions)
@@ -51,13 +54,13 @@ pub(super) fn verify_records<'a>(
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
             }
             StateRecord::Block { subject, update } => {
-                crypto::verify_retained_admission(update, context.authority, context.now)?;
+                super::provenance::admission(catalogue, update)?;
                 if &update.body.subject != subject || update.body.decision != Decision::Block {
                     return Err(refused(Reason::ForeignSnapshotInvalid));
                 }
             }
             StateRecord::Decline { root, until, update } => {
-                crypto::verify_retained_admission(update, context.authority, context.now)?;
+                super::provenance::admission(catalogue, update)?;
                 if update.body.subject != (Subject::Friendship { root: root.clone() })
                     || update.body.decision != Decision::Decline
                     || *until < update.body.issued_at
@@ -69,12 +72,12 @@ pub(super) fn verify_records<'a>(
             StateRecord::Retirement { subject, revision, update, group_floor } => {
                 bases.insert(custody::framed_hash(OPERATION_HASH_DOMAIN, update)?, record);
                 let expected = if let Some(floor) = group_floor {
-                    crypto::verify_group_retirement(update, floor, context.authority, context.now)?;
+                    super::provenance::retirement(catalogue, update, floor)?;
                     floor.block_control.as_ref().map_or(update.body.expected_revision, |control| {
                         control.body.expected_revision.max(update.body.expected_revision)
                     })
                 } else {
-                    crypto::verify_retained_admission(update, context.authority, context.now)?;
+                    super::provenance::admission(catalogue, update)?;
                     update.body.expected_revision
                 };
                 if &update.body.subject != subject

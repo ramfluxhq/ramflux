@@ -17,7 +17,9 @@ pub fn verify_group_roster(
 ) -> Result<(), CryptoError> {
     roster.validate(grant)?;
     verify_retained_admission(grant, authority, now)?;
-    if roster.header.body.recipient_root != authority.envelope().body.account_anchor
+    if roster.header.body.master_certificate_hash
+        != custody::object_hash(&authority.envelope().body.master_certificate)?
+        || roster.header.body.recipient_root != authority.envelope().body.account_anchor
         || roster.header.body.issued_at
             > now.checked_add(60).ok_or_else(|| reject("roster clock overflow"))?
     {
@@ -28,6 +30,25 @@ pub fn verify_group_roster(
         &roster.header,
         &authority.envelope().body.master_certificate.body.self_signing_public_key,
     )
+}
+/// Verify a new roster command against its exact independently current signing context.
+/// # Errors
+/// Refuses stale signed selectors, backdated authority and all live roster failures.
+pub fn verify_group_roster_command(
+    roster: &wire::GroupRoster,
+    grant: &Signed<wire::Admission>,
+    authority: &VerifiedRecord,
+    now: u64,
+) -> Result<(), CryptoError> {
+    if roster.header.body.authority_head_hash != custody::object_hash(authority.envelope())? {
+        return Err(reject("roster command current head mismatch"));
+    }
+    super::original_management_time(
+        authority,
+        &authority.envelope().body.master_certificate.body.primary_device_ref,
+        roster.header.body.issued_at,
+    )?;
+    verify_group_roster(roster, grant, authority, now)
 }
 /// Verify every original witness in a group retirement; witness grants authorize nothing.
 /// Missing historical signer evidence must stay pending, never become an empty denial.
@@ -73,13 +94,18 @@ impl SelfSigningKey {
         now: u64,
     ) -> Result<Signed<wire::GroupRosterHeader>, CryptoError> {
         body.validate()?;
+        super::original_management_time(
+            authority,
+            &authority.envelope().body.master_certificate.body.primary_device_ref,
+            body.issued_at,
+        )?;
         let cert = &authority.envelope().body.master_certificate.body;
         manager(
             authority,
             &cert.primary_device_ref,
             &body.recipient_root,
-            &custody::object_hash(authority.envelope())?,
-            &custody::object_hash(&authority.envelope().body.master_certificate)?,
+            &body.authority_head_hash,
+            &body.master_certificate_hash,
             now,
         )?;
         if self.public_key() != cert.self_signing_public_key

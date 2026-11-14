@@ -247,6 +247,10 @@ pub enum Operation {
         limit: u64,
         ack_seqs: Vec<u64>,
     },
+    ReachProvenance {
+        snapshot_id: String,
+        proof_hash: String,
+    },
     ReachState {
         known_revision: u64,
         snapshot_id: Option<String>,
@@ -308,21 +312,72 @@ pub enum SubmitOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationResult {
-    Query { reply: Box<PeerReply> },
-    Submit { envelope_id: String, outcome: SubmitOutcome, reason: Option<Reason> },
-    Policy { revision: u64, outcome: Applied },
-    Admission { revision: u64, outcome: Applied },
-    GroupRoster { group_epoch: u64, outcome: Applied },
-    Start { revision: u64, outcome: Applied, submission: Box<OperationResult> },
-    Reply { revision: u64, outcome: Applied, submission: Box<OperationResult> },
-    Strangers { entries: Vec<StrangerEntry>, next_seq: u64 },
-    ReachState { manifest: Signed<StateManifest>, page: StatePage },
-    Challenge { challenge: Signed<Challenge> },
-    UsernameMutate { receipt: Signed<directory::IndexReceipt> },
-    UsernameStatus { receipt: Signed<directory::IndexReceipt> },
-    UsernameResolve { resolve: Signed<directory::IndexResolve> },
-    ProfilePublish { epoch: u64, profile_hash: String, outcome: Applied },
-    Error { reason: Reason, retry_after_ms: Option<u64>, current_revision: Option<u64> },
+    Query {
+        reply: Box<PeerReply>,
+    },
+    Submit {
+        envelope_id: String,
+        outcome: SubmitOutcome,
+        reason: Option<Reason>,
+    },
+    Policy {
+        revision: u64,
+        outcome: Applied,
+    },
+    Admission {
+        revision: u64,
+        outcome: Applied,
+    },
+    GroupRoster {
+        group_epoch: u64,
+        outcome: Applied,
+    },
+    Start {
+        revision: u64,
+        outcome: Applied,
+        submission: Box<OperationResult>,
+    },
+    Reply {
+        revision: u64,
+        outcome: Applied,
+        submission: Box<OperationResult>,
+    },
+    Strangers {
+        entries: Vec<StrangerEntry>,
+        next_seq: u64,
+    },
+    ReachProvenance {
+        manifest: Signed<StateManifest>,
+        proof_hash: String,
+        authority: Box<CustodyAuthority>,
+        custodian_history: Vec<HistoricalCustodian>,
+    },
+    ReachState {
+        manifest: Signed<StateManifest>,
+        page: StatePage,
+    },
+    Challenge {
+        challenge: Signed<Challenge>,
+    },
+    UsernameMutate {
+        receipt: Signed<directory::IndexReceipt>,
+    },
+    UsernameStatus {
+        receipt: Signed<directory::IndexReceipt>,
+    },
+    UsernameResolve {
+        resolve: Signed<directory::IndexResolve>,
+    },
+    ProfilePublish {
+        epoch: u64,
+        profile_hash: String,
+        outcome: Applied,
+    },
+    Error {
+        reason: Reason,
+        retry_after_ms: Option<u64>,
+        current_revision: Option<u64>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

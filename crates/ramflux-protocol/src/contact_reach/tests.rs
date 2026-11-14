@@ -48,13 +48,22 @@ fn manifest(pages: &[StatePage]) -> Result<StateManifest, Box<dyn std::error::Er
         record_count: 2,
         pages_hash: framed_hash(STATE_PAGES_DOMAIN, &pages)?,
         state_hash: state_hash(&d(2), 1, 1, 0, &records())?,
+        provenance_hash: d(20),
+        provenance_count: 1,
+        provenance_bytes: 1000,
         issued_at: 200,
         expires_at: 260,
     })
 }
 #[test]
 fn cr_state_identity_survives_transport_renewal_but_detects_actual_record_changes() -> TestResult {
-    let first = vec![StatePage { version: 1, snapshot_id: d(10), page: 0, records: records() }];
+    let first = vec![StatePage {
+        version: 1,
+        snapshot_id: d(10),
+        page: 0,
+        records: records(),
+        signers: references(&records())?,
+    }];
     let m1 = manifest(&first)?;
     assert_eq!(
         verify_pages(&m1, &first)?,
@@ -67,6 +76,7 @@ fn cr_state_identity_survives_transport_renewal_but_detects_actual_record_change
             version: 1,
             snapshot_id: d(11),
             page: u64::try_from(index)?,
+            signers: references(std::slice::from_ref(&record))?,
             records: vec![record],
         });
     }
@@ -312,4 +322,20 @@ fn cr_peer_query_literal_carrier_excludes_owner_credentials() -> TestResult {
         "card correlation remains explicit null without becoming a possession credential"
     );
     Ok(())
+}
+
+fn references(records: &[StateRecord]) -> Result<Vec<SignerReference>, crate::ProtocolError> {
+    let mut out = records
+        .iter()
+        .map(record_signers)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    for reference in &mut out {
+        reference.proof_hash = d(21);
+    }
+    out.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+    out.dedup();
+    Ok(out)
 }

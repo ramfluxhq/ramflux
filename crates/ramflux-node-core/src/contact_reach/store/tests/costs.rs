@@ -9,7 +9,7 @@ use ramflux_protocol::home_migration::{
 use redb::{ReadableTableMetadata, TableDefinition};
 const CHALLENGES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("contact_reach_challenges_v1");
-fn issuer(store: &RouterRedbStore, f: &Fixture) -> TestResult<crate::MigrationNode> {
+pub(super) fn issuer(store: &RouterRedbStore, f: &Fixture) -> TestResult<crate::MigrationNode> {
     let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
     let mut body = {
         let tx = store.begin_write()?;

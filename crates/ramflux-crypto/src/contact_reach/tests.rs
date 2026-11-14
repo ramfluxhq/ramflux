@@ -160,6 +160,10 @@ fn cr_group_roster_binds_primary_grant_and_nul_framed_members() -> TestResult {
     let grant = group_grant(&owner)?;
     let members = vec![wire::GroupRosterMember { root: d(40), since_epoch: 10 }];
     let header = wire::GroupRosterHeader {
+        authority_head_hash: custody::object_hash(owner.record.envelope())?,
+        master_certificate_hash: custody::object_hash(
+            &owner.record.envelope().body.master_certificate,
+        )?,
         version: 1,
         recipient_root: grant.body.recipient_root.clone(),
         group_id: "group".into(),

@@ -87,9 +87,59 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             }
             pages.push(page);
         }
+        let mut authorities = std::collections::BTreeMap::new();
+        let signers = ramflux_protocol::contact_reach::page_signers(&pages)?;
+        let mut staging_bytes = ramflux_protocol::canonical_json_bytes(&pages)?.len();
+        for reference in &signers {
+            if authorities.contains_key(&reference.proof_hash) {
+                continue;
+            }
+            let result = self
+                .reach_operation(Operation::ReachProvenance {
+                    snapshot_id: manifest.body.snapshot_id.clone(),
+                    proof_hash: reference.proof_hash.clone(),
+                })
+                .await?;
+            staging_bytes = staging_bytes
+                .checked_add(ramflux_protocol::canonical_json_bytes(&result)?.len())
+                .ok_or_else(|| refused(Reason::ForeignCapacity))?;
+            if staging_bytes > ramflux_protocol::contact_reach::MAX_REACH_STAGING_BYTES {
+                return Err(refused(Reason::ForeignCapacity));
+            }
+            let OperationResult::ReachProvenance {
+                manifest: returned,
+                proof_hash,
+                authority,
+                custodian_history,
+            } = result
+            else {
+                return Err(refused(Reason::ForeignSnapshotInvalid));
+            };
+            if returned != manifest || proof_hash != reference.proof_hash {
+                return Err(refused(Reason::ForeignSnapshotInvalid));
+            }
+            authorities.insert(
+                proof_hash.clone(),
+                ramflux_protocol::contact_reach::ProvenanceAuthority {
+                    proof_hash,
+                    authority: *authority,
+                    custodian_history,
+                },
+            );
+        }
+        let provenance = ramflux_protocol::contact_reach::Provenance {
+            kind: ramflux_protocol::contact_reach::ProvenanceKind::ReachProvenance,
+            version: 1,
+            account_anchor: manifest.body.account_anchor.clone(),
+            revision: manifest.body.revision,
+            state_hash: manifest.body.state_hash.clone(),
+            signers,
+            authorities: authorities.into_values().collect(),
+        };
         VerifiedReachState::verify(
             &manifest,
             &pages,
+            provenance,
             ReachReadContext {
                 authority: self.account.verified(),
                 device: &self.device,

@@ -180,7 +180,10 @@ pub(super) fn verified_records(
     let hash = state_hash(root, revision, policy_revision, admission_revision, &records)?;
     let count = u64::try_from(records.len())?;
     let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    let pages = vec![StatePage { version: 1, snapshot_id: snapshot_id.clone(), page: 0, records }];
+    let provenance = fixture_provenance(&authority, revision, &hash, &records)?;
+    let signers = provenance.signers.clone();
+    let pages =
+        vec![StatePage { version: 1, snapshot_id: snapshot_id.clone(), page: 0, records, signers }];
     let device = authority
         .envelope()
         .body
@@ -207,6 +210,14 @@ pub(super) fn verified_records(
         record_count: count,
         pages_hash: custody::framed_hash(STATE_PAGES_DOMAIN, &pages)?,
         state_hash: hash,
+        provenance_hash: custody::framed_hash(
+            ramflux_protocol::contact_reach::STATE_CONTENT_DOMAIN,
+            &provenance,
+        )?,
+        provenance_count: 1,
+        provenance_bytes: u64::try_from(
+            ramflux_protocol::canonical_json_bytes(&provenance)?.len(),
+        )?,
         issued_at: now,
         expires_at: now.checked_add(60).ok_or("state lease overflow")?,
     };
@@ -220,6 +231,7 @@ pub(super) fn verified_records(
     let verified = VerifiedReachState::verify(
         &manifest,
         &pages,
+        provenance,
         ReachReadContext {
             authority: &authority,
             device: &requesting_device,
@@ -230,4 +242,42 @@ pub(super) fn verified_records(
         },
     )?;
     Ok(verified)
+}
+
+fn fixture_provenance(
+    authority: &ramflux_crypto::custody::VerifiedRecord,
+    revision: u64,
+    hash: &str,
+    records: &[StateRecord],
+) -> TestResult<ramflux_protocol::contact_reach::Provenance> {
+    let root = &authority.envelope().body.account_anchor;
+    let mut proof = ramflux_protocol::contact_reach::ProvenanceAuthority {
+        proof_hash: String::new(),
+        authority: custody::CustodyAuthority {
+            publication: custody::Publication {
+                record: authority.envelope().clone(),
+                compacted_ids: None,
+            },
+            custodian_publication: None,
+        },
+        custodian_history: vec![],
+    };
+    proof.proof_hash = proof.content_hash()?;
+    let mut signers = std::collections::BTreeMap::new();
+    for record in records {
+        for mut reference in ramflux_protocol::contact_reach::record_signers(record)? {
+            reference.proof_hash.clone_from(&proof.proof_hash);
+            signers.insert((reference.object_kind, reference.object_hash.clone()), reference);
+        }
+    }
+    let signers: Vec<_> = signers.into_values().collect();
+    Ok(ramflux_protocol::contact_reach::Provenance {
+        kind: ramflux_protocol::contact_reach::ProvenanceKind::ReachProvenance,
+        version: 1,
+        account_anchor: root.clone(),
+        revision,
+        state_hash: hash.to_owned(),
+        signers: signers.clone(),
+        authorities: vec![proof],
+    })
 }

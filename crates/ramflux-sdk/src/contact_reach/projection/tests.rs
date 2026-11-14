@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 const NOW: u64 = 1000;
 fn state() -> SavedReachState {
     SavedReachState {
+        provenance: None,
+        provenance_hash: None,
         root: "owner".into(),
         revision: 1,
         admission_revision: 1,

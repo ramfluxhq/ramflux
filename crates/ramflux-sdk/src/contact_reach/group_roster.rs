@@ -244,6 +244,10 @@ impl RamfluxClient {
         }
         let members = membership::derive(db, update, &state, queue.checkpoint.as_ref())?;
         let header = GroupRosterHeader {
+            authority_head_hash: custody::object_hash(authority.envelope())?,
+            master_certificate_hash: custody::object_hash(
+                &authority.envelope().body.master_certificate,
+            )?,
             version: 1,
             recipient_root: mirror.root,
             group_id: group.into(),

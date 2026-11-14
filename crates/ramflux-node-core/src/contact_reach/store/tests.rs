@@ -190,3 +190,5 @@ fn cr_primary_denial_is_durable_and_unblock_restores_no_grant() -> TestResult {
 
 mod costs;
 mod groups;
+
+mod provenance;

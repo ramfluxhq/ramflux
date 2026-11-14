@@ -73,6 +73,10 @@ fn install_live_group(store: &RouterRedbStore, f: &Fixture) -> TestResult<Operat
     };
     let members = vec![GroupRosterMember { root: digest(41), since_epoch: 100 }];
     let body = GroupRosterHeader {
+        authority_head_hash: custody::object_hash(f.authority.envelope())?,
+        master_certificate_hash: custody::object_hash(
+            &f.authority.envelope().body.master_certificate,
+        )?,
         version: 1,
         recipient_root: f.root.clone(),
         group_id: "group".into(),
@@ -377,7 +381,7 @@ fn cr_source_submit_requires_original_return_grant_before_first_dm() -> TestResu
     Ok(())
 }
 
-fn renewed_primary(f: &Fixture, expires: u64) -> TestResult<VerifiedRecord> {
+pub(super) fn renewed_primary(f: &Fixture, expires: u64) -> TestResult<VerifiedRecord> {
     let mut body = f.authority.envelope().body.clone();
     body.device_set_epoch = body.device_set_epoch.checked_add(1).ok_or("epoch overflow")?;
     body.previous_record_hash = Some(custody::object_hash(f.authority.envelope())?);

@@ -123,7 +123,7 @@ impl RouterRedbStore {
         else {
             return Err(refuse(Reason::ForeignReadRefused));
         };
-        ramflux_crypto::contact_reach::verify_group_roster(roster, grant, &authority, now)?;
+        ramflux_crypto::contact_reach::verify_group_roster_command(roster, grant, &authority, now)?;
         let changed = state.group_roster(roster.clone())?;
         let result = OperationResult::GroupRoster {
             group_epoch: roster.header.body.group_epoch,
@@ -131,6 +131,7 @@ impl RouterRedbStore {
         };
         // Roster intent retry identity is kept separately from consent and survives reconnect.
         retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
+        super::provenance::retain(&tx, owner.recipient_root, &state, now)?;
         super::save(&tx, owner.recipient_root, &state)?;
         #[cfg(test)]
         fault::checkpoint(fault::Point::BeforeCommit)?;

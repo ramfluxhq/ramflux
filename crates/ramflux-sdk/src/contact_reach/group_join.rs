@@ -277,6 +277,10 @@ fn initial_roster(
         .map(|root| GroupRosterMember { root, since_epoch: intent.notice.epoch })
         .collect();
     let header = GroupRosterHeader {
+        authority_head_hash: custody::object_hash(authority.envelope())?,
+        master_certificate_hash: custody::object_hash(
+            &authority.envelope().body.master_certificate,
+        )?,
         version: 1,
         recipient_root: intent.notice.recipient_root.clone(),
         group_id: intent.notice.group_id.clone(),

@@ -408,6 +408,7 @@ impl RouterRedbStore {
             return Ok(result);
         }
         retain_operation(&tx, &operation_key, expires, &hash, &result, now)?;
+        provenance::retain(&tx, owner.recipient_root, &state, now)?;
         save(&tx, owner.recipient_root, &state)?;
         tx.commit()?;
         Ok(result)
@@ -819,6 +820,7 @@ mod tests;
 mod denials;
 
 mod migration;
+pub(in crate::contact_reach) mod provenance;
 mod rosters;
 pub(crate) use migration::require_empty_reach_activation;
 

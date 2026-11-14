@@ -49,6 +49,8 @@ impl GroupJoinNotice {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRosterHeader {
+    pub authority_head_hash: String,
+    pub master_certificate_hash: String,
     pub version: u32,
     pub recipient_root: String,
     pub group_id: String,
@@ -67,9 +69,14 @@ impl GroupRosterHeader {
         super::group_profile::validate_group_id(&self.group_id)?;
         crate::message::dm_scope::validate_group(&self.conversation_id)
             .map_err(|_| invalid("group roster conversation"))?;
-        for value in
-            [&self.recipient_root, &self.grant_hash, &self.membership_hash, &self.members_hash]
-        {
+        for value in [
+            &self.recipient_root,
+            &self.grant_hash,
+            &self.membership_hash,
+            &self.members_hash,
+            &self.authority_head_hash,
+            &self.master_certificate_hash,
+        ] {
             digest(value)?;
         }
         safe(self.group_epoch)?;

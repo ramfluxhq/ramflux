@@ -14,6 +14,7 @@ mod group_test_support;
 mod inner;
 mod producer;
 mod projection;
+mod provenance;
 mod receive_policy;
 mod signal_settings;
 mod verification;
@@ -52,6 +53,7 @@ pub struct VerifiedReachState {
     pub(crate) manifest: StateManifest,
     pub(crate) records: Vec<StateRecord>,
     home_node_key: String,
+    provenance: ramflux_protocol::contact_reach::Provenance,
 }
 /// Independently pinned state-read context; none of these facts comes from the manifest itself.
 #[derive(Clone, Copy)]
@@ -70,6 +72,7 @@ impl VerifiedReachState {
     pub fn verify(
         manifest: &Signed<StateManifest>,
         pages: &[StatePage],
+        provenance: ramflux_protocol::contact_reach::Provenance,
         context: ReachReadContext<'_>,
     ) -> Result<Self, SdkError> {
         let b = &manifest.body;
@@ -99,9 +102,15 @@ impl VerifiedReachState {
             context.home_node_key,
         )?;
         let records = verify_pages(b, pages)?;
-        let bases = verification::verify_records(&records, b, &context)?;
+        provenance.verify(b, pages)?;
+        let bases = verification::verify_records(&records, b, &provenance)?;
         verification::verify_placements(&records, b, &bases)?;
-        Ok(Self { manifest: b.clone(), records, home_node_key: context.home_node_key.to_owned() })
+        Ok(Self {
+            manifest: b.clone(),
+            records,
+            home_node_key: context.home_node_key.to_owned(),
+            provenance,
+        })
     }
     #[must_use]
     pub fn revision(&self) -> u64 {
@@ -124,6 +133,10 @@ pub(crate) struct SavedReachState {
     home_node_key: Option<String>,
     authority_head_hash: String,
     state_hash: String,
+    #[serde(default)]
+    provenance_hash: Option<String>,
+    #[serde(default)]
+    provenance: Option<provenance::RetainedProofs>,
     records: Vec<StateRecord>,
     restrictions: BTreeMap<String, StateRecord>,
     conflict: bool,
@@ -173,7 +186,10 @@ impl crate::RamfluxClient {
                     return Err(refused(Reason::HomeRollback));
                 }
                 if verified.manifest.revision == saved.revision {
-                    if verified.manifest.state_hash == saved.state_hash {
+                    if verified.manifest.state_hash == saved.state_hash
+                        && saved.provenance_hash.as_deref()
+                            == Some(verified.manifest.provenance_hash.as_str())
+                    {
                         let mut refreshed = saved.clone();
                         refreshed.home_head_hash.clone_from(&verified.manifest.home_head_hash);
                         refreshed.home_node_key = Some(verified.home_node_key.clone());
@@ -207,6 +223,10 @@ impl crate::RamfluxClient {
                 }
                 Err(error) => return Err(error),
             };
+            let proofs = provenance::RetainedProofs::merge(
+                previous.as_ref().and_then(|saved| saved.provenance.as_ref()),
+                &verified.provenance,
+            )?;
             let saved = SavedReachState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
@@ -215,6 +235,8 @@ impl crate::RamfluxClient {
                 home_node_key: Some(verified.home_node_key),
                 authority_head_hash: verified.manifest.authority_head_hash,
                 state_hash: verified.manifest.state_hash,
+                provenance_hash: Some(verified.manifest.provenance_hash),
+                provenance: Some(proofs),
                 records: verified.records,
                 restrictions,
                 conflict: false,

@@ -15,7 +15,7 @@ use ramflux_protocol::{
 mod groups;
 mod report_receipt;
 mod source;
-pub use groups::{verify_group_retirement, verify_group_roster};
+pub use groups::{verify_group_retirement, verify_group_roster, verify_group_roster_command};
 pub use report_receipt::verify_bound_node_report_receipt;
 pub use source::{verify_current_source_submission, verify_original_source_submission};
 mod continuity;
@@ -84,6 +84,7 @@ pub fn verify_policy(
     let b = &update.body;
     b.validate()?;
     wire::check_submission_time(b.issued_at, b.expires_at, now)?;
+    original_management_time(authority, &b.actor, b.issued_at)?;
     if &b.actor != actor || b.home_head_hash != home_hash {
         return Err(reject("reach policy session or home mismatch"));
     }
@@ -205,6 +206,7 @@ pub fn verify_admission(
     let b = &update.body;
     b.validate()?;
     wire::check_submission_time(b.issued_at, b.expires_at, now)?;
+    original_management_time(authority, &b.actor, b.issued_at)?;
     if &b.actor != actor || b.home_head_hash != home_hash {
         return Err(reject("admission session or home mismatch"));
     }
@@ -412,4 +414,27 @@ pub fn solve_cost(
         }
     }
     Ok(None)
+}
+
+mod provenance;
+pub use provenance::{
+    verify_historical_admission, verify_historical_policy, verify_historical_roster_header,
+};
+
+fn original_management_time(
+    authority: &VerifiedRecord,
+    actor: &DeviceRef,
+    issued_at: u64,
+) -> Result<(), CryptoError> {
+    let recipient = &authority.envelope().body;
+    let manager = authority.management_actor_authority(actor)?;
+    if recipient.issued_at > issued_at
+        || recipient.master_certificate.body.issued_at > issued_at
+        || manager.envelope().body.issued_at > issued_at
+        || manager.envelope().body.master_certificate.body.issued_at > issued_at
+    {
+        return Err(reject("management authority was issued after original intent"));
+    }
+    authority.authorize_primary_management(actor, "contact_consent", issued_at)?;
+    Ok(())
 }

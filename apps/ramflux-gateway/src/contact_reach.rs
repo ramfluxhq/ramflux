@@ -114,7 +114,11 @@ static SNAPSHOTS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
 
 fn check_snapshot(operation: &Operation, session: &str, now: u64) -> anyhow::Result<()> {
-    let Operation::ReachState { snapshot_id: Some(id), .. } = operation else { return Ok(()) };
+    let (Operation::ReachState { snapshot_id: Some(id), .. }
+    | Operation::ReachProvenance { snapshot_id: id, .. }) = operation
+    else {
+        return Ok(());
+    };
     let mut snapshots =
         SNAPSHOTS.lock().map_err(|_| anyhow::anyhow!("snapshot owner lock unavailable"))?;
     snapshots.retain(|_, owner| owner.expires_at > now);

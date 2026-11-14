@@ -220,6 +220,9 @@ pub struct StateManifest {
     pub record_count: u64,
     pub pages_hash: String,
     pub state_hash: String,
+    pub provenance_hash: String,
+    pub provenance_count: u64,
+    pub provenance_bytes: u64,
     pub issued_at: u64,
     pub expires_at: u64,
 }
@@ -235,6 +238,7 @@ impl StateManifest {
             &self.snapshot_id,
             &self.pages_hash,
             &self.state_hash,
+            &self.provenance_hash,
         ] {
             digest(v)?;
         }
@@ -245,6 +249,8 @@ impl StateManifest {
         if self.version != 1
             || !(1..=256).contains(&self.page_count)
             || !(2..=8192).contains(&self.record_count)
+            || self.provenance_count > super::MAX_PROVENANCE_OBJECTS as u64
+            || self.provenance_bytes > super::MAX_PROVENANCE_BYTES as u64
         {
             return Err(invalid("reach state counts or version"));
         }
@@ -258,6 +264,7 @@ pub struct StatePage {
     pub snapshot_id: String,
     pub page: u64,
     pub records: Vec<StateRecord>,
+    pub signers: Vec<super::SignerReference>,
 }
 
 /// Stable state hash excludes transport audience, lease, signatures and page boundaries.
@@ -326,6 +333,7 @@ pub fn verify_pages(
     if u64::try_from(records.len()).ok() != Some(manifest.record_count) {
         return Err(invalid("reach record count mismatch"));
     }
+    super::page_signers(pages)?;
     let mut previous = None;
     let mut policy = 0;
     let mut meta = 0;

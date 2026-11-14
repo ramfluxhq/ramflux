@@ -75,6 +75,8 @@ fn roster(
     Ok(GroupRoster {
         header: Signed {
             body: GroupRosterHeader {
+                authority_head_hash: grant.body.authority_head_hash.clone(),
+                master_certificate_hash: grant.body.master_certificate_hash.clone(),
                 version: 1,
                 recipient_root: digest(1),
                 group_id: "group".into(),

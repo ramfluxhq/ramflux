@@ -15,6 +15,10 @@ impl Request {
         if self.session_generation == 0 || !(1..=10_000).contains(&self.remaining_ms) {
             return Err(invalid("reach session generation or budget"));
         }
+        if let Operation::ReachProvenance { snapshot_id, proof_hash } = &self.operation {
+            digest(snapshot_id)?;
+            digest(proof_hash)?;
+        }
         if let Operation::GroupRoster { operation_id, roster } = &self.operation {
             digest(operation_id)?;
             roster.header.body.validate()?;
@@ -46,6 +50,20 @@ impl Request {
 
 impl Operation {
     fn validate_error_reason(&self, reason: Reason) -> Result<(), crate::ProtocolError> {
+        if matches!(self, Self::ReachProvenance { .. })
+            && !matches!(
+                reason,
+                Reason::FeatureDisabled
+                    | Reason::ForeignReadRefused
+                    | Reason::ForeignSnapshotExpired
+                    | Reason::ForeignSnapshotInvalid
+                    | Reason::CustodyRefused
+                    | Reason::ForeignStorageUnavailable
+                    | Reason::ForeignCapacity
+            )
+        {
+            return Err(invalid("historical proof error reason"));
+        }
         if matches!(self, Self::GroupRoster { .. })
             && !matches!(
                 reason,
@@ -183,6 +201,24 @@ fn directory_result(
     result: &OperationResult,
 ) -> Result<bool, crate::ProtocolError> {
     Ok(match (operation, result) {
+        (
+            Operation::ReachProvenance { snapshot_id, proof_hash },
+            OperationResult::ReachProvenance {
+                manifest,
+                proof_hash: returned,
+                authority,
+                custodian_history,
+            },
+        ) => {
+            manifest.body.validate()?;
+            let proof = super::super::ProvenanceAuthority {
+                proof_hash: returned.clone(),
+                authority: authority.as_ref().clone(),
+                custodian_history: custodian_history.clone(),
+            };
+            proof.validate()?;
+            snapshot_id == &manifest.body.snapshot_id && proof_hash == returned
+        }
         (
             Operation::ProfilePublish { update, .. },
             OperationResult::ProfilePublish { epoch, profile_hash, .. },
