@@ -142,24 +142,7 @@ impl RamfluxClient {
         &self,
         contact_root: &str,
     ) -> Result<Option<SdkContactSafetyNumber>, SdkError> {
-        if self.born_v3_account.is_some() {
-            return self.contact_safety_number(contact_root).map(Some);
-        }
-        let link = self
-            .friend_links()?
-            .into_iter()
-            .find(|link| {
-                link.state == "accepted"
-                    && (link.requester_id == contact_root || link.target_id == contact_root)
-            })
-            .ok_or_else(|| SdkError::LocalBus("accepted contact safety link unavailable".into()))?;
-        let own_root =
-            if link.requester_id == contact_root { link.target_id } else { link.requester_id };
-        if self.observed_device_set(contact_root)?.is_none()
-            || self.observed_device_set(&own_root)?.is_none()
-        {
-            return Ok(None);
-        }
+        let _account = self.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
         self.contact_safety_number(contact_root).map(Some)
     }
 

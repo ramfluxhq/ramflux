@@ -67,14 +67,18 @@ fn with_profile(
     )?);
     Ok(manifest)
 }
-#[test]
-fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contact_verification()
+#[tokio::test]
+async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contact_verification()
 -> TestResult {
-    let owner = Actor::new("agent", "agent-device", 131, 132, 1)?;
-    mode(&owner, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
-    let peer = Actor::new("bob", "bob", 141, 142, 1)?;
-    let signed = with_profile(&owner, owner.manifest()?, "Cafe\u{301} Agent", 1, 1)?;
-    observe(&peer.client, &signed)?;
+    let agent = crate::client::native_test_support::Fixture::headless(
+        "agent-home",
+        "agent",
+        "agent-device",
+        "Café Agent",
+    )
+    .await?;
+    let peer = crate::client::native_test_support::Fixture::new("bob").await?;
+    peer.client.persist_fetched_identity_directory(&agent.manifest)?;
     let row = crate::bus::read_model::row(&peer.client, "identity", "agent")?;
     assert_eq!(row["kind"], "headless_ai");
     assert_eq!(row["kind_verified"], true);
