@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Host-owned locale and theme configuration, separate from peer card JSON.
+//! Approval facts and single-tap Deny/Allow controls belong to the host security
+//! surface; they are never rendered or localized by peer card content.
 use crate::CardError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
