@@ -19,14 +19,14 @@ mod tests {
         crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await
     }
     async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let root = Root(temporary.path().join("node"));
+        let temporary = ramflux_test_support::TestPath::new()?;
+        let root = Root(temporary.child("node"));
         std::fs::create_dir(&root.0)?;
         let (address, ca, server) = start_server_with_connections(&root, false, 1)
             .await
             .map_err(|error| error.to_string())?;
         let mut server = Server(Some(server));
-        let account_root = temporary.path().join("source");
+        let account_root = temporary.child("source");
         std::fs::create_dir(&account_root)?;
         let vault = Arc::new(crate::custody::tests::TestVault::default());
         let account = crate::custody::tests::create(

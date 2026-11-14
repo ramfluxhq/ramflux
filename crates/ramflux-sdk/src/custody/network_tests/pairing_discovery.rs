@@ -17,15 +17,15 @@ mod tests {
     async fn pairing_public_node_discovery_uses_pinned_tls_without_account_or_session()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         crate::bus::credentials::contract_tests::deadline(Box::pin(async {
-            let temporary = tempfile::tempdir()?;
-            let root = Root(temporary.path().join("node"));
+            let temporary = ramflux_test_support::TestPath::new()?;
+            let root = Root(temporary.child("node"));
             std::fs::create_dir(&root.0)?;
             let (address, ca, server) =
                 start_server(&root).await.map_err(|error| error.to_string())?;
             let mut server = Server(Some(server));
             let config = CustodyNetworkConfig {
                 pairing_admission: None,
-                account_root: root.0.clone(),
+                account_root: root.0.to_path_buf(),
                 account_id: "never-created".into(),
                 device_id: "unreserved".into(),
                 gateway_address: address,
