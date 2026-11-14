@@ -22,6 +22,7 @@ impl RamfluxClient {
         if selected.local_account_id() != local_id {
             return Err(SdkError::CustodySetupInvalid);
         }
+        self.born_v3_vault = Some(vault.clone());
         let root = self.account_index()?.root().to_path_buf();
         let device_id = device_id.to_owned();
         let (account, reference, credentials) = tokio::task::spawn_blocking(move || {

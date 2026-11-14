@@ -23,6 +23,40 @@ pub trait LocalCredentialProvider: Send + Sync {
     /// # Errors
     /// Provider transport or validation failures.
     fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError>;
+    /// Actual SDK-validated operation/role scope for connection-owned private adapters.
+    /// # Errors
+    /// Refuses a changed local scope or unavailable attended input.
+    fn provide_scoped(
+        &self,
+        request: &CredentialRequest,
+        _scope: &super::private_credential::PrivateCredentialScope,
+    ) -> Result<CredentialOutcome, SdkError> {
+        self.provide(request)
+    }
+    /// Interrupt outstanding attended input before the owning lifecycle drains workers.
+    fn cancel(&self) {}
+}
+
+pub(crate) struct ScopedProvider<'a> {
+    provider: &'a dyn LocalCredentialProvider,
+    scope: super::private_credential::PrivateCredentialScope,
+}
+pub(crate) fn scoped(
+    provider: &dyn LocalCredentialProvider,
+    scope: super::private_credential::PrivateCredentialScope,
+) -> ScopedProvider<'_> {
+    ScopedProvider { provider, scope }
+}
+impl LocalCredentialProvider for ScopedProvider<'_> {
+    fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
+        if self.scope.request() != request {
+            return Err(SdkError::PairingField("credential_scope"));
+        }
+        self.provider.provide_scoped(request, &self.scope)
+    }
+    fn cancel(&self) {
+        self.provider.cancel();
+    }
 }
 
 /// Private provider result. Not a pairing DTO.
@@ -44,6 +78,13 @@ impl SecretUtf8 {
             return Err(SdkError::PairingField("credential_length"));
         }
         Ok(Self(Zeroizing::new(bytes.to_vec())))
+    }
+
+    pub(super) fn from_owned(bytes: Zeroizing<Vec<u8>>) -> Result<Self, SdkError> {
+        if bytes.is_empty() || bytes.len() > 1024 || std::str::from_utf8(&bytes).is_err() {
+            return Err(SdkError::PairingField("credential_length"));
+        }
+        Ok(Self(bytes))
     }
 
     #[must_use]
@@ -180,6 +221,17 @@ pub fn acquire_unlock(
     take_bound(root, expected, provider, stored, "unlock")
 }
 
+// Only the full-transfer participant may call this after checking its actual
+// responder stage, final durable duplex and explicit attended Prepare binding.
+pub(super) fn acquire_phrase(
+    root: &Path,
+    expected: &CredentialRequest,
+    provider: &dyn LocalCredentialProvider,
+    stored: &PersistedReservation,
+) -> Result<SecretUtf8, SdkError> {
+    take_bound(root, expected, provider, stored, "phrase")
+}
+
 fn take_bound(
     root: &Path,
     expected: &CredentialRequest,
@@ -280,8 +332,11 @@ fn bind_slot(root: &Path, stored: &PersistedReservation) {
     slot.outstanding = false;
 }
 
-fn slot_key(root: &Path, account_id: &str) -> String {
-    format!("{}\0{account_id}", root.as_os_str().to_string_lossy())
+type SlotKey = (PathBuf, String);
+fn slot_key(root: &Path, account_id: &str) -> SlotKey {
+    let normalized = std::fs::canonicalize(root)
+        .unwrap_or_else(|_| std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+    (normalized, account_id.into())
 }
 
 struct AccountSlot {
@@ -313,8 +368,8 @@ impl AccountSlot {
     }
 }
 
-fn slots() -> &'static Mutex<HashMap<String, AccountSlot>> {
-    static SLOTS: OnceLock<Mutex<HashMap<String, AccountSlot>>> = OnceLock::new();
+fn slots() -> &'static Mutex<HashMap<SlotKey, AccountSlot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<SlotKey, AccountSlot>>> = OnceLock::new();
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -498,10 +553,13 @@ pub fn take_cancel_fences() -> u64 {
     observer::take_cancels()
 }
 
-/// Drop in-memory slots. Models a process restart over the persisted reservation.
+/// Drop only the fixture account slot. Parallel fixtures keep their cancellation fences.
 #[cfg(test)]
-pub fn forget_slots() {
-    slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+pub fn forget_slots(root: &Path, account_id: &str) {
+    slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&slot_key(root, account_id));
 }
 
 #[cfg(test)]

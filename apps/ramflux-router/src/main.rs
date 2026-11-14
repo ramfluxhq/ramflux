@@ -19,6 +19,7 @@ mod migration_courier;
 mod migration_drain;
 mod migration_forward_limits;
 mod operator;
+mod pairing_full;
 mod pairing_mesh;
 mod retention;
 mod router_engine;

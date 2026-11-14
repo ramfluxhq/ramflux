@@ -270,7 +270,7 @@ impl RamfluxClient {
             ApplyOpts { attachments, prepared: None },
             Self::legacy_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
+        // The receive state machine must stay off caller stacks in every feature set.
         let apply = Box::pin(apply);
         apply.await
     }
@@ -289,7 +289,6 @@ impl RamfluxClient {
             ApplyOpts { attachments: false, prepared: Some(prepared) },
             Self::legacy_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
         apply.await
     }
@@ -310,7 +309,6 @@ impl RamfluxClient {
             ApplyOpts { attachments: false, prepared },
             persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
         apply.await
     }
@@ -402,6 +400,7 @@ impl RamfluxClient {
         opts: ApplyOpts,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
+        self.require_native_pair_device_not_revoked()?;
         #[cfg(feature = "itest-rfd-fault")]
         let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
         #[cfg(feature = "itest-rfd-fault")]

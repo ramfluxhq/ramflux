@@ -17,6 +17,8 @@ pub(crate) const LIMIT: usize = 4096;
 pub(crate) const PENDING_CAP: usize = 3;
 const ID_MAX: usize = 128;
 const SCHEMA: &str = "ramflux.pairing.Install.v2";
+mod full;
+pub use full::{FullInstall, PriorGeneration};
 
 /// Closed T(Install) record. Public refs and hashes only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +40,8 @@ pub struct Install {
     pub state: String,
     pub cleanup_ref: Option<String>,
     pub cleanup_owner_ref: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "full::present")]
+    pub full_transfer: Option<FullInstall>,
 }
 
 fn field(name: &'static str) -> SdkError {
@@ -48,7 +52,7 @@ fn require(ok: bool, name: &'static str) -> Result<(), SdkError> {
     if ok { Ok(()) } else { Err(field(name)) }
 }
 
-fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
+pub(super) fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
     require(
         value.len() == 43
             && decode_base64url(value)
@@ -57,7 +61,7 @@ fn b32(value: &str, name: &'static str) -> Result<(), SdkError> {
     )
 }
 
-fn ident(value: &str, name: &'static str) -> Result<(), SdkError> {
+pub(super) fn ident(value: &str, name: &'static str) -> Result<(), SdkError> {
     require(
         !value.is_empty()
             && value.len() <= ID_MAX
@@ -96,8 +100,18 @@ impl Install {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), SdkError> {
-        require(self.schema == SCHEMA, "schema")?;
-        require(self.version == 2, "version")?;
+        match (self.schema.as_str(), self.version, &self.full_transfer) {
+            (SCHEMA, 2, None) => {}
+            ("ramflux.pairing.Install.v3", 3, Some(full)) => {
+                require(self.install_purpose == "transfer_destination", "install_purpose")?;
+                full.validate()?;
+            }
+            (SCHEMA, 2, Some(_)) | ("ramflux.pairing.Install.v3", 3, None) => {
+                return Err(field("full_transfer"));
+            }
+            (SCHEMA | "ramflux.pairing.Install.v3", _, _) => return Err(field("version")),
+            _ => return Err(field("schema")),
+        }
         ident(&self.account_id, "account_id")?;
         b32(&self.account_anchor, "account_anchor")?;
         b32(&self.operation_id, "operation_id")?;
@@ -314,6 +328,42 @@ pub fn list_pending(root: &Path, account_id: &str) -> Result<Vec<Install>, SdkEr
     Ok(rows)
 }
 
+/// A cleanup-only source latch cannot close its already installed secondary branch.
+/// Other pending owners remain restrictive, including incomplete role/file/DB updates.
+pub(crate) fn pending_blocks_network(pending: &[Install], installed: Option<&Install>) -> bool {
+    if pending.is_empty() {
+        return false;
+    }
+    let Some(installed) = installed else {
+        return true;
+    };
+    if installed.state != "installed"
+        || !matches!(installed.install_purpose.as_str(), "transfer_source" | "authority_refresh")
+        || installed.primary_vault_ref.is_some()
+    {
+        return true;
+    }
+    pending.iter().any(|row| {
+        row.state != "cleanup_pending"
+            || row.install_purpose != "transfer_source"
+            || row.account_id != installed.account_id
+            || row.account_anchor != installed.account_anchor
+            || (installed.install_purpose == "transfer_source"
+                && (row.operation_id != installed.operation_id
+                    || row.record_hash != installed.record_hash
+                    || row.prior_record_hash != installed.prior_record_hash))
+            || row.recipient_ref != installed.recipient_ref
+            || row.recipient_mode != installed.recipient_mode
+            || row.branch_vault_ref != installed.branch_vault_ref
+            || row.data_vault_ref != installed.data_vault_ref
+            || row.primary_vault_ref.is_some()
+            || row.cleanup_ref.is_none()
+            || row.cleanup_owner_ref.as_ref() != Some(&installed.recipient_ref)
+            || row.full_transfer.is_some()
+            || installed.full_transfer.is_some()
+    })
+}
+
 /// Remove one pending operation file and fsync the directory.
 ///
 /// # Errors
@@ -409,3 +459,6 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod full_tests;

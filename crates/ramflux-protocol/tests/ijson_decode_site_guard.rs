@@ -61,16 +61,44 @@ const PLANTED_SOURCE: &str = r#"
     #[cfg(test)]
     mod external;
 "#;
-const DECODERS: [&str; 8] = [
+const DECODERS: [&str; 9] = [
     "from_slice",
     "from_str",
     "from_value",
     "from_reader",
     "parse_i_json",
+    "parse_i_json_secret",
     "decode_signed_envelope_ijson",
     "decode_signed_ack_ijson",
     "decode_signed_nack_ijson",
 ];
+
+#[test]
+fn registry_guard_recognizes_strict_owned_secret_decoder() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = temp_tree("owned-secret")?;
+    write_source(
+        &root,
+        "apps/ramflux-router/src/handlers.rs",
+        "fn ingress(b: &[u8]) { let _: Envelope = ramflux_protocol::parse_i_json_secret(b).unwrap(); }",
+    )?;
+    let sites = scan_tree(&root)?;
+    assert_eq!(sites.len(), 1);
+    assert!(sites.first().ok_or("missing owned-secret decoder")?.strict);
+    let rows = sites
+        .iter()
+        .map(|site| {
+            (
+                site.key.clone(),
+                RegistryRow {
+                    class: 'A',
+                    evidence: "strict=parse_i_json_secret; admission=owned secret DTO".into(),
+                },
+            )
+        })
+        .collect();
+    validate_registry(&sites, &rows).map_err(Into::into)
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Key {
@@ -552,9 +580,11 @@ impl<'a> SiteVisitor<'a> {
             }
         }
         if full.first().is_some_and(|part| part == "ramflux_protocol")
-            && full
-                .last()
-                .is_some_and(|last| last == "parse_i_json" || last.starts_with("decode_signed_"))
+            && full.last().is_some_and(|last| {
+                last == "parse_i_json"
+                    || last == "parse_i_json_secret"
+                    || last.starts_with("decode_signed_")
+            })
         {
             self.aliases.insert(local.clone(), full.join("::"));
         }
@@ -580,6 +610,7 @@ impl<'a> SiteVisitor<'a> {
         if DECODERS.contains(&last) {
             let is_json_decoder = normalized.first().is_some_and(|part| part == "serde_json")
                 || last == "parse_i_json"
+                || last == "parse_i_json_secret"
                 || last.starts_with("decode_signed_");
             if is_json_decoder {
                 return Some(last.to_owned());
@@ -635,7 +666,9 @@ impl<'a> SiteVisitor<'a> {
         let generic_deserialize = !self.generic_deserialize.is_empty()
             && *self.generic_deserialize.last().unwrap_or(&false)
             && target_identifiers(&target).iter().any(|name| name == "T");
-        let strict = spelling == "parse_i_json" || spelling.starts_with("decode_signed_");
+        let strict = spelling == "parse_i_json"
+            || spelling == "parse_i_json_secret"
+            || spelling.starts_with("decode_signed_");
         let key = Key { path: self.path.clone(), function, ordinal };
         self.sites.push(Site { key, spelling, target, closure_hit, generic_deserialize, strict });
         for argument in args {

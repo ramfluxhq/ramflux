@@ -924,3 +924,38 @@ fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     prune_reuse_and_restart()?;
     Ok(())
 }
+
+#[test]
+fn pairing_native_and_full_slots_share_global_and_account_admission() -> TestResult {
+    let (mut store, clock) = open()?;
+    let full = store.full_allocations();
+    let one = full.reserve([201; 32], 0)?;
+    let two = full.reserve([202; 32], 0)?;
+    for n in 0..62 {
+        store.issue(spec_n(n, WALL))?;
+    }
+    assert_eq!(store.stats().slots, 64);
+    assert_eq!(store.stats().full, 2);
+    assert!(matches!(store.issue(spec_n(64, WALL)), Err(PairingRelayError::Busy { .. })));
+    drop(one);
+    store.issue(spec_n(64, WALL))?;
+    assert_eq!(store.accounted_bytes(), store.measured_bytes());
+    clock.advance_secs(301);
+    store.issue(spec_n(65, clock.wall_unix_secs()?))?;
+    assert_eq!(store.stats().slots, 2);
+    assert_eq!(store.stats().full, 1);
+    drop(two);
+    let mut root = [0; 32];
+    root[..8].copy_from_slice(&1000_u64.to_le_bytes());
+    let data = full.reserve(root, clock.monotonic_ms())?;
+    store.issue(spec_n(1000, clock.wall_unix_secs()?))?;
+    store.issue(spec_n(1000, clock.wall_unix_secs()?))?;
+    assert!(matches!(
+        store.issue(spec_n(1000, clock.wall_unix_secs()?)),
+        Err(PairingRelayError::Busy { .. })
+    ));
+    drop(data);
+    store.issue(spec_n(1000, clock.wall_unix_secs()?))?;
+    assert_eq!(store.accounted_bytes(), store.measured_bytes());
+    Ok(())
+}

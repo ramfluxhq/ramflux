@@ -24,7 +24,7 @@ fn key(group: &str) -> String {
     format!("group-state/removal-floors/{}", ramflux_protocol::encode_base64url(group))
 }
 impl AccountDb {
-    fn shared_group_removal_floors(&self, group: &str) -> Result<Floors, StorageError> {
+    pub(super) fn shared_group_removal_floors(&self, group: &str) -> Result<Floors, StorageError> {
         let owned_group = group.to_owned();
         if let Some(floors) =
             self.connection.call(move |db| Floors::load_index(db, "main", &owned_group))?

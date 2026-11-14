@@ -20,19 +20,16 @@ use crate::custody::pairing::local_credential::{
 };
 use crate::custody::{BranchCredentials, PrimaryVault, require_vault_reference};
 use ramflux_crypto::custody::SelfSigningKey;
-use ramflux_protocol::canonical_json_bytes;
 use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
 use ramflux_protocol::custody::pairing::native::{Invitation, invitation_signing_bytes};
 use ramflux_protocol::custody::{DeviceRef, Envelope};
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AdoptionRow, FileVaultSecretSource};
+use ramflux_storage::FileVaultSecretSource;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -181,11 +178,7 @@ impl DiskVault {
     }
 
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(self.slot(reference)) {
+        match crate::platform::fs::create_new_owner_only_io(&self.slot(reference)) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
                 file.sync_all()?;
@@ -374,14 +367,22 @@ fn stage_sample(
     account: &str,
 ) -> TestResult<super::StagedRecipient> {
     let invite = invitation("new", 3, None)?;
-    Ok(stage_new(&StageNew {
-        root,
-        account_id: account,
-        invitation: &invite,
-        vault,
-        provider: &Phrase::setup(PHRASE),
-        frontend_generation: 1,
-    })?)
+    let mut client = crate::RamfluxClient::new();
+    let staged = super::stage_new_for_generation(
+        &StageNew {
+            root,
+            account_id: account,
+            invitation: &invite,
+            vault,
+            provider: &Phrase::setup(PHRASE),
+            frontend_generation: 1,
+        },
+        &mut client,
+        1,
+    )?;
+    // The restart proof owns its sentinel; production staging creates no test actor.
+    client.account_db()?.persist_actor_state("pairing/local-sentinel", &"sealed")?;
+    Ok(staged)
 }
 
 fn closed_unlock_leg(root: &Path, account: &str) -> TestResult {
@@ -434,26 +435,21 @@ async fn existing_open_leg() -> TestResult {
     })?;
     closed_unlock_leg(dest.path(), "acct-open")?;
     install_store::remove_pending(dest.path(), "acct-open", &staged.install.operation_id)?;
-    let hash = ramflux_protocol::custody::object_hash(native.record())?;
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(dest.path())?;
     client.unlock_account("acct-open", PHRASE)?;
-    client.account_db()?.put_pairing_adoption(&AdoptionRow {
-        account_id: "acct-open".into(),
-        operation_id: staged.install.operation_id.clone(),
-        record_hash: hash.clone(),
-        local_ref: canonical_json_bytes(&recipient_ref)?,
-        local_role: "secondary".into(),
-        branch_vault_ref: staged.branch_vault_ref.clone(),
-        data_vault_ref: staged.data_vault_ref.clone(),
-        primary_vault_ref: None,
-    })?;
+    crate::custody::pairing::refresh_authority(
+        dest.path(),
+        client.account_db()?,
+        &vault,
+        "acct-open",
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication(),
+            custodian_publication: None,
+        },
+        now,
+    )?;
     drop(client);
-    let mut installed = staged.install;
-    installed.record_hash = Some(hash);
-    installed.state = "installed".into();
-    installed.validate()?;
-    install_store::write_installed(dest.path(), &installed)?;
     let expected = reopen_unlock(dest.path(), "acct-open")?;
     let mut state = daemon(dest.path());
     unlock_from_provider(&mut state, "acct-open", &expected, &Phrase::setup(PHRASE), None)?;
@@ -702,7 +698,7 @@ fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
     drop(vault);
     let expected = reopen_unlock(root.path(), "acct-p08-slot")?;
     let stored = load_reservation(root.path(), "acct-p08-slot")?.ok_or("stored")?;
-    let late = LateCancel { root: root.path().to_path_buf(), account: "acct-p08-slot".into() };
+    let late = LateCancel { root: root.path().join("."), account: "acct-p08-slot".into() };
     assert!(acquire_unlock(root.path(), &expected, &late, &stored).is_err(), "late callback");
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(root.path())?;
@@ -712,10 +708,111 @@ fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
     client.open_account_index(root.path())?;
     unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
     drop(client);
-    forget_slots();
+    forget_slots(root.path(), "acct-p08-slot");
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(root.path())?;
     unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
     assert_eq!(staged.install.state, "vault_durable");
+    Ok(())
+}
+
+struct FrontendOnlyPorts;
+impl super::super::NodeHeadPersist for FrontendOnlyPorts {
+    fn persist_head(
+        &self,
+        _: &ramflux_protocol::custody::Publication,
+        _: u64,
+    ) -> Result<String, SdkError> {
+        Err(SdkError::PairingCode("WrongContext"))
+    }
+}
+impl super::super::PairingAuthorityQuery for FrontendOnlyPorts {
+    fn current_authority(
+        &self,
+        _: &str,
+    ) -> Result<ramflux_protocol::custody::CustodyAuthority, SdkError> {
+        Err(SdkError::PairingCode("WrongContext"))
+    }
+}
+struct FrontendVaultSecret;
+impl ramflux_storage::VaultSecretSource for FrontendVaultSecret {
+    fn vault_secret(&self, _: &str) -> Result<[u8; 32], ramflux_storage::StorageError> {
+        Ok([77; 32])
+    }
+}
+#[test]
+fn pairing_existing_frontend_unlock_preserves_custom_vault_and_actual_writer() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let account = "linked-frontend";
+    let native = crate::custody::tests::create_with_device(
+        root.path(),
+        account,
+        "linked-device",
+        vault.as_ref(),
+        crate::custody::network_now()?,
+    )?;
+    let reference = DeviceRef {
+        account_anchor: native.record().body.account_anchor.clone(),
+        device_id: native.local_device_id()?.into(),
+        device_epoch: 1,
+    };
+    let mut client = crate::RamfluxClient::new();
+    client.set_vault_secret_source(Box::new(FrontendVaultSecret));
+    client.open_account_index(root.path())?;
+    client.seal_new_account_data(account, &reference.account_anchor, PHRASE)?;
+    client.unlock_account(account, PHRASE)?;
+    let path = client.account_db()?.path.clone();
+    let invite = invitation("existing", 25, Some(reference.clone()))?;
+    let provider = Arc::new(Phrase::setup(PHRASE));
+    let participant = Arc::new(super::super::LocalPairingParticipant {
+        root: root.path().into(),
+        account_id: account.into(),
+        vault,
+        provider: provider.clone(),
+        db: std::sync::Mutex::new(None),
+        persist: Arc::new(FrontendOnlyPorts),
+        query: Arc::new(FrontendOnlyPorts),
+    });
+    let stale = super::ExistingFrontendUnlock::acquire(participant.clone(), invite.clone(), 3, 1)?;
+    let unlock = super::ExistingFrontendUnlock::acquire(participant.clone(), invite, 3, 1)?;
+    assert!(
+        matches!(stale.finish(&client), Err(SdkError::PairingCode("Retired"))),
+        "test: a replaced private reservation authorized an old credential reply"
+    );
+    assert!(
+        install_store::list_pending(root.path(), account)?.is_empty(),
+        "test: private prompt created an install before the actual frontend verified it"
+    );
+    assert!(
+        participant.db.lock().map_err(|_| "test: participant mutex")?.is_none(),
+        "test: credential prompt parked the ordinary account writer"
+    );
+    client.account_db()?.persist_actor_state("test/ordinary-during-prompt", &true)?;
+    assert_eq!(
+        unlock.finish(&client)?,
+        reference,
+        "test: linked staging changed its original device identity"
+    );
+    assert_eq!(
+        client.account_db()?.path,
+        path,
+        "test: linked staging replaced the ordinary frontend database"
+    );
+    assert_eq!(
+        provider.setups.load(Ordering::SeqCst),
+        0,
+        "test: linked target was prompted to set a new data password"
+    );
+    assert!(
+        !root.path().join("vault").join(format!("{account}.key")).exists(),
+        "test: linked verification replaced the configured custom vault with a file vault"
+    );
+    let pending = install_store::list_pending(root.path(), account)?;
+    assert_eq!(
+        pending.len(),
+        1,
+        "test: verified linked staging did not persist one pending install"
+    );
     Ok(())
 }

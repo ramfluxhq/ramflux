@@ -22,6 +22,11 @@ pub(crate) fn set_owner_only_file(path: &Path) -> Result<(), SdkError> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn permission_bits(path: &Path) -> std::io::Result<u32> {
+    Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
 pub(crate) fn create_new_owner_only(path: &Path) -> Result<File, SdkError> {
     Ok(create_new_owner_only_io(path)?)
 }
@@ -75,6 +80,16 @@ pub(crate) fn open_owner_only_append(path: &Path) -> Result<File, SdkError> {
 pub(crate) fn open_owner_only_no_follow(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false).mode(0o600);
+    options.custom_flags(
+        i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).map_err(std::io::Error::other)?,
+    );
+    options.open(path)
+}
+
+/// Open an existing file for reading without following a final symlink or creating it.
+pub(crate) fn open_read_only_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
     options.custom_flags(
         i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).map_err(std::io::Error::other)?,
     );

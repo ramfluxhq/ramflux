@@ -104,6 +104,8 @@ enum RamfluxErrorCode
   RAMFLUX_ERROR_CODE_OBJECT_OWNERSHIP_UNVERIFIED = 21,
   RAMFLUX_ERROR_CODE_CUSTODY_FORK_FENCED = 22,
   RAMFLUX_ERROR_CODE_SCHEMA_RESET_REQUIRED = 23,
+  RAMFLUX_ERROR_CODE_PAIRING_REFUSED = 28,
+  RAMFLUX_ERROR_CODE_PAIRING_STALE = 29,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -193,6 +195,19 @@ struct RamfluxV2CustodyProvider {
    */
   int32_t (*invoke)(uint64_t context, struct RamfluxV2CustodyRequest *request);
 };
+
+/*
+ Nullable host callback; null unregisters and drains outstanding uses.
+ */
+typedef int32_t (*CredentialProviderCallback)(const uint8_t*,
+                                              size_t,
+                                              uint8_t*,
+                                              size_t,
+                                              size_t*,
+                                              uint8_t*,
+                                              size_t,
+                                              size_t*,
+                                              void*);
 
 #ifdef __cplusplus
 extern "C" {
@@ -398,6 +413,35 @@ int32_t ramflux_message_update_adapt(const unsigned char *update_json,
                                      size_t update_json_len,
                                      struct RamfluxBuffer **out_update_json,
                                      struct RamfluxBuffer **out_error_json);
+
+/*
+ Invoke one closed pairing/transfer DTO using the configured same-user local daemon.
+ Configure `pairing_socket` and, for a new target, `pairing_account_id` in client JSON.
+ `out` follows existing APIs: pass writable pointer storage, free the returned allocation
+ with `ramflux_buffer_free`. Inputs remain readable and the client remains live throughout.
+ */
+int32_t ramflux_pairing_call(struct RamfluxClient *client,
+                             const char *method_name,
+                             const uint8_t *body,
+                             size_t body_len,
+                             struct RamfluxBuffer **out);
+
+/*
+ Return one queued public display snapshot or an empty SDK buffer. No callback runs here.
+ The caller owns the returned buffer and frees it with `ramflux_buffer_free`.
+ */
+int32_t ramflux_pairing_event_poll(struct RamfluxClient *client, struct RamfluxBuffer **out);
+
+/*
+ Install or unregister (NULL callback) the client's attended input provider.
+ Host output capacities are 1024 bytes; SDK storage is zeroized on every path.
+ Replacement/unregister/close waits for previous callback invocations to finish.
+ The host must keep `user_data` valid until that wait returns and must not reenter
+ this client from its callback; cancel its own waiting UI before closing the client.
+ */
+int32_t ramflux_pairing_set_credential_provider(struct RamfluxClient *client,
+                                                CredentialProviderCallback callback,
+                                                void *user_data);
 
 #ifdef __cplusplus
 }  // extern "C"

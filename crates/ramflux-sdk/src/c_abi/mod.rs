@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub mod v2;
 
 const ABI_VERSION_MAJOR: u32 = 1;
-const ABI_VERSION_MINOR: u32 = 0;
+const ABI_VERSION_MINOR: u32 = 1;
 const PROTOCOL_VERSION: u32 = 1;
 
 mod generated_message;
@@ -52,6 +52,8 @@ pub enum RamfluxErrorCode {
     ObjectOwnershipUnverified = 21,
     CustodyForkFenced = 22,
     SchemaResetRequired = 23,
+    PairingRefused = 28,
+    PairingStale = 29,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -60,6 +62,11 @@ pub const RAMFLUX_ERR_ACCOUNT_BUSY: i32 = 18;
 
 /// Local attachment erasure; this outcome does not terminate the client or daemon.
 pub const RAMFLUX_ERR_OBJECT_ERASED: i32 = 19;
+
+/// Pairing wrote a closed local refusal result to the caller's output buffer.
+pub const RAMFLUX_ERR_PAIRING_REFUSED: i32 = 28;
+/// Pairing rejected a stale operation generation without applying its request.
+pub const RAMFLUX_ERR_PAIRING_STALE: i32 = 29;
 
 impl RamfluxErrorCode {
     const fn name(self) -> &'static str {
@@ -84,6 +91,8 @@ impl RamfluxErrorCode {
             Self::ObjectOwnershipUnverified => "ObjectOwnershipUnverified",
             Self::CustodyForkFenced => "CustodyForkFenced",
             Self::SchemaResetRequired => "SchemaResetRequired",
+            Self::PairingRefused => "PairingRefused",
+            Self::PairingStale => "PairingStale",
             Self::RateLimited => "RateLimited",
             Self::Internal => "Internal",
             Self::PanicAborted => "PanicAborted",
@@ -114,6 +123,7 @@ struct CAbiClientInner {
     event_bus: Arc<CAbiEventBus>,
     closing: AtomicBool,
     next_operation_id: AtomicU64,
+    pairing: pairing::State,
 }
 
 struct CAbiEventBus {
@@ -136,6 +146,10 @@ type CAbiResult<T> = Result<T, CAbiError>;
 #[derive(Deserialize)]
 struct ClientConfigJson {
     account_root: String,
+    #[serde(default)]
+    pairing_socket: Option<String>,
+    #[serde(default)]
+    pairing_account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -220,15 +234,21 @@ pub extern "C" fn ramflux_client_new(
         let mut client = RustRamfluxClient::new();
         client.open_account_index(&config.account_root).map_err(|error| map_sdk_error(&error))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .map_err(|source| CAbiError::new(RamfluxErrorCode::Internal, source.to_string()))?;
+        let pairing = pairing::State::new(
+            client.account_index().map_err(|error| map_sdk_error(&error))?.root().to_path_buf(),
+            config.pairing_socket,
+            config.pairing_account_id,
+        )?;
         let inner = Box::new(CAbiClientInner {
             runtime,
             client: Mutex::new(client),
             event_bus: Arc::new(CAbiEventBus { queue: Mutex::new(VecDeque::new()) }),
             closing: AtomicBool::new(false),
             next_operation_id: AtomicU64::new(1),
+            pairing,
         });
         write_out_ptr(out_client, Box::into_raw(inner).cast::<RamfluxClient>())
     })
@@ -277,7 +297,8 @@ pub extern "C" fn ramflux_buffer_free(buffer: *mut RamfluxBuffer) {
         if !buffer.ptr.is_null() && buffer.len > 0 {
             let slice = ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
             // SAFETY: write_buffer allocated this exact boxed slice and retained its length.
-            let _bytes = unsafe { Box::from_raw(slice) };
+            let mut bytes = unsafe { Box::from_raw(slice) };
+            zeroize::Zeroize::zeroize(bytes.as_mut());
         }
     }));
 }
@@ -665,6 +686,7 @@ fn close_inner(inner: &CAbiClientInner) {
     if inner.closing.swap(true, Ordering::AcqRel) {
         return;
     }
+    inner.pairing.close();
     let _entered = inner.runtime.enter();
     let _ignored = push_event(
         &inner.event_bus,
@@ -1206,4 +1228,21 @@ fn receive_reconcile_keeps_existing_abi_classes() {
     ] {
         assert_eq!(sdk_error_code(&SdkError::ReceiveEpochReconcile(reason)), sdk_error_code(&old));
     }
+}
+
+#[cfg(test)]
+mod pairing_error_tests;
+
+mod pairing;
+pub use pairing::{
+    CredentialCallback, ramflux_pairing_call, ramflux_pairing_event_poll,
+    ramflux_pairing_set_credential_provider,
+};
+
+#[cfg(test)]
+pub(crate) fn pairing_registered_state_for_test(
+    config: &[u8],
+    body: &[u8],
+) -> Result<Value, String> {
+    pairing::registered_state_for_test(config, body)
 }

@@ -8,6 +8,8 @@ mod commit_gate;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
 pub mod pairing;
+mod primary_signing;
+pub(crate) use primary_signing::PrimarySigningLease;
 mod secret_buffer;
 pub(crate) use secret_buffer::serialize_secret;
 pub(crate) mod home_authorization;
@@ -16,6 +18,11 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
+pub(crate) use store::pairing::{
+    matches_generation_install, matches_install, verify_generation_keys,
+    verify_local as verify_pairing_local, write_authority as write_pairing_authority,
+    write_generation_authority,
+};
 #[cfg(test)]
 pub(crate) use store::sibling_fixture::{SiblingSetup, install_sibling_fixture};
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
@@ -47,7 +54,7 @@ fn random() -> Result<zeroize::Zeroizing<[u8; 32]>, SdkError> {
     getrandom::fill(&mut *seed).map_err(|_| SdkError::CustodyRandomUnavailable)?;
     Ok(seed)
 }
-fn valid_id(id: &str) -> Result<(), SdkError> {
+pub(crate) fn valid_id(id: &str) -> Result<(), SdkError> {
     if id.is_empty()
         || id.len() > 128
         || !id.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))

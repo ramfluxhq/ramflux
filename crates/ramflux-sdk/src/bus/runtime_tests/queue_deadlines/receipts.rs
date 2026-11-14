@@ -18,7 +18,7 @@ fn ack(key: &str) -> AccountCommand {
 async fn concurrent_keyed_network_calls_share_one_effect_and_effects_started_fail_closed() -> Case {
     LocalSet::new()
         .run_until(crate::bus::connection_manager::tests::watchdog(async {
-            let Fixture { actor, connection, mut io, root, reader, router } =
+            let Fixture { actor, connection, mut io, temp, reader, router } =
                 fixture(Duration::from_secs(600)).await?;
             let owner = actor.clone();
             let first =
@@ -71,7 +71,7 @@ async fn concurrent_keyed_network_calls_share_one_effect_and_effects_started_fai
             drop(connection);
             drop(reader);
             router.await?;
-            std::fs::remove_dir_all(root)?;
+            temp.close()?;
             Ok(())
         }))
         .await

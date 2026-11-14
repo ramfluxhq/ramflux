@@ -391,6 +391,25 @@ pub(crate) fn native_handoff_matches(
     }
 }
 
+/// Live sessions recheck current branch ownership; unrelated roster/profile changes do not
+/// replace the connection-bound grant. Initial handoff still requires the exact head.
+pub(crate) fn native_live_authority_matches(
+    registered: &ramflux_node_core::DeviceAuthKeyResponse,
+    grant: &super::custody::GatewayGrant,
+    established_branch_key: &str,
+    now: u64,
+) -> bool {
+    let session = grant.session();
+    registered.custody_authority.as_ref().is_some_and(|authority| {
+        grant.live(now)
+            && !registered.revoked
+            && registered.branch_public_key == established_branch_key
+            && session.device_ref.account_anchor == authority.publication.record.body.account_anchor
+            && session.device_ref.device_id == registered.device_id
+            && session.device_ref.device_epoch == registered.device_epoch
+    })
+}
+
 pub(crate) async fn validate_native_frame(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
@@ -406,7 +425,10 @@ pub(crate) async fn validate_native_frame(
     )
     .await?;
     let key = key.ok_or_else(|| anyhow::anyhow!("native branch unavailable"))?;
-    anyhow::ensure!(native_handoff_matches(&key, Some(grant), now)?, "native authority changed");
+    anyhow::ensure!(
+        native_live_authority_matches(&key, grant, &runtime.branch_public_key, now),
+        "native authority changed"
+    );
     let capability = match frame {
         Frame::OwnDeviceFanout { .. } => "sync",
         Frame::VoiceLease { .. } => "call",

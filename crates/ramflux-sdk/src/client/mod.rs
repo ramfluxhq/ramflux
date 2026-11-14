@@ -102,6 +102,7 @@ pub struct RamfluxClient {
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
+    pub(crate) born_v3_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault>>,
     // Fetched compare material. Preview keeps it here; only a successful CAS commit stores it.
     pub(crate) held_manifests: HeldManifests,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
@@ -134,6 +135,7 @@ impl Default for RamfluxClient {
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,
+            born_v3_vault: None,
             held_manifests: std::cell::RefCell::new(BTreeMap::new()),
             voice_calls: BTreeMap::new(),
             voice_transition: std::cell::RefCell::new(None),

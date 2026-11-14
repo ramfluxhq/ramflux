@@ -35,6 +35,30 @@ impl Fixture {
         client.initialize_born_v3_branch(device, vault.clone()).await?;
         Self::ready(client, root, vault, id, device, account.record().clone())
     }
+    pub(crate) async fn externally_custodied(id: &str) -> TestResult<Self> {
+        let root = Root::new()?;
+        let vault = Arc::new(TestVault::default());
+        let now = crate::custody::network_now()?;
+        crate::custody::tests::create(&root.0, "custodian", vault.as_ref(), now)?;
+        crate::custody::tests::mark_live(&root.0, "custodian", now)?;
+        let mut input = crate::custody::tests::input(id);
+        input.principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
+        input.custodian_account_id = Some("custodian".into());
+        let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        let account = ceremony.confirm_with_passphrase(
+            &crate::custody::tests::words(&phrase, positions)?,
+            vault.as_ref(),
+            now,
+            b"external fixture passphrase",
+        )?;
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root.0)?;
+        client.unlock_account(id, b"external fixture passphrase")?;
+        client.initialize_born_v3_branch("primary", vault.clone()).await?;
+        Self::ready(client, root, vault, id, "primary", account.record().clone())
+    }
     fn ready(
         client: RamfluxClient,
         root: Root,
@@ -46,20 +70,25 @@ impl Fixture {
         let anchor = record.body.account_anchor.clone();
         let identity = client.owned_device_identity()?;
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
-        let manifest = SdkDeviceManifestResponse::from_native(CustodyManifest {
-            publication: Publication { record, compacted_ids: None },
-            custodian_publication: None,
-            devices: vec![CustodyManifestDevice {
-                device_ref: DeviceRef {
-                    account_anchor: anchor,
-                    device_id: device.into(),
-                    device_epoch: 1,
-                },
-                target_delivery_id: identity.storage_key().into(),
-                prekey_bundle: serde_json::to_value(bundle)?,
-                message_layer: None,
-            }],
-        })?;
+        let manifest =
+            SdkDeviceManifestResponse::from_native(CustodyManifest {
+                publication: Publication { record, compacted_ids: None },
+                custodian_publication: client
+                    .born_v3_account
+                    .as_ref()
+                    .ok_or("test: native account")?
+                    .custodian_publication(&root.0, crate::custody::network_now()?)?,
+                devices: vec![CustodyManifestDevice {
+                    device_ref: DeviceRef {
+                        account_anchor: anchor,
+                        device_id: device.into(),
+                        device_epoch: 1,
+                    },
+                    target_delivery_id: identity.storage_key().into(),
+                    prekey_bundle: serde_json::to_value(bundle)?,
+                    message_layer: None,
+                }],
+            })?;
         client.persist_fetched_identity_directory(&manifest)?;
         let endpoint = GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse()?,
@@ -120,3 +149,4 @@ pub(crate) mod watchdog;
 
 #[cfg(all(ramflux_itest, not(ramflux_release_profile), not(ramflux_production)))]
 mod local_search;
+pub(crate) mod pairing_history;
