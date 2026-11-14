@@ -235,7 +235,7 @@ fn failed_recovery_sync_refuses_open() -> TestResult {
     let reached = Arc::new(AtomicBool::new(false));
     let reached_hook = Arc::clone(&reached);
     let _guard = observe(
-        root.to_path_buf(),
+        root.clone(),
         Arc::new(move |_, op, completed| {
             if op == "sync_all" && !completed {
                 reached_hook.store(true, Ordering::SeqCst);
