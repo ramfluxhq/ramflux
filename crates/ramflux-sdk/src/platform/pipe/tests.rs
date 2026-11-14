@@ -1,0 +1,372 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Carrier tests for the M2 acceptance: a second user is refused, a pre-created pipe name is
+//! refused by the daemon and by the client, and a low-integrity token is refused.
+//!
+//! The second-user tests need a second local account. They are ignored unless the job provides
+//! `RAMFLUX_TEST_SECOND_USER` and `RAMFLUX_TEST_SECOND_USER_PASSWORD`.
+
+use std::ffi::OsString;
+use std::future::Future;
+use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::windows::named_pipe::ServerOptions;
+
+use super::listener::{
+    BusListener, BusStream, PeerCred, PipeBusListener, authorize, bind, connect, connect_named,
+};
+use super::name;
+use super::win32::test_tokens::{impersonate_low_integrity, impersonate_user, sid_from_string};
+use super::win32::{self, MEDIUM_INTEGRITY_RID, SecurityDescriptor, TokenFacts};
+use crate::SdkError;
+
+const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+const LOW_INTEGRITY_RID: u32 = 0x1000;
+const HIGH_INTEGRITY_RID: u32 = 0x3000;
+const MAX_TEST_FRAME: u64 = 64;
+const STEP: Duration = Duration::from_secs(15);
+
+fn text(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+/// Failure text for the same-user pipe test. `pipe` is `None` when bind did not create one.
+/// `last_labeled_call` is the last call this thread named, which on a deadline is the bind
+/// call rather than the accept that is still waiting.
+fn explain_pipe(error: &str, pipe: Option<&std::ffi::OsStr>, name_file: &Path) -> String {
+    let call = win32::last_call();
+    let token = win32::diag::token_line();
+    let (built_pipe, built_file) =
+        match win32::process_facts().and_then(|facts| facts.user.to_sddl_string()) {
+            Ok(sid) => (name::pipe_sddl(&sid), name::name_file_sddl(&sid)),
+            Err(error) => (format!("build-failed:{error}"), format!("build-failed:{error}")),
+        };
+    let read_pipe = match pipe {
+        Some(pipe) => win32::diag::object_sddl(Path::new(pipe), true),
+        None => "pipe was not created".to_owned(),
+    };
+    let read_file = win32::diag::object_sddl(name_file, false);
+    format!(
+        "{error} | {token} | built_pipe={built_pipe} | read_pipe={read_pipe} | built_file={built_file} | read_file={read_file} | last_labeled_call={call}"
+    )
+}
+
+/// Bound one real pipe or thread wait. Paused time cannot cover a kernel object.
+async fn within<T>(work: impl Future<Output = T>) -> Result<T, String> {
+    match tokio::time::timeout(STEP, work).await {
+        Ok(value) => Ok(value),
+        Err(_elapsed) => Err("test: the pipe operation exceeded its deadline".to_owned()),
+    }
+}
+
+fn finish_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver.recv_timeout(STEP).map_err(|_| "test: worker thread exceeded its deadline".to_owned())
+}
+
+/// A name file this user owns. `std::fs::write` on an elevated token is owned by Administrators.
+fn write_user_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let me = win32::process_facts().map_err(text)?.user;
+    let sid = me.to_sddl_string().map_err(text)?;
+    let descriptor = SecurityDescriptor::from_sddl(&name::name_file_sddl(&sid)).map_err(text)?;
+    let mut file = win32::create_new_file(path, &descriptor).map_err(text)?;
+    file.write_all(bytes).map_err(text)?;
+    Ok(())
+}
+
+fn unused_name() -> Result<(OsString, String, win32::Sid), String> {
+    let me = win32::process_facts().map_err(text)?.user;
+    let user_sid = me.to_sddl_string().map_err(text)?;
+    let nonce = name::fresh_nonce().map_err(text)?;
+    Ok((name::pipe_name(&user_sid, &nonce).map_err(text)?, user_sid, me))
+}
+
+fn second_user() -> Option<(String, String)> {
+    Some((
+        std::env::var("RAMFLUX_TEST_SECOND_USER").ok()?,
+        std::env::var("RAMFLUX_TEST_SECOND_USER_PASSWORD").ok()?,
+    ))
+}
+
+/// Open the pipe the way any other process could, on a thread that impersonates `token`.
+fn open_while_impersonating<G: Send + 'static>(
+    name: OsString,
+    token: impl FnOnce() -> std::io::Result<G> + Send + 'static,
+) -> Result<std::io::Result<()>, String> {
+    finish_thread(move || {
+        let guard = token().map_err(text)?;
+        let opened = std::fs::OpenOptions::new().read(true).write(true).open(&name).map(|_pipe| ());
+        drop(guard);
+        Ok(opened)
+    })?
+}
+
+#[tokio::test]
+async fn same_user_connects_and_bytes_round_trip() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let path = dir.path().join("daemon.sock");
+    let listener = match bind(&path) {
+        Ok(listener) => listener,
+        Err(error) => return Err(explain_pipe(&error.to_string(), None, &path)),
+    };
+    let pipe_name = listener.name().to_os_string();
+    let owner = match listener.owner() {
+        Ok(owner) => owner,
+        Err(error) => {
+            return Err(explain_pipe(&error.to_string(), Some(pipe_name.as_os_str()), &path));
+        }
+    };
+    let name_file = path.clone();
+    let outcome = within(async move {
+        let (accepted, client) = tokio::join!(listener.accept(), connect(&path));
+        let accepted = accepted.map_err(text)?;
+        let mut client = client.map_err(text)?;
+        accepted.matches_peer(owner).map_err(text)?;
+        let (mut reader, mut writer) = accepted.into_halves();
+        client.write_all(&5_u32.to_be_bytes()).await.map_err(text)?;
+        client.write_all(b"hello").await.map_err(text)?;
+        let len = reader.read_u32().await.map_err(text)?;
+        let body_len = usize::try_from(len).map_err(text)?;
+        if u64::try_from(body_len).map_err(text)? > MAX_TEST_FRAME {
+            return Err("frame longer than the test bound".to_owned());
+        }
+        let mut body = vec![0_u8; body_len];
+        reader.read_exact(&mut body).await.map_err(text)?;
+        if body != b"hello" {
+            return Err("frame body changed in transit".to_owned());
+        }
+        writer.write_all(b"ok").await.map_err(text)?;
+        let mut reply = [0_u8; 2];
+        client.read_exact(&mut reply).await.map_err(text)?;
+        if &reply == b"ok" { Ok(()) } else { Err("reply changed in transit".to_owned()) }
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(explain_pipe(&error, Some(pipe_name.as_os_str()), &name_file)),
+        Err(error) => Err(explain_pipe(&error, Some(pipe_name.as_os_str()), &name_file)),
+    }
+}
+
+#[tokio::test]
+async fn a_second_client_is_served_while_the_first_stays_connected() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let path = dir.path().join("daemon.sock");
+    let listener = bind(&path).map_err(text)?;
+    within(async move {
+        let (first, _first_client) = tokio::join!(listener.accept(), connect(&path));
+        let _first = first.map_err(text)?;
+        let (second, second_client) = tokio::join!(listener.accept(), connect(&path));
+        second.map_err(text)?;
+        second_client.map(|_stream| ()).map_err(text)
+    })
+    .await?
+}
+
+#[test]
+fn server_rule_refuses_other_user_low_integrity_and_app_container() -> Result<(), String> {
+    let me = win32::process_facts().map_err(text)?.user;
+    let other = sid_from_string(LOCAL_SYSTEM_SID).map_err(text)?;
+    let facts =
+        |user, integrity_rid, app_container| TokenFacts { user, integrity_rid, app_container };
+    authorize(&facts(me, MEDIUM_INTEGRITY_RID, false), &me).map_err(text)?;
+    authorize(&facts(me, HIGH_INTEGRITY_RID, false), &me).map_err(text)?;
+    for refused in [
+        facts(other, MEDIUM_INTEGRITY_RID, false),
+        facts(me, LOW_INTEGRITY_RID, false),
+        facts(me, MEDIUM_INTEGRITY_RID, true),
+    ] {
+        match authorize(&refused, &me) {
+            Err(SdkError::LocalBusPermissionDenied) => {}
+            Ok(()) => return Err("a refused token was accepted".to_owned()),
+            Err(error) => return Err(text(error)),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_client_fails_the_check_against_another_owner_sid() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let path = dir.path().join("daemon.sock");
+    let listener = bind(&path).map_err(text)?;
+    within(async move {
+        let (accepted, _client) = tokio::join!(listener.accept(), connect(&path));
+        let accepted = accepted.map_err(text)?;
+        let other = PeerCred { sid: sid_from_string(LOCAL_SYSTEM_SID).map_err(text)? };
+        match accepted.matches_peer(other) {
+            Err(SdkError::LocalBusPermissionDenied) => Ok(()),
+            Ok(()) => Err("a different SID was accepted".to_owned()),
+            Err(error) => Err(text(error)),
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn daemon_refuses_a_pre_created_pipe_name() -> Result<(), String> {
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let _squatter = ServerOptions::new().create(&pipe_name).map_err(text)?;
+    match PipeBusListener::create(pipe_name, &user_sid, me) {
+        Err(SdkError::DataRootInUse) => Ok(()),
+        Ok(_) => Err("the daemon bound a name that already existed".to_owned()),
+        Err(error) => Err(text(error)),
+    }
+}
+
+#[tokio::test]
+async fn a_second_listener_on_the_same_name_is_refused() -> Result<(), String> {
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let _first = PipeBusListener::create(pipe_name.clone(), &user_sid, me).map_err(text)?;
+    match PipeBusListener::create(pipe_name, &user_sid, me) {
+        Err(SdkError::DataRootInUse) => Ok(()),
+        Ok(_) => Err("two listeners share one pipe name".to_owned()),
+        Err(error) => Err(text(error)),
+    }
+}
+
+#[tokio::test]
+async fn client_refuses_a_pipe_of_another_owner_before_sending_a_frame() -> Result<(), String> {
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let listener = PipeBusListener::create(pipe_name, &user_sid, me).map_err(text)?;
+    let other = sid_from_string(LOCAL_SYSTEM_SID).map_err(text)?;
+    within(async move {
+        let (accepted, client) =
+            tokio::join!(listener.accept(), connect_named(listener.name(), &other));
+        match client {
+            Err(SdkError::LocalBusPermissionDenied) => {}
+            Ok(_) => return Err("the client trusted a pipe of another owner".to_owned()),
+            Err(error) => return Err(text(error)),
+        }
+        let (reader, _writer) = accepted.map_err(text)?.into_halves();
+        let mut received = Vec::new();
+        // The refused client closed its end. The server sees end of stream and not one byte.
+        let _ = reader.take(MAX_TEST_FRAME).read_to_end(&mut received).await;
+        if received.is_empty() { Ok(()) } else { Err("the client sent bytes".to_owned()) }
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn client_refuses_a_name_file_it_does_not_own_or_cannot_parse() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let path = dir.path().join("daemon.sock");
+    write_user_file(&path, b"not a pipe name")?;
+    match within(connect(&path)).await? {
+        Err(SdkError::LocalBus(_)) => {}
+        Ok(_) => return Err("a malformed name file was used".to_owned()),
+        Err(error) => return Err(text(error)),
+    }
+    let other = sid_from_string(LOCAL_SYSTEM_SID).map_err(text)?;
+    match name::read_name_file(&path, &other) {
+        Err(SdkError::LocalBusPermissionDenied) => Ok(()),
+        Ok(_) => Err("a name file of another owner was read".to_owned()),
+        Err(error) => Err(text(error)),
+    }
+}
+
+#[tokio::test]
+async fn name_file_is_removed_only_while_it_publishes_this_listener() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(text)?;
+    let path = dir.path().join("daemon.sock");
+    let listener = bind(&path).map_err(text)?;
+    let Some(endpoint) = listener.endpoint().map_err(text)? else {
+        return Err("the listener published no name file".to_owned());
+    };
+    std::fs::remove_file(&path).map_err(text)?;
+    write_user_file(&path, b"0123456789abcdef0123456789abcdef")?;
+    endpoint.remove_if_unchanged().map_err(text)?;
+    if !path.exists() {
+        return Err("a name file of another listener was removed".to_owned());
+    }
+    std::fs::remove_file(&path).map_err(text)?;
+    drop(listener);
+    let listener = bind(&path).map_err(text)?;
+    let Some(endpoint) = listener.endpoint().map_err(text)? else {
+        return Err("the listener published no name file".to_owned());
+    };
+    endpoint.remove_if_unchanged().map_err(text)?;
+    if path.exists() { Err("the name file was left behind".to_owned()) } else { Ok(()) }
+}
+
+#[tokio::test]
+async fn low_integrity_token_of_the_same_user_cannot_open_the_pipe() -> Result<(), String> {
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let listener = PipeBusListener::create(pipe_name, &user_sid, me).map_err(text)?;
+    let name = listener.name().to_os_string();
+    let opened = tokio::task::spawn_blocking(move || {
+        open_while_impersonating(name, impersonate_low_integrity)
+    })
+    .await
+    .map_err(text)??;
+    match opened {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Ok(()) => Err("a low-integrity token opened the pipe".to_owned()),
+        Err(error) => Err(text(error)),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
+async fn second_user_cannot_open_the_pipe() -> Result<(), String> {
+    let Some((user, password)) = second_user() else {
+        return Err("second user credentials are not set".to_owned());
+    };
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let listener = PipeBusListener::create(pipe_name, &user_sid, me).map_err(text)?;
+    let name = listener.name().to_os_string();
+    let opened = tokio::task::spawn_blocking(move || {
+        open_while_impersonating(name, move || impersonate_user(&user, &password))
+    })
+    .await
+    .map_err(text)??;
+    match opened {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Ok(()) => Err("a second user opened the pipe".to_owned()),
+        Err(error) => Err(text(error)),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a second local user: RAMFLUX_TEST_SECOND_USER and RAMFLUX_TEST_SECOND_USER_PASSWORD"]
+async fn daemon_and_client_refuse_a_name_pre_created_by_a_second_user() -> Result<(), String> {
+    let Some((user, password)) = second_user() else {
+        return Err("second user credentials are not set".to_owned());
+    };
+    let (pipe_name, user_sid, me) = unused_name()?;
+    let runtime = tokio::runtime::Handle::current();
+    let squatted = pipe_name.clone();
+    let squatter = within(tokio::task::spawn_blocking(move || {
+        finish_thread(move || -> Result<_, String> {
+            let guard = impersonate_user(&user, &password).map_err(text)?;
+            let _context = runtime.enter();
+            let pipe = ServerOptions::new().create(&squatted).map_err(text)?;
+            drop(guard);
+            Ok(pipe)
+        })
+    }))
+    .await?
+    .map_err(text)???;
+    match PipeBusListener::create(pipe_name.clone(), &user_sid, me) {
+        Err(SdkError::DataRootInUse) => {}
+        Ok(_) => return Err("the daemon bound a name another user created".to_owned()),
+        Err(error) => return Err(text(error)),
+    }
+    let refused = match within(connect_named(&pipe_name, &me)).await? {
+        Err(SdkError::LocalBusPermissionDenied) => Ok(()),
+        Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Ok(_) => Err("the client trusted a pipe another user created".to_owned()),
+        Err(error) => Err(text(error)),
+    };
+    drop(squatter);
+    refused
+}

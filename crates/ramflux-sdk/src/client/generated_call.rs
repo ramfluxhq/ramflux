@@ -151,7 +151,7 @@ impl RamfluxClient {
         event_id: Vec<u8>,
         control: &ramflux_protocol::CallControl,
     ) -> Result<Vec<u8>, SdkError> {
-        Self::encode_generated_call(stream, event_id, native::from_native(control))
+        Self::encode_generated_call(stream, event_id, native::from_native(control)?)
     }
 
     /// Encode a generated Call Inner. Does not send or persist.

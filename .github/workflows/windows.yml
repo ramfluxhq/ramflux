@@ -1,0 +1,187 @@
+name: Windows
+
+# Windows host build and tests (named-pipe carrier, DPAPI vault, owner-only store).
+# Advisory: this workflow is not a required check. It lives in its own file because the CI
+# workflow cancels superseded runs on every ref, and a Windows run on main must finish.
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "crates/ramflux-sdk/**"
+      - "crates/ramflux-storage/**"
+      - "crates/ramflux-transport/**"
+      - "crates/ramflux-crypto/**"
+      - "crates/ramflux-protocol/**"
+      - "crates/ramflux-sync/**"
+      - "apps/rf/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "crates/ramflux-sdk/**"
+      - "crates/ramflux-storage/**"
+      - "crates/ramflux-transport/**"
+      - "crates/ramflux-crypto/**"
+      - "crates/ramflux-protocol/**"
+      - "crates/ramflux-sync/**"
+      - "apps/rf/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+# A newer run cancels an older one on a pull request only. Runs on main are never cancelled.
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  windows-host:
+    name: Windows host (rf.exe, pipe, vault, store)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $line = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { Write-Output '::error::rust-toolchain.toml names no channel'; exit 1 }
+          $toolchain = $line.Matches[0].Groups[1].Value
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+
+      # SQLCipher is compiled from source and needs the OpenSSL headers and libcrypto. The
+      # hosted image ships OpenSSL; a missing or moved installation fails the job here with the
+      # reason instead of deep inside a build script.
+      - name: Locate OpenSSL for SQLCipher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'C:\Program Files\OpenSSL'
+          $include = Join-Path $root 'include'
+          if (-not (Test-Path (Join-Path $include 'openssl\crypto.h'))) {
+            Write-Output "::error::OpenSSL headers not found under $include"
+            exit 1
+          }
+          $candidates = @('lib\VC\x64\MD', 'lib\VC\static', 'lib') | ForEach-Object { Join-Path $root $_ }
+          $lib = $candidates | Where-Object { Test-Path (Join-Path $_ 'libcrypto.lib') } | Select-Object -First 1
+          if (-not $lib) {
+            Write-Output "::error::libcrypto.lib not found under $root\lib"
+            exit 1
+          }
+          $bin = Join-Path $root 'bin'
+          $dll = Get-ChildItem -Path $bin -Filter 'libcrypto-*.dll' | Select-Object -First 1
+          if (-not $dll) {
+            Write-Output "::error::libcrypto DLL not found under $bin"
+            exit 1
+          }
+          "OPENSSL_INCLUDE_DIR=$include" >> $env:GITHUB_ENV
+          "OPENSSL_LIB_DIR=$lib" >> $env:GITHUB_ENV
+          "RF_LIBCRYPTO_DLL=$($dll.FullName)" >> $env:GITHUB_ENV
+          $bin >> $env:GITHUB_PATH
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: windows-host
+
+      # The refusal tests need a second local account. The job creates it with a random
+      # password that exists only for this run; nothing comes from repository secrets.
+      - name: Create the second local user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = New-Object byte[] 24
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $password = 'Rf1!' + [Convert]::ToBase64String($bytes)
+          Write-Output "::add-mask::$password"
+          $name = 'rf-ci-second'
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $name -Password $secure -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group 'Users' -Member $name
+          "RAMFLUX_TEST_SECOND_USER=$name" >> $env:GITHUB_ENV
+          "RAMFLUX_TEST_SECOND_USER_PASSWORD=$password" >> $env:GITHUB_ENV
+
+      - name: Build rf.exe
+        shell: pwsh
+        run: cargo build --locked --release -p ramflux-rf --bin rf
+
+      # No proxy variable is set anywhere in this job: the client has no HTTP proxy support.
+      - name: Windows carrier, vault and store tests
+        shell: pwsh
+        run: >
+          cargo test --locked -p ramflux-sdk --lib --
+          platform::pipe:: platform::fs:: custody::vault::windows::
+
+      - name: Second-user refusal tests
+        shell: pwsh
+        run: >
+          cargo test --locked -p ramflux-sdk --lib -- --ignored
+          platform::pipe:: platform::fs:: custody::vault::windows::
+
+      - name: Daemon and second process over the named pipe
+        shell: pwsh
+        run: ./scripts/ci/windows-daemon-smoke.ps1 -Rf target\release\rf.exe
+
+      # Design M2 acceptance: two accounts, one DM, delivery, then the receiver reopens.
+      # The release rf.exe above stays free of itest features. This step builds its own
+      # dev-profile rf with the memory vault and the four local node services.
+      - name: Two-account DM through the gateway
+        shell: pwsh
+        env:
+          RAMFLUX_ITEST_BUILD: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Join-Path $env:RUNNER_TEMP 'dm-acceptance.txt'
+          cargo test --locked -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm f1_two_accounts_contact_dm_receive_ack -- --ignored --exact --test-threads=1 *> $log
+          $code = $LASTEXITCODE
+          Get-Content $log | Write-Host
+          if ($code -ne 0) { exit $code }
+          $joined = Get-Content $log -Raw
+          if ($joined -notmatch 'test result: ok\. 1 passed;') {
+            Write-Error 'DM acceptance did not report exactly one passing test'
+            exit 1
+          }
+
+      - name: Package rf.exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\rf.exe dist\
+          Copy-Item $env:RF_LIBCRYPTO_DLL dist\
+          Copy-Item LICENSE* dist\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist\* -DestinationPath rf-windows-x86_64.zip -Force
+          Get-FileHash rf-windows-x86_64.zip -Algorithm SHA256 | Format-List
+
+      - name: Upload rf.exe zip
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: rf-windows-x86_64
+          path: rf-windows-x86_64.zip
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Remove the second local user
+        if: always()
+        shell: pwsh
+        run: Remove-LocalUser -Name 'rf-ci-second' -ErrorAction SilentlyContinue

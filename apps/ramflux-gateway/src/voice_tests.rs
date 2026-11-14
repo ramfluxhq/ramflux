@@ -88,6 +88,7 @@ fn runtime(
     manifest: &DeviceManifestResponse,
 ) -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,
@@ -203,6 +204,7 @@ fn native_runtime(
     };
     let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
     Ok(GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,

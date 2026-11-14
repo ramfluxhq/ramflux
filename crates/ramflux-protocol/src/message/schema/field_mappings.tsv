@@ -515,3 +515,5 @@ OwnSentMessage	exact_inner	8	SentMessage.body_base64	bytes
 GroupControlBody	snapshot	5	SharedGroupPacket	GroupControlBodySnapshot
 GroupControlBodySnapshot	snapshot	1	SharedGroupPacket.snapshot_base64	NativeGroupSnapshot
 GroupControlBodySnapshot	distribution	2	SharedGroupPacket.distribution_base64	optional GroupKeyDistribution
+CallControl	call_ref	11	CallControl.call_ref	optional string
+CallControl	call_start	12	CallControl.call_start	optional bytes

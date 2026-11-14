@@ -4,9 +4,13 @@
 //! Explicit local ceremonies read secret input only from the controlling terminal.
 use crate::RfError;
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{IsTerminal, Read, Write},
     path::Path,
+};
+#[cfg(not(windows))]
+use std::{
+    fs::OpenOptions,
     process::{Command, Stdio},
 };
 use zeroize::Zeroizing;
@@ -15,30 +19,112 @@ struct Terminal {
     input: File,
     output: File,
     echo_disabled: bool,
+    /// A carriage return ended the previous line. A following line feed belongs to that Enter.
+    #[cfg(windows)]
+    skip_lf: bool,
+    /// Modes from before the ceremony. Restored on the way out, including virtual-terminal state.
+    #[cfg(windows)]
+    saved_input_mode: u32,
+    #[cfg(windows)]
+    saved_output_mode: u32,
+    /// Escape sequences hide the words only when the output console accepted this mode.
+    #[cfg(windows)]
+    virtual_terminal: bool,
+    #[cfg(windows)]
+    modes_restored: bool,
 }
 impl Terminal {
     fn open() -> Result<Self, RfError> {
-        let terminal =
-            OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| {
-                RfError::Message("This ceremony requires a local interactive terminal.".into())
+        #[cfg(windows)]
+        {
+            let input = super::windows_console::open_input().map_err(|error| {
+                RfError::Message(format!(
+                    "This ceremony requires a local interactive terminal: {error}"
+                ))
             })?;
-        if !terminal.is_terminal() {
-            return Err(RfError::Message("A local interactive terminal is required.".into()));
+            let output = super::windows_console::open_output().map_err(|error| {
+                RfError::Message(format!(
+                    "This ceremony requires a local interactive terminal: {error}"
+                ))
+            })?;
+            if !input.is_terminal() {
+                return Err(RfError::Message("A local interactive terminal is required.".into()));
+            }
+            let saved_input_mode =
+                super::windows_console::console_mode(&input).map_err(|error| {
+                    RfError::Message(format!("Could not protect terminal input: {error}"))
+                })?;
+            let saved_output_mode =
+                super::windows_console::console_mode(&output).map_err(|error| {
+                    RfError::Message(format!("Could not protect the recovery words: {error}"))
+                })?;
+            super::windows_console::prepare_input(&input).map_err(|error| {
+                RfError::Message(format!("Could not protect terminal input: {error}"))
+            })?;
+            let virtual_terminal = match super::windows_console::enable_virtual_terminal(
+                &output,
+                saved_output_mode,
+            ) {
+                Ok(()) => true,
+                Err(vt_error) => {
+                    // No escape sequence is written unless this flag sticks. A console that
+                    // rejects it must still be able to erase the buffer, or the words would
+                    // stay on screen.
+                    if let Err(clear_error) = super::windows_console::screen_buffer_usable(&output)
+                    {
+                        return Err(RfError::Message(format!(
+                            "Could not protect the recovery words: virtual terminal {vt_error}; console clear {clear_error}"
+                        )));
+                    }
+                    false
+                }
+            };
+            return Ok(Self {
+                input,
+                output,
+                echo_disabled: false,
+                skip_lf: false,
+                saved_input_mode,
+                saved_output_mode,
+                virtual_terminal,
+                modes_restored: false,
+            });
         }
-        Ok(Self { input: terminal.try_clone()?, output: terminal, echo_disabled: false })
+        #[cfg(not(windows))]
+        {
+            let terminal =
+                OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| {
+                    RfError::Message("This ceremony requires a local interactive terminal.".into())
+                })?;
+            if !terminal.is_terminal() {
+                return Err(RfError::Message("A local interactive terminal is required.".into()));
+            }
+            Ok(Self { input: terminal.try_clone()?, output: terminal, echo_disabled: false })
+        }
     }
     fn echo(&mut self, enabled: bool) -> Result<(), RfError> {
-        let status = Command::new("stty")
-            .arg(if enabled { "echo" } else { "-echo" })
-            .stdin(Stdio::from(self.input.try_clone()?))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(RfError::Message("Could not protect terminal input.".into()));
+        #[cfg(windows)]
+        {
+            super::windows_console::set_echo(&self.input, enabled).map_err(|error| {
+                RfError::Message(format!("Could not protect terminal input: {error}"))
+            })?;
+            self.echo_disabled = !enabled;
+            return Ok(());
         }
-        self.echo_disabled = !enabled;
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            let status = Command::new("stty")
+                .arg(if enabled { "echo" } else { "-echo" })
+                .stdin(Stdio::from(self.input.try_clone()?))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !status.success() {
+                return Err(RfError::Message("Could not protect terminal input.".into()));
+            }
+            self.echo_disabled = !enabled;
+            Ok(())
+        }
     }
     fn line(&mut self, prompt: &str, hidden: bool) -> Result<Zeroizing<String>, RfError> {
         if hidden {
@@ -51,7 +137,19 @@ impl Terminal {
         let mut overflow = false;
         loop {
             self.input.read_exact(&mut *byte)?;
+            #[cfg(windows)]
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte[0] == b'\n' {
+                    continue;
+                }
+            }
             if byte[0] == b'\n' {
+                break;
+            }
+            #[cfg(windows)]
+            if byte[0] == b'\r' {
+                self.skip_lf = true;
                 break;
             }
             if bytes.len() < 4096 {
@@ -78,9 +176,51 @@ impl Terminal {
             }
         }
     }
+
+    fn restore_modes(&mut self) -> Result<(), RfError> {
+        #[cfg(windows)]
+        {
+            if self.modes_restored {
+                return Ok(());
+            }
+            super::windows_console::restore_modes(
+                &self.input,
+                self.saved_input_mode,
+                &self.output,
+                self.saved_output_mode,
+            )
+            .map_err(|error| {
+                RfError::Message(format!("Could not restore the terminal: {error}"))
+            })?;
+            self.modes_restored = true;
+            self.echo_disabled = false;
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            if self.echo_disabled {
+                self.echo(true)?;
+            }
+            Ok(())
+        }
+    }
 }
+
+fn finish<T>(terminal: &mut Terminal, outcome: Result<T, RfError>) -> Result<T, RfError> {
+    let restored = terminal.restore_modes();
+    match outcome {
+        Ok(value) => restored.map(|()| value),
+        Err(error) => Err(error),
+    }
+}
+
 impl Drop for Terminal {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if !self.modes_restored {
+            let _ = self.restore_modes();
+        }
+        #[cfg(not(windows))]
         if self.echo_disabled {
             let _ = self.echo(true);
         }
@@ -89,6 +229,15 @@ impl Drop for Terminal {
 
 pub(crate) async fn recover(socket: &Path, account: &str) -> Result<(), RfError> {
     let mut terminal = Terminal::open()?;
+    let outcome = recover_with(&mut terminal, socket, account).await;
+    finish(&mut terminal, outcome)
+}
+
+async fn recover_with(
+    terminal: &mut Terminal,
+    socket: &Path,
+    account: &str,
+) -> Result<(), RfError> {
     let mut client = ramflux_sdk::LocalBusRecoveryClient::connect(socket).await?;
     let pending = client.begin(account).await?;
     writeln!(
@@ -114,15 +263,26 @@ pub(crate) async fn create(
     custodian: Option<&str>,
 ) -> Result<(), RfError> {
     let mut terminal = Terminal::open()?;
+    let outcome = create_with(&mut terminal, socket, display_name, kind, custodian).await;
+    finish(&mut terminal, outcome)
+}
+
+async fn create_with(
+    terminal: &mut Terminal,
+    socket: &Path,
+    display_name: &str,
+    kind: crate::cli::AccountKind,
+    custodian: Option<&str>,
+) -> Result<(), RfError> {
     let mut client = ramflux_sdk::LocalBusCreationClient::connect(socket).await?;
     let result = match (kind, custodian) {
         (crate::cli::AccountKind::Human, None) => {
             client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
-            create_human_confirm(&mut terminal, &mut client).await
+            create_human_confirm(terminal, &mut client).await
         }
         (crate::cli::AccountKind::HeadlessAi, Some(custodian)) => {
             client.begin_headless(display_name, custodian).await?;
-            create_headless_confirm(&mut terminal, &mut client).await
+            create_headless_confirm(terminal, &mut client).await
         }
         (crate::cli::AccountKind::HeadlessAi, None) => {
             Err(RfError::Message("Headless AI account creation requires --custodian.".into()))
@@ -164,10 +324,10 @@ async fn recovery_challenge(
     client: &mut ramflux_sdk::LocalBusCreationClient,
 ) -> Result<[Zeroizing<String>; 3], RfError> {
     // An alternate screen keeps the once-only phrase out of the normal terminal scrollback.
-    terminal.output.write_all(b"\x1b[?1049h\x1b[2J\x1b[H")?;
+    // On a Windows console that rejects virtual-terminal mode, the same hide is a buffer erase.
+    enter_private_screen(terminal)?;
     let shown = show_phrase(terminal, client).await;
-    let cleared = terminal.output.write_all(b"\x1b[2J\x1b[H\x1b[?1049l");
-    terminal.output.flush()?;
+    let cleared = leave_private_screen(terminal);
     cleared?;
     shown?;
     let positions = client.hidden_challenge().await?;
@@ -176,6 +336,33 @@ async fn recovery_challenge(
         *word = terminal.line(&format!("Recovery word {position} (hidden): "), true)?;
     }
     Ok(words)
+}
+
+fn enter_private_screen(terminal: &mut Terminal) -> Result<(), RfError> {
+    #[cfg(windows)]
+    if !terminal.virtual_terminal {
+        return Ok(());
+    }
+    terminal.output.write_all(b"\x1b[?1049h\x1b[2J\x1b[H")?;
+    terminal.output.flush()?;
+    Ok(())
+}
+
+fn leave_private_screen(terminal: &mut Terminal) -> Result<(), RfError> {
+    #[cfg(windows)]
+    if !terminal.virtual_terminal {
+        let cleared = super::windows_console::clear_screen_and_scrollback(&terminal.output);
+        let flushed = terminal.output.flush();
+        cleared.map_err(|error| {
+            RfError::Message(format!("Could not hide the recovery words: {error}"))
+        })?;
+        flushed?;
+        return Ok(());
+    }
+    let cleared = terminal.output.write_all(b"\x1b[2J\x1b[H\x1b[?1049l");
+    terminal.output.flush()?;
+    cleared?;
+    Ok(())
 }
 
 async fn show_phrase(

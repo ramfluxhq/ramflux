@@ -21,12 +21,8 @@ enum Class {
 
 const DURABLE_INGRESS: &[(&str, Class)] = &[
     (
-        "clients.rs:notify_offline_wake",
-        Class::NonIngress("offline wake notify; no envelope persist"),
-    ),
-    (
-        "clients.rs:notification_class_for_envelope",
-        Class::NonIngress("pure notification class mapping"),
+        "call_intent.rs:verify_submission",
+        Class::NonIngress("verifies a signed call intent; no envelope persist"),
     ),
     (
         "durable_mode.rs:rejected_security",
@@ -71,7 +67,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (7, 4));
+    assert_eq!((non_ingress_count, edge_count), (6, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

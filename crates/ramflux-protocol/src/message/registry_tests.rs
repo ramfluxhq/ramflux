@@ -65,6 +65,8 @@ fn kind_registry_is_exhaustive_and_reserved() -> TestResult {
         pool.all_messages().map(|message| message.fields().len()).sum::<usize>()
     );
     verify_approved_fields()?;
+    assert_eq!(field_layer("CallControl", 11), Some(3), "call reference must be a layer 3 field");
+    assert_eq!(field_layer("CallControl", 12), Some(3), "signed Start must be a layer 3 field");
     Ok(())
 }
 
@@ -105,7 +107,7 @@ fn verify_approved_fields() -> TestResult {
         assert_eq!(actual, expected, "{message}.{name}");
         count += 1;
     }
-    assert_eq!(count, 516, "approved section 3.1 mapping coverage");
+    assert_eq!(count, 518, "approved native mapping coverage includes both call authority fields");
     Ok(())
 }
 

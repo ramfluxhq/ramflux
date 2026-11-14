@@ -312,12 +312,9 @@ fn server_retention_notify_wal_prunes_expired_work_and_bounded_diagnostics()
     let wal = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal)?;
     let now = now_unix_seconds();
-    let entry = store.queue_wake_for_async_accept(
-        "delivery",
-        &notification_wake("expire-wal", 1),
-        now,
-        false,
-    )?;
+    let mut wake = notification_wake("expire-wal", 1);
+    wake.absolute_expires_at = now.saturating_add(1);
+    let entry = store.queue_wake_for_async_accept("delivery", &wake, now, false)?;
     for index in 0..30 {
         let mut attempt = notify_attempt(&entry.queue_id, false);
         attempt.sent_at = now + index;

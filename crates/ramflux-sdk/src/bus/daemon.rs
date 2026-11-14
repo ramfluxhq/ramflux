@@ -132,8 +132,8 @@ pub(crate) fn write_local_bus_account_manifest(
     set_owner_only_file_permissions(&tmp_path)?;
     std::fs::rename(tmp_path, &path)?;
     set_owner_only_file_permissions(&path)?;
-    std::fs::File::open(&accounts_dir)?.sync_all()?;
-    std::fs::File::open(data_root)?.sync_all()?;
+    crate::platform::fs::sync_path(&accounts_dir)?;
+    crate::platform::fs::sync_path(data_root)?;
     Ok(())
 }
 
@@ -208,7 +208,8 @@ async fn restore_local_bus_account_impl(
         gateway = gateway.with_tcp_gateway_addr(addr);
     }
     let stored_push = crate::bus::dispatch::device::stored_push_route(&client)?;
-    gateway.push_route = stored_push.registration;
+    gateway.push_routes = stored_push.routes;
+    gateway.push_route_clears = stored_push.clears;
     gateway.push_route_clear_pending = stored_push.clear_pending;
     // Next sequence = max(saved + 1, now in ms): a reset clock never reuses one.
     gateway.push_route_last_seq = crate::bus::dispatch::device::stored_push_route_seq(&client)?;
@@ -331,7 +332,7 @@ pub(crate) async fn dispatch_local_bus_request(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

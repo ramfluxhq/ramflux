@@ -212,7 +212,7 @@ impl BornAccount {
             ));
             create_private_temp(&temp, &bytes)?;
             fs::rename(temp, dir.join("authority.json"))?;
-            fs::File::open(&dir)?.sync_all()?;
+            crate::platform::fs::sync_path(&dir)?;
             if clamped {
                 clock::persisted(&dir, &current.stored);
             }

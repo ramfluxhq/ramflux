@@ -44,6 +44,17 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[path = "gateway_call_intent.rs"]
+mod gateway_call_intent;
+#[path = "gateway_wake_dedup.rs"]
+mod gateway_wake_dedup;
+pub use gateway_call_intent::{
+    CallGrant, CallIntentAdmission, CallIntentEffect, WakeOwnerLookup, WakeResolution,
+};
+pub use gateway_wake_dedup::{
+    WakeAdmitOutcome, WakeAdmitRequest, WakeDedupRecord, WakeDedupTerminal,
+};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum GatewaySessionLifecycle {
     Connect,
@@ -658,6 +669,7 @@ fn write_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 pub struct GatewayRedbStore {
+    call_authority: std::sync::OnceLock<std::sync::Arc<crate::send_authority::AuthorityClient>>,
     db: redb::Database,
     path: PathBuf,
     replay_config: std::sync::Mutex<Option<GatewayReplayConfig>>,
@@ -846,7 +858,11 @@ impl GatewayRedbStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         let path = path.as_ref().to_path_buf();
         let db = store_format::open(&path)?;
+        gateway_wake_dedup::ensure_wake_dedup_table(&db)?;
+        gateway_call_intent::ensure_call_intent_table(&db)?;
+        crate::send_authority::AuthorityOrigin::initialize(&db)?;
         Ok(Self {
+            call_authority: std::sync::OnceLock::new(),
             db,
             path,
             replay_config: std::sync::Mutex::new(None),

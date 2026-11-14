@@ -7,7 +7,9 @@ use super::{
     *,
 };
 use crate::custody::tests::Root;
-use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{sync::mpsc, time::Duration};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::test]
@@ -77,6 +79,7 @@ async fn custody_authority_concurrent_reader_never_observes_partial_publication(
         }
         writer.await??;
         assert_eq!(fs::read(&path)?, expected);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read_dir(&root.0)?.count(), 1, "temporary publication was not removed");
         Ok::<_, Box<dyn std::error::Error>>(())
@@ -91,12 +94,14 @@ fn custody_authority_publication_never_replaces_existing_or_incomplete_authority
         let root = Root::new()?;
         let path = root.0.join("authority.json");
         fs::write(&path, existing)?;
+        #[cfg(unix)]
         let mode = fs::metadata(&path)?.permissions().mode();
         assert!(matches!(
             write_public(&path, b"replacement authority"),
             Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
         ));
         assert_eq!(fs::read(&path)?, existing);
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path)?.permissions().mode(), mode);
         assert_eq!(fs::read_dir(&root.0)?.count(), 1, "failed publication leaked its temporary");
     }

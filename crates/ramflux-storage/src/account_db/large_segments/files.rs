@@ -50,7 +50,7 @@ pub(super) fn private_dir(path: &Path) -> Result<(), StorageError> {
 pub(super) fn sync_dir(path: &Path) -> Result<(), StorageError> {
     #[cfg(test)]
     note_filesystem_operation();
-    File::open(path)?.sync_all()?;
+    crate::sync_path::sync_path(path)?;
     Ok(())
 }
 fn regular(path: &Path) -> Result<(), StorageError> {
@@ -366,7 +366,7 @@ impl SegmentStore<'_> {
             }
             // Re-establish durability before adopting bytes after interrupted commit.
             if full && !row.cipher_verified {
-                File::open(&final_path)?.sync_all()?;
+                crate::sync_path::sync_path(&final_path)?;
                 sync_dir(&dir)?;
             }
             if bits != row.received_bitmap || full != row.cipher_verified {

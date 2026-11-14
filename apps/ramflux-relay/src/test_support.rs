@@ -496,6 +496,7 @@ pub(crate) fn test_config(
     let mut endpoints = BTreeMap::new();
     endpoints.insert("retention".to_owned(), retention_endpoint.to_owned());
     ramflux_node_core::NodeServiceConfig {
+        send_authority: None,
         node_id: "node-retention-a".to_owned(),
         service_id: "ramflux-relay".to_owned(),
         redb_path: ":memory:".to_owned(),

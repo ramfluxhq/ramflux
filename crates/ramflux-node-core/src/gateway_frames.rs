@@ -148,10 +148,52 @@ pub struct GatewayAuthFrame {
     pub device_proof: ramflux_protocol::DeviceProof,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(from = "ramflux_protocol::CallSubmitCarrier")]
 pub struct GatewaySubmitFrame {
     pub signed_request: ramflux_protocol::SignedRequest,
     pub envelope: ramflux_protocol::Envelope,
+    /// Caller-signed call intent. Absent on every submit that is not a one-to-one call.
+    /// Boxed so `GatewayClientFrame::Submit` stays within the enum size budget.
+    pub call_intent: Option<Box<ramflux_protocol::SignedCallIntentV1>>,
+    /// Wake id the authenticated device is resolving. The id alone is not authority.
+    pub wake_id: Option<String>,
+    /// Call reference bound into the encrypted control before it was signed.
+    pub call_ref: Option<String>,
+    /// `answer`, `reject`, or `end` from an authenticated participant.
+    pub call_terminal: Option<String>,
+    /// Correlation authenticated by the complete call submission body.
+    pub call_context: Option<ramflux_protocol::CallSubmitContext>,
+}
+
+impl From<ramflux_protocol::CallSubmitCarrier> for GatewaySubmitFrame {
+    fn from(value: ramflux_protocol::CallSubmitCarrier) -> Self {
+        Self {
+            signed_request: value.signed_request,
+            envelope: value.envelope,
+            call_intent: value.call_intent,
+            wake_id: value.wake_id,
+            call_ref: value.call_ref,
+            call_terminal: value.call_terminal,
+            call_context: value.call_context,
+        }
+    }
+}
+impl serde::Serialize for GatewaySubmitFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(
+            &ramflux_protocol::CallSubmitCarrierRef {
+                signed_request: &self.signed_request,
+                envelope: &self.envelope,
+                call_intent: self.call_intent.as_deref(),
+                wake_id: self.wake_id.as_deref(),
+                call_ref: self.call_ref.as_deref(),
+                call_terminal: self.call_terminal.as_deref(),
+                call_context: self.call_context.as_ref(),
+            },
+            serializer,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,6 +253,9 @@ pub struct GatewaySessionEstablishedFrame {
     pub accepted_cursor: Option<InboxCursorResponse>,
     pub resume_token: String,
     pub resume_window_seconds: u64,
+    /// Present only when the call-resolution capability was negotiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_session_generation: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -336,6 +381,13 @@ pub enum GatewayServerFrame {
     },
     Close {
         reason: String,
+    },
+    /// Authenticated call resolution. The wake may be finished while media stays open.
+    CallResolved {
+        context: ramflux_protocol::CallSubmitContext,
+        state: ramflux_protocol::CallResolutionState,
+        media_allowed: bool,
+        wake_resolved: bool,
     },
 }
 

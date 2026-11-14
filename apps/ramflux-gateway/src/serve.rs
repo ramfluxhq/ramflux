@@ -44,6 +44,7 @@ pub(crate) fn serve_gateway_quic(
     store: Arc<ramflux_node_core::GatewayRedbStore>,
 ) -> anyhow::Result<()> {
     let custody = crate::custody::initialize()?;
+    crate::send_authority::configure(config, &store)?;
     let addr = gateway_quic_listen_addr(config)?;
     let addr: SocketAddr = addr.parse()?;
     let tls = ramflux_transport::MeshTlsConfig {
@@ -407,7 +408,7 @@ fn read_gateway_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
 
 fn gateway_forward_listen_addr(
     config: &ramflux_node_core::NodeServiceConfig,
-    peers: &GatewayPeerDirectory,
+    _peers: &GatewayPeerDirectory,
 ) -> Option<String> {
     ramflux_node_core::environment::var("RAMFLUX_GATEWAY_FORWARD_LISTEN_ADDR")
         .ok()
@@ -415,7 +416,7 @@ fn gateway_forward_listen_addr(
             let trimmed = value.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_owned())
         })
-        .or_else(|| (!peers.is_empty()).then(|| config.mesh.listen_addr.clone()))
+        .or_else(|| Some(config.mesh.listen_addr.clone()))
 }
 
 fn gateway_mesh_tls_config(
@@ -458,6 +459,11 @@ fn run_gateway_forward_mesh_listener(
         )?;
         let local_addr = server.local_addr()?;
         tracing::info!(addr = %local_addr, "gateway forward mesh surface listening");
+        let authority_reads = Arc::new(crate::send_authority::Reads {
+            node_id: context.node_id.clone(),
+            store: Arc::clone(&context.store),
+            admission: Arc::new(tokio::sync::Semaphore::new(64)),
+        });
         loop {
             let shutdown = ramflux_node_core::service_shutdown_token();
             let accepted = tokio::select! {
@@ -472,9 +478,10 @@ fn run_gateway_forward_mesh_listener(
                 }
             };
             let connection_hub = Arc::clone(&context.hub);
+            let reads = Arc::clone(&authority_reads);
             tokio::spawn(async move {
                 if let Err(error) =
-                    gateway_forward_mesh_connection_loop(connection, connection_hub).await
+                    gateway_mesh_connection_loop(connection, connection_hub, Some(reads)).await
                 {
                     tracing::debug!(%error, "gateway forward mesh connection ended");
                 }
@@ -486,17 +493,31 @@ fn run_gateway_forward_mesh_listener(
     result
 }
 
+#[cfg(test)]
 pub(crate) async fn gateway_forward_mesh_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
     hub: Arc<GatewaySessionHub>,
 ) -> anyhow::Result<()> {
+    gateway_mesh_connection_loop(connection, hub, None).await
+}
+
+async fn gateway_mesh_connection_loop(
+    connection: ramflux_transport::MeshQuicConnection,
+    hub: Arc<GatewaySessionHub>,
+    reads: Option<Arc<crate::send_authority::Reads>>,
+) -> anyhow::Result<()> {
     let peer_spiffe_uri = connection.peer_spiffe_uri().map(str::to_owned);
+    let controls = peer_spiffe_uri
+        .as_deref()
+        .and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok())
+        .is_some_and(|peer| peer.service_id == "ramflux-notify");
     loop {
-        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
-            &connection,
-        )
-        .await
-        {
+        let accepted = match if controls {
+            ramflux_transport::MeshQuicServer::accept_control_request_on_connection(&connection)
+                .await
+        } else {
+            ramflux_transport::MeshQuicServer::accept_request_on_connection(&connection).await
+        } {
             Ok(accepted) => accepted,
             Err(error) => {
                 tracing::debug!(%error, "gateway forward mesh stream loop ended");
@@ -505,9 +526,15 @@ pub(crate) async fn gateway_forward_mesh_connection_loop(
         };
         let request_hub = Arc::clone(&hub);
         let request_peer = peer_spiffe_uri.clone();
+        let request_reads = reads.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_gateway_forward_mesh_request(accepted, request_hub, request_peer).await
+            if let Err(error) = handle_gateway_forward_mesh_request(
+                accepted,
+                request_hub,
+                request_peer,
+                request_reads,
+            )
+            .await
             {
                 tracing::warn!(%error, "gateway forward mesh request failed");
             }
@@ -548,7 +575,17 @@ async fn handle_gateway_forward_mesh_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     hub: Arc<GatewaySessionHub>,
     peer_spiffe_uri: Option<String>,
+    reads: Option<Arc<crate::send_authority::Reads>>,
 ) -> anyhow::Result<()> {
+    if accepted.request.method == "POST"
+        && accepted.request.path == ramflux_node_core::send_authority::NOTIFY_CALL_READ_PATH
+    {
+        if let Some(reads) = reads {
+            return crate::send_authority::read(accepted, peer_spiffe_uri, reads).await;
+        }
+        accepted.write_text_response(503, "call authority unavailable").await?;
+        return Ok(());
+    }
     if accepted.request.method == "POST" && is_gateway_forward_path(&accepted.request.path) {
         let source_gateway_id = forward_source_gateway_id(&accepted.request);
         if let Err(reason) =

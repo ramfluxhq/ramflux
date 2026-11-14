@@ -106,6 +106,7 @@ mod tests {
                     webpush_auth: None,
                     registered_at: now,
                     expires_at: now + 60,
+                    route_generation: 0,
                 };
                 let rows = [route];
                 let bytes = if expected == "notify plaintext routes" {
@@ -160,6 +161,7 @@ mod tests {
             webpush_auth: None,
             registered_at: now,
             expires_at: now + 60,
+            route_generation: 0,
         };
         let db = redb::Database::open(&path)?;
         let write = db.begin_write()?;
@@ -208,8 +210,10 @@ mod tests {
             webpush_auth: None,
             registered_at: now,
             expires_at: now + 60,
+            route_generation: 0,
         };
         store.register_authenticated_push_route(&authority, &route)?;
+        let expected = store.load_notify_routes(&authority.target_delivery_id)?;
         drop(store);
         let store = NotifyRedbStore::open_without_wal(&path)?;
         assert_eq!(
@@ -218,7 +222,7 @@ mod tests {
                 .ok_or("route state missing")?
                 .routes_by_device
                 .get(&authority.target_delivery_id),
-            Some(&vec![route]),
+            Some(&expected),
             "current encrypted routes and authenticated owner bindings must survive reopen"
         );
         Ok(())

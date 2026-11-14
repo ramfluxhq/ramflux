@@ -1272,6 +1272,7 @@ mod tests {
         let mut endpoints = BTreeMap::new();
         endpoints.insert(service_id.to_owned(), endpoint.to_owned());
         ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: "node-retention-a".to_owned(),
             service_id: "ramflux-retention".to_owned(),
             redb_path: "test.redb".to_owned(),

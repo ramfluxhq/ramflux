@@ -98,6 +98,9 @@ impl LiveCall {
         consent: VoiceLeaseConsent,
         now: i64,
     ) -> Result<(), SdkError> {
+        if self.media_held {
+            return Err(invalid("call resolution missing"));
+        }
         if self.local != self.callee || !matches!(self.row.state.as_str(), "connecting" | "active")
         {
             return Err(invalid("allocation outside consenting callee"));

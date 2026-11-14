@@ -27,6 +27,11 @@ pub struct CallControl {
     pub body: ::core::option::Option<CallAction>,
     #[prost(string, tag = "10")]
     pub signature: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "11")]
+    pub call_ref: ::core::option::Option<::prost::alloc::string::String>,
+    /// Strict I-JSON SignedCallIntentV1; bounded and verified by the native call owner.
+    #[prost(bytes = "vec", optional, tag = "12")]
+    pub call_start: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 impl serde::Serialize for CallControl {
     #[allow(deprecated)]
@@ -66,6 +71,12 @@ impl serde::Serialize for CallControl {
         if !self.signature.is_empty() {
             len += 1;
         }
+        if self.call_ref.is_some() {
+            len += 1;
+        }
+        if self.call_start.is_some() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.CallControl", len)?;
         if !self.schema.is_empty() {
             struct_ser.serialize_field("schema", &self.schema)?;
@@ -102,6 +113,15 @@ impl serde::Serialize for CallControl {
         if !self.signature.is_empty() {
             struct_ser.serialize_field("signature", &self.signature)?;
         }
+        if let Some(v) = self.call_ref.as_ref() {
+            struct_ser.serialize_field("callRef", v)?;
+        }
+        if let Some(v) = self.call_start.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("callStart", pbjson::private::base64::encode(&v).as_str())?;
+        }
         struct_ser.end()
     }
 }
@@ -125,6 +145,10 @@ impl<'de> serde::Deserialize<'de> for CallControl {
             "createdAt",
             "body",
             "signature",
+            "call_ref",
+            "callRef",
+            "call_start",
+            "callStart",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -138,6 +162,8 @@ impl<'de> serde::Deserialize<'de> for CallControl {
             CreatedAt,
             Body,
             Signature,
+            CallRef,
+            CallStart,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -171,6 +197,8 @@ impl<'de> serde::Deserialize<'de> for CallControl {
                             "createdAt" | "created_at" => Ok(GeneratedField::CreatedAt),
                             "body" => Ok(GeneratedField::Body),
                             "signature" => Ok(GeneratedField::Signature),
+                            "callRef" | "call_ref" => Ok(GeneratedField::CallRef),
+                            "callStart" | "call_start" => Ok(GeneratedField::CallStart),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -198,6 +226,8 @@ impl<'de> serde::Deserialize<'de> for CallControl {
                 let mut created_at__ = None;
                 let mut body__ = None;
                 let mut signature__ = None;
+                let mut call_ref__ = None;
+                let mut call_start__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -268,6 +298,24 @@ impl<'de> serde::Deserialize<'de> for CallControl {
                             }
                             signature__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::CallRef => {
+                            if call_ref__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("callRef"));
+                            }
+                            call_ref__ = map_.next_value()?;
+                        }
+                        GeneratedField::CallStart => {
+                            if call_start__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("callStart"));
+                            }
+                            call_start__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::BytesDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
                     }
                 }
                 Ok(CallControl {
@@ -281,6 +329,8 @@ impl<'de> serde::Deserialize<'de> for CallControl {
                     created_at: created_at__.unwrap_or_default(),
                     body: body__,
                     signature: signature__.unwrap_or_default(),
+                    call_ref: call_ref__,
+                    call_start: call_start__,
                 })
             }
         }

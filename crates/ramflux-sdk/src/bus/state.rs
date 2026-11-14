@@ -633,9 +633,13 @@ impl LocalBusAccountState {
     pub(crate) fn forget_confirmed_push_clear(&mut self) {
         let confirmed =
             self.connection.as_ref().and_then(ConnectionHandle::metadata).is_some_and(|metadata| {
-                metadata.config.push_route.is_none() && !metadata.config.push_route_clear_pending
+                metadata.config.push_routes.is_empty()
+                    && metadata.config.push_route_clears.is_empty()
+                    && !metadata.config.push_route_clear_pending
             }) || self.engine.as_ref().is_some_and(|engine| {
-                engine.config.push_route.is_none() && !engine.config.push_route_clear_pending
+                engine.config.push_routes.is_empty()
+                    && engine.config.push_route_clears.is_empty()
+                    && !engine.config.push_route_clear_pending
             });
         if !confirmed {
             return;
@@ -718,11 +722,13 @@ impl LocalBusDaemonState {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn unregister_connection(&mut self, connection_id: u64) {
         self.subscribers.remove(&connection_id);
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn broadcast_events(&mut self, events: &[LocalBusFrame]) {
         let mut stale_connections = BTreeSet::new();
         for event in events {

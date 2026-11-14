@@ -122,6 +122,52 @@ impl NodeServiceSigningKey {
             .map_err(|_| NodeCoreError::Unauthorized("push route control rejected".into()))
     }
 
+    /// Sign a `WakeV2` body with this service key. The signature covers every body field.
+    ///
+    /// # Errors
+    /// Returns an error when the body is not the closed `WakeV2` shape.
+    pub fn sign_wake_v2(
+        &self,
+        body: &ramflux_protocol::WakeV2,
+    ) -> Result<ramflux_protocol::SignedWakeV2, NodeCoreError> {
+        let mut signed_body = body.clone();
+        self.signing_key_id().clone_into(&mut signed_body.signing_key_id);
+        signed_body.signature_alg = ramflux_protocol::WakeSignatureAlg::Ed25519;
+        if signed_body.audience != ramflux_protocol::NOTIFY_WAKE_AUDIENCE {
+            return Err(NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned()));
+        }
+        let bytes = ramflux_protocol::wake_signing_bytes(&signed_body).map_err(|_source| {
+            NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned())
+        })?;
+        let signature = ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, self.seed);
+        Ok(ramflux_protocol::SignedWakeV2 { body: signed_body, signature })
+    }
+
+    /// Verify a `WakeV2` signature from this service key.
+    ///
+    /// # Errors
+    /// Returns an error when the key, audience, shape, or signature does not match.
+    pub fn verify_wake_v2(
+        &self,
+        signed: &ramflux_protocol::SignedWakeV2,
+    ) -> Result<(), NodeCoreError> {
+        if signed.body.signing_key_id != self.signing_key_id()
+            || signed.body.signature_alg != ramflux_protocol::WakeSignatureAlg::Ed25519
+            || signed.body.audience != ramflux_protocol::NOTIFY_WAKE_AUDIENCE
+        {
+            return Err(NodeCoreError::Unauthorized("notify wake signature rejected".to_owned()));
+        }
+        let bytes = ramflux_protocol::wake_signing_bytes(&signed.body).map_err(|_source| {
+            NodeCoreError::Unauthorized("notify wake signature rejected".to_owned())
+        })?;
+        ramflux_crypto::verify_canonical_signature(
+            &bytes,
+            &signed.signature,
+            self.public_key_base64url(),
+        )
+        .map_err(|_source| NodeCoreError::Unauthorized("notify wake signature rejected".to_owned()))
+    }
+
     /// # Errors
     /// Returns an error when the wake cannot be canonicalized or signed.
     pub fn sign_notification_wake(
@@ -509,6 +555,7 @@ mod tests {
             delivery_class: ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
             priority: ramflux_protocol::PushPriority::Normal,
             ttl: 60,
+            absolute_expires_at: 1_900_000_060,
             collapse_key: Some("collapse".to_owned()),
             encrypted_hint: Some("hint".to_owned()),
         }

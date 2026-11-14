@@ -115,12 +115,16 @@ pub struct GatewaySessionConfig {
     pub source_ip_hash: Option<String>,
     pub max_inflight_downstream: u32,
     pub max_inflight_upstream: u32,
-    /// Push route registered on every authenticated (re)connect; `None` disables push.
-    pub push_route: Option<super::GatewayPushRouteRegistration>,
-    /// A cleared route whose deregistration the node has not yet confirmed.
+    /// Desired routes, one per provider. Alert and `VoIP` are separate registrations.
+    pub push_routes: BTreeMap<super::GatewayPushProvider, super::GatewayPushRouteRegistration>,
+    /// Providers whose delete-one the node has not confirmed.
+    pub push_route_clears: BTreeSet<super::GatewayPushProvider>,
+    /// Delete-all is still unconfirmed. It is a barrier over every provider.
     pub push_route_clear_pending: bool,
-    /// Push route retry and backoff state; survives reconnects with the config.
+    /// Backoff for the delete-all barrier.
     pub push_route_retry: super::PushRouteRetry,
+    /// Per-provider backoff. A refusal on one provider does not delay another.
+    pub push_route_retries: BTreeMap<super::GatewayPushProvider, super::PushRouteRetry>,
     /// Last push route control sequence (milliseconds, strictly increasing).
     pub push_route_last_seq: u64,
     /// Advertise the session-push capability in the signed scope. Production sets this
@@ -214,6 +218,7 @@ impl GatewaySessionConfig {
             capability_scope: vec![
                 "gateway.session".to_owned(),
                 ramflux_protocol::GATEWAY_FORWARD_ACK_CAPABILITY.to_owned(),
+                ramflux_protocol::CALL_RESOLUTION_CAPABILITY.to_owned(),
             ],
             auth_expires_at: now.saturating_add(GATEWAY_SESSION_AUTH_TTL_SECONDS),
             now,
@@ -227,9 +232,11 @@ impl GatewaySessionConfig {
             source_ip_hash: None,
             max_inflight_downstream: 64,
             max_inflight_upstream: 64,
-            push_route: None,
+            push_routes: BTreeMap::new(),
+            push_route_clears: BTreeSet::new(),
             push_route_clear_pending: false,
             push_route_retry: super::PushRouteRetry::default(),
+            push_route_retries: BTreeMap::new(),
             push_route_last_seq: 0,
             session_push_advertise: false,
         }
@@ -354,10 +361,52 @@ pub struct GatewayAuthFrame {
     pub device_proof: ramflux_protocol::DeviceProof,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+#[serde(from = "ramflux_protocol::CallSubmitCarrier")]
 pub struct GatewaySubmitFrame {
     pub signed_request: ramflux_protocol::SignedRequest,
     pub envelope: ramflux_protocol::Envelope,
+    /// Caller-signed call intent. Absent on every submit that is not a one-to-one call.
+    /// Boxed so `GatewayClientFrame::Submit` stays within the enum size budget.
+    pub call_intent: Option<Box<ramflux_protocol::SignedCallIntentV1>>,
+    /// Wake id the authenticated device is resolving. The id alone is not authority.
+    pub wake_id: Option<String>,
+    /// Call reference bound into the encrypted control before it was signed.
+    pub call_ref: Option<String>,
+    /// `answer`, `reject`, or `end` from an authenticated participant.
+    pub call_terminal: Option<String>,
+    /// Correlation authenticated by the complete call submission body.
+    pub call_context: Option<ramflux_protocol::CallSubmitContext>,
+}
+
+impl From<ramflux_protocol::CallSubmitCarrier> for GatewaySubmitFrame {
+    fn from(value: ramflux_protocol::CallSubmitCarrier) -> Self {
+        Self {
+            signed_request: value.signed_request,
+            envelope: value.envelope,
+            call_intent: value.call_intent,
+            wake_id: value.wake_id,
+            call_ref: value.call_ref,
+            call_terminal: value.call_terminal,
+            call_context: value.call_context,
+        }
+    }
+}
+impl serde::Serialize for GatewaySubmitFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(
+            &ramflux_protocol::CallSubmitCarrierRef {
+                signed_request: &self.signed_request,
+                envelope: &self.envelope,
+                call_intent: self.call_intent.as_deref(),
+                wake_id: self.wake_id.as_deref(),
+                call_ref: self.call_ref.as_deref(),
+                call_terminal: self.call_terminal.as_deref(),
+                call_context: self.call_context.as_ref(),
+            },
+            serializer,
+        )
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -463,6 +512,9 @@ pub struct GatewaySessionEstablishedFrame {
     pub accepted_cursor: Option<GatewayCursor>,
     pub resume_token: String,
     pub resume_window_seconds: u64,
+    /// Present only when the call-resolution capability was negotiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_session_generation: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -587,6 +639,13 @@ pub enum GatewayServerFrame {
     Close {
         reason: String,
     },
+    /// Authenticated call resolution. The wake may be finished while media stays open.
+    CallResolved {
+        context: ramflux_protocol::CallSubmitContext,
+        state: ramflux_protocol::CallResolutionState,
+        media_allowed: bool,
+        wake_resolved: bool,
+    },
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -615,6 +674,7 @@ pub struct GatewayCursor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewaySessionState {
+    pub call_session_generation: Option<String>,
     pub session_id: String,
     pub gateway_id: String,
     pub resume_token: String,

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! State, replay and device-selection regressions independent of transport timing.
-use super::state::LiveCall;
 use super::*;
+use crate::client::call::state::LiveCall;
 use ramflux_protocol::{CallAction, VoiceAllocation, VoiceCallFailureReason};
 fn endpoint(principal: &str, device: &str) -> CallEndpoint {
     CallEndpoint {
@@ -12,14 +12,28 @@ fn endpoint(principal: &str, device: &str) -> CallEndpoint {
         root_public_key: format!("root-{principal}"),
     }
 }
+// State/key tests start after the transport layer has verified its correlated decision.
 fn outgoing() -> Result<LiveCall, SdkError> {
-    LiveCall::outgoing(
+    let mut call = LiveCall::outgoing(
         ramflux_protocol::encode_base64url([7; 16]),
         "thread".into(),
         endpoint("alice", "a1"),
         vec![endpoint("bob", "b1"), endpoint("bob", "b2")],
         100,
-    )
+    )?;
+    assert!(call.media_held, "new outgoing calls must start held");
+    call.allow_media();
+    Ok(call)
+}
+fn resolved_incoming(
+    control: &ramflux_protocol::CallControl,
+    local: CallEndpoint,
+    now: i64,
+) -> Result<LiveCall, SdkError> {
+    let mut call = LiveCall::incoming(control, local, now)?;
+    assert!(call.media_held, "new incoming calls must start held");
+    call.allow_media();
+    Ok(call)
 }
 fn allocation() -> VoiceAllocation {
     VoiceAllocation {
@@ -36,8 +50,8 @@ fn allocation() -> VoiceAllocation {
 fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> Result<(), SdkError>
 {
     let mut origin = outgoing()?;
-    let mut first = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
-    let mut second = LiveCall::incoming(&origin.pending[1], endpoint("bob", "b2"), 100)?;
+    let mut first = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut second = resolved_incoming(&origin.pending[1], endpoint("bob", "b2"), 100)?;
     assert_ne!(first.receive_key, second.receive_key);
     origin.pending.clear();
     first.pending.clear();
@@ -76,7 +90,7 @@ fn first_answer_wins_and_other_devices_do_not_share_the_winners_media_key() -> R
 #[test]
 fn replay_cross_call_and_uninvited_endpoint_cannot_mutate_call() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
-    let mut peer = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut peer = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     let ringing = peer.pending.pop().ok_or_else(|| invalid("test ringing missing"))?;
     origin.apply(&ringing, 100)?;
     assert!(origin.clone().apply(&ringing, 100).is_err());
@@ -104,13 +118,13 @@ fn unanswered_call_expires_at_forty_five_seconds_and_wipes_media_keys() -> Resul
     assert_eq!(call.send_key.as_ref(), &[0; 32]);
     assert!(call.receive_key.is_none());
     assert!(!call.expire(146)?);
-    assert!(LiveCall::incoming(&outgoing()?.pending[0], endpoint("bob", "b1"), 146).is_err());
+    assert!(resolved_incoming(&outgoing()?.pending[0], endpoint("bob", "b1"), 146).is_err());
     Ok(())
 }
 #[test]
 fn a_siblings_rejection_does_not_cancel_another_ringing_device() -> Result<(), SdkError> {
     let mut call = outgoing()?;
-    let mut first = LiveCall::incoming(&call.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut first = resolved_incoming(&call.pending[0], endpoint("bob", "b1"), 100)?;
     first.pending.clear();
     first.end(true, 101)?;
     call.apply(&first.pending[0], 101)?;
@@ -124,19 +138,19 @@ fn a_future_dated_invite_cannot_extend_the_local_ring_timer() -> Result<(), SdkE
     let origin = outgoing()?;
     let mut invite = origin.pending[0].clone();
     invite.created_at = 130;
-    let mut recipient = LiveCall::incoming(&invite, endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&invite, endpoint("bob", "b1"), 100)?;
     assert!(!recipient.expire(144)?);
     assert!(recipient.expire(145)?);
     assert_eq!(recipient.row.end_reason.as_deref(), Some("missed"));
     invite.created_at = 161;
-    assert!(LiveCall::incoming(&invite, endpoint("bob", "b1"), 100).is_err());
+    assert!(resolved_incoming(&invite, endpoint("bob", "b1"), 100).is_err());
     Ok(())
 }
 #[test]
 fn a_late_answer_times_out_instead_of_selecting_a_key_or_claiming_another_winner()
 -> Result<(), SdkError> {
     let mut origin = outgoing()?;
-    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     recipient.pending.clear();
     recipient.answer(144)?;
     assert!(!origin.apply(&recipient.pending[0], 145)?);
@@ -148,7 +162,7 @@ fn a_late_answer_times_out_instead_of_selecting_a_key_or_claiming_another_winner
 #[test]
 fn a_selected_device_cannot_replace_an_active_key_with_a_second_answer() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
-    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     recipient.pending.clear();
     recipient.answer(101)?;
     let mut answer = recipient.pending[0].clone();
@@ -162,7 +176,7 @@ fn a_selected_device_cannot_replace_an_active_key_with_a_second_answer() -> Resu
 #[test]
 fn a_busy_callee_sends_a_terminal_control_and_never_keeps_media_keys() -> Result<(), SdkError> {
     let origin = outgoing()?;
-    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     recipient.busy(101)?;
     assert_eq!(recipient.row.end_reason.as_deref(), Some("busy"));
     assert_eq!(recipient.pending.len(), 1);
@@ -175,7 +189,7 @@ fn a_busy_callee_sends_a_terminal_control_and_never_keeps_media_keys() -> Result
 #[test]
 fn a_peer_failure_is_not_attributed_as_a_local_failure() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
-    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     recipient.fail(ramflux_protocol::VoiceCallFailureReason::RelayUnavailable, 101)?;
     let failed = recipient
         .pending
@@ -201,7 +215,7 @@ fn a_peer_failure_is_not_attributed_as_a_local_failure() -> Result<(), SdkError>
 fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> Result<(), SdkError>
 {
     let mut origin = outgoing()?;
-    let mut recipient = LiveCall::incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
+    let mut recipient = resolved_incoming(&origin.pending[0], endpoint("bob", "b1"), 100)?;
     recipient.pending.clear();
     recipient.answer(101)?;
     origin.apply(&recipient.pending[0], 102)?;
@@ -265,7 +279,7 @@ fn terminal_calls_discard_unsent_invites_and_their_media_secrets() -> Result<(),
 fn a_callee_ack_contains_only_the_callees_own_relay_credential() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
     let invite = origin.pending[0].clone();
-    let mut receiver = LiveCall::incoming(&invite, origin.callee.clone(), 100)?;
+    let mut receiver = resolved_incoming(&invite, origin.callee.clone(), 100)?;
     receiver.pending.clear();
     receiver.answer(101)?;
     origin.apply(&receiver.pending[0], 101)?;
@@ -305,7 +319,7 @@ fn claim(call: &mut LiveCall, caller: &VoiceAllocation, now: i64) -> Result<(), 
 
 fn active_pair() -> Result<(LiveCall, LiveCall), SdkError> {
     let mut origin = outgoing()?;
-    let mut callee = LiveCall::incoming(&origin.pending[0], origin.callee.clone(), 100)?;
+    let mut callee = resolved_incoming(&origin.pending[0], origin.callee.clone(), 100)?;
     callee.pending.clear();
     callee.answer(101)?;
     origin.apply(&callee.pending[0], 101)?;
@@ -401,3 +415,6 @@ fn refused_caller_without_hangup_fails_at_original_lease_expiry() -> Result<(), 
     assert!(!origin.expire_media(201)?);
     Ok(())
 }
+
+#[path = "native_tests.rs"]
+mod native;

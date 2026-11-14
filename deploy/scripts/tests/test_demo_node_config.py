@@ -25,6 +25,7 @@ class DemoNodeConfigTests(unittest.TestCase):
         self.settings = {
             "DEMO_PROJECT": "demo-test",
             "DEMO_HOST": "demo.example.org",
+            "DEMO_PUBLIC_ORIGIN": "",
             "DEMO_NODE_ID": "demo.invalid",
             "DEMO_GATEWAY_PORT": "59443",
             "DEMO_RELAY_PORT": "59447",

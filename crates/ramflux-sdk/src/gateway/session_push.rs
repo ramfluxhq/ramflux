@@ -473,6 +473,7 @@ const CAPABLE_ONLY: [&str; 7] = [
 const SHARED: [&str; 4] = ["deliver", "ack", "cursor", "nack"];
 
 fn legacy(bytes: &[u8]) -> Result<Routed, RouteError> {
+    ramflux_protocol::validate_call_resolution_frame(bytes).map_err(RouteError::Legacy)?;
     ramflux_protocol::parse_i_json::<GatewayServerFrame>(bytes)
         .map(|frame| Routed::Legacy(Box::new(frame)))
         .map_err(RouteError::Legacy)

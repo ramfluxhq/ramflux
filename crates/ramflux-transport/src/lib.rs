@@ -15,7 +15,9 @@ mod compio_mesh;
 mod error;
 mod gateway_frame_reader;
 mod loopback;
+mod mesh_authority;
 mod mesh_http;
+pub use mesh_authority::MeshAuthorityClient;
 mod mesh_quic;
 mod mesh_quic_admission;
 #[cfg(test)]

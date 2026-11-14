@@ -546,6 +546,9 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Err(SdkError::NetworkingPending);
         };
+        for call in account.client.voice_calls.values_mut() {
+            call.bind_gateway_generation(metadata.session.call_session_generation.as_deref())?;
+        }
         let verified = metadata.mode.push_incarnation().map(str::to_owned);
         account.gateway_config = metadata.config;
         account.target_delivery_id.clone_from(&account.gateway_config.target_delivery_id);

@@ -80,6 +80,7 @@ fn assert_session_push_scope(config: &GatewaySessionConfig, advertise: bool) {
 
 fn established_session() -> ramflux_node_core::GatewaySessionEstablishedFrame {
     ramflux_node_core::GatewaySessionEstablishedFrame {
+        call_session_generation: None,
         session_id: "p24b2a-session".into(),
         gateway_id: "p24b2a-gateway".into(),
         accepted_cursor: None,

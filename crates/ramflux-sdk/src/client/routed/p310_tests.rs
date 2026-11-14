@@ -24,7 +24,7 @@ struct Relay {
 }
 impl Relay {
     fn start(expected: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
-        let root = PathBuf::from("/tmp").join(format!(
+        let root = std::env::temp_dir().join(format!(
             "rf-p310-relay-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()

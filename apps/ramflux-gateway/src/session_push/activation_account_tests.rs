@@ -116,6 +116,7 @@ impl Account {
         })
         .with_owned_device(&identity, branch)?;
         let session = GatewaySessionState {
+            call_session_generation: None,
             session_id: runtime.session_id.clone(),
             gateway_id: context.gateway_id.clone(),
             resume_token: runtime.resume_token.clone(),

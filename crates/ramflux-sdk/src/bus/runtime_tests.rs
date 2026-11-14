@@ -128,13 +128,19 @@ impl GatewaySessionFrameSource for Gateway {
 }
 
 pub(crate) fn root(name: &str) -> PathBuf {
+    const LABEL_CHARS: usize = 8;
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
-    PathBuf::from("/tmp")
-        .join(format!("ramflux-actor-{name}-{}-{sequence}-{unique}", std::process::id()))
+    let label: String =
+        ramflux_crypto::blake3_256_base64url("ramflux.sdk.test-root.v1", name.as_bytes())
+            .chars()
+            .take(LABEL_CHARS)
+            .collect();
+    std::env::temp_dir()
+        .join(format!("rf-actor-{label}-{}-{sequence}-{unique}", std::process::id()))
 }
 pub(crate) fn account(
     root: &Path,
@@ -299,10 +305,16 @@ async fn client(
     let path = root("socket");
     std::fs::create_dir_all(&path)?;
     let socket = path.join("bus.sock");
+    #[cfg(unix)]
     let listener = UnixListener::bind(&socket)
         .map_err(|error| failure(&format!("test socket bind {}: {error}", socket.display())))?;
+    #[cfg(windows)]
+    let listener = crate::platform::listener::bind(&socket)?;
     let client = LocalBusClient::connect(&socket).await?;
+    #[cfg(unix)]
     let (stream, _) = listener.accept().await?;
+    #[cfg(windows)]
+    let stream = listener.accept().await?;
     let task = tokio::task::spawn_local(super::connection::handle(stream, supervisor, id));
     std::fs::remove_file(socket)?;
     std::fs::remove_dir(path)?;
@@ -770,6 +782,7 @@ async fn pipelined_mutations_keep_mailbox_order_and_account_config_survives_rest
         .await
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn client_rejects_wrong_response_kinds_and_fails_later_requests_without_hanging()
 -> Result<(), SdkError> {
@@ -873,6 +886,7 @@ async fn lifecycle_keys_remain_idempotent_after_lock_and_process_supervisor_rest
         .await
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Result<(), SdkError> {
     // Stop must cancel a live network operation and finish durable cleanup; neither phase is a 2 s SLA.
@@ -1185,11 +1199,14 @@ mod native_busy;
 
 mod contact_verification;
 
+#[cfg(unix)]
 mod lifecycle;
 mod lifecycle_registry;
 
+#[cfg(unix)]
 mod lifecycle_takeover;
 
+#[cfg(unix)]
 mod reconciliation;
 
 #[tokio::test(flavor = "current_thread")]

@@ -55,6 +55,13 @@ pub struct CallControl {
     pub seq: u64,
     pub created_at: i64,
     pub body: CallAction,
+    /// Fresh per-target call reference bound into this encrypted control before it is signed.
+    /// Absent on controls that are not a one-to-one call wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_ref: Option<String>,
+    /// Verified original Start, present only on an invitation carrying a call reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_start: Option<crate::SignedCallIntentV1>,
     pub signature: String,
 }
 /// Issuance scope signed by a live authenticated caller session.

@@ -33,18 +33,33 @@ use crate::{
 };
 mod raw_request;
 use arc_swap::ArcSwap;
+pub(crate) use raw_request::mesh_quic_post_raw_with_deadline_sync;
 pub use raw_request::{MeshQuicRawPost, mesh_quic_post_raw_with_peer_ca_pems_async};
 use tokio::sync::{Mutex, Notify};
 
 /// Paths under this prefix keep their request body bytes exactly as received.
 pub const RAW_BODY_PATH_PREFIX: &str = "/s9/attachments/";
 
-fn raw_attachment_body(frame: &[u8]) -> Result<Vec<u8>, ramflux_protocol::ProtocolError> {
+fn raw_attachment_body(
+    frame: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>, ramflux_protocol::ProtocolError> {
     ramflux_protocol::validate_i_json_bytes(frame)?;
     let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(frame)
         .map_err(ramflux_protocol::ProtocolError::IJson)?;
+    if raw.body.get().len() > limit {
+        return Err(ramflux_protocol::ProtocolError::TransportProtocol(
+            "authority body exceeds 8KiB".into(),
+        ));
+    }
     Ok(raw.body.get().as_bytes().to_vec())
 }
+pub(crate) fn authority_path(path: &str) -> bool {
+    path.starts_with("/internal/notify/send-authority")
+        || path == "/internal/router/notify-owner/v1"
+        || path == "/internal/gateway/notify-call/v1"
+}
+
 const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
 const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT: Duration = Duration::from_secs(5);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,6 +77,8 @@ const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_MS_ENV: &str =
 const MESH_QUIC_CLIENT_POOL_SIZE_DEFAULT: usize = 8;
 const MESH_QUIC_POSTCARD_MAGIC: &[u8] = b"ramflux.mesh.postcard.v1\0";
 
+pub(crate) mod control_ingress;
+
 pub struct MeshQuicServer {
     endpoint: quinn::Endpoint,
 }
@@ -76,6 +93,7 @@ pub struct MeshQuicAcceptedRequest {
     /// The body exactly as received, kept for [`RAW_BODY_PATH_PREFIX`] routes so their
     /// byte cap is enforced on the wire bytes, not on a re-serialized `Value`.
     pub raw_body: Option<Vec<u8>>,
+    control: Option<control_ingress::ControlRequest>,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
 }
@@ -133,11 +151,12 @@ struct MeshQuicClientRequestJob {
     peer_ca_pems: Vec<String>,
     request: MeshQuicClientRequestPayload,
     expected_gateway_instance: Option<String>,
+    expected_peer_spiffe: Option<String>,
     enqueued_at: std::time::Instant,
 }
 
 enum MeshQuicClientRequestPayload {
-    RawJson(GatewayQuicRequest),
+    RawJson(GatewayQuicRequest, usize),
     Json(GatewayQuicRequest),
     Postcard(MeshQuicPostcardRequest),
 }
@@ -150,6 +169,7 @@ enum MeshQuicClientResponsePayload {
 
 enum MeshQuicClientResponse {
     Sync(mpsc::Sender<Result<MeshQuicClientResponsePayload, TransportError>>),
+    BoundedSync(mpsc::SyncSender<Result<MeshQuicClientResponsePayload, TransportError>>),
     Async(tokio::sync::oneshot::Sender<Result<MeshQuicClientResponsePayload, TransportError>>),
 }
 
@@ -158,7 +178,7 @@ impl MeshQuicClientResponse {
     /// cannot signal cancellation, so their side never resolves.
     async fn closed(&mut self) {
         match self {
-            Self::Sync(_) => std::future::pending::<()>().await,
+            Self::Sync(_) | Self::BoundedSync(_) => std::future::pending::<()>().await,
             Self::Async(sender) => sender.closed().await,
         }
     }
@@ -166,6 +186,9 @@ impl MeshQuicClientResponse {
     fn send(self, result: Result<MeshQuicClientResponsePayload, TransportError>) {
         match self {
             Self::Sync(sender) => {
+                let _sent = sender.send(result);
+            }
+            Self::BoundedSync(sender) => {
                 let _sent = sender.send(result);
             }
             Self::Async(sender) => {
@@ -640,7 +663,9 @@ impl MeshQuicServer {
                 return Err(error);
             }
         };
-        let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
+        let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX)
+            || authority_path(&request.path)
+        {
             let raw = match ramflux_protocol::validate_i_json_bytes(&frame).and_then(|()| {
                 serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)
                     .map_err(ramflux_protocol::ProtocolError::IJson)
@@ -659,6 +684,9 @@ impl MeshQuicServer {
                     return Err(error);
                 }
             };
+            if authority_path(&request.path) && raw.body.get().len() > 8192 {
+                return Err(TransportError::FrameTooLarge { len: raw.body.get().len() });
+            }
             Some(raw.body.get().as_bytes().to_vec())
         } else {
             None
@@ -666,6 +694,7 @@ impl MeshQuicServer {
         Ok(MeshQuicAcceptedWireRequest::Json(MeshQuicAcceptedRequest {
             request,
             raw_body,
+            control: None,
             send,
             recv,
         }))
@@ -741,24 +770,28 @@ impl MeshQuicServer {
             }
         };
         record_mesh_server_quic_request_read(request_read_started.elapsed());
-        let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
-            match raw_attachment_body(&frame) {
-                Ok(body) => Some(body),
-                Err(error) => {
-                    let error = TransportError::Protocol(error);
-                    reject_i_json(
-                        send,
-                        recv,
-                        reject_deadline
-                            .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
-                    );
-                    return Err(error);
+        let raw_body =
+            if request.path.starts_with(RAW_BODY_PATH_PREFIX) || authority_path(&request.path) {
+                match raw_attachment_body(
+                    &frame,
+                    if authority_path(&request.path) { 8192 } else { usize::MAX },
+                ) {
+                    Ok(body) => Some(body),
+                    Err(error) => {
+                        let error = TransportError::Protocol(error);
+                        reject_i_json(
+                            send,
+                            recv,
+                            reject_deadline
+                                .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                        );
+                        return Err(error);
+                    }
                 }
-            }
-        } else {
-            None
-        };
-        Ok(MeshQuicAcceptedRequest { request, raw_body, send, recv })
+            } else {
+                None
+            };
+        Ok(MeshQuicAcceptedRequest { request, raw_body, control: None, send, recv })
     }
 }
 
@@ -843,8 +876,7 @@ impl MeshQuicAcceptedRequest {
     ) -> Result<(), TransportError> {
         let response_started = std::time::Instant::now();
         let body = serde_json::to_value(value)?;
-        write_quic_json_message(&mut self.send, &GatewayQuicResponse { status, body }).await?;
-        self.finish_response_stream().await?;
+        self.write_response(GatewayQuicResponse { status, body }).await?;
         record_mesh_server_quic_response_write(response_started.elapsed());
         Ok(())
     }
@@ -857,18 +889,48 @@ impl MeshQuicAcceptedRequest {
         body: &str,
     ) -> Result<(), TransportError> {
         let response_started = std::time::Instant::now();
-        write_quic_json_message(
-            &mut self.send,
-            &GatewayQuicResponse { status, body: serde_json::json!({ "error": body }) },
-        )
+        self.write_response(GatewayQuicResponse {
+            status,
+            body: serde_json::json!({"error":body}),
+        })
         .await?;
-        self.finish_response_stream().await?;
         record_mesh_server_quic_response_write(response_started.elapsed());
         Ok(())
     }
 
+    async fn write_response(
+        &mut self,
+        response: GatewayQuicResponse,
+    ) -> Result<(), TransportError> {
+        let deadline = self.control.as_ref().map(|control| control.deadline);
+        let work = async {
+            write_quic_json_message(&mut self.send, &response).await?;
+            self.finish_response_stream().await
+        };
+        match deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+                    .await
+                    .map_err(|_| {
+                        TransportError::Quic(
+                            "notification control response deadline exceeded".into(),
+                        )
+                    })?
+            }
+            None => work.await,
+        }
+    }
+
     async fn finish_response_stream(&mut self) -> Result<(), TransportError> {
         self.send.finish().map_err(|error| TransportError::Quic(error.to_string()))?;
+        if let Some(control) = &self.control {
+            let _ = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(control.deadline),
+                self.send.stopped(),
+            )
+            .await;
+            return Ok(());
+        }
         drain_quic_recv_to_fin(&mut self.recv).await
     }
 }
@@ -1164,6 +1226,7 @@ fn run_mesh_quic_request_with_instance(
         peer_ca_pems: peer_ca_pems.to_vec(),
         request: MeshQuicClientRequestPayload::Json(request),
         expected_gateway_instance: Some(expected_gateway_instance.to_owned()),
+        expected_peer_spiffe: None,
         enqueued_at: std::time::Instant::now(),
     })
 }
@@ -1196,6 +1259,18 @@ fn require_gateway_instance(
         return Err(TransportError::Tls(format!(
             "mesh peer gateway instance {instance_id} does not match directory key {expected_gateway_instance}"
         )));
+    }
+    Ok(())
+}
+
+fn require_exact_mesh_peer(
+    connection: &quinn::Connection,
+    expected: Option<&str>,
+) -> Result<(), TransportError> {
+    if let Some(expected) = expected
+        && quinn_peer_spiffe_uri(connection)?.as_deref() != Some(expected)
+    {
+        return Err(TransportError::Tls("mesh peer authority identity mismatch".into()));
     }
     Ok(())
 }
@@ -1240,6 +1315,7 @@ impl MeshQuicClientRuntime {
             peer_ca_pems: peer_ca_pems.to_vec(),
             request: MeshQuicClientRequestPayload::Json(request),
             expected_gateway_instance: None,
+            expected_peer_spiffe: None,
             enqueued_at: std::time::Instant::now(),
         })
     }
@@ -1285,6 +1361,7 @@ impl MeshQuicClientRuntime {
                     peer_ca_pems: peer_ca_pems.to_vec(),
                     request: MeshQuicClientRequestPayload::Json(request),
                     expected_gateway_instance: None,
+                    expected_peer_spiffe: None,
                     enqueued_at: std::time::Instant::now(),
                 },
                 response: MeshQuicClientResponse::Async(response),
@@ -1320,6 +1397,7 @@ impl MeshQuicClientRuntime {
                     peer_ca_pems: peer_ca_pems.to_vec(),
                     request: MeshQuicClientRequestPayload::Postcard(request),
                     expected_gateway_instance: None,
+                    expected_peer_spiffe: None,
                     enqueued_at: std::time::Instant::now(),
                 },
                 response: MeshQuicClientResponse::Async(response),
@@ -1400,7 +1478,7 @@ async fn mesh_quic_cached_request(
     retry_cached: bool,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
     record_mesh_client_request();
-    let peer_addr = if matches!(&job.request, MeshQuicClientRequestPayload::RawJson(_)) {
+    let peer_addr = if matches!(&job.request, MeshQuicClientRequestPayload::RawJson(_, _)) {
         tokio::net::lookup_host(job.endpoint.as_str())
             .await?
             .next()
@@ -1422,6 +1500,7 @@ async fn mesh_quic_cached_request(
     if let Some(expected) = job.expected_gateway_instance.as_deref() {
         require_gateway_instance(connection.connection(), expected)?;
     }
+    require_exact_mesh_peer(connection.connection(), job.expected_peer_spiffe.as_deref())?;
     let request_timeout = if reused_cached_connection && retry_cached {
         MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
     } else {
@@ -1453,6 +1532,10 @@ async fn mesh_quic_cached_request(
             if let Some(expected) = job.expected_gateway_instance.as_deref() {
                 require_gateway_instance(retry_connection.connection(), expected)?;
             }
+            require_exact_mesh_peer(
+                retry_connection.connection(),
+                job.expected_peer_spiffe.as_deref(),
+            )?;
             match timed_mesh_quic_request_on_connection(
                 retry_connection.connection(),
                 &job.request,
@@ -1666,7 +1749,7 @@ async fn mesh_quic_request_on_connection(
         let request_write_result = async {
             match request {
                 MeshQuicClientRequestPayload::Json(request)
-                | MeshQuicClientRequestPayload::RawJson(request) => {
+                | MeshQuicClientRequestPayload::RawJson(request, _) => {
                     write_quic_json_message(&mut send, request).await?;
                 }
                 MeshQuicClientRequestPayload::Postcard(request) => {
@@ -1681,8 +1764,10 @@ async fn mesh_quic_request_on_connection(
         let response_read_started = std::time::Instant::now();
         let response_read_result = async {
             let response = match request {
-                MeshQuicClientRequestPayload::RawJson(_) => {
-                    MeshQuicClientResponsePayload::RawJson(read_quic_raw_frame(&mut recv).await?)
+                MeshQuicClientRequestPayload::RawJson(_, limit) => {
+                    MeshQuicClientResponsePayload::RawJson(
+                        crate::quic_gateway::read_quic_raw_frame_limited(&mut recv, *limit).await?,
+                    )
                 }
                 MeshQuicClientRequestPayload::Json(_request) => {
                     MeshQuicClientResponsePayload::Json(read_quic_json_frame(&mut recv).await?)
@@ -2066,6 +2151,7 @@ mod tests {
                 body: serde_json::Value::Null,
             }),
             expected_gateway_instance: None,
+            expected_peer_spiffe: None,
             enqueued_at: Instant::now(),
         };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -2637,7 +2723,7 @@ mod tests {
                 let job = receiver.recv().map_err(|e| e.to_string())?;
                 let response = match job.request.request {
                     MeshQuicClientRequestPayload::Json(_)
-                    | MeshQuicClientRequestPayload::RawJson(_) => {
+                    | MeshQuicClientRequestPayload::RawJson(_, _) => {
                         MeshQuicClientResponsePayload::Postcard(MeshQuicPostcardResponse {
                             status: 200,
                             body: Vec::new(),

@@ -38,6 +38,14 @@ pub const GROUP_EVENT: &str = "ramflux.group_event.v1";
 pub const CONVERSATION_EVENT: &str = "ramflux.conversation_event.v1";
 pub const MESSAGE_EVENT: &str = "ramflux.message_event.v1";
 pub const NOTIFICATION_WAKE: &str = "ramflux.notification_wake.v1";
+/// Ed25519 transcript domain for a `WakeV2` body. The NUL separator is added at signing time.
+pub const NOTIFICATION_WAKE_V2: &str = "ramflux.notification.wake.v2";
+/// Ed25519 transcript domain for a `CallIntentV1` body. The NUL separator is added at signing time.
+pub const NOTIFICATION_CALL_INTENT_V1: &str = "ramflux.notification.call_intent.v1";
+/// Domain label hashed, with a trailing NUL, into a call-intent digest. It is not an Ed25519 domain.
+pub const NOTIFICATION_CALL_INTENT_DIGEST_V1: &str = "ramflux.notification.call_intent_digest.v1";
+/// HMAC domain for the per-device message collapse pseudonym.
+pub const NOTIFICATION_DEVICE_COLLAPSE_V1: &str = "ramflux.notification.device_collapse.v1";
 pub const MCP_GRANT: &str = "ramflux.mcp_grant.v1";
 pub const BOT_MANIFEST: &str = "ramflux.bot_manifest.v1";
 pub const BOT_EVENT: &str = "ramflux.bot_event.v1";
@@ -192,7 +200,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 164] = [
+pub const ALL: [&str; 168] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -357,6 +365,10 @@ pub const ALL: [&str; 164] = [
     MESSAGE_FRIEND_APPLIED,
     MESSAGE_HISTORY_PAGE,
     MESSAGE_DELETE_TOMBSTONE,
+    NOTIFICATION_WAKE_V2,
+    NOTIFICATION_CALL_INTENT_V1,
+    NOTIFICATION_CALL_INTENT_DIGEST_V1,
+    NOTIFICATION_DEVICE_COLLAPSE_V1,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -414,7 +426,7 @@ mod tests {
         for label in &super::ALL[140..155] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[155..].len(), 9);
+        assert_eq!(super::ALL[155..164].len(), 9);
         for label in [
             super::MESSAGE_ID,
             super::MESSAGE_FRIEND_APPLIED,
@@ -422,11 +434,19 @@ mod tests {
             super::MESSAGE_HISTORY_PAGE,
             super::MESSAGE_ORIGINAL_HEADER,
         ] {
-            assert!(super::ALL[155..].contains(&label));
+            assert!(super::ALL[155..164].contains(&label));
         }
-        assert!(super::ALL[155..].contains(&super::REPORT_OPENING));
-        assert!(super::ALL[155..].contains(&super::COLLAPSE_KEY));
-        assert!(super::ALL[155..].contains(&super::FRANKING_NODE_TAG_V2));
+        assert!(super::ALL[155..164].contains(&super::REPORT_OPENING));
+        assert!(super::ALL[155..164].contains(&super::COLLAPSE_KEY));
+        assert!(super::ALL[155..164].contains(&super::FRANKING_NODE_TAG_V2));
+        assert_eq!(super::ALL[164..].len(), 4);
+        for label in &super::ALL[164..] {
+            assert!(label.starts_with("ramflux.notification."));
+        }
+        assert!(super::ALL.contains(&super::NOTIFICATION_WAKE_V2));
+        assert!(super::ALL.contains(&super::NOTIFICATION_CALL_INTENT_V1));
+        assert!(super::ALL.contains(&super::NOTIFICATION_CALL_INTENT_DIGEST_V1));
+        assert!(super::ALL.contains(&super::NOTIFICATION_DEVICE_COLLAPSE_V1));
         assert_eq!(
             super::CUSTODY_BRANCH_EXPORTER,
             "EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3"

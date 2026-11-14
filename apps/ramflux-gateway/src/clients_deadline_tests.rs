@@ -271,15 +271,3 @@ fn admission_is_released_only_after_the_blocking_worker_exits() -> TestResult {
     std::fs::remove_dir_all(fixture.root)?;
     Ok(())
 }
-
-#[test]
-fn call_wake_has_call_notification_class() -> TestResult {
-    let mut envelope = crate::session::submit_fixtures::test_envelope(100)?;
-    envelope.delivery_class = ramflux_protocol::DeliveryClass::CallWake;
-    assert_eq!(
-        notification_class_for_envelope(&envelope),
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification,
-        "call wake must use call notification routing"
-    );
-    Ok(())
-}

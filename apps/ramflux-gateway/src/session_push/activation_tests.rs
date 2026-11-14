@@ -731,10 +731,12 @@ async fn capture_account_baseline(
     );
     let before_gateway = serde_json::to_vec(&context.store.load_state()?)?;
     let before_issued = issued(context).await?;
-    let before_artifacts = files(&child.1)?;
     let before_control = context.notify.wake_count();
     crate::session::dispatch_offline_wake(
         context,
+        "agent-device",
+        1,
+        1,
         TARGET,
         &crate::session::submit_fixtures::test_envelope(i64::try_from(
             ramflux_node_core::now_unix_seconds(),
@@ -747,6 +749,8 @@ async fn capture_account_baseline(
         "wake observer must see production spawn_blocking"
     );
     let wakes = context.notify.wake_count();
+    // The durable control writes the gateway store. Measure artifacts after that write.
+    let before_artifacts = files(&child.1)?;
 
     Ok(AccountBaseline {
         baseline_replay,

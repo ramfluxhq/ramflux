@@ -45,10 +45,6 @@ fn open_with(
     let mut builder = redb::Database::builder();
     builder.set_cache_size(super::GATEWAY_REPLAY_PAGE_CACHE_BYTES);
     if !path.try_exists().map_err(redb_error)? {
-        let directory = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
         // Only a fully committed v3 database can acquire the public name. An interrupted
         // creator leaves an unpublished temporary file; old public files remain refused.
         let stage = tempfile::Builder::new()

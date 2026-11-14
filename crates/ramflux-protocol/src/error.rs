@@ -65,4 +65,6 @@ pub enum ProtocolError {
     HeaderFieldCountOverflow,
     #[error("canonical header field value is too long")]
     HeaderFieldValueTooLong,
+    #[error("notification contract rejected: {0}")]
+    NotificationContract(&'static str),
 }

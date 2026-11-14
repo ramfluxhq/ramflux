@@ -20,10 +20,13 @@ pub const GATEWAY_PUSH_ROUTE_DELETE_PATH: &str = "/notify/v1/push-route/delete";
 /// Re-register once less than this much node-assigned route lifetime remains.
 pub const GATEWAY_PUSH_ROUTE_RENEW_BEFORE_SECONDS: u64 = 15 * 86_400;
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayPushProvider {
     Apns,
+    ApnsVoip,
     Fcm,
     #[serde(rename = "webpush")]
     WebPush,
@@ -121,6 +124,8 @@ pub(crate) struct PendingPushRoute {
     request_id: String,
     sent_at: u64,
     deregister: bool,
+    /// `None` is a delete-all barrier.
+    provider: Option<GatewayPushProvider>,
 }
 
 /// Retry state for push route control; kept in the session config so it survives reconnects.
@@ -176,30 +181,101 @@ impl GatewaySessionEngine {
         self.push_route_expires_at
     }
 
-    /// Replaces the device's push route (for example after a token rotation) and registers it
-    /// now; `None` sends an explicit deregistration that deletes the node's route and keeps
-    /// retrying it with backoff until the node confirms. Waits a bounded time for the answer;
-    /// a later answer is still matched by request id. A drain or close frame that arrives
-    /// meanwhile ends the wait and stays queued for the next reader.
+    /// Upserts one provider route and registers it now. Other providers stay.
+    /// `None` sends a delete-all barrier and retries it until the node confirms.
+    /// Waits a bounded time for the answer; a later answer is still matched by request id.
+    /// A drain or close frame that arrives meanwhile ends the wait and stays queued.
     /// # Errors
     /// Returns transport, signing, refusal or session-ending errors.
     pub async fn set_push_route(
         &mut self,
         registration: Option<GatewayPushRouteRegistration>,
     ) -> Result<Option<u64>, SdkError> {
-        if self.config.push_route != registration {
-            self.push_route_expires_at = None;
-        }
-        // A token change (or a clear) is a new intent: it is never held back by old backoff.
-        self.config.push_route_retry = PushRouteRetry::default();
-        self.config.push_route_clear_pending = registration.is_none();
-        self.config.push_route.clone_from(&registration);
         let now = now_unix_timestamp().unsigned_abs();
-        let request_id = if registration.is_some() {
-            self.send_push_route_registration(now).await?
+        let request_id = if let Some(registration) = registration {
+            self.upsert_push_route(&registration);
+            self.send_provider_registration(now, registration).await?
         } else {
-            self.send_push_route_deregistration(now).await?
+            self.begin_delete_all();
+            self.send_push_route_deregistration(now, None).await?
         };
+        self.finish_push_control(request_id).await
+    }
+
+    /// Deletes one provider and retries that delete until the node confirms.
+    /// The other providers stay registered.
+    /// # Errors
+    /// Returns transport, signing, refusal or session-ending errors.
+    pub async fn clear_push_provider(
+        &mut self,
+        provider: GatewayPushProvider,
+    ) -> Result<Option<u64>, SdkError> {
+        self.config.push_routes.remove(&provider);
+        self.config.push_route_retries.remove(&provider);
+        let removed = self.push_route_expiries.remove(&provider);
+        if self.push_route_expires_at == removed || self.push_route_expiries.is_empty() {
+            self.push_route_expires_at = self.push_route_expiries.values().copied().min();
+        }
+        self.config.push_route_clears.insert(provider);
+        let now = now_unix_timestamp().unsigned_abs();
+        let request_id = self.send_push_route_deregistration(now, Some(provider)).await?;
+        self.finish_push_control(request_id).await
+    }
+
+    /// Sends every desired route that is not itself pending or backing off.
+    /// Returns the last request id, or `None` when nothing was sent.
+    /// # Errors
+    /// Returns signing or transport write errors.
+    pub async fn register_push_route(&mut self) -> Result<Option<String>, SdkError> {
+        let now = now_unix_timestamp().unsigned_abs();
+        let routes: Vec<GatewayPushRouteRegistration> = self
+            .config
+            .push_routes
+            .values()
+            .filter(|registration| {
+                let provider = Some(registration.provider);
+                !self.push_control_pending(provider) && !self.push_retry_blocks(provider, now)
+            })
+            .cloned()
+            .collect();
+        let mut last = None;
+        for registration in routes {
+            last = self.send_provider_registration(now, registration).await?;
+        }
+        Ok(last)
+    }
+
+    fn upsert_push_route(&mut self, registration: &GatewayPushRouteRegistration) {
+        let provider = registration.provider;
+        let unchanged = self.config.push_routes.get(&provider) == Some(registration);
+        if !unchanged {
+            self.push_route_expiries.remove(&provider);
+            let others = self.config.push_routes.keys().any(|existing| *existing != provider);
+            if !others {
+                self.push_route_expires_at = None;
+            }
+        }
+        // A token change is a new intent: it is never held back by old backoff.
+        self.config.push_route_retries.remove(&provider);
+        self.config.push_route_clears.remove(&provider);
+        self.config.push_route_clear_pending = false;
+        self.config.push_routes.insert(provider, registration.clone());
+    }
+
+    fn begin_delete_all(&mut self) {
+        self.config.push_routes.clear();
+        self.config.push_route_clears.clear();
+        self.config.push_route_retries.clear();
+        self.config.push_route_retry = PushRouteRetry::default();
+        self.config.push_route_clear_pending = true;
+        self.push_route_expiries.clear();
+        self.push_route_expires_at = None;
+    }
+
+    async fn finish_push_control(
+        &mut self,
+        request_id: Option<String>,
+    ) -> Result<Option<u64>, SdkError> {
         let Some(request_id) = request_id else {
             return Ok(None);
         };
@@ -217,27 +293,23 @@ impl GatewaySessionEngine {
         }
     }
 
-    /// Sends the configured registration without waiting for the answer.
-    /// # Errors
-    /// Returns signing or transport write errors.
-    pub async fn register_push_route(&mut self) -> Result<Option<String>, SdkError> {
-        self.send_push_route_registration(now_unix_timestamp().unsigned_abs()).await
-    }
-
-    async fn send_push_route_registration(&mut self, now: u64) -> Result<Option<String>, SdkError> {
-        let Some(body) = self.config.push_route.clone() else {
-            return Ok(None);
-        };
+    async fn send_provider_registration(
+        &mut self,
+        now: u64,
+        body: GatewayPushRouteRegistration,
+    ) -> Result<Option<String>, SdkError> {
+        let provider = body.provider;
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
             request: Box::new(GatewayPushRouteFrame { signed_request, body }),
         })
         .await?;
-        self.pending_push_route = Some(PendingPushRoute {
+        self.note_pending(PendingPushRoute {
             request_id: request_id.clone(),
             sent_at: now,
             deregister: false,
+            provider: Some(provider),
         });
         Ok(Some(request_id))
     }
@@ -245,20 +317,60 @@ impl GatewaySessionEngine {
     async fn send_push_route_deregistration(
         &mut self,
         now: u64,
+        provider: Option<GatewayPushProvider>,
     ) -> Result<Option<String>, SdkError> {
-        let body = GatewayPushRouteDeregistration { provider: None };
+        let body = GatewayPushRouteDeregistration { provider };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_DELETE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteDeregister {
             request: Box::new(GatewayPushRouteDeregistrationFrame { signed_request, body }),
         })
         .await?;
-        self.pending_push_route = Some(PendingPushRoute {
+        self.note_pending(PendingPushRoute {
             request_id: request_id.clone(),
             sent_at: now,
             deregister: true,
+            provider,
         });
         Ok(Some(request_id))
+    }
+
+    fn note_pending(&mut self, pending: PendingPushRoute) {
+        self.pending_push_routes.retain(|existing| existing.provider != pending.provider);
+        self.pending_push_routes.push(pending);
+    }
+
+    fn push_control_pending(&self, provider: Option<GatewayPushProvider>) -> bool {
+        self.pending_push_routes.iter().any(|pending| pending.provider == provider)
+    }
+
+    fn push_retry_blocks(&self, provider: Option<GatewayPushProvider>, now: u64) -> bool {
+        let retry = if let Some(provider) = provider {
+            self.config.push_route_retries.get(&provider)
+        } else {
+            Some(&self.config.push_route_retry)
+        };
+        retry.is_some_and(|retry| now < retry.not_before)
+    }
+
+    fn record_push_retry(
+        &mut self,
+        provider: Option<GatewayPushProvider>,
+        code: GatewayPushRouteRefusal,
+        sent_at: u64,
+    ) {
+        if let Some(provider) = provider {
+            self.config.push_route_retries.entry(provider).or_default().record(code, sent_at);
+        } else {
+            self.config.push_route_retry.record(code, sent_at);
+        }
+    }
+
+    fn expiry_of(&self, provider: GatewayPushProvider) -> Option<u64> {
+        if let Some(expiry) = self.push_route_expiries.get(&provider).copied() {
+            return Some(expiry);
+        }
+        if self.config.push_routes.len() == 1 { self.push_route_expires_at } else { None }
     }
 
     fn session_bound_request<T: serde::Serialize>(
@@ -358,43 +470,88 @@ impl GatewaySessionEngine {
         frame: GatewayServerFrame,
     ) -> Result<Option<u64>, SdkError> {
         let id = push_route_reply_id(&frame).map(str::to_owned);
-        let pending =
-            self.pending_push_route.take_if(|pending| Some(&pending.request_id) == id.as_ref());
+        let pending = id.as_deref().and_then(|request_id| self.take_pending(request_id));
         match frame {
             GatewayServerFrame::PushRouteRegistered { expires_at, .. } => {
-                if pending.is_some() {
-                    self.config.push_route_retry = PushRouteRetry::default();
-                }
-                if self.config.push_route.is_some() {
-                    self.push_route_expires_at = Some(expires_at);
-                }
+                self.remember_registered_expiry(pending.as_ref(), expires_at);
                 Ok(Some(expires_at))
             }
             GatewayServerFrame::PushRouteDeregistered { .. } => {
-                if pending.is_some() {
-                    self.config.push_route_retry = PushRouteRetry::default();
-                    self.config.push_route_clear_pending = false;
-                }
-                self.push_route_expires_at = None;
+                self.apply_deregistered(pending);
                 Ok(None)
             }
             GatewayServerFrame::PushRouteRefused { reason, code, .. } => {
-                if let Some(pending) = pending {
-                    if pending.deregister && code == GatewayPushRouteRefusal::RejectedOwner {
-                        // Verifiably not the routes' owner: retrying cannot succeed.
-                        tracing::warn!(
-                            "push route deregistration refused; dropping the pending clear"
-                        );
-                        self.config.push_route_clear_pending = false;
-                        self.config.push_route_retry = PushRouteRetry::default();
-                    } else {
-                        self.config.push_route_retry.record(code, pending.sent_at);
-                    }
-                }
+                self.apply_refused(pending, code);
                 Err(SdkError::GatewaySessionRejected(reason))
             }
             _ => Ok(None),
         }
+    }
+
+    fn take_pending(&mut self, request_id: &str) -> Option<PendingPushRoute> {
+        let index =
+            self.pending_push_routes.iter().position(|pending| pending.request_id == request_id)?;
+        Some(self.pending_push_routes.remove(index))
+    }
+
+    fn remember_registered_expiry(&mut self, pending: Option<&PendingPushRoute>, expires_at: u64) {
+        if let Some(provider) = pending.and_then(|item| item.provider) {
+            self.config.push_route_retries.remove(&provider);
+        }
+        let provider = pending.and_then(|item| item.provider).or_else(|| {
+            if self.config.push_routes.len() == 1 {
+                self.config.push_routes.keys().next().copied()
+            } else {
+                None
+            }
+        });
+        if let Some(provider) = provider
+            && self.config.push_routes.contains_key(&provider)
+        {
+            self.push_route_expiries.insert(provider, expires_at);
+            self.push_route_expires_at = Some(expires_at);
+        }
+    }
+
+    fn apply_deregistered(&mut self, pending: Option<PendingPushRoute>) {
+        let Some(pending) = pending else {
+            if self.config.push_routes.is_empty() {
+                self.push_route_expiries.clear();
+                self.push_route_expires_at = None;
+            }
+            return;
+        };
+        if let Some(provider) = pending.provider {
+            self.config.push_route_retries.remove(&provider);
+            self.config.push_route_clears.remove(&provider);
+            let removed = self.push_route_expiries.remove(&provider);
+            if self.push_route_expires_at == removed || self.push_route_expiries.is_empty() {
+                self.push_route_expires_at = self.push_route_expiries.values().copied().min();
+            }
+            return;
+        }
+        self.config.push_route_retry = PushRouteRetry::default();
+        self.config.push_route_clear_pending = false;
+        self.push_route_expiries.clear();
+        self.push_route_expires_at = None;
+    }
+
+    fn apply_refused(&mut self, pending: Option<PendingPushRoute>, code: GatewayPushRouteRefusal) {
+        let Some(pending) = pending else {
+            return;
+        };
+        if pending.deregister && code == GatewayPushRouteRefusal::RejectedOwner {
+            tracing::warn!("push route deregistration refused; dropping the pending clear");
+            if let Some(provider) = pending.provider {
+                self.config.push_route_clears.remove(&provider);
+                self.config.push_route_retries.remove(&provider);
+            } else {
+                self.config.push_route_clear_pending = false;
+                self.config.push_route_retry = PushRouteRetry::default();
+            }
+            return;
+        }
+        self.record_push_retry(pending.provider, code, pending.sent_at);
     }
 
     /// Best-effort, non-blocking push route control after (re)connect, when renewal is due, or
@@ -406,30 +563,75 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
-        if let Some(pending) = &self.pending_push_route {
-            if now.saturating_sub(pending.sent_at) < PUSH_ROUTE_RETRY_AFTER_SECONDS {
-                return;
-            }
-            let sent_at = pending.sent_at;
-            self.pending_push_route = None;
-            self.config.push_route_retry.record(GatewayPushRouteRefusal::Unavailable, sent_at);
-        }
-        if now < self.config.push_route_retry.not_before {
+        self.expire_stale_push_controls(now);
+        if self.config.push_route_clear_pending {
+            self.refresh_delete_all(now).await;
             return;
         }
-        let sent = if self.config.push_route.is_some() {
-            if !push_route_renewal_due(self.push_route_expires_at, now) {
-                return;
+        let due: Vec<GatewayPushRouteRegistration> = self
+            .config
+            .push_routes
+            .values()
+            .filter(|registration| {
+                let provider = Some(registration.provider);
+                !self.push_control_pending(provider)
+                    && !self.push_retry_blocks(provider, now)
+                    && push_route_renewal_due(self.expiry_of(registration.provider), now)
+            })
+            .cloned()
+            .collect();
+        for registration in due {
+            let provider = registration.provider;
+            if let Err(error) = self.send_provider_registration(now, registration).await {
+                tracing::warn!(%error, "push route control deferred");
+                self.record_push_retry(Some(provider), GatewayPushRouteRefusal::Unavailable, now);
             }
-            Box::pin(self.send_push_route_registration(now)).await
-        } else if self.config.push_route_clear_pending {
-            Box::pin(self.send_push_route_deregistration(now)).await
-        } else {
+        }
+        let clears: Vec<GatewayPushProvider> = self
+            .config
+            .push_route_clears
+            .iter()
+            .copied()
+            .filter(|provider| {
+                !self.push_control_pending(Some(*provider))
+                    && !self.push_retry_blocks(Some(*provider), now)
+            })
+            .collect();
+        for provider in clears {
+            if let Err(error) = self.send_push_route_deregistration(now, Some(provider)).await {
+                tracing::warn!(%error, "push route control deferred");
+                self.record_push_retry(Some(provider), GatewayPushRouteRefusal::Unavailable, now);
+            }
+        }
+    }
+
+    fn expire_stale_push_controls(&mut self, now: u64) {
+        let mut kept = Vec::new();
+        let mut stale = Vec::new();
+        for pending in self.pending_push_routes.drain(..) {
+            if now.saturating_sub(pending.sent_at) >= PUSH_ROUTE_RETRY_AFTER_SECONDS {
+                stale.push(pending);
+            } else {
+                kept.push(pending);
+            }
+        }
+        self.pending_push_routes = kept;
+        for pending in stale {
+            self.record_push_retry(
+                pending.provider,
+                GatewayPushRouteRefusal::Unavailable,
+                pending.sent_at,
+            );
+        }
+    }
+
+    async fn refresh_delete_all(&mut self, now: u64) {
+        if self.push_control_pending(None) || self.push_retry_blocks(None, now) {
             return;
-        };
-        if let Err(error) = sent {
+        }
+        if let Err(error) = self.send_push_route_deregistration(now, None).await {
             tracing::warn!(%error, "push route control deferred");
-            self.config.push_route_retry.record(GatewayPushRouteRefusal::Unavailable, now);
+            self.record_push_retry(None, GatewayPushRouteRefusal::Unavailable, now);
         }
     }
 }
@@ -571,6 +773,7 @@ mod tests {
         engine.set_push_route(Some(webpush("rotated"))).await.expect("rotate");
         assert_eq!(registrations.lock().expect("lock")[1].body.token, "rotated");
         // Inside the renewal window the next liveness check renews the route.
+        engine.push_route_expiries.insert(GatewayPushProvider::WebPush, now + 86_400);
         engine.push_route_expires_at = Some(now + 86_400);
         engine.ensure_live(0).await.expect("live");
         assert_eq!(registrations.lock().expect("lock").len(), 3);
@@ -679,7 +882,67 @@ mod tests {
         engine.set_push_route(Some(webpush("first"))).await.expect("register");
         assert_eq!(engine.set_push_route(None).await.expect("deregister"), None);
         assert_eq!(engine.push_route_expires_at(), None);
-        assert!(engine.config.push_route.is_none());
+        assert!(engine.config.push_routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dual_apns_routes_survive_rotation_reconnect_and_delete() -> Result<(), String> {
+        let now = now_unix_timestamp().unsigned_abs();
+        let (mut engine, registrations) = engine(now + 30 * 86_400);
+        engine.set_push_route(Some(apns("alert-a"))).await.map_err(|error| error.to_string())?;
+        engine
+            .set_push_route(Some(apns_voip("voip-a")))
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(engine.config.push_routes.len(), 2);
+        engine.pending_push_routes.clear();
+        engine.push_route_expiries.clear();
+        engine.push_route_expires_at = None;
+        engine.register_push_route().await.map_err(|error| error.to_string())?;
+        let connected = registrations.lock().map_err(|error| error.to_string())?.len();
+        assert_eq!(connected, 4, "reconnect sends both routes");
+        let before = registrations.lock().map_err(|error| error.to_string())?.len();
+        engine.set_push_route(Some(apns("alert-b"))).await.map_err(|error| error.to_string())?;
+        assert_eq!(registrations.lock().map_err(|error| error.to_string())?.len(), before + 1);
+        assert!(engine.config.push_routes.contains_key(&GatewayPushProvider::ApnsVoip));
+        engine.pending_push_routes.clear();
+        engine.push_route_expiries.insert(GatewayPushProvider::Apns, now + 86_400);
+        engine.push_route_expiries.insert(GatewayPushProvider::ApnsVoip, now + 30 * 86_400);
+        engine.refresh_push_route_at(now).await;
+        let frames = registrations.lock().map_err(|error| error.to_string())?.clone();
+        assert_eq!(frames.len(), before + 2, "only the due alert route renews");
+        let renewal = frames.last().ok_or("renewal")?;
+        assert_eq!(renewal.body.provider, GatewayPushProvider::Apns);
+        engine
+            .clear_push_provider(GatewayPushProvider::Apns)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!engine.config.push_routes.contains_key(&GatewayPushProvider::Apns));
+        assert!(engine.config.push_routes.contains_key(&GatewayPushProvider::ApnsVoip));
+        assert_eq!(engine.set_push_route(None).await.map_err(|error| error.to_string())?, None);
+        assert!(engine.config.push_routes.is_empty());
+        assert!(engine.config.push_route_clears.is_empty());
+        Ok(())
+    }
+
+    fn apns(token: &str) -> GatewayPushRouteRegistration {
+        GatewayPushRouteRegistration {
+            provider: GatewayPushProvider::Apns,
+            token: token.into(),
+            endpoint: None,
+            webpush_p256dh: None,
+            webpush_auth: None,
+        }
+    }
+
+    fn apns_voip(token: &str) -> GatewayPushRouteRegistration {
+        GatewayPushRouteRegistration {
+            provider: GatewayPushProvider::ApnsVoip,
+            token: token.into(),
+            endpoint: None,
+            webpush_p256dh: None,
+            webpush_auth: None,
+        }
     }
 
     #[test]

@@ -4,3 +4,5 @@
 //! Test-only fixture modules (default-off `test-support` feature, or `cfg(test)`).
 
 pub mod federation_fixtures;
+
+pub mod notification_authority;

@@ -107,6 +107,31 @@ pub(crate) async fn submit_classified(
     submit_inner(context, envelope, route, deadline, false, false).await
 }
 
+/// Submit one envelope on the local gateway, optionally with a caller-signed call intent.
+///
+/// Cross-node federation does not use this path. The destination forward posts only the
+/// envelope, so a remote call keeps message priority.
+///
+/// # Errors
+/// Returns an error when the gateway rejects the submit or the exchange fails.
+pub(crate) async fn submit_local_call(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    deadline: tokio::time::Instant,
+    extras: crate::gateway::engine::CallSubmitExtras,
+) -> Result<crate::gateway::call_resolution::CallSubmitOutcome, SdkError> {
+    context
+        .priority_call(
+            move |engine| {
+                Box::pin(
+                    async move { engine.submit_correlated_call(envelope, extras, deadline).await },
+                )
+            },
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+}
+
 pub(crate) async fn submit_until(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,

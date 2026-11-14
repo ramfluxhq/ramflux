@@ -4,11 +4,13 @@
 //! Production registration is bound to the live session and fresh root-qualified authority.
 //!
 //! Route control never runs inside the session loop. Each session has one serial worker: at
-//! most one control is in flight, a newer control replaces a queued one (latest intent wins,
-//! the replaced one is answered `superseded`), and every exchange with router and notify is
-//! bounded and cancelled at the bound. Every answer carries the signed request id.
+//! most one control is in flight. A queued control is replaced only by a later control for
+//! the same provider. Delete-all drains every queued control and stays the barrier. Replaced
+//! controls are answered `superseded`. Every exchange with router and notify is bounded and
+//! cancelled at the bound. Every answer carries the signed request id.
 use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
 use ramflux_node_core::{GatewayServerFrame, PUSH_ROUTE_PATH, PushRouteRefusal};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,6 +31,17 @@ impl RouteIntent {
             Self::Deregister(frame) => &frame.signed_request.request_id,
         }
     }
+
+    fn provider(&self) -> Option<ramflux_node_core::PushProviderKind> {
+        match self {
+            Self::Register(frame) => Some(frame.body.provider.clone()),
+            Self::Deregister(frame) => frame.body.provider.clone(),
+        }
+    }
+
+    fn is_delete_all(&self) -> bool {
+        matches!(self, Self::Deregister(frame) if frame.body.provider.is_none())
+    }
 }
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -37,7 +50,7 @@ type Reply = Arc<dyn Fn(GatewayServerFrame) -> BoxFuture<()> + Send + Sync>;
 
 /// Per-session serial executor with latest-intent-wins coalescing.
 pub(crate) struct RouteControlQueue {
-    slot: Arc<tokio::sync::Mutex<Option<RouteIntent>>>,
+    slot: Arc<tokio::sync::Mutex<VecDeque<RouteIntent>>>,
     wake: Arc<tokio::sync::Notify>,
     reply: Reply,
     worker: tokio::task::JoinHandle<()>,
@@ -52,16 +65,17 @@ impl Drop for RouteControlQueue {
 
 impl RouteControlQueue {
     pub(crate) fn start(execute: Execute, reply: Reply) -> Self {
-        let slot: Arc<tokio::sync::Mutex<Option<RouteIntent>>> = Arc::default();
+        let slot: Arc<tokio::sync::Mutex<VecDeque<RouteIntent>>> = Arc::default();
         let wake = Arc::new(tokio::sync::Notify::new());
         let worker = tokio::spawn({
             let (slot, wake, reply) = (Arc::clone(&slot), Arc::clone(&wake), Arc::clone(&reply));
             async move {
                 loop {
-                    let next = slot.lock().await.take();
-                    match next {
-                        Some(intent) => reply(execute(intent).await).await,
-                        None => wake.notified().await,
+                    let next = slot.lock().await.pop_front();
+                    if let Some(intent) = next {
+                        reply(execute(intent).await).await;
+                    } else {
+                        wake.notified().await;
                     }
                 }
             }
@@ -69,11 +83,29 @@ impl RouteControlQueue {
         Self { slot, wake, reply, worker }
     }
 
-    /// Queues `intent`; a queued but not yet started intent is answered `superseded`.
+    /// Queues `intent`. Same-provider controls replace only that provider. Delete-all
+    /// supersedes every queued control and then runs after the one already in flight.
     pub(crate) async fn submit(&self, intent: RouteIntent) {
-        let replaced = self.slot.lock().await.replace(intent);
+        let superseded = {
+            let mut queued = self.slot.lock().await;
+            let mut superseded = Vec::new();
+            if intent.is_delete_all() {
+                superseded.extend(queued.drain(..));
+                queued.push_back(intent);
+            } else if let Some(index) =
+                queued.iter().position(|item| item.provider() == intent.provider())
+            {
+                if let Some(old) = queued.remove(index) {
+                    superseded.push(old);
+                }
+                queued.insert(index, intent);
+            } else {
+                queued.push_back(intent);
+            }
+            superseded
+        };
         self.wake.notify_one();
-        if let Some(replaced) = replaced {
+        for replaced in superseded {
             (self.reply)(refused(replaced.request_id().to_owned(), PushRouteRefusal::Superseded))
                 .await;
         }

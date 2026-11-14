@@ -53,6 +53,8 @@ fn control(action: call_action::Value) -> CallControl {
         created_at: 1,
         body: Some(CallAction { value: Some(action) }),
         signature: "sig-alice".into(),
+        call_ref: None,
+        call_start: None,
     }
 }
 
@@ -64,7 +66,7 @@ fn round_trip(action: call_action::Value, event_id: &[u8]) -> TestResult {
     let call = call(action);
     RamfluxClient::validate_generated_call(&call)?;
     let native = super::native::to_native(call.clone())?;
-    assert_eq!(super::native::from_native(&native), call);
+    assert_eq!(super::native::from_native(&native)?, call);
     let encoded =
         RamfluxClient::encode_generated_call(&mut stream(), event_id.to_vec(), call.clone())?;
     let (_, decoded) = RamfluxClient::decode_generated_inner(&encoded)?;
