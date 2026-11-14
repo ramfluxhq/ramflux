@@ -213,9 +213,13 @@ async fn merge(
 ) -> TestResult {
     let mut merged = false;
     for _ in 0..96 {
-        rig.clock.advance_ms(1001);
+        if !rig.primary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
-        rig.clock.advance_ms(1001);
+        if !rig.secondary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(Box::pin(rig.secondary.sync_relay()), target, client).await?;
         let a = rig.primary.transfer_status(request).await?;
         let b = rig.secondary.transfer_status(request).await?;

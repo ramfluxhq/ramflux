@@ -101,9 +101,13 @@ async fn hold_base_application(
                 return Ok(loan);
             }
         }
-        rig.clock.advance_ms(1001);
+        if !rig.primary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
-        rig.clock.advance_ms(1001);
+        if !rig.secondary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(Box::pin(rig.secondary.sync_relay()), source, &rig.source.client).await?;
         settle_stream_work(rig).await;
     }

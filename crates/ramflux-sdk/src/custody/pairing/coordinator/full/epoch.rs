@@ -233,7 +233,15 @@ impl crate::custody::pairing::PairingActor {
             return Ok(false);
         };
         if let Some(stream) = &mut state.stream {
-            if let Some(packet) = stream.advance().await? {
+            if let Some(packet) = stream.advance().await.inspect_err(|error| {
+                tracing::debug!(
+                    section = "stream completion",
+                    code = Self::background_error_code(error),
+                    "full data worker refused"
+                );
+                #[cfg(test)]
+                eprintln!("test: full stream completion refused: {error}");
+            })? {
                 state.epoch_ready = Some(packet);
             }
             return Ok(true);
@@ -246,7 +254,15 @@ impl crate::custody::pairing::PairingActor {
             let finished = job.finish().await?;
             state.trust = Some(finished.trust);
             state.keys = Some(finished.keys);
-            let mut packet = finished.packet?;
+            let mut packet = finished.packet.inspect_err(|error| {
+                tracing::debug!(
+                    section = "epoch completion",
+                    code = Self::background_error_code(error),
+                    "full data worker refused"
+                );
+                #[cfg(test)]
+                eprintln!("test: full epoch completion refused: {error}");
+            })?;
             if let Some(manifest) = &state.idle_manifest {
                 packet.expect_idle_position(manifest)?;
             }

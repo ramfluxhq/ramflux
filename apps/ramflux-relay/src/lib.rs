@@ -44,13 +44,9 @@ pub fn run() -> anyhow::Result<()> {
     run_service("ramflux-relay")
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_service(service: &'static str) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--health-check") {
-        // T23-A2b2b: in the default keyring mode, health is NOT unconditional. When the client
-        // object-relay QUIC surface is configured, the federation provider keyring must be fully
-        // configured and load/verify against the pinned offline root, or the health check fails
-        // (non-zero) — a relay that cannot authorize object requests must never report healthy.
+        // Object-relay health requires verified federation trust and its pinned offline root.
         if service == "ramflux-relay"
             && ramflux_node_core::environment::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some()
         {
@@ -79,64 +75,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         #[cfg(feature = "itest-media-udp")]
         let service_key = relay_service_key(&config)?;
 
-        let mut trust_snapshot_cache = ramflux_node_core::RelayTrustSnapshotCache::new();
-
-        // The client-facing object-relay QUIC surface is opt-in via its bind address, and never started
-        // for a one-shot `--once` init run.
         let once = std::env::args().any(|arg| arg == "--once");
         let client_object_quic_enabled =
             ramflux_node_core::environment::var_os(RELAY_CLIENT_QUIC_ADDR_ENV).is_some() && !once;
-        let mut initial_keyring_envelope: Option<ramflux_node_core::ProviderSignedTrustSnapshot> =
-            None;
-        // T23-A2b2b: when the object-relay QUIC surface will be served, the federation provider keyring
-        // is MANDATORY. A missing/incomplete config or a keyring that fails to load/verify makes the
-        // process fail closed (return `Err` → exit) so the relay never serves object requests it cannot
-        // authorize while reporting healthy. A `--once` init run or a relay without the client QUIC
-        // surface has no object surface to protect and skips the provider.
-        if client_object_quic_enabled {
-            let (endpoint, _keyring_file, _offline_root, issuer_node_id, cache_file, keyring) =
-                require_keyring_provider_ready()?;
-            let now = now_unix_seconds();
-            let tls = mesh_tls_config(&config);
-            let peer_ca_pems = vec![std::fs::read_to_string(&config.mesh.ca_cert)?];
-            // Restore persisted state (best-effort) into the live-to-be cache, tracking its
-            // authoritative envelope for the anti-rollback high-water.
-            initial_keyring_envelope = load_keyring_trust(
-                &cache_file,
-                &mut trust_snapshot_cache,
-                &keyring,
-                &issuer_node_id,
-                now,
-            )
-            .unwrap_or_else(|error| {
-                tracing::debug!(%error, "no usable persisted keyring trust snapshot");
-                None
-            });
-            // Fetch + plan a candidate on top of the restored state; persist BEFORE adopting, so a
-            // persistence failure keeps the durable-consistent restored state. A federation outage at
-            // startup leaves the cache fail-closed-at-read (empty), not fail-open.
-            let fetched = fetch_keyring_envelope(&endpoint, &tls, &peer_ca_pems).ok();
-            if let Some((candidate, candidate_envelope)) = plan_keyring_candidate(
-                &trust_snapshot_cache,
-                &keyring,
-                fetched,
-                initial_keyring_envelope.as_ref(),
-                &issuer_node_id,
-                now,
-            ) {
-                match persist_keyring_trust(&cache_file, &candidate, candidate_envelope.as_ref()) {
-                    Ok(()) => {
-                        trust_snapshot_cache = candidate;
-                        initial_keyring_envelope = candidate_envelope;
-                        tracing::info!(generation = ?trust_snapshot_cache.generation(), "initial keyring trust snapshot loaded");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "initial keyring trust persistence failed; keeping restored state fail-closed");
-                    }
-                }
-            }
-        }
-        let trust_snapshot_cache = Arc::new(Mutex::new(trust_snapshot_cache));
+        let RelayTrust { cache: trust_snapshot_cache, envelope: mut initial_keyring_envelope } =
+            initial_relay_trust(&config, client_object_quic_enabled)?;
 
         if client_object_quic_enabled
             && let Some((endpoint, keyring_file, offline_root, issuer_node_id, cache_file)) =
@@ -163,29 +106,8 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             )?;
         }
         start_expire_scheduler(Arc::clone(&store), Arc::clone(&state));
-        // RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only: periodically log redb page-cache metrics
-        // (used_bytes/evictions/read+write hit+miss) at INFO so the control(1 GiB)-vs-candidate(32 MiB)
-        // experiment can observe the cache high-water and eviction behaviour. Absent from the default
-        // build (no cache_stats accessor, no thread) — no production control-surface expansion.
         #[cfg(feature = "itest-redb-cache-probe")]
-        {
-            let probe_redb = Arc::clone(&store);
-            let _ = std::thread::Builder::new().name("relay-redb-cache-probe".to_owned()).spawn(
-                move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    let cache = probe_redb.cache_stats();
-                    tracing::info!(
-                        used_bytes = cache.used_bytes(),
-                        evictions = cache.evictions(),
-                        read_hits = cache.read_hits(),
-                        read_misses = cache.read_misses(),
-                        write_hits = cache.write_hits(),
-                        write_misses = cache.write_misses(),
-                        "redb cache probe stats"
-                    );
-                },
-            );
-        }
+        start_cache_probe(&store);
 
         #[cfg(feature = "itest-media-udp")]
         serve_media_relay_udp(service_key.clone())?;
@@ -225,6 +147,100 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         })
         .map_err(Into::into)
 }
+struct RelayTrust {
+    cache: Arc<Mutex<ramflux_node_core::RelayTrustSnapshotCache>>,
+    envelope: Option<ramflux_node_core::ProviderSignedTrustSnapshot>,
+}
+fn initial_relay_trust(
+    config: &ramflux_node_core::NodeServiceConfig,
+    client_object_quic_enabled: bool,
+) -> anyhow::Result<RelayTrust> {
+    let mut trust_snapshot_cache = ramflux_node_core::RelayTrustSnapshotCache::new();
+    let mut initial_keyring_envelope: Option<ramflux_node_core::ProviderSignedTrustSnapshot> = None;
+    // T23-A2b2b: when the object-relay QUIC surface will be served, the federation provider keyring
+    // is MANDATORY. A missing/incomplete config or a keyring that fails to load/verify makes the
+    // process fail closed (return `Err` → exit) so the relay never serves object requests it cannot
+    // authorize while reporting healthy. A `--once` init run or a relay without the client QUIC
+    // surface has no object surface to protect and skips the provider.
+    if client_object_quic_enabled {
+        let (endpoint, _keyring_file, _offline_root, issuer_node_id, cache_file, keyring) =
+            require_keyring_provider_ready()?;
+        let now = now_unix_seconds();
+        let tls = mesh_tls_config(config);
+        let peer_ca_pems = vec![operator_ca_bundle(&config.mesh.ca_cert)?];
+        // Restore persisted state (best-effort) into the live-to-be cache, tracking its
+        // authoritative envelope for the anti-rollback high-water.
+        initial_keyring_envelope = load_keyring_trust(
+            &cache_file,
+            &mut trust_snapshot_cache,
+            &keyring,
+            &issuer_node_id,
+            now,
+        )
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "no usable persisted keyring trust snapshot");
+            None
+        });
+        // Fetch + plan a candidate on top of the restored state; persist BEFORE adopting, so a
+        // persistence failure keeps the durable-consistent restored state. A federation outage at
+        // startup leaves the cache fail-closed-at-read (empty), not fail-open.
+        let fetched = fetch_keyring_envelope(&endpoint, &tls, &peer_ca_pems).ok();
+        if let Some((candidate, candidate_envelope)) = plan_keyring_candidate(
+            &trust_snapshot_cache,
+            &keyring,
+            fetched,
+            initial_keyring_envelope.as_ref(),
+            &issuer_node_id,
+            now,
+        ) {
+            match persist_keyring_trust(&cache_file, &candidate, candidate_envelope.as_ref()) {
+                Ok(()) => {
+                    trust_snapshot_cache = candidate;
+                    initial_keyring_envelope = candidate_envelope;
+                    tracing::info!(generation = ?trust_snapshot_cache.generation(), "initial keyring trust snapshot loaded");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "initial keyring trust persistence failed; keeping restored state fail-closed");
+                }
+            }
+        }
+    }
+    Ok(RelayTrust {
+        cache: Arc::new(Mutex::new(trust_snapshot_cache)),
+        envelope: initial_keyring_envelope,
+    })
+}
+fn operator_ca_bundle(path: &str) -> anyhow::Result<String> {
+    use std::io::Read as _;
+    const MAX_BYTES: u64 = 1_048_576;
+    let mut pem = String::new();
+    std::fs::File::open(path)?.take(MAX_BYTES + 1).read_to_string(&mut pem)?;
+    if pem.len() as u64 > MAX_BYTES {
+        anyhow::bail!("relay CA bundle exceeds startup read bound");
+    }
+    Ok(pem)
+}
+#[cfg(feature = "itest-redb-cache-probe")]
+fn start_cache_probe(store: &Arc<ramflux_node_core::RelayRedbStore>) {
+    let probe_redb = Arc::clone(store);
+    let _ =
+        std::thread::Builder::new().name("relay-redb-cache-probe".to_owned()).spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let cache = probe_redb.cache_stats();
+                tracing::info!(
+                    used_bytes = cache.used_bytes(),
+                    evictions = cache.evictions(),
+                    read_hits = cache.read_hits(),
+                    read_misses = cache.read_misses(),
+                    write_hits = cache.write_hits(),
+                    write_misses = cache.write_misses(),
+                    "redb cache probe stats"
+                );
+            }
+        });
+}
+
 mod config;
 mod voice;
 

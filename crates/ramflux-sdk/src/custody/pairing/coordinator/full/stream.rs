@@ -266,7 +266,7 @@ impl PairingActor {
     ) -> Result<Option<crate::custody::pairing::FullLocalIoLoan>, SdkError> {
         if !self.full_base_stream_started_for_test() {
             self.service_full_transfer(db).inspect_err(|error| {
-                eprintln!("test: target application barrier stream start: {error}")
+                eprintln!("test: target application barrier stream start: {error}");
             })?;
         }
         let Some(loan) = self
@@ -284,7 +284,7 @@ impl PairingActor {
             Ok(Some(loan))
         } else {
             loan.apply(db).inspect_err(|error| {
-                eprintln!("test: target application barrier preceding local request: {error}")
+                eprintln!("test: target application barrier preceding local request: {error}");
             })?;
             Ok(None)
         }

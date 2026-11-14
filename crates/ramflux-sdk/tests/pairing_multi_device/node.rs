@@ -4,7 +4,6 @@
 //! Real node custody service with serialized direct frames; no HTTP/Fedwire claim.
 use super::{ResultOf, vault::Vault};
 use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
-use ramflux_node_core::pairing_relay::PairingClock as _;
 use ramflux_node_core::{CustodyService, CustodyTlsContext, RouterCore, RouterRedbStore};
 use ramflux_protocol::{custody::*, encode_base64url};
 use ramflux_sdk::{

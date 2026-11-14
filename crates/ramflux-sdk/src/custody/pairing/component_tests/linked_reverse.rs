@@ -124,7 +124,9 @@ mod tests {
             rig.primary.full_epoch_in_flight_for_test(),
             rig.secondary.full_epoch_in_flight_for_test()
         );
-        rig.clock.advance_ms(1001);
+        if !rig.primary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(
             Box::pin(rig.primary.sync_relay()),
             source_service,
@@ -134,7 +136,9 @@ mod tests {
         )
         .await
         .map_err(|error| format!("test: linked source sync ({position}): {error}"))?;
-        rig.clock.advance_ms(1001);
+        if !rig.secondary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(
             Box::pin(rig.secondary.sync_relay()),
             source_service,

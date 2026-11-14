@@ -58,6 +58,9 @@ async fn run() -> TestResult {
         b"component-recipient-passphrase",
     )
     .await?;
+    // Cold owners have discarded the old bearer tokens. The native relay keeps
+    // that epoch until its specified ten-second idle expiry.
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
     drive(Box::pin(rig.primary.transfer_status(&request)), &mut source, &rig.source.client).await?;
     drive(Box::pin(rig.secondary.transfer_status(&request)), &mut target, &client).await?;
     Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;

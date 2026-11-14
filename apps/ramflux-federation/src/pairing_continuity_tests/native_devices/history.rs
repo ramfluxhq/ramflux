@@ -140,8 +140,7 @@ async fn run() -> TestResult {
         "test: history bypassed authenticated object fetch"
     );
     let before_media = network.objects.gets.load(Ordering::SeqCst);
-    let native = custody::load_account(b.root.path(), &b.id, wall()?)?;
-    let sibling = native.local_device_id()?;
+    let sibling = &original_branch.2.device_id;
     const MEDIA: &[u8] = b"ordinary authorized media after independent pairing";
     Box::pin(source.send_pairing_media(sibling, BODY, MEDIA)).await?;
     Box::pin(target.wait_pairing_history("paired-ordinary-media-message", BODY)).await?;

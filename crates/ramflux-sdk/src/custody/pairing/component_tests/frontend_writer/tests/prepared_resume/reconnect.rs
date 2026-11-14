@@ -35,6 +35,9 @@ async fn run() -> TestResult {
     let target_relay = relay(&mut rig.secondary)?;
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
+    // A cold endpoint has no token with which to close the old relay epoch. Let
+    // its specified ten-second idle owner expire before fresh original proofs.
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
     rig.source.client = crate::RamfluxClient::new();
     assert!(
         rig.participant_b.db.lock().map_err(|_| "test: retired B writer")?.is_none(),
@@ -151,9 +154,13 @@ async fn pump(
     target: &crate::RamfluxClient,
 ) -> TestResult {
     for _ in 0..96 {
-        rig.clock.advance_ms(1001);
+        if !rig.primary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         let source = drive(Box::pin(rig.primary.sync_relay()), a, &rig.source.client).await;
-        rig.clock.advance_ms(1001);
+        if !rig.secondary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         let recipient = drive(Box::pin(rig.secondary.sync_relay()), b, target).await;
         for result in [source, recipient] {
             match result {
