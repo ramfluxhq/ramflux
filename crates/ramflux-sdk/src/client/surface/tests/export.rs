@@ -3,9 +3,9 @@
 
 //! Peer-driven export regressions and validated same-root checkpoint replication.
 use super::*;
-#[test]
-fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let exported = f.human.own_surface_history_export(None)?;
     assert_eq!(exported.checkpoints.len(), 1);
@@ -29,9 +29,9 @@ fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -
     assert_eq!(conflict["out_of_sync"], true);
     Ok(())
 }
-#[test]
-fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> TestResult {
+    let f = Fixture::new().await?;
     let mut own_content = snapshot();
     own_content.surface_id = "own".into();
     let mut own =
@@ -78,10 +78,10 @@ fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> Test
     assert_eq!(recorded["truncated"], false);
     Ok(())
 }
-#[test]
-fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundred_row_cap()
+#[tokio::test]
+async fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundred_row_cap()
 -> TestResult {
-    let f = Fixture::new()?;
+    let f = Fixture::new().await?;
     create(&f)?;
     for version in 1..=128 {
         if version > 1 {
@@ -91,10 +91,10 @@ fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundre
                 &format!("v{version}"),
                 &event(
                     version,
-                    C::StreamAppend(StreamAppendCommand {
+                    C::AppendText(AppendText {
                         surface_id: "s".into(),
-                        component_id: "stream".into(),
-                        text_delta: String::new(),
+                        path: "/stream".into(),
+                        delta: String::new(),
                         final_: false,
                     }),
                 )?,
@@ -139,9 +139,9 @@ fn cache_human_manifest(f: &Fixture) -> TestResult {
     Ok(())
 }
 
-#[test]
-fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = serde_json::to_value(f.human.own_surface_history_export(None)?)?;
     for i in 0..64 {
@@ -153,10 +153,10 @@ fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
         )?;
         held.wire_base64 = ramflux_protocol::encode_base64url(event(
             3,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: format!("unknown-{i}"),
-                component_id: "stream".into(),
-                text_delta: "future".into(),
+                path: "/stream".into(),
+                delta: "future".into(),
                 final_: false,
             }),
         )?);
@@ -179,9 +179,10 @@ fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
     assert_eq!(serde_json::to_value(f.human.own_surface_history_export(None)?)?, before);
     Ok(())
 }
-#[test]
-fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent()
+-> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let original = f.human.own_surface_history_export(None)?.checkpoints.remove(0);
     let mut content = snapshot();
@@ -222,9 +223,9 @@ fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent
     Ok(())
 }
 
-#[test]
-fn repeated_checkpoint_retains_the_original_signed_history_entry() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn repeated_checkpoint_retains_the_original_signed_history_entry() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let owned = f.human.export_owned_surface_checkpoint(
         &f.human.resolve_surface_reference("s", None, None)?.ok_or("reference")?,

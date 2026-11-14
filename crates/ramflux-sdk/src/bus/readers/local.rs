@@ -53,6 +53,7 @@ impl AccountView {
             views.insert(
                 "device.list",
                 serde_json::to_value(LocalBusDeviceListResponse {
+                    a2ui_renderer_capabilities: ramflux_protocol::renderer_capabilities(),
                     principal_id: account.gateway_config.principal_id.clone(),
                     local_device_id: account.gateway_config.device_id.clone(),
                     devices,

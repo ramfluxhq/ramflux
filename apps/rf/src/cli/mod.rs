@@ -67,7 +67,6 @@ pub(crate) enum Command {
     Keychain(KeychainCommand),
     Vault(VaultCommand),
     A2i(A2iCommand),
-    A2ui(A2uiCommand),
     Surface(SurfaceCommand),
     Admin(AdminCommand),
 }

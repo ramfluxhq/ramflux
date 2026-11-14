@@ -194,9 +194,9 @@ impl<E: EngineProvider> AgentHost<E> {
         let wire =
             ramflux_protocol::decode_base64url(row["wire_base64"].as_str().ok_or(Error::State)?)
                 .map_err(|_| Error::State)?;
-        let action = ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&wire)
-            .map_err(|_| Error::State)?;
-        let content: ramflux_protocol::CreateSurfaceCommand =
+        let action =
+            ramflux_protocol::SurfaceAction::from_wire_bytes(&wire).map_err(|_| Error::State)?;
+        let content: ramflux_protocol::SurfaceSnapshot =
             serde_json::from_value(view["snapshot"].clone()).map_err(|_| Error::State)?;
         if action.conversation_id() != conversation || action.surface_id() != content.surface_id {
             return Err(Error::Unauthorized);
@@ -220,17 +220,13 @@ impl<E: EngineProvider> AgentHost<E> {
         }) {
             return Err(Error::State);
         }
-        if intents.iter().any(|intent| {
-            intent.command().is_none_or(|command| {
-                crate::runner_output::command_id(&command) != content.surface_id
-            })
-        }) {
+        if intents.iter().any(|intent| intent.surface_id() != Some(content.surface_id.as_str())) {
             return Err(Error::State);
         }
         crate::runner_output::surface_outputs(
             conversation,
             &intents,
-            view["version"].as_u64().ok_or(Error::State)?.checked_add(1).ok_or(Error::Limit)?,
+            &crate::runner_output::state_from_view(conversation, &view)?,
         )
     }
 }

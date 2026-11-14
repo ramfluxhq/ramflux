@@ -4,19 +4,18 @@
 //! A creator-device decision ledger with authenticated, non-executable replicas.
 use super::{Carrier, Outcome, Payload, PayloadKind, SnapshotProof, invalid, key};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::A2uiSurfaceAction;
+use ramflux_protocol::SurfaceAction;
 use serde_json::{Value, json};
-pub(super) fn decision_key(
-    carrier: &Carrier,
-    action: &A2uiSurfaceAction,
-) -> Result<String, SdkError> {
+pub(super) fn decision_key(carrier: &Carrier, action: &SurfaceAction) -> Result<String, SdkError> {
     Ok(format!(
         "{}/{}",
         key("decisions", &carrier.surface_reference()?),
         ramflux_protocol::hash_base64url(
-            "ramflux.surface.decision.v1",
+            "ramflux.surface.decision.v2",
             &ramflux_protocol::canonical_json_bytes(&(
                 action.version(),
+                action.source_component_id(),
+                action.source_instance(),
                 action.action_id(),
                 &carrier.sender_principal_id
             ))?
@@ -28,7 +27,7 @@ impl RamfluxClient {
         &self,
         receipt: &Carrier,
         original: &Carrier,
-        action: &A2uiSurfaceAction,
+        action: &SurfaceAction,
     ) -> Result<Outcome, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let Some((record, current)) = self.surface_state_ref(&receipt.surface_reference()?)? else {
@@ -73,7 +72,7 @@ impl RamfluxClient {
     pub(super) fn persist_surface_decision(
         &self,
         original: &Carrier,
-        action: &A2uiSurfaceAction,
+        action: &SurfaceAction,
         actionable: bool,
         group_epoch: Option<u64>,
     ) -> Result<(), SdkError> {

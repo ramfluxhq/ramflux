@@ -5,7 +5,7 @@
 //! This is account-owned persistence, never a substitute for peer event authentication.
 use super::{StoredSurface, invalid, key};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::{A2uiConversationEvent, SurfaceState};
+use ramflux_protocol::{SurfaceEvent, SurfaceState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[derive(Clone, Serialize, Deserialize)]
@@ -31,14 +31,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("surface conversation missing"))?;
         let epoch = self.account_db()?.load_actor_state::<u64>(&key("group_epoch", reference))?;
         self.check_owned_surface_floor(&conversation, epoch)?;
-        let command = ramflux_protocol::A2uiConversationCommand::CreateSurface(
-            state.content().ok_or_else(|| invalid("surface content missing"))?.clone(),
-        );
-        let wire = ramflux_protocol::encode_a2ui_conversation_event(
-            &record.conversation_id,
-            state.version(),
-            &command,
-        )?;
+        let wire = state.resync_frame()?.wire_bytes()?;
         Ok(OwnedSurfaceCheckpoint {
             record,
             snapshot_wire_base64: ramflux_protocol::encode_base64url(wire),
@@ -176,13 +169,17 @@ impl RamfluxClient {
         }
         let wire = ramflux_protocol::decode_base64url(&owned.snapshot_wire_base64)
             .map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
-        let event = A2uiConversationEvent::from_wire_bytes(&wire)?;
+        let event = SurfaceEvent::from_wire_bytes(&wire)?;
         let bytes = ramflux_protocol::decode_base64url(&record.checkpoint_base64)
             .map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
+        let checkpoint_state = SurfaceState::from_checkpoint_bytes(&bytes)
+            .map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
+        if checkpoint_state != SurfaceState::validate_proof(&event)? {
+            return Err(SdkError::SurfaceCheckpointMismatch);
+        }
         let repeated = previous.as_ref().is_some_and(|(_, state)| state.version() == owned.version);
         let prior = previous.map_or_else(SurfaceState::default, |(_, state)| state);
-        let state =
-            prior.resynchronize(&event, &bytes).map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
+        let state = prior.apply(&event).map_err(|_| SdkError::SurfaceCheckpointMismatch)?;
         if state.version() != owned.version
             || state.hash() != Some(owned.surface_hash.as_str())
             || state.conversation_id() != Some(record.conversation_id.as_str())

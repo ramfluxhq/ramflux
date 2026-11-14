@@ -126,8 +126,8 @@ fn own_forward(
     )?;
     Ok(())
 }
-#[test]
-fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestResult {
+#[tokio::test]
+async fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestResult {
     let t = Terminals::new()?;
     let [b1, b2, a1, a2] = t.clients.as_slice() else { return Err("terminals".into()) };
     let mut create =
@@ -193,8 +193,8 @@ fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestRe
     assert_eq!(executable[1]["actions"][0]["actionable"], false);
     Ok(())
 }
-#[test]
-fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> TestResult {
+#[tokio::test]
+async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> TestResult {
     let t = Terminals::new()?;
     let b1 = &t.clients[0];
     let b2 = &t.clients[1];
@@ -215,8 +215,9 @@ fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> Te
     Ok(())
 }
 
-#[test]
-fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult {
+#[tokio::test]
+async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult
+{
     let t = Terminals::new()?;
     let source = &t.clients[0];
     let target = &t.clients[1];
@@ -229,7 +230,7 @@ fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() 
         source,
         PayloadKind::Event,
         "close",
-        &event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     source.attach_surface_snapshot(&mut close)?;
     close = source.sign_surface_carrier(close)?;
@@ -248,8 +249,8 @@ fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() 
     Ok(())
 }
 
-#[test]
-fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
+#[tokio::test]
+async fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
     let t = Terminals::new()?;
     let source = &t.clients[0];
     source.create_group("g", "author-device")?;
@@ -278,8 +279,8 @@ fn own_surface_history_omits_group_state_below_the_current_membership_floor() ->
     Ok(())
 }
 
-#[test]
-fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
+#[tokio::test]
+async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
     let t = Terminals::new()?;
     let author = &t.clients[0];
     let create =
@@ -298,10 +299,10 @@ fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestRe
         "append",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "x".into(),
+                path: "/stream".into(),
+                delta: "x".into(),
                 final_: false,
             }),
         )?,

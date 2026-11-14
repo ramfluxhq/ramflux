@@ -3,14 +3,12 @@
 
 use ed25519_dalek::SigningKey;
 use ramflux_protocol::{
-    A2uiCommand, CreateSurfaceCommand, CursorState, DeleteSurfaceCommand, DeleteSurfaceReason,
-    EventOrderingState, FIXTURE_OBJECTS, HeaderField, HeaderKind, McpCapability, ProtocolError,
-    ReplayGuard, RiskLevel, SignedRequest, SurfaceType, UpdateComponentsCommand,
-    UpdateDataModelCommand, canonical_header_bytes, canonical_json_bytes, decode_base64url,
-    event_sort_key, fixture_canonical_path, fixture_hash_path, fixture_invalid_signature_path,
-    fixture_json_path, fixture_replay_path, fixture_sig_path, hash_hex, header_hash_base64url,
-    home_node_migration_proof_signed_bytes, parse_fixture_value, signed_value, surface_hash,
-    verify_canonical_signature, verify_json_signature,
+    CursorState, EventOrderingState, FIXTURE_OBJECTS, HeaderField, HeaderKind, McpCapability,
+    ProtocolError, ReplayGuard, RiskLevel, SignedRequest, canonical_header_bytes,
+    canonical_json_bytes, decode_base64url, event_sort_key, fixture_canonical_path,
+    fixture_hash_path, fixture_invalid_signature_path, fixture_json_path, fixture_replay_path,
+    fixture_sig_path, hash_hex, header_hash_base64url, home_node_migration_proof_signed_bytes,
+    parse_fixture_value, signed_value, verify_canonical_signature, verify_json_signature,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -196,48 +194,17 @@ fn mcp_capability_default_risk_matrix_is_canonical() {
 }
 
 #[test]
-fn a2ui_commands_and_surface_hash_are_canonical() -> Result<(), Box<dyn std::error::Error>> {
-    let mut data_model = serde_json::Map::new();
-    data_model.insert("status".to_owned(), Value::String("pending".to_owned()));
-    let create = A2uiCommand::CreateSurface(CreateSurfaceCommand {
-        surface_id: "surf_01".to_owned(),
-        surface_type: SurfaceType::ApprovalCard,
-        catalog: "ramflux.basic.v1".to_owned(),
-        catalog_version: "1.0.0".to_owned(),
-        fallback_text: "Approve request".to_owned(),
-        fallback_markdown: None,
-        components: vec![json!({"id":"approve","kind":"button"})],
-        data_model,
-        allowed_actions: vec![json!({"name":"approve"})],
-    });
-    let update_components = A2uiCommand::UpdateComponents(UpdateComponentsCommand {
-        surface_id: "surf_01".to_owned(),
-        base_surface_hash: "base".to_owned(),
-        components: vec![json!({"id":"deny","kind":"button"})],
-        remove_component_ids: vec!["approve".to_owned()],
-        new_surface_hash: "new".to_owned(),
-    });
-    let mut patch = serde_json::Map::new();
-    patch.insert("status".to_owned(), Value::String("done".to_owned()));
-    let update_data = A2uiCommand::UpdateDataModel(UpdateDataModelCommand {
-        surface_id: "surf_01".to_owned(),
-        base_surface_hash: "base".to_owned(),
-        data_patch: patch,
-        new_surface_hash: "new".to_owned(),
-    });
-    let delete = A2uiCommand::DeleteSurface(DeleteSurfaceCommand {
-        surface_id: "surf_01".to_owned(),
-        reason: Some(DeleteSurfaceReason::Completed),
-    });
-
-    for command in [create, update_components, update_data, delete] {
-        let canonical = canonical_json_bytes(&command)?;
-        assert_ne!(canonical.len(), 0);
-    }
-
-    let with_hash = json!({"surfaceId":"surf_01","surface_hash":"ignored","components":[]});
-    let without_hash = json!({"surfaceId":"surf_01","components":[]});
-    assert_eq!(surface_hash(&with_hash)?, surface_hash(&without_hash)?);
+fn surface_v3_independent_state_and_action_commitments() -> Result<(), Box<dyn std::error::Error>> {
+    let create = include_bytes!("../fixtures/protocol/v1/a2ui_surface/create.event.json");
+    let event = ramflux_protocol::SurfaceEvent::from_wire_bytes(create)?;
+    let state = ramflux_protocol::SurfaceState::default().apply(&event)?;
+    let expected = include_str!("../fixtures/protocol/v1/a2ui_surface/surface.hash").trim();
+    assert_eq!(state.hash(), Some(expected), "state hash must match the independent Python oracle");
+    let action = ramflux_protocol::SurfaceAction::from_wire_bytes(include_bytes!(
+        "../fixtures/protocol/v1/a2ui_surface/submit.action.json"
+    ))?;
+    state.validate_action(&action)?;
+    assert_eq!(state.version(), 1, "a raw-input submit must not consume a surface version");
     Ok(())
 }
 

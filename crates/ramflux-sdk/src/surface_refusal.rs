@@ -47,13 +47,12 @@ impl SurfaceRefusalCode {
     pub(crate) fn renderer(error: &serde_json::Value) -> Self {
         if let Ok(reject) = serde_json::from_value::<SurfaceReject>(error["reject"].clone()) {
             return match reject {
-                SurfaceReject::Version { .. } | SurfaceReject::Stale => Self::StaleVersion,
-                SurfaceReject::Conflict
-                | SurfaceReject::ResultHashMismatch
-                | SurfaceReject::ArgumentsHashMismatch => Self::StaleHash,
-                SurfaceReject::Closed | SurfaceReject::BlockClosed => Self::Closed,
+                SurfaceReject::Version { .. } => Self::StaleVersion,
+                SurfaceReject::Conflict => Self::StaleHash,
+                SurfaceReject::Integrity => Self::StaleHash,
+                SurfaceReject::Closed => Self::Closed,
                 SurfaceReject::NotCreated => Self::NotFound,
-                SurfaceReject::LimitExceeded { .. } => Self::TooLarge,
+                SurfaceReject::Limit => Self::TooLarge,
                 _ => Self::InvalidRequest,
             };
         }

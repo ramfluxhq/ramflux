@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Span Brain
 use super::*;
 
-#[test]
-fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     for version in 2..=270 {
         let signed = carrier(
@@ -13,10 +13,10 @@ fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
             &format!("v{version}"),
             &event(
                 version,
-                C::StreamAppend(StreamAppendCommand {
+                C::AppendText(AppendText {
                     surface_id: "s".into(),
-                    component_id: "stream".into(),
-                    text_delta: "x".into(),
+                    path: "/stream".into(),
+                    delta: "x".into(),
                     final_: false,
                 }),
             )?,
@@ -39,9 +39,10 @@ fn history_is_bounded_and_reports_its_retained_version_range() -> TestResult {
     assert_eq!(f.author.surface_get("s", 0, None)?["version"], 270);
     Ok(())
 }
-#[test]
-fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write() -> TestResult
+{
+    let f = Fixture::new().await?;
     let db = f.author.account_db()?;
     let prefix = key("actions", "retention") + "/";
     for version in 1..=5 {
@@ -65,9 +66,9 @@ fn byte_retention_preserves_the_latest_record_and_rolls_back_an_oversized_write(
     assert_eq!(db.surface_history_page::<Value>(&prefix, &prefix, 100)?, before);
     Ok(())
 }
-#[test]
-fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn one_large_accepted_action_remains_readable_by_action_id() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let view = f.author.surface_get("s", 0, None)?;
     let values = json!({"note":"x".repeat(10_000)});

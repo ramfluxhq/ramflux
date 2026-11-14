@@ -10,7 +10,7 @@ pub mod custody;
 pub mod large_attachment;
 pub mod message;
 pub use client_discovery::*;
-pub mod a2ui_state;
+pub mod a2ui;
 mod core_types;
 mod device_address;
 pub use device_address::{
@@ -45,7 +45,8 @@ mod state;
 mod surfaces;
 pub mod tasks;
 pub mod text_safety;
-pub use a2ui_state::*;
+pub use a2ui::Reject as SurfaceReject;
+pub use a2ui::*;
 pub use i_json::{
     I_JSON_REJECTED, MAX_SAFE_JSON_INTEGER, decode_signed_ack_ijson, decode_signed_envelope_ijson,
     decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection, parse_i_json,
@@ -97,12 +98,10 @@ pub use replay::{
 pub use signature::{verify_canonical_signature, verify_json_signature, verify_signed_fields};
 pub use state::{CursorState, EventOrderingState, EventSortKey, GroupEpochState, event_sort_key};
 pub use surfaces::{
-    A2iControlEvent, A2uiCommand, A2uiEventType, A2uiSurfaceEvent, ActorType, BotEventBody,
-    BotInstallGrant, BotManifest, ControlDomain, CreateSurfaceCommand, DeleteSurfaceCommand,
-    DeleteSurfaceReason, FederationHandshake, HostingModel, KeyCustodyClass, McpCapability,
-    McpGrant, NotificationDeliveryClass, NotificationWake, ObjectChunkRequest, ObjectManifest,
-    PushPriority, RiskLevel, SafetyDisclosure, SurfaceType, UpdateComponentsCommand,
-    UpdateDataModelCommand, surface_hash, surface_snapshot_hash,
+    A2iControlEvent, ActorType, BotEventBody, BotInstallGrant, BotManifest, ControlDomain,
+    FederationHandshake, HostingModel, KeyCustodyClass, McpCapability, McpGrant,
+    NotificationDeliveryClass, NotificationWake, ObjectChunkRequest, ObjectManifest, PushPriority,
+    RiskLevel, SafetyDisclosure,
 };
 
 pub const CRATE_NAME: &str = "ramflux-protocol";

@@ -4,11 +4,10 @@
 use serde::Serialize;
 
 use crate::{
-    A2iControlEvent, A2uiSurfaceEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof,
-    ConversationEvent, Cursor, DeviceProof, Envelope, EventId, FederationHandshake,
-    FriendLinkEvent, GroupEvent, HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent,
-    McpGrant, MessageEvent, Nack, NotificationWake, ObjectChunkRequest, ObjectManifest,
-    SignedRequest, domain,
+    A2iControlEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof, ConversationEvent,
+    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent, GroupEvent,
+    HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent, McpGrant, MessageEvent, Nack,
+    NotificationWake, ObjectChunkRequest, ObjectManifest, SignedRequest, domain,
 };
 
 pub trait ProtocolObject: Serialize {
@@ -97,9 +96,6 @@ impl_protocol_object!(
     }
 );
 impl_protocol_object!(A2iControlEvent, domain::A2I_CONTROL, |v: &A2iControlEvent| {
-    Some(format!("{}:{}", v.domain, v.correlation_id))
-});
-impl_protocol_object!(A2uiSurfaceEvent, domain::A2UI_SURFACE, |v: &A2uiSurfaceEvent| {
     Some(format!("{}:{}", v.domain, v.correlation_id))
 });
 impl_protocol_object!(McpGrant, domain::MCP_GRANT, |v: &McpGrant| Some(format!(

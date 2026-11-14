@@ -3,7 +3,7 @@
 
 use super::support::Fake;
 use ramflux_agent_host::{AgentBus, Error, Result};
-use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
+use ramflux_protocol::{A2uiConversationCommand as C, SurfaceEvent, SurfaceState};
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ impl SurfaceBus {
         .map_err(|_| Error::State)?;
         self.state = self
             .state
-            .apply(&A2uiConversationEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
+            .apply(&SurfaceEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
             .map_err(|_| Error::State)?;
         if let Some(action) = self.action.as_mut() {
             action["actionable"] = json!(false);
@@ -86,7 +86,7 @@ impl SurfaceBus {
         let raw =
             ramflux_protocol::decode_base64url(body["wire_base64"].as_str().ok_or(Error::State)?)
                 .map_err(|_| Error::State)?;
-        let event = A2uiConversationEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?;
+        let event = SurfaceEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?;
         if let Some(reason) = self.refusal.take() {
             return Err(Error::SurfaceRefused(reason));
         }
@@ -109,7 +109,7 @@ impl SurfaceBus {
             .map_err(|_| Error::State)?;
             self.state = self
                 .state
-                .apply(&A2uiConversationEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
+                .apply(&SurfaceEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
                 .map_err(|_| Error::State)?;
             if self.faults.disconnect_after_conflict {
                 self.get_failures = 1;
@@ -139,7 +139,7 @@ impl SurfaceBus {
             .map_err(|_| Error::State)?;
             self.state = self
                 .state
-                .apply(&A2uiConversationEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?)
+                .apply(&SurfaceEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?)
                 .map_err(|_| Error::State)?;
         }
         if self.faults.disconnect_after_conflict

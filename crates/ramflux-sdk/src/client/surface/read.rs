@@ -28,8 +28,20 @@ impl RamfluxClient {
         let Some(mut view) = db.client_record("surface", id)? else {
             return Ok(Value::Null);
         };
+        let author = view
+            .get("author_principal_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("surface author missing"))?;
+        let render_allowed = self.surface_author_is_own_agent(author)?;
+        let authored_locally =
+            self.device_branch.as_ref().is_some_and(|local| local.principal_id == author);
+        view["render_allowed"] = json!(render_allowed);
         if let Some((record, state)) = self.surface_state_ref(id)? {
-            view["snapshot"] = serde_json::to_value(state.content())?;
+            view["snapshot"] = if render_allowed || authored_locally {
+                serde_json::to_value(state.content())?
+            } else {
+                Value::Null
+            };
             view["author_device_id"] = json!(record.author_device_id);
             view["streams"] = json!(state.stream_states());
             view["created_at"] = json!(record.created_at);
@@ -91,7 +103,7 @@ impl RamfluxClient {
             if let Some(wire) = action["carrier"]["wire_base64"].as_str() {
                 let raw = ramflux_protocol::decode_base64url(wire)
                     .map_err(|_| invalid("stored surface action wire invalid"))?;
-                let parsed = ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&raw)?;
+                let parsed = ramflux_protocol::SurfaceAction::from_wire_bytes(&raw)?;
                 action["task_binding"] = serde_json::to_value(parsed.task_binding())?;
             }
             if let Some(row) = action.as_object_mut() {

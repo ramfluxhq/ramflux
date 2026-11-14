@@ -296,7 +296,9 @@ impl RamfluxClient {
         let outcome = self
             .project_surface_message(conversation, &message, sender, &bytes, outbound)?
             .ok_or_else(|| invalid("surface projection absent"))?;
-        if carrier.payload_kind == PayloadKind::ActionReceipt {
+        if carrier.payload_kind == PayloadKind::ActionReceipt
+            || carrier.payload_kind.rpc_kind().is_some()
+        {
             return Ok(true);
         }
         if self.direct_message_by_id(&message)?.is_none() {

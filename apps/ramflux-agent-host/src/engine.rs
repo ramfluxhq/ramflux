@@ -4,8 +4,8 @@
 //! Typed rule planning and detached-provider events with human approval metadata.
 use crate::{Config, Error, Result, Rule};
 use ramflux_protocol::{
-    A2uiConversationCommand as Command, A2uiSurfaceAction, CreateSurfaceCommand,
-    DeleteSurfaceCommand, PatchSurfaceCommand, StreamAppendCommand, SurfacePatchOp, SurfaceType,
+    AppendText, CATALOG_ID, DeleteSurface, EVENT_SCHEMA, EventFrame, Mutation, MutationMessage,
+    SurfaceAction, SurfaceSnapshot, SurfaceState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,28 +70,69 @@ pub struct EngineInput<'a> {
 }
 /// An action already accepted by rfd, plus the latest explicitly read surface snapshot.
 pub struct ActionInput<'a> {
-    pub action: &'a A2uiSurfaceAction,
-    pub snapshot: &'a CreateSurfaceCommand,
+    pub action: &'a SurfaceAction,
+    pub snapshot: &'a SurfaceSnapshot,
     pub closed: bool,
 }
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Intent {
     ReplyText(String),
-    CreateSurface(CreateSurfaceCommand),
-    StreamAppend(StreamAppendCommand),
-    PatchSurface(PatchSurfaceCommand),
-    CloseSurface(DeleteSurfaceCommand),
+    CreateSurface(SurfaceSnapshot),
+    AppendText(AppendText),
+    ReplaceSurface(SurfaceSnapshot),
+    CloseSurface(DeleteSurface),
 }
 impl Intent {
-    pub(crate) fn command(&self) -> Option<Command> {
+    pub(crate) fn surface_id(&self) -> Option<&str> {
         Some(match self {
             Self::ReplyText(_) => return None,
-            Self::CreateSurface(c) => Command::CreateSurface(c.clone()),
-            Self::StreamAppend(c) => Command::StreamAppend(c.clone()),
-            Self::PatchSurface(c) => Command::PatchSurface(c.clone()),
-            Self::CloseSurface(c) => Command::DeleteSurface(c.clone()),
+            Self::CreateSurface(s) | Self::ReplaceSurface(s) => &s.surface_id,
+            Self::AppendText(a) => &a.surface_id,
+            Self::CloseSurface(c) => &c.surface_id,
         })
+    }
+    pub(crate) fn frame(&self, conversation: &str, state: &SurfaceState) -> Result<EventFrame> {
+        if let Self::ReplaceSurface(snapshot) = self {
+            let mut frame = state.resync_frame().map_err(|_| Error::State)?;
+            frame.surface_version = state.version().checked_add(1).ok_or(Error::Limit)?;
+            frame.new_surface_hash = snapshot.hash().map_err(|_| Error::Limit)?;
+            frame.fallback_text = Some(snapshot.fallback_text.clone());
+            frame.final_ = Some(snapshot.final_.clone());
+            frame.closed = Some(snapshot.closed);
+            frame.metadata = snapshot.metadata.clone();
+            frame.resync = Some(ramflux_protocol::Resync {
+                a2ui: MutationMessage::new(Mutation::CreateSurface(snapshot.create())),
+            });
+            return Ok(frame);
+        }
+        let mut frame = EventFrame {
+            schema: EVENT_SCHEMA.into(),
+            conversation_id: conversation.into(),
+            surface_version: state.version().checked_add(1).ok_or(Error::Limit)?,
+            base_surface_hash: state.hash().map(str::to_owned),
+            new_surface_hash: String::new(),
+            fallback_text: None,
+            close_reason: None,
+            a2ui: None,
+            append_text: None,
+            resync: None,
+            final_: None,
+            closed: None,
+            metadata: None,
+        };
+        match self {
+            Self::CreateSurface(s) => {
+                frame.a2ui = Some(MutationMessage::new(Mutation::CreateSurface(s.create())));
+                frame.fallback_text = Some(s.fallback_text.clone());
+            }
+            Self::AppendText(a) => frame.append_text = Some(a.clone()),
+            Self::CloseSurface(c) => {
+                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c.clone())))
+            }
+            Self::ReplyText(_) | Self::ReplaceSurface(_) => return Err(Error::State),
+        }
+        state.prepare_event(frame).map_err(|_| Error::State)
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -227,58 +268,56 @@ impl EngineProvider for RuleEngine {
         let Some(surface) = &rule.surface else {
             return Ok(vec![Intent::ReplyText(rule.reply.clone())]);
         };
-        let id =
-            format!("agent-{}", ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?);
-        let mut content = CreateSurfaceCommand {
+        let random = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
+        let suffix: String = random.bytes().map(|b| format!("{b:02x}")).collect();
+        let id = format!("agent_{suffix}");
+        let mut components = vec![
+            json!({"id":"root","component":"Column","children":["reply","result"]}),
+            json!({"id":"reply","component":"Text","text":{"@path":"/reply"}}),
+            json!({"id":"result","component":"Text","text":{"@path":"/result"}}),
+        ];
+        let mut children = vec![json!("reply"), json!("result")];
+        for (index, choice) in surface.choices.iter().enumerate() {
+            let button = format!("choice{index}");
+            let label = format!("label{index}");
+            children.push(json!(button));
+            components.push(json!({"id":button,"component":"Button","child":label,"action":{"event":{"name":choice.id,"context":{"decision":choice.id}}}}));
+            components.push(json!({"id":label,"component":"Text","text":choice.label}));
+        }
+        if let Some(root) = components.first_mut() {
+            root["children"] = json!(children);
+        }
+        let content = SurfaceSnapshot {
             surface_id: id.clone(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Working".into(),
-            fallback_markdown: None,
-            components: vec![
-                json!({"id":"reply","type":"Text","text":""}),
-                json!({"id":"result","type":"Text","text":""}),
-            ],
-            data_model: serde_json::Map::from_iter([
-                ("rule".into(), json!(rule.pattern)),
-                ("agent_host".into(), json!("ramflux.agent.rule.v1")),
-            ]),
-            allowed_actions: surface
-                .choices
-                .iter()
-                .map(|choice| json!({"name":choice.id,"label":choice.label}))
-                .collect(),
+            catalog_id: CATALOG_ID.into(),
+            fallback_text: rule.reply.clone(),
+            metadata: None,
+            components,
+            data_model: json!({"reply":"","result":"","rule":rule.pattern,"agent_host":"ramflux.agent.rule.v1"}),
+            final_: Vec::new(),
+            closed: false,
         };
-        let mut intents = vec![Intent::CreateSurface(content.clone())];
-        let parts = chunks(&rule.reply, surface.chunk_bytes);
+        let mut intents = vec![Intent::CreateSurface(content)];
+        let mut parts = chunks(&rule.reply, surface.chunk_bytes);
+        if parts.is_empty() {
+            parts.push("");
+        }
         for (index, part) in parts.iter().enumerate() {
-            intents.push(Intent::StreamAppend(StreamAppendCommand {
+            intents.push(Intent::AppendText(AppendText {
                 surface_id: id.clone(),
-                component_id: "reply".into(),
-                text_delta: part.to_string(),
+                path: "/reply".into(),
+                delta: (*part).into(),
                 final_: index + 1 == parts.len(),
             }));
         }
-        content.components[0]["text"] = json!(rule.reply);
-        let base = ramflux_protocol::surface_snapshot_hash(&content).map_err(|_| Error::Limit)?;
-        content.fallback_text.clone_from(&rule.reply);
-        intents.push(Intent::PatchSurface(PatchSurfaceCommand {
-            surface_id: id.clone(),
-            base_surface_hash: base,
-            ops: vec![SurfacePatchOp::SetFallbackText { fallback_text: rule.reply.clone() }],
-            new_surface_hash: ramflux_protocol::surface_snapshot_hash(&content)
-                .map_err(|_| Error::Limit)?,
-        }));
         if surface.choices.is_empty() {
-            intents
-                .push(Intent::CloseSurface(DeleteSurfaceCommand { surface_id: id, reason: None }));
+            intents.push(Intent::CloseSurface(DeleteSurface { surface_id: id }));
         }
         Ok(intents)
     }
     fn action(&mut self, input: &ActionInput<'_>) -> Result<Vec<Intent>> {
         if input.closed
-            || input.snapshot.catalog != "basic"
+            || input.snapshot.catalog_id != CATALOG_ID
             || input.snapshot.data_model.get("agent_host").and_then(serde_json::Value::as_str)
                 != Some("ramflux.agent.rule.v1")
         {
@@ -290,59 +329,43 @@ impl EngineProvider for RuleEngine {
         }) else {
             return Ok(Vec::new());
         };
-        let Some(surface) = &rule.surface else { return Ok(Vec::new()) };
+        let Some(surface) = &rule.surface else {
+            return Ok(Vec::new());
+        };
         let Some(choice) =
             surface.choices.iter().find(|choice| choice.id == input.action.action_id())
         else {
             return Ok(Vec::new());
         };
-        if !input.snapshot.allowed_actions.iter().any(|action| action["name"] == choice.id) {
-            let expected = format!("You chose {}.", choice.label);
-            if surface.close_on_action
-                && input.snapshot.allowed_actions.is_empty()
-                && input.snapshot.fallback_text == expected
-                && input
-                    .snapshot
-                    .components
-                    .iter()
-                    .any(|block| block["id"] == "result" && block["text"] == expected)
-            {
-                return Ok(vec![Intent::CloseSurface(DeleteSurfaceCommand {
-                    surface_id: input.snapshot.surface_id.clone(),
-                    reason: None,
-                })]);
-            }
-            return Ok(Vec::new());
-        }
         let result = format!("You chose {}.", choice.label);
-        let mut content = input.snapshot.clone();
-        let base = ramflux_protocol::surface_snapshot_hash(&content).map_err(|_| Error::State)?;
-        let component = json!({"id":"result","type":"Text","text":result});
-        let block =
-            content.components.iter_mut().find(|b| b["id"] == "result").ok_or(Error::State)?;
-        *block = component.clone();
-        content.fallback_text.clone_from(&result);
-        content.allowed_actions.clear();
-        let mut intents = vec![Intent::PatchSurface(PatchSurfaceCommand {
-            surface_id: content.surface_id.clone(),
-            base_surface_hash: base,
-            ops: vec![
-                SurfacePatchOp::ReplaceBlock { component },
-                SurfacePatchOp::SetActions { actions: Vec::new() },
-                SurfacePatchOp::SetFallbackText { fallback_text: result },
-            ],
-            new_surface_hash: ramflux_protocol::surface_snapshot_hash(&content)
-                .map_err(|_| Error::State)?,
-        })];
+        let mut snapshot = input.snapshot.clone();
+        let root = snapshot
+            .components
+            .iter_mut()
+            .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some("root"))
+            .ok_or(Error::State)?;
+        if let Some(map) = root.as_object_mut() {
+            map.insert("children".into(), json!(["reply", "result"]));
+        }
+        snapshot.components.retain(|c| {
+            matches!(
+                c.get("id").and_then(serde_json::Value::as_str),
+                Some("root" | "reply" | "result")
+            )
+        });
+        let model = snapshot.data_model.as_object_mut().ok_or(Error::State)?;
+        model.insert("result".into(), json!(result));
+        snapshot.fallback_text = result;
+        let mut intents = vec![Intent::ReplaceSurface(snapshot)];
         if surface.close_on_action {
-            intents.push(Intent::CloseSurface(DeleteSurfaceCommand {
-                surface_id: content.surface_id,
-                reason: None,
+            intents.push(Intent::CloseSurface(DeleteSurface {
+                surface_id: input.snapshot.surface_id.clone(),
             }));
         }
         Ok(intents)
     }
 }
+
 pub(crate) fn chunks(text: &str, bytes: usize) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut tail = text;

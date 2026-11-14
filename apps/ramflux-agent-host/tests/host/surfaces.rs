@@ -90,12 +90,12 @@ async fn conflict_reloads_current_snapshot_and_rebuilds_the_result_patch() -> Te
     assert_eq!(bus.requests.len() - before, 3, "conflict, rebuilt result, close");
     assert_ne!(bus.requests[before]["message_id"], bus.requests[before + 1]["message_id"]);
     let decode = |row: &serde_json::Value| -> std::result::Result<
-        ramflux_protocol::A2uiConversationEvent,
+        ramflux_protocol::SurfaceEvent,
         Box<dyn std::error::Error>,
     > {
-        Ok(ramflux_protocol::A2uiConversationEvent::from_wire_bytes(
-            &ramflux_protocol::decode_base64url(row["wire_base64"].as_str().ok_or("wire")?)?,
-        )?)
+        Ok(ramflux_protocol::SurfaceEvent::from_wire_bytes(&ramflux_protocol::decode_base64url(
+            row["wire_base64"].as_str().ok_or("wire")?,
+        )?)?)
     };
     assert_eq!(
         decode(&bus.requests[before + 1])?.version(),

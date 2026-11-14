@@ -460,8 +460,8 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
 -> Result<(), SdkError> {
     use crate::client::surface::{Carrier, PayloadKind, SnapshotProof};
     use ramflux_protocol::{
-        A2uiConversationCommand as C, A2uiConversationEvent as E, CreateSurfaceCommand,
-        StreamAppendCommand, SurfaceState, SurfaceType,
+        A2uiConversationCommand as C, CreateSurfaceCommand, StreamAppendCommand, SurfaceEvent as E,
+        SurfaceState, SurfaceType,
     };
     let mut a = Fixture::new("alice", 231)?;
     let mut b = Fixture::new("bob", 241)?;

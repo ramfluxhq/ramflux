@@ -3,9 +3,10 @@
 
 //! Hash disagreement and recipient-driven resync preserve state and bound response amplification.
 use super::*;
-#[test]
-fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advancing() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advancing()
+-> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.human.surface_get("s", 0, None)?;
     let delta = carrier(
@@ -14,10 +15,10 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
         "v2",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "hello".into(),
+                path: "/stream".into(),
+                delta: "hello".into(),
                 final_: false,
             }),
         )?,
@@ -41,8 +42,8 @@ fn delta_requires_a_hash_and_hash_disagreement_marks_out_of_sync_without_advanci
     assert_eq!(after["out_of_sync"], true);
     Ok(())
 }
-#[test]
-fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
+#[tokio::test]
+async fn only_original_author_answers_each_device_once_in_one_surface_window_and_recovery_converges()
 -> TestResult {
     let terminals = devices::Terminals::new()?;
     let [author, sibling, human, human_two] = terminals.clients.as_slice() else {
@@ -59,10 +60,10 @@ fn only_original_author_answers_each_device_once_in_one_surface_window_and_recov
         "v2",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "new state".into(),
+                path: "/stream".into(),
+                delta: "new state".into(),
                 final_: false,
             }),
         )?,

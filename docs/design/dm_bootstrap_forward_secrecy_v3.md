@@ -24,7 +24,7 @@ external gates are excluded. QA+sd001 e2e later is controller-owned; it is not a
 per-card acceptance gate. Product in-crate fixture conversion remains owned by
 03/04, preserving the assertions and ownership listed below.
 
-S0 section 11 (`message_schema_v1.md`, approved design input
+S0 section 11 ([historical message schema design](https://github.com/ramfluxhq/ramflux/blob/61d96751b550c661d15444a7ddecff116897498d/docs/design/message_schema_v1.md), approved design input
 `61d96751b550c661d15444a7ddecff116897498d`) takes precedence for capsule handoff
 and retry reuse. Preserve the exact RFS1 header/transcript and X3DH outputs;
 S10b encrypts the header in its bootstrap capsule, with only format/E public.

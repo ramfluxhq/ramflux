@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Span Brain
 use super::*;
 
-#[test]
-fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResult {
+    let f = Fixture::new().await?;
     let good = carrier(
         &f.author,
         PayloadKind::Event,
@@ -19,9 +19,9 @@ fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResult {
     assert!(project(&f.human, &good, "real")?.accepted);
     Ok(())
 }
-#[test]
-fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
+    let f = Fixture::new().await?;
     f.author.persist_root_verified_directory(
         &crate::client::identity_authority::test_support::public_manifest(&f.human)?,
     )?;
@@ -91,9 +91,9 @@ fn project_in(client: &RamfluxClient, signed: &Carrier) -> Result<Outcome, SdkEr
         )?
         .ok_or_else(|| super::super::invalid("surface"))
 }
-#[test]
-fn equal_ids_are_independent_across_conversations_and_authors() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn equal_ids_are_independent_across_conversations_and_authors() -> TestResult {
+    let f = Fixture::new().await?;
     let a = signed_in(&f.author, "author", "thread", "a", "Author in thread")?;
     let b = signed_in(&f.human, "human", "thread", "b", "Human in thread")?;
     let c = signed_in(&f.author, "author", "another-thread", "c", "Author elsewhere")?;
@@ -129,16 +129,16 @@ fn equal_ids_are_independent_across_conversations_and_authors() -> TestResult {
     );
     Ok(())
 }
-#[test]
-fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.human.surface_get("s", 0, None)?;
     let bad = carrier(
         &f.human,
         PayloadKind::Event,
         "non-author",
-        &event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     assert!(!project(&f.human, &bad, "bad")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?, before);
@@ -152,9 +152,9 @@ fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> TestRe
     );
     Ok(())
 }
-#[test]
-fn checkpoint_cannot_restore_under_another_row_or_inconsistent_view() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn checkpoint_cannot_restore_under_another_row_or_inconsistent_view() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let reference = f
         .human
@@ -191,9 +191,9 @@ fn checkpoint_cannot_restore_under_another_row_or_inconsistent_view() -> TestRes
     Ok(())
 }
 
-#[test]
-fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced() -> TestResult {
+    let f = Fixture::new().await?;
     let mut first =
         carrier(&f.author, PayloadKind::Event, "stable", &event(1, C::CreateSurface(snapshot()))?)?;
     f.author.attach_surface_snapshot(&mut first)?;
@@ -206,7 +206,7 @@ fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced() -> 
         &f.author,
         PayloadKind::Event,
         "next",
-        &event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     project(&f.author, &next, "next")?;
     let mut candidate = first.clone();
@@ -220,9 +220,9 @@ fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced() -> 
     Ok(())
 }
 
-#[test]
-fn colliding_peer_names_do_not_block_the_original_surface_signer() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> TestResult {
+    let f = Fixture::new().await?;
     let mut outsider = client(&f.root.join("outsider"), "outsider", 61)?;
     outsider.create_device_branch("outsider", "author-device", 1, [62; 32]);
     f.human.persist_root_verified_directory(

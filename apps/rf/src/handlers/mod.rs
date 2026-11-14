@@ -4,7 +4,6 @@
 #![allow(unused_imports)]
 
 pub(crate) mod a2i;
-pub(crate) mod a2ui;
 pub(crate) mod account;
 mod account_backup;
 mod account_ceremony;
@@ -42,17 +41,17 @@ pub(crate) use crate::utils::*;
 pub(crate) use crate::{DEFAULT_DATA_ROOT, RfError};
 pub(crate) use ramflux_sdk::{
     GatewayQuicEndpointConfig, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
-    LocalBusA2uiActionRequest, LocalBusA2uiRenderRequest, LocalBusAccountBackupExportRequest,
-    LocalBusAccountBackupImportRequest, LocalBusAccountCreateRequest,
-    LocalBusAccountPassphraseRotateRequest, LocalBusAccountUnlockRequest,
-    LocalBusBotInstallRequest, LocalBusBotRevokeRequest, LocalBusBotTrustAddRequest,
-    LocalBusCallAnswerRequest, LocalBusCallHangupRequest, LocalBusCallInviteRequest,
-    LocalBusClient, LocalBusConfig, LocalBusContactAddRequest, LocalBusContactFederatedRequest,
-    LocalBusContactLinkRequest, LocalBusContactRemoveRequest, LocalBusContactSafetyRequest,
-    LocalBusConversationDisappearingExpireRequest, LocalBusConversationDisappearingSetRequest,
-    LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusDeviceRevokeRequest,
-    LocalBusFederationRoute, LocalBusGrantRequest, LocalBusGrantRevokeRequest,
-    LocalBusGroupCreateRequest, LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
+    LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,
+    LocalBusAccountCreateRequest, LocalBusAccountPassphraseRotateRequest,
+    LocalBusAccountUnlockRequest, LocalBusBotInstallRequest, LocalBusBotRevokeRequest,
+    LocalBusBotTrustAddRequest, LocalBusCallAnswerRequest, LocalBusCallHangupRequest,
+    LocalBusCallInviteRequest, LocalBusClient, LocalBusConfig, LocalBusContactAddRequest,
+    LocalBusContactFederatedRequest, LocalBusContactLinkRequest, LocalBusContactRemoveRequest,
+    LocalBusContactSafetyRequest, LocalBusConversationDisappearingExpireRequest,
+    LocalBusConversationDisappearingSetRequest, LocalBusConversationMuteRequest,
+    LocalBusConversationRequest, LocalBusDeviceRevokeRequest, LocalBusFederationRoute,
+    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGroupCreateRequest,
+    LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
     LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,
     LocalBusGroupMemberRemoveRequest, LocalBusGroupMessageDeleteRequest,
     LocalBusGroupNameSetRequest, LocalBusGroupReceiveRequest, LocalBusGroupRequest,

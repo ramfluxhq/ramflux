@@ -4,9 +4,20 @@
 use super::{Carrier, Outcome, PayloadKind, key};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{
-    A2uiConversationCommand as C, CreateSurfaceCommand, DeleteSurfaceCommand, PatchSurfaceCommand,
-    StreamAppendCommand, SurfacePatchOp, SurfaceType, surface_args_hash, surface_snapshot_hash,
+    ACTION_SCHEMA, Action, ActionFrame, ActionMessage, AppendText, CATALOG_ID, DeleteSurface,
+    EVENT_SCHEMA, EventFrame, Mutation, MutationMessage, Resync, SurfaceSnapshot, SurfaceState,
 };
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+#[derive(Clone)]
+enum C {
+    CreateSurface(SurfaceSnapshot),
+    AppendText(AppendText),
+    DeleteSurface(DeleteSurface),
+    Resync(SurfaceSnapshot),
+}
+thread_local! { static AUTHOR_STATES: RefCell<BTreeMap<(String,u64),SurfaceState>> = const { RefCell::new(BTreeMap::new()) }; }
+
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -25,7 +36,8 @@ fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, S
     Ok(client)
 }
 impl Fixture {
-    fn new() -> Result<Self, SdkError> {
+    async fn new() -> TestResult<Self> {
+        AUTHOR_STATES.with(|states| states.borrow_mut().clear());
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = ramflux_test_support::TestPath::new()
             .expect("test: allocate fixture directory")
@@ -34,12 +46,9 @@ impl Fixture {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-        let author = client(&root.join("author"), "author", 31)?;
-        let human = client(&root.join("human"), "human", 35)?;
+        let (human, author) = super::test_support::owned_pair(&root, "human", "author").await?;
         for (local, remote) in [(&author, &human), (&human, &author)] {
-            local.persist_root_verified_directory(
-                &crate::client::identity_authority::test_support::public_manifest(remote)?,
-            )?;
+            let _ = remote;
             local.account_db()?.persist_client_record(
                 "conversation",
                 "thread",
@@ -55,24 +64,105 @@ impl Drop for Fixture {
         self.human = RamfluxClient::new();
     }
 }
-fn snapshot() -> CreateSurfaceCommand {
-    CreateSurfaceCommand {
+fn snapshot() -> SurfaceSnapshot {
+    let mut components = vec![
+        json!({"id":"root","component":"Column","children":["stream","result","approve"]}),
+        json!({"id":"stream","component":"Text","text":{"@path":"/stream"}}),
+        json!({"id":"result","component":"Text","text":{"@path":"/result"}}),
+        json!({"id":"approve","component":"Button","child":"approve_label","action":{"event":{"name":"approve","context":{"approved":true}}}}),
+        json!({"id":"approve_label","component":"Text","text":"Approve"}),
+    ];
+    components.sort_by(|a, b| {
+        a.get("id").and_then(Value::as_str).cmp(&b.get("id").and_then(Value::as_str))
+    });
+    SurfaceSnapshot {
         surface_id: "s".into(),
-        surface_type: SurfaceType::StatusPanel,
-        catalog: "basic".into(),
-        catalog_version: "1".into(),
+        catalog_id: CATALOG_ID.into(),
         fallback_text: "Working".into(),
-        fallback_markdown: None,
-        components: vec![json!({"id":"stream","text":""}), json!({"id":"result","text":""})],
-        data_model: serde_json::Map::default(),
-        allowed_actions: vec![json!({"name":"approve"})],
+        metadata: None,
+        components,
+        data_model: json!({"stream":"","result":""}),
+        final_: Vec::new(),
+        closed: false,
     }
 }
-fn event(version: u64, command: C) -> Result<Vec<u8>, serde_json::Error> {
-    let command = serde_json::to_value(command)?;
-    serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.conversation.v2","conversationId":"thread","version":version,"command":command}),
-    )
+fn event(version: u64, intent: C) -> Result<Vec<u8>, SdkError> {
+    AUTHOR_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let surface = match &intent {
+            C::CreateSurface(s) | C::Resync(s) => &s.surface_id,
+            C::AppendText(a) => &a.surface_id,
+            C::DeleteSurface(c) => &c.surface_id,
+        }
+        .clone();
+        let previous = if matches!(intent, C::CreateSurface(_)) {
+            SurfaceState::default()
+        } else {
+            states
+                .get(&(surface.clone(), version.saturating_sub(1)))
+                .cloned()
+                .or_else(|| {
+                    states
+                        .iter()
+                        .rev()
+                        .find(|((id, _), _)| *id == surface)
+                        .map(|(_, state)| state.clone())
+                })
+                .unwrap_or_default()
+        };
+        let expected = previous.version() + 1;
+        let mut frame = EventFrame {
+            schema: EVENT_SCHEMA.into(),
+            conversation_id: "thread".into(),
+            surface_version: expected,
+            base_surface_hash: previous.hash().map(str::to_owned),
+            new_surface_hash: "invalid".into(),
+            fallback_text: None,
+            close_reason: None,
+            a2ui: None,
+            append_text: None,
+            resync: None,
+            final_: None,
+            closed: None,
+            metadata: None,
+        };
+        match intent {
+            C::CreateSurface(s) => {
+                frame.fallback_text = Some(s.fallback_text.clone());
+                frame.new_surface_hash = s.hash()?;
+                frame.a2ui = Some(MutationMessage::new(Mutation::CreateSurface(s.create())));
+            }
+            C::AppendText(a) => frame.append_text = Some(a),
+            C::DeleteSurface(c) => {
+                frame.a2ui = Some(MutationMessage::new(Mutation::DeleteSurface(c)))
+            }
+            C::Resync(s) => {
+                frame.base_surface_hash = None;
+                frame.fallback_text = Some(s.fallback_text.clone());
+                frame.new_surface_hash = s.hash()?;
+                frame.resync = Some(Resync {
+                    a2ui: MutationMessage::new(Mutation::CreateSurface(s.create())),
+                });
+                frame.final_ = Some(s.final_.clone());
+                frame.closed = Some(s.closed);
+                frame.metadata = s.metadata;
+            }
+        }
+        if frame.resync.is_none()
+            && let Ok(prepared) = previous.prepare_event(frame.clone())
+        {
+            frame = prepared;
+        }
+        frame.surface_version = version;
+        let wire = frame.wire_bytes()?;
+        if let Ok(next) = previous.apply(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&wire)?) {
+            states.insert((surface, version), next);
+        }
+        while states.len() > 256 {
+            states.pop_first();
+        }
+        Ok(wire)
+    })
 }
 fn carrier(
     sender: &RamfluxClient,
@@ -81,7 +171,7 @@ fn carrier(
     wire: &[u8],
 ) -> Result<Carrier, SdkError> {
     let device = sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let mut signed = Carrier {
+    let signed = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -97,54 +187,8 @@ fn carrier(
         signature: String::new(),
         snapshot: None,
     };
-    if signed.payload_kind == PayloadKind::Event {
-        attach_reference_hash(sender, &mut signed, wire)?;
-    }
     sender.sign_surface_carrier(signed)
 }
-// Model the authoring sequence separately from the receiver's projection and delivery order.
-fn attach_reference_hash(
-    sender: &RamfluxClient,
-    carrier: &mut Carrier,
-    wire: &[u8],
-) -> Result<(), SdkError> {
-    let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(wire)?;
-    let prefix = format!("test/author-model/{}/", carrier.surface_reference()?);
-    let previous_key = format!("{prefix}{:020}", event.version().saturating_sub(1));
-    let saved = sender.account_db()?.load_actor_state::<Vec<u8>>(&previous_key)?;
-    let previous = if let Some(bytes) = saved {
-        ramflux_protocol::SurfaceState::from_checkpoint_bytes(&bytes)
-            .map_err(|_| super::invalid("reference checkpoint"))?
-    } else if event.version() > 1 {
-        let create = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(
-            &event_bytes_for_reference_create()?,
-        )?;
-        ramflux_protocol::SurfaceState::default()
-            .apply(&create)
-            .map_err(|_| super::invalid("reference create"))?
-    } else {
-        ramflux_protocol::SurfaceState::default()
-    };
-    let next = previous.apply(&event);
-    let expected = next.as_ref().unwrap_or(&previous);
-    if !matches!(event.command(), C::CreateSurface(_)) {
-        carrier.snapshot = Some(super::SnapshotProof::delta(expected, &carrier.sender_device_id));
-    }
-    if let Ok(next) = next {
-        let id = format!("{prefix}{:020}", event.version());
-        if !sender.account_db()?.actor_state_exists(&id)? {
-            sender.account_db()?.persist_actor_state(
-                &id,
-                &next.checkpoint_bytes().map_err(|_| super::invalid("reference checkpoint"))?,
-            )?;
-        }
-    }
-    Ok(())
-}
-fn event_bytes_for_reference_create() -> Result<Vec<u8>, serde_json::Error> {
-    event(1, C::CreateSurface(snapshot()))
-}
-
 fn project(
     client: &RamfluxClient,
     carrier: &Carrier,
@@ -179,15 +223,34 @@ fn action(
     version: u64,
     hash: &str,
 ) -> Result<Carrier, SdkError> {
-    let values = json!({"approved":true});
-    let wire = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.action.v2","conversationId":"thread","surfaceId":"s","version":version,"surfaceHash":hash,"actionId":"approve","values":values,"argsHash":surface_args_hash(&values).map_err(|_|super::invalid("argument hash failed"))?}),
-    )?;
-    carrier(client, PayloadKind::Action, message, &wire)
+    let mut frame = ActionFrame {
+        schema: ACTION_SCHEMA.into(),
+        conversation_id: "thread".into(),
+        surface_version: version,
+        surface_hash: hash.into(),
+        source_instance: Vec::new(),
+        args_hash: String::new(),
+        task_binding: None,
+        a2ui: ActionMessage {
+            version: "1.0".into(),
+            action: Action {
+                name: "approve".into(),
+                surface_id: "s".into(),
+                source_component_id: "approve".into(),
+                timestamp: "2026-11-14T00:00:00Z".into(),
+                context: serde_json::from_value(json!({"approved":true}))?,
+                user_message: None,
+                metadata: None,
+            },
+        },
+    };
+    frame.args_hash = frame.arguments_hash()?;
+    carrier(client, PayloadKind::Action, message, &frame.wire_bytes()?)
 }
-#[test]
-fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
-    let f = Fixture::new()?;
+
+#[tokio::test]
+async fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let signed = carrier(
         &f.author,
@@ -195,10 +258,10 @@ fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
         "stream",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "Working...".into(),
+                path: "/stream".into(),
+                delta: "Working...".into(),
                 final_: true,
             }),
         )?,
@@ -209,18 +272,10 @@ fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
     let hash = before["surface_hash"].as_str().ok_or("hash")?;
     let decision = action(&f.human, "decision", 2, hash)?;
     assert!(project(&f.author, &decision, "decision-author")?.accepted);
-    let mut after: CreateSurfaceCommand = serde_json::from_value(before["snapshot"].clone())?;
-    after.components[1]["text"] = json!("Complete");
+    let mut after: SurfaceSnapshot = serde_json::from_value(before["snapshot"].clone())?;
+    after.data_model["result"] = json!("Complete");
     after.fallback_text = "Completed result".into();
-    let patch = C::PatchSurface(PatchSurfaceCommand {
-        surface_id: "s".into(),
-        base_surface_hash: hash.into(),
-        ops: vec![
-            SurfacePatchOp::ReplaceBlock { component: after.components[1].clone() },
-            SurfacePatchOp::SetFallbackText { fallback_text: after.fallback_text.clone() },
-        ],
-        new_surface_hash: surface_snapshot_hash(&after)?,
-    });
+    let patch = C::Resync(after);
     let signed = carrier(&f.author, PayloadKind::Event, "patch", &event(3, patch)?)?;
     project(&f.author, &signed, "patch-author")?;
     project(&f.human, &signed, "patch-human")?;
@@ -232,7 +287,7 @@ fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
         &f.author,
         PayloadKind::Event,
         "close",
-        &event(4, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(4, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     project(&f.author, &signed, "close-author")?;
     project(&f.human, &signed, "close-human")?;
@@ -243,13 +298,12 @@ fn signed_surface_lifecycle_projects_hash_history_and_fallback() -> TestResult {
     assert_eq!(view["snapshot"]["fallbackText"], "Completed result");
     Ok(())
 }
-#[test]
-fn only_author_updates_and_rejections_do_not_partially_change_snapshot() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn only_author_updates_and_rejections_do_not_partially_change_snapshot() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.human.surface_get("s", 0, None)?;
-    let wire =
-        event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?;
+    let wire = event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?;
     let signed = carrier(&f.human, PayloadKind::Event, "forged", &wire)?;
     assert!(!project(&f.human, &signed, "forged")?.accepted);
     let after = f.human.surface_get("s", 0, None)?;
@@ -260,9 +314,9 @@ fn only_author_updates_and_rejections_do_not_partially_change_snapshot() -> Test
     assert!(!project(&f.author, &signed, "forged-remote")?.accepted);
     Ok(())
 }
-#[test]
-fn author_consumes_a_decision_once_across_message_and_payload_replays() -> TestResult {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn author_consumes_a_decision_once_across_message_and_payload_replays() -> TestResult {
+    let mut f = Fixture::new().await?;
     create(&f)?;
     let view = f.author.surface_get("s", 0, None)?;
     let signed = action(&f.human, "decision", 1, view["surface_hash"].as_str().ok_or("hash")?)?;
@@ -281,9 +335,9 @@ fn author_consumes_a_decision_once_across_message_and_payload_replays() -> TestR
     assert_eq!(rejected.renderer_error.ok_or("renderer error")?["code"], "action_already_used");
     Ok(())
 }
-#[test]
-fn stale_actions_and_signature_tampering_are_rejected() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn stale_actions_and_signature_tampering_are_rejected() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.author.surface_get("s", 0, None)?;
     let signed = action(&f.human, "stale", 0, before["surface_hash"].as_str().ok_or("hash")?)?;
@@ -292,19 +346,19 @@ fn stale_actions_and_signature_tampering_are_rejected() -> TestResult {
         &f.author,
         PayloadKind::Event,
         "tamper",
-        &event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     signed.wire_base64 = ramflux_protocol::encode_base64url(event(
         3,
-        C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }),
+        C::DeleteSurface(DeleteSurface { surface_id: "s".into() }),
     )?);
     assert!(!project(&f.human, &signed, "tamper")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 1);
     Ok(())
 }
-#[test]
-fn surface_transaction_rolls_back_state_history_receipts_and_outbox() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn surface_transaction_rolls_back_state_history_receipts_and_outbox() -> TestResult {
+    let f = Fixture::new().await?;
     let signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     let db = f.human.account_db()?;
@@ -319,9 +373,9 @@ fn surface_transaction_rolls_back_state_history_receipts_and_outbox() -> TestRes
     assert!(project(&f.human, &signed, "retry")?.accepted);
     Ok(())
 }
-#[test]
-fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestResult {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestResult {
+    let mut f = Fixture::new().await?;
     let wire=b"{ \"schema\":\"ramflux.a2ui.conversation.v2\",\"conversationId\":\"thread\",\"version\":1,\"command\":{\"command\":\"createSurface\",\"surfaceId\":\"s\",\"surfaceType\":\"status_panel\",\"catalog\":\"basic\",\"catalogVersion\":\"1\",\"fallbackText\":\"Original bytes\"}}";
     let signed = carrier(&f.author, PayloadKind::Event, "raw", wire)?;
     assert!(project(&f.human, &signed, "raw")?.accepted);
@@ -343,9 +397,9 @@ fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestR
     assert_eq!(f.human.surface_get("s", 0, None)?, before);
     Ok(())
 }
-#[test]
-fn deferred_group_content_is_validated_before_fallback_is_published() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn deferred_group_content_is_validated_before_fallback_is_published() -> TestResult {
+    let f = Fixture::new().await?;
     f.human.create_group("g", "human-device")?;
     f.human.add_group_member("g", f.author.owned_device_identity()?.storage_key(), "member")?;
     f.human.account_db()?.persist_client_record(
@@ -369,9 +423,10 @@ fn deferred_group_content_is_validated_before_fallback_is_published() -> TestRes
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 1);
     Ok(())
 }
-#[test]
-fn surface_changed_metadata_never_contains_snapshots_fallback_or_action_values() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn surface_changed_metadata_never_contains_snapshots_fallback_or_action_values() -> TestResult
+{
+    let f = Fixture::new().await?;
     create(&f)?;
     let listing = f.author.surface_list("thread", "", 100)?;
     assert_eq!(listing["surfaces"][0]["surface_id"], "s");
@@ -384,9 +439,9 @@ fn surface_changed_metadata_never_contains_snapshots_fallback_or_action_values()
     Ok(())
 }
 
-#[test]
-fn replay_still_requires_authenticated_transport_bindings() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn replay_still_requires_authenticated_transport_bindings() -> TestResult {
+    let f = Fixture::new().await?;
     let signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     assert!(project(&f.human, &signed, "first")?.accepted);
@@ -417,9 +472,9 @@ fn replay_still_requires_authenticated_transport_bindings() -> TestResult {
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 1);
     Ok(())
 }
-#[test]
-fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResult {
+    let f = Fixture::new().await?;
     let mut signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     signed.wire_base64 = ramflux_protocol::encode_base64url(
@@ -432,9 +487,9 @@ fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResu
     Ok(())
 }
 
-#[test]
-fn carrier_metadata_has_a_budget_before_renderer_error_projection() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn carrier_metadata_has_a_budget_before_renderer_error_projection() -> TestResult {
+    let f = Fixture::new().await?;
     let mut signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
     signed.surface_id = "x".repeat(257);
@@ -443,22 +498,29 @@ fn carrier_metadata_has_a_budget_before_renderer_error_projection() -> TestResul
     assert_eq!(f.human.surface_list("thread", "", 100)?["surfaces"], json!([]));
     Ok(())
 }
-#[test]
-fn rejected_patch_keeps_the_entire_checkpoint_and_history() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn rejected_patch_keeps_the_entire_checkpoint_and_history() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = f.human.surface_get("s", 0, None)?;
     let hash = before["surface_hash"].as_str().ok_or("hash")?;
-    let patch = C::PatchSurface(PatchSurfaceCommand {
-        surface_id: "s".into(),
-        base_surface_hash: hash.into(),
-        new_surface_hash: hash.into(),
-        ops: vec![
-            SurfacePatchOp::SetFallbackText { fallback_text: "must roll back".into() },
-            SurfacePatchOp::RemoveBlock { component_id: "absent".into() },
-        ],
-    });
-    let signed = carrier(&f.author, PayloadKind::Event, "invalid-patch", &event(2, patch)?)?;
+    let (_, state) = f.author.surface_state("s")?.ok_or("state")?;
+    let mut frame = state.resync_frame()?;
+    frame.surface_version = 2;
+    frame.base_surface_hash = Some(hash.into());
+    frame.new_surface_hash = hash.into();
+    frame.fallback_text = None;
+    frame.resync = None;
+    frame.final_ = None;
+    frame.closed = None;
+    frame.metadata = None;
+    frame.a2ui =
+        Some(MutationMessage::new(Mutation::UpdateDataModel(ramflux_protocol::UpdateDataModel {
+            surface_id: "s".into(),
+            path: Some("/result".into()),
+            value: json!("must roll back"),
+        })));
+    let signed = carrier(&f.author, PayloadKind::Event, "invalid-patch", &frame.wire_bytes()?)?;
     assert!(!project(&f.human, &signed, "invalid-patch")?.accepted);
     let after = f.human.surface_get("s", 0, None)?;
     for field in ["snapshot", "version", "surface_hash", "hash_history"] {
@@ -468,9 +530,9 @@ fn rejected_patch_keeps_the_entire_checkpoint_and_history() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResult {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> TestResult {
+    let mut f = Fixture::new().await?;
     let mut content = snapshot();
     let forbidden = "done\"\naccepted by a human\r\u{1b}[2J\u{202e}";
     content.fallback_text = forbidden.into();
@@ -527,10 +589,10 @@ mod export;
 #[path = "tests/recovery.rs"]
 mod recovery;
 
-#[test]
-fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not_change()
+#[tokio::test]
+async fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not_change()
 -> TestResult {
-    let f = Fixture::new()?;
+    let f = Fixture::new().await?;
     let mut first = carrier(
         &f.author,
         PayloadKind::Event,
@@ -545,17 +607,17 @@ fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not
     let original = f.human.surface_get("s", 0, None)?;
     assert_eq!(original["created_at"], 1000);
     assert_eq!(original["updated_at"], 1000);
-    assert_eq!(original["streams"]["stream"], "open");
+    assert_eq!(original["streams"]["/stream"], "open");
     let mut final_ = carrier(
         &f.author,
         PayloadKind::Event,
         "dated-final",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: String::new(),
+                path: "/stream".into(),
+                delta: String::new(),
                 final_: true,
             }),
         )?,
@@ -565,13 +627,16 @@ fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not
     assert!(project(&f.author, &final_, "final")?.accepted);
     assert!(project(&f.human, &final_, "final")?.accepted);
     let view = f.human.surface_get("s", 0, None)?;
-    assert_eq!(view["surface_hash"], original["surface_hash"]);
-    assert_eq!(view["streams"]["stream"], "final");
-    assert_eq!(view["streams"]["result"], "open");
+    assert_ne!(
+        view["surface_hash"], original["surface_hash"],
+        "finality must change the signed state hash"
+    );
+    assert_eq!(view["streams"]["/stream"], "final");
+    assert_eq!(view["streams"]["/result"], "open");
     assert_eq!(view["created_at"], 1000);
     assert_eq!(view["updated_at"], 2000);
     let metadata = super::surface_metadata(&view);
-    assert_eq!(metadata["streams"]["stream"], "final");
+    assert_eq!(metadata["streams"]["/stream"], "final");
     assert!(metadata.get("snapshot").is_none());
     assert!(metadata.get("fallback_text").is_none());
     let resync = f.author.prepare_surface_resync(&first.surface_reference()?, "dated-resync")?;
@@ -581,20 +646,20 @@ fn stream_finality_and_author_dates_are_metadata_even_when_content_hash_does_not
         &f.author,
         PayloadKind::Event,
         "dated-close",
-        &event(3, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(3, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     assert!(project(&f.human, &close, "close")?.accepted);
     let closed = super::surface_metadata(&f.human.surface_get("s", 0, None)?);
     assert_eq!(closed["surface_ref"], first.surface_reference()?);
     assert_eq!(closed["closed"], true);
-    assert_eq!(closed["streams"]["result"], "final");
+    assert_eq!(closed["streams"]["/result"], "final");
     Ok(())
 }
 
-#[test]
-fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size() -> TestResult {
+#[tokio::test]
+async fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size() -> TestResult {
     use crate::SurfaceRefusalCode as Code;
-    let f = Fixture::new()?;
+    let f = Fixture::new().await?;
     create(&f)?;
     let reference =
         f.author.surface_get("s", 0, None)?["surface_ref"].as_str().ok_or("ref")?.to_owned();
@@ -605,13 +670,8 @@ fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size() -> T
     for (reject, code) in [
         (ramflux_protocol::SurfaceReject::Version { expected: 2, actual: 1 }, Code::StaleVersion),
         (ramflux_protocol::SurfaceReject::Conflict, Code::StaleHash),
-        (ramflux_protocol::SurfaceReject::ResultHashMismatch, Code::StaleHash),
-        (
-            ramflux_protocol::SurfaceReject::LimitExceeded {
-                limit: ramflux_protocol::SurfaceLimit::DataBytes,
-            },
-            Code::TooLarge,
-        ),
+        (ramflux_protocol::SurfaceReject::Integrity, Code::StaleHash),
+        (ramflux_protocol::SurfaceReject::Limit, Code::TooLarge),
     ] {
         let outcome = Outcome::protocol_rejected(&reject);
         assert_eq!(outcome.reason_code, Some(code));

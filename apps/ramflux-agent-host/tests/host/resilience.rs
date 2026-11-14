@@ -208,7 +208,7 @@ async fn r3_an_applied_result_still_closes_after_a_stale_close_refusal() -> Test
 }
 #[tokio::test]
 async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps() -> TestResult {
-    use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
+    use ramflux_protocol::{A2uiConversationCommand as C, SurfaceEvent, SurfaceState};
     // The recent-action FIFO holds 2048 ids; 2064 choices wrap it once (evicting 16 ids) and keep going.
     const CHOICES: u64 = 2064;
     let mut f = fixture()?;
@@ -229,8 +229,7 @@ async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps()
             1,
             &C::CreateSurface(content.clone()),
         )?;
-        bus.state =
-            SurfaceState::default().apply(&A2uiConversationEvent::from_wire_bytes(&bytes)?)?;
+        bus.state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(&bytes)?)?;
         bus.decision()?;
         let id = format!("choice-{i}");
         bus.action.as_mut().ok_or("action")?["id"] = json!(id);

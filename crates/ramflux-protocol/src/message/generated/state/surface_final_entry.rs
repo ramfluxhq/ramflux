@@ -7,12 +7,10 @@ use super::super::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SurfaceFinalEntry {
-    #[prost(string, tag = "1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(bool, tag = "2")]
-    pub nested: bool,
     #[prost(string, tag = "3")]
     pub text_hash: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub pointer: ::prost::alloc::string::String,
 }
 impl serde::Serialize for SurfaceFinalEntry {
     #[allow(deprecated)]
@@ -22,25 +20,19 @@ impl serde::Serialize for SurfaceFinalEntry {
     {
         use serde::ser::SerializeStruct;
         let mut len = 0;
-        if !self.id.is_empty() {
-            len += 1;
-        }
-        if self.nested {
-            len += 1;
-        }
         if !self.text_hash.is_empty() {
+            len += 1;
+        }
+        if !self.pointer.is_empty() {
             len += 1;
         }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.SurfaceFinalEntry", len)?;
-        if !self.id.is_empty() {
-            struct_ser.serialize_field("id", &self.id)?;
-        }
-        if self.nested {
-            struct_ser.serialize_field("nested", &self.nested)?;
-        }
         if !self.text_hash.is_empty() {
             struct_ser.serialize_field("textHash", &self.text_hash)?;
+        }
+        if !self.pointer.is_empty() {
+            struct_ser.serialize_field("pointer", &self.pointer)?;
         }
         struct_ser.end()
     }
@@ -51,12 +43,11 @@ impl<'de> serde::Deserialize<'de> for SurfaceFinalEntry {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["id", "nested", "text_hash", "textHash"];
+        const FIELDS: &[&str] = &["text_hash", "textHash", "pointer"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
-            Id,
-            Nested,
             TextHash,
+            Pointer,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -78,9 +69,8 @@ impl<'de> serde::Deserialize<'de> for SurfaceFinalEntry {
                         E: serde::de::Error,
                     {
                         match value {
-                            "id" => Ok(GeneratedField::Id),
-                            "nested" => Ok(GeneratedField::Nested),
                             "textHash" | "text_hash" => Ok(GeneratedField::TextHash),
+                            "pointer" => Ok(GeneratedField::Pointer),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -98,39 +88,31 @@ impl<'de> serde::Deserialize<'de> for SurfaceFinalEntry {
             where
                 V: serde::de::MapAccess<'de>,
             {
-                let mut id__ = None;
-                let mut nested__ = None;
                 let mut text_hash__ = None;
+                let mut pointer__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
                         return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
                     }
                     match k {
-                        GeneratedField::Id => {
-                            if id__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("id"));
-                            }
-                            id__ = Some(map_.next_value()?);
-                        }
-                        GeneratedField::Nested => {
-                            if nested__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("nested"));
-                            }
-                            nested__ = Some(map_.next_value()?);
-                        }
                         GeneratedField::TextHash => {
                             if text_hash__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("textHash"));
                             }
                             text_hash__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::Pointer => {
+                            if pointer__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("pointer"));
+                            }
+                            pointer__ = Some(map_.next_value()?);
+                        }
                     }
                 }
                 Ok(SurfaceFinalEntry {
-                    id: id__.unwrap_or_default(),
-                    nested: nested__.unwrap_or_default(),
                     text_hash: text_hash__.unwrap_or_default(),
+                    pointer: pointer__.unwrap_or_default(),
                 })
             }
         }

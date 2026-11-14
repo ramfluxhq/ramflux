@@ -80,101 +80,139 @@ fn validate_carrier(carrier: &g::SurfaceCarrier) -> Result<(), SdkError> {
             validate_carrier(inner)?;
             authorize_surface_action_signer(&carrier.sender_principal_id, inner)
         }
+        Some(g::surface_carrier::Payload::FunctionCall(frame)) => {
+            validate_rpc(frame, ramflux_protocol::RpcKind::FunctionCall)
+        }
+        Some(g::surface_carrier::Payload::FunctionResponse(frame)) => {
+            validate_rpc(frame, ramflux_protocol::RpcKind::FunctionResponse)
+        }
+        Some(g::surface_carrier::Payload::Error(frame)) => {
+            validate_rpc(frame, ramflux_protocol::RpcKind::Error)
+        }
         None => Err(refused("surface carrier requires event, action or action receipt")),
     }
 }
 
 fn validate_event(event: &g::SurfaceEvent) -> Result<(), SdkError> {
-    if event.conversation_id.is_empty() {
-        return Err(refused("surface event requires a conversation id"));
+    let mut value = serde_json::json!({"schema":event.schema,"conversationId":event.conversation_id,"surfaceVersion":event.surface_version,"newSurfaceHash":event.new_surface_hash});
+    let object = value.as_object_mut().ok_or_else(|| refused("event object missing"))?;
+    for (key, field) in [
+        ("baseSurfaceHash", &event.base_surface_hash),
+        ("fallbackText", &event.fallback_text),
+        ("closeReason", &event.close_reason),
+    ] {
+        if let Some(field) = field {
+            object.insert(key.into(), serde_json::json!(field));
+        }
     }
-    match event.command.as_ref().and_then(|command| command.value.as_ref()) {
-        Some(g::surface_command::Value::CreateSurface(body)) => {
-            let Some(create) = body.value.as_ref() else {
-                return Err(refused("create surface command is missing"));
-            };
-            if create.surface_id.is_empty() || create.surface_type.is_none() {
-                Err(refused("create surface requires id and type"))
-            } else {
-                Ok(())
-            }
-        }
-        Some(g::surface_command::Value::UpdateComponents(body)) => {
-            let Some(update) = body.value.as_ref() else {
-                return Err(refused("update components command is missing"));
-            };
-            require_surface_hashes(
-                &update.surface_id,
-                &update.base_surface_hash,
-                &update.new_surface_hash,
-            )
-        }
-        Some(g::surface_command::Value::UpdateDataModel(body)) => {
-            let Some(update) = body.value.as_ref() else {
-                return Err(refused("update data model command is missing"));
-            };
-            require_surface_hashes(
-                &update.surface_id,
-                &update.base_surface_hash,
-                &update.new_surface_hash,
-            )
-        }
-        Some(g::surface_command::Value::DeleteSurface(body)) => {
-            let Some(delete) = body.value.as_ref() else {
-                return Err(refused("delete surface command is missing"));
-            };
-            if delete.surface_id.is_empty() || delete.reason.is_none() {
-                Err(refused("delete surface requires id and reason"))
-            } else {
-                Ok(())
-            }
-        }
-        Some(g::surface_command::Value::PatchSurface(body)) => validate_patch(body),
-        Some(g::surface_command::Value::StreamAppend(body)) => {
-            let Some(append) = body.value.as_ref() else {
-                return Err(refused("stream append command is missing"));
-            };
-            if append.surface_id.is_empty() || append.component_id.is_empty() {
-                Err(refused("stream append requires surface and component ids"))
-            } else {
-                Ok(())
-            }
-        }
-        None => Err(refused("surface event requires a typed command")),
+    if let Some(metadata) = &event.metadata {
+        object.insert("metadata".into(), json_object(metadata, 0)?);
     }
-}
-
-fn validate_patch(body: &g::SurfaceCommandPatchSurface) -> Result<(), SdkError> {
-    let Some(patch) = body.value.as_ref() else {
-        return Err(refused("patch surface command is missing"));
-    };
-    require_surface_hashes(&patch.surface_id, &patch.base_surface_hash, &patch.new_surface_hash)?;
-    if patch.ops.is_empty() {
-        return Err(refused("patch surface requires operations"));
+    if let Some(closed) = event.closed {
+        object.insert("closed".into(), serde_json::json!(closed));
     }
-    for op in &patch.ops {
-        match op.value.as_ref() {
-            Some(
-                g::surface_patch_op::Value::ReplaceBlock(_)
-                | g::surface_patch_op::Value::InsertBlock(_)
-                | g::surface_patch_op::Value::RemoveBlock(_)
-                | g::surface_patch_op::Value::SetActions(_)
-                | g::surface_patch_op::Value::SetFallbackText(_),
-            ) => {}
-            None => return Err(refused("surface patch op requires a typed arm")),
+    match event.operation.as_ref() {
+        Some(g::surface_event::Operation::A2ui(message)) => {
+            object.insert("a2ui".into(), json_object(message, 0)?);
         }
+        Some(g::surface_event::Operation::AppendText(append)) => {
+            object.insert("appendText".into(),serde_json::json!({"surfaceId":append.surface_id,"path":append.path,"delta":append.delta,"final":append.r#final}));
+        }
+        Some(g::surface_event::Operation::Resync(resync)) => {
+            let message =
+                resync.a2ui.as_ref().ok_or_else(|| refused("resync A2UI message missing"))?;
+            object.insert("resync".into(), serde_json::json!({"a2ui":json_object(message,0)?}));
+            object.insert("final".into(),serde_json::json!(event.r#final.iter().map(|entry| serde_json::json!({"pointer":entry.pointer,"textHash":entry.text_hash})).collect::<Vec<_>>()));
+        }
+        None => return Err(refused("surface event requires exactly one operation")),
+    }
+    let bytes = ramflux_protocol::canonical_json_bytes(&value)?;
+    let native = ramflux_protocol::SurfaceEvent::from_wire_bytes(&bytes)?;
+    if native.is_create() || native.is_resync() {
+        ramflux_protocol::SurfaceState::validate_proof(&native)?;
     }
     Ok(())
 }
-
 fn validate_action(action: &g::SurfaceAction) -> Result<(), SdkError> {
-    if action.conversation_id.is_empty()
-        || action.surface_id.is_empty()
-        || action.action_id.is_empty()
-        || action.surface_hash.is_empty()
-    {
-        return Err(refused("surface action requires ids and surface hash"));
+    let mut value = serde_json::json!({"schema":action.schema,"conversationId":action.conversation_id,"surfaceVersion":action.surface_version,"surfaceHash":action.surface_hash,"sourceInstance":action.source_instance,"argsHash":action.args_hash,"a2ui":json_object(action.a2ui.as_ref().ok_or_else(|| refused("action A2UI message missing"))?,0)?});
+    if let Some(binding) = &action.task_binding {
+        let object = value.as_object_mut().ok_or_else(|| refused("action object missing"))?;
+        object.insert(
+            "taskBinding".into(),
+            serde_json::json!({"task_id":binding.task_id,"step_id":binding.step_id}),
+        );
     }
+    ramflux_protocol::SurfaceAction::from_wire_bytes(&ramflux_protocol::canonical_json_bytes(
+        &value,
+    )?)?;
+    Ok(())
+}
+fn json_object(object: &g::JsonObject, depth: usize) -> Result<serde_json::Value, SdkError> {
+    if depth > 16 || object.members.len() > ramflux_protocol::MAX_STATE_BYTES {
+        return Err(refused("surface JSON limit"));
+    }
+    let mut map = serde_json::Map::new();
+    for member in &object.members {
+        if member.key.len() > ramflux_protocol::MAX_STATE_BYTES || map.contains_key(&member.key) {
+            return Err(refused("duplicate or oversized surface JSON key"));
+        }
+        map.insert(
+            member.key.clone(),
+            json_value(
+                member.value.as_ref().ok_or_else(|| refused("JSON member value missing"))?,
+                depth + 1,
+            )?,
+        );
+    }
+    Ok(serde_json::Value::Object(map))
+}
+fn json_value(value: &g::JsonValue, depth: usize) -> Result<serde_json::Value, SdkError> {
+    use g::json_value::Value as V;
+    if depth > 16 {
+        return Err(refused("surface JSON depth"));
+    }
+    Ok(match value.value.as_ref().ok_or_else(|| refused("surface JSON kind missing"))? {
+        V::Null(_) => serde_json::Value::Null,
+        V::Boolean(v) => serde_json::Value::Bool(*v),
+        V::Number(v) => {
+            serde_json::Value::Number(v.parse().map_err(|_| refused("surface JSON number"))?)
+        }
+        V::Text(v) => {
+            if v.len() > ramflux_protocol::MAX_STATE_BYTES {
+                return Err(refused("surface JSON text limit"));
+            }
+            serde_json::Value::String(v.clone())
+        }
+        V::Array(v) => {
+            if v.values.len() > ramflux_protocol::MAX_STATE_BYTES {
+                return Err(refused("surface JSON array limit"));
+            }
+            serde_json::Value::Array(
+                v.values.iter().map(|v| json_value(v, depth + 1)).collect::<Result<_, _>>()?,
+            )
+        }
+        V::Object(v) => json_object(v, depth + 1)?,
+    })
+}
+
+fn validate_rpc(
+    frame: &g::SurfaceRpcFrame,
+    kind: ramflux_protocol::RpcKind,
+) -> Result<(), SdkError> {
+    let native = ramflux_protocol::RpcFrame {
+        schema: frame.schema.clone(),
+        conversation_id: frame.conversation_id.clone(),
+        surface_id: frame.surface_id.clone(),
+        known_version: frame.known_version,
+        known_hash: frame.known_hash.clone(),
+        function_call_id: frame.function_call_id.clone(),
+        rejected_version: frame.rejected_version,
+        a2ui: json_object(
+            frame.a2ui.as_ref().ok_or_else(|| refused("RPC A2UI message missing"))?,
+            0,
+        )?,
+    };
+    native.wire_bytes(kind)?;
     Ok(())
 }
 
@@ -187,14 +225,6 @@ fn validate_resync(request: &g::SurfaceResyncRequest) -> Result<(), SdkError> {
         return Err(refused("surface resync requires conversation, surface, ref and author"));
     }
     Ok(())
-}
-
-fn require_surface_hashes(surface_id: &str, base: &str, next: &str) -> Result<(), SdkError> {
-    if surface_id.is_empty() || base.is_empty() || next.is_empty() {
-        Err(refused("surface command requires id and hashes"))
-    } else {
-        Ok(())
-    }
 }
 
 fn refused(message: &str) -> SdkError {

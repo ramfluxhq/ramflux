@@ -13,10 +13,10 @@ fn stream(
         message,
         &event(
             version,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: text.into(),
+                path: "/stream".into(),
+                delta: text.into(),
                 final_: false,
             }),
         )?,
@@ -28,9 +28,10 @@ fn pending_count(client: &RamfluxClient) -> Result<usize, SdkError> {
         .surface_history_page::<Value>("surface/pending/", "surface/pending/", 100)?
         .len())
 }
-#[test]
-fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_receipts() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_receipts() -> TestResult
+{
+    let f = Fixture::new().await?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
     let three = stream(&f.author, "v3", 3, "two")?;
@@ -38,7 +39,7 @@ fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_receipts() 
         &f.author,
         PayloadKind::Event,
         "v4",
-        &event(4, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(4, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     for signed in [&three, &four] {
         f.human.send_direct_message("thread", &signed.message_id, "author-device", b"encrypted")?;
@@ -60,9 +61,9 @@ fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_receipts() 
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 4);
     Ok(())
 }
-#[test]
-fn future_event_survives_restart_and_waits_for_create() -> TestResult {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn future_event_survives_restart_and_waits_for_create() -> TestResult {
+    let mut f = Fixture::new().await?;
     let two = stream(&f.author, "early", 2, "arrived early")?;
     f.human.send_direct_message("thread", "early", "author-device", b"encrypted")?;
     let held = project(&f.human, &two, "early")?;
@@ -85,9 +86,9 @@ fn future_event_survives_restart_and_waits_for_create() -> TestResult {
     assert_eq!(pending_count(&f.human)?, 0);
     Ok(())
 }
-#[test]
-fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "")?;
     let first = stream(&f.author, "future", 3, "original")?;
@@ -101,9 +102,9 @@ fn conflicting_pending_message_cannot_replace_the_verified_original() -> TestRes
     assert_eq!(f.human.surface_get("s", 0, None)?["snapshot"]["components"][0]["text"], "original");
     Ok(())
 }
-#[test]
-fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "")?;
     for version in 3..=35 {
@@ -124,9 +125,9 @@ fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() -> TestR
     Ok(())
 }
 
-#[test]
-fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
     let three = stream(&f.author, "v3", 3, "two")?;
@@ -160,9 +161,9 @@ fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> TestRes
     Ok(())
 }
 
-#[test]
-fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let mut accepted = 0;
     for version in 3..=8 {
@@ -203,19 +204,19 @@ fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> TestResul
     Ok(())
 }
 
-#[test]
-fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
+    let f = Fixture::new().await?;
     for surface in ["s", "second"] {
         for version in 3..=34 {
             let mut signed = stream(&f.author, &format!("{surface}-{version}"), version, "x")?;
             signed.surface_id = surface.into();
             let wire = event(
                 version,
-                C::StreamAppend(StreamAppendCommand {
+                C::AppendText(AppendText {
                     surface_id: surface.into(),
-                    component_id: "stream".into(),
-                    text_delta: "x".into(),
+                    path: "/stream".into(),
+                    delta: "x".into(),
                     final_: false,
                 }),
             )?;
@@ -254,9 +255,9 @@ fn one_author_cannot_exhaust_another_authors_holdback_share() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn explicit_signed_resync_fills_a_gap_without_waiting_for_holdback_expiry() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn explicit_signed_resync_fills_a_gap_without_waiting_for_holdback_expiry() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
     assert!(project(&f.author, &two, "two")?.accepted);

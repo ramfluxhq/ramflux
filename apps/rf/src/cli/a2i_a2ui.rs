@@ -5,7 +5,6 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Args)]
 pub(crate) struct A2iCommand {
@@ -50,38 +49,4 @@ pub(crate) struct A2iAck {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) event: String,
-}
-
-#[derive(Args)]
-pub(crate) struct A2uiCommand {
-    #[command(subcommand)]
-    pub(crate) action: A2uiAction,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum A2uiAction {
-    Render(A2uiRender),
-    Action(A2uiActionSubmit),
-}
-
-#[derive(Args)]
-pub(crate) struct A2uiRender {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long)]
-    pub(crate) surface: PathBuf,
-    #[arg(allow_hyphen_values = true, long = "catalog", default_value = "ramflux.basic.v1")]
-    pub(crate) supported_catalog: Vec<String>,
-    #[arg(allow_hyphen_values = true, long = "permission")]
-    pub(crate) permission: Vec<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct A2uiActionSubmit {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long)]
-    pub(crate) surface: PathBuf,
-    #[arg(long)]
-    pub(crate) action: PathBuf,
 }

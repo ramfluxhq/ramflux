@@ -14,6 +14,9 @@ pub(crate) async fn send(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
 ) -> Result<Value, SdkError> {
+    if carrier.payload_kind.rpc_kind().is_some() || carrier.payload_kind == PayloadKind::Action {
+        return send_private(account, carrier).await;
+    }
     let bytes = carrier.bytes()?;
     if let Err(error) = crate::client::surface::check_delivery_size(bytes.len()) {
         account.client.surface_outgoing_too_large(carrier)?;
@@ -281,4 +284,80 @@ async fn copy_own_for_test(
         &account.client,
         &RamfluxClient::surface_timeline_id(carrier)?,
     )
+}
+
+async fn send_private(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+) -> Result<Value, SdkError> {
+    let thread = account
+        .client
+        .account_db()?
+        .client_record("conversation", &carrier.conversation_id)?
+        .ok_or_else(|| invalid("surface conversation missing"))?;
+    let group = thread.get("group_id").and_then(Value::as_str);
+    let epoch = group.map(|g| account.client.group_state(g).map(|s| s.group_epoch)).transpose()?;
+    let outcome = account.client.stage_surface_outgoing(carrier, epoch)?;
+    if !outcome.accepted {
+        return Ok(serde_json::to_value(outcome)?);
+    }
+    let root = if carrier.payload_kind == PayloadKind::FunctionCall {
+        account
+            .client
+            .born_v3_account
+            .as_ref()
+            .and_then(|a| a.record().body.profile.custodian.as_ref())
+            .map(|c| c.account_anchor.clone())
+            .ok_or_else(|| invalid("agent RPC requires its verified human custodian"))?
+    } else {
+        account
+            .client
+            .account_db()?
+            .client_record("identity", &carrier.author_principal_id)?
+            .and_then(|v| {
+                v.get("contact_identity_commitment").and_then(Value::as_str).map(str::to_owned)
+            })
+            .ok_or_else(|| invalid("surface author identity missing"))?
+    };
+    let mut engine = account.session_client().await?;
+    let client = &account.client;
+    let manifest =
+        client.cache_verified_device_manifest(engine.config(), &root, "surface_peer").await?;
+    let control = client
+        .surface_control_packet(carrier, crate::client::surface::ControlKind::Peer, epoch)?
+        .bytes()?;
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let mut sent = 0usize;
+    for device in manifest.devices {
+        if let Some(group) = group {
+            let identity = client.device_identity_for_root(&root, &device.device_id)?;
+            if !client.surface_group_device_allowed(group, &identity)? {
+                return Err(invalid("surface private destination is outside the group"));
+            }
+        }
+        let message = GatewayDirectMessage {
+            conversation_id: carrier.conversation_id.clone(),
+            message_id: carrier.message_id.clone(),
+            envelope_id: crate::new_surface_message_id()?,
+            source_principal_id: local.principal_id.clone(),
+            sender_id: local.device_id.clone(),
+            recipient_device_id: Some(device.device_id),
+            recipient_principal_commitment: Some(root.clone()),
+            target_delivery_id: device.target_delivery_id,
+            encrypted_body: Vec::new(),
+            created_at: now_unix_timestamp(),
+            ttl: client.content_ttl()?,
+        };
+        submit_pair_control(client, &mut engine, message, &control, group).await?;
+        sent += 1;
+    }
+    if sent == 0 {
+        return Err(invalid("surface private destination has no active devices"));
+    }
+    let mut response = serde_json::to_value(outcome)?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert("delivery_state".into(), json!("submitted"));
+        object.insert("message_id".into(), json!(carrier.message_id));
+    }
+    Ok(response)
 }

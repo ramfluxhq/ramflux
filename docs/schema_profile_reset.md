@@ -3,7 +3,7 @@
 The active application profile remains generation **0**. Message schema v1
 reserves generation **1**; this foundation does not activate it or advertise a
 new wire profile. The approved design is imported verbatim from `61d96751` in
-`docs/design/message_schema_v1.md`. Its activation rules apply to the later
+[the pinned historical design](https://github.com/ramfluxhq/ramflux/blob/61d96751b550c661d15444a7ddecff116897498d/docs/design/message_schema_v1.md). Its activation rules apply to the later
 coordinated reset.
 
 SQLite `PRAGMA user_version` is the durable application-profile marker, separate

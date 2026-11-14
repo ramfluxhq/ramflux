@@ -62,7 +62,7 @@ impl RamfluxClient {
         let version = match carrier.payload()? {
             super::Payload::Event(event) => event.version(),
             super::Payload::ActionReceipt { action, .. } => action.version(),
-            super::Payload::Action(_) => return Ok(()),
+            super::Payload::Action(_) | super::Payload::Rpc(..) => return Ok(()),
         };
         let previous = self
             .surface_state_ref(&carrier.surface_reference()?)?

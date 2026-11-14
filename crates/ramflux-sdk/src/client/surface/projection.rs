@@ -21,6 +21,9 @@ impl RamfluxClient {
         payload: &Payload,
         outbound: bool,
     ) -> Result<Outcome, SdkError> {
+        if let Payload::Rpc(kind, rpc) = payload {
+            return self.preflight_surface_rpc(carrier, *kind, rpc, outbound);
+        }
         if let Payload::ActionReceipt { original, action } = payload {
             return self.validate_surface_receipt(carrier, original, action);
         }
@@ -32,6 +35,12 @@ impl RamfluxClient {
             && carrier.sender_principal_id != carrier.author_principal_id
         {
             return Ok(reject("non_author_update"));
+        }
+        if outbound
+            && matches!(payload, Payload::Action(_))
+            && !self.surface_author_is_own_agent(&carrier.author_principal_id)?
+        {
+            return Ok(reject("surface_author_not_owned"));
         }
         if let Payload::Action(action) = payload {
             let view =
@@ -46,7 +55,7 @@ impl RamfluxClient {
                     || view["surface_hash"] != action.surface_hash()
                 {
                     return Ok(Outcome::rejected(
-                        json!({"code":"renderer_error","reject":ramflux_protocol::SurfaceReject::Stale}),
+                        json!({"code":"renderer_error","reject":ramflux_protocol::SurfaceReject::Conflict}),
                     ));
                 }
                 let used = super::decision::decision_key(carrier, action)?;
@@ -107,13 +116,15 @@ impl RamfluxClient {
                 }
                 Outcome::accepted(&carrier.author_principal_id, &state)
             }
-            Payload::ActionReceipt { .. } => Err(invalid("receipt validation dispatch mismatch")),
+            Payload::ActionReceipt { .. } | Payload::Rpc(..) => {
+                Err(invalid("surface validation dispatch mismatch"))
+            }
         }
     }
     fn next_surface_event(
         &self,
         carrier: &Carrier,
-        event: &ramflux_protocol::A2uiConversationEvent,
+        event: &ramflux_protocol::SurfaceEvent,
     ) -> Result<Result<SurfaceState, Outcome>, SdkError> {
         let saved = self.surface_state_scoped(
             &carrier.conversation_id,
@@ -121,16 +132,6 @@ impl RamfluxClient {
             &carrier.surface_id,
         )?;
         let state = saved.map_or_else(SurfaceState::default, |(_, state)| state);
-        if carrier.snapshot.as_ref().is_some_and(super::SnapshotProof::is_full) {
-            return match self.restore_surface_proof(carrier, &state, event.version()) {
-                Ok(Some(next)) => Ok(Ok(next)),
-                Ok(None) => Ok(Err(Outcome::rejected(json!({"code":"snapshot_required"})))),
-                Err(error @ (SdkError::Storage(_) | SdkError::SurfaceCheckpointMismatch)) => {
-                    Err(error)
-                }
-                Err(_) => Ok(Err(Outcome::rejected(json!({"code":"snapshot_rejected"})))),
-            };
-        }
         let next = state.apply(event).map_err(|error| Outcome::protocol_rejected(&error));
         if let Ok(next) = &next
             && let Some(proof) = &carrier.snapshot
@@ -162,9 +163,11 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         match payload {
+            Payload::Rpc(kind, rpc) => {
+                return self.apply_surface_rpc(carrier, kind, &rpc, outbound, group_epoch);
+            }
             Payload::Event(event) => {
-                let recovering =
-                    carrier.snapshot.as_ref().is_some_and(super::SnapshotProof::is_full);
+                let recovering = event.is_resync();
                 let state = self
                     .next_surface_event(carrier, &event)?
                     .map_err(|_| invalid("surface changed during writer transaction"))?;
