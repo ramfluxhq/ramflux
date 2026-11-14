@@ -133,6 +133,16 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
     let f = Fixture::new()?;
     f.insert("victim", "oldcanary")?;
     f.insert("survivor", "unrelatedcanary")?;
+    let old_term = super::normalizer::encode_term('w', "oldcanary")?;
+    let stored: bool = f.db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_search_fts_data WHERE instr(block,CAST(?1 AS BLOB))>0)",
+        params![old_term.expose()],
+        |r| r.get(0),
+    )?;
+    assert!(
+        stored,
+        "fixture must demonstrate the reversible old term exists in a real FTS segment before purge"
+    );
     let stamp = f.watch.stamp();
     let cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let callback = std::sync::Arc::clone(&cleared);
@@ -150,6 +160,15 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
         )?;
         Ok(())
     })?;
+    let retained: bool = f.db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_search_fts_data WHERE instr(block,CAST(?1 AS BLOB))>0)",
+        params![old_term.expose()],
+        |r| r.get(0),
+    )?;
+    assert!(
+        !retained,
+        "pinned FTS secure deletion must remove the old encoded term from current segment blocks, not merely hide its MATCH result"
+    );
     assert!(
         cleared.load(std::sync::atomic::Ordering::Acquire),
         "committed mutation must clear pending replies before returning"
