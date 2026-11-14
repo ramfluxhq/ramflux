@@ -72,7 +72,15 @@ pub(super) fn install_grant(peer: &Fixture, state: &VerifiedGroupState) -> TestR
         epoch: state.view().epoch,
         membership_hash: state.snapshot().state_hash.clone(),
         inviter_root: state.creator().identity.root_commitment.clone(),
-        member_root_count: 2,
+        member_root_count: u64::try_from(
+            state
+                .view()
+                .members
+                .iter()
+                .map(|member| &member.identity.root_commitment)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+        )?,
     };
     let mut body = account.reach_decision_body(&context, subject.clone(), Decision::Allow)?;
     body.permissions = Some(Permissions::UNACCEPTED);

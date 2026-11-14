@@ -109,4 +109,6 @@ pub(super) fn merge(
 }
 
 #[cfg(test)]
+mod signed_read_tests;
+#[cfg(test)]
 mod tests;
