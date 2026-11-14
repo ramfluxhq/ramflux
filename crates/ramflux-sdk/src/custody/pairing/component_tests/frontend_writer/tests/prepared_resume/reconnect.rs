@@ -156,6 +156,8 @@ async fn pump(
     target: &crate::RamfluxClient,
 ) -> TestResult {
     for _ in 0..96 {
+        rig.primary.service_full_transfer_client(&rig.source.client)?;
+        rig.secondary.service_full_transfer_client(target)?;
         if !rig.primary.full_data_worker_owns_relay() {
             rig.clock.advance_ms(1001);
         }
@@ -192,7 +194,9 @@ async fn review_and_renew(
     >,
 ) -> TestResult {
     for _ in 0..72 {
+        rig.clock.advance_ms(1001);
         drive(Box::pin(rig.secondary.poll_full_management_control()), b, target).await?;
+        rig.clock.advance_ms(1001);
         drive(Box::pin(rig.primary.poll_full_management_control()), a, &rig.source.client).await?;
         if rig.primary.displayed_proposal().is_ok() {
             break;
@@ -232,7 +236,9 @@ async fn review_and_renew(
         expected == renewed.body,
         "test: renewal changed immutable candidate or transfer operands"
     );
+    rig.clock.advance_ms(1001);
     drive(Box::pin(rig.primary.poll_full_management_control()), a, &rig.source.client).await?;
+    rig.clock.advance_ms(1001);
     drive(Box::pin(rig.secondary.poll_full_management_control()), b, target).await?;
     assert!(
         rig.secondary.service_full_transfer(target.account_db()?)?,

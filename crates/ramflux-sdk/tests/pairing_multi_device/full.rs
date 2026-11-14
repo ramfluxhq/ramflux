@@ -219,6 +219,31 @@ impl Fixture {
         }
         Err("test: external full driver did not finish durable duplex".into())
     }
+    async fn affirm_source_if_displayed(&mut self) -> ResultOf<()> {
+        if self.a.actor.affirmed_full_source_preservation().is_ok() {
+            return Ok(());
+        }
+        let Ok(candidate) = self.a.actor.displayed_proposal() else { return Ok(()) };
+        let affirm = TransferAffirm {
+            schema: "ramflux.pairing.TransferAffirm.v2".into(),
+            version: 2,
+            operation_id: self.operation.clone(),
+            generation: self.a.actor.actor_generation(),
+            transcript_hash: self.a.actor.displayed_transcript()?,
+            new_record_hash: candidate,
+            approved: true,
+        };
+        drive(
+            Box::pin(self.a.actor.affirm_full_transfer(&affirm)),
+            &mut self.source,
+            &self.a.client,
+            &mut self.target,
+            &self.b.client,
+        )
+        .await?;
+        self.a.service_data()?;
+        Ok(())
+    }
     pub async fn publish(&mut self) -> ResultOf<()> {
         let original = self.b.selected_path()?;
         let request = Prepare {
@@ -254,6 +279,7 @@ impl Fixture {
                 )
                 .await?;
             }
+            self.affirm_source_if_displayed().await?;
             drive(
                 Box::pin(self.a.actor.advance_full_source_publication()),
                 &mut self.source,

@@ -214,12 +214,12 @@ async fn merge(
     let mut merged = false;
     for turn in 0..96 {
         eprintln!("test: tail merge turn={turn} source step");
-        if !rig.primary.full_data_worker_owns_relay() {
+        if !rig.primary.full_tail_epoch_in_flight_for_test() {
             rig.clock.advance_ms(1001);
         }
         drive(Box::pin(rig.primary.sync_relay()), source, &rig.source.client).await?;
         eprintln!("test: tail merge turn={turn} target step");
-        if !rig.secondary.full_data_worker_owns_relay() {
+        if !rig.secondary.full_tail_epoch_in_flight_for_test() {
             rig.clock.advance_ms(1001);
         }
         drive(Box::pin(rig.secondary.sync_relay()), target, client).await?;

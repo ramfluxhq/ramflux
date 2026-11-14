@@ -26,6 +26,7 @@ async fn pairing_three_devices_keep_distinct_keys_and_live_sessions() -> ResultO
     deadline(Box::pin(three_devices())).await
 }
 async fn deadline(work: impl std::future::Future<Output = ResultOf<()>>) -> ResultOf<()> {
+    diagnostics();
     tokio::time::timeout(std::time::Duration::from_secs(120), work)
         .await
         .map_err(|_| "test: multi-device native operation exceeded its deadline")?
@@ -253,4 +254,18 @@ async fn merge_full_tail(fixture: &mut full::Fixture) -> ResultOf<()> {
         );
     }
     Ok(())
+}
+
+fn diagnostics() {
+    use tracing_subscriber::prelude::*;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let filtered = tracing_subscriber::fmt::layer().with_test_writer().with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                *metadata.level() <= tracing::Level::DEBUG
+                    && metadata.target().starts_with("ramflux_sdk::custody::pairing::coordinator")
+            }),
+        );
+        let _ = tracing_subscriber::registry().with(filtered).try_init();
+    });
 }

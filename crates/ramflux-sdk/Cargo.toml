@@ -102,6 +102,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 serde_json = { version = "1.0", features = ["raw_value"] }
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }

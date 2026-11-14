@@ -81,6 +81,7 @@ async fn begin_native(wire: &mut Continuity) -> TestResult<(String, u64)> {
     Ok((operation, generation))
 }
 async fn deadline(work: impl std::future::Future<Output = TestResult>) -> TestResult {
+    diagnostics();
     tokio::time::timeout(std::time::Duration::from_secs(120), work)
         .await
         .map_err(|_| "test: real TLS/Fedwire SDK enrollment exceeded deadline")?
@@ -121,3 +122,17 @@ mod handoff;
 #[cfg(unix)]
 #[path = "native_devices/history.rs"]
 mod history;
+
+fn diagnostics() {
+    use tracing_subscriber::prelude::*;
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let filtered = tracing_subscriber::fmt::layer().with_test_writer().with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                *metadata.level() <= tracing::Level::DEBUG
+                    && metadata.target().starts_with("ramflux_sdk::custody::pairing::coordinator")
+            }),
+        );
+        let _ = tracing_subscriber::registry().with(filtered).try_init();
+    });
+}

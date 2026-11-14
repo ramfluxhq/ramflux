@@ -55,7 +55,7 @@ impl Fixture {
         }
         Ok(())
     }
-    async fn status(&mut self, primary: bool) -> TestResult<FullStatus> {
+    async fn status(&mut self, primary: bool) -> TestResult<Option<FullStatus>> {
         let actor = if primary { &mut self.wire.primary } else { &mut self.wire.recipient };
         let request = StatusRequest {
             schema: "ramflux.pairing.StatusRequest.v2".into(),
@@ -72,15 +72,26 @@ impl Fixture {
         )
         .await?;
         match result.outcome {
-            Outcome::FullStatus { value } => Ok(*value),
-            _ => Err("test: expected actual full status".into()),
+            Outcome::FullStatus { value } => Ok(Some(*value)),
+            Outcome::Update { value }
+                if !matches!(value.phase.as_str(), "cancelled" | "expired" | "rejected") =>
+            {
+                Ok(None)
+            }
+            _ => Err("test: TLS full operation refused before durable full status".into()),
         }
     }
     pub(super) async fn data(&mut self) -> TestResult {
         for _ in 0..512 {
             self.step().await?;
-            if self.status(true).await?.stage == FullStatusStage::AwaitingPrepare
-                && self.status(false).await?.stage == FullStatusStage::AwaitingPrepare
+            if self
+                .status(true)
+                .await?
+                .is_some_and(|value| value.stage == FullStatusStage::AwaitingPrepare)
+                && self
+                    .status(false)
+                    .await?
+                    .is_some_and(|value| value.stage == FullStatusStage::AwaitingPrepare)
             {
                 return Ok(());
             }
@@ -117,6 +128,7 @@ impl Fixture {
                 )
                 .await?;
             }
+            self.affirm_source_if_displayed().await?;
             drive(
                 Box::pin(self.wire.primary.advance_full_source_publication()),
                 &mut self.source,
@@ -136,11 +148,42 @@ impl Fixture {
         }
         Err("test: TLS full handoff did not complete exact native/G3 installation".into())
     }
+    async fn affirm_source_if_displayed(&mut self) -> TestResult {
+        if self.wire.primary.affirmed_full_source_preservation().is_ok() {
+            return Ok(());
+        }
+        let Ok(candidate) = self.wire.primary.displayed_proposal() else { return Ok(()) };
+        let affirm = ramflux_protocol::custody::pairing::local_dto::TransferAffirm {
+            schema: "ramflux.pairing.TransferAffirm.v2".into(),
+            version: 2,
+            operation_id: self.operation.clone(),
+            generation: self.wire.primary.actor_generation(),
+            transcript_hash: self.wire.primary.displayed_transcript()?,
+            new_record_hash: candidate,
+            approved: true,
+        };
+        drive(
+            Box::pin(self.wire.primary.affirm_full_transfer(&affirm)),
+            &mut self.source,
+            &self.a.client,
+            &mut self.target,
+            &self.b.client,
+        )
+        .await?;
+        self.a.service_data(&mut self.wire.primary)?;
+        Ok(())
+    }
     pub(super) async fn merge(&mut self) -> TestResult {
         for _ in 0..512 {
             self.step().await?;
-            if self.status(true).await?.tail_status == FullTailStatus::Merged
-                && self.status(false).await?.tail_status == FullTailStatus::Merged
+            if self
+                .status(true)
+                .await?
+                .is_some_and(|value| value.tail_status == FullTailStatus::Merged)
+                && self
+                    .status(false)
+                    .await?
+                    .is_some_and(|value| value.tail_status == FullTailStatus::Merged)
             {
                 return Ok(());
             }

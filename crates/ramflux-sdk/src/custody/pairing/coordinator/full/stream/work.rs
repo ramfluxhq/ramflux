@@ -43,7 +43,9 @@ impl FullStreamWork {
             self.runtime.require_live()?;
             if let Some(packet) = self.packet.poll(self.relay.as_ref(), &self.origin).await? {
                 self.runtime.require_live()?;
-                if let Some(data) = self.packet.open_packet(&packet)? {
+                if let Some(data) = self.packet.open_packet(&packet).inspect_err(|error| {
+                    Self::note_failure("packet authentication/position", error);
+                })? {
                     if matches!(data, DataPacket::Rebind { .. }) {
                         Box::pin(self.accept_rebind(data)).await?;
                         continue;

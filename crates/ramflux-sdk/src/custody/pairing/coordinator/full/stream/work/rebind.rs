@@ -48,6 +48,11 @@ impl FullStreamWork {
         &mut self,
         manifest: &SourceManifest,
     ) -> Result<(), SdkError> {
+        self.send_manifest_inner(manifest).await.inspect_err(|error| {
+            Self::note_failure("manifest send/rebind", error);
+        })
+    }
+    async fn send_manifest_inner(&mut self, manifest: &SourceManifest) -> Result<(), SdkError> {
         let bytes =
             zeroize::Zeroizing::new(manifest.to_wire_bytes().map_err(|error| wire(&error))?);
         let manifest_hash = hash(manifest)?;
