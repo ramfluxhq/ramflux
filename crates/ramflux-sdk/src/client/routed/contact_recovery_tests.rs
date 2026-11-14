@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Provisional contact recovery, stronger pin protection, and metadata preservation.
-use super::cards::Origin;
+use super::cards::{Origin, install_native_home};
 use super::*;
 fn client(s: &LocalBusDaemonState) -> Result<&RamfluxClient, SdkError> {
     Ok(&s.accounts.get("alice").ok_or_else(|| invalid("alice"))?.client)
@@ -13,19 +13,25 @@ async fn card(s: &mut LocalBusDaemonState) -> Result<String, SdkError> {
         .map(str::to_owned)
         .ok_or_else(|| invalid("card"))
 }
+type Native = crate::client::native_test_support::Fixture;
 async fn lying_lookup()
--> Result<(Fixture, Fixture, Fixture, Directory, Origin, LocalBusDaemonState, String), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let fake = Fixture::new("bob", 71)?;
-    let d = Directory::new(&a, &b).await?;
-    let real = super::super::r9::manifest(&b)?;
-    d.records.lock().map_err(|_| invalid("mutex"))?[1] = super::super::r9::manifest(&fake)?;
-    d.records.lock().map_err(|_| invalid("mutex"))?.push(real);
+-> Result<(Native, Native, Native, Directory, Origin, LocalBusDaemonState, String), SdkError> {
+    let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
+    let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;
+    let fake = Native::named("fake", "bob", "bob").await.map_err(native_account)?;
+    let d = Directory::from_records(
+        &a.root.0,
+        vec![a.manifest.clone(), fake.manifest.clone(), b.manifest.clone()],
+    )
+    .await?;
     let origin = Origin::new(&d).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    let vault = b.vault.clone();
+    let bob_root = b.root.0.clone();
+    let mut s = born_state(&mut a, &mut b, &d)?;
+    s.config.custody_vault = Some(vault);
+    s.config.data_root.clone_from(&bob_root);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     let added = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
     assert_eq!(added["contact"]["root_source"], "lookup");
     let old =
@@ -35,12 +41,12 @@ async fn lying_lookup()
 #[tokio::test]
 async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retires_the_old_session()
 -> Result<(), SdkError> {
-    let (mut a, mut b, fake, _d, _origin, mut s, old) = lying_lookup().await?;
+    let (mut a, mut b, fake, _d, _origin, mut s, old) = Box::pin(lying_lookup()).await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client);
     let local = a.client.owned_device_identity()?;
     let fake_identity = fake.client.owned_device_identity()?;
-    seal(&a, &fake, message("old-session", "thread"), b"old")?;
+    seal_native(&a, &fake, "old-session", "thread", b"old")?;
     assert!(a.client.active_pair(&local, &fake_identity)?.is_some());
     s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client =
         std::mem::take(&mut a.client);
@@ -82,13 +88,14 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
         real
     );
     assert!(db.journal_after(0,256)?.iter().any(|e|e.topic=="safety.changed" && e.body["reason"]=="provisional_root_replaced"));
+    call(&mut s, "bob", "contact.add", json!({"principal_id":"alice"})).await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("alice"))?.client);
     b.client = std::mem::take(&mut s.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?.client);
-    let first = seal(&a, &b, message("genuine-first", "thread"), b"to the real bob")?;
+    let first = seal_native(&a, &b, "genuine-first", "thread", b"to the real bob")?;
     assert_eq!(b.client.open_routed(&first, "bob")?.body.as_slice(), b"to the real bob");
     a.client.active_account_db.take();
-    a.client.unlock_account("alice", b"routed-test")?;
+    a.client.unlock_account("alice", b"native fixture data passphrase")?;
     assert_eq!(a.client.contact_entry("bob")?["root_source"], "card");
     assert_eq!(a.client.contact_entry("bob")?["root_commitment"], real);
     Ok(())
@@ -96,27 +103,23 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
 #[tokio::test]
 async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_the_genuine_root()
 -> Result<(), SdkError> {
-    let (_a, _b, _fake, _d, _origin, mut s, old) = lying_lookup().await?;
+    let (_a, _b, _fake, _d, _origin, mut s, old) = Box::pin(lying_lookup()).await?;
     let root = s.accounts.get("bob").ok_or_else(|| invalid("bob"))?.principal_commitment.clone();
     let body = json!({"principal_id":"bob","contact_identity_commitment":root});
-    let preview = call(&mut s, "alice", "contact.safety_number", body).await;
-    assert!(
-        matches!(preview, Err(SdkError::CustodyModeDowngrade)),
-        "a non-custody account cannot preview safety material: {preview:?}"
-    );
+    let preview = call(&mut s, "alice", "contact.safety_number", body).await?;
+    assert_eq!(preview["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
-    let link_id = client(&s)?
-        .friend_links()?
-        .into_iter()
-        .find(|link| link.state == "accepted")
-        .ok_or_else(|| invalid("link"))?
-        .link_id;
-    let expected = crate::client::contact_verification_cas::preview_contact_safety_expectation(
-        client(&s)?,
-        &root,
-        &link_id,
-    );
-    assert!(matches!(expected, Err(SdkError::CustodyModeDowngrade)));
+    let expected: ramflux_protocol::message::ExpectedContactSafety = serde_json::from_value(
+        preview.get("expected").cloned().ok_or_else(|| invalid("expected"))?,
+    )?;
+    assert_eq!(expected.replace_provisional_root.as_deref(), Some(old.as_str()));
+    let mut missing = expected.clone();
+    missing.replace_provisional_root = None;
+    let refused = call(&mut s, "alice", "contact.verify", json!({"expected": missing}))
+        .await
+        .err()
+        .ok_or_else(|| invalid("missing confirmation"))?;
+    assert!(matches!(refused, SdkError::ContactConfirmationRequired(_)));
     assert!(
         client(&s)?
             .account_db()?
@@ -127,13 +130,57 @@ async fn out_of_band_safety_preview_is_non_mutating_and_confirmation_promotes_th
     assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "lookup");
     assert_eq!(client(&s)?.contact_entry("bob")?["verified"], false);
     assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], old);
+    let verified = call(&mut s, "alice", "contact.verify", json!({"expected": expected})).await?;
+    let verified_result: ramflux_protocol::message::ContactSafetyVerifyResult =
+        serde_json::from_value(verified)?;
+    assert_eq!(verified_result.verification_state, "verified");
+    assert_eq!(
+        json!(client(&s)?.contact_safety_number(&root)?.safety_number),
+        preview["safety_number"]
+    );
+    let stamp = client(&s)?
+        .account_db()?
+        .load_actor_state::<String>(&format!("identity/safety_verified_set/{root}"))?
+        .ok_or_else(|| invalid("verified set"))?;
+    let record = client(&s)?
+        .account_db()?
+        .contact_verification(&root)?
+        .ok_or_else(|| invalid("verification"))?;
+    assert_eq!(
+        stamp, record.verified_device_set_hash,
+        "confirmed resolution persists the authority stamp"
+    );
+    assert_eq!(client(&s)?.contact_entry("bob")?["root_source"], "verified");
+    assert_eq!(
+        client(&s)?
+            .account_db()?
+            .client_record("identity", "bob")?
+            .ok_or_else(|| invalid("identity"))?["root_source"],
+        "verified"
+    );
+    assert_eq!(client(&s)?.contact_entry("bob")?["verified"], true);
+    assert_eq!(client(&s)?.contact_entry("bob")?["root_commitment"], root);
+    let db = client(&s)?.account_db()?;
+    db.observe_contact_key_state(ramflux_storage::ContactKeyObservation {
+        contact_identity_commitment: &root,
+        safety_number_hash: "changed",
+        device_set_hash: &record.verified_device_set_hash,
+        lineage_head: &record.verified_lineage_head,
+        change_event_id: "changed-root",
+        seen_at: now_unix_timestamp(),
+    })?;
+    let identity = db.client_record("identity", "bob")?.ok_or_else(|| invalid("identity"))?;
+    assert_eq!(identity["root_source"], "verified");
+    assert!(
+        client(&s)?.contact_replacement(&identity, "bob", "different-root", Some(&root)).is_err()
+    );
     Ok(())
 }
 #[tokio::test]
 async fn card_and_manually_verified_roots_refuse_replacement_even_with_confirmation()
 -> Result<(), SdkError> {
     for verified in [false, true] {
-        let (_a, _b, _fake, _d, _origin, mut s, old) = lying_lookup().await?;
+        let (_a, _b, _fake, _d, _origin, mut s, old) = Box::pin(lying_lookup()).await?;
         if verified {
             let db = client(&s)?.account_db()?;
             let mut identity =
@@ -165,13 +212,18 @@ async fn card_and_manually_verified_roots_refuse_replacement_even_with_confirmat
 #[tokio::test]
 async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_fields_are_null()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
+    let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
+    let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin = Origin::new(&d).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    let vault = b.vault.clone();
+    let bob_root = b.root.0.clone();
+    let mut s = born_state(&mut a, &mut b, &d)?;
+    s.config.custody_vault = Some(vault);
+    s.config.data_root.clone_from(&bob_root);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     client(&s)?.account_db()?.persist_client_record(
         "identity",
         "bob",
@@ -179,8 +231,8 @@ async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_field
     )?;
     let signed = card(&mut s).await?;
     let body = crate::parse_contact_card(&signed, now_unix_timestamp())?;
-    assert!(body.display_name.is_none());
-    assert!(body.kind_asserted.is_none());
+    assert!(body.display_name.as_deref().is_some_and(|name| !name.is_empty()));
+    assert_eq!(body.kind_asserted.as_deref(), Some("human"));
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
     assert_eq!(added["contact"]["display_name"], "My own label");
     assert_eq!(added["contact"]["kind_asserted"], "human");
@@ -190,23 +242,20 @@ async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_field
 #[tokio::test]
 async fn a_rejected_contact_resolution_keeps_the_group_key_change_observation()
 -> Result<(), SdkError> {
-    let (_a, _b, fake, _d, _origin, mut s, _old) = lying_lookup().await?;
-    let original = super::super::r9::manifest(&fake)?;
+    let (_a, _b, fake, _d, _origin, mut s, _old) = Box::pin(lying_lookup()).await?;
+    let original = fake.manifest.clone();
+    let pinned_device = RamfluxClient::device_identity_from_manifest(&original, "bob")?;
     client(&s)?.create_group("pinned", "alice")?;
-    client(&s)?.add_group_member(
-        "pinned",
-        fake.client.owned_device_identity()?.storage_key(),
-        "member",
-    )?;
+    client(&s)?.add_group_member("pinned", pinned_device.storage_key(), "member")?;
     let db = client(&s)?.account_db()?;
     db.persist_group_member_device_key(
         "pinned",
-        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
+        &pinned_device,
         &original.devices[0].branch_public_key,
     )?;
     db.bind_group_member_key_identity(
         "pinned",
-        &RamfluxClient::device_identity_from_manifest(&original, "bob")?,
+        &pinned_device,
         "bob",
         &original.principal_commitment,
         &original.devices[0].branch_public_key,
@@ -221,17 +270,19 @@ async fn a_rejected_contact_resolution_keeps_the_group_key_change_observation()
     assert!(db.journal_after(0, 128)?.iter().any(|e| e.topic == "safety.changed"));
     assert!(client(&s)?.friend_links()?.iter().all(|link| link.state != "accepted"));
     assert_eq!(
-        db.client_record("device", "bob")?.ok_or_else(|| invalid("device"))?["signing_public_key"],
+        db.client_record("device", pinned_device.storage_key())?
+            .ok_or_else(|| invalid("device"))?["signing_public_key"],
         original.devices[0].branch_public_key
     );
     Ok(())
 }
 #[tokio::test]
 async fn principal_add_and_accept_use_the_same_link_id_for_both_sides() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
+    let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
+    let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut s = born_state(&mut a, &mut b, &d)?;
     call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
     call(&mut s, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
     let alice = client(&s)?.friend_links()?;
@@ -439,13 +490,18 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
 #[tokio::test]
 async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
+    let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
+    let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin = Origin::new(&d).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    let vault = b.vault.clone();
+    let bob_root = b.root.0.clone();
+    let mut s = born_state(&mut a, &mut b, &d)?;
+    s.config.custody_vault = Some(vault);
+    s.config.data_root.clone_from(&bob_root);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     let signed = card(&mut s).await?;
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
     let node = added["contact"]["node"].clone();
@@ -477,30 +533,29 @@ async fn directory_refresh_preserves_card_locator_and_verified_provenance() -> R
 }
 
 #[tokio::test]
-async fn directory_refresh_without_profile_preserves_card_asserted_kind() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
+async fn directory_refresh_keeps_certified_kind_over_card_assertion() -> Result<(), SdkError> {
+    let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
+    let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin = Origin::new(&d).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
-    let mut body = crate::parse_contact_card(&card(&mut s).await?, now_unix_timestamp())?;
-    body.kind_asserted = Some("bot".into());
-    let seed = s
-        .accounts
-        .get("bob")
-        .ok_or_else(|| invalid("bob"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (signed, _) = crate::contact_card::encode_contact_card(body, seed, now_unix_timestamp())?;
+    let vault = b.vault.clone();
+    let bob_root = b.root.0.clone();
+    let mut s = born_state(&mut a, &mut b, &d)?;
+    s.config.custody_vault = Some(vault);
+    s.config.data_root.clone_from(&bob_root);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
+    let signed = card(&mut s).await?;
+    let body = crate::parse_contact_card(&signed, now_unix_timestamp())?;
+    assert_eq!(body.kind_asserted.as_deref(), Some("human"));
     let added = call(&mut s, "alice", "contact.add", json!({"card":signed})).await?;
-    assert_eq!(added["contact"]["kind_asserted"], "bot");
-    assert_eq!(added["contact"]["kind_verified"], false);
+    assert_eq!(added["contact"]["kind_asserted"], "human");
+    assert_eq!(added["contact"]["kind_verified"], true);
+    let db = client(&s)?.account_db()?;
+    let mut identity = db.client_record("identity", "bob")?.ok_or_else(|| invalid("identity"))?;
+    identity["kind_asserted"] = json!("bot");
+    db.persist_client_record("identity", "bob", &identity)?;
     let manifest = d
         .records
         .lock()
@@ -509,11 +564,10 @@ async fn directory_refresh_without_profile_preserves_card_asserted_kind() -> Res
         .find(|record| record.principal_id == "bob")
         .cloned()
         .ok_or_else(|| invalid("bob manifest"))?;
-    assert!(manifest.signed_device_set.as_ref().is_some_and(|record| record.profile.is_none()));
     client(&s)?.persist_root_verified_directory(&manifest)?;
     let contact = client(&s)?.contact_entry("bob")?;
-    assert_eq!(contact["kind_asserted"], "bot");
-    assert_eq!(contact["kind_verified"], false);
+    assert_eq!(contact["kind_asserted"], "human");
+    assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["root_source"], "card");
     Ok(())
 }

@@ -68,14 +68,14 @@ fn contact_changes_publish_reachability_kind_and_current_safety_verification()
     let recorded = super::super::journal::project(client, &entry)?;
     assert!(recorded.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["verified"] == false
-        && row["safety_state"].is_null()));
+        && row["safety_state"] == "unverified"));
     assert!(recorded.iter().any(|(topic, _, _)| topic == "safety.changed"));
     identity["device_set_hash"] = json!("changed-device-set");
     db.persist_client_record("identity", "peer", &identity)?;
     let stale = super::super::journal::project(client, &entry)?;
     assert!(stale.iter().any(|(topic, row, _)| topic == "contact.changed"
         && row["verified"] == false
-        && row["safety_state"].is_null()));
+        && row["safety_state"] == "unverified"));
     drop(account);
     Ok(())
 }

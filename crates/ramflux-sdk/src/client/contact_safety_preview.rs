@@ -12,21 +12,14 @@ impl RamfluxClient {
     pub(crate) fn resolve_contact_safety(
         &self,
         identity: &mut serde_json::Value,
-        own: &SdkDeviceManifestResponse,
+        _own: &SdkDeviceManifestResponse,
         peer: &SdkDeviceManifestResponse,
         verification: Option<&SdkContactSafetyNumber>,
         device: &str,
     ) -> Result<(), SdkError> {
-        let own_material = super::contact::contact_safety_material_from_manifest(own)?;
-        let peer_material = super::contact::contact_safety_material_from_manifest(peer)?;
-        self.capture_contact_safety(
-            identity,
-            &peer.principal_commitment,
-            &own_material,
-            &peer_material,
-        )?;
+        self.capture_contact_safety(identity, &peer.principal_commitment)?;
         if let Some(safety) = verification {
-            self.commit_contact_safety(safety, &own_material, &peer_material, device)?;
+            self.commit_contact_safety(safety, device)?;
             identity["root_source"] = serde_json::json!(crate::ContactRootSource::Verified);
         }
         Ok(())
@@ -36,26 +29,20 @@ impl RamfluxClient {
         &self,
         identity: &mut serde_json::Value,
         peer: &str,
-        own_material: &ramflux_crypto::ContactSafetyMaterial,
-        peer_material: &ramflux_crypto::ContactSafetyMaterial,
     ) -> Result<(), SdkError> {
-        let (number, version) = if self.born_v3_account.is_some() {
-            (self.native_safety_number(peer)?.safety_number, 2)
-        } else {
-            (ramflux_crypto::safety_number(own_material, peer_material), 1)
-        };
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
+        let number = self.native_safety_number(peer)?.safety_number;
         identity["safety_number"] = serde_json::json!(number);
-        identity["safety_number_algorithm_version"] = serde_json::json!(version);
+        identity["safety_number_algorithm_version"] = serde_json::json!(2);
         Ok(())
     }
     pub(crate) fn commit_contact_safety(
         &self,
         safety: &SdkContactSafetyNumber,
-        _own: &ramflux_crypto::ContactSafetyMaterial,
-        _peer: &ramflux_crypto::ContactSafetyMaterial,
         device: &str,
     ) -> Result<(), SdkError> {
-        // A verification grant is born-v3 compare-and-record. Device-material digits are not a grant.
         if self.born_v3_account.is_none() {
             return Err(SdkError::CustodyModeDowngrade);
         }

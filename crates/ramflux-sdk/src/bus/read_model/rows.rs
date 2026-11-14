@@ -157,6 +157,9 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved.get("device_set_hash").and_then(Value::as_str),
     ) {
         Ok(state) => json!(state),
+        // A contact that has not been manually verified is unverified.
+        // Compare and commit still return the typed custody error.
+        Err(SdkError::CustodyModeDowngrade) => json!("unverified"),
         // Authority unavailable is state A and is not persisted as unverified.
         Err(SdkError::NetworkingPending) => Value::Null,
         Err(error) => return Err(error),

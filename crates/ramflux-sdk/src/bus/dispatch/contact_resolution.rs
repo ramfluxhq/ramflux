@@ -321,19 +321,11 @@ fn parse_selector(
         .and_then(|a| a.card.as_deref())
         .map(|c| crate::parse_contact_card(c, now))
         .transpose()?;
-    if let Some(card) = &card {
-        if account.client.born_v3_account.is_some() && card.version != 3 {
-            return Err(SdkError::CustodyModeDowngrade);
-        }
-        if card.version == 3
-            && let Some(pinned) =
-                account.client.account_db()?.client_record("identity", &card.principal_id)?
-            && pinned["contact_identity_commitment"]
-                .as_str()
-                .is_some_and(|anchor| anchor != card.root_commitment)
-        {
-            return Err(ContactReason::AnchorMismatch.into());
-        }
+    if let Some(card) = &card
+        && account.client.born_v3_account.is_some()
+        && card.version != 3
+    {
+        return Err(SdkError::CustodyModeDowngrade);
     }
     let selector = match (&parsed, &legacy, &card) {
         (

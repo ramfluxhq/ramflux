@@ -451,10 +451,9 @@ pub(crate) fn effective_state(
     commitment: &str,
     _observed_hash: Option<&str>,
 ) -> Result<String, SdkError> {
-    // No custody account has no authority to compare. State A is not a stored
-    // unverified verdict and not a second algorithm.
+    // A missing custody account is the same typed error as the other gates.
     if client.born_v3_account.is_none() {
-        return Err(SdkError::NetworkingPending);
+        return Err(SdkError::CustodyModeDowngrade);
     }
     let db = client.account_db()?;
     if db.is_query_only()? || db.in_transaction()? {

@@ -107,7 +107,7 @@ impl Origin {
         Ok(())
     }
 }
-fn install_native_home(
+pub(super) fn install_native_home(
     origin: &Origin,
     state: &mut LocalBusDaemonState,
     id: &str,
@@ -262,36 +262,66 @@ async fn an_exported_card_pins_the_root_and_resolves_a_fresh_contact_without_saf
     Ok(())
 }
 
+fn resigned_native_card(
+    state: &LocalBusDaemonState,
+    id: &str,
+    node_url: &str,
+    fingerprint: &str,
+) -> Result<String, SdkError> {
+    let account = state.accounts.get(id).ok_or_else(|| invalid("account"))?;
+    let born = account.client.born_v3_account.as_ref().ok_or_else(|| invalid("native account"))?;
+    let record = born.record();
+    let now = crate::custody::network_now()?;
+    let vault = state.config.custody_vault.as_ref().ok_or_else(|| invalid("vault"))?;
+    let signed = born.sign_contact_card(
+        vault.as_ref(),
+        ramflux_protocol::custody::ContactCardV3 {
+            version: 3,
+            principal_id: record.body.principal_id.clone(),
+            account_anchor: record.body.account_anchor.clone(),
+            master_public_key: record.body.master_certificate.body.master_public_key.clone(),
+            master_certificate: record.body.master_certificate.clone(),
+            authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            devices: record.body.devices.clone(),
+            node_url: node_url.into(),
+            node_key_fingerprint: fingerprint.into(),
+            display_name: record.body.profile.display_name.clone(),
+            issued_at: now,
+            expires_at: now.saturating_add(7 * 24 * 60 * 60),
+        },
+        now,
+    )?;
+    Ok(crate::contact_card_native::encode(
+        &signed,
+        i64::try_from(now).map_err(|_| invalid("clock"))?,
+    )?
+    .0)
+}
+
 #[tokio::test]
 async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_publication()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let home = Origin::new(&directory).await?;
     let foreign = Origin::named(&directory, "foreign.test").await?;
-    let mut s = state(&mut a, &mut b, &directory)?;
-    home.configure(&mut s, "alice")?;
-    home.configure(&mut s, "bob")?;
+    let vault = a.vault.clone();
+    let mut s = born_state(&mut a, &mut b, &directory)?;
+    s.config.custody_vault = Some(vault);
+    install_native_home(&home, &mut s, "alice")?;
+    install_native_home(&home, &mut s, "bob")?;
     let exported = call(&mut s, "alice", "contact.card.export", json!({})).await?;
-    let mut body = crate::parse_contact_card(
+    let body = crate::parse_contact_card(
         exported["card"].as_str().ok_or_else(|| invalid("card"))?,
         now_unix_timestamp(),
     )?;
-    body.node.url = foreign.url.clone();
-    let root = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("account"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?;
-    let (card, _) = crate::contact_card::encode_contact_card(
-        body,
-        root.signing_key.to_bytes(),
-        now_unix_timestamp(),
-    )?;
+    let card = resigned_native_card(&s, "alice", &foreign.url, &body.node.key_fingerprint)?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":card}))
         .await
         .err()
@@ -314,11 +344,18 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
 #[tokio::test]
 async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_paths()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin = Origin::new(&directory).await?;
-    let mut s = state(&mut a, &mut b, &directory)?;
+    let vault = a.vault.clone();
+    let mut s = born_state(&mut a, &mut b, &directory)?;
+    s.config.custody_vault = Some(vault);
     let added = crate::bus::dispatch::node::dispatch_node_bus_request(
         &request(
             "alice",
@@ -342,8 +379,8 @@ async fn node_add_confirm_and_card_export_use_origins_from_discovery_urls_with_p
             .discovery_url,
         origin.url
     );
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     // An older in-memory profile must also produce an importable card.
     s.nodes
         .profiles
@@ -364,28 +401,32 @@ mod locator;
 #[tokio::test]
 async fn legacy_card_origin_case_and_trailing_slash_still_resolve_the_pinned_home()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin =
         Origin::bound(&directory, "contact.test", "127.0.0.1:0", Some("localhost")).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
-    origin.configure(&mut state, "alice")?;
-    origin.configure(&mut state, "bob")?;
+    let vault = a.vault.clone();
+    let mut state = born_state(&mut a, &mut b, &directory)?;
+    state.config.custody_vault = Some(vault);
+    install_native_home(&origin, &mut state, "alice")?;
+    install_native_home(&origin, &mut state, "bob")?;
     let exported = call(&mut state, "alice", "contact.card.export", json!({})).await?;
-    let mut card = crate::parse_contact_card(
+    let card = crate::parse_contact_card(
         exported["card"].as_str().ok_or_else(|| invalid("card"))?,
         now_unix_timestamp(),
     )?;
-    card.node.url = format!("{}/", origin.url.to_uppercase());
-    let seed = state.accounts["alice"]
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
-    let (legacy, _) = crate::contact_card::encode_contact_card(card, seed, now_unix_timestamp())?;
+    let legacy = resigned_native_card(
+        &state,
+        "alice",
+        &format!("{}/", origin.url.to_uppercase()),
+        &card.node.key_fingerprint,
+    )?;
     let added = call(&mut state, "bob", "contact.add", json!({"card":legacy})).await?;
     assert_eq!(added["contact"]["principal_id"], "alice");
     assert_eq!(added["contact"]["reachable"], true);

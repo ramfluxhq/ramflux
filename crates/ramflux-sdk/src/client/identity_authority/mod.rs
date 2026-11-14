@@ -82,7 +82,7 @@ impl RamfluxClient {
             .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
         {
             Ok(state) => state == "verified",
-            Err(SdkError::NetworkingPending) => false,
+            Err(SdkError::CustodyModeDowngrade | SdkError::NetworkingPending) => false,
             Err(error) => return Err(error),
         };
         if verified { self.root_asserted_principal_kind(principal) } else { Ok(None) }

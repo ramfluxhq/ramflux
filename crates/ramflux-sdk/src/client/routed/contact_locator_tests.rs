@@ -24,13 +24,21 @@ async fn cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reje
     crate::node::DISCOVERY_CLIENT.scope(client, lan_round_trip(&bind)).await
 }
 async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(|error| invalid(&error.to_string()))?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let origin = Origin::bound(&directory, "contact.test", bind, Some("192.168.42.7")).await?;
-    let mut s = state(&mut a, &mut b, &directory)?;
-    origin.configure(&mut s, "alice")?;
-    origin.configure(&mut s, "bob")?;
+    let wrong = mismatched_native_card(&a, &origin)?;
+    let vault = a.vault.clone();
+    let mut s = born_card_state(&mut a, &mut b, &directory)?;
+    s.config.custody_vault = Some(vault);
+    install_native_home(&origin, &mut s, "alice")?;
+    install_native_home(&origin, &mut s, "bob")?;
     let exported = call(&mut s, "alice", "contact.card.export", json!({})).await?;
     let text = exported["card"].as_str().ok_or_else(|| invalid("card"))?;
     let card = crate::parse_contact_card(text, now_unix_timestamp())?;
@@ -39,21 +47,6 @@ async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
         card.node.key_fingerprint,
         crate::contact_node_fingerprint(&origin.record.node_public_key)?
     );
-    let mut wrong = card.clone();
-    wrong.node.key_fingerprint = "0".repeat(64);
-    let root = s
-        .accounts
-        .get("alice")
-        .ok_or_else(|| invalid("alice"))?
-        .client
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?;
-    let (wrong, _) = crate::contact_card::encode_contact_card(
-        wrong,
-        root.signing_key.to_bytes(),
-        now_unix_timestamp(),
-    )?;
     let error = call(&mut s, "bob", "contact.add", json!({"card":wrong}))
         .await
         .err()

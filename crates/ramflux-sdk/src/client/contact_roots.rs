@@ -22,7 +22,9 @@ impl RamfluxClient {
                 ("display_name", json!(card.display_name)),
                 ("kind_asserted", json!(card.kind_asserted)),
             ] {
-                if identity["kind_verified"] != true {
+                // Adopt marks the new custody profile verified before this runs. A label that
+                // existed before that adoption still wins; an already verified profile does not.
+                if old["kind_verified"] != true {
                     identity[field] =
                         old.get(field).filter(|v| !v.is_null()).cloned().unwrap_or(value);
                 }

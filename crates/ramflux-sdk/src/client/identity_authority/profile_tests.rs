@@ -29,8 +29,8 @@ fn missing_confirmation_and_missing_custody_account_refuse_without_changing_the_
         verified_at: crate::time::now_unix_timestamp(),
         verified_by_device_id: "peer",
     })?;
-    let missing = peer.client.contact_safety_number(&signed.principal_commitment)?;
-    assert_eq!(missing.verification_state, "unverified");
+    let missing = peer.client.contact_safety_number(&signed.principal_commitment);
+    assert!(matches!(missing, Err(SdkError::CustodyModeDowngrade)), "{missing:?}");
     let refused = crate::client::contact_verification_cas::verify_linked_contact(
         &peer.client,
         &signed.principal_commitment,
@@ -80,7 +80,7 @@ fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contac
     assert_eq!(row["kind_verified"], true);
     assert_eq!(row["kind_asserted"], "headless_ai");
     assert_eq!(row["display_name"], "Café Agent");
-    assert!(row["safety_state"].is_null(), "incomplete authority is not unverified");
+    assert_eq!(row["safety_state"], "unverified");
     let contact = peer.client.contact_entry("agent")?;
     assert_eq!(contact["kind_asserted"], "headless_ai");
     assert_eq!(contact["display_name"], "Café Agent");

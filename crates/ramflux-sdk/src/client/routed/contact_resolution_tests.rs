@@ -298,6 +298,121 @@ impl ramflux_transport::GatewaySessionFrameSource for DirectorySession {
         })
     }
 }
+fn native_account(error: Box<dyn std::error::Error>) -> SdkError {
+    let message = error.to_string();
+    drop(error);
+    invalid(&message)
+}
+
+fn born_state(
+    a: &mut crate::client::native_test_support::Fixture,
+    b: &mut crate::client::native_test_support::Fixture,
+    d: &Directory,
+) -> Result<LocalBusDaemonState, SdkError> {
+    let mut accounts = BTreeMap::new();
+    for fixture in [&mut *a, &mut *b] {
+        let mut config = fixture.config.clone();
+        config.transport_kind = GatewaySessionTransportKind::TcpTls;
+        config.gateway_addr = d.addr;
+        config.tcp_gateway_addr = Some(d.addr);
+        config.server_name = "directory.test".into();
+        config.ca_cert.clone_from(&d.ca);
+        let engine = GatewaySessionEngine::with_test_transport(
+            config,
+            Box::new(DirectorySession {
+                captured: d.captured.clone(),
+                incoming: d.incoming.clone(),
+                acknowledged: d.acknowledged.clone(),
+                records: d.records.clone(),
+                unavailable: d.unavailable.clone(),
+                responses: VecDeque::new(),
+            }),
+        );
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        accounts.insert(
+            id,
+            LocalBusAccountState::new(
+                std::mem::take(&mut fixture.client),
+                engine,
+                fixture.manifest.principal_commitment.clone(),
+            ),
+        );
+    }
+    Ok(LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(a.root.0.join("bus.sock"), &a.root.0),
+        accounts,
+        active_account_id: None,
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    })
+}
+
+fn seal_native(
+    sender: &crate::client::native_test_support::Fixture,
+    receiver: &crate::client::native_test_support::Fixture,
+    id: &str,
+    conversation: &str,
+    body: &[u8],
+) -> Result<GatewayInboxEntry, SdkError> {
+    let mut message = GatewayDirectMessage {
+        conversation_id: conversation.into(),
+        message_id: id.into(),
+        envelope_id: id.into(),
+        source_principal_id: sender.manifest.principal_id.clone(),
+        sender_id: sender.config.device_id.clone(),
+        recipient_device_id: Some(receiver.config.device_id.clone()),
+        recipient_principal_commitment: Some(receiver.manifest.principal_commitment.clone()),
+        target_delivery_id: receiver.config.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let local = sender.client.owned_device_identity()?;
+    let remote = receiver.client.owned_device_identity()?;
+    let (mut session, header, bundle) = sender.client.new_send_pair(
+        &local,
+        &message,
+        receiver.client.load_x3dh_private_state(&remote)?.bundle,
+    )?;
+    let sealed = sender.client.seal_routed_with_route(
+        &message,
+        body,
+        Route::direct(),
+        SealPair {
+            local: &sender.config.device_id,
+            remote: remote.storage_key(),
+            session: &mut session,
+            header,
+            bundle,
+        },
+    )?;
+    message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+    let mut envelope = gateway_direct_message_envelope_sealed(
+        &sender.config,
+        &message,
+        None,
+        sealed.committed_a0.as_deref(),
+    )?;
+    crate::dm::add_message_metadata_commitment(
+        &sender.config,
+        &mut envelope,
+        sealed.metadata_commitment,
+    )?;
+    envelope.source_principal_id.clone_from(&message.source_principal_id);
+    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
+        sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &envelope,
+    )?;
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: receiver.config.target_delivery_id.clone(),
+        envelope,
+    })
+}
+
 fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaemonState, SdkError> {
     let mut accounts = BTreeMap::new();
     for f in [&mut *a, &mut *b] {
@@ -364,10 +479,15 @@ async fn call(
 #[tokio::test]
 async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut s = born_state(&mut a, &mut b, &d)?;
     for (own, peer) in [("alice", "bob"), ("bob", "alice")] {
         let added = call(&mut s, own, "contact.add", json!({"principal_id":peer})).await?;
         assert_eq!(added["contact"]["principal_id"], peer);
@@ -405,8 +525,10 @@ async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("alice"))?.client);
     b.client = std::mem::take(&mut s.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?.client);
-    assert!(b.client.account_db()?.client_record("device", "alice")?.is_some());
-    let first = seal(&a, &b, message("contact-first", "contact-conversation"), b"hello after add")?;
+    let alice_device = a.client.owned_device_identity()?.storage_key().to_owned();
+    let recorded = b.client.account_db()?.client_record("device", &alice_device)?;
+    assert_eq!(recorded.as_ref().and_then(|row| row["device_id"].as_str()), Some("alice"));
+    let first = seal_native(&a, &b, "contact-first", "contact-conversation", b"hello after add")?;
     let opened = b.client.open_routed(&first, "bob")?;
     assert_eq!(opened.body.as_slice(), b"hello after add");
     b.client.persist_pair(
@@ -415,12 +537,8 @@ async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm
         &opened.bundle_hash,
         &opened.session,
     )?;
-    let mut reply = message("contact-reply", "contact-conversation");
-    reply.source_principal_id = "bob".into();
-    reply.sender_id = "bob".into();
-    reply.recipient_device_id = Some("alice".into());
-    reply.target_delivery_id = "alice".into();
-    let entry = seal(&b, &a, reply, b"reply after accept")?;
+    let entry =
+        seal_native(&b, &a, "contact-reply", "contact-conversation", b"reply after accept")?;
     assert_eq!(a.client.open_routed(&entry, "alice")?.body.as_slice(), b"reply after accept");
     Ok(())
 }

@@ -28,12 +28,22 @@ impl Fixture {
 
     /// `principal` is the published id. Routed card tests keep it equal to the account id.
     pub(crate) async fn named(account: &str, principal: &str, device: &str) -> TestResult<Self> {
+        Self::named_kind(account, principal, device, ramflux_protocol::PrincipalKind::Human).await
+    }
+
+    pub(crate) async fn named_kind(
+        account: &str,
+        principal: &str,
+        device: &str,
+        kind: ramflux_protocol::PrincipalKind,
+    ) -> TestResult<Self> {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         let now = crate::custody::network_now()?;
         let mut input = crate::custody::tests::input(account);
         input.principal_id = principal.into();
         input.device_id = device.into();
+        input.principal_kind = kind;
         let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
