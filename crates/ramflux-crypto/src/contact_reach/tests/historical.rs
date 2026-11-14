@@ -187,3 +187,25 @@ fn cr_group_header_historical_selector() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_provenance_stage_verifies_each_original_from_one_proof_at_a_time() -> TestResult {
+    let (records, catalogue) = fixture()?;
+    let mut stage = ProvenanceStageBuilder::new(
+        &catalogue.account_anchor,
+        catalogue.revision,
+        &catalogue.state_hash,
+        catalogue.signers.clone(),
+    )?;
+    for proof in &catalogue.authorities {
+        stage.push(proof)?;
+    }
+    let stage = stage.finish()?;
+    stage.verify_originals(&records)?;
+    assert_eq!(
+        stage.proof_hashes().count(),
+        4,
+        "all four independently selected original signer contexts remain encrypted stage members"
+    );
+    Ok(())
+}

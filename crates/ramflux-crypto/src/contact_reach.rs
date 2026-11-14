@@ -439,3 +439,6 @@ fn original_management_time(
     authority.authorize_primary_management(actor, "contact_consent", issued_at)?;
     Ok(())
 }
+
+mod staging;
+pub use staging::{EncryptedProvenanceStage, ProvenanceStageBuilder};

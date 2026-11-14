@@ -130,3 +130,5 @@ pub fn verify_historical_roster_header(
 
 mod records;
 pub use records::verify_historical_state_records;
+
+pub(in crate::contact_reach) use records::{HistoricalProofReader, verify_records_with_reader};
