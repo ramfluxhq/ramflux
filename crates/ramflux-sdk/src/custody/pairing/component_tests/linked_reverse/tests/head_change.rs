@@ -38,7 +38,7 @@ async fn primary_transfer_full_head_change_mid_stream() -> TestResult {
             .map_err(|error| format!("test: compatible native-change installation: {error}"))?;
         Box::pin(revoked_target())
             .await
-            .map_err(|error| format!("test: revoked-target DATA refusal: {error}"))
+            .map_err(|error| format!("test: revoked-target DATA refusal: {error}").into())
     }))
     .await;
     hold.finish().await?;

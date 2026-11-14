@@ -55,7 +55,7 @@ impl Supervisor {
 async fn deliver(
     stream: PairingEventSubscription,
     request: LocalBusFrame,
-    outbound: tokio::sync::mpsc::Sender<LocalBusFrame>,
+    outbound: crate::bus::outbound::LocalBusOutbound,
     mut cursor: u64,
 ) {
     let signal = stream.signal();

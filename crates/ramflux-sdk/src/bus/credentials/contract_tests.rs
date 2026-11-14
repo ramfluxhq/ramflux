@@ -7,6 +7,7 @@ use crate::custody::pairing::{
     CredentialOutcome, PersistedReservation, SecretUtf8, persist_reservation,
     private_credential::{encode_reply, provider_for_account, read_reply},
 };
+use tokio::sync::mpsc;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 fn reply(generation: u64) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     encode_reply(
