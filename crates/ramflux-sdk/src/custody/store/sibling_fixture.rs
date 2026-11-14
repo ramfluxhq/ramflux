@@ -48,6 +48,7 @@ pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), Sdk
     let branch_ref =
         format!("branch:{}", custody_vault_reference(root, id, &record.body.account_anchor)?);
     let stored = StoredAuthority {
+        pairing_adoption_required: false,
         schema: "ramflux.local.custody_account.v1".into(),
         local_account_id: id.into(),
         local_device_id: device.into(),

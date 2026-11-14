@@ -249,6 +249,7 @@ impl BackupJobs {
             self.verify_install_contribution(job, &merged, &incoming, &incoming_key, true),
         )?;
         drop(merged);
+        drop(source);
         let wrapped = self.index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let marker = serde_json::to_vec(
             &serde_json::json!({"schema":"ramflux.local.native_data_generation.v1","local_account_id":id,"account_anchor":native.anchor()}),

@@ -2,16 +2,48 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant pairing install-store and SDK coordinator. Default-off.
+/// Same-user local subscription topic carrying only closed public pairing display events.
+pub const PAIRING_EVENT_TOPIC: &str = "device.pairing.event";
+mod activate;
+pub(crate) mod admission;
 mod coordinator;
+mod full_bootstrap;
+mod full_epoch;
+mod full_io;
+pub use full_epoch::{FullEpoch, FullPacketEpoch, FullResumeProofSigningRequest};
+pub use full_io::{
+    FullApplicationDraft, FullDeltaManifestDraft, FullLocalIoLoan, FullLocalIoPort,
+    FullLocalIoService, FullReverseManifestDraft, FullTransferLocalIo,
+};
+pub mod full_generation;
+pub use full_bootstrap::{
+    FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest, FullSourceManifestSigningRequest,
+};
+mod native_ports;
+mod participant;
+pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};
+pub use native_ports::{NativePairingPublication, NativePairingQuery};
+pub use participant::{
+    FullPreparedTransferCandidate, FullRecipientNativeObservation, FullRecipientPublicationQuery,
+    FullSourceCandidateObservation, FullSourceNativeObservation, FullSourcePublicationQuery,
+    FullSourcePublished, FullSourceRetirementOutcome, FullSourceSubmission, FullTailContext,
+    LocalPairingParticipant, ParticipantContext, retry_full_source_cleanup,
+};
 pub mod install_gate;
 pub mod install_store;
 pub(crate) mod local_credential;
+pub mod private_credential;
 pub(crate) mod publication;
 pub(crate) mod recipient;
+pub mod transfer_payload;
 mod transport;
 pub use coordinator::{
-    PairingActor, PairingIdentity, handle_bus, install_actor, pairing_enabled,
-    validate_head_advance,
+    PairingActor, PairingIdentity, PairingLocalWriterService, handle_bus, install_actor,
+    pairing_enabled, remove_actor, remove_actor_and_drain, validate_head_advance,
+};
+pub(crate) use coordinator::{
+    PairingEventSubscription, install_actor_with_writer, pairing_event_stream, service_frontend,
+    take_installed_recipient, work_signal,
 };
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};
@@ -28,10 +60,13 @@ pub use recipient::{
     unadmitted_data_unlock, unlock_with_provider,
 };
 pub use transport::{
+    FreshPairingNative, FullClaimRequest, FullPairingTransport, FullPortFuture, FullRelayRequest,
     HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate, PreparedIssue,
     ProofPairingNative,
 };
 
+#[cfg(test)]
+mod component_tests;
 #[cfg(test)]
 mod prove_tests;
 #[cfg(test)]

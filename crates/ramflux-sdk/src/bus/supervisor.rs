@@ -45,7 +45,10 @@ pub(super) struct Supervisor {
 }
 
 impl Supervisor {
-    pub(super) fn new(config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
+    pub(super) fn new(mut config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
+        if config.pairing.is_none() {
+            config.pairing = Some(crate::custody::pairing::PairingConfig::from_env()?);
+        }
         let nodes = crate::node::NodeStore::load(&config.data_root, &config.builtin_nodes)?;
         let (stop_requested, _) = watch::channel(false);
         let (stop_response, _) = watch::channel(false);
@@ -277,6 +280,19 @@ impl Supervisor {
                 Ok(None) => return Box::pin(self.search_request(request, connection)).await,
             }
         }
+        let credential_call =
+            super::credentials::call(&self.config.data_root, &request, connection)?;
+        if request.method == "account.lock" {
+            crate::custody::pairing::private_credential::cancel_call(
+                &self.config.data_root,
+                request_account_id(&request)?,
+            )?;
+        }
+        if request.method == "account.unlock"
+            && let Some(call) = &credential_call
+        {
+            return self.private_unlock(&request, call).await;
+        }
         if !super::lifecycle::handles(&request.method) {
             return Box::pin(self.route(request, connection)).await;
         }
@@ -330,6 +346,41 @@ impl Supervisor {
         }
         self.lifecycle_changed.notify_one();
         super::lifecycle_registry::wait(receive).await
+    }
+
+    async fn private_unlock(
+        &self,
+        request: &LocalBusFrame,
+        call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+    ) -> Result<ActorResponse, SdkError> {
+        self.ensure_request_allowed(request)?;
+        if request.body.as_object().is_none_or(|body| !body.is_empty()) {
+            return Err(SdkError::CustodySetupInvalid);
+        }
+        let id = request_account_id(request)?.to_owned();
+        self.require_restore_ready(&id, true)?;
+        let secret =
+            super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
+        call.require_live()?;
+        let existing = self.accounts.borrow().get(&id).cloned();
+        let actor = if let Some(actor) = existing {
+            actor
+        } else {
+            let actor = AccountActor::start(
+                id.clone(),
+                self.config.clone(),
+                self.nodes.borrow().clone(),
+                self.index.clone(),
+                self.events.clone(),
+            )?;
+            self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            actor
+        };
+        let result = actor.unlock_native(secret, None).await?;
+        self.restore_states.borrow_mut().remove(&id);
+        self.set_active(&id).await?;
+        self.set_unlocked(&id, true).await?;
+        Ok(reply(serde_json::to_value(result)?))
     }
 
     async fn lifecycle_request(
@@ -393,7 +444,7 @@ impl Supervisor {
     }
     async fn route(
         &self,
-        mut request: LocalBusFrame,
+        request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
@@ -445,6 +496,14 @@ impl Supervisor {
             }
             return Ok(response);
         }
+        Box::pin(self.route_account(request, connection)).await
+    }
+
+    async fn route_account(
+        &self,
+        mut request: LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<ActorResponse, SdkError> {
         self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
         if self.installing.borrow().contains(&id) {
@@ -458,10 +517,11 @@ impl Supervisor {
             return Ok(status);
         }
         let creating = opens_account(&request.method);
+        let creating_pairing = super::pairing::creates_recipient(&self.config, &request)?;
         self.require_restore_ready(&id, creating)?;
         let actor = if let Some(actor) = actor {
             actor
-        } else if creating {
+        } else if creating || creating_pairing {
             #[cfg(test)]
             super::lifecycle::hold_before_creation(&self.config).await;
             let actor = AccountActor::start(
@@ -480,7 +540,19 @@ impl Supervisor {
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let response = actor.request(request).await;
+        let response = if matches!(
+            request.request.method.as_str(),
+            "device.transfer.begin"
+                | "device.transfer.status"
+                | "device.pair.join"
+                | "device.transfer.join"
+        ) {
+            // Source preparation and attended recipient input belong to the initiating
+            // connection/account lifecycle, beyond the ordinary command deadline.
+            super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await
+        } else {
+            actor.request(request).await
+        };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
             self.set_active(&id).await?;

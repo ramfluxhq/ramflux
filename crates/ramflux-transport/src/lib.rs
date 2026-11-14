@@ -3,6 +3,7 @@
 
 //! Transport backends for `grpc_h2`, `quic_quinn`, and `https_json`.
 
+mod admitted_mesh_request;
 mod backend;
 mod bounded_http;
 mod bounded_http_dns;
@@ -37,6 +38,9 @@ mod relay_quic_pool;
 mod tls_config;
 mod types;
 
+pub use admitted_mesh_request::{
+    AdmittedMeshHttpRequest, read_bounded_mesh_http_request_with_admission,
+};
 pub use backend::{GrpcH2Backend, HttpsJsonBackend, QuicQuinnBackend};
 pub use bounded_http::{BoundedHttpPost, BoundedHttpTls, bounded_http_post};
 pub use bounded_mesh_request::{
@@ -57,9 +61,9 @@ pub use compio_mesh::{
 pub use error::TransportError;
 pub use loopback::transport_submit_result;
 pub use mesh_http::{
-    MeshHttpClient, close_mesh_server_stream, mesh_http_get_json, mesh_http_post_json,
-    mesh_http_post_json_with_peer_ca_pems, mesh_http_post_status_body, read_mesh_http_request,
-    write_mesh_json_response, write_mesh_text_response,
+    MeshHttpClient, RawMeshPost, RawMeshResponse, close_mesh_server_stream, mesh_http_get_json,
+    mesh_http_post_json, mesh_http_post_json_with_peer_ca_pems, mesh_http_post_status_body,
+    read_mesh_http_request, write_mesh_json_response, write_mesh_text_response,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use mesh_quic::mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async;
@@ -78,7 +82,9 @@ pub use mesh_quic_limited::{
     LIMITED_ENVELOPE_SLACK, MeshQuicLimitedIngress, MeshQuicLimitedRequest,
     MeshQuicLimitedResponder, mesh_quic_exchange_raw_frame,
 };
-pub use mesh_request_deadline::{MeshRequestDeadline, mesh_request_deadline};
+pub use mesh_request_deadline::{
+    MeshRequestDeadline, mesh_request_deadline, mesh_socket_request_deadline,
+};
 pub use mesh_tls::{
     MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_tcp_stream,
     authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,

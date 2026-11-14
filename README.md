@@ -26,6 +26,9 @@ cryptography, storage, transport, sync, and core libraries.
 - `crates/ramflux-{core,protocol,crypto,storage,transport,sync,node-core}` —
   shared libraries used by the services, SDK, and CLI.
 
+Native device pairing remains **default-off**, in **preview / CLI only** scope.
+See [device pairing](docs/device_pairing.md) for its trust and readiness boundaries.
+
 ## Quick Start
 
 Build the workspace:

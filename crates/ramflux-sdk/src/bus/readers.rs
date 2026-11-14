@@ -44,6 +44,7 @@ pub(crate) async fn test_account_reader_request(
 
 #[derive(Clone)]
 pub(super) struct AccountReaders {
+    generation_path: std::path::PathBuf,
     search: Option<Arc<crate::search::LocalSearch>>,
     identity: ReaderIdentity,
     view: Arc<RwLock<Arc<local::AccountView>>>,
@@ -52,6 +53,9 @@ pub(super) struct AccountReaders {
 }
 
 impl AccountReaders {
+    pub(super) fn generation_path(&self) -> &std::path::Path {
+        &self.generation_path
+    }
     #[cfg(test)]
     pub(super) fn connection_for_test(
         &self,
@@ -171,6 +175,7 @@ impl AccountReaders {
             senders.push(sender);
         }
         Ok(Self {
+            generation_path: db.path.clone(),
             search,
             identity,
             view,

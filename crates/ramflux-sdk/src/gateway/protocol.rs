@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+use std::sync::Arc;
 
 const GATEWAY_SESSION_AUTH_TTL_SECONDS: i64 = 300;
 
@@ -81,6 +82,7 @@ impl GatewaySessionTransportKind {
 
 #[derive(Clone, Debug)]
 pub struct GatewaySessionConfig {
+    pub(crate) pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub(crate) custody_networking_pending: bool,
     pub(crate) custody: Option<super::GatewayCustodyConfig>,
     pub transport_kind: GatewaySessionTransportKind,
@@ -200,6 +202,7 @@ impl GatewaySessionConfig {
         Self {
             custody_networking_pending: false,
             custody: None,
+            pairing_admission: None,
             transport_kind: parts.transport_kind,
             bind_addr: parts.bind_addr,
             gateway_addr: parts.gateway_addr,
@@ -272,6 +275,8 @@ impl GatewaySessionConfig {
             self.device_branch = None;
             self.source_identity = None;
             self.custody_networking_pending = false;
+            self.pairing_admission =
+                Some(Arc::new(client.account_db()?.pairing_admission_reader()));
             return Ok(self);
         }
         client.require_legacy_networking()?;

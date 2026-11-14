@@ -55,7 +55,8 @@ fn declaration_publication(
 ) -> TestResult<ramflux_protocol::custody::Publication> {
     let device_id = account.local_device_id()?.to_owned();
     let (_, branch) = account.credentials(vault, &device_id, issued_at)?;
-    let primary = account.group_primary(vault)?;
+    // This public raw-key API acquires its own signing barrier; do not nest a lease.
+    let primary = vault.load_primary(account.primary_vault_ref())?;
     let publication = account.candidate_message_layer_publication(
         root,
         &branch,

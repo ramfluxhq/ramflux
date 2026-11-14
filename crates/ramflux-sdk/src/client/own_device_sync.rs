@@ -6,6 +6,7 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 
+mod pairing;
 pub(crate) mod receive_job;
 
 impl RamfluxClient {

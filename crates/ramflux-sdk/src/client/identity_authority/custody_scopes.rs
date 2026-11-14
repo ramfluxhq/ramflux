@@ -27,6 +27,15 @@ impl RamfluxClient {
         sender: &str,
         receiver: &str,
     ) -> Result<(), SdkError> {
+        if let Some(account) = &self.born_v3_account
+            && account.record().body.account_anchor == root
+            && !crate::custody::pairing::ordinary_session_admitted(
+                self,
+                account.local_account_id(),
+            )?
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
         for device in [sender, receiver] {
             self.require_native_operation(
                 &self.device_identity_for_root(root, device)?,

@@ -4,7 +4,8 @@
 //! Daemon-owned background backup jobs with account-ordered snapshot capture.
 mod attachments;
 mod format;
-mod generation_lock;
+pub(crate) mod full_generation;
+pub(crate) mod generation_lock;
 mod install;
 mod native;
 mod output_ownership;

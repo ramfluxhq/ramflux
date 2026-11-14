@@ -155,17 +155,33 @@ impl RamfluxClient {
         if let Some(own) = &self.born_v3_account
             && own.record().body.account_anchor == expected
         {
-            // The public authority file advances before cache metadata. A crash can leave a
-            // cache behind the local floor; it cannot revive an older registration proof.
-            crate::custody::accept_publication(
-                self.account_index()?.root(),
-                own.local_account_id(),
-                &ramflux_protocol::custody::CustodyAuthority {
-                    publication: manifest.publication.clone(),
-                    custodian_publication: manifest.custodian_publication.clone(),
-                },
-                now,
-            )?;
+            let root = self.account_index()?.root();
+            let authority = ramflux_protocol::custody::CustodyAuthority {
+                publication: manifest.publication.clone(),
+                custodian_publication: manifest.custodian_publication.clone(),
+            };
+            if own.pairing_adoption_required() {
+                if let Some(vault) = &self.born_v3_vault {
+                    crate::custody::pairing::refresh_authority(
+                        root,
+                        self.account_db()?,
+                        vault.as_ref(),
+                        own.local_account_id(),
+                        &authority,
+                        now,
+                    )?;
+                } else if ramflux_protocol::custody::object_hash(own.record())?
+                    != ramflux_protocol::custody::object_hash(&authority.publication.record)?
+                    || !crate::custody::pairing::ordinary_session_admitted(
+                        self,
+                        own.local_account_id(),
+                    )?
+                {
+                    return Err(SdkError::PairingCode("PublicationPending"));
+                }
+            } else {
+                crate::custody::accept_publication(root, own.local_account_id(), &authority, now)?;
+            }
         }
         Ok(())
     }

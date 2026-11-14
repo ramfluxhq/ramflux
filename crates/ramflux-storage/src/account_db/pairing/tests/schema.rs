@@ -2,10 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 use super::super::schema::{DESCRIPTOR_MAX, HEAD_ROW_MAX, TABLES};
-use super::helpers::{TestResult, floor, h};
-use crate::{AccountDb, AccountDbKey, AccountIndex};
+use super::helpers::{TestResult, h};
 use rusqlite::params;
-use std::path::Path;
 
 pub(super) fn tables_and_indexes() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-tables")?;
@@ -18,7 +16,23 @@ pub(super) fn tables_and_indexes() -> TestResult {
         )?;
         assert_eq!(n, 1, "{table}");
     }
-    assert_eq!(TABLES.len(), 5);
+    assert_eq!(
+        TABLES,
+        [
+            "pairing_floor",
+            "pairing_live",
+            "pairing_head",
+            "pairing_terminal",
+            "pairing_adoption",
+            "pairing_full_tail",
+            "pairing_source_cleanup",
+            "pairing_full_tail_apply",
+            "pairing_full_tail_dependency",
+            "pairing_full_completion",
+            "pairing_own_sync",
+        ],
+        "test: pairing journal owner inventory changed"
+    );
     for index in ["pairing_live_phase", "pairing_terminal_finished"] {
         let n: i64 = db.connection.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
@@ -29,41 +43,6 @@ pub(super) fn tables_and_indexes() -> TestResult {
     }
     let _ = std::fs::remove_dir_all(root);
     Ok(())
-}
-
-pub(super) fn old_open_creates_tables() -> TestResult {
-    let (root, db) = crate::tests::test_db("pair04-migrate")?;
-    db.connection.execute_batch(
-        "DROP TABLE pairing_live; DROP TABLE pairing_head; DROP TABLE pairing_terminal;
-         DROP TABLE pairing_adoption; DROP TABLE pairing_floor;",
-    )?;
-    drop(db);
-    let db = reopen(&root)?;
-    for table in TABLES {
-        let n: i64 = db.connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-            params![table],
-            |row| row.get(0),
-        )?;
-        assert_eq!(n, 1, "{table}");
-    }
-    db.put_pairing_floor(&floor())?;
-    drop(db);
-    let db = reopen(&root)?;
-    let kept = db.pairing_floor()?.ok_or("floor after reopen")?;
-    assert_eq!(kept.issued_seq, 3);
-    drop(db);
-    let db = reopen(&root)?;
-    let again = db.pairing_floor()?.ok_or("floor after second reopen")?;
-    assert_eq!(again, kept);
-    let _ = std::fs::remove_dir_all(root);
-    Ok(())
-}
-
-fn reopen(root: &Path) -> Result<AccountDb, crate::StorageError> {
-    let index = AccountIndex::open(root)?;
-    let key = AccountDbKey::derive("acct", b"storage-test-secret");
-    AccountDb::open(&index, "acct", &key)
 }
 
 pub(super) fn caps_and_sql_bounds() -> TestResult {

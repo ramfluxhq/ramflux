@@ -3,6 +3,7 @@
 
 //! Root-free pairing routes: native proof plus HTTPS relay, never an account grant.
 use super::*;
+mod full_lease;
 use crate::pairing_relay::{
     PAIRING_CLAIM_PATH, PAIRING_POLL_PATH, PAIRING_SEND_PATH, PairingClock, PairingRelayConfig,
     PairingRelayStore, TestPairingClock, handle_pairing_http,

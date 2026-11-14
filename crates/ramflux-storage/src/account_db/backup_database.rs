@@ -49,8 +49,75 @@ enum MarkerAuthoritySource {
 pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
     original_input: BackupInputObservation,
+    _generation_reader: Option<crate::account_generation::GenerationReadLease>,
+}
+#[derive(Clone, Copy)]
+enum FullInputMode {
+    PrivateCopy,
+    SelectedRead,
 }
 impl BackupDatabase {
+    /// Open only the receiver owner's freshly copied CURRENT-schema B database.
+    /// This preserves B-local rows and MAC authority exactly: archive normalization
+    /// belongs to imported archives and must not run on this own-device copy.
+    pub(in crate::account_db) fn open_full_receiver_copy(
+        path: &Path,
+        key: &AccountDbKey,
+    ) -> Result<Self, StorageError> {
+        Self::open_full_input(path, key, FullInputMode::PrivateCopy)
+    }
+    /// Verify a selected live generation without changing its journal or taking a writer lock.
+    pub(in crate::account_db) fn open_full_selected_read(
+        path: &Path,
+        key: &AccountDbKey,
+    ) -> Result<Self, StorageError> {
+        Self::open_full_input(path, key, FullInputMode::SelectedRead)
+    }
+    fn open_full_input(
+        path: &Path,
+        key: &AccountDbKey,
+        mode: FullInputMode,
+    ) -> Result<Self, StorageError> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let (flags, settings) = match mode {
+            FullInputMode::PrivateCopy => (
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+            ),
+            FullInputMode::SelectedRead => {
+                (rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, "PRAGMA query_only=ON; BEGIN;")
+            }
+        };
+        let db = rusqlite::Connection::open_with_flags(
+            path,
+            flags | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let hex = zeroize::Zeroizing::new(key.sqlcipher_hex());
+        let pragma = zeroize::Zeroizing::new(format!(
+            "PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; {settings}",
+            hex.as_str()
+        ));
+        // Only our private copy is normalized. A selected ordinary writer keeps its
+        // existing WAL mode; recovery reads one stable transaction under observation.
+        db.execute_batch(&pragma)?;
+        crate::schema_generation::validate(&db)?;
+        crate::schema_object_erasure::validate(&db)?;
+        let fingerprint: String = db.query_row(
+            "SELECT key_fingerprint FROM account_key_check WHERE singleton_id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if fingerprint != key.fingerprint() {
+            return Err(StorageError::AccountKeyMismatch);
+        }
+        super::backup_native::full_transfer_snapshot_preflight(&db)?;
+        let original_input = observation::capture(&db, false)?;
+        Ok(Self { db, original_input, _generation_reader: None })
+    }
+
     /// Opens a private snapshot or an owner-guarded generation for restore checks.
     /// Never use this worker handle as an active live account writer.
     /// # Errors
@@ -117,6 +184,11 @@ impl BackupDatabase {
         mode: BackupOpenMode,
         source: MarkerAuthoritySource,
     ) -> Result<Self, StorageError> {
+        let generation_reader = if matches!(source, MarkerAuthoritySource::LiveAccountKey) {
+            Some(crate::account_generation::GenerationReadLease::acquire(path)?)
+        } else {
+            None
+        };
         let mut db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
@@ -180,7 +252,7 @@ impl BackupDatabase {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
         super::attachment_retirement::recount_archive(&db)?;
-        let opened = Self { db, original_input };
+        let opened = Self { db, original_input, _generation_reader: generation_reader };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
         opened.db.execute_batch(crate::schema_contact_requests::CONSENT_DECISIONS)?;

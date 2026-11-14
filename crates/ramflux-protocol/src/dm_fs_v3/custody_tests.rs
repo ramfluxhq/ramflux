@@ -102,7 +102,7 @@ fn dm_fs_v3_custody_carriers_reject_each_field_and_cross_field() -> Result {
         v["operation"] = json!("unknown");
         rejects(
             &v,
-            "unknown variant `unknown`, expected one of `publish`, `register`, `open_session`, `home_migration`, `prekey_status`, `register_update`, `pairing_issue`, `pairing_create`",
+            "unknown variant `unknown`, expected one of `publish`, `register`, `open_session`, `home_migration`, `prekey_status`, `register_update`, `pairing_issue`, `pairing_create`, `pairing_data_lease`",
         )?;
         let mut v = action.clone();
         v[field] = json!(format!("{}=", action[field].as_str().ok_or("carrier")?));

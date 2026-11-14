@@ -1,0 +1,41 @@
+{
+  "cells": [
+    {
+      "hex": "",
+      "type": 0
+    },
+    {
+      "hex": "fffffffffffffffe",
+      "type": 1
+    },
+    {
+      "hex": "8000000000000000",
+      "type": 2
+    },
+    {
+      "hex": "c3a9",
+      "type": 3
+    },
+    {
+      "hex": "00ff",
+      "type": 4
+    }
+  ],
+  "keyless_preimage_hex": "0000001e72616d666c75782e70616972696e672e66756c6c2e726f776b65792e763100000000000100000008fffffffffffffffe020000000880000000000000000300000002c3a9040000000200ff",
+  "occurrences": [
+    {
+      "key": "ld8zJ7G4kbjiqCrVADuFojcSiB0d0iAPgtHXFwAtNsMAAAAA",
+      "occurrence": 0
+    },
+    {
+      "key": "ld8zJ7G4kbjiqCrVADuFojcSiB0d0iAPgtHXFwAtNsMAAAAB",
+      "occurrence": 1
+    },
+    {
+      "key": "ld8zJ7G4kbjiqCrVADuFojcSiB0d0iAPgtHXFwAtNsP_____",
+      "occurrence": 4294967295
+    }
+  ],
+  "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
+  "stable_key": "AAAAAAABAAAACP_________-AgAAAAiAAAAAAAAAAAMAAAACw6kEAAAAAgD_"
+}

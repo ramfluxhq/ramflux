@@ -5,6 +5,24 @@
 use super::{RamfluxClient, SdkError, now_unix_timestamp};
 use serde_json::{Value, json};
 impl RamfluxClient {
+    // Persisted local denial is decisive before any peer-directory network work.
+    // Ordinary freshness checks still run at their existing authorization boundary.
+    pub(crate) fn require_native_pair_device_not_revoked(&self) -> Result<(), SdkError> {
+        if self.born_v3_account.is_some()
+            && self
+                .account_db()?
+                .load_actor_state::<bool>(&Self::device_revocation_key(
+                    &self.owned_device_identity()?,
+                ))?
+                .unwrap_or(false)
+        {
+            return Err(crate::client::identity_authority::invalid(
+                "device is locally fenced by a pending root revocation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn require_pair_device_active(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,

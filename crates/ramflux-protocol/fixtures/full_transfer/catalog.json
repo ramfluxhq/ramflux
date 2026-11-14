@@ -1,0 +1,174 @@
+{
+  "census_hash": "WHAVWFpmU2CRUSypYWWzhsCDGcE-GoL14lYf9QPQgFg",
+  "changed_nested_disposition_hash": "dFMpGuokwRWdKvlQnIoen5vdCOqlotOfGPTYg-r1dR0",
+  "changed_nested_merge_hash": "lqK_22PDnN0rlVydLVceNwGlTpgY5a5O1ysNh6Hz7tw",
+  "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
+  "rule_hashes": [
+    "0RtPEF9UDngqhqoAPif3yGoa91vE_br6EPcnsRZzVm8",
+    "Aj8W6UBO8UACri-liS7ky21ZB-yP3zaEQPezhBslpms"
+  ],
+  "rules": [
+    {
+      "cells": [
+        {
+          "name": "row_id",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "body",
+          "nullable": false,
+          "type": "utf8"
+        }
+      ],
+      "codec": [
+        {
+          "codec": {
+            "cell_type": "i64",
+            "kind": "scalar"
+          },
+          "disposition": "transfer",
+          "merge": "immutable",
+          "name": "row_id",
+          "nullable": false
+        },
+        {
+          "codec": {
+            "fields": [
+              {
+                "codec": {
+                  "cell_type": "utf8",
+                  "kind": "scalar"
+                },
+                "disposition": "transfer",
+                "merge": "prefer_local",
+                "name": "note",
+                "nullable": false
+              },
+              {
+                "codec": {
+                  "decoded_bytes": "32",
+                  "kind": "encoded_bytes"
+                },
+                "disposition": "exclude",
+                "merge": "immutable",
+                "name": "private_seed",
+                "nullable": false
+              },
+              {
+                "codec": {
+                  "kind": "decimal_u64"
+                },
+                "disposition": "exclude",
+                "merge": "restrict_union",
+                "name": "veto",
+                "nullable": false
+              }
+            ],
+            "kind": "object"
+          },
+          "disposition": "transfer",
+          "merge": "inert_history",
+          "name": "body",
+          "nullable": false
+        }
+      ],
+      "codec_version": "1",
+      "disposition": "transfer",
+      "excluded": [],
+      "id": "sql/catalog_vector/history",
+      "key": [
+        "row_id"
+      ],
+      "key_grammar_version": "1",
+      "merge": "inert_history",
+      "restrictive": false,
+      "restrictive_projection": [],
+      "selector": {
+        "table": "catalog_vector"
+      }
+    },
+    {
+      "cells": [
+        {
+          "name": "row_id",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "body",
+          "nullable": false,
+          "type": "utf8"
+        }
+      ],
+      "codec": [
+        {
+          "codec": {
+            "cell_type": "i64",
+            "kind": "scalar"
+          },
+          "disposition": "transfer",
+          "merge": "immutable",
+          "name": "row_id",
+          "nullable": false
+        },
+        {
+          "codec": {
+            "fields": [
+              {
+                "codec": {
+                  "cell_type": "utf8",
+                  "kind": "scalar"
+                },
+                "disposition": "exclude",
+                "merge": "prefer_local",
+                "name": "note",
+                "nullable": false
+              },
+              {
+                "codec": {
+                  "decoded_bytes": "32",
+                  "kind": "encoded_bytes"
+                },
+                "disposition": "exclude",
+                "merge": "immutable",
+                "name": "private_seed",
+                "nullable": false
+              },
+              {
+                "codec": {
+                  "kind": "decimal_u64"
+                },
+                "disposition": "transfer",
+                "merge": "restrict_union",
+                "name": "veto",
+                "nullable": false
+              }
+            ],
+            "kind": "object"
+          },
+          "disposition": "transfer",
+          "merge": "restrict_union",
+          "name": "body",
+          "nullable": false
+        }
+      ],
+      "codec_version": "1",
+      "disposition": "transfer",
+      "excluded": [],
+      "id": "sql/catalog_vector/veto",
+      "key": [
+        "row_id"
+      ],
+      "key_grammar_version": "1",
+      "merge": "restrict_union",
+      "restrictive": true,
+      "restrictive_projection": [
+        "/body/veto"
+      ],
+      "selector": {
+        "table": "catalog_vector"
+      }
+    }
+  ]
+}

@@ -13,12 +13,42 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
+mod generation_fence;
+pub(crate) use generation_fence::require_deadline as require_generation_rebase_deadline;
+
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 
 #[derive(Clone)]
 pub(crate) struct Connection {
     inner: std::sync::Arc<Worker>,
+    rebase: Option<generation_fence::Permit>,
 }
+#[derive(Clone)]
+pub(crate) struct WeakConnection {
+    inner: std::sync::Weak<Worker>,
+    rebase: Option<generation_fence::Permit>,
+}
+impl WeakConnection {
+    pub(crate) fn upgrade_account_writer(&self) -> Option<Connection> {
+        let inner = self.inner.upgrade()?;
+        let owner = inner.account_writer.as_ref()?;
+        let permit = match &self.rebase {
+            Some(permit) => Some(permit.clone()),
+            None => generation_fence::current(owner).ok()?,
+        };
+        if let Some(permit) = &permit {
+            permit.require_live(inner.account_generation).ok()?;
+        } else if !owner
+            .generation
+            .read()
+            .is_ok_and(|selected| *selected == inner.account_generation)
+        {
+            return None;
+        }
+        Some(Connection { inner, rebase: permit })
+    }
+}
+
 struct Worker {
     search_watch: std::sync::Arc<Mutex<Option<std::sync::Arc<crate::local_search::SearchWatch>>>>,
     id: u64,
@@ -27,7 +57,9 @@ struct Worker {
     checkpoints: std::sync::Arc<BackgroundCheckpoint>,
     #[cfg(feature = "itest-work-budget")]
     work_probe: Mutex<Option<crate::SqlWorkProbe>>,
-    _account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+    account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+    account_generation: u64,
+    _generation_reader: Option<crate::account_generation::GenerationReadLease>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -58,31 +90,59 @@ fn active_writers() -> &'static Mutex<BTreeMap<PathBuf, WriterOwner>> {
 }
 
 impl Connection {
+    pub(crate) fn same_worker(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    pub(crate) fn owned_path(&self) -> &Path {
+        &self.inner.path
+    }
+    pub(crate) fn downgrade(&self) -> WeakConnection {
+        let rebase = self.rebase.clone().or_else(|| {
+            self.inner
+                .account_writer
+                .as_ref()
+                .and_then(|owner| generation_fence::current(owner).ok().flatten())
+        });
+        WeakConnection { inner: std::sync::Arc::downgrade(&self.inner), rebase }
+    }
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_flags(path, OpenFlags::default())
     }
 
     pub(crate) fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self> {
-        Self::open_owned(path.as_ref(), flags, None)
+        Self::open_owned(path.as_ref(), flags, None, None)
     }
 
     pub(crate) fn open_account_writer(
         path: &Path,
         writer: std::sync::Arc<crate::account_writer::AccountWriter>,
     ) -> Result<Self> {
-        Self::open_owned(path, OpenFlags::default(), Some(writer))
+        let lease = crate::account_generation::GenerationReadLease::acquire(path)
+            .map_err(|_| Error::InvalidQuery)?;
+        Self::open_owned(path, OpenFlags::default(), Some(writer), Some(lease))
+    }
+
+    pub(crate) fn open_account_reader(path: &Path) -> Result<Self> {
+        let lease = crate::account_generation::GenerationReadLease::acquire(path)
+            .map_err(|_| Error::InvalidQuery)?;
+        Self::open_owned(path, OpenFlags::SQLITE_OPEN_READ_ONLY, None, Some(lease))
     }
 
     fn open_owned(
         path: &Path,
         flags: OpenFlags,
         writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+        generation_reader: Option<crate::account_generation::GenerationReadLease>,
     ) -> Result<Self> {
+        let account_generation = writer.as_ref().map_or(Ok(0), |owner| {
+            owner.generation.read().map(|epoch| *epoch).map_err(|_| Error::InvalidQuery)
+        })?;
         let path = path.to_path_buf();
         let connection_id = NEXT_CONNECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel::<Job>(64);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker_path = path.clone();
+        let checkpoint_writer = writer.clone();
         let worker = std::thread::Builder::new()
             .name("ramflux-db".to_owned())
             .spawn(move || {
@@ -130,7 +190,17 @@ impl Connection {
                                     }
                                 }
                                 // Each job has delivered its reply before checkpoint I/O starts.
-                                worker_checkpoints.maintain(&db);
+                                if let Some(owner) = &checkpoint_writer {
+                                    // Maintenance can clear a durable privacy marker too.
+                                    // It obeys the same G2 fence and never mutates a retired DB.
+                                    if let Ok(selected) = owner.generation.try_read()
+                                        && *selected == account_generation
+                                    {
+                                        worker_checkpoints.maintain(&db);
+                                    }
+                                } else {
+                                    worker_checkpoints.maintain(&db);
+                                }
                             }
                         }
                     }
@@ -142,6 +212,7 @@ impl Connection {
             .map_err(|_| Error::InvalidQuery)?;
         let checkpoints = ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
         Ok(Self {
+            rebase: None,
             inner: std::sync::Arc::new(Worker {
                 id: connection_id,
                 path,
@@ -150,7 +221,9 @@ impl Connection {
                 checkpoints,
                 #[cfg(feature = "itest-work-budget")]
                 work_probe: Mutex::new(None),
-                _account_writer: writer,
+                account_writer: writer,
+                account_generation,
+                _generation_reader: generation_reader,
                 sender: Some(sender),
                 handle: Some(worker),
             }),
@@ -158,6 +231,80 @@ impl Connection {
     }
 
     pub(crate) fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let owner = self.inner.account_writer.clone();
+        let epoch = self.inner.account_generation;
+        let permit = self.rebase.clone().or(owner
+            .as_ref()
+            .map(generation_fence::current)
+            .transpose()?
+            .flatten());
+        self.dispatch(move |db| {
+            // Rebase requests carry only a same-thread, memory-scoped permit. Ordinary
+            // queued jobs refuse Busy instead of blocking the fenced owner's worker.
+            if let Some(permit) = permit {
+                permit.require_live(epoch)?;
+                return f(db);
+            }
+            // Acquired on the actual worker, covering SQLite lock waits as well as SQL.
+            // A queued old-generation write cannot cross a successful G2 selection.
+            let guard =
+                owner.as_ref().map(|owner| owner.generation.try_read()).transpose().map_err(
+                    |_| {
+                        Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                            None,
+                        )
+                    },
+                )?;
+            if guard.as_ref().is_some_and(|selected| **selected != epoch) {
+                return Err(Error::InvalidQuery);
+            }
+            f(db)
+        })
+    }
+
+    /// Run one bounded local generation switch while excluding every account worker.
+    /// `retire` invalidates ALL existing writer handles, including jobs already queued.
+    /// The caller must resolve an uncertain index commit before choosing `retire`.
+    pub(crate) fn call_generation<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut rusqlite::Connection) -> (Result<T>, bool) + Send + 'static,
+    ) -> Result<T> {
+        let owner = self.inner.account_writer.clone().ok_or(Error::InvalidQuery)?;
+        let epoch = self.inner.account_generation;
+        if let Some(permit) = self.rebase.clone().or(generation_fence::current(&owner)?) {
+            return self.dispatch(move |db| {
+                permit.require_live(epoch)?;
+                if !db.is_autocommit() {
+                    return Err(Error::InvalidQuery);
+                }
+                let (result, retire) = f(db);
+                if retire {
+                    permit.retire();
+                }
+                result
+            });
+        }
+        self.dispatch(move |db| {
+            let mut selected = owner.generation.try_write().map_err(|_| {
+                Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), None)
+            })?;
+            if *selected != epoch || !db.is_autocommit() {
+                return Err(Error::InvalidQuery);
+            }
+            let next = selected.checked_add(1).ok_or(Error::InvalidQuery)?;
+            let (result, retire) = f(db);
+            if retire {
+                *selected = next;
+            }
+            result
+        })
+    }
+
+    fn dispatch<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -224,7 +371,9 @@ impl Connection {
     }
 
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {
-        let sql = sql.to_owned();
+        // PRAGMA key/rekey statements contain key material. The queued worker copy
+        // must erase it too, rather than outliving the caller's Zeroizing buffer.
+        let sql = zeroize::Zeroizing::new(sql.to_owned());
         #[cfg(any(test, feature = "durability-test-hooks"))]
         let path = self.inner.path.clone();
         self.call(move |db| {
@@ -312,6 +461,38 @@ impl Connection {
 
     pub(crate) fn is_autocommit(&self) -> Result<bool> {
         self.call(|db| Ok(db.is_autocommit()))
+    }
+
+    /// Execute one complete immediate transaction in a single managed worker job.
+    /// The borrowed SQLite transaction cannot escape or leave an untracked BEGIN.
+    pub(crate) fn call_immediate<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.call_immediate_result(action)?
+    }
+
+    /// Preserve domain errors while rolling back their complete atomic callback.
+    /// A managed outer transaction is deliberately refused; no worker job may
+    /// join this callback's BEGIN-to-COMMIT interval.
+    pub(crate) fn call_immediate_result<T: Send + 'static, E: Send + 'static>(
+        &self,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> std::result::Result<T, E> + Send + 'static,
+    ) -> Result<std::result::Result<T, E>> {
+        self.call(move |db| {
+            if !db.is_autocommit() {
+                return Err(Error::InvalidQuery);
+            }
+            let transaction =
+                db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            match action(&transaction) {
+                Ok(value) => {
+                    transaction.commit()?;
+                    Ok(Ok(value))
+                }
+                Err(error) => Ok(Err(error)),
+            }
+        })
     }
 
     pub(crate) fn deferred_transaction(&self) -> Result<Transaction<'_>> {
@@ -692,6 +873,45 @@ mod tests {
         }
         let count: i64 = db.query_row("SELECT count(*) FROM state", [], |row| row.get(0))?;
         assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_worker_transaction_rolls_back_errors_and_refuses_nested_begin() -> rusqlite::Result<()>
+    {
+        let db = Connection::open(":memory:")?;
+        db.execute_batch("CREATE TABLE private_record(value INTEGER)")?;
+        let failed = db.call_immediate(|transaction| {
+            transaction.execute("INSERT INTO private_record VALUES(1)", [])?;
+            Err::<(), _>(rusqlite::Error::InvalidQuery)
+        });
+        assert!(failed.is_err(), "test: failed atomic writer callback committed");
+        let count: u64 =
+            db.query_row("SELECT count(*) FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(count, 0, "test: failed atomic callback retained a partial record");
+        let refused = db.call_immediate_result(|transaction| {
+            transaction
+                .execute("INSERT INTO private_record VALUES(3)", [])
+                .map_err(|_| "sqlite refusal")?;
+            Err::<(), _>("semantic refusal")
+        })?;
+        assert_eq!(refused, Err("semantic refusal"), "test: atomic callback lost its domain error");
+        let count: u64 =
+            db.query_row("SELECT count(*) FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(count, 0, "test: semantic refusal committed partial application");
+        db.call_immediate(|transaction| {
+            transaction.execute("INSERT INTO private_record VALUES(2)", [])?;
+            Ok(())
+        })?;
+        let value: u64 = db.query_row("SELECT value FROM private_record", [], |row| row.get(0))?;
+        assert_eq!(value, 2, "test: successful atomic callback did not commit");
+        let outer = db.immediate_transaction()?;
+        assert!(
+            db.call_immediate(|_| Ok(())).is_err(),
+            "test: atomic callback joined an already managed outer transaction"
+        );
+        drop(outer);
+        assert!(db.is_autocommit()?, "test: nested refusal damaged outer transaction cleanup");
         Ok(())
     }
 

@@ -455,6 +455,7 @@ pub(crate) fn pending_restore(
         capacity_retry_at: None,
         pending_branch: true,
         custody_v3_observed: true,
+        pairing_adoption_required: false,
         primary_vault_ref: String::new(),
         branch_vault_ref: branch_ref.clone(),
         vault_class: vault.vault_class().into(),

@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    /// Frozen pairing configuration; None reads the strict default-off environment once at startup.
+    pub pairing: Option<crate::custody::pairing::PairingConfig>,
     /// Explicit runtime opt-in for unmigrated fixture accounts. Startup refuses this
     /// setting unless the integration-only creation implementation is compiled in.
     pub itest_legacy_accounts: bool,
@@ -1177,6 +1179,7 @@ impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
+            pairing: None,
             #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
             custody_vault: None,
             itest_legacy_accounts: false,

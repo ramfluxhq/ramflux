@@ -346,9 +346,15 @@ pub(crate) fn handle_mesh_request(
     } else {
         None
     };
-    let Some(request) = ramflux_transport::read_bounded_mesh_http_request(
+    let accepted = std::time::Instant::now();
+    let Some(admitted) = ramflux_transport::read_bounded_mesh_http_request_with_admission(
         stream,
-        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+        &crate::pairing_full::cap,
+        |reader, method, path, raw, bytes| {
+            let context =
+                crate::pairing_full::ReadContext { router, peer, socket: &reader.sock, accepted };
+            crate::pairing_full::admit(&context, method, path, raw, bytes)
+        },
     )?
     else {
         return Ok(false);
@@ -361,6 +367,14 @@ pub(crate) fn handle_mesh_request(
         );
         return Ok(false);
     };
+    let (mut request, full) = admitted.into_parts();
+    if let Some(mut full) = full {
+        let context =
+            crate::pairing_full::ReadContext { router, peer, socket: &stream.sock, accepted };
+        let reply = crate::pairing_full::handle(&context, &mut full, &mut request);
+        crate::pairing_full::write(stream, &reply)?;
+        return Ok(false);
+    }
     #[cfg(feature = "itest-http")]
     if matches!(
         request.path.as_str(),

@@ -50,6 +50,7 @@ fn runtime(
             connection_sender,
             connection_work,
             ledger: None,
+            pairing: super::super::pairing_calls::Calls::default(),
             transient: TransientHost::default(),
             receive_gate_hook: None,
             courier_events: None,

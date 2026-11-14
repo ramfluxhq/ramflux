@@ -3,6 +3,9 @@
 
 //! Recipient J0/J1: own branch vault and data-store passphrase, no master/SS.
 
+mod existing_frontend;
+pub(crate) use existing_frontend::ExistingFrontendUnlock;
+
 use super::coordinator::verify_invitation;
 use super::install_gate;
 use super::install_store::{self, Install};
@@ -64,6 +67,17 @@ pub trait RecipientKeyStaging: Send + Sync {
         invitation: &Envelope<Invitation>,
         generation: u64,
     ) -> Result<DeviceRef, SdkError>;
+    /// Stage with distinct frontend and durable ceremony generations.
+    /// # Errors
+    /// Same failures as `stage`; existing non-journal providers delegate to it.
+    fn stage_with_generation(
+        &self,
+        invitation: &Envelope<Invitation>,
+        frontend_generation: u64,
+        _ceremony_generation: u64,
+    ) -> Result<DeviceRef, SdkError> {
+        self.stage(invitation, frontend_generation)
+    }
 }
 
 /// Production [`RecipientKeyStaging`] over [`stage_new`].
@@ -97,10 +111,25 @@ impl RecipientKeyStaging for RecipientStaging {
 /// # Errors
 /// Reservation, provider, vault, or journal failures. Refusal leaves the run unadmitted.
 pub fn stage_new(request: &StageNew<'_>) -> Result<StagedRecipient, SdkError> {
+    stage_new_on_client(request, &mut crate::RamfluxClient::new())
+}
+
+pub(crate) fn stage_new_on_client(
+    request: &StageNew<'_>,
+    client: &mut crate::RamfluxClient,
+) -> Result<StagedRecipient, SdkError> {
+    stage_new_for_generation(request, client, 1)
+}
+
+pub(crate) fn stage_new_for_generation(
+    request: &StageNew<'_>,
+    client: &mut crate::RamfluxClient,
+    generation: u64,
+) -> Result<StagedRecipient, SdkError> {
     verify_invitation(request.invitation)?;
     let reservation = reserve_new(request)?;
     let credential = setup_secret(request, &reservation.reservation_id)?;
-    commit_new(request, reservation, &credential)
+    commit_new(request, reservation, &credential, client, generation)
 }
 
 /// Existing-target J0/J1: original password, branch and data refs, zero setup callbacks.
@@ -108,8 +137,18 @@ pub fn stage_new(request: &StageNew<'_>) -> Result<StagedRecipient, SdkError> {
 /// # Errors
 /// Reservation or unlock failures. Setup action is refused.
 pub fn stage_existing(request: &StageExisting<'_>) -> Result<StagedRecipient, SdkError> {
+    stage_existing_for_generation(request, &mut crate::RamfluxClient::new(), 1)
+}
+
+pub(crate) fn stage_existing_for_generation(
+    request: &StageExisting<'_>,
+    client: &mut crate::RamfluxClient,
+    generation: u64,
+) -> Result<StagedRecipient, SdkError> {
     verify_invitation(request.new.invitation)?;
-    existing_reservation(request)
+    let staged = existing_reservation(request, client)?;
+    write_floor_live(client.account_db()?, &request.new, &staged, generation)?;
+    Ok(staged)
 }
 
 /// Ordinary networking stays closed until install, DB, vault and authority agree.
@@ -128,7 +167,20 @@ pub fn ordinary_networking_allowed(root: &Path, account_id: &str) -> Result<bool
 pub fn unadmitted_data_unlock(root: &Path, account_id: &str) -> Result<bool, SdkError> {
     Ok(install_store::list_pending(root, account_id)?
         .iter()
-        .any(|row| matches!(row.state.as_str(), "reserved" | "vault_durable")))
+        .any(|row| matches!(row.state.as_str(), "reserved" | "vault_durable"))
+        || full_install_data_unlock(root, account_id)?)
+}
+
+pub(crate) fn full_install_data_unlock(root: &Path, account_id: &str) -> Result<bool, SdkError> {
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    let selected = index.account(account_id)?;
+    Ok(install_store::list_pending(root, account_id)?.iter().any(|row| {
+        row.full_transfer.is_some()
+            && row.install_purpose == "transfer_destination"
+            && row.account_anchor == selected.principal_commitment
+            && row.record_hash.is_some()
+            && matches!(row.state.as_str(), "adopt_prepared" | "authority_durable")
+    }))
 }
 
 /// Session admission used by `native_account::unlock` after the data store is open.
@@ -140,17 +192,42 @@ pub fn ordinary_session_admitted(
     account_id: &str,
 ) -> Result<bool, SdkError> {
     let root = client.account_index()?.root();
-    let adoption = client
-        .account_db()
-        .ok()
-        .and_then(|db| db.pairing_adoption().ok().flatten())
-        .map(|row| row.record_hash);
-    ordinary_session_admitted_at(
+    let adoption = client.account_db()?.pairing_adoption()?;
+    let installed = install_store::read_installed(root, account_id)?;
+    if let (Some(install), Some(adoption)) = (&installed, &adoption)
+        && (install.full_transfer.is_some()
+            || adoption.full_generation_nonce.is_some()
+            || adoption.full_initial_union_root.is_some())
+    {
+        let account =
+            crate::custody::load_data_account(root, account_id, crate::custody::network_now()?)?;
+        return Ok(super::full_generation::require_completed_full_generation(
+            root, &account, install, adoption,
+        )
+        .is_ok());
+    }
+    if !ordinary_session_admitted_at(
         root,
         account_id,
-        adoption.as_deref(),
+        adoption.as_ref().map(|row| row.record_hash.as_str()),
         authority_present(root, account_id),
-    )
+    )? {
+        return Ok(false);
+    }
+    let installed = install_store::read_installed(root, account_id)?;
+    match (installed, adoption) {
+        (None, None) => Ok(true),
+        (Some(install), Some(adoption)) => {
+            let account = crate::custody::load_data_account(
+                root,
+                account_id,
+                crate::custody::network_now()?,
+            )?;
+            Ok(super::activate::adoption(&install)? == adoption
+                && crate::custody::matches_install(&account, &install)?)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn ordinary_session_admitted_at(
@@ -220,16 +297,24 @@ fn setup_secret(request: &StageNew<'_>, reservation_id: &str) -> Result<SecretUt
         return Err(SdkError::PairingField("credential_reservation"));
     }
     let expected = credential_request(request, reservation_id, "setup")?;
-    acquire_setup(request.root, &expected, request.provider, &stored)
+    let binding = super::private_credential::PrivateCredentialScope::data(
+        expected.clone(),
+        Some(request.invitation.body.request_id.clone()),
+    )?;
+    let provider = super::local_credential::scoped(request.provider, binding);
+    acquire_setup(request.root, &expected, &provider, &stored)
 }
 
 fn commit_new(
     request: &StageNew<'_>,
     mut staged: StagedRecipient,
     credential: &SecretUtf8,
+    client: &mut crate::RamfluxClient,
+    generation: u64,
 ) -> Result<StagedRecipient, SdkError> {
     let mut secrets = generate_secrets()?;
-    let outcome = commit_vault_and_db(request, &staged, &secrets, credential.as_bytes());
+    let outcome =
+        commit_vault_and_db(request, &staged, &secrets, credential.as_bytes(), client, generation);
     match outcome {
         Ok(()) => {
             staged.install.state = "vault_durable".into();
@@ -255,6 +340,8 @@ fn commit_vault_and_db(
     staged: &StagedRecipient,
     secrets: &RecipientSecrets,
     passphrase: &[u8],
+    client: &mut crate::RamfluxClient,
+    generation: u64,
 ) -> Result<(), SdkError> {
     request.vault.preflight()?;
     let mut written = false;
@@ -266,7 +353,6 @@ fn commit_vault_and_db(
             &staged.recipient_ref,
             &secrets.branch,
         )?;
-        let mut client = crate::RamfluxClient::new();
         client.open_account_index(request.root)?;
         client.seal_new_account_data(
             request.account_id,
@@ -274,7 +360,7 @@ fn commit_vault_and_db(
             passphrase,
         )?;
         client.unlock_account(request.account_id, passphrase)?;
-        write_floor_live(client.account_db()?, request, staged)?;
+        write_floor_live(client.account_db()?, request, staged, generation)?;
         let wrapped = client
             .account_index()?
             .load_wrapped_db_key(request.account_id)?
@@ -294,20 +380,32 @@ fn write_floor_live(
     db: &AccountDb,
     request: &StageNew<'_>,
     staged: &StagedRecipient,
+    generation: u64,
 ) -> Result<(), SdkError> {
     let body = &request.invitation.body;
-    db.put_pairing_floor(&FloorRow {
-        account_id: request.account_id.into(),
-        account_anchor: body.account_anchor.clone(),
-        issued_seq: 1,
-        next_generation: 2,
-    })?;
-    db.put_pairing_live(&invited_live(request, staged)?)?;
-    db.persist_actor_state("pairing/local-sentinel", &"sealed")?;
+    let sequence = db
+        .pairing_floor()?
+        .map_or(Ok(1), |row| row.issued_seq.checked_add(1).ok_or(SdkError::PairingCode("Busy")))?;
+    let mut live = invited_live(request, staged, generation)?;
+    live.local_seq = sequence;
+    live.primary_vault_ref.clone_from(&staged.install.primary_vault_ref);
+    db.commit_pairing_invitation(
+        &FloorRow {
+            account_id: request.account_id.into(),
+            account_anchor: body.account_anchor.clone(),
+            issued_seq: sequence,
+            next_generation: generation.checked_add(1).ok_or(SdkError::PairingCode("Busy"))?,
+        },
+        &live,
+    )?;
     Ok(())
 }
 
-fn invited_live(request: &StageNew<'_>, staged: &StagedRecipient) -> Result<LiveRow, SdkError> {
+fn invited_live(
+    request: &StageNew<'_>,
+    staged: &StagedRecipient,
+    generation: u64,
+) -> Result<LiveRow, SdkError> {
     let body = &request.invitation.body;
     Ok(LiveRow {
         account_id: request.account_id.into(),
@@ -315,7 +413,7 @@ fn invited_live(request: &StageNew<'_>, staged: &StagedRecipient) -> Result<Live
         invitation_id: body.invitation_id.clone(),
         issuer_seq: body.issuer_seq,
         local_seq: 1,
-        generation: 1,
+        generation,
         role: "responder".into(),
         descriptor: canonical_json_bytes(request.invitation)?,
         phase: "invited".into(),
@@ -334,7 +432,10 @@ fn invited_live(request: &StageNew<'_>, staged: &StagedRecipient) -> Result<Live
     })
 }
 
-fn existing_reservation(request: &StageExisting<'_>) -> Result<StagedRecipient, SdkError> {
+fn existing_reservation(
+    request: &StageExisting<'_>,
+    client: &mut crate::RamfluxClient,
+) -> Result<StagedRecipient, SdkError> {
     let destination = request
         .new
         .invitation
@@ -351,8 +452,8 @@ fn existing_reservation(request: &StageExisting<'_>) -> Result<StagedRecipient, 
         crate::custody::network_now()?,
     )?;
     require_existing_refs(request, &native)?;
-    unlock_existing(request)?;
-    write_existing_install(request, native.primary_vault_ref())
+    unlock_existing(request, client)?;
+    write_existing_install(request, &encode_base64url(*random_32()?))
 }
 
 fn require_existing_refs(
@@ -363,6 +464,12 @@ fn require_existing_refs(
         return Err(SdkError::PairingField("recipient_ref"));
     }
     if request.recipient_ref.device_id != native.local_device_id()? {
+        return Err(SdkError::PairingField("recipient_ref"));
+    }
+    if !native.record().body.devices.iter().any(|device| {
+        device.device_id == request.recipient_ref.device_id
+            && device.device_epoch == request.recipient_ref.device_epoch
+    }) {
         return Err(SdkError::PairingField("recipient_ref"));
     }
     if request.branch_vault_ref != native.branch_vault_ref() {
@@ -381,7 +488,23 @@ fn stored_data_vault_ref(root: &Path, account_id: &str) -> Result<String, SdkErr
     Ok(wrapped.key_wrapping_ref)
 }
 
-fn unlock_existing(request: &StageExisting<'_>) -> Result<(), SdkError> {
+fn unlock_existing(
+    request: &StageExisting<'_>,
+    client: &mut crate::RamfluxClient,
+) -> Result<(), SdkError> {
+    let (secret, _) = acquire_existing_secret(request)?;
+    client.open_account_index(request.new.root)?;
+    if client.active_account_db.is_some() {
+        client.verify_active_account_secret(request.new.account_id, secret.as_bytes())?;
+    } else {
+        client.unlock_account(request.new.account_id, secret.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn acquire_existing_secret(
+    request: &StageExisting<'_>,
+) -> Result<(SecretUtf8, PersistedReservation), SdkError> {
     let reservation_id = encode_base64url(*random_32()?);
     persist_reservation(
         request.new.root,
@@ -395,18 +518,19 @@ fn unlock_existing(request: &StageExisting<'_>) -> Result<(), SdkError> {
         .ok_or(SdkError::PairingField("credential_reservation"))?;
     let expected = credential_request(&request.new, &reservation_id, "unlock")?;
     expected.validate_recipient_mode("existing").map_err(|error| wire(&error))?;
-    let mut client = crate::RamfluxClient::new();
-    client.open_account_index(request.new.root)?;
-    let secret = match acquire_unlock(request.new.root, &expected, request.new.provider, &stored) {
+    let binding = super::private_credential::PrivateCredentialScope::data(
+        expected.clone(),
+        Some(request.new.invitation.body.request_id.clone()),
+    )?;
+    let provider = super::local_credential::scoped(request.new.provider, binding);
+    let secret = match acquire_unlock(request.new.root, &expected, &provider, &stored) {
         Ok(secret) => secret,
         Err(error) => {
             let _ = remove_reservation(request.new.root, request.new.account_id);
             return Err(error);
         }
     };
-    client.unlock_account(request.new.account_id, secret.as_bytes())?;
-    let _ = client.account_db()?.load_actor_state::<String>("pairing/local-sentinel");
-    Ok(())
+    Ok((secret, stored))
 }
 
 fn write_existing_install(
@@ -455,15 +579,25 @@ fn reserved_install(
         operation_id: body.request_id.clone(),
         recipient_ref: recipient_ref.clone(),
         recipient_mode: "new".into(),
-        install_purpose: "enroll".into(),
+        install_purpose: if body.purpose == "primary_transfer" {
+            "transfer_destination"
+        } else {
+            "enroll"
+        }
+        .into(),
         record_hash: None,
         prior_record_hash: None,
         branch_vault_ref: branch_vault_ref.into(),
         data_vault_ref: data_vault_ref.into(),
-        primary_vault_ref: None,
+        primary_vault_ref: if body.purpose == "primary_transfer" {
+            Some(encode_base64url(*random_32()?))
+        } else {
+            None
+        },
         state: "reserved".into(),
         cleanup_ref: None,
         cleanup_owner_ref: None,
+        full_transfer: None,
     };
     install.validate()?;
     Ok(install)
