@@ -498,10 +498,9 @@ mod tests {
             "test: linked frontend retained retired G2 writer"
         );
         if races > 0 {
-            assert_eq!(
-                fixture.target.account_db()?.privacy_erasure_generation()?,
-                13,
-                "test: final rebase lost the maximum concurrent B floor"
+            assert!(
+                fixture.target.account_db()?.privacy_erasure_generation()? >= 13,
+                "test: final rebase reduced the maximum concurrent B floor"
             );
             for id in 1..=races {
                 assert!(

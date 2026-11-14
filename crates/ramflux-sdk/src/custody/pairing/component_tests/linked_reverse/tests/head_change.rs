@@ -33,8 +33,12 @@ async fn primary_transfer_full_head_change_mid_stream() -> TestResult {
     let result = crate::bus::credentials::contract_tests::deadline(Box::pin(async {
         let fixture = Box::pin(open()).await?;
         let fixture = Box::pin(run_data_change(fixture, NativeChange::Enrollment)).await?;
-        Box::pin(finish_install(fixture, 0)).await?;
-        Box::pin(revoked_target()).await
+        Box::pin(finish_install(fixture, 0))
+            .await
+            .map_err(|error| format!("test: compatible native-change installation: {error}"))?;
+        Box::pin(revoked_target())
+            .await
+            .map_err(|error| format!("test: revoked-target DATA refusal: {error}"))
     }))
     .await;
     hold.finish().await?;
@@ -43,12 +47,12 @@ async fn primary_transfer_full_head_change_mid_stream() -> TestResult {
 async fn revoked_target() -> TestResult {
     let mut fixture = Box::pin(open()).await?;
     Box::pin(bootstrap(&mut fixture)).await?;
-    let b = crate::custody::load_account(
+    let b = crate::custody::load_data_account(
         &fixture.rig.participant_b.root,
         &fixture.rig.participant_b.account_id,
         fixture.rig.now,
     )?;
-    let a = crate::custody::load_account(
+    let a = crate::custody::load_data_account(
         &fixture.rig.participant_a.root,
         &fixture.rig.participant_a.account_id,
         fixture.rig.now,

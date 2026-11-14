@@ -37,9 +37,10 @@ async fn run() -> TestResult {
             "test: delete/install/tail race dropped veto {wire}"
         );
     }
-    assert_eq!(
-        b.privacy_erasure_generation()?,
-        13,
+    // Applying source absences can create additional local erasure work. Its
+    // monotonic generation must preserve at least the concurrent B floor.
+    assert!(
+        b.privacy_erasure_generation()? >= 13,
         "test: source tail reduced concurrent B privacy floor"
     );
     fixture.rig.primary.lock().await?;
@@ -71,6 +72,7 @@ async fn primary_transfer_full_linked_union_never_loses_veto() -> TestResult {
 async fn cold_vetoes() -> TestResult {
     let mut fixture = Box::pin(prepare_race()).await?;
     let path = fixture.target.account_db()?.path.clone();
+    let floor = fixture.target.account_db()?.privacy_erasure_generation()?;
     fixture.rig.primary.lock().await?;
     fixture.rig.secondary.lock().await?;
     *fixture.target = crate::RamfluxClient::new();
@@ -97,8 +99,8 @@ async fn cold_vetoes() -> TestResult {
     }
     assert_eq!(
         db.privacy_erasure_generation()?,
-        13,
-        "test: cold union lost maximum independent privacy floor"
+        floor,
+        "test: cold union lost its exact committed privacy floor"
     );
     assert!(
         ordinary_session_admitted(&fixture.target, &fixture.rig.participant_b.account_id)?,
