@@ -477,12 +477,13 @@ where
     }
     let mut discriminator = [0_u8; 1];
     reader.read_exact(&mut discriminator).await?;
-    if discriminator[0] == 0xC1 {
+    let [discriminator] = discriminator;
+    if discriminator == 0xC1 {
         // Binary private replies require their connection-owned pending slot.
         // This generic reader never allocates or forwards their secret payload to JSON.
         return Err(SdkError::PairingField("credential_channel"));
     }
-    read_encoded_after_discriminator(reader, len, discriminator[0]).await
+    read_encoded_after_discriminator(reader, len, discriminator).await
 }
 pub(super) async fn read_json_after_discriminator<R: AsyncRead + Unpin>(
     reader: &mut R,
