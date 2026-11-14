@@ -46,7 +46,8 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
     let directory = copy.scratch.path.clone();
     let nonce = copy.union_encoding().ok_or("test: initial union missing")?.generation_nonce;
     let key = copy.key.fingerprint();
-    let a_rows = source_rows(&copy)?;
+    let a_rows = source_rows(&copy)
+        .map_err(|error| format!("test: source ledger before B refresh: {error}"))?;
     // Removing B's copy of a dependency removes only B's qualified contribution.
     b.connection.execute("DELETE FROM object_payload_dependency", [])?;
     seed(&b, 31, 10)?;
@@ -60,9 +61,14 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
         nonce,
         "test: fourth rebase replaced union owner"
     );
-    assert_eq!(source_rows(&copy)?, a_rows, "test: fourth rebase changed frozen A records");
-    let private =
-        BackupDatabase::open_full_receiver_copy(&directory.join("private.db"), &copy.key)?;
+    assert_eq!(
+        source_rows(&copy)
+            .map_err(|error| format!("test: source ledger after B refresh: {error}"))?,
+        a_rows,
+        "test: fourth rebase changed frozen A records"
+    );
+    let private = BackupDatabase::open_full_receiver_copy(&directory.join("private.db"), &copy.key)
+        .map_err(|error| format!("test: open retained private DB after B refresh: {error}"))?;
     let old_b = encode_base64url([21; 32]);
     let source = encode_base64url([11; 32]);
     assert!(
@@ -106,7 +112,8 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
             "test: private rebase changed original B permissions"
         );
     }
-    copy.verify_materialization(&stage)?;
+    copy.verify_materialization(&stage)
+        .map_err(|error| format!("test: final retained B union verification: {error}"))?;
     Ok(())
 }
 

@@ -117,3 +117,5 @@ mod history_item_tests;
 mod reaction_restore_tests;
 
 pub(crate) mod watchdog;
+
+pub(crate) mod pairing_history;

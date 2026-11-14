@@ -48,7 +48,8 @@ impl FullTargetObservation {
         let observed = Self {
             account,
             root: self.root.clone(),
-            worker: db.connection.downgrade(),
+            // Keep the original weak owner, not this short fence's expiring permit.
+            worker: self.worker.clone(),
             version: version(&db.connection)?,
         };
         observed.require_current(db)?;
