@@ -170,16 +170,18 @@ pub(super) fn serve(
     }
 }
 fn write_failure(stream: &mut MeshTlsServerStream, error: &PairingRelayError) -> TestResult {
-    let bytes = Failure {
-        schema: "ramflux.pairing.Failure.v2".into(),
-        version: 2,
-        code: error.code().into(),
-        retry_after_ms: match error {
-            PairingRelayError::Busy { retry_after_ms } => Some(*retry_after_ms),
-            _ => None,
-        },
-    }
-    .encode_secret()?;
+    let bytes = Zeroizing::new(
+        Failure {
+            schema: "ramflux.pairing.Failure.v2".into(),
+            version: 2,
+            code: error.code().into(),
+            retry_after_ms: match error {
+                PairingRelayError::Busy { retry_after_ms } => Some(*retry_after_ms),
+                _ => None,
+            },
+        }
+        .to_wire_bytes()?,
+    );
     write_bytes(stream, &bytes)
 }
 fn write_bytes(stream: &mut MeshTlsServerStream, bytes: &[u8]) -> TestResult {
