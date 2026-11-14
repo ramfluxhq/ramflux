@@ -124,7 +124,7 @@ pub(super) fn serve(
         &|_, path| match path {
             FULL_MESH_ADMIT_PATH => 1024,
             "/pairing/v1/full/send" => 524_288,
-            _ => 65536,
+            _ => 65_536,
         },
         |method, path, raw, bytes| {
             if method != "POST" {
