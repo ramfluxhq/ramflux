@@ -532,6 +532,8 @@ jobs:
           # Unified rows explicitly report dormancy until the separately audited activation.
           cargo build -p ramflux-rf --bin rf --features itest-memory-vault,itest-rfd-fault
           python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
+          # Conversation actions report schema dormancy until activation, same as the unified gate.
+          python3 -B scripts/ci/run-nextest.py --label e2e_conversation_actions -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_conversation_actions --run-ignored ignored-only --test-threads=1
 
       - name: Upload CLI JUnit
         if: always()
