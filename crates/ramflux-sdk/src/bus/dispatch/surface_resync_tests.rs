@@ -107,15 +107,15 @@ impl Group {
             }
             client.pin_local_group_member("group")?;
             client.pin_joined_group_member("group", source_identity.storage_key())?;
-            let seed = [u8::try_from(index + 1)?; 32];
+            let session_secret = [u8::try_from(index + 1)?; 32];
             let send = ramflux_crypto::DmSession::initiator(
-                seed,
+                session_secret,
                 dm_device_id_hash(&source_device),
                 dm_device_id_hash(&local.device_id),
                 [3; 32],
             )?;
             let recv = ramflux_crypto::DmSession::recipient(
-                seed,
+                session_secret,
                 dm_device_id_hash(&local.device_id),
                 dm_device_id_hash(&source_device),
                 [3; 32],

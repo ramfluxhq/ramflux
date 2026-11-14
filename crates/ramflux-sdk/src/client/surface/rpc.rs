@@ -171,18 +171,9 @@ impl RamfluxClient {
             &carrier.sender_device_id,
             group_epoch,
         )?;
-        let rate_key = key("rpc-rate", &carrier.author_principal_id);
-        let mut window = db
-            .load_actor_state::<Window>(&rate_key)?
-            .unwrap_or(Window { started_at: now, count: 0 });
-        if now >= window.started_at.saturating_add(60) {
-            window = Window { started_at: now, count: 0 };
-        }
-        if window.count >= CALLS_PER_MINUTE {
+        if !self.claim_surface_rpc_rate(&carrier.author_principal_id, now)? {
             return Ok(dropped());
         }
-        window.count += 1;
-        db.persist_actor_state(&rate_key, &window)?;
         let id =
             rpc.frame().function_call_id.as_deref().ok_or_else(|| invalid("RPC call id absent"))?;
         let prefix = ledger_prefix(&carrier.author_principal_id);
@@ -252,6 +243,22 @@ impl RamfluxClient {
         db.persist_actor_state(&entry_key, &entry)?;
         self.queue_rpc_response(carrier, &entry, group, group_epoch)?;
         Ok(accepted())
+    }
+    fn claim_surface_rpc_rate(&self, author: &str, now: i64) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let rate_key = key("rpc-rate", author);
+        let mut window = db
+            .load_actor_state::<Window>(&rate_key)?
+            .unwrap_or(Window { started_at: now, count: 0 });
+        if now >= window.started_at.saturating_add(60) {
+            window = Window { started_at: now, count: 0 };
+        }
+        if window.count >= CALLS_PER_MINUTE {
+            return Ok(false);
+        }
+        window.count += 1;
+        db.persist_actor_state(&rate_key, &window)?;
+        Ok(true)
     }
     fn queue_rpc_response(
         &self,

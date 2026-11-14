@@ -48,8 +48,7 @@ impl SurfaceRefusalCode {
         if let Ok(reject) = serde_json::from_value::<SurfaceReject>(error["reject"].clone()) {
             return match reject {
                 SurfaceReject::Version { .. } => Self::StaleVersion,
-                SurfaceReject::Conflict => Self::StaleHash,
-                SurfaceReject::Integrity => Self::StaleHash,
+                SurfaceReject::Conflict | SurfaceReject::Integrity => Self::StaleHash,
                 SurfaceReject::Closed => Self::Closed,
                 SurfaceReject::NotCreated => Self::NotFound,
                 SurfaceReject::Limit => Self::TooLarge,

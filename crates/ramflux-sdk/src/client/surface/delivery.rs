@@ -72,45 +72,7 @@ impl RamfluxClient {
             && !local_author
             && !self.surface_author_is_own_agent(&carrier.author_principal_id)?
         {
-            if carrier.sender_principal_id != carrier.author_principal_id {
-                return self.reject_surface_delivery(
-                    conversation,
-                    message,
-                    sender,
-                    "surface_author_not_owned",
-                );
-            }
-            let Payload::Event(event) = &payload else {
-                return self.reject_surface_delivery(
-                    conversation,
-                    message,
-                    sender,
-                    "surface_author_not_owned",
-                );
-            };
-            let fallback_key = key("fallback-only", &carrier.surface_reference()?);
-            let mut retained = self
-                .account_db()?
-                .load_actor_state::<serde_json::Value>(&fallback_key)?
-                .unwrap_or_else(|| json!({"text":"","version":0}));
-            if let Some(text) = &event.frame().fallback_text
-                && retained.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0)
-                    <= event.version()
-            {
-                retained = json!({"text":text,"version":event.version()});
-                self.account_db()?.persist_actor_state(&fallback_key, &retained)?;
-            }
-            let text = retained.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-            let outcome = Outcome {
-                accepted: true,
-                fallback_text: super::fallback::render(&carrier.author_principal_id, text),
-                renderer_error: None,
-                reason_code: None,
-                retryable: false,
-                queued: false,
-            };
-            self.store_surface_message_reference(&carrier, message, sender, &outcome, true)?;
-            return Ok(outcome);
+            return self.project_surface_fallback_only(&carrier, &payload, message, sender);
         }
         // A payload claim can never reserve another principal's logical-message id.
         let fingerprint =
@@ -186,6 +148,54 @@ impl RamfluxClient {
             )?;
         }
         self.store_surface_message_reference(&carrier, message, sender, &outcome, false)?;
+        Ok(outcome)
+    }
+    fn project_surface_fallback_only(
+        &self,
+        carrier: &Carrier,
+        payload: &Payload,
+        message: &str,
+        sender: SurfaceSender<'_>,
+    ) -> Result<Outcome, SdkError> {
+        let conversation = carrier.conversation_id.as_str();
+        if carrier.sender_principal_id != carrier.author_principal_id {
+            return self.reject_surface_delivery(
+                conversation,
+                message,
+                sender,
+                "surface_author_not_owned",
+            );
+        }
+        let Payload::Event(event) = payload else {
+            return self.reject_surface_delivery(
+                conversation,
+                message,
+                sender,
+                "surface_author_not_owned",
+            );
+        };
+        let fallback_key = key("fallback-only", &carrier.surface_reference()?);
+        let mut retained = self
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&fallback_key)?
+            .unwrap_or_else(|| json!({"text":"","version":0}));
+        if let Some(text) = &event.frame().fallback_text
+            && retained.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                <= event.version()
+        {
+            retained = json!({"text":text,"version":event.version()});
+            self.account_db()?.persist_actor_state(&fallback_key, &retained)?;
+        }
+        let text = retained.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+        let outcome = Outcome {
+            accepted: true,
+            fallback_text: super::fallback::render(&carrier.author_principal_id, text),
+            renderer_error: None,
+            reason_code: None,
+            retryable: false,
+            queued: false,
+        };
+        self.store_surface_message_reference(carrier, message, sender, &outcome, true)?;
         Ok(outcome)
     }
     fn reject_surface_delivery(

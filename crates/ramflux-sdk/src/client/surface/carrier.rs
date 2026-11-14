@@ -54,7 +54,7 @@ impl PayloadKind {
     }
 }
 pub(crate) enum Payload {
-    Event(SurfaceEvent),
+    Event(Box<SurfaceEvent>),
     Action(SurfaceAction),
     Rpc(RpcKind, SurfaceRpc),
     ActionReceipt { original: Box<Carrier>, action: SurfaceAction },
@@ -71,7 +71,7 @@ impl Carrier {
         let bytes = ramflux_protocol::decode_base64url(&self.wire_base64)
             .map_err(|_| invalid("invalid surface wire encoding"))?;
         let payload = match self.payload_kind {
-            PayloadKind::Event => Payload::Event(SurfaceEvent::from_wire_bytes(&bytes)?),
+            PayloadKind::Event => Payload::Event(Box::new(SurfaceEvent::from_wire_bytes(&bytes)?)),
             PayloadKind::Action => Payload::Action(SurfaceAction::from_wire_bytes(&bytes)?),
             PayloadKind::FunctionCall | PayloadKind::FunctionResponse | PayloadKind::Error => {
                 let kind =

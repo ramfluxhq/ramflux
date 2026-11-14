@@ -101,10 +101,10 @@ impl RamfluxClient {
         let Some(proof) = &carrier.snapshot else {
             return Ok(None);
         };
-        if let Some((record, _)) = self.surface_state_ref(&carrier.surface_reference()?)? {
-            if record.author_device_id != proof.author_device_id {
-                return Err(invalid("snapshot executor changed"));
-            }
+        if let Some((record, _)) = self.surface_state_ref(&carrier.surface_reference()?)?
+            && record.author_device_id != proof.author_device_id
+        {
+            return Err(invalid("snapshot executor changed"));
         }
         if proof.author_device_id != carrier.sender_device_id {
             let owner =

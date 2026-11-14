@@ -346,7 +346,7 @@ async fn send_private_to_manifest(
     crate::client::surface::check_delivery_size(carrier.bytes()?.len())?;
     let epoch = group.map(|g| client.group_state(g).map(|s| s.group_epoch)).transpose()?;
     let manifest =
-        client.cache_verified_device_manifest(engine.config(), &root, "surface_peer").await?;
+        client.cache_verified_device_manifest(engine.config(), root, "surface_peer").await?;
     let control = client
         .surface_control_packet(carrier, crate::client::surface::ControlKind::Peer, epoch)?
         .bytes()?;
@@ -354,7 +354,7 @@ async fn send_private_to_manifest(
     let mut sent = 0usize;
     for device in manifest.devices {
         if let Some(group) = group {
-            let identity = client.device_identity_for_root(&root, &device.device_id)?;
+            let identity = client.device_identity_for_root(root, &device.device_id)?;
             if !client.surface_group_device_allowed(group, &identity)? {
                 return Err(invalid("surface private destination is outside the group"));
             }
