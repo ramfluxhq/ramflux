@@ -4,6 +4,10 @@
 //! Verified out-of-band safety material without changing an existing contact pin.
 use crate::ContactReason;
 use crate::prelude::*;
+
+/// Unconfirmed previews keep at most this many manifests for the life of the client.
+pub(crate) const HELD_MANIFEST_CAP: usize = 32;
+
 impl RamfluxClient {
     pub(crate) fn resolve_contact_safety(
         &self,
@@ -79,12 +83,34 @@ impl RamfluxClient {
         Ok(())
     }
 
+    pub(crate) fn hold_compared_manifests(
+        &self,
+        manifests: impl IntoIterator<Item = SdkDeviceManifestResponse>,
+    ) -> Result<(), SdkError> {
+        let incoming = manifests.into_iter().collect::<Vec<_>>();
+        let mut held = self.held_manifests.borrow_mut();
+        let extra = incoming
+            .iter()
+            .filter(|manifest| !held.contains_key(&manifest.principal_commitment))
+            .count();
+        if held.len().saturating_add(extra) > HELD_MANIFEST_CAP {
+            return Err(SdkError::InboundRejected("held manifest cap exceeded".into()));
+        }
+        for manifest in incoming {
+            held.insert(manifest.principal_commitment.clone(), manifest);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn preview_contact_safety(
         &self,
         gateway: &GatewaySessionConfig,
         principal: &str,
         root: &str,
     ) -> Result<serde_json::Value, SdkError> {
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
         let old = self
             .account_db()?
             .client_record("identity", principal)?
@@ -110,25 +136,22 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own = fetch(own_root.clone()).await?;
-        if self.born_v3_account.is_some() {
-            let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
-                let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-                ramflux_crypto::custody::verify_publication(
-                    &ramflux_protocol::custody::CustodyAuthority {
-                        publication: native.publication.clone(),
-                        custodian_publication: native.custodian_publication.clone(),
-                    },
-                    crate::custody::network_now()?,
-                )
-                .map_err(SdkError::from)
-            };
-            let _ = verify(&own)?;
-            let _ = verify(&peer)?;
-        }
+        let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
+            let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+            ramflux_crypto::custody::verify_publication(
+                &ramflux_protocol::custody::CustodyAuthority {
+                    publication: native.publication.clone(),
+                    custodian_publication: native.custodian_publication.clone(),
+                },
+                crate::custody::network_now()?,
+            )
+            .map_err(SdkError::from)
+        };
+        let _ = verify(&own)?;
+        let _ = verify(&peer)?;
         // Nothing is stored until compare-and-record commits. The expectation is computed
         // from these held manifests.
-        self.held_manifests.borrow_mut().insert(own.principal_commitment.clone(), own);
-        self.held_manifests.borrow_mut().insert(peer.principal_commitment.clone(), peer);
+        self.hold_compared_manifests([own, peer])?;
         super::contact_verification_cas::compared_safety_json(self, root)
     }
 }

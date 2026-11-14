@@ -929,7 +929,6 @@ crates/ramflux-storage/src/account_db/runtime/control.rs | load_actor_state | 1 
 crates/ramflux-storage/src/account_db/runtime/operations.rs | lookup_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/operations.rs | reserve_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/outbox.rs | pending_outbox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/safety_verification.rs | state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/shared_group_delivery.rs | next_shared_group_intent | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/shared_group_delivery.rs | prune_shared_group_boundaries | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/surface.rs | surface_export_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

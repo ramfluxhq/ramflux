@@ -71,6 +71,82 @@ impl RamfluxClient {
         Ok(())
     }
 
+    /// Commit equivocation before a compare-and-record transaction.
+    ///
+    /// A fence discovered inside that transaction would roll back with it. This write
+    /// commits only when the observation is a fence, so a later rollback cannot drop it.
+    /// # Errors
+    /// Returns the fence error after the evidence is committed, plus storage errors.
+    pub(crate) fn commit_equivocation_fence(
+        &self,
+        manifest: &CustodyManifest,
+        expected: &str,
+    ) -> Result<(), SdkError> {
+        let now = crate::custody::network_now()?;
+        let verified = verify_native_authority(manifest, expected, now)?;
+        let db = self.account_db()?;
+        let state_key = key(expected)?;
+        let mut probed = db.load_actor_state::<RetainedAuthority>(&state_key)?.unwrap_or_default();
+        let outcome = probed.pins.observe_with_previous(
+            &verified,
+            probed.publication.as_ref().map(|publication| &publication.record),
+        )?;
+        if !matches!(outcome, PinOutcome::Fenced(_)) {
+            return Ok(());
+        }
+        let stored =
+            db.write_transaction(|| self.write_observed_pins(manifest, expected, &verified))?;
+        if !matches!(stored, PinOutcome::Fenced(_)) {
+            return Err(invalid("custody authority equivocation fenced"));
+        }
+        Err(invalid("custody authority equivocation fenced"))
+    }
+
+    /// Advance the public own-account authority file after a committed compare.
+    ///
+    /// The file is outside the SQL transaction, so it moves only after that commit succeeds.
+    /// # Errors
+    /// Returns storage, publication, and equivocation errors.
+    pub(crate) fn advance_committed_own_authority(&self) -> Result<(), SdkError> {
+        let Some(own) = &self.born_v3_account else {
+            return Ok(());
+        };
+        let anchor = own.record().body.account_anchor.clone();
+        let account_id = own.local_account_id().to_owned();
+        let now = crate::custody::network_now()?;
+        let Some(state) =
+            self.account_db()?.load_actor_state::<RetainedAuthority>(&key(&anchor)?)?
+        else {
+            return Ok(());
+        };
+        let Some(publication) = state.publication else {
+            return Ok(());
+        };
+        let manifest = CustodyManifest {
+            publication,
+            custodian_publication: state.custodian,
+            devices: Vec::new(),
+        };
+        let verified = verify_native_authority(&manifest, &anchor, now)?;
+        self.invalidate_changed_custody_head(
+            &anchor,
+            &ramflux_protocol::custody::object_hash(verified.envelope())?,
+        );
+        let outcome = crate::custody::accept_publication(
+            self.account_index()?.root(),
+            &account_id,
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: manifest.publication,
+                custodian_publication: manifest.custodian_publication,
+            },
+            now,
+        )?;
+        if matches!(outcome, PinOutcome::Fenced(_)) {
+            return Err(invalid("custody authority equivocation fenced"));
+        }
+        Ok(())
+    }
+
     fn write_observed_pins(
         &self,
         manifest: &CustodyManifest,

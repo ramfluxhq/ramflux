@@ -115,10 +115,6 @@ struct Snapshot {
     safety: SdkContactSafetyNumber,
 }
 
-fn signed_head(record: &ramflux_protocol::SignedDeviceSetRecord) -> Result<String, SdkError> {
-    Ok(ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(record)?))
-}
-
 fn custody_snapshot(
     client: &RamfluxClient,
     commitment: &str,
@@ -137,65 +133,6 @@ fn custody_snapshot(
         ramflux_protocol::custody::object_hash(own.envelope())?,
         ramflux_protocol::custody::object_hash(peer.envelope())?,
         peer.envelope().body.principal_id.clone(),
-        link_id,
-    );
-    Ok(Snapshot { expected, stamp, safety })
-}
-
-fn signed_number(
-    self_material: &ramflux_crypto::ContactSafetyMaterial,
-    contact_material: &ramflux_crypto::ContactSafetyMaterial,
-    own: &str,
-    commitment: &str,
-) -> SdkContactSafetyNumber {
-    let fingerprint = ramflux_crypto::safety_fingerprint(self_material, contact_material);
-    let device_set_hash = ramflux_crypto::device_set_hash(&contact_material.devices);
-    SdkContactSafetyNumber {
-        algorithm_version: 1,
-        contact_identity_commitment: commitment.to_owned(),
-        self_identity_commitment: own.to_owned(),
-        safety_number: ramflux_crypto::safety_number(self_material, contact_material),
-        fingerprint_hex: super::contact::bytes_to_hex(&fingerprint),
-        safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
-        self_device_count: self_material.devices.len(),
-        contact_device_count: contact_material.devices.len(),
-        contact_device_set_hash: ramflux_protocol::encode_base64url(device_set_hash),
-        contact_lineage_head: ramflux_protocol::encode_base64url(&contact_material.lineage_head),
-        verification_state: "unverified".into(),
-    }
-}
-
-fn signed_safety(
-    client: &RamfluxClient,
-    own: &str,
-    commitment: &str,
-) -> Result<SdkContactSafetyNumber, SdkError> {
-    Ok(signed_number(
-        &client.cached_contact_safety_material(own)?,
-        &client.cached_contact_safety_material(commitment)?,
-        own,
-        commitment,
-    ))
-}
-
-fn signed_snapshot(
-    client: &RamfluxClient,
-    commitment: &str,
-    link_id: &str,
-) -> Result<Snapshot, SdkError> {
-    let own = client.own_account_anchor()?;
-    let self_set = client.observed_device_set(&own)?.ok_or(SdkError::NetworkingPending)?;
-    let peer_set = client.observed_device_set(commitment)?.ok_or(SdkError::NetworkingPending)?;
-    if self_set.principal_commitment != own || peer_set.principal_commitment != commitment {
-        return Err(SdkError::LocalBus("signed set root mismatch".into()));
-    }
-    let safety = signed_safety(client, &own, commitment)?;
-    let stamp = super::identity_authority::set_fingerprint(&peer_set)?;
-    let expected = expected_from_safety(
-        &safety,
-        signed_head(&self_set)?,
-        signed_head(&peer_set)?,
-        peer_set.principal_id.clone(),
         link_id,
     );
     Ok(Snapshot { expected, stamp, safety })
@@ -263,36 +200,6 @@ fn held_pair(
     (held.get(own).cloned(), held.get(commitment).cloned())
 }
 
-fn snapshot_from_signed_manifests(
-    own_manifest: &SdkDeviceManifestResponse,
-    peer_manifest: &SdkDeviceManifestResponse,
-    link_id: &str,
-) -> Result<Snapshot, SdkError> {
-    let self_set = own_manifest.signed_device_set.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-    let peer_set =
-        peer_manifest.signed_device_set.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-    if self_set.principal_commitment != own_manifest.principal_commitment
-        || peer_set.principal_commitment != peer_manifest.principal_commitment
-    {
-        return Err(SdkError::LocalBus("signed set root mismatch".into()));
-    }
-    let safety = signed_number(
-        &super::contact::contact_safety_material_from_manifest(own_manifest)?,
-        &super::contact::contact_safety_material_from_manifest(peer_manifest)?,
-        &own_manifest.principal_commitment,
-        &peer_manifest.principal_commitment,
-    );
-    let stamp = super::identity_authority::set_fingerprint(peer_set)?;
-    let expected = expected_from_safety(
-        &safety,
-        signed_head(self_set)?,
-        signed_head(peer_set)?,
-        peer_set.principal_id.clone(),
-        link_id,
-    );
-    Ok(Snapshot { expected, stamp, safety })
-}
-
 fn held_custody_snapshot(
     client: &RamfluxClient,
     commitment: &str,
@@ -318,53 +225,25 @@ fn held_custody_snapshot(
     Ok(Snapshot { expected, stamp, safety })
 }
 
-fn born_snapshot(
+fn load_snapshot(
     client: &RamfluxClient,
     commitment: &str,
     link_id: &str,
 ) -> Result<Snapshot, SdkError> {
+    // Every account is born-v3. A missing custody account is not a second comparison.
+    if client.born_v3_account.is_none() {
+        return Err(SdkError::CustodyModeDowngrade);
+    }
     let now = crate::custody::network_now()?;
     let own = client.own_account_anchor()?;
+    // One custody algorithm. Admitted pins win. Until this commit stores them, the
+    // in-memory hold is the same material the preview returned.
     if client.current_custody_authority(&own, now)?.is_some()
         && client.current_custody_authority(commitment, now)?.is_some()
     {
         return custody_snapshot(client, commitment, link_id);
     }
     held_custody_snapshot(client, commitment, link_id)
-}
-
-fn admitted_signed_snapshot(
-    client: &RamfluxClient,
-    commitment: &str,
-    link_id: &str,
-) -> Result<Snapshot, SdkError> {
-    let own = client.own_account_anchor()?;
-    if client.observed_device_set(&own)?.is_some()
-        && client.observed_device_set(commitment)?.is_some()
-    {
-        return signed_snapshot(client, commitment, link_id);
-    }
-    let (own_manifest, peer_manifest) = held_pair(client, &own, commitment);
-    if let (Some(own_manifest), Some(peer_manifest)) = (own_manifest, peer_manifest) {
-        return snapshot_from_signed_manifests(&own_manifest, &peer_manifest, link_id);
-    }
-    Err(SdkError::CustodyModeDowngrade)
-}
-
-fn load_snapshot(
-    client: &RamfluxClient,
-    commitment: &str,
-    link_id: &str,
-) -> Result<Snapshot, SdkError> {
-    // The replacement selector is display-only. Compare-and-record reads it from the
-    // submitted expectation, so a missing selector stays a typed confirmation error.
-    if client.born_v3_account.is_some() {
-        return born_snapshot(client, commitment, link_id);
-    }
-    // An account that is not born-v3 and has no admitted signed device set is a typed error.
-    // The routed recovery contract still compares an admitted signed set; that stamp is
-    // `set_fingerprint`, and the test that measures it is unchanged.
-    admitted_signed_snapshot(client, commitment, link_id)
 }
 
 fn persist_held_for_commit(client: &RamfluxClient, contact: &str) -> Result<(), SdkError> {
@@ -566,11 +445,25 @@ fn effective_in_place(client: &RamfluxClient, commitment: &str) -> Result<String
     })
 }
 
+fn stored_safety_state(client: &RamfluxClient, commitment: &str) -> Result<String, SdkError> {
+    let stored = client.account_db()?.contact_verification(commitment)?;
+    if stored.as_ref().is_some_and(|row| row.verification_state == "verified")
+        && stored_confirmation(client, commitment)?.is_none()
+    {
+        return Err(SdkError::InboundRejected("safety confirmation missing".into()));
+    }
+    Ok(stored.map_or_else(|| "unverified".into(), |row| row.verification_state))
+}
+
 pub(crate) fn effective_state(
     client: &RamfluxClient,
     commitment: &str,
     _observed_hash: Option<&str>,
 ) -> Result<String, SdkError> {
+    // A non-custody account has no live comparison. Reads use the stored row only.
+    if client.born_v3_account.is_none() {
+        return stored_safety_state(client, commitment);
+    }
     let db = client.account_db()?;
     if db.is_query_only()? || db.in_transaction()? {
         effective_in_place(client, commitment)
@@ -978,13 +871,51 @@ impl RamfluxClient {
         }
         let _ = load_snapshot(self, &self.own_account_anchor()?, "")?;
         let _ = load_snapshot(self, &expected.contact_identity_commitment, &expected.link_id)?;
+        // A fence commits on its own, before the compare transaction can roll it back.
+        refuse_fenced_held(self, &expected.contact_identity_commitment)?;
         #[cfg(test)]
         before_transaction(self)?;
-        let committed = self.account_db()?.write_transaction(|| commit_compared(self, expected))?;
+        let committed =
+            match self.account_db()?.write_transaction(|| commit_compared(self, expected)) {
+                Err(error) if fence_rolled_back(&error) => {
+                    refuse_fenced_held(self, &expected.contact_identity_commitment)?;
+                    return Err(error);
+                }
+                other => other?,
+            };
         release_compared_manifests(self, expected)?;
+        self.advance_committed_own_authority()?;
         self.finish_pair_retirement()?;
         Ok(committed)
     }
+}
+
+fn fence_rolled_back(error: &SdkError) -> bool {
+    matches!(
+        error,
+        SdkError::InboundRejected(message)
+            if message == "identity authority: custody authority equivocation fenced"
+    )
+}
+
+fn refuse_fenced_held(client: &RamfluxClient, contact: &str) -> Result<(), SdkError> {
+    if client.born_v3_account.is_none() {
+        return Ok(());
+    }
+    let own = client.own_account_anchor()?;
+    let manifests = {
+        let held = client.held_manifests.borrow();
+        [own, contact.to_owned()]
+            .into_iter()
+            .filter_map(|key| held.get(&key).cloned())
+            .collect::<Vec<_>>()
+    };
+    for manifest in manifests {
+        if let Some(custody) = manifest.custody.as_deref() {
+            client.commit_equivocation_fence(custody, &manifest.principal_commitment)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

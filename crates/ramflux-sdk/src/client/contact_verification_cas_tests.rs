@@ -200,6 +200,30 @@ async fn provisional_replacement() -> TestResult {
 }
 
 #[tokio::test]
+async fn held_manifest_cap_refuses_another_unconfirmed_preview() -> TestResult {
+    let local = Fixture::new("cas-hold-cap").await?;
+    let cap = super::super::contact_safety_preview::HELD_MANIFEST_CAP;
+    for index in 0..cap {
+        let mut manifest = local.manifest.clone();
+        manifest.principal_commitment = format!("hold-{index:02}");
+        local.client.hold_compared_manifests([manifest])?;
+    }
+    let mut overflow = local.manifest.clone();
+    overflow.principal_commitment = "hold-overflow".into();
+    let refused = local.client.hold_compared_manifests([overflow]).expect_err("test: cap");
+    assert!(
+        matches!(refused, SdkError::InboundRejected(ref message) if message == "held manifest cap exceeded"),
+        "{refused:?}"
+    );
+    assert_eq!(local.client.held_manifests.borrow().len(), cap);
+    let mut replacement = local.manifest.clone();
+    replacement.principal_commitment = "hold-00".into();
+    local.client.hold_compared_manifests([replacement])?;
+    assert_eq!(local.client.held_manifests.borrow().len(), cap);
+    Ok(())
+}
+
+#[tokio::test]
 async fn verify_cas_orders_authority_updates_and_rolls_back() -> TestResult {
     let _hooks = ClearHooks;
     let (mut local, peer, peer_root) = linked().await?;
