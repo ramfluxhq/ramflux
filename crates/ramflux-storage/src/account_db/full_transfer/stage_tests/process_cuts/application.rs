@@ -2,10 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Process death around the actual private recipient generation and atomic semantic DV ledger.
-use super::{ARMED, PairingRole, TestResult, fixture, kill_writer, open, reference};
+use super::{
+    ARMED, PairingRole, TestResult, fixture, kill_writer, open, reference, save_reference,
+};
 use crate::account_db::full_transfer::receiver_projection::tests::{db, input, seed};
 use crate::{AccountIndex, FullTransferStage};
-use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::CHUNK_BYTES};
+use ramflux_protocol::custody::pairing::full_transfer::CHUNK_BYTES;
 use std::{path::Path, time::Duration};
 
 pub(super) fn write(root: &Path, cut: u8) -> TestResult {
@@ -56,7 +58,7 @@ async fn run(cut: u8) -> TestResult {
     for (index, chunk) in bytes.chunks(CHUNK_BYTES as usize).enumerate() {
         stage.retain_forward_chunk(&hash, index as u64, chunk)?;
     }
-    std::fs::write(owner.path().join("reference"), stage.reference().to_wire_bytes()?)?;
+    save_reference(owner.path(), stage.reference())?;
     drop(stage);
     drop(target);
     kill_writer(owner.path(), cut).await?;

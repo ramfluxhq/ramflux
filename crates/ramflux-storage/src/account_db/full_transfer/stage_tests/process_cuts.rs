@@ -38,6 +38,13 @@ fn open(root: &Path) -> TestResult<AccountDb> {
         &AccountDbKey::derive("acct", PASSWORD),
     )?)
 }
+fn save_reference(root: &Path, reference: &FullStageReference) -> TestResult {
+    let mut file = super::super::stage::create_file(&root.join("reference"))?;
+    file.write_all(&reference.to_wire_bytes()?)?;
+    file.sync_all()?;
+    crate::sync_path::sync_path(root)?;
+    Ok(())
+}
 fn reference(root: &Path) -> TestResult<FullStageReference> {
     let bytes = super::super::stage::read_bounded(&root.join("reference"), 1024)?;
     Ok(FullStageReference::from_wire_bytes(&bytes)?)
@@ -53,9 +60,14 @@ fn chunk_writer_child() -> TestResult {
     if cut >= 5 {
         return application::write(&root, cut);
     }
-    let db = open(&root)?;
+    let db =
+        open(&root).map_err(|error| format!("test: crash child original DB reopen: {error}"))?;
     let (_, manifest, bytes) = fixture()?;
-    let stage = db.open_full_stage_reference(reference(&root)?, PairingRole::Responder, 604_801)?;
+    let saved =
+        reference(&root).map_err(|error| format!("test: crash child reference: {error}"))?;
+    let stage = db
+        .open_full_stage_reference(saved, PairingRole::Responder, 604_801)
+        .map_err(|error| format!("test: crash child encrypted stage reopen: {error}"))?;
     ARMED.with(|armed| armed.set(Some(cut)));
     stage.retain_forward_chunk(
         &ramflux_protocol::encode_base64url(
@@ -86,7 +98,7 @@ async fn run(cut: u8) -> TestResult {
     let db = open(root)?;
     let mut stage = db.create_full_stage_for_test(record, 604_900)?;
     stage.retain_forward_manifest(&manifest, &manifest.manifest.families)?;
-    std::fs::write(root.join("reference"), stage.reference().to_wire_bytes()?.as_slice())?;
+    save_reference(root, stage.reference())?;
     drop(stage);
     drop(db);
     kill_writer(root, cut).await?;

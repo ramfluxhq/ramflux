@@ -45,7 +45,7 @@ mod tests {
         client.unlock_account("source", b"native-publication-password")?;
         let config = CustodyNetworkConfig {
             pairing_admission: None,
-            account_root,
+            account_root: account_root.to_path_buf(),
             account_id: "source".into(),
             device_id: "primary".into(),
             gateway_address: address,
