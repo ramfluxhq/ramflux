@@ -35,6 +35,7 @@ impl FullEpochJob {
     }
 }
 struct FullEpochWork {
+    tail_duplex: Option<ramflux_storage::FullDuplexReceipt>,
     signer: Arc<FullProofSigner>,
     cancelled: ramflux_storage::FullStageIoCancel,
     trust: FullResumeTrust,
@@ -56,7 +57,7 @@ fn start(
     work: FullEpochWork,
     scope: EpochScope,
 ) -> Result<FullEpochJob, SdkError> {
-    let FullEpochWork { signer, cancelled, trust, mut keys } = work;
+    let FullEpochWork { signer, cancelled, trust, mut keys, tail_duplex } = work;
     stop.require_live()?;
     let owner = stop.clone();
     let task = tokio::spawn(async move {
@@ -87,7 +88,7 @@ fn start(
             phase = "HPKE control and Ready";
             let role = trust.local_stage_record()?.role;
             tracing::debug!(role = role.as_str(), "full epoch original branch proofs accepted");
-            let packet = match role {
+            let mut packet = match role {
                 PairingRole::Initiator => {
                     let (mut packet, control) = epoch.source_control()?;
                     packet.send_control(relay.as_ref(), &origin, control).await?;
@@ -128,6 +129,9 @@ fn start(
                     packet
                 }
             };
+            if let Some(proof) = tail_duplex {
+                packet.preserve_verified_tail_reverse(&proof)?;
+            }
             stop.require_live()?;
             // Keep the key owner so any reconnect consumes a fresh half, never the SAS half.
             Ok(packet)
@@ -160,6 +164,7 @@ pub(super) fn start_tail(
         origin,
         stop,
         FullEpochWork {
+            tail_duplex: Some(resume.duplex),
             signer: resume.signer,
             cancelled: resume.cancelled,
             trust: resume.trust,
@@ -295,7 +300,7 @@ impl crate::custody::pairing::PairingActor {
             relay,
             c.origin.clone(),
             self.full_runtime.clone(),
-            FullEpochWork { signer, cancelled, trust, keys },
+            FullEpochWork { signer, cancelled, trust, keys, tail_duplex: None },
             EpochScope::Ceremony,
         )?);
         Ok(true)

@@ -146,6 +146,19 @@ impl FullPacketEpoch {
         self.channel()?.expect_idle_position(hash)?;
         Ok(())
     }
+    pub(crate) fn preserve_verified_tail_reverse(
+        &mut self,
+        proof: &ramflux_storage::FullDuplexReceipt,
+    ) -> Result<(), SdkError> {
+        if proof.role() != self.role
+            || proof.lease_id() != self.lease_id
+            || crate::custody::network_now()? >= proof.expires_at()
+        {
+            return Err(wrong());
+        }
+        self.channel()?.preserve_completed_reverse_on_resume()?;
+        Ok(())
+    }
     pub(crate) fn allow_verified_duplex(
         &mut self,
         proof: &ramflux_storage::FullDuplexReceipt,

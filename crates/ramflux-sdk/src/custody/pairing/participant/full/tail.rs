@@ -91,6 +91,7 @@ impl LocalPairingParticipant {
 
 /// Only authenticated local pending state can create a fresh tail epoch.
 pub(in crate::custody::pairing) struct FullTailResume {
+    pub(in crate::custody::pairing) duplex: ramflux_storage::FullDuplexReceipt,
     pub(in crate::custody::pairing) trust: ramflux_crypto::custody::pairing::FullResumeTrust,
     pub(in crate::custody::pairing) signer: std::sync::Arc<super::proof_signer::FullProofSigner>,
     pub(in crate::custody::pairing) cancelled: ramflux_storage::FullStageIoCancel,
@@ -111,6 +112,7 @@ impl LocalPairingParticipant {
         let endpoint =
             db.open_full_tail_endpoint(&request.operation_id, request.generation, current, now)?;
         let record = endpoint.pending_resume_record(now)?;
+        let duplex = endpoint.pending_duplex_receipt(now)?;
         if record.role == PairingRole::Responder {
             let install = crate::custody::pairing::install_store::read_installed(
                 &self.root,
@@ -147,6 +149,7 @@ impl LocalPairingParticipant {
             &trust,
         )?;
         Ok(FullTailResume {
+            duplex,
             trust,
             signer: std::sync::Arc::new(signer),
             cancelled,

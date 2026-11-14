@@ -105,6 +105,21 @@ impl FullConfirmedChannel {
         self.idle_last_verified = Some(last_verified);
         Ok(())
     }
+    /// Preserve the reverse position only after the coordinator reads its own complete
+    /// durable duplex from a pending installed tail. This opens no control/approval gate.
+    /// # Errors
+    /// Refuses an initial or already-positioned epoch; a peer packet cannot supply this proof.
+    pub fn preserve_completed_reverse_on_resume(&mut self) -> Result<(), CryptoError> {
+        self.cipher.live()?;
+        if self.initial_epoch
+            || self.forward_position != ForwardPosition::Awaiting
+            || self.reverse_position != ReversePosition::Required
+        {
+            return Err(CryptoError::Pairing("WrongContext"));
+        }
+        self.reverse_position = ReversePosition::Preserved;
+        Ok(())
+    }
     /// The trusted coordinator calls this ONLY after reading its durable forward `DataVerified`
     /// and applied reverse proof. `transfer_ready_held` means its exact saved, verified full
     /// preservation control is present. This opens a data transport gate, never authority;

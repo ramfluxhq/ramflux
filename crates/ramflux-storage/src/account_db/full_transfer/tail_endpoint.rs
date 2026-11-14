@@ -144,6 +144,17 @@ impl FullTailEndpoint<'_> {
         }
         Ok(record)
     }
+    /// Read the original completed duplex only from this currently pending installed tail.
+    /// No peer-supplied flag, ordinary receipt or terminal stage can restore this position.
+    /// # Errors
+    /// Refuses terminal/foreign state, stale native scope, expiry or incomplete signed DV.
+    pub fn pending_duplex_receipt(
+        &self,
+        now: u64,
+    ) -> Result<super::FullDuplexReceipt, StorageError> {
+        self.pending_resume_record(now)?;
+        self.stage.verified_duplex(now)
+    }
     /// A cancellation fence for this one tail job; contains no data or key.
     #[must_use]
     pub fn io_cancel_handle(&self) -> crate::FullStageIoCancel {
