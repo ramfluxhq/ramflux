@@ -161,6 +161,15 @@ impl Fixture {
             *attended = true;
             return Ok(());
         }
+        // displayed_proposal also carries the earlier SAS proposal hash. Wait for
+        // the typed native-candidate phase before presenting a transfer approval.
+        if !self
+            .status(true)
+            .await?
+            .is_some_and(|status| status.stage == FullStatusStage::Candidate)
+        {
+            return Ok(());
+        }
         let Ok(candidate) = self.wire.primary.displayed_proposal() else { return Ok(()) };
         let affirm = ramflux_protocol::custody::pairing::local_dto::TransferAffirm {
             schema: "ramflux.pairing.TransferAffirm.v2".into(),

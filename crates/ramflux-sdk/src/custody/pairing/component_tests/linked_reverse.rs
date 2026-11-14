@@ -647,6 +647,25 @@ mod tests {
             *attended = true;
             return Ok(());
         }
+        let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+            schema: "ramflux.pairing.StatusRequest.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: rig.primary.actor_generation(),
+        };
+        let status = drive(
+            Box::pin(rig.primary.transfer_status(&request)),
+            source_service,
+            &rig.source.client,
+            target_service,
+            target,
+        )
+        .await?;
+        if !matches!(status.outcome, Outcome::FullStatus { value }
+            if value.stage == ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Candidate)
+        {
+            return Ok(());
+        }
         let Ok(candidate) = rig.primary.displayed_proposal() else { return Ok(()) };
         let affirm = ramflux_protocol::custody::pairing::local_dto::TransferAffirm {
             schema: "ramflux.pairing.TransferAffirm.v2".into(),
