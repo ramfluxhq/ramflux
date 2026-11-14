@@ -12,6 +12,20 @@ pub(in crate::bus) enum Work {
     Query { owner: u64, request: Box<SearchQuery>, admission: crate::search::admission::Admission },
     Status,
 }
+struct QueryCancellation {
+    runtime: Arc<LocalSearch>,
+    owner: u64,
+    id: String,
+    armed: bool,
+}
+impl Drop for QueryCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.runtime.cancel(self.owner, self.runtime.unlock_epoch(), &self.id);
+        }
+    }
+}
+
 impl AccountReaders {
     pub(in crate::bus) fn search_runtime(&self) -> Result<Arc<LocalSearch>, SdkError> {
         self.search.clone().ok_or_else(|| SearchError::IndexUnavailable.into())
@@ -24,12 +38,16 @@ impl AccountReaders {
         request.validate()?;
         let runtime = self.search_runtime()?;
         let admission = runtime.admit(owner, &request.request_id).await?;
+        let mut cancellation =
+            QueryCancellation { runtime, owner, id: request.request_id.clone(), armed: true };
         let (reply, result) = oneshot::channel();
         self.enqueue(ReadCommand::Search(
             Work::Query { owner, request: Box::new(request), admission },
             reply,
         ))?;
-        result.await.map_err(|_| closed())?
+        let body = result.await.map_err(|_| closed())??;
+        cancellation.armed = false;
+        Ok(body)
     }
     pub(in crate::bus) async fn search_status(&self) -> Result<serde_json::Value, SdkError> {
         let (reply, result) = oneshot::channel();

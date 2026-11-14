@@ -200,6 +200,11 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
             shared.check_current()?;
             drop(shared);
             drop(ticket);
+            let cancelled = runtime.query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary")).await?;
+            let token = runtime.queue_completion(7, cancelled)?;
+            runtime.cancel(7, runtime.unlock_epoch(), "cancelled-reply")?;
+            assert!(matches!(runtime.take_completion(7, token["search_completion"].as_str().ok_or("cancel token")?), Err(crate::SdkError::Search(SearchError::CursorStale))), "cancellation must release a queued completion and its executor admission immediately");
+            runtime.query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary")).await?.take()?;
             let query = SearchQuery::new("empty-query", "canary");
             let completion = runtime.query(&fixture.client, 7, &query).await?;
             assert!(

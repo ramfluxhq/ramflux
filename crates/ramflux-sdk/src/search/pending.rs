@@ -40,21 +40,45 @@ impl LocalSearch {
         );
         drop(retired);
     }
+    pub(super) fn cancel_pending(&self, owner: u64, request: &str) {
+        let retired = {
+            let mut pending =
+                self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let keys = pending
+                .iter()
+                .filter(|(_, (client, completion, _))| {
+                    *client == owner && completion.admission.belongs_to(owner, request)
+                })
+                .map(|(token, _)| token.clone())
+                .collect::<Vec<_>>();
+            keys.into_iter().filter_map(|token| pending.remove(&token)).collect::<Vec<_>>()
+        };
+        drop(retired);
+    }
     pub(crate) fn queue_completion(
         &self,
         owner: u64,
         completion: SearchCompletion,
     ) -> Result<serde_json::Value, SdkError> {
+        completion.check_current()?;
         let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if pending.len() >= 3 {
+            drop(pending);
             return Err(SearchError::Capacity.into());
         }
         let token =
             SearchText::from(ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
         let body = serde_json::json!({"search_completion":token.expose()});
-        let old = pending.insert(token, (owner, completion, Instant::now()));
+        let old = pending.insert(token.clone(), (owner, completion, Instant::now()));
+        let current = pending
+            .get(token.expose())
+            .ok_or(SearchError::CursorStale)
+            .and_then(|(_, completion, _)| completion.check_current());
+        let retired = if current.is_err() { pending.remove(token.expose()) } else { None };
         drop(pending);
         drop(old);
+        drop(retired);
+        current?;
         Ok(body)
     }
     pub(crate) fn take_completion(

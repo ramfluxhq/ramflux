@@ -61,13 +61,16 @@ impl SearchCompletion {
     /// # Errors
     /// Invalidated or already consumed pages are never returned from a pending completion.
     pub fn take(&self) -> SearchResult<SearchPage> {
-        self.admission.control.check()?;
         let mut page = self.page.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.watch.stamp() != self.stamp
             || self.expires_at.is_some_and(|expiry| self.clock.now_unix() >= expiry)
         {
             page.take();
             return Err(SearchError::CursorStale);
+        }
+        if let Err(error) = self.admission.control.check() {
+            page.take();
+            return Err(error);
         }
         page.take().ok_or(SearchError::CursorStale)
     }
@@ -180,14 +183,16 @@ impl LocalSearch {
         self.unlock
     }
     fn cancel_request(&self, client: u64, request_id: &str) {
-        if let Some(control) = self
+        let control = self
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&(client, request_id.to_owned()))
-        {
+            .cloned();
+        if let Some(control) = control {
             control.cancel();
         }
+        self.cancel_pending(client, request_id);
     }
     pub fn close_cursor(&self, client: u64, token: &str) {
         self.cursors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).close(client, token);
