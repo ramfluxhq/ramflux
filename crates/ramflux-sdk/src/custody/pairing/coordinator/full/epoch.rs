@@ -45,6 +45,10 @@ enum EpochScope {
     Ceremony,
     Tail,
 }
+fn epoch_deadline(phase: &'static str) -> SdkError {
+    tracing::debug!(phase, "full epoch deadline reached");
+    SdkError::PairingCode("ResumeRequired")
+}
 fn start(
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
@@ -56,6 +60,7 @@ fn start(
     stop.require_live()?;
     let owner = stop.clone();
     let task = tokio::spawn(async move {
+        let mut phase = "original branch proofs";
         let packet = timeout(Duration::from_secs(10), async {
             stop.require_live()?;
             let signing_stop = stop.clone();
@@ -79,7 +84,9 @@ fn start(
             if cancelled.is_cancelled() {
                 return Err(SdkError::PairingCode("Retired"));
             }
+            phase = "HPKE control and Ready";
             let role = trust.local_stage_record()?.role;
+            tracing::debug!(role = role.as_str(), "full epoch original branch proofs accepted");
             let packet = match role {
                 PairingRole::Initiator => {
                     let (mut packet, control) = epoch.source_control()?;
@@ -126,7 +133,7 @@ fn start(
             Ok(packet)
         })
         .await
-        .unwrap_or_else(|_| Err(SdkError::PairingCode("ResumeRequired")));
+        .unwrap_or_else(|_| Err(epoch_deadline(phase)));
         FullEpochFinished { trust, keys, packet }
     });
     // Retain even an already-aborted join owner: dropping its handle here could leave
