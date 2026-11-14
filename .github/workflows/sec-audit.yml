@@ -24,7 +24,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
       # Run the scanner directly: reporting through a separate Checks API request
       # must not turn an otherwise completed audit into an HTTP failure.
@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
       # Install cargo-deny from crates.io (same pinned version the action used) instead of the
       # action's GitHub-release tarball download, so a release-asset outage cannot block the gate.
