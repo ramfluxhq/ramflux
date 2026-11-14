@@ -23,9 +23,15 @@ impl FullStreamWork {
     }
     pub(super) async fn fresh(&mut self) -> Result<(), SdkError> {
         tracing::debug!(role = self.role.as_str(), "full data native observation started");
-        let current = self.own_native_head().await?;
+        let current = self
+            .own_native_head()
+            .await
+            .inspect_err(|error| Self::note_failure("own native rebind observation", error))?;
         tracing::debug!(role = self.role.as_str(), "full data native observation returned");
-        let (observed, bound) = self.io.observe_prepublication_binding(current.clone()).await?;
+        let (observed, bound) =
+            self.io.observe_prepublication_binding(current.clone()).await.inspect_err(|error| {
+                Self::note_failure("writer native rebind observation", error)
+            })?;
         tracing::debug!(
             role = self.role.as_str(),
             "full data original writer observed native binding"
@@ -49,7 +55,9 @@ impl FullStreamWork {
                 .inspect_err(|error| Self::note_failure("retain native rebind", error))?;
             self.pending_rebind = Some(packet);
         }
-        self.flush_rebind().await?;
+        self.flush_rebind()
+            .await
+            .inspect_err(|error| Self::note_failure("send pending native rebind", error))?;
         self.runtime.require_live()
     }
     pub(super) async fn flush_rebind(&mut self) -> Result<(), SdkError> {

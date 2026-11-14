@@ -458,7 +458,11 @@ mod tests {
         mut fixture: Linked,
         races: u8,
     ) -> Result<Linked, Box<dyn std::error::Error>> {
-        fixture.rig.secondary.set_install_races_for_test(races)?;
+        fixture
+            .rig
+            .secondary
+            .set_install_races_for_test(races)
+            .map_err(|error| format!("test: linked installation race owner: {error}"))?;
         let original = fixture.target.account_db()?.path.clone();
         let native = crate::custody::load_data_account(
             &fixture.rig.participant_b.root,
@@ -468,12 +472,16 @@ mod tests {
         let branch = native.branch_vault_ref().to_owned();
         let index = fixture.target.account_index()?;
         let wrapping = index.load_wrapped_db_key(&fixture.rig.participant_b.account_id)?;
-        Box::pin(publish_linked(&mut fixture)).await?;
+        Box::pin(publish_linked(&mut fixture))
+            .await
+            .map_err(|error| format!("test: linked publish before handback: {error}"))?;
         for _ in 0..12 {
             poll_management(&mut fixture, true).await?;
             poll_management(&mut fixture, false).await?;
             let Linked { rig, target, target_service, .. } = &mut fixture;
-            rig.secondary.service_linked_installation(target, target_service)?;
+            rig.secondary
+                .service_linked_installation(target, target_service)
+                .map_err(|error| format!("test: linked G3 handback: {error}"))?;
             if target.account_db()?.path != original {
                 break;
             }
@@ -502,13 +510,6 @@ mod tests {
                 );
             }
         }
-        assert!(
-            crate::custody::pairing::ordinary_session_admitted(
-                &fixture.target,
-                &fixture.rig.participant_b.account_id,
-            )?,
-            "test: linked frontend did not pass exact G3 admission"
-        );
         assert_eq!(
             fixture
                 .target
@@ -527,6 +528,27 @@ mod tests {
             branch,
             "test: linked installation replaced B's device key"
         );
+        require_installed_admission_and_vetoes(&fixture)?;
+        assert!(
+            !fixture
+                .rig
+                .secondary
+                .service_linked_installation(&mut fixture.target, &mut fixture.target_service,)?,
+            "test: linked generation was handed back twice"
+        );
+        if let Some(third) = &mut fixture.third {
+            third::verify(&fixture.rig, &fixture.target, third).await?;
+        }
+        Ok(fixture)
+    }
+    fn require_installed_admission_and_vetoes(fixture: &Linked) -> TestResult {
+        assert!(
+            crate::custody::pairing::ordinary_session_admitted(
+                &fixture.target,
+                &fixture.rig.participant_b.account_id,
+            )?,
+            "test: linked frontend did not pass exact G3 admission"
+        );
         assert!(
             fixture
                 .target
@@ -543,17 +565,7 @@ mod tests {
                 .is_err(),
             "test: A veto was lost at installation"
         );
-        assert!(
-            !fixture
-                .rig
-                .secondary
-                .service_linked_installation(&mut fixture.target, &mut fixture.target_service,)?,
-            "test: linked generation was handed back twice"
-        );
-        if let Some(third) = &mut fixture.third {
-            third::verify(&fixture.rig, &fixture.target, third).await?;
-        }
-        Ok(fixture)
+        Ok(())
     }
     async fn poll_management(fixture: &mut Linked, primary: bool) -> TestResult {
         let Linked { rig, target, source_service, target_service, .. } = fixture;
@@ -566,7 +578,8 @@ mod tests {
             target_service,
             target,
         )
-        .await?;
+        .await
+        .map_err(|error| format!("test: linked management primary={primary}: {error}"))?;
         Ok(())
     }
     async fn publish_linked(fixture: &mut Linked) -> TestResult {
@@ -597,7 +610,9 @@ mod tests {
         for _ in 0..72 {
             poll_management(fixture, false).await?;
             poll_management(fixture, true).await?;
-            affirm_displayed_candidate(fixture, &prepare.operation_id).await?;
+            affirm_displayed_candidate(fixture, &prepare.operation_id)
+                .await
+                .map_err(|error| format!("test: linked source affirmation: {error}"))?;
             let Linked { rig, target, source_service, target_service, .. } = fixture;
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
             rig.secondary.service_full_transfer(target.account_db()?)?;
