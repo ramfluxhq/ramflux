@@ -15,6 +15,20 @@ mod credential;
 mod request;
 mod state;
 pub use credential::CredentialCallback;
+/// Nullable host callback; null unregisters and drains outstanding uses.
+pub type CredentialProviderCallback = Option<
+    extern "C" fn(
+        *const u8,
+        usize,
+        *mut u8,
+        usize,
+        *mut usize,
+        *mut u8,
+        usize,
+        *mut usize,
+        *mut c_void,
+    ) -> i32,
+>;
 pub(super) use state::State;
 fn invalid() -> CAbiError {
     CAbiError::new(RamfluxErrorCode::InvalidArgument, "invalid pairing ABI argument")
@@ -109,7 +123,7 @@ pub extern "C" fn ramflux_pairing_event_poll(
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_pairing_set_credential_provider(
     client: *mut RamfluxClient,
-    callback: Option<CredentialCallback>,
+    callback: CredentialProviderCallback,
     user_data: *mut c_void,
 ) -> i32 {
     ffi_result(std::ptr::null_mut(), || {

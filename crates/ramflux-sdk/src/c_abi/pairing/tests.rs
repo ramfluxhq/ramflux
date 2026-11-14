@@ -204,7 +204,7 @@ fn ffi_case(config: &[u8]) -> Result<(), String> {
             body.len(),
             &raw mut refused
         ),
-        25,
+        RamfluxErrorCode::PairingStale as i32,
         "test: ABI sent or accepted a known stale operation generation"
     );
     let refused = Buffer(refused);

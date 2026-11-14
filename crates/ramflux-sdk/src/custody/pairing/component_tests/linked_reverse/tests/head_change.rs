@@ -47,6 +47,21 @@ async fn primary_transfer_full_head_change_mid_stream() -> TestResult {
 async fn revoked_target() -> TestResult {
     let mut fixture = Box::pin(open()).await?;
     Box::pin(bootstrap(&mut fixture)).await?;
+    // Confirmation precedes the first Manifest; wait for actual B stage admission.
+    let mut staged = false;
+    for _ in 0..32 {
+        step(&mut fixture).await?;
+        for row in fixture.target.account_db()?.pairing_live_rows()? {
+            if row.full_stage_reference()?.is_some() {
+                staged = true;
+                break;
+            }
+        }
+        if staged {
+            break;
+        }
+    }
+    assert!(staged, "test: B never admitted its prepublication DATA stage");
     let b = crate::custody::load_data_account(
         &fixture.rig.participant_b.root,
         &fixture.rig.participant_b.account_id,
