@@ -169,6 +169,7 @@ async fn saturated_writer_voice_renew_preserves_active_call_and_initial_media() 
             assert_eq!(after["allocation"],before["allocation"],"busy lost/extended valid allocation");
             assert_eq!(after["pending"],before["pending"],"busy acknowledged uncommitted lease");
             assert_eq!(after["receive_key_present"],before["receive_key_present"]);
+            assert_eq!(after["media_held"],before["media_held"],"writer busy changed call media authorization");
             assert!(matches!(reply,GatewayServerFrame::Nack {reason} if reason=="gateway_writer_busy: retryable"),"voice busy must stay typed");
             assert_eq!(after["next_refresh"],now+1);
             call.expire(i64::try_from(now+if active {60} else {45})?)?;

@@ -294,7 +294,7 @@ impl LiveCall {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn allow_media(&mut self) {
         let peers = if self.local == self.caller {
             self.invited.clone()
