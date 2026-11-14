@@ -54,7 +54,7 @@ async fn exercise(input: bool, read_only: bool) -> TestResult {
 }
 async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> TestResult {
     let mut f = Fixture::new()?;
-    let (human, agent) = crate::client::surface::test_support::owned_pair(
+    let (human, agent, vault) = crate::client::surface::test_support::owned_pair_with_vault(
         &f.root.join("surface-native"),
         "human",
         "agent",
@@ -142,6 +142,11 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
     let binding = if restart {
         drop(f.human.active_account_db.take());
         f.human.unlock_account("human", b"surface-test-secret")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            f.human.initialize_born_v3_branch("human-device", vault.clone()),
+        )
+        .await??;
         let recovered = f.human.surface_get("form", 0, None)?;
         assert_eq!(recovered["actions"][0]["receipt_verified"], false);
         assert_eq!(recovered["actions"][0]["actionable"], false);

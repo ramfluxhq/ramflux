@@ -26,7 +26,7 @@ impl Group {
         let source_identity = source_client.owned_device_identity()?;
         let source_device =
             source_client.device_branch.as_ref().ok_or("source branch")?.device_id.clone();
-        source_client.create_group("group", &source_device)?;
+        source_client.create_group("group", source_identity.storage_key())?;
         let identities = clients
             .iter()
             .map(RamfluxClient::owned_device_identity)
@@ -90,13 +90,13 @@ impl Group {
                 epoch,
                 128,
                 "none",
-                &local.device_id,
+                client.owned_device_identity()?.storage_key(),
                 "member",
                 1,
             )?;
             client.account_db()?.upsert_group_member_snapshot(
                 "group",
-                &source_device,
+                source_identity.storage_key(),
                 "owner",
                 1,
             )?;
@@ -109,7 +109,7 @@ impl Group {
                 )?;
             }
             client.pin_local_group_member("group")?;
-            client.pin_joined_group_member("group", &source_device)?;
+            client.pin_joined_group_member("group", source_identity.storage_key())?;
             let seed = [u8::try_from(index + 1)?; 32];
             let send = ramflux_crypto::DmSession::initiator(
                 seed,

@@ -874,3 +874,22 @@ async fn signed_self_consistent_resync_cannot_erase_finality_live_or_after_nativ
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn native_author_planning_reads_need_public_account_provenance_without_a_branch_signer()
+-> TestResult {
+    let mut f = Fixture::new().await?;
+    create(&f)?;
+    let before = f.author.surface_get("s", 0, None)?;
+    f.author.device_branch = None;
+    let after = f.author.surface_get("s", 0, None)?;
+    assert_eq!(
+        after["snapshot"], before["snapshot"],
+        "data readers need the author's signed base to derive the next v3 frame"
+    );
+    assert_eq!(
+        after["render_allowed"], false,
+        "planning access does not grant an agent renderer authority over itself"
+    );
+    Ok(())
+}

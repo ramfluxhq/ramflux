@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Existing test timing sites; review renewals individually.
 site = [
+  { path = "crates/ramflux-sdk/src/client/task/surface_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 30 )", count = 1, owner = "ramflux-sdk", reason = "Bounds certified native branch restoration after requester data reopen; no elapsed-time assertion", expires = "2026-12-13" },
   { path = "crates/ramflux-sdk/src/client/surface/test_support.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 30 )", count = 2, owner = "ramflux-sdk", reason = "Bounds real phrase-created account and certified sibling branch initialization or reopen; no elapsed-time assertion", expires = "2026-12-13" },
   { path = "crates/ramflux-sdk/src/client/surface/tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 30 )", count = 4, owner = "ramflux-sdk", reason = "Bounds real phrase-created account and certified sibling branch initialization or reopen; no elapsed-time assertion", expires = "2026-12-13" },
   { path = "crates/ramflux-sdk/src/client/surface/tests/reordering.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 30 )", count = 1, owner = "ramflux-sdk", reason = "Bounds real phrase-created account and certified sibling branch initialization or reopen; no elapsed-time assertion", expires = "2026-12-13" },

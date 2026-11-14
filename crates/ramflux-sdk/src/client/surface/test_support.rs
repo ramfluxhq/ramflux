@@ -16,7 +16,7 @@ pub(crate) async fn owned_pair(
     let (human, agent, _vault) = owned_pair_with_vault(root, human, agent).await?;
     Ok((human, agent))
 }
-pub(super) async fn owned_pair_with_vault(
+pub(crate) async fn owned_pair_with_vault(
     root: &Path,
     human: &str,
     agent: &str,

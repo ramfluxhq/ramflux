@@ -34,7 +34,12 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("surface author missing"))?;
         let render_allowed = self.surface_author_is_own_agent(author)?;
         let authored_locally =
-            self.device_branch.as_ref().is_some_and(|local| local.principal_id == author);
+            self.device_branch.as_ref().is_some_and(|local| local.principal_id == author)
+                || self
+                    .born_v3_account
+                    .as_ref()
+                    .is_some_and(|local| local.record().body.principal_id == author)
+                || self.reader_principal_id.as_deref() == Some(author);
         view["render_allowed"] = json!(render_allowed);
         if let Some((record, state)) = self.surface_state_ref(id)? {
             view["snapshot"] = if render_allowed || authored_locally {

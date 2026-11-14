@@ -121,6 +121,9 @@ impl AccountReaders {
                                             client.reader_device_identity = device;
                                             let view =
                                                 Arc::clone(&*view.read().map_err(|_| closed())?);
+                                            client.reader_principal_id =
+                                                (!view.principal.is_empty())
+                                                    .then(|| view.principal.clone());
                                             client.born_v3_account.clone_from(&view.native);
                                             client
                                                 .reader_account_root

@@ -30,7 +30,7 @@ pub(super) struct AccountView {
     pub connection: Option<super::super::connection_manager::ConnectionHandle>,
     pub account_has_relay: bool,
     pub upload_relays: BTreeMap<String, bool>,
-    principal: String,
+    pub(super) principal: String,
     anchor: String,
     status: Value,
     views: BTreeMap<&'static str, Value>,
