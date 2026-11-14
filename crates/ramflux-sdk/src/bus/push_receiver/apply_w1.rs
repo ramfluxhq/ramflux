@@ -173,16 +173,15 @@ async fn apply_once(
     if !cover && !open_already_covered(account, turn, handle_generation, prepared, backpressure)? {
         return Ok(None);
     }
-    let own_copy = None;
     #[cfg(test)]
     let classification = if take_manifest_wait() {
         manifest_await().await;
         Ok((Kind::LegacyHold, None))
     } else {
-        classified_kind(account, entry, own_copy, prepared.retry_key.as_deref())
+        classified_kind(account, entry, prepared.retry_key.as_deref())
     };
     #[cfg(not(test))]
-    let classification = classified_kind(account, entry, own_copy, prepared.retry_key.as_deref());
+    let classification = classified_kind(account, entry, prepared.retry_key.as_deref());
     let (kind, classified_pending) = classification?;
     #[cfg(test)]
     after_classify(account.client.account_db()?);
@@ -199,20 +198,6 @@ async fn apply_once(
                 backpressure,
             ))
             .await
-        }
-        #[cfg(test)]
-        Kind::OwnCopy(manifest) => {
-            let message = entry.envelope.envelope_id.clone();
-            let client = &account.client;
-            let key = client.inbox_admission_key(entry)?;
-            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
-                client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
-                // Sibling control has no routed DM projection; the outer envelope is not one.
-                ReplyOutbox::prune_marker_in(tx, &key)?;
-                cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
-                Ok(false)
-            })?;
-            Ok(None)
         }
         Kind::LegacyHold => {
             hold_unrouted(account, turn, handle_generation, entry, sequence)?;
@@ -237,10 +222,9 @@ async fn apply_once(
 fn classified_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
-    own_copy: Option<crate::SdkDeviceManifestResponse>,
     retry_key: Option<&str>,
 ) -> Result<(Kind, Option<SdkError>), SdkError> {
-    match classify(account, entry, own_copy, retry_key) {
+    match classify(account, entry, retry_key) {
         Ok(kind) => Ok((kind, None)),
         Err(error) => {
             if crate::client::routed::decode(&entry.envelope).is_ok() && directory_pending(&error) {
@@ -702,8 +686,6 @@ fn hold_unrouted(
 }
 
 enum Kind {
-    #[cfg(test)]
-    OwnCopy(Box<crate::SdkDeviceManifestResponse>),
     Routed,
     LegacyHold,
     PolicyFailure(ReceiveFailureKind, &'static str),
@@ -714,17 +696,11 @@ enum Kind {
 fn classify(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
-    own_copy: Option<crate::SdkDeviceManifestResponse>,
     retry_key: Option<&str>,
 ) -> Result<Kind, SdkError> {
-    drop(own_copy);
     #[cfg(test)]
     if let Some(error) = take_classify_error() {
         return Err(error);
-    }
-    #[cfg(test)]
-    if take_own_copy() {
-        return Ok(Kind::OwnCopy(Box::new(dummy_own_copy_manifest())));
     }
     #[cfg(test)]
     if take_projection() {
@@ -1309,7 +1285,6 @@ thread_local! {
     static CLASSIFY_ERROR: std::cell::RefCell<Option<SdkError>> =
         const { std::cell::RefCell::new(None) };
     static PROJECTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static OWN_COPY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TERMINAL_REPLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MANIFEST_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SKIP_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1430,43 +1405,6 @@ pub(crate) fn queue_policy_kind(kind: ReceiveFailureKind) {
         ReceiveFailureKind::Exhausted => SdkError::ReplayMismatch,
     };
     CLASSIFY_ERROR.with(|cell| cell.replace(Some(error)));
-}
-
-#[cfg(test)]
-pub(crate) fn queue_own_copy() {
-    queue_own_copy_n(1);
-}
-
-#[cfg(test)]
-pub(crate) fn queue_own_copy_n(n: u32) {
-    OWN_COPY.with(|cell| cell.set(n));
-}
-
-#[cfg(test)]
-fn take_own_copy() -> bool {
-    OWN_COPY.with(|cell| {
-        let n = cell.get();
-        if n == 0 {
-            false
-        } else {
-            cell.set(n - 1);
-            true
-        }
-    })
-}
-
-/// Dummy directory material for the own-copy classify hook. `commit_own_copy_from_entry`
-/// returns `Ok(false)` on the dummy payload before reading this value.
-#[cfg(test)]
-fn dummy_own_copy_manifest() -> crate::SdkDeviceManifestResponse {
-    crate::SdkDeviceManifestResponse {
-        custody: None,
-        signed_device_set: None,
-        principal_id: String::new(),
-        principal_commitment: String::new(),
-        root_public_key: String::new(),
-        devices: Vec::new(),
-    }
 }
 
 /// Stands in for the identity authority's answer only; admission itself is the real path.

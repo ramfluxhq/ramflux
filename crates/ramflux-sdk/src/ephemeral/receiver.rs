@@ -1474,10 +1474,6 @@ mod sender_hash_audit_tests {
             crate::client::routed::verify_sender_record(&entry, &record),
             Err(crate::SdkError::Protocol(ramflux_protocol::ProtocolError::PayloadHashMismatch))
         ));
-        assert!(matches!(
-            crate::RamfluxClient::new().own_device_receive_manifest_request(&entry),
-            Err(crate::SdkError::Protocol(ramflux_protocol::ProtocolError::PayloadHashMismatch))
-        ));
         Ok(())
     }
 }

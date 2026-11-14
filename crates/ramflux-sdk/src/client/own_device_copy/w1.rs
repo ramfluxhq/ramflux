@@ -270,43 +270,6 @@ impl RamfluxClient {
         Ok(())
     }
 
-    /// Decrypts an own-copy packet and commits through the dormant W1 adapter.
-    #[cfg(test)]
-    pub(crate) fn apply_own_copy_w1(
-        &self,
-        entry: &crate::GatewayInboxEntry,
-        manifest: &crate::SdkDeviceManifestResponse,
-        expected: ReceiveExpectation<'_>,
-        sequence: u64,
-        message: &str,
-    ) -> Result<bool, SdkError> {
-        let db = self.account_db()?;
-        let generation = expected.generation;
-        let gate = OwnCopyW1 { expected, generation };
-        let ack = self.own_copy_ack_binding(entry)?;
-        gate.effect(db, sequence, message, ack, || self.commit_own_copy_from_entry(entry, manifest))
-    }
-
-    /// Same cut as [`Self::apply_own_copy_w1`], joining an already-open receive transaction.
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub(crate) fn apply_own_copy_w1_in(
-        &self,
-        tx: &ReceiveTransaction<'_>,
-        entry: &crate::GatewayInboxEntry,
-        manifest: &crate::SdkDeviceManifestResponse,
-        expected: ReceiveExpectation<'_>,
-        sequence: u64,
-        message: &str,
-    ) -> Result<bool, SdkError> {
-        let generation = expected.generation;
-        let gate = OwnCopyW1 { expected, generation };
-        let ack = self.own_copy_ack_binding(entry)?;
-        gate.effect_in(tx, sequence, message, ack, || {
-            self.commit_own_copy_from_entry(entry, manifest)
-        })
-    }
-
     /// Recovery W1 cut for the pair-reset durable writes.
     pub(crate) fn recover_own_copy_w1(
         &self,

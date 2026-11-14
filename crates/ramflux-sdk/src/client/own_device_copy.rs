@@ -9,8 +9,6 @@ use aes_gcm::{
     aead::{Aead, Payload},
 };
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use serde_json::Value;
 use serde_json::json;
 use zeroize::Zeroize;
 pub(crate) const DOMAIN: &str = "ramflux.sdk.own_device_message.v2";
@@ -22,8 +20,6 @@ pub(crate) mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
 mod generated;
 mod generated_authority;
-#[cfg(test)]
-mod receive;
 pub(crate) mod w1;
 pub(super) const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,50 +34,6 @@ pub(crate) struct OwnDeviceMessage {
     #[serde(skip)]
     pub(crate) context_delivery: Option<super::surface::OwnContextDelivery>,
 }
-impl OwnDeviceMessage {
-    #[cfg(test)]
-    fn verify_source(
-        &self,
-        entry: &GatewayInboxEntry,
-        manifest: &crate::prekey::SdkDeviceManifestResponse,
-        recipient: &str,
-    ) -> Result<(), SdkError> {
-        let source = manifest
-            .devices
-            .iter()
-            .find(|d| d.device_id == entry.envelope.source_device_id)
-            .ok_or_else(|| invalid("own-device sender is not active"))?;
-        if !manifest.devices.iter().any(|d| d.device_id == recipient) {
-            return Err(invalid("own-device recipient is not active"));
-        }
-        if entry.envelope.source_principal_id != manifest.principal_id
-            || entry.envelope.ext.ext.get("source_root_commitment").and_then(Value::as_str)
-                != Some(manifest.principal_commitment.as_str())
-        {
-            return Err(invalid("own-device outer authority mismatch"));
-        }
-        ramflux_protocol::verify_envelope_sender_signature(
-            &entry.envelope,
-            &source.branch_public_key,
-        )?;
-        ramflux_crypto::verify_device_branch_signature(
-            &source.branch_public_key,
-            &self.signing()?,
-            &self.signature,
-        )?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn recipient_slot(&self, device: &str) -> Result<&OwnKeySlot, SdkError> {
-        let mut slots = self.slots.iter().filter(|slot| slot.recipient_device_id == device);
-        let slot = slots.next().ok_or_else(|| invalid("own-device recipient slot ambiguity"))?;
-        if slots.next().is_some() {
-            return Err(invalid("own-device recipient slot ambiguity"));
-        }
-        Ok(slot)
-    }
-}
 /// Only the recipient selector and cryptographic bootstrap are needed outside AEAD.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,21 +41,6 @@ pub(crate) struct OwnKeySlot {
     pub recipient_device_id: String,
     x3dh: Option<SdkDmX3dhHeader>,
     ciphertext: ramflux_crypto::DmCiphertext,
-}
-impl OwnKeySlot {
-    #[cfg(test)]
-    fn object_slot(&self, id: &str, root: &str) -> SdkObjectKeySlot {
-        SdkObjectKeySlot {
-            schema: "ramflux.sdk.object_key_slot.dm.v2".into(),
-            version: 2,
-            object_id: id.into(),
-            conversation_id: String::new(),
-            recipient_device_id: self.recipient_device_id.clone(),
-            source_principal_commitment: Some(root.into()),
-            x3dh: self.x3dh.clone(),
-            ciphertext: self.ciphertext.clone(),
-        }
-    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -226,25 +163,6 @@ impl OwnDeviceMessage {
         let context: PrivateContext = ramflux_protocol::parse_i_json(&plaintext[..split])?;
         let body = zeroize::Zeroizing::new(plaintext[split + 1..].to_vec());
         Ok((context, body))
-    }
-    #[cfg(test)]
-    fn validate(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-        if self.schema != DOMAIN
-            || self.id.is_empty()
-            || self.id.len() > 256
-            || self.slots.is_empty()
-            || self.slots.len() > 1024
-            || entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl
-        {
-            return Err(invalid("own-device message scope mismatch"));
-        }
-        Ok(())
-    }
-    #[cfg(test)]
-    fn signing(&self) -> Result<Value, SdkError> {
-        let mut body = serde_json::to_value(self)?;
-        body.as_object_mut().ok_or_else(|| invalid("own-device body missing"))?.remove("signature");
-        Ok(json!({"domain":DOMAIN,"body":body}))
     }
     fn aad(&self) -> Result<Vec<u8>, SdkError> {
         Ok(ramflux_protocol::canonical_json_bytes(&(DOMAIN, &self.id))?)
@@ -461,51 +379,6 @@ impl RamfluxClient {
             .collect()
     }
 
-    #[cfg(test)]
-    fn apply_own_device_control(
-        &self,
-        entry: &GatewayInboxEntry,
-        source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
-        context: &PrivateContext,
-        body: &[u8],
-        target: &str,
-    ) -> Result<ReceiptScope, SdkError> {
-        let consent = self.receive_own_group_consent(source_identity, body)?;
-        let sent = !consent
-            && self.receive_own_sent_message(
-                source_identity,
-                OwnMessageInput {
-                    payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
-                    id: &context.message,
-                    conversation: &context.conversation,
-                    group: context.group.as_deref(),
-                    created_at: context.created_at,
-                    body,
-                },
-            )?;
-        if !consent
-            && !sent
-            && !self.receive_own_contact(body)?
-            && !self.receive_surface_control_from(
-                entry,
-                source_identity,
-                &context.conversation,
-                context.group.as_deref(),
-                body,
-            )?
-        {
-            return Err(invalid("unsupported own-device control"));
-        }
-        Ok(if sent {
-            ReceiptScope::Private {
-                private_scope: self
-                    .account_db()?
-                    .own_sent_receipt_scope(&context.source, target)?,
-            }
-        } else {
-            ReceiptScope::Names { source: context.source.clone(), target: target.into() }
-        })
-    }
     fn persist_own_device_receipt(
         &self,
         key: &str,

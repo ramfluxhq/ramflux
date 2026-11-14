@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded, identity-free commit evidence survives disposable receipt eviction.
-#[cfg(test)]
-use super::OwnDeviceMessage;
 use super::{DOMAIN, RECEIPTS, Receipt, invalid};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use ramflux_storage::AccountDb;
@@ -102,47 +100,7 @@ pub(crate) fn remember(
     })
 }
 
-#[cfg(test)]
-pub(crate) struct Replay {
-    pub key: String,
-    pub fingerprint: String,
-    pub committed: bool,
-}
-
 impl RamfluxClient {
-    #[cfg(test)]
-    pub(super) fn own_copy_replay(
-        &self,
-        entry: &GatewayInboxEntry,
-        packet: &OwnDeviceMessage,
-        bytes: &[u8],
-        now: i64,
-    ) -> Result<Replay, SdkError> {
-        let db = self.account_db()?;
-        let target = self.owned_device_identity()?;
-        let key = replay_key(db, &target, entry, &packet.id)?;
-        let wire_fingerprint = ramflux_protocol::hash_base64url(DOMAIN, bytes);
-        let fingerprint = packet_fingerprint(db, &wire_fingerprint)?;
-        let committed = if committed(db, &key, &fingerprint, now)? {
-            true
-        } else if let Some(old) =
-            db.load_actor_state::<Receipt>(&format!("{RECEIPTS}{}", packet.id))?
-        {
-            old.validate(
-                db,
-                &entry.envelope.source_device_id,
-                target.device_id(),
-                &wire_fingerprint,
-                now,
-            )?;
-            remember(db, &key, &fingerprint, old.valid_until, old.acknowledged, now)?;
-            true
-        } else {
-            false
-        };
-        Ok(Replay { key, fingerprint, committed })
-    }
-
     /// Legacy live ACK path only (the gateway inbox ACK helper): called after the gateway confirms this
     /// exact inbox entry's ACK. The WA path never calls it; it marks through the locator's
     /// [`OwnCopyAckBinding`] inside the settlement transaction. Retired with the legacy path.
