@@ -357,7 +357,7 @@ fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
 
 #[test]
 fn pairing_mesh_full_unknown_token_is_refused_before_bulk_read_and_redacted() -> TestResult {
-    let (handle, _env, _redb, _record, _) = wired_handle("pairing-mesh-full-prebody")?;
+    let (_redb, _record, handle, _env, _) = wired_handle("pairing-mesh-full-prebody")?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let socket = std::net::TcpStream::connect(listener.local_addr()?)?;
     let (_remote, _) = listener.accept()?;
@@ -389,10 +389,24 @@ fn pairing_mesh_full_unknown_token_is_refused_before_bulk_read_and_redacted() ->
             },
         );
         let Err(error) = result else { anyhow::bail!("unowned bulk body admitted") };
-        assert_eq!(error.to_string(), "HTTP error: full pairing mesh refused");
-        assert!(!error.to_string().contains(&token));
-        assert!(!error.to_string().contains("PairingFull"));
-        assert_eq!(header_only.position(), raw.len() as u64);
+        assert_eq!(
+            error.to_string(),
+            "HTTP error: full pairing mesh refused",
+            "test: pre-body refusal lost its redacted error class"
+        );
+        assert!(
+            !error.to_string().contains(&token),
+            "test: unknown DATA token reached diagnostics"
+        );
+        assert!(
+            !error.to_string().contains("PairingFull"),
+            "test: DATA authorization reached diagnostics"
+        );
+        assert_eq!(
+            header_only.position(),
+            u64::try_from(raw.len())?,
+            "test: unowned body bytes were read before native admission"
+        );
         assert_eq!(
             handle
                 .pairing_relay()

@@ -45,7 +45,11 @@ fn lease(
     )?;
     let source_ref = record.body.master_certificate.body.primary_device_ref.clone();
     let destination_ref = DeviceRef { device_id: "new-b".into(), ..source_ref.clone() };
-    let mut destination_branch = record.body.devices[0]
+    let mut destination_branch = record
+        .body
+        .devices
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("test: source native device absent"))?
         .branch_certificate
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("source branch"))?
@@ -168,20 +172,29 @@ fn tokens(
     };
     let first =
         FullDiscovery::from_wire_bytes(&claim(ctx, &FullClaim::Hello(Box::new(hello.clone())))?)?;
-    assert!(first.template.is_none());
+    assert!(first.template.is_none(), "test: one Hello disclosed a dual-branch proof template");
     hello.role = "responder".into();
     hello.hpke_key = encode_base64url(ramflux_crypto::X25519KeyPair::from_seed([73; 32]).public);
     let both = FullDiscovery::from_wire_bytes(&claim(ctx, &FullClaim::Hello(Box::new(hello)))?)?;
     let template = both.template.ok_or_else(|| anyhow::anyhow!("proof template"))?;
-    assert!(matches!(prove(ctx, &template, "initiator", 63)?, FullProofReply::Pending(_)));
+    assert!(
+        matches!(prove(ctx, &template, "initiator", 63)?, FullProofReply::Pending(_)),
+        "test: A received DATA tokens before original B proved its branch"
+    );
     let FullProofReply::Ready(b) = prove(ctx, &template, "responder", 69)? else {
         anyhow::bail!("B not ready")
     };
     let FullProofReply::Ready(a) = prove(ctx, &template, "initiator", 63)? else {
         anyhow::bail!("A not ready")
     };
-    assert_eq!(a.peer_proof.body.role, "responder");
-    assert_eq!(b.peer_proof.body.role, "initiator");
+    assert_eq!(
+        a.peer_proof.body.role, "responder",
+        "test: A received the wrong original peer proof"
+    );
+    assert_eq!(
+        b.peer_proof.body.role, "initiator",
+        "test: B received the wrong original peer proof"
+    );
     Ok((*a, *b))
 }
 fn authorization(token: &ResumeTokenFull) -> anyhow::Result<String> {
@@ -199,7 +212,7 @@ fn pairing_mesh_full_raw_claim_proof_and_atomic_prebody_forward_are_wired() -> T
     use ramflux_node_core::pairing_relay::{
         FULL_MESH_ADMIT_PATH, FullArm, FullMeshAdmit, FullMeshPermit, SecretAuthorization,
     };
-    let (handle, _env, _redb, _record, _) = wired_handle("pairing-mesh-full-raw")?;
+    let (_redb, _record, handle, _env, _) = wired_handle("pairing-mesh-full-raw")?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let socket = std::net::TcpStream::connect(listener.local_addr()?)?;
     let (_remote, _) = listener.accept()?;
@@ -244,10 +257,13 @@ fn pairing_mesh_full_raw_claim_proof_and_atomic_prebody_forward_are_wired() -> T
         encode_base64url([74; 32]),
         encode_base64url(permit.permit.decode(32)?.as_slice())
     );
-    assert!(matches!(
-        raw(&ctx, FullArm::Close.mesh_path(), &headers, &body)?,
-        Reply::Data(ramflux_node_core::pairing_relay::FullAdmittedReply::Closed)
-    ));
+    assert!(
+        matches!(
+            raw(&ctx, FullArm::Close.mesh_path(), &headers, &body)?,
+            Reply::Data(ramflux_node_core::pairing_relay::FullAdmittedReply::Closed)
+        ),
+        "test: native publication did not convert the outstanding permit to scoped Tail close"
+    );
     assert!(
         raw(&ctx, FullArm::Close.mesh_path(), &headers, &body).is_err(),
         "claimed permit replayed"
