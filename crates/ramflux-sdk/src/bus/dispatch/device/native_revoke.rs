@@ -75,6 +75,18 @@ pub(super) async fn dispatch(
     let published = with_db(account, |db| {
         custody::pairing::publish_head(db, &root, selected.vault.as_ref(), &write, &receipt)
     })?;
+    // Feed our acknowledged native denial through the same authority observer as a
+    // fetched head. Disk installation alone does not retire private pair state or
+    // invalidate a previously cached directory in this unlocked client.
+    account.client.observe_custody_manifest(
+        &ramflux_protocol::custody::CustodyManifest {
+            publication: Publication { record: published.record.clone(), compacted_ids: None },
+            custodian_publication: None,
+            devices: Vec::new(),
+        },
+        &published.record.body.account_anchor,
+        custody::network_now()?,
+    )?;
     account.client.born_v3_account = Some(Box::new(custody::load_account(
         account.client.account_index()?.root(),
         &account.client.account_db()?.local_account_id,
