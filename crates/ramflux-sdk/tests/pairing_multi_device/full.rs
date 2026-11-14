@@ -148,7 +148,9 @@ impl Fixture {
         self.a.service_data()?;
         self.b.service_data()?;
         for actor in [&mut self.a.actor, &mut self.b.actor] {
-            self.node.clock.advance_ms(1001);
+            if !actor.full_data_worker_owns_relay() {
+                self.node.clock.advance_ms(1001);
+            }
             drive(
                 Box::pin(actor.sync_relay()),
                 &mut self.source,

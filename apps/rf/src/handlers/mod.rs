@@ -24,9 +24,9 @@ pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(unix)]
 mod node_custody;
+pub(crate) mod pairing;
 #[cfg(windows)]
 mod windows_console;
-pub(crate) mod pairing;
 #[cfg(not(unix))]
 mod node_custody {
     pub(crate) fn provision(_: &crate::cli::NodeCustody, _: bool) -> Result<(), crate::RfError> {

@@ -26,7 +26,9 @@ impl Fixture {
         self.a.service_data(&mut self.wire.primary)?;
         self.b.service_data(&mut self.wire.recipient)?;
         for actor in [&mut self.wire.primary, &mut self.wire.recipient] {
-            self.wire.clock.advance_ms(1001);
+            if !actor.full_data_worker_owns_relay() {
+                self.wire.clock.advance_ms(1001);
+            }
             drive(
                 Box::pin(actor.sync_relay()),
                 &mut self.source,

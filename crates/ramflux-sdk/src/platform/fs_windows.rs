@@ -112,6 +112,20 @@ pub(crate) fn open_owner_only_no_follow(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Open an existing file for reading while refusing a final reparse point.
+pub(crate) fn open_read_only_no_follow(path: &Path) -> io::Result<File> {
+    let file = files::open_owner_only(
+        path,
+        GENERIC_READ,
+        windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    )?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "final component is a link"));
+    }
+    Ok(file)
+}
+
 /// Volume serial number and file index, the Windows counterpart of device and inode.
 pub(crate) fn file_device_inode(file: &File) -> io::Result<(u64, u64)> {
     files::identity(file)
